@@ -32,6 +32,7 @@ export type RunConfig = {
   readonly envFilePath: string;
 
   readonly maxImplAttempts?: number;
+  readonly maxReviewRounds?: number;
   readonly maxTotalIssues?: number;
 
   readonly sandboxHooks: SandboxHooks;
@@ -44,12 +45,14 @@ export type ResolvedConfig = Required<Omit<RunConfig, "contextMdPath" | "adrDir"
 };
 
 export const DEFAULT_MAX_IMPL_ATTEMPTS = 8;
+export const DEFAULT_MAX_REVIEW_ROUNDS = 3;
 export const DEFAULT_MAX_TOTAL_ISSUES = 50;
 
 export function resolveConfig(config: RunConfig): ResolvedConfig {
   return {
     ...config,
     maxImplAttempts: config.maxImplAttempts ?? DEFAULT_MAX_IMPL_ATTEMPTS,
+    maxReviewRounds: config.maxReviewRounds ?? DEFAULT_MAX_REVIEW_ROUNDS,
     maxTotalIssues: config.maxTotalIssues ?? DEFAULT_MAX_TOTAL_ISSUES,
   };
 }

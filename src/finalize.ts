@@ -44,6 +44,15 @@ export const NEEDS_HUMAN_COMMENT_TEMPLATE = (failureTrace: string): string =>
   `<details><summary>Last failure trace</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
+export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
+  latestReviewerProse: string,
+): string =>
+  `${BOT_COMMENT_PREFIX} exhausted the reviewer-round budget without an ` +
+  `\`APPROVED\` verdict. The latest reviewer pass below is the bar violation ` +
+  `report the human needs to resolve. Push a fix on this branch (or rewrite ` +
+  `the standards if the reviewer was wrong), then drop \`needs-human\` and ` +
+  `re-apply \`ready-for-agent\` when ready.\n\n---\n\n${latestReviewerProse}`;
+
 export const SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE = (attempts: number): string =>
   `${BOT_COMMENT_PREFIX} hit the silent-merge-abort failure mode ${attempts} time${attempts === 1 ? "" : "s"} ` +
   `this run. Each time, the merger's resolve-loop reported success but no merge commit landed on the source branch ` +
@@ -65,6 +74,11 @@ export type FinalizeInput =
       readonly kind: "needs-human";
       readonly issue: IssueRef;
       readonly failureTrace: string;
+    }
+  | {
+      readonly kind: "review-budget-exhausted";
+      readonly issue: IssueRef;
+      readonly latestReviewerProse: string;
     }
   | {
       readonly kind: "hard-error";
@@ -181,6 +195,17 @@ export async function finalizeOne(
       await adapter.postComment(
         n,
         NEEDS_HUMAN_COMMENT_TEMPLATE(input.failureTrace),
+      );
+      await adapter.editLabels(n, [READY_FOR_AGENT_LABEL], [NEEDS_HUMAN_LABEL]);
+      return { kind: "pushed" };
+    }
+    case "review-budget-exhausted": {
+      const n = issueNumberOf(input.issue);
+      await adapter.removeWorktreeFor(input.issue.branch);
+      await adapter.pushBranch(input.issue.branch);
+      await adapter.postComment(
+        n,
+        REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(input.latestReviewerProse),
       );
       await adapter.editLabels(n, [READY_FOR_AGENT_LABEL], [NEEDS_HUMAN_LABEL]);
       return { kind: "pushed" };

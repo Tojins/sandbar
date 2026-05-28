@@ -5,9 +5,11 @@
 //                              `## Blocked by` section.
 //   Phase 2 (Inner-loop ralph): Each issue runs in its own sandbox up to
 //                              config.maxImplAttempts times; on gate-1 green
-//                              the reviewer runs in the same sandbox and
-//                              gate-2 runs unconditionally. Gate-2 is the
-//                              deciding authority. DONE branches flow forward.
+//                              the (strictly-advisory) reviewer runs in the
+//                              same sandbox and consumes one of
+//                              config.maxReviewRounds. APPROVED → DONE;
+//                              CHANGES-REQUESTED loops back to a new impl
+//                              attempt carrying the reviewer's prose.
 //   Phase 3 (Merge):           Procedural merger lands DONE branches into
 //                              the source branch and pushes once.
 //   Phase 4 (Finalise):        Per-issue branch lifecycle — push/delete the
@@ -159,6 +161,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     sourceBranch: config.sourceBranch,
     modelId: config.modelId,
     maxImplAttempts: config.maxImplAttempts,
+    maxReviewRounds: config.maxReviewRounds,
     gateImage: config.gateImage,
     gateCommands: config.gateCommands,
     claudeMdPath: config.claudeMdPath,
@@ -392,6 +395,12 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           kind: "needs-human",
           issue: o.issue,
           failureTrace: t.failureTrace,
+        });
+      } else if (t.type === "NEEDS-HUMAN-REVIEW") {
+        finalizeInputs.push({
+          kind: "review-budget-exhausted",
+          issue: o.issue,
+          latestReviewerProse: t.latestReviewerProse,
         });
       } else if (t.type === "HARD-ERROR") {
         finalizeInputs.push({

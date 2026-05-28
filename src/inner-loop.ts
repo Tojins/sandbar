@@ -4,13 +4,14 @@
 //   1. Setup a sandcastle sandbox + Postgres sidecar.
 //   2. Drive the state machine (inner-loop-machine.ts) to a verdict by
 //      executing the action it emits and feeding the result back as an event.
-//   3. Translate the verdict to a Terminal (attaching commit lists and, for
-//      REVERT-THEN-DONE, resetting the worktree to the pre-reviewer SHA).
+//   3. Translate the verdict to a Terminal.
 //   4. If the verdict is HARD-ERROR, the outer loop here asks
 //      decideAfterTerminal whether to dispose the sandbox and restart from
 //      attempt 1 with a fresh one (up to HARD_ERROR_MAX_RETRIES times).
 //
-// All branching decisions live in the state machine. This file only does I/O.
+// Reviewer is strictly advisory and never commits — there is no gate-2 and
+// no revert-after-reviewer logic. All branching decisions live in the state
+// machine. This file only does I/O.
 
 import * as sandcastle from "@ai-hero/sandcastle";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
@@ -19,7 +20,7 @@ import type { Sandbox, SandboxHooks } from "@ai-hero/sandcastle";
 import { onCleanup } from "./cleanup.js";
 import type { GateCommand } from "./config.js";
 import { lastNLines, runGate } from "./gate.js";
-import { commitsSince, ensureIssueBranch, getHeadSha, resetHard } from "./git-ops.js";
+import { ensureIssueBranch } from "./git-ops.js";
 import {
   HARD_ERROR_MAX_RETRIES,
   type LoopAction,
@@ -35,6 +36,7 @@ import type { AttemptLogger } from "./logs.js";
 import { type Sidecar, startPgSidecar } from "./pg-sidecar.js";
 import { parsePromise } from "./promise-parser.js";
 import { buildPrompt, buildReviewerPrompt } from "./prompt.js";
+import { parseVerdict } from "./verdict-parser.js";
 
 export const FAILURE_TAIL_LINES = 200;
 
@@ -49,6 +51,11 @@ export type Terminal =
   | { readonly type: "NEEDS-INFO"; readonly questions: string }
   | { readonly type: "NEEDS-HUMAN"; readonly failureTrace: string }
   | {
+      readonly type: "NEEDS-HUMAN-REVIEW";
+      readonly latestReviewerProse: string;
+      readonly commits: readonly { sha: string }[];
+    }
+  | {
       readonly type: "HARD-ERROR";
       readonly reason: string;
       readonly commits: readonly { sha: string }[];
@@ -58,6 +65,7 @@ export type InnerLoopConfig = {
   readonly sourceBranch: string;
   readonly modelId: string;
   readonly maxImplAttempts: number;
+  readonly maxReviewRounds: number;
   readonly gateImage: string;
   readonly gateCommands: GateCommand;
   readonly claudeMdPath: string;
@@ -77,7 +85,6 @@ export type InnerLoopOptions = {
 type SandboxCycleOutcome = {
   readonly verdict: Verdict;
   readonly accumulatedCommits: readonly { sha: string }[];
-  readonly reviewerCommits: readonly { sha: string }[];
 };
 
 export async function runInnerLoop(
@@ -98,19 +105,20 @@ export async function runInnerLoop(
 }
 
 function toTerminal(outcome: SandboxCycleOutcome): Terminal {
-  const { verdict, accumulatedCommits, reviewerCommits } = outcome;
+  const { verdict, accumulatedCommits } = outcome;
   switch (verdict.type) {
     case "DONE":
-      return { type: "DONE", commits: [...accumulatedCommits, ...reviewerCommits] };
-    case "REVERT-THEN-DONE":
-      // The reset to pre-reviewer SHA already happened in runSandboxCycle as
-      // part of action execution; here we only need to publish the implementer's
-      // accumulated commits.
       return { type: "DONE", commits: accumulatedCommits };
     case "NEEDS-INFO":
       return { type: "NEEDS-INFO", questions: verdict.questions };
     case "NEEDS-HUMAN":
       return { type: "NEEDS-HUMAN", failureTrace: verdict.failureTrace };
+    case "NEEDS-HUMAN-REVIEW":
+      return {
+        type: "NEEDS-HUMAN-REVIEW",
+        latestReviewerProse: verdict.latestReviewerProse,
+        commits: accumulatedCommits,
+      };
     case "HARD-ERROR":
       return {
         type: "HARD-ERROR",
@@ -128,7 +136,6 @@ async function runSandboxCycle(
   let sandbox: Sandbox | null = null;
   let sidecar: Sidecar | null = null;
   const accumulated: { sha: string }[] = [];
-  let reviewerCommits: readonly { sha: string }[] = [];
 
   try {
     // Seed the issue branch off origin/<sourceBranch> (not the host's local)
@@ -175,8 +182,10 @@ async function runSandboxCycle(
       sourceBranch: config.sourceBranch,
     };
 
-    let preReviewerSha: string | null = null;
-    let state: LoopState = initialState(config.maxImplAttempts);
+    let state: LoopState = initialState({
+      maxAttempts: config.maxImplAttempts,
+      maxReviewRounds: config.maxReviewRounds,
+    });
     let action: LoopAction = initialAction(state);
 
     while (action.kind !== "terminate") {
@@ -188,30 +197,13 @@ async function runSandboxCycle(
         anchorOpts,
         gateOpts,
         accumulated,
-        onReviewerComplete: (sha, commits) => {
-          preReviewerSha = sha;
-          reviewerCommits = commits;
-        },
       });
       const r = step(state, event);
       state = r.state;
       action = r.action;
     }
 
-    const verdict = action.verdict;
-    if (verdict.type === "REVERT-THEN-DONE") {
-      if (preReviewerSha === null) {
-        throw new Error(
-          "REVERT-THEN-DONE verdict but no pre-reviewer SHA was captured",
-        );
-      }
-      await resetHard(sandbox.worktreePath, preReviewerSha);
-      console.log(
-        `  ${issue.id}: gate-2 red after reviewer made ${reviewerCommits.length} commit(s); reset to pre-reviewer SHA, accepting implementer's work.`,
-      );
-    }
-
-    return { verdict, accumulatedCommits: accumulated, reviewerCommits };
+    return { verdict: action.verdict, accumulatedCommits: accumulated };
   } catch (err) {
     // Setup failure or any other unhandled exception inside the cycle.
     // Surface as HARD-ERROR so the outer loop can decide whether to retry
@@ -222,7 +214,6 @@ async function runSandboxCycle(
         reason: err instanceof Error ? err.message : String(err),
       },
       accumulatedCommits: accumulated,
-      reviewerCommits,
     };
   } finally {
     if (sandbox) {
@@ -268,10 +259,6 @@ type ExecuteActionCtx = {
   };
   readonly gateOpts: SidecarGateOpts;
   readonly accumulated: { sha: string }[];
-  readonly onReviewerComplete: (
-    preReviewerSha: string,
-    commits: readonly { sha: string }[],
-  ) => void;
 };
 
 async function executeAction(
@@ -283,8 +270,8 @@ async function executeAction(
       return runImplementer(action, ctx);
     case "run-gate-1":
       return runGate1(action, ctx);
-    case "run-reviewer-and-gate-2":
-      return runReviewerAndGate2(action, ctx);
+    case "run-reviewer":
+      return runReviewer(action, ctx);
     case "terminate":
       throw new Error("executeAction called with terminate; runner should exit instead");
   }
@@ -304,6 +291,9 @@ async function runImplementer(
       lastFailureTrace: action.failureTrace,
       sourceBranch: config.sourceBranch,
       ...(action.extraReprompt !== null ? { extraReprompt: action.extraReprompt } : {}),
+      ...(action.latestReviewerProse !== null
+        ? { latestReviewerProse: action.latestReviewerProse }
+        : {}),
     },
     anchorOpts,
   );
@@ -345,12 +335,11 @@ async function runGate1(
   };
 }
 
-async function runReviewerAndGate2(
-  action: Extract<LoopAction, { kind: "run-reviewer-and-gate-2" }>,
+async function runReviewer(
+  action: Extract<LoopAction, { kind: "run-reviewer" }>,
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
-  const { issue, sandbox, opts, config, gateOpts, onReviewerComplete } = ctx;
-  const preReviewerSha = await getHeadSha(sandbox.worktreePath);
+  const { issue, sandbox, opts, config } = ctx;
 
   const reviewerPrompt = await buildReviewerPrompt({
     issue,
@@ -361,50 +350,39 @@ async function runReviewerAndGate2(
     contextMdPath: config.contextMdPath,
   });
 
+  let reviewerStdout = "";
   try {
     const reviewerRun = await sandbox.run({
-      name: `reviewer-${issue.id}`,
+      name: `reviewer-${issue.id}-round-${action.reviewRound}`,
       maxIterations: 1,
       agent: sandcastle.claudeCode(config.modelId),
       prompt: reviewerPrompt,
     });
-    if (opts.attemptLogger) {
-      await opts.attemptLogger.writeAttemptReviewer(
-        issue.id,
-        action.attempt,
-        reviewerRun.stdout,
-      );
-    }
+    reviewerStdout = reviewerRun.stdout;
   } catch (err) {
+    // A reviewer that crashes mid-run defaults to CHANGES-REQUESTED via the
+    // verdict parser (empty stdout = no verdict token). Surface the error
+    // text as prose so the next implementer attempt sees something useful.
+    reviewerStdout =
+      `reviewer run errored: ${err instanceof Error ? err.message : String(err)}\n`;
     console.error(
-      `  ${issue.id}: reviewer run errored — gate-2 will decide. (${err instanceof Error ? err.message : String(err)})`,
+      `  ${issue.id}: reviewer run errored — defaulting to CHANGES-REQUESTED. (${err instanceof Error ? err.message : String(err)})`,
     );
-    if (opts.attemptLogger) {
-      await opts.attemptLogger.writeAttemptReviewer(
-        issue.id,
-        action.attempt,
-        `reviewer run errored: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
-    }
   }
 
-  const reviewerCommits = await commitsSince(sandbox.worktreePath, preReviewerSha);
-  onReviewerComplete(preReviewerSha, reviewerCommits);
+  if (opts.attemptLogger) {
+    await opts.attemptLogger.writeAttemptReviewer(
+      issue.id,
+      action.attempt,
+      reviewerStdout,
+    );
+  }
 
-  const gate2 = await runGate({ worktreePath: sandbox.worktreePath, ...gateOpts });
+  const { verdict, prose } = parseVerdict(reviewerStdout);
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(
-      `issue=${issue.id} attempt=${action.attempt} gate-2 ok=${gate2.ok} exitCode=${gate2.exitCode} reviewerCommits=${reviewerCommits.length}`,
+      `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} verdict=${verdict}`,
     );
   }
-
-  return {
-    kind: "gate-2-result",
-    ok: gate2.ok,
-    reviewerCommitCount: reviewerCommits.length,
-    failureTrace: gate2.ok
-      ? ""
-      : lastNLines(`${gate2.stdout}\n${gate2.stderr}`, FAILURE_TAIL_LINES),
-    failedStep: gate2.failedStep,
-  };
+  return { kind: "reviewer-result", verdict, prose };
 }

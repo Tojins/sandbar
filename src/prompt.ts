@@ -3,13 +3,18 @@
 // Layer 1 (project anchor):    @CLAUDE.md, @CONTEXT.md (when present),
 //                              @docs/adr/* listing, last 10 commits on
 //                              sourceBranch. Reviewer additionally references
-//                              the coding standards file.
+//                              the coding standards file (the "bar"); the
+//                              implementer does not.
 // Layer 2 (issue anchor):      `gh issue view <id> --comments` output verbatim.
 // Layer 3 (per-attempt slot):  implementer: attempt counter, full branch diff,
 //                              last 200 lines of the previous gate-1 trace,
-//                              escalation language at attempts ≥ 6.
+//                              the previous reviewer's prose (when the prior
+//                              round returned CHANGES-REQUESTED), escalation
+//                              language at attempts ≥ 6.
 //                              reviewer: branch diff + commit list + standards
-//                              guidance.
+//                              guidance + verdict-token instructions. Each
+//                              reviewer pass is stateless — no prior-round
+//                              transcript is included.
 
 import { execFile } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
@@ -35,6 +40,7 @@ export type PromptInputs = {
   readonly lastFailureTrace: string;
   readonly sourceBranch: string;
   readonly extraReprompt?: string;
+  readonly latestReviewerProse?: string;
 };
 
 export type ReviewerPromptInputs = {
@@ -129,6 +135,7 @@ async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
     worktreePath,
     sourceBranch,
     extraReprompt,
+    latestReviewerProse,
   } = inputs;
   const lines: string[] = [];
   lines.push(`# Attempt ${attempt} of ${maxAttempts}`);
@@ -174,6 +181,19 @@ async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
     lines.push("");
   }
 
+  if (latestReviewerProse) {
+    lines.push("## Previous reviewer feedback (CHANGES-REQUESTED)");
+    lines.push("");
+    lines.push(latestReviewerProse);
+    lines.push("");
+    lines.push(
+      "Address the reviewer's concerns. The reviewer checks the branch against " +
+        "the project's coding standards; addressing the prose above is what " +
+        "earns an APPROVED verdict.",
+    );
+    lines.push("");
+  }
+
   if (extraReprompt) {
     lines.push("## Orchestrator note");
     lines.push("");
@@ -200,8 +220,8 @@ async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
   lines.push("");
   lines.push(
     "When the implementation is complete and committed, emit `<promise>COMPLETE</promise>`. " +
-      "Gate-1 (project's `check` + `test`) is the deciding authority — a passing claim with " +
-      "a red gate sends you to the next attempt with the failure output.",
+      "Gate-1 (project's `check` + `test`) is the deciding authority on correctness — a " +
+      "passing claim with a red gate sends you to the next attempt with the failure output.",
   );
   lines.push(
     "If you need information you cannot derive from the issue or codebase, emit " +
@@ -212,16 +232,7 @@ async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
 }
 
 async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> {
-  const { issue, worktreePath, sourceBranch, codingStandardsPath, claudeMdPath, contextMdPath } =
-    inputs;
-  const lines: string[] = [];
-  lines.push("# Review");
-  lines.push("");
-  lines.push(
-    `Review the implementation on branch \`${issue.branch}\` against \`${sourceBranch}\`.`,
-  );
-  lines.push(`Issue #${issue.id}: ${issue.title}`);
-  lines.push("");
+  const { worktreePath, sourceBranch } = inputs;
 
   let commits = "";
   try {
@@ -247,6 +258,29 @@ async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> 
     diff = "";
   }
 
+  return renderReviewerSlot({ ...inputs, commits, diff });
+}
+
+// Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
+// shape without mocking git. Reviewer is strictly stateless across rounds:
+// nothing here carries prior-round content beyond what's already in the diff.
+export type ReviewerSlotRender = ReviewerPromptInputs & {
+  readonly commits: string;
+  readonly diff: string;
+};
+
+export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
+  const { issue, sourceBranch, codingStandardsPath, claudeMdPath, contextMdPath, commits, diff } =
+    inputs;
+  const lines: string[] = [];
+  lines.push("# Review");
+  lines.push("");
+  lines.push(
+    `Review the implementation on branch \`${issue.branch}\` against \`${sourceBranch}\`.`,
+  );
+  lines.push(`Issue #${issue.id}: ${issue.title}`);
+  lines.push("");
+
   if (commits) {
     lines.push("## Commits on this branch");
     lines.push("");
@@ -262,6 +296,11 @@ async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> 
     lines.push(diff);
     lines.push("```");
     lines.push("");
+  } else {
+    lines.push("## Branch diff");
+    lines.push("");
+    lines.push("(empty — no changes against the source branch)");
+    lines.push("");
   }
 
   const conventionsRef = contextMdPath
@@ -270,21 +309,31 @@ async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> 
   lines.push("## Review process");
   lines.push("");
   lines.push(
-    `Apply the standards from @${codingStandardsPath} and the conventions from ` +
-      `${conventionsRef}. Look for: unnecessary complexity, redundant abstractions, ` +
-      "unclear naming, missing tests for new behaviour, unsafe casts, security issues. " +
-      "Preserve functionality — change how, not what.",
+    `Check the branch against the bar in @${codingStandardsPath}, plus the ` +
+      `conventions in ${conventionsRef}. Your role is strictly advisory: you ` +
+      "must not modify the branch, commit, push, or run gate commands. " +
+      "Read-only investigation only.",
   );
   lines.push("");
   lines.push(
-    "If you find improvements, make the edits directly on this branch and commit them. " +
-      "If the code already meets the standards, make no changes.",
+    "Only raise concerns that are bar violations. Stylistic preferences, " +
+      "alternative-design musings, or anything you cannot point to a specific " +
+      "standard for must not be raised — the bar (not your judgment) decides " +
+      "what ships.",
+  );
+  lines.push("");
+  lines.push("## Verdict");
+  lines.push("");
+  lines.push("End your review with a single verdict token on its own:");
+  lines.push("");
+  lines.push("- `<verdict>APPROVED</verdict>` — branch meets the bar, ship it.");
+  lines.push(
+    "- `<verdict>CHANGES-REQUESTED</verdict>` — list the bar violations above and " +
+      "the implementer will address them in the next round.",
   );
   lines.push("");
   lines.push(
-    "Gate-2 (project's `check` + `test`) runs after you finish, regardless of whether " +
-      "you committed. A red gate-2 with reviewer commits causes those commits to be reverted " +
-      "automatically — the implementer's work is preserved either way.",
+    "A missing verdict defaults to CHANGES-REQUESTED. Emit exactly one verdict.",
   );
 
   return lines.join("\n");

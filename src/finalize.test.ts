@@ -10,6 +10,7 @@ import {
   NEEDS_INFO_LABEL,
   READY_FOR_AGENT_LABEL,
   READY_FOR_HUMAN_LABEL,
+  REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE,
   finalizeAll,
   finalizeOne,
   issueNumberOf,
@@ -123,6 +124,14 @@ describe("comment templates", () => {
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("E: boom");
     expect(body).toContain("stack…");
+  });
+  it("REVIEW_BUDGET_EXHAUSTED body includes bot prefix and the latest reviewer prose verbatim", () => {
+    const body = REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(
+      "## Bar violations\n- foo not extracted\n- naming is unclear",
+    );
+    expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
+    expect(body).toContain("foo not extracted");
+    expect(body).toContain("naming is unclear");
   });
 });
 
@@ -240,6 +249,30 @@ describe("finalizeOne", () => {
     expect(calls.worktreeRemoves).toEqual([i.branch]);
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.body).toContain("AssertionError: red");
+    expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT_LABEL], add: [NEEDS_HUMAN_LABEL] },
+    ]);
+  });
+
+  it("review-budget-exhausted: removes worktree, pushes, comments with latest reviewer prose, swaps labels to needs-human", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "review-budget-exhausted",
+        issue: i,
+        latestReviewerProse: "## Bar violations\n- too much indirection",
+      },
+      adapter,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    expect(calls.pushes).toEqual([i.branch]);
+    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.comments.length).toBe(1);
+    expect(calls.comments[0]!.n).toBe(45);
+    expect(calls.comments[0]!.body).toContain("too much indirection");
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT_LABEL], add: [NEEDS_HUMAN_LABEL] },

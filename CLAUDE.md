@@ -21,14 +21,16 @@ The orchestrator (`src/run.ts`) cycles plan → execute → merge → finalise u
 
 1. **Phase 1 — Plan** (`src/plan-resolver.ts`): purely deterministic. Lists GitHub issues labelled `ready-for-agent`, parses each body's `## Blocked by` section, and selects the top-K unblocked issues (default 3) sorted by issue number. No LLM involvement.
 
-2. **Phase 2 — Inner loop** (`src/inner-loop.ts`): each planned issue runs in parallel (`Promise.allSettled`) inside its own sandcastle sandbox + per-issue Postgres sidecar + podman network. The inner loop is ralph-style — up to `maxImplAttempts` (default 8) attempts in the **same** sandbox so commits accumulate on the issue branch.
-   - Per attempt: build 3-layer prompt → run implementer agent → parse `<promise>` token (`promise-parser.ts`) → if `COMPLETE`, run **gate-1** (host's `check` + `test` in a one-shot container, `gate.ts`). On gate-1 green, run the reviewer in the same sandbox, then **gate-2** unconditionally.
-   - **Gate-2 is the deciding authority.** `decideAfterGate2(gate2Ok, reviewerCommitCount)` is the pure decision function: green → `DONE`; red with reviewer commits → revert reviewer commits, accept implementer's work as `DONE`; red with no reviewer commits → `HARD-ERROR` (treated as infra flake, retried once with a fresh sandbox via `HARD_ERROR_MAX_RETRIES`).
-   - Terminals: `DONE | NEEDS-INFO | NEEDS-HUMAN | HARD-ERROR`.
+2. **Phase 2 — Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`): each planned issue runs in parallel (`Promise.allSettled`) inside its own sandcastle sandbox + per-issue Postgres sidecar + podman network. The inner loop is ralph-style — up to `maxImplAttempts` (default 8) attempts in the **same** sandbox so commits accumulate on the issue branch.
+   - All transitions live in a pure state machine (`inner-loop-machine.ts`); `inner-loop.ts` is I/O glue that executes the action the SM emits and feeds the result back as an event.
+   - Per attempt: build 3-layer prompt → run implementer agent → parse `<promise>` token (`promise-parser.ts`) → if `COMPLETE`, run **gate-1** (host's `check` + `test` in a one-shot container, `gate.ts`). On gate-1 green, run the **reviewer** — strictly advisory, never commits — which emits `<verdict>APPROVED|CHANGES-REQUESTED</verdict>` (parsed by `verdict-parser.ts`). On `APPROVED` → `DONE`. On `CHANGES-REQUESTED`, the prose is stashed and the loop runs another implementer attempt with the prose surfaced in its prompt.
+   - **Two orthogonal budgets.** Each implementer pass consumes one of `maxImplAttempts`; each reviewer pass consumes one of `maxReviewRounds` (default 3). Exhausting impl attempts → `NEEDS-HUMAN` (last gate trace). Exhausting review rounds → `NEEDS-HUMAN-REVIEW` (latest reviewer prose).
+   - **HARD-ERROR is for infra failures only.** The SM never emits it; the runner wraps unhandled exceptions (setup, container) as HARD-ERROR so the outer-layer `decideAfterTerminal` can retry with a fresh sandbox (up to `HARD_ERROR_MAX_RETRIES = 2`).
+   - Terminals: `DONE | NEEDS-INFO | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | HARD-ERROR`.
 
 3. **Phase 3 — Merge** (`src/merger.ts` + `src/resolve-loop.ts`): procedural, direct-to-source-branch. For each DONE branch in ascending issue order: capture `preMergeSha`, `git merge --no-ff`, then either succeed and push, or invoke the **agentic resolve loop** for conflict OR post-merge-gate-red. The resolve loop sees the bodies of all sibling issues in the cycle so it can reason about cross-branch intent collisions. On `<promise>ABANDON</promise>` or budget exhaustion, the merge is reverted to `preMergeSha` and the branch is skipped. A single `git push` at the end.
 
-4. **Phase 4 — Finalise** (`src/finalize.ts`): per-issue branch lifecycle (push/delete worktree + branch), bot-prefixed issue comments, label flips (`ready-for-agent` ↔ `needs-info`/`needs-human`/`ready-for-human`). Pure orchestration via `FinalizeAdapter`; the real adapter shells out to `git`/`gh`.
+4. **Phase 4 — Finalise** (`src/finalize.ts`): per-issue branch lifecycle (push/delete worktree + branch), bot-prefixed issue comments, label flips (`ready-for-agent` ↔ `needs-info`/`needs-human`/`ready-for-human`). Pure orchestration via `FinalizeAdapter`; the real adapter shells out to `git`/`gh`. The `review-budget-exhausted` input pushes the branch and posts the **latest reviewer prose only** (not the per-round transcript — that stays in the run-log for offline diagnosis).
 
 ### Exit conditions (`src/exit-conditions.ts`)
 
@@ -44,7 +46,7 @@ The outer loop terminates on the first of:
 
 ## Key design constraints
 
-- **Pure decision functions where possible.** `decideAfterGate2`, `parsePromise`, `resolvePlan`, `applyCycle`, `checkInvariants`, `finalizeOne` are all pure functions over their inputs. I/O wrappers (`fetchCandidates`, `realAdapter`, etc.) are thin shells around them. Add tests against the pure layer; don't mock `gh`/`git` if you can table-test the decision instead.
+- **Pure decision functions where possible.** The inner-loop state machine (`step`, `decideAfterTerminal`), `parsePromise`, `parseVerdict`, `renderReviewerSlot`, `resolvePlan`, `applyCycle`, `checkInvariants`, `finalizeOne` are all pure functions over their inputs. I/O wrappers (`fetchCandidates`, `realAdapter`, etc.) are thin shells around them. Add tests against the pure layer; don't mock `gh`/`git` if you can table-test the decision instead.
 - **Adapters for I/O boundaries.** `MergerAdapter`, `FinalizeAdapter`, `ResolveAdapter` define the contract; tests use fakes, production uses `realAdapter(...)`. Don't reach for `execFile` from new code if there's an adapter slot.
 - **Per-issue isolation.** Every issue gets its own podman network + Postgres sidecar (named `sandcastle-net-<id>` / `sandcastle-pg-<id>`); the gate container joins the network and resolves the sidecar by container name (no host port). `cleanupOrphanContainers` sweeps stale prefixed resources at start and between cycles.
 - **Container runtime is podman.** Hard-coded `RUNTIME = "podman"` in `pg-sidecar.ts`; the agent sandbox uses sandcastle's `podman()` provider. The Postgres image is `docker.io/pgvector/pgvector:pg18` (fully qualified because hosts without unqualified-search registries can't resolve a bare short name).
@@ -52,6 +54,7 @@ The outer loop terminates on the first of:
 - **Issue branches seed from `origin/<sourceBranch>`,** not local. The preflight emits a soft warning when local is ahead of origin because per-issue worktrees won't see unpushed work.
 - **Single-instance lock.** `src/lock.ts` uses `proper-lockfile` plus a PID sidecar for stale-PID takeover. Don't try to run two sandbar processes against the same workdir.
 - **Promise-token contract.** Agents signal state with a single `<promise>TOKEN</promise>` tag. Implementer: `COMPLETE` | `NEEDS-INFO` (paired with `<questions>`). Resolve-loop: `COMMITTED` | `ABANDON` (paired with `<reason>`). Anything else is a no-signal — the loop re-prompts. The orchestrator gates *between* attempts; the agent never decides "this is green".
+- **Verdict-token contract.** The reviewer emits a single `<verdict>APPROVED|CHANGES-REQUESTED</verdict>` tag (parsed by `verdict-parser.ts`). Missing or malformed token defaults to `CHANGES-REQUESTED` — convergence relies on the bar in `CODING_STANDARDS.md` being sharp enough to be deterministic, not on round-trip retries. The reviewer is read-only: prompt instructs it not to modify the branch, commit, push, or run gates.
 - **Logs are append-only and unbuffered** (`src/logs.ts`). Crash-safe by construction; don't introduce in-memory buffering.
 
 ## When making changes
