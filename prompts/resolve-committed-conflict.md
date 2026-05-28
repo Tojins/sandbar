@@ -1,0 +1,1 @@
+- `<promise>COMMITTED</promise>` — you have resolved every conflict marker, `git add`-ed the files, and `git commit --no-edit`-ed. The orchestrator gates next.

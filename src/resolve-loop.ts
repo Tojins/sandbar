@@ -21,9 +21,19 @@
 
 import { lastNLines } from "./gate.js";
 import type { MergerGateOutput } from "./merger.js";
+import { loadTemplate, render } from "./prompts.js";
 
 export const RESOLVE_MAX_ATTEMPTS = 4;
 const TRACE_LINES = 200;
+
+// Prose templates, loaded once at import (see prompts.ts). The pure prompt
+// builders below substitute into these in-memory strings.
+const RELATED_INTRO_TPL = loadTemplate("resolve-related-intro");
+const CONFLICT_TPL = loadTemplate("resolve-conflict");
+const GATE_RED_TPL = loadTemplate("resolve-gate-red");
+const DONE_SIGNAL_TPL = loadTemplate("resolve-done-signal");
+const COMMITTED_CONFLICT_TPL = loadTemplate("resolve-committed-conflict");
+const COMMITTED_GATE_TPL = loadTemplate("resolve-committed-gate");
 
 export type IssueRef = {
   readonly id: string;
@@ -252,8 +262,8 @@ export function buildResolvePromptBody(inputs: ResolvePromptInputs): string {
   );
 
   if (inputs.relatedIssueAnchors.length > 0) {
-    const blocks = inputs.relatedIssueAnchors.map(
-      ({ issue, body }) =>
+    const blocks = inputs.relatedIssueAnchors
+      .map(({ issue, body }) =>
         [
           `## Related issue #${issue.id}: ${issue.title}`,
           ``,
@@ -261,16 +271,9 @@ export function buildResolvePromptBody(inputs: ResolvePromptInputs): string {
           ``,
           body,
         ].join("\n"),
-    );
-    parts.push(
-      [
-        `# Related issues in this run`,
-        ``,
-        `These branches are also active this cycle. Some may already have merged into the source branch; others are queued behind this one. Read them to understand whether the conflict or failure is a real integration bug, stale work, or a case where two intents genuinely contradict and one should lose.`,
-        ``,
-        blocks.join("\n\n"),
-      ].join("\n"),
-    );
+      )
+      .join("\n\n");
+    parts.push(render(RELATED_INTRO_TPL, { blocks }));
   }
 
   parts.push(`# Task\n\n${renderModeBlock(inputs.mode)}`);
@@ -282,25 +285,9 @@ export function buildResolvePromptBody(inputs: ResolvePromptInputs): string {
 
 function renderModeBlock(mode: AttemptTrace): string {
   if (mode.kind === "still-conflicted") {
-    return [
-      "A `git merge --no-ff` of this branch into the source branch is in progress and has hit a conflict.",
-      "",
-      mode.digest,
-      "",
-      "Resolve every conflict, `git add` the files, and `git commit --no-edit` to complete the merge. The orchestrator will then run the project's `check` + `test` against the result.",
-    ].join("\n");
+    return render(CONFLICT_TPL, { digest: mode.digest });
   }
-  return [
-    "This branch merged cleanly into the source branch, but the post-merge gate (project's `check` + `test`) is failing against the merged tree.",
-    "",
-    "## Gate output (last 200 lines)",
-    "",
-    "```",
-    mode.trace,
-    "```",
-    "",
-    "Commit a fix on top of HEAD. The merge commit itself stays in place; your work is a follow-up commit. If the two branches' intents genuinely contradict and the failure can't be reconciled with a small fix, declare ABANDON with a `<reason>` that names the colliding issues and which one should lose.",
-  ].join("\n");
+  return render(GATE_RED_TPL, { trace: mode.trace });
 }
 
 function buildDoneSignal(
@@ -308,27 +295,13 @@ function buildDoneSignal(
   maxAttempts: number,
   mode: AttemptTrace,
 ): string {
-  const lines: string[] = [];
-  lines.push(`# Attempt ${attempt} of ${maxAttempts}`, "");
-  lines.push("## Done signals", "");
-  if (mode.kind === "still-conflicted") {
-    lines.push(
-      "- `<promise>COMMITTED</promise>` — you have resolved every conflict marker, `git add`-ed the files, and `git commit --no-edit`-ed. The orchestrator gates next.",
-    );
-  } else {
-    lines.push(
-      "- `<promise>COMMITTED</promise>` — you have committed a fix on top of HEAD. The orchestrator re-runs the gate next.",
-    );
-  }
-  lines.push(
-    "- `<promise>ABANDON</promise>` plus `<reason>…</reason>` — this can't be resolved automatically. Reason should be specific: which two intents collide, which branch you believe should lose, or what human decision is missing.",
-    "",
-    "After you exit, the orchestrator inspects the working tree. A claim of COMMITTED with the merge still mid-merge, or with the gate still red, rolls you back into the next attempt with the updated trace.",
-    "",
-    "Do not run the gate yourself.",
-    "Do not push.",
-  );
-  return lines.join("\n");
+  const committedSignal =
+    mode.kind === "still-conflicted" ? COMMITTED_CONFLICT_TPL : COMMITTED_GATE_TPL;
+  return render(DONE_SIGNAL_TPL, {
+    attempt: String(attempt),
+    maxAttempts: String(maxAttempts),
+    committedSignal,
+  });
 }
 
 // ---------------------------------------------------------------------------

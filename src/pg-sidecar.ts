@@ -9,9 +9,16 @@
 // The orchestrator holds a single-instance lock, so the id collides only
 // with stale resources from a prior aborted run — those are swept by
 // cleanupOrphanResources() at start.
+//
+// Lifecycle ownership lives here: startPgSidecar registers its own teardown
+// with onCleanup() before creating any resource, so a signal during bringup
+// is covered. Callers do not need to re-register `sidecar.stop` (the flag in
+// stop makes a double-register a harmless no-op regardless).
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+
+import { onCleanup } from "./cleanup.js";
 
 const exec = promisify(execFile);
 
@@ -57,8 +64,6 @@ export async function startPgSidecar(cfg: SidecarConfig): Promise<Sidecar> {
   const networkName = networkNameFor(cfg.issueId);
   const containerName = containerNameFor(cfg.issueId);
 
-  await exec(RUNTIME, ["network", "create", networkName]);
-
   let stopped = false;
   const stop = async (): Promise<void> => {
     if (stopped) return;
@@ -74,6 +79,15 @@ export async function startPgSidecar(cfg: SidecarConfig): Promise<Sidecar> {
       /* best-effort */
     }
   };
+  // Register the teardown before the first `exec`, so a SIGINT/SIGTERM landing
+  // anywhere in the bringup window below — network create, the detached `run`,
+  // or the ~60s waitForReady poll — still sweeps whatever resources exist.
+  // The local catch only fires for JS throws; signal-driven process.exit does
+  // not unwind it. `stop` is idempotent (stopped flag) and best-effort, so
+  // registering it before either resource exists is safe — the `rm`s no-op.
+  onCleanup(stop);
+
+  await exec(RUNTIME, ["network", "create", networkName]);
 
   try {
     await exec(RUNTIME, [

@@ -13,7 +13,7 @@ Node ≥ 20 is required. The package is ESM (`"type": "module"`); imports inside
 
 ## What this package is
 
-`@offergeist/sandbar` is a **library**, not a CLI. It exports `run(config: RunConfig)` from `src/index.ts`. A host repo wires it up by supplying its own `Containerfile`, `CODING_STANDARDS.md`, env file, anchor docs (`CLAUDE.md`, `CONTEXT.md`, optional ADR dir), and gate commands. Sandbar then drives an issue-tracker-driven (GitHub Issues via `gh`) coding-agent loop against that host.
+`@offergeist/sandbar` is a **library**, not a CLI. It exports `run(config: RunConfig)` from `src/index.ts`. A host repo wires it up by supplying its own `Containerfile`, env file, anchor docs (`CLAUDE.md`, `CONTEXT.md`, optional ADR dir), and gate commands. The reviewer's coding standards ship built-in (`prompts/coding-standards.md`); a host may optionally extend them with its own `CODING_STANDARDS.md` (`config.codingStandardsPath`) but is not required to. Sandbar then drives an issue-tracker-driven (GitHub Issues via `gh`) coding-agent loop against that host.
 
 ## Architecture — the four-phase outer loop
 
@@ -54,7 +54,8 @@ The outer loop terminates on the first of:
 - **Issue branches seed from `origin/<sourceBranch>`,** not local. The preflight emits a soft warning when local is ahead of origin because per-issue worktrees won't see unpushed work.
 - **Single-instance lock.** `src/lock.ts` uses `proper-lockfile` plus a PID sidecar for stale-PID takeover. Don't try to run two sandbar processes against the same workdir.
 - **Promise-token contract.** Agents signal state with a single `<promise>TOKEN</promise>` tag. Implementer: `COMPLETE` | `NEEDS-INFO` (paired with `<questions>`). Resolve-loop: `COMMITTED` | `ABANDON` (paired with `<reason>`). Anything else is a no-signal — the loop re-prompts. The orchestrator gates *between* attempts; the agent never decides "this is green".
-- **Verdict-token contract.** The reviewer emits a single `<verdict>APPROVED|CHANGES-REQUESTED</verdict>` tag (parsed by `verdict-parser.ts`). Missing or malformed token defaults to `CHANGES-REQUESTED` — convergence relies on the bar in `CODING_STANDARDS.md` being sharp enough to be deterministic, not on round-trip retries. The reviewer is read-only: prompt instructs it not to modify the branch, commit, push, or run gates.
+- **Verdict-token contract.** The reviewer emits a single `<verdict>APPROVED|CHANGES-REQUESTED</verdict>` tag (parsed by `verdict-parser.ts`). Missing or malformed token defaults to `CHANGES-REQUESTED` — convergence relies on the bar being sharp, i.e. on the coding standards (the built-in `prompts/coding-standards.md`, plus any project `CODING_STANDARDS.md` that extends them) being precise enough to be deterministic, not on round-trip retries. The reviewer is read-only: prompt instructs it not to modify the branch, commit, push, or run gates.
+- **Prompt prose lives in `prompts/*.md`, not in code.** `src/prompts.ts` loads templates and does `{{placeholder}}` substitution; `prompt.ts` and `resolve-loop.ts` load them into module-level consts at import and fill the placeholders. Keep substantive instructional prose in the markdown files; only structural scaffolding (headings, code-fence wrapping, data interpolation, which optional block to include) stays in TS. The `prompts/` dir sits beside `src/`/`dist/` so the same `../prompts` path resolves from both, and is shipped via package.json `files`.
 - **Logs are append-only and unbuffered** (`src/logs.ts`). Crash-safe by construction; don't introduce in-memory buffering.
 
 ## When making changes

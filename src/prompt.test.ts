@@ -11,14 +11,36 @@ const baseInputs = {
 } as const;
 
 describe("renderReviewerSlot", () => {
-  it("references the standards path and conventions", () => {
+  it("embeds the built-in coding standards and references conventions", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first\nb2 second",
       diff: "diff --git a/x b/x\n+hi",
     });
-    expect(slot).toContain("@docs/CODING_STANDARDS.md");
+    expect(slot).toContain("## Coding standards");
     expect(slot).toContain("@CLAUDE.md");
+  });
+
+  it("references the optional project standards file when provided", () => {
+    const slot = renderReviewerSlot({
+      ...baseInputs,
+      commits: "a1 first",
+      diff: "diff",
+    });
+    expect(slot).toContain("### Project standards");
+    expect(slot).toContain("@docs/CODING_STANDARDS.md");
+  });
+
+  it("emits only the built-in standards when no project standards file is provided", () => {
+    const { codingStandardsPath: _omit, ...noStandards } = baseInputs;
+    const slot = renderReviewerSlot({
+      ...noStandards,
+      commits: "a1 first",
+      diff: "diff",
+    });
+    expect(slot).toContain("## Coding standards");
+    expect(slot).not.toContain("### Project standards");
+    expect(slot).not.toContain("CODING_STANDARDS");
   });
 
   it("includes the optional context-md reference when provided", () => {

@@ -1,0 +1,1 @@
+- `<promise>COMMITTED</promise>` — you have committed a fix on top of HEAD. The orchestrator re-runs the gate next.

@@ -17,7 +17,6 @@ import * as sandcastle from "@ai-hero/sandcastle";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
 import type { Sandbox, SandboxHooks } from "@ai-hero/sandcastle";
 
-import { onCleanup } from "./cleanup.js";
 import type { GateCommand } from "./config.js";
 import { lastNLines, runGate } from "./gate.js";
 import { ensureIssueBranch } from "./git-ops.js";
@@ -71,7 +70,7 @@ export type InnerLoopConfig = {
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
-  readonly codingStandardsPath: string;
+  readonly codingStandardsPath?: string;
 };
 
 export type InnerLoopOptions = {
@@ -159,9 +158,8 @@ async function runSandboxCycle(
         : (sidecarResult as PromiseRejectedResult).reason;
     }
 
-    const sidecarRef = sidecar;
-    onCleanup(() => sidecarRef.stop());
-
+    // startPgSidecar already registered sidecar.stop with onCleanup before it
+    // created any podman resource, so no re-registration is needed here.
     const gateOpts: SidecarGateOpts = {
       gateImage: config.gateImage,
       gateCommands: config.gateCommands,
@@ -178,7 +176,6 @@ async function runSandboxCycle(
       claudeMdPath: config.claudeMdPath,
       contextMdPath: config.contextMdPath,
       adrDir: config.adrDir,
-      codingStandardsPath: config.codingStandardsPath,
       sourceBranch: config.sourceBranch,
     };
 
@@ -254,7 +251,6 @@ type ExecuteActionCtx = {
     readonly claudeMdPath: string;
     readonly contextMdPath?: string;
     readonly adrDir?: string;
-    readonly codingStandardsPath: string;
     readonly sourceBranch: string;
   };
   readonly gateOpts: SidecarGateOpts;

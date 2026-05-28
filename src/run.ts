@@ -285,8 +285,9 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     let mergerSummary: MergerSummary | null = null;
     let halt = false;
     if (completedIssues.length > 0) {
+      // startPgSidecar registers mergerSidecar.stop with onCleanup itself,
+      // before creating any podman resource — no re-registration needed here.
       const mergerSidecar = await startPgSidecar({ issueId: "merger" });
-      onCleanup(() => mergerSidecar.stop());
       const adapter = realAdapter({
         cwd: config.cwd,
         sourceBranch: config.sourceBranch,
@@ -313,9 +314,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         claudeMdPath: config.claudeMdPath,
         contextMdPath: config.contextMdPath,
         adrDir: config.adrDir,
-        codingStandardsPath: config.codingStandardsPath,
         sourceBranch: config.sourceBranch,
-        includeCodingStandards: false,
       });
       try {
         mergerSummary = await runMergerWithAdapter(

@@ -5,8 +5,10 @@
 // it never commits — so the verdict is the only signal that travels back to
 // the inner loop alongside its free-form prose.
 //
-// Convergence relies on the bar (CODING_STANDARDS.md) being sharp enough to
-// produce a deterministic verdict, so we never block on the reviewer being
+// Convergence relies on the bar being sharp — i.e. on the coding standards
+// (sandbar's built-in prompts/coding-standards.md, plus any project standards
+// file that extends them) being precise enough to produce a deterministic
+// verdict, so we never block on the reviewer being
 // indecisive: a missing or malformed token defaults to CHANGES-REQUESTED
 // (the safer choice — implementer gets another pass instead of shipping
 // unreviewed work). Last token wins if the reviewer emits more than one.

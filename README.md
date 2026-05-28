@@ -19,6 +19,6 @@ await run({
 
 The host project supplies:
 - A `Containerfile` for the sandbox image
-- A `CODING_STANDARDS.md` consumed by the reviewer
+- Optionally, a `CODING_STANDARDS.md` (`codingStandardsPath`) — the reviewer ships with built-in default coding standards (`prompts/coding-standards.md`); this file *extends* them and is not required
 - `.env` with `GH_TOKEN` and either `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`
 - Project anchor paths (`CLAUDE.md`, optional `CONTEXT.md`, optional ADR directory)

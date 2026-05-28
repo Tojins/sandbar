@@ -2,34 +2,56 @@
 //
 // Layer 1 (project anchor):    @CLAUDE.md, @CONTEXT.md (when present),
 //                              @docs/adr/* listing, last 10 commits on
-//                              sourceBranch. Reviewer additionally references
-//                              the coding standards file (the "bar"); the
-//                              implementer does not.
+//                              sourceBranch. Shared verbatim by both agents.
 // Layer 2 (issue anchor):      `gh issue view <id> --comments` output verbatim.
 // Layer 3 (per-attempt slot):  implementer: attempt counter, full branch diff,
 //                              last 200 lines of the previous gate-1 trace,
 //                              the previous reviewer's prose (when the prior
 //                              round returned CHANGES-REQUESTED), escalation
 //                              language at attempts ≥ 6.
-//                              reviewer: branch diff + commit list + standards
-//                              guidance + verdict-token instructions. Each
+//                              reviewer: branch diff + commit list + the
+//                              built-in coding standards
+//                              (prompts/coding-standards.md) + optional project
+//                              standards + verdict-token instructions. Each
 //                              reviewer pass is stateless — no prior-round
 //                              transcript is included.
+//
+// All prose lives in prompts/*.md and is loaded via prompts.ts; this module
+// only formats data into the templates' placeholders.
 
 import { execFile } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { loadTemplate, render } from "./prompts.js";
+
 const exec = promisify(execFile);
+
+// Prose templates, loaded once at import (see prompts.ts). The render functions
+// below substitute into these in-memory strings and stay pure.
+const CODING_STANDARDS = loadTemplate("coding-standards");
+const REVIEWER_TPL = loadTemplate("reviewer");
+const REVIEWER_PROJECT_STANDARDS_TPL = loadTemplate("reviewer-project-standards");
+const IMPLEMENTER_TPL = loadTemplate("implementer");
+const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
+const IMPLEMENTER_REVIEWER_FEEDBACK_TPL = loadTemplate("implementer-reviewer-feedback");
+const IMPLEMENTER_ESCALATION_TPL = loadTemplate("implementer-escalation");
+
+// Attempt at which the implementer prompt starts surfacing the escalation block.
+const ESCALATION_ATTEMPT = 6;
+
+// Append a trailing blank-line separator to a non-empty section so the skeleton
+// templates can place optional sections back-to-back without managing spacing.
+function section(body: string): string {
+  return body ? `${body}\n\n` : "";
+}
 
 export type ProjectAnchorOptions = {
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
-  readonly codingStandardsPath: string;
   readonly sourceBranch: string;
-  readonly includeCodingStandards: boolean;
 };
 
 export type PromptInputs = {
@@ -47,17 +69,19 @@ export type ReviewerPromptInputs = {
   readonly issue: { readonly id: string; readonly title: string; readonly branch: string };
   readonly worktreePath: string;
   readonly sourceBranch: string;
-  readonly codingStandardsPath: string;
+  // Optional project standards file that *extends* the built-in coding
+  // standards. Absent for hosts that rely on the built-in standards alone.
+  readonly codingStandardsPath?: string;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
 };
 
 export async function buildPrompt(
   inputs: PromptInputs,
-  anchor: Omit<ProjectAnchorOptions, "includeCodingStandards">,
+  anchor: ProjectAnchorOptions,
 ): Promise<string> {
   const layers = [
-    await buildProjectAnchor({ ...anchor, includeCodingStandards: false }),
+    await buildProjectAnchor(anchor),
     await buildIssueAnchor(inputs.issue.id),
     await buildAttemptSlot(inputs),
   ];
@@ -71,9 +95,7 @@ export async function buildReviewerPrompt(
     await buildProjectAnchor({
       claudeMdPath: inputs.claudeMdPath,
       contextMdPath: inputs.contextMdPath,
-      codingStandardsPath: inputs.codingStandardsPath,
       sourceBranch: inputs.sourceBranch,
-      includeCodingStandards: true,
     }),
     await buildIssueAnchor(inputs.issue.id),
     await buildReviewerSlot(inputs),
@@ -87,9 +109,6 @@ export async function buildProjectAnchor(
   const lines = ["# Project anchor", "", `Conventions: @${opts.claudeMdPath}`];
   if (opts.contextMdPath && existsSync(opts.contextMdPath)) {
     lines.push(`Context: @${opts.contextMdPath}`);
-  }
-  if (opts.includeCodingStandards && existsSync(opts.codingStandardsPath)) {
-    lines.push(`Coding standards: @${opts.codingStandardsPath}`);
   }
   if (opts.adrDir && existsSync(opts.adrDir)) {
     const adrs = readdirSync(opts.adrDir).filter((f) => f.endsWith(".md")).sort();
@@ -127,22 +146,7 @@ async function buildIssueAnchor(issueId: string): Promise<string> {
 }
 
 async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
-  const {
-    issue,
-    attempt,
-    maxAttempts,
-    lastFailureTrace,
-    worktreePath,
-    sourceBranch,
-    extraReprompt,
-    latestReviewerProse,
-  } = inputs;
-  const lines: string[] = [];
-  lines.push(`# Attempt ${attempt} of ${maxAttempts}`);
-  lines.push("");
-  lines.push(`Fix issue #${issue.id}: ${issue.title}`);
-  lines.push(`Branch: ${issue.branch}`);
-  lines.push("");
+  const { worktreePath, sourceBranch } = inputs;
 
   let diff = "";
   try {
@@ -158,77 +162,62 @@ async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
   } catch {
     diff = "";
   }
-  if (diff.trim()) {
-    lines.push("## Work done so far");
-    lines.push("");
-    lines.push("```diff");
-    lines.push(diff.trim());
-    lines.push("```");
-    lines.push("");
-  } else {
-    lines.push("No commits yet on this branch.");
-    lines.push("");
-  }
 
-  if (lastFailureTrace) {
-    lines.push("## Previous gate-1 failure (last 200 lines)");
-    lines.push("");
-    lines.push("```");
-    lines.push(lastFailureTrace);
-    lines.push("```");
-    lines.push("");
-    lines.push("Fix the failures. Gate-1 runs the project's `check` + `test` commands.");
-    lines.push("");
-  }
+  return renderAttemptSlot({ ...inputs, diff });
+}
 
-  if (latestReviewerProse) {
-    lines.push("## Previous reviewer feedback (CHANGES-REQUESTED)");
-    lines.push("");
-    lines.push(latestReviewerProse);
-    lines.push("");
-    lines.push(
-      "Address the reviewer's concerns. The reviewer checks the branch against " +
-        "the project's coding standards; addressing the prose above is what " +
-        "earns an APPROVED verdict.",
-    );
-    lines.push("");
-  }
+// Pure renderer for the implementer slot, separated from the git I/O above so
+// the prompt's shape is table-testable. Optional sections collapse to "" when
+// their input is absent; `section()` supplies the trailing blank line.
+export type AttemptSlotRender = PromptInputs & { readonly diff: string };
 
-  if (extraReprompt) {
-    lines.push("## Orchestrator note");
-    lines.push("");
-    lines.push(extraReprompt);
-    lines.push("");
-  }
+export function renderAttemptSlot(inputs: AttemptSlotRender): string {
+  const {
+    issue,
+    attempt,
+    maxAttempts,
+    lastFailureTrace,
+    extraReprompt,
+    latestReviewerProse,
+    diff,
+  } = inputs;
 
-  if (attempt >= 6) {
-    lines.push("## Escalation");
-    lines.push("");
-    lines.push(
-      `This is attempt ${attempt}/${maxAttempts}. If you cannot make further progress:`,
-    );
-    lines.push(
-      "- Emit `<promise>NEEDS-INFO</promise>` with a `<questions>` block listing the specific decisions or facts you need.",
-    );
-    lines.push(
-      "- Or revert to the last-good commit and let the orchestrator route this to a human reviewer.",
-    );
-    lines.push("");
-  }
+  const workDone = diff.trim()
+    ? `## Work done so far\n\n\`\`\`diff\n${diff.trim()}\n\`\`\``
+    : "No commits yet on this branch.";
 
-  lines.push("## Done signal");
-  lines.push("");
-  lines.push(
-    "When the implementation is complete and committed, emit `<promise>COMPLETE</promise>`. " +
-      "Gate-1 (project's `check` + `test`) is the deciding authority on correctness — a " +
-      "passing claim with a red gate sends you to the next attempt with the failure output.",
-  );
-  lines.push(
-    "If you need information you cannot derive from the issue or codebase, emit " +
-      "`<promise>NEEDS-INFO</promise>` followed by a `<questions>` block.",
-  );
+  const gateFailure = lastFailureTrace
+    ? render(IMPLEMENTER_GATE_FAILURE_TPL, { trace: lastFailureTrace })
+    : "";
 
-  return lines.join("\n");
+  const reviewerFeedback = latestReviewerProse
+    ? render(IMPLEMENTER_REVIEWER_FEEDBACK_TPL, { prose: latestReviewerProse })
+    : "";
+
+  const orchestratorNote = extraReprompt
+    ? `## Orchestrator note\n\n${extraReprompt}`
+    : "";
+
+  const escalation =
+    attempt >= ESCALATION_ATTEMPT
+      ? render(IMPLEMENTER_ESCALATION_TPL, {
+          attempt: String(attempt),
+          maxAttempts: String(maxAttempts),
+        })
+      : "";
+
+  return render(IMPLEMENTER_TPL, {
+    attempt: String(attempt),
+    maxAttempts: String(maxAttempts),
+    issueId: issue.id,
+    issueTitle: issue.title,
+    branch: issue.branch,
+    workDone: section(workDone),
+    gateFailure: section(gateFailure),
+    reviewerFeedback: section(reviewerFeedback),
+    orchestratorNote: section(orchestratorNote),
+    escalation: section(escalation),
+  });
 }
 
 async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> {
@@ -258,7 +247,14 @@ async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> 
     diff = "";
   }
 
-  return renderReviewerSlot({ ...inputs, commits, diff });
+  // Only point at the project standards file when it actually exists, so a
+  // configured-but-absent path doesn't send the reviewer chasing a dead @ref.
+  const codingStandardsPath =
+    inputs.codingStandardsPath && existsSync(inputs.codingStandardsPath)
+      ? inputs.codingStandardsPath
+      : undefined;
+
+  return renderReviewerSlot({ ...inputs, codingStandardsPath, commits, diff });
 }
 
 // Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
@@ -272,69 +268,32 @@ export type ReviewerSlotRender = ReviewerPromptInputs & {
 export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
   const { issue, sourceBranch, codingStandardsPath, claudeMdPath, contextMdPath, commits, diff } =
     inputs;
-  const lines: string[] = [];
-  lines.push("# Review");
-  lines.push("");
-  lines.push(
-    `Review the implementation on branch \`${issue.branch}\` against \`${sourceBranch}\`.`,
-  );
-  lines.push(`Issue #${issue.id}: ${issue.title}`);
-  lines.push("");
 
-  if (commits) {
-    lines.push("## Commits on this branch");
-    lines.push("");
-    lines.push("```");
-    lines.push(commits);
-    lines.push("```");
-    lines.push("");
-  }
-  if (diff) {
-    lines.push("## Branch diff");
-    lines.push("");
-    lines.push("```diff");
-    lines.push(diff);
-    lines.push("```");
-    lines.push("");
-  } else {
-    lines.push("## Branch diff");
-    lines.push("");
-    lines.push("(empty — no changes against the source branch)");
-    lines.push("");
-  }
+  const commitsBlock = commits
+    ? `## Commits on this branch\n\n\`\`\`\n${commits}\n\`\`\``
+    : "";
+
+  const diffBlock = diff
+    ? `## Branch diff\n\n\`\`\`diff\n${diff}\n\`\`\``
+    : "## Branch diff\n\n(empty — no changes against the source branch)";
+
+  const projectStandards = codingStandardsPath
+    ? render(REVIEWER_PROJECT_STANDARDS_TPL, { codingStandardsPath })
+    : "";
 
   const conventionsRef = contextMdPath
     ? `@${claudeMdPath} (and @${contextMdPath} if it exists)`
     : `@${claudeMdPath}`;
-  lines.push("## Review process");
-  lines.push("");
-  lines.push(
-    `Check the branch against the bar in @${codingStandardsPath}, plus the ` +
-      `conventions in ${conventionsRef}. Your role is strictly advisory: you ` +
-      "must not modify the branch, commit, push, or run gate commands. " +
-      "Read-only investigation only.",
-  );
-  lines.push("");
-  lines.push(
-    "Only raise concerns that are bar violations. Stylistic preferences, " +
-      "alternative-design musings, or anything you cannot point to a specific " +
-      "standard for must not be raised — the bar (not your judgment) decides " +
-      "what ships.",
-  );
-  lines.push("");
-  lines.push("## Verdict");
-  lines.push("");
-  lines.push("End your review with a single verdict token on its own:");
-  lines.push("");
-  lines.push("- `<verdict>APPROVED</verdict>` — branch meets the bar, ship it.");
-  lines.push(
-    "- `<verdict>CHANGES-REQUESTED</verdict>` — list the bar violations above and " +
-      "the implementer will address them in the next round.",
-  );
-  lines.push("");
-  lines.push(
-    "A missing verdict defaults to CHANGES-REQUESTED. Emit exactly one verdict.",
-  );
 
-  return lines.join("\n");
+  return render(REVIEWER_TPL, {
+    branch: issue.branch,
+    sourceBranch,
+    issueId: issue.id,
+    issueTitle: issue.title,
+    commits: section(commitsBlock),
+    diff: section(diffBlock),
+    codingStandards: CODING_STANDARDS,
+    projectStandards: section(projectStandards),
+    conventionsRef,
+  });
 }

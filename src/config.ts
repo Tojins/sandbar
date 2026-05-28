@@ -27,7 +27,10 @@ export type RunConfig = {
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
-  readonly codingStandardsPath: string;
+  // Optional. When set, the file *extends* sandbar's built-in coding standards
+  // (prompts/coding-standards.md) with project-specific rules; hosts are not
+  // required to supply one.
+  readonly codingStandardsPath?: string;
 
   readonly envFilePath: string;
 
@@ -39,9 +42,12 @@ export type RunConfig = {
   readonly copyToWorktree: readonly string[];
 };
 
-export type ResolvedConfig = Required<Omit<RunConfig, "contextMdPath" | "adrDir">> & {
+export type ResolvedConfig = Required<
+  Omit<RunConfig, "contextMdPath" | "adrDir" | "codingStandardsPath">
+> & {
   readonly contextMdPath?: string;
   readonly adrDir?: string;
+  readonly codingStandardsPath?: string;
 };
 
 export const DEFAULT_MAX_IMPL_ATTEMPTS = 8;

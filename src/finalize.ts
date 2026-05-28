@@ -48,7 +48,7 @@ export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
   latestReviewerProse: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} exhausted the reviewer-round budget without an ` +
-  `\`APPROVED\` verdict. The latest reviewer pass below is the bar violation ` +
+  `\`APPROVED\` verdict. The latest reviewer pass below is the standards-violation ` +
   `report the human needs to resolve. Push a fix on this branch (or rewrite ` +
   `the standards if the reviewer was wrong), then drop \`needs-human\` and ` +
   `re-apply \`ready-for-agent\` when ready.\n\n---\n\n${latestReviewerProse}`;
