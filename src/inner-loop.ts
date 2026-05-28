@@ -1,13 +1,16 @@
-// Inner-loop runner.
+// Inner-loop runner — I/O glue around the pure state machine.
 //
-// Per issue: ralph-style attempts loop bounded by config.maxImplAttempts,
-// single sandbox reused across attempts so commits accumulate on the issue
-// branch. After each attempt the orchestrator parses the agent's promise
-// token and either gate-checks (COMPLETE), terminates (NEEDS-INFO), or
-// re-prompts (any no-signal). On gate-1 green the reviewer runs in the same
-// sandbox, then gate-2 always runs. Budget exhaustion → NEEDS-HUMAN. Sandbox
-// crash or gate-2 red without reviewer commits → HARD-ERROR with one
-// fresh-sandbox retry, then surface.
+// Per issue:
+//   1. Setup a sandcastle sandbox + Postgres sidecar.
+//   2. Drive the state machine (inner-loop-machine.ts) to a verdict by
+//      executing the action it emits and feeding the result back as an event.
+//   3. Translate the verdict to a Terminal (attaching commit lists and, for
+//      REVERT-THEN-DONE, resetting the worktree to the pre-reviewer SHA).
+//   4. If the verdict is HARD-ERROR, the outer loop here asks
+//      decideAfterTerminal whether to dispose the sandbox and restart from
+//      attempt 1 with a fresh one (up to HARD_ERROR_MAX_RETRIES times).
+//
+// All branching decisions live in the state machine. This file only does I/O.
 
 import * as sandcastle from "@ai-hero/sandcastle";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
@@ -17,12 +20,22 @@ import { onCleanup } from "./cleanup.js";
 import type { GateCommand } from "./config.js";
 import { lastNLines, runGate } from "./gate.js";
 import { commitsSince, ensureIssueBranch, getHeadSha, resetHard } from "./git-ops.js";
+import {
+  HARD_ERROR_MAX_RETRIES,
+  type LoopAction,
+  type LoopEvent,
+  type LoopState,
+  type Verdict,
+  decideAfterTerminal,
+  initialAction,
+  initialState,
+  step,
+} from "./inner-loop-machine.js";
 import type { AttemptLogger } from "./logs.js";
 import { type Sidecar, startPgSidecar } from "./pg-sidecar.js";
 import { parsePromise } from "./promise-parser.js";
 import { buildPrompt, buildReviewerPrompt } from "./prompt.js";
 
-export const HARD_ERROR_MAX_RETRIES = 2;
 export const FAILURE_TAIL_LINES = 200;
 
 export type IssueRef = {
@@ -61,57 +74,67 @@ export type InnerLoopOptions = {
   readonly onOrchestratorLog?: (line: string) => Promise<void> | void;
 };
 
-export type Gate2Decision = "DONE" | "REVERT-THEN-DONE" | "HARD-ERROR";
-
-// Pure decision: gate-2 result and the reviewer's commit count fully determine
-// what the inner-loop does next. Tested in isolation; the I/O around it (sha
-// recording, reset, retry) is glued in attemptIssueOnce.
-export function decideAfterGate2(
-  gate2Ok: boolean,
-  reviewerCommitCount: number,
-): Gate2Decision {
-  if (gate2Ok) return "DONE";
-  if (reviewerCommitCount > 0) return "REVERT-THEN-DONE";
-  return "HARD-ERROR";
-}
-
-class HardError extends Error {}
+type SandboxCycleOutcome = {
+  readonly verdict: Verdict;
+  readonly accumulatedCommits: readonly { sha: string }[];
+  readonly reviewerCommits: readonly { sha: string }[];
+};
 
 export async function runInnerLoop(
   issue: IssueRef,
   opts: InnerLoopOptions,
 ): Promise<Terminal> {
-  let outcome = await attemptIssueOnce(issue, opts);
-  for (let retry = 1; retry <= HARD_ERROR_MAX_RETRIES; retry++) {
-    if (outcome.type !== "HARD-ERROR") return outcome;
+  let retriesUsed = 0;
+  for (;;) {
+    const outcome = await runSandboxCycle(issue, opts);
+    const decision = decideAfterTerminal(outcome.verdict, retriesUsed);
+    if (decision.kind === "surface") return toTerminal(outcome);
+    retriesUsed = decision.nextRetriesUsed;
+    const reason = outcome.verdict.type === "HARD-ERROR" ? outcome.verdict.reason : "";
     console.error(
-      `  ${issue.id}: HARD-ERROR (${outcome.reason}) — retry ${retry}/${HARD_ERROR_MAX_RETRIES} with a fresh sandbox.`,
+      `  ${issue.id}: HARD-ERROR (${reason}) — retry ${retriesUsed}/${HARD_ERROR_MAX_RETRIES} with a fresh sandbox.`,
     );
-    outcome = await attemptIssueOnce(issue, opts);
   }
-  return outcome;
 }
 
-async function attemptIssueOnce(
+function toTerminal(outcome: SandboxCycleOutcome): Terminal {
+  const { verdict, accumulatedCommits, reviewerCommits } = outcome;
+  switch (verdict.type) {
+    case "DONE":
+      return { type: "DONE", commits: [...accumulatedCommits, ...reviewerCommits] };
+    case "REVERT-THEN-DONE":
+      // The reset to pre-reviewer SHA already happened in runSandboxCycle as
+      // part of action execution; here we only need to publish the implementer's
+      // accumulated commits.
+      return { type: "DONE", commits: accumulatedCommits };
+    case "NEEDS-INFO":
+      return { type: "NEEDS-INFO", questions: verdict.questions };
+    case "NEEDS-HUMAN":
+      return { type: "NEEDS-HUMAN", failureTrace: verdict.failureTrace };
+    case "HARD-ERROR":
+      return {
+        type: "HARD-ERROR",
+        reason: verdict.reason,
+        commits: accumulatedCommits,
+      };
+  }
+}
+
+async function runSandboxCycle(
   issue: IssueRef,
   opts: InnerLoopOptions,
-): Promise<Terminal> {
+): Promise<SandboxCycleOutcome> {
   const { config } = opts;
   let sandbox: Sandbox | null = null;
   let sidecar: Sidecar | null = null;
   const accumulated: { sha: string }[] = [];
-  let lastFailureTrace = "";
-  let extraReprompt: string | undefined = undefined;
+  let reviewerCommits: readonly { sha: string }[] = [];
 
   try {
     // Seed the issue branch off origin/<sourceBranch> (not the host's local)
-    // so sandcastle never inherits cwd's in-progress state. Idempotent:
-    // existing branches with accumulated commits are left alone. Preflight
-    // has already fetched origin.
+    // so sandcastle never inherits cwd's in-progress state. Idempotent.
     await ensureIssueBranch(issue.branch, config.sourceBranch);
 
-    // allSettled (not all) so we can tear down a side that resolved when the
-    // other rejected.
     const [sandboxResult, sidecarResult] = await Promise.allSettled([
       sandcastle.createSandbox({
         branch: issue.branch,
@@ -132,7 +155,7 @@ async function attemptIssueOnce(
     const sidecarRef = sidecar;
     onCleanup(() => sidecarRef.stop());
 
-    const gateOpts = {
+    const gateOpts: SidecarGateOpts = {
       gateImage: config.gateImage,
       gateCommands: config.gateCommands,
       networkName: sidecar.networkName,
@@ -152,84 +175,54 @@ async function attemptIssueOnce(
       sourceBranch: config.sourceBranch,
     };
 
-    for (let attempt = 1; attempt <= config.maxImplAttempts; attempt++) {
-      const prompt = await buildPrompt(
-        {
-          issue,
-          attempt,
-          maxAttempts: config.maxImplAttempts,
-          worktreePath: sandbox.worktreePath,
-          lastFailureTrace,
-          sourceBranch: config.sourceBranch,
-          extraReprompt,
-        },
+    let preReviewerSha: string | null = null;
+    let state: LoopState = initialState(config.maxImplAttempts);
+    let action: LoopAction = initialAction(state);
+
+    while (action.kind !== "terminate") {
+      const event = await executeAction(action, {
+        issue,
+        sandbox,
+        opts,
+        config,
         anchorOpts,
-      );
-
-      const run = await sandbox.run({
-        name: `implementer-${issue.id}-attempt-${attempt}`,
-        maxIterations: 1,
-        agent: sandcastle.claudeCode(config.modelId),
-        prompt,
+        gateOpts,
+        accumulated,
+        onReviewerComplete: (sha, commits) => {
+          preReviewerSha = sha;
+          reviewerCommits = commits;
+        },
       });
-      if (opts.attemptLogger) {
-        await opts.attemptLogger.writeAttempt(issue.id, attempt, run.stdout);
-      }
-      accumulated.push(...run.commits);
-      extraReprompt = undefined;
+      const r = step(state, event);
+      state = r.state;
+      action = r.action;
+    }
 
-      const signal = parsePromise(run.stdout, {
-        commitsAccumulated: accumulated.length,
-      });
-
-      if (signal.kind === "NEEDS-INFO") {
-        return { type: "NEEDS-INFO", questions: signal.questions };
-      }
-
-      if (signal.kind === "COMPLETE") {
-        const gate1 = await runGate({
-          worktreePath: sandbox.worktreePath,
-          ...gateOpts,
-        });
-        if (opts.onOrchestratorLog) {
-          await opts.onOrchestratorLog(
-            `issue=${issue.id} attempt=${attempt} gate-1 ok=${gate1.ok} exitCode=${gate1.exitCode} failedStep=${gate1.failedStep ?? "-"}`,
-          );
-        }
-        if (!gate1.ok) {
-          lastFailureTrace = lastNLines(
-            `${gate1.stdout}\n${gate1.stderr}`,
-            FAILURE_TAIL_LINES,
-          );
-          continue;
-        }
-
-        const reviewerOutcome = await runReviewerAndGate2(
-          sandbox,
-          issue,
-          attempt,
-          accumulated,
-          gateOpts,
-          opts,
+    const verdict = action.verdict;
+    if (verdict.type === "REVERT-THEN-DONE") {
+      if (preReviewerSha === null) {
+        throw new Error(
+          "REVERT-THEN-DONE verdict but no pre-reviewer SHA was captured",
         );
-        return reviewerOutcome;
       }
-
-      if (signal.reprompt) extraReprompt = signal.reprompt;
+      await resetHard(sandbox.worktreePath, preReviewerSha);
+      console.log(
+        `  ${issue.id}: gate-2 red after reviewer made ${reviewerCommits.length} commit(s); reset to pre-reviewer SHA, accepting implementer's work.`,
+      );
     }
 
-    return {
-      type: "NEEDS-HUMAN",
-      failureTrace: lastFailureTrace || "Attempt budget exhausted with no green gate.",
-    };
+    return { verdict, accumulatedCommits: accumulated, reviewerCommits };
   } catch (err) {
-    if (err instanceof HardError) {
-      return { type: "HARD-ERROR", reason: err.message, commits: accumulated };
-    }
+    // Setup failure or any other unhandled exception inside the cycle.
+    // Surface as HARD-ERROR so the outer loop can decide whether to retry
+    // with a fresh sandbox.
     return {
-      type: "HARD-ERROR",
-      reason: err instanceof Error ? err.message : String(err),
-      commits: accumulated,
+      verdict: {
+        type: "HARD-ERROR",
+        reason: err instanceof Error ? err.message : String(err),
+      },
+      accumulatedCommits: accumulated,
+      reviewerCommits,
     };
   } finally {
     if (sandbox) {
@@ -261,15 +254,102 @@ type SidecarGateOpts = {
   readonly dbNameTest: string;
 };
 
+type ExecuteActionCtx = {
+  readonly issue: IssueRef;
+  readonly sandbox: Sandbox;
+  readonly opts: InnerLoopOptions;
+  readonly config: InnerLoopConfig;
+  readonly anchorOpts: {
+    readonly claudeMdPath: string;
+    readonly contextMdPath?: string;
+    readonly adrDir?: string;
+    readonly codingStandardsPath: string;
+    readonly sourceBranch: string;
+  };
+  readonly gateOpts: SidecarGateOpts;
+  readonly accumulated: { sha: string }[];
+  readonly onReviewerComplete: (
+    preReviewerSha: string,
+    commits: readonly { sha: string }[],
+  ) => void;
+};
+
+async function executeAction(
+  action: LoopAction,
+  ctx: ExecuteActionCtx,
+): Promise<LoopEvent> {
+  switch (action.kind) {
+    case "run-implementer":
+      return runImplementer(action, ctx);
+    case "run-gate-1":
+      return runGate1(action, ctx);
+    case "run-reviewer-and-gate-2":
+      return runReviewerAndGate2(action, ctx);
+    case "terminate":
+      throw new Error("executeAction called with terminate; runner should exit instead");
+  }
+}
+
+async function runImplementer(
+  action: Extract<LoopAction, { kind: "run-implementer" }>,
+  ctx: ExecuteActionCtx,
+): Promise<LoopEvent> {
+  const { issue, sandbox, opts, config, anchorOpts, accumulated } = ctx;
+  const prompt = await buildPrompt(
+    {
+      issue,
+      attempt: action.attempt,
+      maxAttempts: config.maxImplAttempts,
+      worktreePath: sandbox.worktreePath,
+      lastFailureTrace: action.failureTrace,
+      sourceBranch: config.sourceBranch,
+      ...(action.extraReprompt !== null ? { extraReprompt: action.extraReprompt } : {}),
+    },
+    anchorOpts,
+  );
+
+  const run = await sandbox.run({
+    name: `implementer-${issue.id}-attempt-${action.attempt}`,
+    maxIterations: 1,
+    agent: sandcastle.claudeCode(config.modelId),
+    prompt,
+  });
+  if (opts.attemptLogger) {
+    await opts.attemptLogger.writeAttempt(issue.id, action.attempt, run.stdout);
+  }
+  accumulated.push(...run.commits);
+
+  const signal = parsePromise(run.stdout, {
+    commitsAccumulated: accumulated.length,
+  });
+  return { kind: "implementer-result", signal };
+}
+
+async function runGate1(
+  action: Extract<LoopAction, { kind: "run-gate-1" }>,
+  ctx: ExecuteActionCtx,
+): Promise<LoopEvent> {
+  const { issue, sandbox, opts, gateOpts } = ctx;
+  const gate1 = await runGate({ worktreePath: sandbox.worktreePath, ...gateOpts });
+  if (opts.onOrchestratorLog) {
+    await opts.onOrchestratorLog(
+      `issue=${issue.id} attempt=${action.attempt} gate-1 ok=${gate1.ok} exitCode=${gate1.exitCode} failedStep=${gate1.failedStep ?? "-"}`,
+    );
+  }
+  return {
+    kind: "gate-1-result",
+    ok: gate1.ok,
+    failureTrace: gate1.ok
+      ? ""
+      : lastNLines(`${gate1.stdout}\n${gate1.stderr}`, FAILURE_TAIL_LINES),
+  };
+}
+
 async function runReviewerAndGate2(
-  sandbox: Sandbox,
-  issue: IssueRef,
-  attempt: number,
-  accumulated: { sha: string }[],
-  gateOpts: SidecarGateOpts,
-  opts: InnerLoopOptions,
-): Promise<Terminal> {
-  const { config } = opts;
+  action: Extract<LoopAction, { kind: "run-reviewer-and-gate-2" }>,
+  ctx: ExecuteActionCtx,
+): Promise<LoopEvent> {
+  const { issue, sandbox, opts, config, gateOpts, onReviewerComplete } = ctx;
   const preReviewerSha = await getHeadSha(sandbox.worktreePath);
 
   const reviewerPrompt = await buildReviewerPrompt({
@@ -291,7 +371,7 @@ async function runReviewerAndGate2(
     if (opts.attemptLogger) {
       await opts.attemptLogger.writeAttemptReviewer(
         issue.id,
-        attempt,
+        action.attempt,
         reviewerRun.stdout,
       );
     }
@@ -302,47 +382,29 @@ async function runReviewerAndGate2(
     if (opts.attemptLogger) {
       await opts.attemptLogger.writeAttemptReviewer(
         issue.id,
-        attempt,
+        action.attempt,
         `reviewer run errored: ${err instanceof Error ? err.message : String(err)}\n`,
       );
     }
   }
 
   const reviewerCommits = await commitsSince(sandbox.worktreePath, preReviewerSha);
-  const gate2 = await runGate({
-    worktreePath: sandbox.worktreePath,
-    ...gateOpts,
-  });
+  onReviewerComplete(preReviewerSha, reviewerCommits);
+
+  const gate2 = await runGate({ worktreePath: sandbox.worktreePath, ...gateOpts });
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(
-      `issue=${issue.id} attempt=${attempt} gate-2 ok=${gate2.ok} exitCode=${gate2.exitCode} reviewerCommits=${reviewerCommits.length}`,
+      `issue=${issue.id} attempt=${action.attempt} gate-2 ok=${gate2.ok} exitCode=${gate2.exitCode} reviewerCommits=${reviewerCommits.length}`,
     );
   }
 
-  const decision = decideAfterGate2(gate2.ok, reviewerCommits.length);
-
-  if (decision === "DONE") {
-    return {
-      type: "DONE",
-      commits: [...accumulated, ...reviewerCommits],
-    };
-  }
-
-  if (decision === "REVERT-THEN-DONE") {
-    await resetHard(sandbox.worktreePath, preReviewerSha);
-    console.log(
-      `  ${issue.id}: gate-2 red after reviewer made ${reviewerCommits.length} commit(s); reset to pre-reviewer SHA, accepting implementer's work.`,
-    );
-    return { type: "DONE", commits: accumulated };
-  }
-
-  // HARD-ERROR — gate-1 was green moments ago; gate-2 red with no reviewer
-  // edits is treated as infra flake. Throw to engage the one-retry path.
-  const trace = lastNLines(
-    `${gate2.stdout}\n${gate2.stderr}`,
-    FAILURE_TAIL_LINES,
-  );
-  throw new HardError(
-    `gate-2 red with no reviewer commits (failed step: ${gate2.failedStep ?? "unknown"})\n${trace}`,
-  );
+  return {
+    kind: "gate-2-result",
+    ok: gate2.ok,
+    reviewerCommitCount: reviewerCommits.length,
+    failureTrace: gate2.ok
+      ? ""
+      : lastNLines(`${gate2.stdout}\n${gate2.stderr}`, FAILURE_TAIL_LINES),
+    failedStep: gate2.failedStep,
+  };
 }
