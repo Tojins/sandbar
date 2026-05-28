@@ -1,0 +1,608 @@
+import { describe, expect, it } from "vitest";
+
+import type { MergerGateOutput } from "./merger.js";
+import {
+  INSTALL_FAILED_COMMENT,
+  MergerError,
+  READY_FOR_AGENT_LABEL,
+  type IssueRef,
+  type MergerAdapter,
+  type PushResult,
+  issueNumberOf,
+  runMergerWithAdapter,
+  sortIssuesAsc,
+} from "./merger.js";
+
+function issue(n: number, title = `t-${n}`): IssueRef {
+  return {
+    id: String(n),
+    title,
+    branch: `sandcastle/issue-${n}-${title}`,
+  };
+}
+
+type GateResp = { ok: true } | ({ ok: false } & MergerGateOutput);
+
+type AgentScript = { stdout: string; leavesConflict?: boolean };
+
+type Calls = {
+  merges: string[];
+  agentRuns: string[];
+  isMergeChecks: number;
+  conflictDigests: number;
+  bodies: string[];
+  aborts: number;
+  resets: { sha: string }[];
+  installs: number;
+  gates: number;
+  order: string[];
+  comments: { n: number; msg: string }[];
+  removedLabels: { n: number; label: string }[];
+  closes: { n: number; comment: string }[];
+  pushes: number;
+  pulls: number;
+};
+
+type Script = {
+  merges: ("ok" | "conflict")[];
+  agents?: AgentScript[];
+  installs?: boolean[];
+  gates?: GateResp[];
+  pushes?: PushResult[];
+  pulls?: boolean[];
+  heads?: string[];
+};
+
+function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
+  const calls: Calls = {
+    merges: [],
+    agentRuns: [],
+    isMergeChecks: 0,
+    conflictDigests: 0,
+    bodies: [],
+    aborts: 0,
+    resets: [],
+    installs: 0,
+    gates: 0,
+    order: [],
+    comments: [],
+    removedLabels: [],
+    closes: [],
+    pushes: 0,
+    pulls: 0,
+  };
+  let mIdx = 0;
+  let aIdx = 0;
+  let iIdx = 0;
+  let gIdx = 0;
+  let pIdx = 0;
+  let plIdx = 0;
+  let headIdx = 0;
+  let merging = false;
+
+  const adapter: MergerAdapter = {
+    async mergeNoFf(i) {
+      const r = script.merges[mIdx++];
+      calls.merges.push(i.branch);
+      calls.order.push("merge");
+      if (r === "conflict") merging = true;
+      return { ok: r === "ok" };
+    },
+    async runResolveAgent(_prompt) {
+      const entry = script.agents?.[aIdx++];
+      if (!entry) throw new Error("runResolveAgent not scripted");
+      calls.agentRuns.push("agent");
+      calls.order.push("agent");
+      if (entry.stdout.includes("<promise>COMMITTED</promise>")) {
+        merging = entry.leavesConflict ?? false;
+      } else if (
+        entry.stdout.includes("<promise>ABANDON</promise>") &&
+        entry.leavesConflict !== undefined
+      ) {
+        merging = entry.leavesConflict;
+      }
+      return { stdout: entry.stdout };
+    },
+    async isMergeInProgress() {
+      calls.isMergeChecks++;
+      return merging;
+    },
+    async conflictDigest() {
+      calls.conflictDigests++;
+      return { status: "UU foo", diff: "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>>" };
+    },
+    async getIssueBody(id) {
+      calls.bodies.push(id);
+      return `body-${id}`;
+    },
+    async getHeadSha() {
+      const idx = headIdx++;
+      return script.heads?.[idx] ?? `sha-${idx}`;
+    },
+    async abortMerge() {
+      calls.aborts++;
+      calls.order.push("abort");
+      merging = false;
+    },
+    async resetHardSha(sha) {
+      calls.resets.push({ sha });
+      calls.order.push("reset");
+      merging = false;
+    },
+    async npmInstall() {
+      const r = script.installs?.[iIdx++] ?? true;
+      calls.installs++;
+      calls.order.push("install");
+      return { ok: r };
+    },
+    async runGate() {
+      const r = script.gates?.[gIdx++];
+      if (r === undefined)
+        throw new Error("gate called more times than scripted");
+      calls.gates++;
+      calls.order.push("gate");
+      return r;
+    },
+    async commentOnIssue(n, msg) {
+      calls.comments.push({ n, msg });
+    },
+    async removeLabel(n, label) {
+      calls.removedLabels.push({ n, label });
+    },
+    async closeIssue(n, comment) {
+      calls.closes.push({ n, comment });
+    },
+    async push() {
+      const r = script.pushes?.[pIdx++] ?? { kind: "ok" as const };
+      calls.pushes++;
+      return r;
+    },
+    async pullFfOnly() {
+      const r = script.pulls?.[plIdx++];
+      if (r === undefined) throw new Error("pull called but not scripted");
+      calls.pulls++;
+      return { ok: r };
+    },
+  };
+  return { adapter, calls };
+}
+
+function gateRed(): { ok: false } & MergerGateOutput {
+  return {
+    ok: false,
+    stdout: "x",
+    stderr: "y",
+    failedStep: "test",
+    exitCode: 1,
+  };
+}
+
+describe("issueNumberOf", () => {
+  it("parses positive integer ids", () => {
+    expect(issueNumberOf({ id: "44", title: "x", branch: "y" })).toBe(44);
+  });
+  it("rejects non-integer ids", () => {
+    expect(() => issueNumberOf({ id: "abc", title: "x", branch: "y" })).toThrow();
+    expect(() => issueNumberOf({ id: "0", title: "x", branch: "y" })).toThrow();
+    expect(() => issueNumberOf({ id: "-3", title: "x", branch: "y" })).toThrow();
+  });
+});
+
+describe("sortIssuesAsc", () => {
+  it("sorts by issue number ascending", () => {
+    const sorted = sortIssuesAsc([issue(44), issue(10), issue(42)]);
+    expect(sorted.map((i) => i.id)).toEqual(["10", "42", "44"]);
+  });
+  it("does not mutate input", () => {
+    const input = [issue(44), issue(10)];
+    sortIssuesAsc(input);
+    expect(input.map((i) => i.id)).toEqual(["44", "10"]);
+  });
+});
+
+describe("runMergerWithAdapter — clean-merge happy paths", () => {
+  it("clean merge + green: keeps merge, pushes, closes", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
+    expect(summary.skipped).toEqual([]);
+    expect(summary.pushed).toBe(true);
+    expect(calls.order).toEqual(["merge", "install", "gate"]);
+    expect(calls.agentRuns).toEqual([]);
+    expect(calls.resets).toEqual([]);
+    expect(calls.closes).toEqual([
+      { n: 42, comment: "Completed by Sandbar" },
+    ]);
+  });
+
+  it("clean merge + npm install fails: resets to preMergeSha, comments install-failed, skips, no gate", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      installs: [false],
+      heads: ["pre-sha"],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.merged).toEqual([]);
+    expect(summary.skipped.map((s) => ({ id: s.issue.id, reason: s.reason }))).toEqual([
+      { id: "42", reason: "install-failed" },
+    ]);
+    expect(summary.pushed).toBe(false);
+    expect(calls.resets).toEqual([{ sha: "pre-sha" }]);
+    expect(calls.gates).toBe(0);
+    expect(calls.comments).toEqual([{ n: 42, msg: INSTALL_FAILED_COMMENT }]);
+    expect(calls.removedLabels).toEqual([
+      { n: 42, label: READY_FOR_AGENT_LABEL },
+    ]);
+  });
+});
+
+describe("runMergerWithAdapter — conflict enters resolve loop", () => {
+  it("conflict + agent COMMITTED + gate green: keeps merge, pushes, closes", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
+    expect(summary.skipped).toEqual([]);
+    expect(calls.order).toEqual(["merge", "agent", "install", "gate"]);
+    expect(calls.aborts).toBe(0);
+    expect(calls.resets).toEqual([]);
+    expect(calls.closes).toEqual([
+      { n: 42, comment: "Completed by Sandbar" },
+    ]);
+  });
+
+  it("conflict + agent ABANDON while still conflicted: aborts merge, comments with reason, drops label, skips", async () => {
+    const reason = "branches #42 and #40 collide; #40 should win";
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [
+        {
+          stdout: `<reason>${reason}</reason>\n<promise>ABANDON</promise>`,
+          leavesConflict: true,
+        },
+      ],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.merged).toEqual([]);
+    expect(summary.skipped.map((s) => ({ id: s.issue.id, reason: s.reason }))).toEqual([
+      { id: "42", reason: "conflict" },
+    ]);
+    expect(calls.aborts).toBe(1);
+    expect(calls.resets).toEqual([]);
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.comments[0]!.msg).toContain("agentic resolve loop");
+    expect(calls.comments[0]!.msg).toContain(reason);
+    expect(calls.removedLabels).toEqual([
+      { n: 42, label: READY_FOR_AGENT_LABEL },
+    ]);
+  });
+
+  it("conflict + silent abort (agent COMMITTED, no merge in progress, HEAD unchanged): skips with reason silent-noop, NO comment or label change", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+      heads: ["pre-sha", "pre-sha"],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.merged).toEqual([]);
+    expect(summary.skipped.map((s) => ({ id: s.issue.id, reason: s.reason }))).toEqual([
+      { id: "42", reason: "silent-noop" },
+    ]);
+    expect(calls.aborts).toBe(0);
+    expect(calls.resets).toEqual([{ sha: "pre-sha" }]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.removedLabels).toEqual([]);
+  });
+
+  it("conflict + agent commits the merge then ABANDONs: resets to preMergeSha (not merge --abort)", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [
+        { stdout: "<promise>COMMITTED</promise>" },
+        {
+          stdout: "<reason>cannot fix tests</reason>\n<promise>ABANDON</promise>",
+          leavesConflict: false,
+        },
+      ],
+      gates: [gateRed()],
+      heads: ["pre-sha"],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.merged).toEqual([]);
+    expect(summary.skipped[0]!.reason).toBe("conflict");
+    expect(calls.aborts).toBe(0);
+    expect(calls.resets).toEqual([{ sha: "pre-sha" }]);
+  });
+});
+
+describe("runMergerWithAdapter — gate-red enters resolve loop", () => {
+  it("clean merge + gate red + agent fixes it: keeps merge, pushes, closes", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [gateRed(), { ok: true }],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
+    expect(calls.order).toEqual([
+      "merge",
+      "install",
+      "gate",
+      "agent",
+      "install",
+      "gate",
+    ]);
+    expect(calls.resets).toEqual([]);
+    expect(calls.closes).toEqual([
+      { n: 42, comment: "Completed by Sandbar" },
+    ]);
+  });
+
+  it("clean merge + gate red + agent ABANDONs: resets to preMergeSha, comments with reason, skips", async () => {
+    const reason = "test failure is a real integration bug — needs human";
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      agents: [
+        {
+          stdout: `<reason>${reason}</reason>\n<promise>ABANDON</promise>`,
+        },
+      ],
+      gates: [gateRed()],
+      heads: ["pre-sha"],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.merged).toEqual([]);
+    expect(summary.skipped.map((s) => ({ id: s.issue.id, reason: s.reason }))).toEqual([
+      { id: "42", reason: "gate-red" },
+    ]);
+    expect(calls.aborts).toBe(0);
+    expect(calls.resets).toEqual([{ sha: "pre-sha" }]);
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.comments[0]!.msg).toContain("agentic fix attempt");
+    expect(calls.comments[0]!.msg).toContain(reason);
+    expect(calls.removedLabels).toEqual([
+      { n: 42, label: READY_FOR_AGENT_LABEL },
+    ]);
+  });
+
+  it("gate-red onGateRed sink fires before entering the resolve loop", async () => {
+    const { adapter } = makeAdapter({
+      merges: ["ok"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [gateRed(), { ok: true }],
+    });
+    const sunk: Array<{ issueId: string; failedStep: string | null; exitCode: number }> = [];
+    await runMergerWithAdapter(
+      [issue(42)],
+      adapter,
+      undefined,
+      (issueId, gate) => {
+        sunk.push({ issueId, failedStep: gate.failedStep, exitCode: gate.exitCode });
+      },
+    );
+    expect(sunk).toEqual([{ issueId: "42", failedStep: "test", exitCode: 1 }]);
+  });
+});
+
+describe("runMergerWithAdapter — multi-issue context", () => {
+  it("passes other cycle issues to the resolve loop (bodies fetched for siblings, not self)", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+    });
+    await runMergerWithAdapter(
+      [issue(42)],
+      adapter,
+      undefined,
+      undefined,
+      { cycleIssues: [issue(40), issue(42), issue(44)] },
+    );
+
+    expect(calls.bodies).toEqual(["42", "40", "44"]);
+  });
+
+  it("defaults cycleIssues to the issues argument when not provided", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict", "ok"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }, { ok: true }],
+    });
+    await runMergerWithAdapter([issue(40), issue(42)], adapter);
+    expect(calls.bodies).toEqual(["40", "42"]);
+  });
+});
+
+describe("runMergerWithAdapter — ordering and mixed", () => {
+  it("processes branches in ascending issue number order regardless of input order", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok", "ok"],
+      gates: [{ ok: true }, { ok: true }, { ok: true }],
+    });
+    await runMergerWithAdapter([issue(44), issue(10), issue(42)], adapter);
+
+    expect(calls.merges).toEqual([
+      "sandcastle/issue-10-t-10",
+      "sandcastle/issue-42-t-42",
+      "sandcastle/issue-44-t-44",
+    ]);
+    expect(calls.closes.map((c) => c.n)).toEqual([10, 42, 44]);
+  });
+
+  it("mixed run: some skipped via abandon, some merged — only merged are pushed and closed", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict", "ok", "ok"],
+      agents: [
+        {
+          stdout: "<reason>r1</reason>\n<promise>ABANDON</promise>",
+          leavesConflict: true,
+        },
+        {
+          stdout: "<reason>r2</reason>\n<promise>ABANDON</promise>",
+        },
+      ],
+      gates: [{ ok: true }, gateRed()],
+      heads: ["sha10", "sha42", "sha44"],
+    });
+    const summary = await runMergerWithAdapter(
+      [issue(44), issue(10), issue(42)],
+      adapter,
+    );
+
+    expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
+    expect(summary.skipped.map((s) => ({ id: s.issue.id, reason: s.reason }))).toEqual([
+      { id: "10", reason: "conflict" },
+      { id: "44", reason: "gate-red" },
+    ]);
+    expect(summary.pushed).toBe(true);
+    expect(calls.aborts).toBe(1);
+    expect(calls.resets).toEqual([{ sha: "sha44" }]);
+    expect(calls.closes).toEqual([
+      { n: 42, comment: "Completed by Sandbar" },
+    ]);
+  });
+
+  it("all branches skipped: no push, no closes", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict", "ok"],
+      agents: [
+        {
+          stdout: "<reason>r</reason>\n<promise>ABANDON</promise>",
+          leavesConflict: true,
+        },
+        {
+          stdout: "<reason>r</reason>\n<promise>ABANDON</promise>",
+        },
+      ],
+      gates: [gateRed()],
+    });
+    const summary = await runMergerWithAdapter(
+      [issue(10), issue(11)],
+      adapter,
+    );
+
+    expect(summary.merged).toEqual([]);
+    expect(summary.skipped.length).toBe(2);
+    expect(summary.pushed).toBe(false);
+    expect(calls.pushes).toBe(0);
+    expect(calls.closes).toEqual([]);
+  });
+});
+
+describe("runMergerWithAdapter — push lifecycle", () => {
+  it("push race retry: pulls, re-pushes successfully, closes issues", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      pushes: [{ kind: "race" }, { kind: "ok" }],
+      pulls: [true],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.pushed).toBe(true);
+    expect(calls.pushes).toBe(2);
+    expect(calls.pulls).toBe(1);
+    expect(calls.closes).toEqual([
+      { n: 42, comment: "Completed by Sandbar" },
+    ]);
+  });
+
+  it("push race + pull conflict: throws MergerError, no closes", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      pushes: [{ kind: "race" }],
+      pulls: [false],
+    });
+
+    await expect(runMergerWithAdapter([issue(42)], adapter)).rejects.toBeInstanceOf(
+      MergerError,
+    );
+    expect(calls.pushes).toBe(1);
+    expect(calls.pulls).toBe(1);
+    expect(calls.closes).toEqual([]);
+  });
+
+  it("push race + still-rejected after retry: throws MergerError", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      pushes: [{ kind: "race" }, { kind: "race" }],
+      pulls: [true],
+    });
+
+    await expect(runMergerWithAdapter([issue(42)], adapter)).rejects.toBeInstanceOf(
+      MergerError,
+    );
+    expect(calls.pushes).toBe(2);
+    expect(calls.pulls).toBe(1);
+    expect(calls.closes).toEqual([]);
+  });
+
+  it("push fatal error: throws MergerError, no closes", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      pushes: [{ kind: "fatal", reason: "ssh: handshake failed" }],
+    });
+
+    await expect(runMergerWithAdapter([issue(42)], adapter)).rejects.toThrow(
+      /handshake failed/,
+    );
+    expect(calls.closes).toEqual([]);
+  });
+});
+
+describe("runMergerWithAdapter — logging", () => {
+  it("emits expected log lines for clean-merge happy path", async () => {
+    const { adapter } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+    });
+    const lines: string[] = [];
+    await runMergerWithAdapter([issue(42)], adapter, (line) => {
+      lines.push(line);
+    });
+    expect(lines).toContain("merge-attempt #42 sandcastle/issue-42-t-42");
+    expect(lines).toContain("merged #42");
+    expect(lines).toContain("push attempt 1");
+  });
+
+  it("logs resolve-loop entry on conflict and gate-red", async () => {
+    const { adapter } = makeAdapter({
+      merges: ["conflict", "ok"],
+      agents: [
+        { stdout: "<promise>COMMITTED</promise>" },
+        {
+          stdout: "<reason>r</reason>\n<promise>ABANDON</promise>",
+        },
+      ],
+      gates: [{ ok: true }, gateRed()],
+    });
+    const lines: string[] = [];
+    await runMergerWithAdapter([issue(10), issue(42)], adapter, (line) => {
+      lines.push(line);
+    });
+    expect(lines.some((l) => l.startsWith("conflict #10 entering resolve-loop"))).toBe(
+      true,
+    );
+    expect(lines.some((l) => l.startsWith("merged #10 (via resolve-loop)"))).toBe(true);
+    expect(lines.some((l) => l.startsWith("gate-red #42"))).toBe(true);
+    expect(lines.some((l) => l.startsWith("skip #42 reason=gate-red"))).toBe(true);
+  });
+});

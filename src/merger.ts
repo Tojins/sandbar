@@ -1,0 +1,640 @@
+// Procedural merger — direct-to-source-branch, with an agentic resolve loop
+// covering both conflict and post-merge gate-red.
+//
+// After phase 2 the orchestrator hands DONE branches to runMerger, which
+// iterates them in ascending issue-number order and, for each:
+//
+//   preMergeSha = HEAD                   — for safe revert on abandon
+//   git merge --no-ff <branch>
+//     conflict   → runResolveLoop({conflict, ...}, cycleIssues)
+//                  abandon  → merge --abort OR reset --hard preMergeSha + skip
+//                  resolved → fall through to merged.push (loop already gated)
+//     clean      → npm install
+//                    fail  → reset --hard preMergeSha + skip (unchanged)
+//                  → runGate
+//                    green → merged.push
+//                    red   → runResolveLoop({gate-red, ...}, cycleIssues)
+//                            abandon  → reset --hard preMergeSha + skip
+//                            resolved → merged.push (loop already gated)
+//
+// The resolve loop loads the bodies of *all* other issues in this cycle so the
+// agent can reason about "branch B's intent collides with branch A — abandon
+// B" instead of being stuck inside a single-issue context.
+//
+// After all branches processed: a single `git push origin <sourceBranch>`. On
+// a push race (rejected/non-fast-forward), one retry via `git pull --ff-only`
+// then push again; pull-conflict is a hard fail (operator must resolve). Each
+// surviving merge → `gh issue close <n>`.
+//
+// Merge commits and agent-authored commits inside the loop are attributed to
+// the configured bot identity with a co-author trailer.
+
+import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { promisify } from "node:util";
+
+import { type EnvReader } from "./env.js";
+import { type GateResult, runGate } from "./gate.js";
+import type { GateCommand } from "./config.js";
+import { RUNTIME } from "./pg-sidecar.js";
+import {
+  RESOLVE_MAX_ATTEMPTS,
+  type ResolveAdapter,
+  type ResolveLogger,
+  runResolveLoop,
+} from "./resolve-loop.js";
+
+export type MergerGateOutput = {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly failedStep: "check" | "test" | null;
+  readonly exitCode: number;
+};
+
+const exec = promisify(execFile);
+
+export const READY_FOR_AGENT_LABEL = "ready-for-agent";
+
+export const INSTALL_FAILED_COMMENT =
+  "Sandbar merged this branch into the source branch locally, but `npm install` against " +
+  "the merged tree failed — the post-merge gate could not run. The merge has been " +
+  "reverted and `ready-for-agent` removed; please investigate the dependency change " +
+  "before re-labelling.";
+
+function buildAbandonComment(args: {
+  mode: "conflict" | "gate-red";
+  reason: string;
+  attempts: number;
+}): string {
+  if (args.mode === "conflict") {
+    return [
+      `Sandbar attempted to merge this branch into the source branch and the agentic resolve loop bailed after ${args.attempts} attempt${args.attempts === 1 ? "" : "s"}.`,
+      "The merge has been aborted and `ready-for-agent` removed.",
+      "",
+      `Agent's reason: ${args.reason}`,
+    ].join("\n");
+  }
+  return [
+    `Sandbar merged this branch into the source branch locally, but the post-merge gate was still red after ${args.attempts} agentic fix attempt${args.attempts === 1 ? "" : "s"}.`,
+    "The merge has been reverted and `ready-for-agent` removed.",
+    "",
+    `Agent's reason: ${args.reason}`,
+  ].join("\n");
+}
+
+export type IssueRef = {
+  readonly id: string;
+  readonly title: string;
+  readonly branch: string;
+};
+
+export type PushResult =
+  | { readonly kind: "ok" }
+  | { readonly kind: "race" }
+  | { readonly kind: "fatal"; readonly reason: string };
+
+// Adapter shape. Split into the merger's own primitives and the resolve-loop
+// primitives (which the merger forwards). The real adapter implements both.
+export type MergerAdapter = ResolveAdapter & {
+  mergeNoFf(issue: IssueRef): Promise<{ readonly ok: boolean }>;
+  abortMerge(): Promise<void>;
+  getHeadSha(): Promise<string>;
+  resetHardSha(sha: string): Promise<void>;
+  commentOnIssue(issueNum: number, msg: string): Promise<void>;
+  removeLabel(issueNum: number, label: string): Promise<void>;
+  closeIssue(issueNum: number, comment: string): Promise<void>;
+  push(): Promise<PushResult>;
+  pullFfOnly(): Promise<{ readonly ok: boolean }>;
+};
+
+export type SkipReason =
+  | "conflict"
+  | "gate-red"
+  | "install-failed"
+  // Resolve-loop's HEAD-advance invariant tripped: the agent gave up via a
+  // silent `git merge --abort` rather than completing the merge. The branch
+  // is intact, but no commit landed on the source branch. Orchestrator
+  // decides whether to re-enqueue for a fresh implementer attempt (under
+  // the per-issue retry cap) or escalate to human attention.
+  | "silent-noop";
+
+export type MergerSummary = {
+  readonly merged: readonly IssueRef[];
+  readonly skipped: readonly {
+    readonly issue: IssueRef;
+    readonly reason: SkipReason;
+  }[];
+  readonly pushed: boolean;
+};
+
+export class MergerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MergerError";
+  }
+}
+
+export function issueNumberOf(issue: IssueRef): number {
+  const n = Number(issue.id);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`Invalid issue id (expected positive integer): ${issue.id}`);
+  }
+  return n;
+}
+
+export function sortIssuesAsc(issues: readonly IssueRef[]): IssueRef[] {
+  return [...issues].sort((a, b) => issueNumberOf(a) - issueNumberOf(b));
+}
+
+export type MergerLog = (line: string) => void | Promise<void>;
+
+// Optional sink for the gate output when we *enter* the resolve loop in
+// gate-red mode. The loop will surface its own outputs separately via its
+// log; this sink preserves the existing "merger-gate-<issueId>" artefact.
+export type MergerGateOutputSink = (
+  issueId: string,
+  gate: MergerGateOutput,
+) => void | Promise<void>;
+
+export type RunMergerOptions = {
+  // Full set of issues in this cycle (typically the plan's DONE branches).
+  // The resolve loop loads the bodies of all *other* entries so the agent has
+  // multi-issue context when reasoning about an integration failure.
+  readonly cycleIssues?: readonly IssueRef[];
+  readonly projectAnchor?: string;
+};
+
+export async function runMergerWithAdapter(
+  issues: readonly IssueRef[],
+  adapter: MergerAdapter,
+  log?: MergerLog,
+  onGateRed?: MergerGateOutputSink,
+  opts: RunMergerOptions = {},
+): Promise<MergerSummary> {
+  const merged: IssueRef[] = [];
+  const skipped: { issue: IssueRef; reason: SkipReason }[] = [];
+  const cycle = opts.cycleIssues ?? issues;
+  const projectAnchor = opts.projectAnchor ?? "";
+  const emit = async (line: string): Promise<void> => {
+    if (log) await log(line);
+  };
+  const resolveLog: ResolveLogger = (line) => emit(line);
+
+  for (const issue of sortIssuesAsc(issues)) {
+    const n = issueNumberOf(issue);
+    const relatedIssues = cycle.filter((c) => c.id !== issue.id);
+
+    await emit(`merge-attempt #${n} ${issue.branch}`);
+    const preMergeSha = await adapter.getHeadSha();
+    const m = await adapter.mergeNoFf(issue);
+
+    if (!m.ok) {
+      await emit(`conflict #${n} entering resolve-loop`);
+      const outcome = await runResolveLoop(
+        issue,
+        relatedIssues,
+        { kind: "conflict" },
+        adapter,
+        { projectAnchor, preMergeSha },
+        resolveLog,
+      );
+      if (outcome.kind === "abandon") {
+        if (outcome.mergeInProgress) {
+          await adapter.abortMerge();
+        } else {
+          await adapter.resetHardSha(preMergeSha);
+        }
+        if (outcome.silent) {
+          // Silent abandon: no comment, no label flip. The orchestrator's
+          // finalize will either delete the branch + leave it on the queue
+          // (fresh attempt next cycle) or escalate to human attention, based
+          // on the per-issue retry count it tracks in runState.
+          skipped.push({ issue, reason: "silent-noop" });
+          await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
+          continue;
+        }
+        await adapter.commentOnIssue(
+          n,
+          buildAbandonComment({
+            mode: "conflict",
+            reason: outcome.reason,
+            attempts: RESOLVE_MAX_ATTEMPTS,
+          }),
+        );
+        await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+        skipped.push({ issue, reason: "conflict" });
+        await emit(`skip #${n} reason=conflict resolve-abandon: ${outcome.reason}`);
+        continue;
+      }
+      merged.push(issue);
+      await emit(`merged #${n} (via resolve-loop)`);
+      continue;
+    }
+
+    const inst = await adapter.npmInstall();
+    if (!inst.ok) {
+      await adapter.resetHardSha(preMergeSha);
+      await adapter.commentOnIssue(n, INSTALL_FAILED_COMMENT);
+      await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+      skipped.push({ issue, reason: "install-failed" });
+      await emit(`skip #${n} reason=install-failed`);
+      continue;
+    }
+
+    const g = await adapter.runGate();
+    if (!g.ok) {
+      if (onGateRed) {
+        await onGateRed(issue.id, {
+          stdout: g.stdout,
+          stderr: g.stderr,
+          failedStep: g.failedStep,
+          exitCode: g.exitCode,
+        });
+      }
+      await emit(
+        `gate-red #${n} failedStep=${g.failedStep ?? "-"} exitCode=${g.exitCode}; entering resolve-loop`,
+      );
+      const outcome = await runResolveLoop(
+        issue,
+        relatedIssues,
+        {
+          kind: "gate-red",
+          initialOutput: {
+            stdout: g.stdout,
+            stderr: g.stderr,
+            failedStep: g.failedStep,
+            exitCode: g.exitCode,
+          },
+        },
+        adapter,
+        { projectAnchor, preMergeSha },
+        resolveLog,
+      );
+      if (outcome.kind === "abandon") {
+        await adapter.resetHardSha(preMergeSha);
+        if (outcome.silent) {
+          // Same silent-abandon handling as the conflict path — the agent
+          // reverted the merge commit instead of fixing the gate. Treat as a
+          // fresh-attempt candidate.
+          skipped.push({ issue, reason: "silent-noop" });
+          await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
+          continue;
+        }
+        await adapter.commentOnIssue(
+          n,
+          buildAbandonComment({
+            mode: "gate-red",
+            reason: outcome.reason,
+            attempts: RESOLVE_MAX_ATTEMPTS,
+          }),
+        );
+        await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+        skipped.push({ issue, reason: "gate-red" });
+        await emit(`skip #${n} reason=gate-red resolve-abandon: ${outcome.reason}`);
+        continue;
+      }
+      merged.push(issue);
+      await emit(`merged #${n} (gate-red recovered via resolve-loop)`);
+      continue;
+    }
+
+    merged.push(issue);
+    await emit(`merged #${n}`);
+  }
+
+  if (merged.length === 0) {
+    await emit(`no merges, no push`);
+    return { merged, skipped, pushed: false };
+  }
+
+  await emit(`push attempt 1`);
+  let push = await adapter.push();
+  if (push.kind === "race") {
+    await emit(`push race; pull --ff-only`);
+    const pull = await adapter.pullFfOnly();
+    if (!pull.ok) {
+      await emit(`pull --ff-only failed`);
+      throw new MergerError(
+        "Push to origin source branch was rejected and `git pull --ff-only` then failed " +
+          "(origin source has diverged). Operator must reconcile manually.",
+      );
+    }
+    await emit(`push attempt 2`);
+    push = await adapter.push();
+    if (push.kind === "race") {
+      await emit(`push race retry exhausted`);
+      throw new MergerError(
+        "Push race retry exhausted: still rejected after one fast-forward pull and re-push.",
+      );
+    }
+  }
+  if (push.kind === "fatal") {
+    await emit(`push fatal: ${push.reason}`);
+    throw new MergerError(`Push to origin source branch failed: ${push.reason}`);
+  }
+
+  await emit(`push ok; closing ${merged.length} issue(s)`);
+  for (const issue of merged) {
+    const n = issueNumberOf(issue);
+    await adapter.closeIssue(n, "Completed by Sandbar");
+  }
+
+  return { merged, skipped, pushed: true };
+}
+
+// ---------------------------------------------------------------------------
+// Real adapter — shells out to git, gh, podman, and runGate.
+// ---------------------------------------------------------------------------
+
+export type RealAdapterDeps = {
+  readonly cwd: string;
+  readonly sourceBranch: string;
+  readonly botName: string;
+  readonly botEmail: string;
+  readonly coauthorTrailer: string;
+  readonly modelId: string;
+  readonly gateImage: string;
+  readonly gateCommands: GateCommand;
+  readonly env: EnvReader;
+  readonly gateOpts: {
+    readonly worktreePath: string;
+    readonly networkName: string;
+    readonly dbHost: string;
+    readonly dbPort: number;
+    readonly dbUser: string;
+    readonly dbPassword: string;
+    readonly dbName: string;
+    readonly dbNameTest: string;
+  };
+};
+
+function mergeMessageFor(issue: IssueRef): string {
+  return `Merge sandcastle/issue-${issueNumberOf(issue)}: ${issue.title}`;
+}
+
+function gitAuthorEnv(deps: RealAdapterDeps): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_AUTHOR_NAME: deps.botName,
+    GIT_AUTHOR_EMAIL: deps.botEmail,
+    GIT_COMMITTER_NAME: deps.botName,
+    GIT_COMMITTER_EMAIL: deps.botEmail,
+  };
+}
+
+// 10 minutes per agent invocation: each iteration may need to read multiple
+// related issues + the conflict / gate trace + edit files. The loop above
+// bounds total agentic time at RESOLVE_MAX_ATTEMPTS × this.
+const RESOLVE_AGENT_TIMEOUT_MS = 10 * 60_000;
+
+export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
+  const cwd = deps.cwd;
+  return {
+    async mergeNoFf(issue) {
+      try {
+        await exec(
+          "git",
+          [
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "-m",
+            mergeMessageFor(issue),
+            "-m",
+            deps.coauthorTrailer,
+            issue.branch,
+          ],
+          { cwd, env: gitAuthorEnv(deps) },
+        );
+        return { ok: true };
+      } catch {
+        return { ok: false };
+      }
+    },
+    async runResolveAgent(prompt) {
+      // Runs claude inside a podman container off the gate image (claude is
+      // pre-installed there). Bind-mounts the host repo at /workspace so the
+      // agent's edits and commits are live on host. Captures stdout for the
+      // promise-token parser to inspect.
+      const stdout = await new Promise<string>((resolve) => {
+        const args: string[] = [
+          "run",
+          "--rm",
+          "-i",
+          "--userns=keep-id",
+          "--user",
+          "1000:1000",
+          "-v",
+          `${cwd}:/workspace`,
+          "-w",
+          "/workspace",
+          "-e",
+          "HOME=/tmp",
+          "--label",
+          "sandcastle=true",
+        ];
+        for (const key of [
+          "CLAUDE_CODE_OAUTH_TOKEN",
+          "ANTHROPIC_API_KEY",
+          "GH_TOKEN",
+        ]) {
+          const v = deps.env(key);
+          if (v) args.push("-e", `${key}=${v}`);
+        }
+        args.push(
+          "-e",
+          `GIT_AUTHOR_NAME=${deps.botName}`,
+          "-e",
+          `GIT_AUTHOR_EMAIL=${deps.botEmail}`,
+          "-e",
+          `GIT_COMMITTER_NAME=${deps.botName}`,
+          "-e",
+          `GIT_COMMITTER_EMAIL=${deps.botEmail}`,
+        );
+        args.push(
+          "--entrypoint",
+          "claude",
+          deps.gateImage,
+          "--print",
+          "--dangerously-skip-permissions",
+          "--model",
+          deps.modelId,
+          "-p",
+          "-",
+        );
+        const child = spawn(RUNTIME, args, {
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        let buf = "";
+        child.stdout.on("data", (chunk) => {
+          buf += chunk.toString();
+        });
+        const timer = setTimeout(() => {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            /* already exited */
+          }
+        }, RESOLVE_AGENT_TIMEOUT_MS);
+        child.on("error", () => {
+          clearTimeout(timer);
+          resolve(buf);
+        });
+        child.on("exit", () => {
+          clearTimeout(timer);
+          resolve(buf);
+        });
+        child.stdin.write(prompt);
+        child.stdin.end();
+      });
+      return { stdout };
+    },
+    async isMergeInProgress() {
+      return existsSync(join(cwd, ".git", "MERGE_HEAD"));
+    },
+    async conflictDigest() {
+      let status = "";
+      let diff = "";
+      try {
+        const r = await exec("git", ["status", "--short"], { cwd });
+        status = r.stdout;
+      } catch {
+        status = "(git status failed)";
+      }
+      try {
+        const r = await exec("git", ["diff"], {
+          cwd,
+          maxBuffer: 50 * 1024 * 1024,
+        });
+        diff = r.stdout;
+      } catch {
+        diff = "(git diff failed)";
+      }
+      return { status: status.trim(), diff: diff.trim() };
+    },
+    async getIssueBody(issueId) {
+      try {
+        const { stdout } = await exec(
+          "gh",
+          ["issue", "view", issueId, "--comments"],
+          { cwd },
+        );
+        return stdout;
+      } catch (err) {
+        return `(failed to fetch issue #${issueId}: ${
+          err instanceof Error ? err.message : String(err)
+        })`;
+      }
+    },
+    async getHeadSha() {
+      const { stdout } = await exec("git", ["rev-parse", "HEAD"], { cwd });
+      return stdout.trim();
+    },
+    async resetHardSha(sha) {
+      await exec("git", ["reset", "--hard", sha], { cwd });
+    },
+    async abortMerge() {
+      try {
+        await exec("git", ["merge", "--abort"], { cwd });
+      } catch {
+        /* best-effort */
+      }
+    },
+    async npmInstall() {
+      try {
+        await exec("npm", ["install", "--no-audit", "--no-fund"], {
+          cwd,
+          maxBuffer: 50 * 1024 * 1024,
+        });
+        return { ok: true };
+      } catch {
+        return { ok: false };
+      }
+    },
+    async runGate() {
+      const r: GateResult = await runGate({
+        ...deps.gateOpts,
+        gateImage: deps.gateImage,
+        gateCommands: deps.gateCommands,
+      });
+      if (r.ok) return { ok: true };
+      return {
+        ok: false,
+        stdout: r.stdout,
+        stderr: r.stderr,
+        failedStep: r.failedStep,
+        exitCode: r.exitCode,
+      };
+    },
+    async commentOnIssue(n, msg) {
+      try {
+        await exec("gh", ["issue", "comment", String(n), "--body", msg], {
+          cwd,
+        });
+      } catch (err) {
+        console.error(
+          `  merger: failed to comment on issue #${n}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    },
+    async removeLabel(n, label) {
+      try {
+        await exec(
+          "gh",
+          ["issue", "edit", String(n), "--remove-label", label],
+          { cwd },
+        );
+      } catch (err) {
+        console.error(
+          `  merger: failed to remove label ${label} from issue #${n}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    },
+    async closeIssue(n, comment) {
+      try {
+        await exec(
+          "gh",
+          ["issue", "close", String(n), "--comment", comment],
+          { cwd },
+        );
+      } catch (err) {
+        console.error(
+          `  merger: failed to close issue #${n}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    },
+    async push() {
+      try {
+        await exec("git", ["push", "origin", deps.sourceBranch], { cwd });
+        return { kind: "ok" };
+      } catch (err) {
+        const e = err as { stderr?: string; message?: string };
+        const stderr = e.stderr ?? "";
+        if (/rejected|non-fast-forward|fetch first|stale info/i.test(stderr)) {
+          return { kind: "race" };
+        }
+        return {
+          kind: "fatal",
+          reason: stderr.trim() || e.message || "unknown push error",
+        };
+      }
+    },
+    async pullFfOnly() {
+      try {
+        await exec("git", ["pull", "--ff-only", "origin", deps.sourceBranch], {
+          cwd,
+        });
+        return { ok: true };
+      } catch {
+        return { ok: false };
+      }
+    },
+  };
+}
