@@ -136,7 +136,7 @@ describe("comment templates", () => {
 });
 
 describe("finalizeOne", () => {
-  it("merged: removes worktree before deleting branch, no push, no comment, no label edit", async () => {
+  it("merged: removes worktree before deleting branch, drops ready-for-agent on the closed issue, no push, no comment", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne({ kind: "merged", issue: i }, adapter);
@@ -146,7 +146,9 @@ describe("finalizeOne", () => {
     expect(calls.deletes).toEqual([i.branch]);
     expect(calls.pushes).toEqual([]);
     expect(calls.comments).toEqual([]);
-    expect(calls.labelEdits).toEqual([]);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT_LABEL], add: [] },
+    ]);
   });
 
   it("merged with -d refusal: escalates to -D and returns deleted-local", async () => {
@@ -406,6 +408,7 @@ describe("finalizeAll", () => {
       "sandcastle/issue-13-t-13",
     ]);
     expect(calls.labelEdits).toEqual([
+      { n: 10, remove: [READY_FOR_AGENT_LABEL], add: [] },
       { n: 11, remove: [READY_FOR_AGENT_LABEL], add: [NEEDS_INFO_LABEL] },
       { n: 12, remove: [], add: [READY_FOR_HUMAN_LABEL] },
     ]);

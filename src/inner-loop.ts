@@ -62,6 +62,7 @@ export type Terminal =
 
 export type InnerLoopConfig = {
   readonly sourceBranch: string;
+  readonly workDir: string;
   readonly envFilePath: string;
   readonly modelId: string;
   readonly maxImplAttempts: number;
@@ -149,6 +150,7 @@ async function runSandboxCycle(
         hooks: opts.hooks,
         copyToWorktree: [...opts.copyToWorktree],
         envFilePath: config.envFilePath,
+        workDir: config.workDir,
       }),
       startPgSidecar({ issueId: issue.id }),
     ]);

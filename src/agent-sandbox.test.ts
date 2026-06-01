@@ -372,6 +372,27 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
+  it("honors a custom workDir for the worktree root, matching worktreePathFor (#7)", async () => {
+    await git(["branch", "sandcastle/issue-7-workdir"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      branch: "sandcastle/issue-7-workdir",
+      sandbox: provider,
+      cwd: dir,
+      workDir: ".sandbar",
+    });
+    try {
+      // The sandbox must place the worktree where finalize.ts:worktreePathFor
+      // expects it — otherwise finalize's worktree-remove misses and the
+      // branch-delete is blocked by the still-registered worktree.
+      const expected = worktreePathFor(dir, ".sandbar", "sandcastle/issue-7-workdir");
+      expect(sandbox.worktreePath).toBe(expected);
+      expect(sandbox.worktreePath).toContain(join(".sandbar", "worktrees"));
+    } finally {
+      await sandbox.close();
+    }
+  });
+
   it("falls back to raw stdout when no result event is emitted, and reports zero commits for a no-op", async () => {
     await git(["branch", "sandcastle/issue-2-noop"], dir);
     const provider = makeLocalProvider();

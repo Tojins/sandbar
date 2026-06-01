@@ -155,6 +155,14 @@ export async function finalizeOne(
       // AC: worktree first, then branch — so an interrupt mid-cleanup never
       // leaves a dangling worktree pointing at a deleted ref.
       await adapter.removeWorktreeFor(input.issue.branch);
+      // The merger's merge commit auto-closes the issue, but GitHub doesn't
+      // strip labels on close — drop `ready-for-agent` so the closed issue
+      // isn't left advertising itself as plannable (#7).
+      await adapter.editLabels(
+        issueNumberOf(input.issue),
+        [READY_FOR_AGENT_LABEL],
+        [],
+      );
       const r = await adapter.deleteBranch(input.issue.branch);
       if (r.ok) return { kind: "deleted-local" };
       // `-d` refused. The merger just landed this branch — if the resolve

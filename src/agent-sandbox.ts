@@ -41,6 +41,9 @@ import { parseEnvFile } from "./env-file.js";
 export const SANDBOX_REPO_DIR = "/home/agent/workspace";
 const SANDBOX_HOMEDIR = "/home/agent";
 const CONTAINER_NAME_PREFIX = "sandcastle-";
+// Default worktree-root dir when CreateSandboxOptions.workDir is omitted —
+// upstream's fixed `<repo>/.sandcastle/worktrees/` layout.
+export const DEFAULT_WORK_DIR = ".sandcastle";
 
 export const MAX_TAIL_CHARS = 64 * 1024;
 export const DEFAULT_COMPLETION_SIGNAL = "<promise>COMPLETE</promise>";
@@ -188,6 +191,12 @@ export type CreateSandboxOptions = {
   // when omitted; sandbar forwards `config.envFilePath` so one knob governs
   // both preflight and the container.
   envFilePath?: string;
+  // Directory (relative to `cwd`) under which managed worktrees live, at
+  // `<cwd>/<workDir>/worktrees/`. Defaults to `.sandcastle` (upstream's fixed
+  // location). sandbar forwards `config.workDir` so the sandbox and
+  // finalize.ts:worktreePathFor agree on where worktrees actually are — a
+  // mismatch leaks the worktree+branch on successful merges (#7).
+  workDir?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -593,11 +602,12 @@ const fastForwardFromOrigin = async (
 const worktreeCreate = (
   repoDir: string,
   branch: string,
+  workDir: string,
   baseBranch?: string,
 ): Promise<{ path: string; branch: string }> =>
   withTimeout(
     (async () => {
-      const worktreesDir = join(repoDir, ".sandcastle", "worktrees");
+      const worktreesDir = join(repoDir, workDir, "worktrees");
       const worktreeName = branch.replace(/\//g, "-");
       const worktreePath = join(worktreesDir, worktreeName);
 
@@ -656,7 +666,7 @@ const worktreeCreate = (
   );
 
 const worktreeRemove = (worktreePath: string): Promise<void> => {
-  // Up exactly three levels: <repo>/.sandcastle/worktrees/<name>.
+  // Up exactly three levels: <repo>/<workDir>/worktrees/<name>.
   const repoDir = join(worktreePath, "..", "..", "..");
   return execGit(["worktree", "remove", "--force", worktreePath], repoDir).then(
     () => undefined,
@@ -664,13 +674,13 @@ const worktreeRemove = (worktreePath: string): Promise<void> => {
 };
 
 // Best-effort hygiene run at createSandbox start: prune metadata, then sweep
-// orphaned dirs under .sandcastle/worktrees/. realPath-canonicalises the dir so
-// a symlinked .sandcastle does not make active worktrees look orphaned (#470).
-const pruneStale = (repoDir: string): Promise<void> =>
+// orphaned dirs under <workDir>/worktrees/. realPath-canonicalises the dir so
+// a symlinked workDir does not make active worktrees look orphaned (#470).
+const pruneStale = (repoDir: string, workDir: string): Promise<void> =>
   withTimeout(
     (async () => {
       await execGit(["worktree", "prune"], repoDir);
-      const worktreesDir = join(repoDir, ".sandcastle", "worktrees");
+      const worktreesDir = join(repoDir, workDir, "worktrees");
       let entries: string[];
       try {
         entries = await readdir(worktreesDir);
@@ -1127,14 +1137,16 @@ export const createSandbox = async (
 ): Promise<Sandbox> => {
   const { branch } = options;
   const hostRepoDir = resolve(options.cwd ?? process.cwd());
+  const workDir = options.workDir ?? DEFAULT_WORK_DIR;
 
-  await pruneStale(hostRepoDir).catch(() => {
+  await pruneStale(hostRepoDir, workDir).catch(() => {
     // best-effort
   });
 
   const { path: worktreePath } = await worktreeCreate(
     hostRepoDir,
     branch,
+    workDir,
     options.baseBranch,
   );
 
