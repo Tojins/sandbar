@@ -1,4 +1,4 @@
-import type { SandboxHooks } from "@ai-hero/sandcastle";
+import type { SandboxHooks } from "./agent-sandbox.js";
 
 export type GateCommand = {
   readonly check: { readonly cmd: string; readonly args: readonly string[] };
@@ -32,6 +32,10 @@ export type RunConfig = {
   // required to supply one.
   readonly codingStandardsPath?: string;
 
+  // Authoritative env-file path for BOTH the host-side preflight credential
+  // check and the values injected into each sandbox container (its declared
+  // keys, with per-key process.env fallback). One knob — no hidden
+  // `.sandcastle/.env` second source.
   readonly envFilePath: string;
 
   readonly maxImplAttempts?: number;

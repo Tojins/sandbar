@@ -159,6 +159,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
 
   const innerLoopCfg = {
     sourceBranch: config.sourceBranch,
+    envFilePath: config.envFilePath,
     modelId: config.modelId,
     maxImplAttempts: config.maxImplAttempts,
     maxReviewRounds: config.maxReviewRounds,

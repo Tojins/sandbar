@@ -13,9 +13,9 @@
 // no revert-after-reviewer logic. All branching decisions live in the state
 // machine. This file only does I/O.
 
-import * as sandcastle from "@ai-hero/sandcastle";
-import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
-import type { Sandbox, SandboxHooks } from "@ai-hero/sandcastle";
+import * as sandcastle from "./agent-sandbox.js";
+import { podman } from "./agent-sandbox.js";
+import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
 import type { GateCommand } from "./config.js";
 import { lastNLines, runGate } from "./gate.js";
@@ -62,6 +62,7 @@ export type Terminal =
 
 export type InnerLoopConfig = {
   readonly sourceBranch: string;
+  readonly envFilePath: string;
   readonly modelId: string;
   readonly maxImplAttempts: number;
   readonly maxReviewRounds: number;
@@ -147,6 +148,7 @@ async function runSandboxCycle(
         sandbox: podman(),
         hooks: opts.hooks,
         copyToWorktree: [...opts.copyToWorktree],
+        envFilePath: config.envFilePath,
       }),
       startPgSidecar({ issueId: issue.id }),
     ]);
