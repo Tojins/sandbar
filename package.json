@@ -23,7 +23,9 @@
     "build": "tsc",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "preversion": "npm run check && npm test",
+    "postversion": "git push --follow-tags"
   },
   "dependencies": {
     "proper-lockfile": "^4.1.2"

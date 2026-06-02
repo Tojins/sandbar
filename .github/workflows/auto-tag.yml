@@ -1,0 +1,41 @@
+# Safety net for the release-tag bookkeeping problem (#9 follow-up).
+#
+# The normal release path is `npm version <type>`, which atomically bumps
+# package.json, commits "chore: bump version to X.Y.Z", creates the vX.Y.Z tag,
+# and pushes both (preversion gate + postversion push, see package.json). This
+# workflow is the backstop for when that path is bypassed — e.g. the version is
+# hand-edited inside a feature commit (which is how 0.3.1 landed untagged).
+#
+# On every push to main it reads package.json's version and, if no matching tag
+# exists yet, creates a lightweight vX.Y.Z tag on the pushed commit and pushes
+# it. Idempotent: a no-op once the tag is present, so it never fights the
+# npm-driven path that already pushed the tag.
+name: auto-tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Tag release if package.json version is untagged
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v${VERSION}"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists — nothing to do."
+          else
+            echo "Creating lightweight tag ${TAG} at ${GITHUB_SHA}"
+            git tag "${TAG}" "${GITHUB_SHA}"
+            git push origin "${TAG}"
+          fi
