@@ -35,6 +35,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { type EnvReader } from "./env.js";
+import { SandbarError } from "./errors.js";
 import { type GateResult, runGate } from "./gate.js";
 import type { GateCommand } from "./config.js";
 import { RUNTIME } from "./pg-sidecar.js";
@@ -568,19 +569,24 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       };
     },
     async commentOnIssue(n, msg) {
+      // Required: this comment is the merger's explanation of an abandon/revert.
+      // Swallowing it would strand the human without the reason — fail loud.
       try {
         await exec("gh", ["issue", "comment", String(n), "--body", msg], {
           cwd,
         });
       } catch (err) {
-        console.error(
-          `  merger: failed to comment on issue #${n}: ${
+        throw new SandbarError(
+          `merger: failed to comment on issue #${n}: ${
             err instanceof Error ? err.message : String(err)
           }`,
+          { cause: err },
         );
       }
     },
     async removeLabel(n, label) {
+      // Required: this is the twin of the #8 bug — silently failing to drop
+      // `ready-for-agent` leaves the issue on the queue to be re-picked forever.
       try {
         await exec(
           "gh",
@@ -588,14 +594,18 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           { cwd },
         );
       } catch (err) {
-        console.error(
-          `  merger: failed to remove label ${label} from issue #${n}: ${
+        throw new SandbarError(
+          `merger: failed to remove label '${label}' from issue #${n}: ${
             err instanceof Error ? err.message : String(err)
           }`,
+          { cause: err },
         );
       }
     },
     async closeIssue(n, comment) {
+      // Required: the issue was merged to the source branch; leaving it open
+      // (and still queued) silently would let the planner re-pick already-landed
+      // work. Fail loud so the operator reconciles.
       try {
         await exec(
           "gh",
@@ -603,10 +613,11 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           { cwd },
         );
       } catch (err) {
-        console.error(
-          `  merger: failed to close issue #${n}: ${
+        throw new SandbarError(
+          `merger: failed to close issue #${n} after merging it: ${
             err instanceof Error ? err.message : String(err)
           }`,
+          { cause: err },
         );
       }
     },

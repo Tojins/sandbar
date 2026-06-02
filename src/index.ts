@@ -1,2 +1,3 @@
 export { run } from "./run.js";
-export type { RunConfig, GateCommand } from "./config.js";
+export { SandbarError } from "./errors.js";
+export type { RunConfig, GateCommand, LabelConfig } from "./config.js";

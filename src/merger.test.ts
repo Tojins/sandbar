@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { SandbarError } from "./errors.js";
 import type { MergerGateOutput } from "./merger.js";
 import {
   INSTALL_FAILED_COMMENT,
@@ -285,6 +286,25 @@ describe("runMergerWithAdapter — conflict enters resolve loop", () => {
     expect(calls.removedLabels).toEqual([
       { n: 42, label: READY_FOR_AGENT_LABEL },
     ]);
+  });
+
+  it("abandon path + removeLabel fails: mergeAll propagates the error (fail loud, does not swallow)", async () => {
+    const { adapter } = makeAdapter({
+      merges: ["conflict"],
+      agents: [
+        {
+          stdout: "<reason>collide</reason>\n<promise>ABANDON</promise>",
+          leavesConflict: true,
+        },
+      ],
+    });
+    const throwing: MergerAdapter = {
+      ...adapter,
+      async removeLabel(n) {
+        throw new SandbarError(`merger: failed to remove label from issue #${n}`);
+      },
+    };
+    await expect(runMergerWithAdapter([issue(42)], throwing)).rejects.toThrow(SandbarError);
   });
 
   it("conflict + silent abort (agent COMMITTED, no merge in progress, HEAD unchanged): skips with reason silent-noop, NO comment or label change", async () => {
