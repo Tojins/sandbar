@@ -57,6 +57,10 @@ import {
   realAdapter,
   runMergerWithAdapter,
 } from "./merger.js";
+import {
+  type MergerWorktree,
+  createMergerWorktree,
+} from "./merger-worktree.js";
 import { startPgSidecar } from "./pg-sidecar.js";
 import { buildPlan } from "./plan-resolver.js";
 import { PreflightError, runPreflight } from "./preflight.js";
@@ -284,7 +288,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       }
   
       // ---------------------------------------------------------------------
-      // Phase 3: Merge (procedural, direct-to-source)
+      // Phase 3: Merge (procedural, in an isolated worktree off origin)
       // ---------------------------------------------------------------------
       let mergerSummary: MergerSummary | null = null;
       let halt = false;
@@ -292,35 +296,46 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         // startPgSidecar registers mergerSidecar.stop with onCleanup itself,
         // before creating any podman resource — no re-registration needed here.
         const mergerSidecar = await startPgSidecar({ issueId: "merger" });
-        const adapter = realAdapter({
-          cwd: config.cwd,
-          sourceBranch: config.sourceBranch,
-          botName: config.botName,
-          botEmail: config.botEmail,
-          coauthorTrailer: config.coauthorTrailer,
-          modelId: config.modelId,
-          gateImage: config.gateImage,
-          gateCommands: config.gateCommands,
-          env,
-          gateOpts: {
-            worktreePath: config.cwd,
-            networkName: mergerSidecar.networkName,
-            dbHost: mergerSidecar.dbHost,
-            dbPort: mergerSidecar.dbPort,
-            dbUser: mergerSidecar.dbUser,
-            dbPassword: mergerSidecar.dbPassword,
-            dbName: mergerSidecar.dbName,
-            dbNameTest: mergerSidecar.dbNameTest,
-          },
-        });
-  
-        const projectAnchor = await buildProjectAnchor({
-          claudeMdPath: config.claudeMdPath,
-          contextMdPath: config.contextMdPath,
-          adrDir: config.adrDir,
-          sourceBranch: config.sourceBranch,
-        });
+        // The merger runs in a dedicated worktree detached at
+        // origin/<sourceBranch>, NOT config.cwd — so the operator's uncommitted
+        // edits in their primary checkout can never be swept into a merge
+        // commit (issue #10). createMergerWorktree registers its own teardown
+        // with onCleanup; we also remove it in the finally below.
+        let mergerWorktree: MergerWorktree | null = null;
         try {
+          mergerWorktree = await createMergerWorktree({
+            cwd: config.cwd,
+            workDir: config.workDir,
+            sourceBranch: config.sourceBranch,
+          });
+          const adapter = realAdapter({
+            cwd: mergerWorktree.path,
+            sourceBranch: config.sourceBranch,
+            botName: config.botName,
+            botEmail: config.botEmail,
+            coauthorTrailer: config.coauthorTrailer,
+            modelId: config.modelId,
+            gateImage: config.gateImage,
+            gateCommands: config.gateCommands,
+            env,
+            gateOpts: {
+              worktreePath: mergerWorktree.path,
+              networkName: mergerSidecar.networkName,
+              dbHost: mergerSidecar.dbHost,
+              dbPort: mergerSidecar.dbPort,
+              dbUser: mergerSidecar.dbUser,
+              dbPassword: mergerSidecar.dbPassword,
+              dbName: mergerSidecar.dbName,
+              dbNameTest: mergerSidecar.dbNameTest,
+            },
+          });
+
+          const projectAnchor = await buildProjectAnchor({
+            claudeMdPath: config.claudeMdPath,
+            contextMdPath: config.contextMdPath,
+            adrDir: config.adrDir,
+            sourceBranch: config.sourceBranch,
+          });
           mergerSummary = await runMergerWithAdapter(
             completedIssues,
             adapter,
@@ -351,6 +366,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             throw err;
           }
         } finally {
+          if (mergerWorktree) await mergerWorktree.remove();
           await mergerSidecar.stop();
         }
       }

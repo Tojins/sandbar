@@ -1,6 +1,16 @@
 // Procedural merger — direct-to-source-branch, with an agentic resolve loop
 // covering both conflict and post-merge gate-red.
 //
+// The merger runs in a dedicated, ephemeral worktree checked out (detached) at
+// `origin/<sourceBranch>` — NOT the operator's primary checkout (issue #10).
+// run.ts creates that worktree and points this adapter's `cwd` at it, so the
+// operator's uncommitted edits (and local-only commits) are physically absent
+// from the merge surface: they can never be staged into a merge commit, in the
+// clean path or the conflict-resolution path. The merge result is pushed with
+// `git push origin HEAD:<sourceBranch>`; the operator's local branch is left
+// untouched (it catches up on the next `git pull`, matching how issue branches
+// already seed from origin).
+//
 // After phase 2 the orchestrator hands DONE branches to runMerger, which
 // iterates them in ascending issue-number order and, for each:
 //
@@ -37,6 +47,7 @@ import { promisify } from "node:util";
 import { type EnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
 import { type GateResult, runGate } from "./gate.js";
+import { gitMountsForWorktree } from "./merger-worktree.js";
 import type { GateCommand } from "./config.js";
 import { RUNTIME } from "./pg-sidecar.js";
 import {
@@ -415,9 +426,13 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     },
     async runResolveAgent(prompt) {
       // Runs claude inside a podman container off the gate image (claude is
-      // pre-installed there). Bind-mounts the host repo at /workspace so the
-      // agent's edits and commits are live on host. Captures stdout for the
-      // promise-token parser to inspect.
+      // pre-installed there). Bind-mounts the merger worktree at /workspace so
+      // the agent's edits and commits are live on host. `cwd` is a git worktree
+      // (detached at origin/<sourceBranch>), so its `.git` is a gitlink file
+      // pointing at the parent repo's common git dir — that dir is identity-
+      // mounted too so in-container git can follow the link. Captures stdout
+      // for the promise-token parser to inspect.
+      const extraMounts = await gitMountsForWorktree(cwd);
       const stdout = await new Promise<string>((resolve) => {
         const args: string[] = [
           "run",
@@ -428,6 +443,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           "1000:1000",
           "-v",
           `${cwd}:/workspace`,
+          ...extraMounts.flatMap((m) => ["-v", `${m}:${m}`]),
           "-w",
           "/workspace",
           "-e",
@@ -623,7 +639,14 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     },
     async push() {
       try {
-        await exec("git", ["push", "origin", deps.sourceBranch], { cwd });
+        // The worktree is detached at origin/<sourceBranch>; push HEAD to the
+        // source branch ref on origin. The operator's local branch is left
+        // untouched (it fast-forwards on their next pull).
+        await exec(
+          "git",
+          ["push", "origin", `HEAD:${deps.sourceBranch}`],
+          { cwd },
+        );
         return { kind: "ok" };
       } catch (err) {
         const e = err as { stderr?: string; message?: string };
