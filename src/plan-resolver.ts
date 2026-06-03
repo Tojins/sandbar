@@ -11,6 +11,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { BRANCH_PREFIX } from "./naming.js";
+
 const exec = promisify(execFile);
 
 const WAITING_LABEL = "waiting";
@@ -71,7 +73,7 @@ export function resolvePlan(
   return sorted.slice(0, k).map((c) => ({
     id: String(c.number),
     title: c.title,
-    branch: `sandcastle/issue-${c.number}-${kebabSlug(c.title)}`,
+    branch: `${BRANCH_PREFIX}issue-${c.number}-${kebabSlug(c.title)}`,
   }));
 }
 

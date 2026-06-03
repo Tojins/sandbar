@@ -184,7 +184,7 @@ describe("resolvePlan", () => {
       [issue(42, "", { title: "Fix Auth Bug!" })],
       new Map(),
     );
-    expect(plan[0]!.branch).toBe("sandcastle/issue-42-fix-auth-bug");
+    expect(plan[0]!.branch).toBe("sandbar/issue-42-fix-auth-bug");
   });
 
   it("table: mixed candidates → only the unblocked ones flow through", () => {

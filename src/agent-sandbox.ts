@@ -1,10 +1,12 @@
 // In-house replacement for the @ai-hero/sandcastle subset sandbar consumes.
 //
-// Drops the ~72 MB Effect runtime. Reverse-engineered from sandcastle v0.7.0;
-// the authoritative behaviour notes live in docs/sandcastle/01-07. This module
-// reproduces ONLY sandbar's exercised path: a bind-mount podman provider, an
-// explicit pre-existing branch, `maxIterations: 1`, no session capture. The
-// public surface matches the five symbols sandbar imported (`createSandbox`,
+// Drops the ~72 MB Effect runtime. Reverse-engineered from @ai-hero/sandcastle
+// v0.7.0 (historical provenance only — that package is no longer a dependency);
+// the authoritative behaviour notes live in docs/agent-sandbox/01-07. This
+// module reproduces ONLY sandbar's exercised path: a bind-mount podman
+// provider, an explicit pre-existing branch, `maxIterations: 1`, no session
+// capture. The public surface matches the five symbols sandbar imported
+// (`createSandbox`,
 // `podman`, `claudeCode`, types `Sandbox`/`SandboxHooks`) so call sites change
 // only their import path.
 //
@@ -33,6 +35,7 @@ import { readdir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { parseEnvFile } from "./env-file.js";
+import { RESOURCE_PREFIX } from "./naming.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -40,10 +43,10 @@ import { parseEnvFile } from "./env-file.js";
 
 export const SANDBOX_REPO_DIR = "/home/agent/workspace";
 const SANDBOX_HOMEDIR = "/home/agent";
-const CONTAINER_NAME_PREFIX = "sandcastle-";
+const CONTAINER_NAME_PREFIX = RESOURCE_PREFIX;
 // Default worktree-root dir when CreateSandboxOptions.workDir is omitted —
-// upstream's fixed `<repo>/.sandcastle/worktrees/` layout.
-export const DEFAULT_WORK_DIR = ".sandcastle";
+// `<repo>/.sandbar/worktrees/`.
+export const DEFAULT_WORK_DIR = ".sandbar";
 
 export const MAX_TAIL_CHARS = 64 * 1024;
 export const DEFAULT_COMPLETION_SIGNAL = "<promise>COMPLETE</promise>";
@@ -67,7 +70,7 @@ const GIT_SETUP_RETRY_DELAY_MS = 250;
 const TRANSIENT_EXEC_EXIT_CODES = new Set([126, 137]);
 
 // ---------------------------------------------------------------------------
-// Public types (match the imported sandcastle surface)
+// Public types (match the upstream sandbox surface sandbar imported)
 // ---------------------------------------------------------------------------
 
 export type SandboxHooks = {
@@ -187,13 +190,13 @@ export type CreateSandboxOptions = {
   hooks?: SandboxHooks;
   copyToWorktree?: string[];
   // Host path to the env file whose declared keys are injected into the
-  // sandbox. Defaults to `<cwd>/.sandcastle/.env` (upstream's fixed location)
-  // when omitted; sandbar forwards `config.envFilePath` so one knob governs
+  // sandbox. Defaults to `<cwd>/.sandbar/.env` when omitted; sandbar forwards
+  // `config.envFilePath` so one knob governs
   // both preflight and the container.
   envFilePath?: string;
   // Directory (relative to `cwd`) under which managed worktrees live, at
-  // `<cwd>/<workDir>/worktrees/`. Defaults to `.sandcastle` (upstream's fixed
-  // location). sandbar forwards `config.workDir` so the sandbox and
+  // `<cwd>/<workDir>/worktrees/`. Defaults to `.sandbar`. sandbar forwards
+  // `config.workDir` so the sandbox and
   // finalize.ts:worktreePathFor agree on where worktrees actually are — a
   // mismatch leaks the worktree+branch on successful merges (#7).
   workDir?: string;
@@ -226,7 +229,7 @@ class ExecError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// BoundedTail (F1) — verbatim from sandcastle's boundedTail.ts
+// BoundedTail (F1) — verbatim from the upstream boundedTail.ts
 // ---------------------------------------------------------------------------
 
 export class BoundedTail {
@@ -393,7 +396,7 @@ export const registerShutdown = (teardown: () => void): (() => void) => {
 export const defaultImageName = (repoDir: string): string => {
   const dirName = repoDir.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? "local";
   const sanitized = dirName.toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
-  return `sandcastle:${sanitized || "local"}`;
+  return `sandbar:${sanitized || "local"}`;
 };
 
 const formatVolumeMount = (
@@ -439,7 +442,7 @@ const resolveGitMounts = async (gitPath: string): Promise<Mount[]> => {
 //
 // `envFilePath` is supplied by the caller (sandbar forwards `config.envFilePath`
 // — the SAME path preflight checks; see env.ts) rather than being hardcoded to
-// `<repo>/.sandcastle/.env` as upstream did. Allowlist semantics are preserved:
+// `<repo>/.sandbar/.env` as upstream did. Allowlist semantics are preserved:
 // only keys *declared* in the file cross into the container, with each value
 // falling back to process.env — host env never leaks wholesale. Parsing is the
 // shared `parseEnvFile`. A missing file yields an empty map, but because
@@ -1161,7 +1164,7 @@ export const createSandbox = async (
     }
 
     const resolvedEnv = await resolveEnv(
-      options.envFilePath ?? join(hostRepoDir, ".sandcastle", ".env"),
+      options.envFilePath ?? join(hostRepoDir, ".sandbar", ".env"),
     );
     // mergeProviderEnv: agent env is {} on sandbar's path; provider env layers
     // over resolved (overlap between agent⨯sandbox would throw, but agent={}).

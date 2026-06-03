@@ -14,8 +14,8 @@ const cleanState: RepoState = {
   expectedBranch: "main",
   hasOriginBranch: true,
   envFilePath: ".sandbar/.env",
-  unmergedSandcastleBranches: [],
-  discardedSandcastleBranches: [],
+  unmergedIssueBranches: [],
+  discardedIssueBranches: [],
 };
 
 function failures(s: RepoState): string[] {
@@ -128,34 +128,34 @@ describe("checkInvariants", () => {
     expect(f.some((m) => m.includes("origin/main"))).toBe(true);
   });
 
-  it("flags unmerged sandcastle branches and lists each one", () => {
+  it("flags unmerged issue branches and lists each one", () => {
     const f = failures({
       ...cleanState,
-      unmergedSandcastleBranches: [
-        "sandcastle/issue-42-foo",
-        "sandcastle/issue-43-bar",
+      unmergedIssueBranches: [
+        "sandbar/issue-42-foo",
+        "sandbar/issue-43-bar",
       ],
     });
     expect(f.length).toBe(1);
-    expect(f[0]).toContain("sandcastle/issue-42-foo");
-    expect(f[0]).toContain("sandcastle/issue-43-bar");
+    expect(f[0]).toContain("sandbar/issue-42-foo");
+    expect(f[0]).toContain("sandbar/issue-43-bar");
     expect(f[0]).toContain("git branch -D");
   });
 
-  it("flags discarded sandcastle branches separately from unmerged ones", () => {
+  it("flags discarded issue branches separately from unmerged ones", () => {
     const f = failures({
       ...cleanState,
-      unmergedSandcastleBranches: ["sandcastle/issue-42-foo"],
-      discardedSandcastleBranches: ["sandcastle/issue-43-bar"],
+      unmergedIssueBranches: ["sandbar/issue-42-foo"],
+      discardedIssueBranches: ["sandbar/issue-43-bar"],
     });
     expect(f.length).toBe(2);
     const unmergedMsg = f.find((m) => m.includes("Unmerged"));
     const discardedMsg = f.find((m) => m.includes("Discarded"));
     expect(unmergedMsg).toBeDefined();
-    expect(unmergedMsg).toContain("sandcastle/issue-42-foo");
-    expect(unmergedMsg).not.toContain("sandcastle/issue-43-bar");
+    expect(unmergedMsg).toContain("sandbar/issue-42-foo");
+    expect(unmergedMsg).not.toContain("sandbar/issue-43-bar");
     expect(discardedMsg).toBeDefined();
-    expect(discardedMsg).toContain("sandcastle/issue-43-bar");
+    expect(discardedMsg).toContain("sandbar/issue-43-bar");
     expect(discardedMsg).toContain("remote deleted");
     expect(discardedMsg).toContain("git branch -D");
   });
@@ -182,7 +182,7 @@ describe("checkInvariants", () => {
       inProgressMarkers: ["MERGE_HEAD"],
       currentBranch: "feature/x",
       hasOriginBranch: false,
-      unmergedSandcastleBranches: ["sandcastle/issue-1-x"],
+      unmergedIssueBranches: ["sandbar/issue-1-x"],
     };
     const f = failures(broken);
     for (const msg of f) {

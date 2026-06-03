@@ -58,8 +58,8 @@ describe("startRunLogger", () => {
     const base = await makeBase();
     const logger = await startRunLogger({ baseDir: base });
     const plan = [
-      { id: "45", title: "finalize", branch: "sandcastle/issue-45-finalize" },
-      { id: "47", title: "logs", branch: "sandcastle/issue-47-logs" },
+      { id: "45", title: "finalize", branch: "sandbar/issue-45-finalize" },
+      { id: "47", title: "logs", branch: "sandbar/issue-47-logs" },
     ];
     await logger.cycle(1).writePlan(plan);
 
@@ -73,7 +73,7 @@ describe("startRunLogger", () => {
     const base = await makeBase();
     const logger = await startRunLogger({ baseDir: base });
     const c = logger.cycle(2);
-    await c.appendMerger("merge sandcastle/issue-42-foo");
+    await c.appendMerger("merge sandbar/issue-42-foo");
     await c.appendMerger("gate green: 42");
 
     const body = await readFile(
@@ -82,7 +82,7 @@ describe("startRunLogger", () => {
     );
     const lines = body.trim().split("\n");
     expect(lines.length).toBe(2);
-    expect(lines[0]).toMatch(/merge sandcastle\/issue-42-foo$/);
+    expect(lines[0]).toMatch(/merge sandbar\/issue-42-foo$/);
     expect(lines[1]).toMatch(/gate green: 42$/);
   });
 

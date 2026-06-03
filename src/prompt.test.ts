@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { renderReviewerSlot } from "./prompt.js";
 
 const baseInputs = {
-  issue: { id: "42", title: "do the thing", branch: "sandcastle/issue-42-do-the-thing" },
+  issue: { id: "42", title: "do the thing", branch: "sandbar/issue-42-do-the-thing" },
   worktreePath: "/tmp/wt",
   sourceBranch: "main",
   codingStandardsPath: "docs/CODING_STANDARDS.md",
@@ -157,7 +157,7 @@ describe("renderReviewerSlot", () => {
       diff: "",
     });
     expect(slot).toContain("Issue #42: do the thing");
-    expect(slot).toContain("`sandcastle/issue-42-do-the-thing`");
+    expect(slot).toContain("`sandbar/issue-42-do-the-thing`");
     expect(slot).toContain("`main`");
   });
 });

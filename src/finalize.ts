@@ -381,7 +381,7 @@ export function worktreePathFor(
   workDir: string,
   branch: string,
 ): string {
-  // Mirror sandcastle's WorktreeManager.create: <repoDir>/<workDir>/worktrees/
+  // Mirror the sandbox WorktreeManager.create: <repoDir>/<workDir>/worktrees/
   // <branch with '/' replaced by '-'>.
   return join(repoDir, workDir, "worktrees", branch.replace(/\//g, "-"));
 }
@@ -438,7 +438,7 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       try {
         await exec("git", ["worktree", "remove", "--force", path], { cwd });
       } catch {
-        /* already removed by sandcastle.close() in normal operation */
+        /* already removed by the sandbox close() in normal operation */
       }
       try {
         await exec("git", ["worktree", "prune"], { cwd });

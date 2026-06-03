@@ -123,7 +123,7 @@ adds a Codex-only `usage` variant Claude never emits), the `result || stdout`
 fallback, the non-zero-exit three-tier error detail, the
 `baseHead..refs/heads/<branch> --reverse` commit capture, the two-mount git
 resolution, `NO_CONFIG_LOCK_FLAGS` on `worktree add`, `pruneStale` realpath
-safety, the `.sandcastle/.env` precedence rules, and all load-bearing
+safety, the `.sandbar/.env` precedence rules, and all load-bearing
 names/layout in the [README](./README.md). The agent-run loop and stream-json
 parser remain the most likely to drift with the `claude` CLI — re-verify those
 first if the dependency is bumped again before the port lands (see

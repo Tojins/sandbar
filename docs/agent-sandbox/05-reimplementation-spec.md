@@ -65,7 +65,7 @@ pruneStale(hostRepoDir)                         // best-effort
 worktreePath = worktreeCreate(hostRepoDir, branch)   // git worktree add <path> <branch>
 if copyToWorktree.length: copyToWorktree(...)        // cp -R --reflink=auto, skip missing
 runHostHooks(hooks.host?.onWorktreeReady, cwd=worktreePath)
-env = parseDotSandcastleEnv(hostRepoDir)             // .sandcastle/.env + process.env fallback
+env = parseDotSandbarEnv(hostRepoDir)                // .sandbar/.env + process.env fallback
 gitMounts = resolveGitMounts(hostRepoDir/.git)       // worktree → [.git file, parent .git dir]
 handle = podmanProvider.create({                     // podman run -d ... sleep infinity
   worktreePath, mounts: [worktree→/home/agent/workspace, ...gitMounts], env })
@@ -127,11 +127,11 @@ return { preservedWorktreePath: undefined }
 | --- | --- |
 | Sandbox mount point | `/home/agent/workspace` |
 | Sandbox home | `/home/agent` |
-| Container name | `sandcastle-<randomUUID>` |
-| Worktree root | `<repoDir>/.sandcastle/worktrees/` |
+| Container name | `sandbar-<randomUUID>` |
+| Worktree root | `<repoDir>/.sandbar/worktrees/` |
 | Worktree dir name | `branch.replace(/\//g, "-")` |
 | Worktree-add flags | `-c branch.autoSetupMerge=false -c push.autoSetupRemote=false` |
-| Default image | `sandcastle:<sanitised repo dir name>` |
+| Default image | `sandbar:<sanitised repo dir name>` |
 | podman run flags | `--user 1000:1000 --userns=keep-id:uid=1000,gid=1000 -w <wt> -e... -v host:sandbox:z --entrypoint sleep <img> infinity` |
 | Default completion signal | `<promise>COMPLETE</promise>` |
 | Default idle timeout | 600 s (`DEFAULT_IDLE_TIMEOUT_SECONDS`) |
@@ -151,7 +151,7 @@ the temp-branch merge-to-host path; the `-b` worktree fork fallback;
 
 **Keep:** podman provider (create/exec/cp/close + shared shutdown registry);
 worktree create/remove/prune/dirty-check; copyToWorktree (Linux COW); the
-two-mount git resolution for worktrees; `.sandcastle/.env` resolution; git
+two-mount git resolution for worktrees; `.sandbar/.env` resolution; git
 identity propagation; `baseHead..refs/heads/<branch>` commit capture; the claude
 stream-json command + `parseStreamJsonLine`; the two-phase idle/completion
 timeout; the `result || stdout` fallback; the non-zero-exit error-detail
@@ -201,7 +201,7 @@ history in [07](./07-upstream-fixes-since-0.5.12.md):
    commits, assert `git rev-list baseHead..refs/heads/<branch> --reverse` yields
    exactly those SHAs in order and excludes the base; zero-commit → `[]`.
 3. **Worktree path** — assert `branch.replace(/\//g,"-")` under
-   `.sandcastle/worktrees/` matches `finalize.ts:worktreePathFor` for a sample
+   `.sandbar/worktrees/` matches `finalize.ts:worktreePathFor` for a sample
    branch (guards the byte-for-byte compatibility AC).
 4. **Existing inner-loop suite** — unchanged, using a fake `Sandbox`. The
    `Sandbox` contract (`run` → `{ stdout, commits }`, `worktreePath`, `close`)
@@ -222,9 +222,9 @@ Additional cases the upstream tests prove are necessary (see
 9. **Worktree reuse** — a second `createSandbox` on the same branch reuses the
    worktree even when dirty / carrying unpushed commits, and unpushed commits do
    NOT count as dirty (gotcha D); detached-HEAD collision matches by path.
-10. **`pruneStale` symlink safety** — with `.sandcastle` symlinked, an active
+10. **`pruneStale` symlink safety** — with `.sandbar` symlinked, an active
     worktree is not swept (top-trap #6).
-11. **env isolation** — only keys declared in `.sandcastle/.env` are pulled from
+11. **env isolation** — only keys declared in `.sandbar/.env` are pulled from
     `process.env`; the host environment does not leak (gotcha G).
 12. **Test harness** — add per-worker `GIT_CONFIG_GLOBAL` isolation (doc 06,
     "shipped test helpers") so parallel vitest workers don't race on
@@ -249,15 +249,21 @@ Tests for the load-bearing `0.7.0` baseline behaviours (history in doc
 17. **F4 worktree cleanup on failed start** — a `createSandbox` whose container
     start throws (e.g. image-not-found) leaves no worktree dir behind.
 
-## Compatibility decision (call out in the PR)
+## Compatibility decision (resolved: renamed in lockstep)
 
-The acceptance criteria allow either:
+The acceptance criteria allowed either:
 
-- **(A) byte-compatible** — keep the `sandcastle/` branch prefix, `sandcastle-`
-  container prefix, and `.sandcastle/worktrees/` layout, so `preflight.ts`,
-  `containers.ts`, `finalize.ts`, `merger.ts` need no changes. Lower risk;
-  recommended.
-- **(B) rename in lockstep** — if dropping the `sandcastle` name is desired,
-  update `containers.ts` (`NAME_PREFIX`, `NETWORK_PREFIX`), `merger.ts:435`,
-  `plan-resolver.ts:74`, `preflight.ts` globs, and `finalize.ts:worktreePathFor`
-  together, and document it in the module headers.
+- **(A) byte-compatible** — keep the upstream library's legacy `sandcastle/`
+  branch prefix, `sandcastle-` container prefix, and `.sandcastle/worktrees/`
+  layout, so `preflight.ts`, `containers.ts`, `finalize.ts`, `merger.ts` need no
+  changes.
+- **(B) rename in lockstep** — drop the `sandcastle` name and rename to
+  `sandbar` (`sandbar/` branch prefix, `sandbar-` container prefix,
+  `.sandbar/worktrees/` layout).
+
+**(B) was taken.** The prefixes are now centralized in `src/naming.ts`
+(`BRANCH_PREFIX`, `RESOURCE_PREFIX`), and `containers.ts`, `merger.ts:435`,
+`plan-resolver.ts:74`, `preflight.ts` globs, and `finalize.ts:worktreePathFor`
+were updated together. During the transition window the cleanup paths still
+recognize the legacy `sandcastle-*` / `sandcastle/*` prefixes so artifacts left
+on existing repos get swept rather than orphaned.

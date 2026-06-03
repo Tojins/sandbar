@@ -5,7 +5,7 @@
 // the sidecar by container name (no host port). One pg startup per issue,
 // reused across every gate-1 attempt and gate-2.
 //
-// Naming uses the issue id (`sandcastle-pg-<id>`, `sandcastle-net-<id>`).
+// Naming uses the issue id (`sandbar-pg-<id>`, `sandbar-net-<id>`).
 // The orchestrator holds a single-instance lock, so the id collides only
 // with stale resources from a prior aborted run — those are swept by
 // cleanupOrphanResources() at start.
@@ -19,6 +19,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { onCleanup } from "./cleanup.js";
+import { RESOURCE_PREFIX } from "./naming.js";
 
 const exec = promisify(execFile);
 
@@ -53,11 +54,11 @@ export type Sidecar = {
 };
 
 export function networkNameFor(issueId: string): string {
-  return `sandcastle-net-${issueId}`;
+  return `${RESOURCE_PREFIX}net-${issueId}`;
 }
 
 export function containerNameFor(issueId: string): string {
-  return `sandcastle-pg-${issueId}`;
+  return `${RESOURCE_PREFIX}pg-${issueId}`;
 }
 
 export async function startPgSidecar(cfg: SidecarConfig): Promise<Sidecar> {

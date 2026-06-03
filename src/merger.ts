@@ -382,7 +382,7 @@ export type RealAdapterDeps = {
 };
 
 function mergeMessageFor(issue: IssueRef): string {
-  return `Merge sandcastle/issue-${issueNumberOf(issue)}: ${issue.title}`;
+  return `Merge sandbar/issue-${issueNumberOf(issue)}: ${issue.title}`;
 }
 
 function gitAuthorEnv(deps: RealAdapterDeps): NodeJS.ProcessEnv {
@@ -449,7 +449,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           "-e",
           "HOME=/tmp",
           "--label",
-          "sandcastle=true",
+          "sandbar=true",
         ];
         for (const key of [
           "CLAUDE_CODE_OAUTH_TOKEN",

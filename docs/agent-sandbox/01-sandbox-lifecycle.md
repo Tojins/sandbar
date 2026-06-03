@@ -29,7 +29,7 @@ interface SandboxRunOptions {
   name?: string;                  // sandbar: e.g. "implementer-<id>-attempt-N"
   completionSignal?: string | string[];  // sandbar: unset → default "<promise>COMPLETE</promise>"
   idleTimeoutSeconds?: number;    // sandbar: unset → default 600
-  logging?: LoggingOption;        // sandbar: unset → defaults to a file under .sandcastle/logs
+  logging?: LoggingOption;        // sandbar: unset → defaults to a file under .sandbar/logs
   signal?: AbortSignal;           // sandbar: unset
 }
 
@@ -62,17 +62,17 @@ on disk — see the note after step 11):
 1. **Resolve cwd** → `hostRepoDir` (`resolveCwd`, defaults `process.cwd()`).
 2. **Prune stale worktrees** — `WorktreeManager.pruneStale(hostRepoDir)`,
    best-effort (`catchAll`). Removes orphaned dirs under
-   `.sandcastle/worktrees/`. See [04](./04-worktree-and-mounts.md).
+   `.sandbar/worktrees/`. See [04](./04-worktree-and-mounts.md).
 3. **Create the worktree** — `WorktreeManager.create(hostRepoDir, { branch, baseBranch })`
    → `{ path, branch }`. For an existing branch: `git worktree add <path> <branch>`.
-   `path = <hostRepoDir>/.sandcastle/worktrees/<branch with "/"→"-">`. 30 s timeout.
+   `path = <hostRepoDir>/.sandbar/worktrees/<branch with "/"→"-">`. 30 s timeout.
 4. **Copy anchor files** — if `copyToWorktree` is non-empty and the provider is
    not isolated: `copyToWorktree(paths, hostRepoDir, worktreePath)`. Each path is
    `cp -R --reflink=auto <src> <dest>` (Linux), falling back to `cp -R`; missing
    sources are skipped. 60 s timeout.
 5. **`host.onWorktreeReady` hooks** — run sequentially on the host, cwd =
    worktree (`runHostHooks`).
-6. **Resolve env** — `resolveEnv(hostRepoDir)` parses `<hostRepoDir>/.sandcastle/.env`
+6. **Resolve env** — `resolveEnv(hostRepoDir)` parses `<hostRepoDir>/.sandbar/.env`
    (only declared keys; `process.env` fallback per key), then `mergeProviderEnv`
    layers the sandbox provider's env on top. See [04](./04-worktree-and-mounts.md).
 7. **Resolve git mounts** — `resolveGitMounts(<hostRepoDir>/.git)`. Because the

@@ -18,10 +18,10 @@ on stderr substrings.**
 
 ### Path & branch layout (load-bearing)
 
-- Worktrees root: `<repoDir>/.sandcastle/worktrees/` (created `recursive`).
+- Worktrees root: `<repoDir>/.sandbar/worktrees/` (created `recursive`).
 - For an explicit branch, `worktreeName = branch.replace(/\//g, "-")`. So
-  `sandcastle/issue-5-add-foo` → dir `sandcastle-issue-5-add-foo`, full path
-  `<repoDir>/.sandcastle/worktrees/sandcastle-issue-5-add-foo`.
+  `sandbar/issue-5-add-foo` → dir `sandbar-issue-5-add-foo`, full path
+  `<repoDir>/.sandbar/worktrees/sandbar-issue-5-add-foo`.
 - **`src/finalize.ts:283` (`worktreePathFor`) hard-codes this exact mapping.**
   The port must keep it identical, or update `finalize.ts` in lockstep.
 
@@ -66,7 +66,7 @@ Sandbar always passes an explicit, already-existing `branch`:
 5. 30 s timeout (`WORKTREE_TIMEOUT_MS`).
 
 > The `else` branch (no explicit `branch`) creates a temp
-> `sandcastle/<timestamp>` branch — out of scope.
+> `sandbar/<timestamp>` branch — out of scope.
 
 ### `hasUncommittedChanges(worktreePath)`
 
@@ -76,21 +76,21 @@ Sandbar always passes an explicit, already-existing `branch`:
 ### `remove(worktreePath)`
 
 Derives `repoDir = join(worktreePath, "..", "..", "..")` (relies on the
-`.sandcastle/worktrees/<name>` depth), then
+`.sandbar/worktrees/<name>` depth), then
 `git worktree remove --force <worktreePath>`.
 
 ### `pruneStale(repoDir)` (`WorktreeManager.ts`, `pruneStale`)
 
 1. `git worktree prune` (drops metadata for vanished worktrees).
-2. Read entries under `.sandcastle/worktrees/` (missing dir → return).
+2. Read entries under `.sandbar/worktrees/` (missing dir → return).
 3. `realPath` the worktrees dir (so symlinked repo roots still match git's
    canonicalised `git worktree list --porcelain` output).
 4. For each entry dir not in the active-worktree set: `rm -rf`.
 5. 30 s timeout. Called best-effort (`catchAll`) at `createSandbox` start.
 
 > Sandbar additionally has its own preflight/orphan cleanup in
-> `src/preflight.ts` and `src/containers.ts` — `pruneStale` is sandcastle's
-> internal hygiene, complementary to (not a replacement for) sandbar's.
+> `src/preflight.ts` and `src/containers.ts` — `pruneStale` is the agent-sandbox
+> module's internal hygiene, complementary to (not a replacement for) sandbar's.
 
 ## copyToWorktree (`CopyToWorktree.js`)
 
@@ -131,7 +131,7 @@ workaround — droppable for a Linux-only host).
   sandbar: `host:sandbox:z`.
 - `SANDBOX_REPO_DIR = "/home/agent/workspace"` (`SandboxFactory.ts`) — the
   mount point for the worktree inside the container.
-- `defaultImageName(repoDir)` → `sandcastle:<sanitised-last-segment>`.
+- `defaultImageName(repoDir)` → `sandbar:<sanitised-last-segment>`.
 - `processFileMountParents` — only relevant for file mounts (sandbar has none).
 - `resolveUserMounts` / `resolveSandboxPath` / tilde expansion — only for user
   `mounts` (sandbar passes none).
@@ -140,7 +140,7 @@ workaround — droppable for a Linux-only host).
 
 `resolveEnv(repoDir)`:
 
-1. Parse `<repoDir>/.sandcastle/.env` (`parseEnvFile`): skip blanks and `#`
+1. Parse `<repoDir>/.sandbar/.env` (`parseEnvFile`): skip blanks and `#`
    comments; split each line on the first `=`; strip matching single/double
    quotes; in double-quoted values, unescape `\n \r \t \\`.
 2. For each key declared in that file, take its value, or fall back to
@@ -150,13 +150,13 @@ workaround — droppable for a Linux-only host).
 `mergeProviderEnv({ resolvedEnv, agentProviderEnv, sandboxProviderEnv })`:
 returns `{ ...resolvedEnv, ...sandboxProviderEnv, ...agentProviderEnv }`. Throws
 if agent and sandbox provider env share keys. For sandbar both provider envs are
-`{}`, so the effective env is just `resolvedEnv` (the parsed `.sandcastle/.env`),
+`{}`, so the effective env is just `resolvedEnv` (the parsed `.sandbar/.env`),
 later augmented with `HOME=/home/agent` by the podman provider.
 
 > Sandbar issue #5 notes that `envFilePath` config is currently decorative —
 > env never reaches the container. That bug lives at sandbar's boundary
-> (how/whether it writes `.sandcastle/.env`), and is orthogonal to this port,
-> but the in-house module should keep the same `.sandcastle/.env` contract so a
+> (how/whether it writes `.sandbar/.env`), and is orthogonal to this port,
+> but the in-house module should keep the same `.sandbar/.env` contract so a
 > fix for #5 lands in one place.
 
 ## Reimplementation notes
@@ -168,7 +168,7 @@ later augmented with `HOME=/home/agent` by the podman provider.
   runs *inside* createSandbox before `worktree add`, which is what prevents a
   stale dir from blocking the add; if dropped, ensure sandbar's preflight covers
   the same window).
-- Keep the `.sandcastle/worktrees/<branch-dashed>` layout and `SANDBOX_REPO_DIR`
+- Keep the `.sandbar/worktrees/<branch-dashed>` layout and `SANDBOX_REPO_DIR`
   constant exactly.
 - The two-mount git resolution for worktrees is essential — without the parent
   `.git` dir mount, git inside the container can't resolve objects and every

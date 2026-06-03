@@ -1,5 +1,6 @@
 // Tests for the in-house agent-sandbox module (the @ai-hero/sandcastle
-// replacement). Covers the obligations in docs/sandcastle/05 §"Test
+// replacement; provenance only — that package is no longer a dependency).
+// Covers the obligations in docs/agent-sandbox/05 §"Test
 // obligations": the pure stream-json parser, BoundedTail (F1), the shutdown
 // registry (F3), worktree-path compatibility with finalize.ts, and an
 // integration harness using a LOCAL fake provider (no podman/container) against
@@ -198,9 +199,9 @@ describe("claudeCode", () => {
 
 describe("defaultImageName", () => {
   it("lowercases the last path segment and sanitizes", () => {
-    expect(defaultImageName("/home/unixuser/sandbar")).toBe("sandcastle:sandbar");
-    expect(defaultImageName("/x/My Repo!")).toBe("sandcastle:my-repo-");
-    expect(defaultImageName("/")).toBe("sandcastle:local");
+    expect(defaultImageName("/home/unixuser/sandbar")).toBe("sandbar:sandbar");
+    expect(defaultImageName("/x/My Repo!")).toBe("sandbar:my-repo-");
+    expect(defaultImageName("/")).toBe("sandbar:local");
   });
 });
 
@@ -226,9 +227,9 @@ describe("registerShutdown", () => {
 describe("worktree path layout", () => {
   it("matches finalize.ts:worktreePathFor for a slashed branch", () => {
     const repo = "/repo";
-    const branch = "sandcastle/issue-5-add-foo";
-    expect(worktreePathFor(repo, ".sandcastle", branch)).toBe(
-      join(repo, ".sandcastle", "worktrees", "sandcastle-issue-5-add-foo"),
+    const branch = "sandbar/issue-5-add-foo";
+    expect(worktreePathFor(repo, ".sandbar", branch)).toBe(
+      join(repo, ".sandbar", "worktrees", "sandbar-issue-5-add-foo"),
     );
   });
 });
@@ -238,7 +239,7 @@ describe("worktree path layout", () => {
 // ---------------------------------------------------------------------------
 
 // A fake provider whose handle runs commands locally (`sh -c`) against the host
-// worktree path — the model sandcastle's own test suite uses. It replicates the
+// worktree path — the model the upstream test suite used. It replicates the
 // onLine readline join and captures the env it was handed.
 function makeLocalProvider(): SandboxProvider & {
   capturedEnv?: Record<string, string>;
@@ -336,22 +337,22 @@ describe("createSandbox integration (local provider)", () => {
     await writeFile(join(dir, "README.md"), "seed\n");
     await git(["add", "."], dir);
     await git(["commit", "-m", "seed"], dir);
-    await git(["branch", "sandcastle/issue-1-demo"], dir);
+    await git(["branch", "sandbar/issue-1-demo"], dir);
   });
   afterAll(async () => {
     for (const d of cleanups) await rm(d, { recursive: true, force: true });
   });
 
-  it("creates a managed worktree under .sandcastle/worktrees and captures a commit", async () => {
+  it("creates a managed worktree under .sandbar/worktrees and captures a commit", async () => {
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
-      branch: "sandcastle/issue-1-demo",
+      branch: "sandbar/issue-1-demo",
       sandbox: provider,
       cwd: dir,
     });
     try {
       expect(sandbox.worktreePath).toBe(
-        join(dir, ".sandcastle", "worktrees", "sandcastle-issue-1-demo"),
+        join(dir, ".sandbar", "worktrees", "sandbar-issue-1-demo"),
       );
 
       // The "agent" makes one commit on the branch, then emits a result line.
@@ -365,7 +366,7 @@ describe("createSandbox integration (local provider)", () => {
       expect(run.commits).toHaveLength(1);
       expect(run.commits[0]!.sha).toMatch(/^[0-9a-f]{40}$/);
       // The captured commit is the one the agent made on the branch.
-      const log = await git(["log", "-1", "--format=%H", "sandcastle/issue-1-demo"], dir);
+      const log = await git(["log", "-1", "--format=%H", "sandbar/issue-1-demo"], dir);
       expect(log.stdout.trim()).toBe(run.commits[0]!.sha);
     } finally {
       await sandbox.close();
@@ -373,10 +374,10 @@ describe("createSandbox integration (local provider)", () => {
   });
 
   it("honors a custom workDir for the worktree root, matching worktreePathFor (#7)", async () => {
-    await git(["branch", "sandcastle/issue-7-workdir"], dir);
+    await git(["branch", "sandbar/issue-7-workdir"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
-      branch: "sandcastle/issue-7-workdir",
+      branch: "sandbar/issue-7-workdir",
       sandbox: provider,
       cwd: dir,
       workDir: ".sandbar",
@@ -385,7 +386,7 @@ describe("createSandbox integration (local provider)", () => {
       // The sandbox must place the worktree where finalize.ts:worktreePathFor
       // expects it — otherwise finalize's worktree-remove misses and the
       // branch-delete is blocked by the still-registered worktree.
-      const expected = worktreePathFor(dir, ".sandbar", "sandcastle/issue-7-workdir");
+      const expected = worktreePathFor(dir, ".sandbar", "sandbar/issue-7-workdir");
       expect(sandbox.worktreePath).toBe(expected);
       expect(sandbox.worktreePath).toContain(join(".sandbar", "worktrees"));
     } finally {
@@ -394,10 +395,10 @@ describe("createSandbox integration (local provider)", () => {
   });
 
   it("falls back to raw stdout when no result event is emitted, and reports zero commits for a no-op", async () => {
-    await git(["branch", "sandcastle/issue-2-noop"], dir);
+    await git(["branch", "sandbar/issue-2-noop"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
-      branch: "sandcastle/issue-2-noop",
+      branch: "sandbar/issue-2-noop",
       sandbox: provider,
       cwd: dir,
     });
@@ -413,10 +414,10 @@ describe("createSandbox integration (local provider)", () => {
   });
 
   it("propagates host git identity and marks safe.directory in the sandbox global config", async () => {
-    await git(["branch", "sandcastle/issue-3-id"], dir);
+    await git(["branch", "sandbar/issue-3-id"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
-      branch: "sandcastle/issue-3-id",
+      branch: "sandbar/issue-3-id",
       sandbox: provider,
       cwd: dir,
     });
@@ -439,10 +440,10 @@ describe("createSandbox integration (local provider)", () => {
   });
 
   it("resolves the run via the completion-grace timer when the pipe is held open (F5)", async () => {
-    await git(["branch", "sandcastle/issue-4-grace"], dir);
+    await git(["branch", "sandbar/issue-4-grace"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
-      branch: "sandcastle/issue-4-grace",
+      branch: "sandbar/issue-4-grace",
       sandbox: provider,
       cwd: dir,
     });
@@ -471,17 +472,17 @@ describe("createSandbox integration (local provider)", () => {
     }
   }, 15_000);
 
-  it("only forwards env keys declared in .sandcastle/.env (no host leakage)", async () => {
-    await mkdir(join(dir, ".sandcastle"), { recursive: true });
-    await writeFile(join(dir, ".sandcastle", ".env"), "DECLARED=\nLITERAL=fixed\n");
-    await git(["branch", "sandcastle/issue-5-env"], dir);
+  it("only forwards env keys declared in .sandbar/.env (no host leakage)", async () => {
+    await mkdir(join(dir, ".sandbar"), { recursive: true });
+    await writeFile(join(dir, ".sandbar", ".env"), "DECLARED=\nLITERAL=fixed\n");
+    await git(["branch", "sandbar/issue-5-env"], dir);
 
     process.env.DECLARED = "from-host";
     process.env.UNDECLARED = "should-not-leak";
     try {
       const provider = makeLocalProvider();
       const sandbox = await createSandbox({
-        branch: "sandcastle/issue-5-env",
+        branch: "sandbar/issue-5-env",
         sandbox: provider,
         cwd: dir,
       });
@@ -497,25 +498,24 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
-  it("loads env from config.envFilePath, not the fixed .sandcastle/.env (issue #5)", async () => {
-    // A populated custom file (e.g. the v0.2.0 `.sandbar/.env` rename) must be
-    // honoured even when `.sandcastle/.env` is absent or holds a stale value.
+  it("loads env from config.envFilePath, not the fixed .sandbar/.env (issue #5)", async () => {
+    // A populated custom file must be honoured even when the fixed default
+    // location (`.sandbar/.env`) holds a stale value.
+    await writeFile(join(dir, "custom.env"), "GH_TOKEN=from-custom\n");
     await mkdir(join(dir, ".sandbar"), { recursive: true });
-    await writeFile(join(dir, ".sandbar", ".env"), "GH_TOKEN=from-sandbar\n");
-    await mkdir(join(dir, ".sandcastle"), { recursive: true });
-    await writeFile(join(dir, ".sandcastle", ".env"), "GH_TOKEN=stale-default\n");
-    await git(["branch", "sandcastle/issue-5-path"], dir);
+    await writeFile(join(dir, ".sandbar", ".env"), "GH_TOKEN=stale-default\n");
+    await git(["branch", "sandbar/issue-5-path"], dir);
 
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
-      branch: "sandcastle/issue-5-path",
+      branch: "sandbar/issue-5-path",
       sandbox: provider,
       cwd: dir,
-      envFilePath: join(dir, ".sandbar", ".env"),
+      envFilePath: join(dir, "custom.env"),
     });
     await sandbox.close();
     const env = provider.capturedEnv ?? {};
-    expect(env.GH_TOKEN).toBe("from-sandbar"); // honoured the override
+    expect(env.GH_TOKEN).toBe("from-custom"); // honoured the override
     expect(env.GH_TOKEN).not.toBe("stale-default"); // ignored the fixed path
   });
 });

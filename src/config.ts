@@ -104,7 +104,7 @@ export type RunConfig = {
   // Authoritative env-file path for BOTH the host-side preflight credential
   // check and the values injected into each sandbox container (its declared
   // keys, with per-key process.env fallback). One knob — no hidden
-  // `.sandcastle/.env` second source. Default: ".env".
+  // `.sandbar/.env` second source. Default: ".env".
   readonly envFilePath?: string;
 
   readonly maxImplAttempts?: number;

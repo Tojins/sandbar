@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 
 import { makeEnvReader } from "./env.js";
 import { worktreePathFor } from "./finalize.js";
+import { ALL_BRANCH_PREFIXES } from "./naming.js";
 import { PG_IMAGE, RUNTIME as SIDECAR_RUNTIME } from "./pg-sidecar.js";
 
 const exec = promisify(execFile);
@@ -22,7 +23,7 @@ export type PreflightConfig = {
   readonly sourceBranch: string;
 };
 
-export type SandcastleBranch = {
+export type SandbarBranch = {
   readonly name: string;
   readonly mergedIntoMain: boolean;
 };
@@ -40,8 +41,8 @@ export type RepoState = {
   readonly expectedBranch: string;
   readonly hasOriginBranch: boolean;
   readonly envFilePath: string;
-  readonly unmergedSandcastleBranches: readonly string[];
-  readonly discardedSandcastleBranches: readonly string[];
+  readonly unmergedIssueBranches: readonly string[];
+  readonly discardedIssueBranches: readonly string[];
 };
 
 export type Invariant = { ok: true } | { ok: false; message: string };
@@ -115,23 +116,23 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
         `\`origin/${s.expectedBranch}\` does not exist after fetch. Configure the \`origin\` remote.`,
     });
   }
-  if (s.unmergedSandcastleBranches.length > 0) {
-    const list = s.unmergedSandcastleBranches.map((b) => `  - ${b}`).join("\n");
+  if (s.unmergedIssueBranches.length > 0) {
+    const list = s.unmergedIssueBranches.map((b) => `  - ${b}`).join("\n");
     out.push({
       ok: false,
       message:
-        `Unmerged \`sandcastle/issue-*\` branches found:\n${list}\n` +
+        `Unmerged \`sandbar/issue-*\` branches found:\n${list}\n` +
         "Merge them, push them for review, or delete with `git branch -D <name>`.",
     });
   }
-  if (s.discardedSandcastleBranches.length > 0) {
-    const list = s.discardedSandcastleBranches
+  if (s.discardedIssueBranches.length > 0) {
+    const list = s.discardedIssueBranches
       .map((b) => `  - ${b}`)
       .join("\n");
     out.push({
       ok: false,
       message:
-        `Discarded \`sandcastle/issue-*\` branches (remote deleted, local commits would be lost):\n${list}\n` +
+        `Discarded \`sandbar/issue-*\` branches (remote deleted, local commits would be lost):\n${list}\n` +
         "Confirm the loss with `git branch -D <name>`.",
     });
   }
@@ -214,7 +215,7 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     `refs/remotes/origin/${cfg.sourceBranch}`,
   ]);
 
-  const { unmerged, discarded } = await classifySandcastleBranches(cfg.sourceBranch);
+  const { unmerged, discarded } = await classifyIssueBranches(cfg.sourceBranch);
 
   return {
     hasGit,
@@ -229,8 +230,8 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     expectedBranch: cfg.sourceBranch,
     hasOriginBranch,
     envFilePath: cfg.envFilePath,
-    unmergedSandcastleBranches: unmerged,
-    discardedSandcastleBranches: discarded,
+    unmergedIssueBranches: unmerged,
+    discardedIssueBranches: discarded,
   };
 }
 
@@ -249,11 +250,16 @@ async function checkSandboxGhToken(
   }
 }
 
-async function listSandcastleBranches(): Promise<readonly string[]> {
+// Glob patterns for every recognized issue-branch prefix (current + legacy).
+const ISSUE_BRANCH_REFGLOBS = ALL_BRANCH_PREFIXES.map(
+  (p) => `refs/heads/${p}issue-*`,
+);
+
+async function listIssueBranches(): Promise<readonly string[]> {
   const { ok, stdout } = await captureOk("git", [
     "for-each-ref",
     "--format=%(refname:short)",
-    "refs/heads/sandcastle/issue-*",
+    ...ISSUE_BRANCH_REFGLOBS,
   ]);
   if (!ok) return [];
   return stdout.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -285,7 +291,7 @@ async function branchUpstreamTracks(): Promise<ReadonlyMap<string, string>> {
   const { ok, stdout } = await captureOk("git", [
     "for-each-ref",
     "--format=%(refname:short)\t%(upstream:track)",
-    "refs/heads/sandcastle/issue-*",
+    ...ISSUE_BRANCH_REFGLOBS,
   ]);
   const out = new Map<string, string>();
   if (!ok) return out;
@@ -299,11 +305,11 @@ async function branchUpstreamTracks(): Promise<ReadonlyMap<string, string>> {
   return out;
 }
 
-async function classifySandcastleBranches(_sourceBranch: string): Promise<{
+async function classifyIssueBranches(_sourceBranch: string): Promise<{
   unmerged: readonly string[];
   discarded: readonly string[];
 }> {
-  const all = await listSandcastleBranches();
+  const all = await listIssueBranches();
   const tracks = await branchUpstreamTracks();
   const unmerged: string[] = [];
   const discarded: string[] = [];
@@ -319,10 +325,10 @@ async function classifySandcastleBranches(_sourceBranch: string): Promise<{
   return { unmerged, discarded };
 }
 
-export async function deleteMergedSandcastleBranches(
+export async function deleteMergedIssueBranches(
   cfg: { cwd: string; workDir: string; sourceBranch: string },
 ): Promise<readonly string[]> {
-  const all = await listSandcastleBranches();
+  const all = await listIssueBranches();
   const deleted: string[] = [];
   for (const branch of all) {
     if (!(await isBranchMerged(branch, cfg.sourceBranch))) continue;
@@ -359,15 +365,13 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   // reaped even when the user hasn't pulled local sourceBranch recently.
   await runOk("git", ["fetch", "origin", cfg.sourceBranch, "--quiet"]);
 
-  const deleted = await deleteMergedSandcastleBranches({
+  const deleted = await deleteMergedIssueBranches({
     cwd: cfg.cwd,
     workDir: cfg.workDir,
     sourceBranch: cfg.sourceBranch,
   });
   if (deleted.length > 0) {
-    console.log(
-      `Cleaned up merged sandcastle branches: ${deleted.join(", ")}`,
-    );
+    console.log(`Cleaned up merged issue branches: ${deleted.join(", ")}`);
   }
   const state = await gatherState(cfg);
   const results = checkInvariants(state);

@@ -11,7 +11,7 @@ import {
 } from "./resolve-loop.js";
 
 function issue(n: number): IssueRef {
-  return { id: String(n), title: `t-${n}`, branch: `sandcastle/issue-${n}` };
+  return { id: String(n), title: `t-${n}`, branch: `sandbar/issue-${n}` };
 }
 
 function gateOut(): MergerGateOutput {

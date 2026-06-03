@@ -18,7 +18,7 @@ function issue(n: number, title = `t-${n}`): IssueRef {
   return {
     id: String(n),
     title,
-    branch: `sandcastle/issue-${n}-${title}`,
+    branch: `sandbar/issue-${n}-${title}`,
   };
 }
 
@@ -457,9 +457,9 @@ describe("runMergerWithAdapter — ordering and mixed", () => {
     await runMergerWithAdapter([issue(44), issue(10), issue(42)], adapter);
 
     expect(calls.merges).toEqual([
-      "sandcastle/issue-10-t-10",
-      "sandcastle/issue-42-t-42",
-      "sandcastle/issue-44-t-44",
+      "sandbar/issue-10-t-10",
+      "sandbar/issue-42-t-42",
+      "sandbar/issue-44-t-44",
     ]);
     expect(calls.closes.map((c) => c.n)).toEqual([10, 42, 44]);
   });
@@ -598,7 +598,7 @@ describe("runMergerWithAdapter — logging", () => {
     await runMergerWithAdapter([issue(42)], adapter, (line) => {
       lines.push(line);
     });
-    expect(lines).toContain("merge-attempt #42 sandcastle/issue-42-t-42");
+    expect(lines).toContain("merge-attempt #42 sandbar/issue-42-t-42");
     expect(lines).toContain("merged #42");
     expect(lines).toContain("push attempt 1");
   });

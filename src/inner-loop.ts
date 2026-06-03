@@ -1,7 +1,7 @@
 // Inner-loop runner — I/O glue around the pure state machine.
 //
 // Per issue:
-//   1. Setup a sandcastle sandbox + Postgres sidecar.
+//   1. Setup an agent sandbox + Postgres sidecar.
 //   2. Drive the state machine (inner-loop-machine.ts) to a verdict by
 //      executing the action it emits and feeding the result back as an event.
 //   3. Translate the verdict to a Terminal.
@@ -13,7 +13,7 @@
 // no revert-after-reviewer logic. All branching decisions live in the state
 // machine. This file only does I/O.
 
-import * as sandcastle from "./agent-sandbox.js";
+import * as agentSandbox from "./agent-sandbox.js";
 import { podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
@@ -140,11 +140,11 @@ async function runSandboxCycle(
 
   try {
     // Seed the issue branch off origin/<sourceBranch> (not the host's local)
-    // so sandcastle never inherits cwd's in-progress state. Idempotent.
+    // so the sandbox never inherits cwd's in-progress state. Idempotent.
     await ensureIssueBranch(issue.branch, config.sourceBranch);
 
     const [sandboxResult, sidecarResult] = await Promise.allSettled([
-      sandcastle.createSandbox({
+      agentSandbox.createSandbox({
         branch: issue.branch,
         sandbox: podman(),
         hooks: opts.hooks,
@@ -301,7 +301,7 @@ async function runImplementer(
   const run = await sandbox.run({
     name: `implementer-${issue.id}-attempt-${action.attempt}`,
     maxIterations: 1,
-    agent: sandcastle.claudeCode(config.modelId),
+    agent: agentSandbox.claudeCode(config.modelId),
     prompt,
   });
   if (opts.attemptLogger) {
@@ -355,7 +355,7 @@ async function runReviewer(
     const reviewerRun = await sandbox.run({
       name: `reviewer-${issue.id}-round-${action.reviewRound}`,
       maxIterations: 1,
-      agent: sandcastle.claudeCode(config.modelId),
+      agent: agentSandbox.claudeCode(config.modelId),
       prompt: reviewerPrompt,
     });
     reviewerStdout = reviewerRun.stdout;

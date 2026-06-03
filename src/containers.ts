@@ -1,59 +1,77 @@
 // Orphan resource cleanup.
 //
-// All sandcastle containers and networks live in podman: the agent sandbox
-// (created by @ai-hero/sandcastle's podman provider as `sandcastle-<uuid>`),
-// the gate runner, the per-issue pg sidecar (`sandcastle-pg-*`), and the
-// per-issue network (`sandcastle-net-*`). We identify orphans by name
-// prefix; the upstream library doesn't yet apply a `sandcastle=true` label,
-// but switching to label-based filtering when it does is a one-line change.
+// All sandbar containers and networks live in podman: the agent sandbox
+// (created by the in-house provider as `sandbar-<uuid>`), the gate runner, the
+// per-issue pg sidecar (`sandbar-pg-*`), and the per-issue network
+// (`sandbar-net-*`). We identify orphans by name prefix; switching to
+// label-based filtering (`sandbar=true`, already applied by the merger) is a
+// one-line change.
+//
+// During the sandcastle→sandbar transition the sweep also matches the legacy
+// `sandcastle-*` prefixes so pre-existing resources on already-running repos
+// are reaped rather than orphaned (see ./naming.ts).
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import {
+  ALL_RESOURCE_PREFIXES,
+  LEGACY_RESOURCE_PREFIXES,
+  RESOURCE_PREFIX,
+} from "./naming.js";
 import { RUNTIME } from "./pg-sidecar.js";
 
 const exec = promisify(execFile);
 
-const NAME_PREFIX = "sandcastle-";
-const NETWORK_PREFIX = "sandcastle-net-";
+// Networks are named `<prefix>net-*`; containers carry the bare prefix.
+const NETWORK_PREFIXES: readonly string[] = [
+  RESOURCE_PREFIX,
+  ...LEGACY_RESOURCE_PREFIXES,
+].map((p) => `${p}net-`);
 
 async function listContainerOrphans(): Promise<string[]> {
-  try {
-    const { stdout } = await exec(RUNTIME, [
-      "ps",
-      "-a",
-      "--filter",
-      `name=^${NAME_PREFIX}`,
-      "--format",
-      "{{.Names}}",
-    ]);
-    return stdout
-      .split("\n")
-      .map((s) => s.trim())
-      .filter((n) => n.startsWith(NAME_PREFIX));
-  } catch {
-    // runtime not installed — nothing to clean
-    return [];
+  const found = new Set<string>();
+  for (const prefix of ALL_RESOURCE_PREFIXES) {
+    try {
+      const { stdout } = await exec(RUNTIME, [
+        "ps",
+        "-a",
+        "--filter",
+        `name=^${prefix}`,
+        "--format",
+        "{{.Names}}",
+      ]);
+      for (const n of stdout.split("\n").map((s) => s.trim())) {
+        if (n.startsWith(prefix)) found.add(n);
+      }
+    } catch {
+      // runtime not installed — nothing to clean
+      return [];
+    }
   }
+  return [...found];
 }
 
 async function listNetworkOrphans(): Promise<string[]> {
-  try {
-    const { stdout } = await exec(RUNTIME, [
-      "network",
-      "ls",
-      "--filter",
-      `name=^${NETWORK_PREFIX}`,
-      "--format",
-      "{{.Name}}",
-    ]);
-    return stdout
-      .split("\n")
-      .map((s) => s.trim())
-      .filter((n) => n.startsWith(NETWORK_PREFIX));
-  } catch {
-    return [];
+  const found = new Set<string>();
+  for (const prefix of NETWORK_PREFIXES) {
+    try {
+      const { stdout } = await exec(RUNTIME, [
+        "network",
+        "ls",
+        "--filter",
+        `name=^${prefix}`,
+        "--format",
+        "{{.Name}}",
+      ]);
+      for (const n of stdout.split("\n").map((s) => s.trim())) {
+        if (n.startsWith(prefix)) found.add(n);
+      }
+    } catch {
+      return [];
+    }
   }
+  return [...found];
 }
 
 async function removeContainer(name: string): Promise<boolean> {
@@ -77,7 +95,7 @@ async function removeNetwork(name: string): Promise<boolean> {
 export async function cleanupOrphanContainers(): Promise<readonly string[]> {
   const removed: string[] = [];
   // Containers first; a network can't be removed while a container is still
-  // attached. After force-removing all sandcastle-prefixed containers, the
+  // attached. After force-removing all sandbar-prefixed containers, the
   // network removal is unblocked.
   for (const name of await listContainerOrphans()) {
     if (await removeContainer(name)) removed.push(name);

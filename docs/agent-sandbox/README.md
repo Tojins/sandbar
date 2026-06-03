@@ -1,4 +1,4 @@
-# Sandcastle reverse-engineering specs
+# Agent-sandbox reverse-engineering specs
 
 These documents reverse-engineer the parts of `@ai-hero/sandcastle` (pinned
 `0.7.0`, the latest) that sandbar actually consumes. They exist to support
@@ -44,10 +44,10 @@ Of the `Sandbox` handle, sandbar uses only `run()`, `worktreePath`, and
 ### The exact shape of sandbar's usage
 
 - **Always bind-mount + podman.** `podman()` is called with no options, so:
-  default image name (`sandcastle:<repo-dir>`), `--userns=keep-id`, uid/gid
+  default image name (`sandbar:<repo-dir>`), `--userns=keep-id`, uid/gid
   1000, SELinux label `z`, **no `--network`**. The agent container therefore
   cannot reach the per-issue Postgres sidecar — only the gate container
-  (`src/gate.ts`) joins `sandcastle-net-<id>`. Reproduce this: the agent
+  (`src/gate.ts`) joins `sandbar-net-<id>`. Reproduce this: the agent
   sandbox stays networkless.
 - **Always an explicit, pre-existing branch.** Sandbar runs
   `ensureIssueBranch(issue.branch, sourceBranch)` (seeding from
@@ -113,15 +113,18 @@ temp-branch / merge-to-host cherry-pick path in the lifecycle (only reached when
 
 ## Load-bearing names (do not change casually)
 
-These strings are matched by sandbar code *outside* the sandcastle boundary, so
-the replacement must preserve them (or update every matcher in lockstep — see
-[05](./05-reimplementation-spec.md)):
+These strings are matched by sandbar code *outside* the agent-sandbox boundary,
+so the replacement must preserve them (or update every matcher in lockstep — see
+[05](./05-reimplementation-spec.md)). Naming prefixes are now centralized in
+`src/naming.ts`; during the transition window the cleanup paths also recognize
+the legacy `sandcastle-*` / `sandcastle/*` prefixes so old artifacts on existing
+repos get swept rather than orphaned:
 
-- Worktree dir layout: `<repoDir>/.sandcastle/worktrees/<branch-with-slashes-as-dashes>`
+- Worktree dir layout: `<repoDir>/.sandbar/worktrees/<branch-with-slashes-as-dashes>`
   — `src/finalize.ts:283` (`worktreePathFor`) mirrors `WorktreeManager.create`.
-- Container name prefix `sandcastle-` and network prefix `sandcastle-net-` —
-  `src/containers.ts:17-18` (`NAME_PREFIX`, `NETWORK_PREFIX`), `merger.ts:435`.
-- Branch prefix `sandcastle/issue-<n>-<slug>` — `plan-resolver.ts:74`,
+- Container name prefix `sandbar-` and network prefix `sandbar-net-` —
+  `src/naming.ts` (`RESOURCE_PREFIX`), matched in `containers.ts`, `merger.ts:435`.
+- Branch prefix `sandbar/issue-<n>-<slug>` — `plan-resolver.ts:74`,
   `preflight.ts`, orphan sweeper.
 - Sandbox mount point `/home/agent/workspace` (`SANDBOX_REPO_DIR`) and home
   `/home/agent`.

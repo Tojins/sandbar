@@ -17,7 +17,7 @@ Sandbar calls `podman()` with **no arguments**, so:
 
 | Option | Default | Sandbar value |
 | --- | --- | --- |
-| `imageName` | `defaultImageName(hostRepoPath)` = `sandcastle:<dir>` | derived |
+| `imageName` | `defaultImageName(hostRepoPath)` = `sandbar:<dir>` | derived |
 | `selinuxLabel` | `"z"` | `"z"` |
 | `userns` | `"keep-id"` | `"keep-id"` |
 | `containerUid` | `1000` | `1000` |
@@ -40,8 +40,8 @@ when N agent sandboxes plus N Postgres sidecars run at once. The port's minimum
 keep `maxOutputTailChars` wired into `exec` (below).
 
 `defaultImageName` (`mountUtils.ts`): take the last path segment of the repo
-dir, lowercase, replace `[^a-z0-9_.-]` with `-`, prefix `sandcastle:`. E.g.
-`/home/unixuser/sandbar` → `sandcastle:sandbar`.
+dir, lowercase, replace `[^a-z0-9_.-]` with `-`, prefix `sandbar:`. E.g.
+`/home/unixuser/sandbar` → `sandbar:sandbar`.
 
 ## `create(createOptions)` — container bring-up
 
@@ -52,7 +52,7 @@ the worktree→`/home/agent/workspace` mount plus the git mounts.
 
 Sequence (`podman.ts`, `create`):
 
-1. `containerName = "sandcastle-" + randomUUID()`. **Prefix is load-bearing**
+1. `containerName = "sandbar-" + randomUUID()`. **Prefix is load-bearing**
    (orphan sweeper).
 2. Sandbox-side worktree path = the `sandboxPath` of the mount whose `hostPath`
    equals `createOptions.worktreePath`, else `/home/agent/workspace`.
@@ -72,7 +72,7 @@ Sequence (`podman.ts`, `create`):
 8. Compose args and run:
    ```
    podman run -d \
-     --name sandcastle-<uuid> \
+     --name sandbar-<uuid> \
      --user 1000:1000 \
      --userns=keep-id:uid=1000,gid=1000 \
      [--network <n> ...]        # absent for sandbar
@@ -168,8 +168,8 @@ N)` on non-zero). The in-house module can fold equivalents inline.
 
 - This file is ~90% portable as-is: strip the `createBindMountSandboxProvider`
   indirection and return the handle directly.
-- Keep the `sandcastle-` container-name prefix, or update `containers.ts`
-  `NAME_PREFIX` and `merger.ts:435` together.
+- Keep the `sandbar-` container-name prefix (`RESOURCE_PREFIX` in
+  `src/naming.ts`), or update it and `merger.ts:435` together.
 - Keep the shutdown-registry cleanup — it's what prevents leaked containers on
   crash. Note sandbar *already* has its own orphan sweeper (`containers.ts`) as a
   backstop, but the in-process handlers are the fast path. Port the registry

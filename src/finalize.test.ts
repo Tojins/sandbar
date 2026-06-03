@@ -24,7 +24,7 @@ function issue(n: number, title = `t-${n}`): IssueRef {
   return {
     id: String(n),
     title,
-    branch: `sandcastle/issue-${n}-${title}`,
+    branch: `sandbar/issue-${n}-${title}`,
   };
 }
 
@@ -108,14 +108,14 @@ describe("issueNumberOf", () => {
 
 describe("worktreePathFor", () => {
   it("composes from repoDir + workDir + branch (slashes replaced)", () => {
-    expect(worktreePathFor("/repo", ".sandbar", "sandcastle/issue-45-foo")).toBe(
-      "/repo/.sandbar/worktrees/sandcastle-issue-45-foo",
+    expect(worktreePathFor("/repo", ".sandbar", "sandbar/issue-45-foo")).toBe(
+      "/repo/.sandbar/worktrees/sandbar-issue-45-foo",
     );
   });
 
   it("works with a different workDir", () => {
-    expect(worktreePathFor("/repo", ".sandcastle", "sandcastle/issue-45-foo")).toBe(
-      "/repo/.sandcastle/worktrees/sandcastle-issue-45-foo",
+    expect(worktreePathFor("/repo", ".custom-wd", "sandbar/issue-45-foo")).toBe(
+      "/repo/.custom-wd/worktrees/sandbar-issue-45-foo",
     );
   });
 });
@@ -515,16 +515,16 @@ describe("finalizeAll", () => {
       "pushed",
     ]);
     expect(calls.pushes).toEqual([
-      "sandcastle/issue-11-t-11",
-      "sandcastle/issue-12-t-12",
-      "sandcastle/issue-13-t-13",
+      "sandbar/issue-11-t-11",
+      "sandbar/issue-12-t-12",
+      "sandbar/issue-13-t-13",
     ]);
-    expect(calls.deletes).toEqual(["sandcastle/issue-10-t-10"]);
+    expect(calls.deletes).toEqual(["sandbar/issue-10-t-10"]);
     expect(calls.worktreeRemoves).toEqual([
-      "sandcastle/issue-10-t-10",
-      "sandcastle/issue-11-t-11",
-      "sandcastle/issue-12-t-12",
-      "sandcastle/issue-13-t-13",
+      "sandbar/issue-10-t-10",
+      "sandbar/issue-11-t-11",
+      "sandbar/issue-12-t-12",
+      "sandbar/issue-13-t-13",
     ]);
     expect(calls.labelEdits).toEqual([
       { n: 10, remove: [READY_FOR_AGENT], add: [] },

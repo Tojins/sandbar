@@ -76,10 +76,10 @@ the `0.5.12`→`0.7.0` re-baseline; line numbers are approximate against the
    explicit-branch path too.
 
 6. 🔴 **`pruneStale` must `realPath` the worktrees dir before the active-set
-   check.** `git worktree list --porcelain` canonicalizes paths. If `.sandcastle`
+   check.** `git worktree list --porcelain` canonicalizes paths. If `.sandbar`
    is a symlink and you compare un-canonicalized joined paths, *every* active
    worktree looks orphaned and gets `rm -rf`'d out from under a running sandbox.
-   Test: *"does not remove active worktrees when .sandcastle is a symlink"*
+   Test (upstream name): *"does not remove active worktrees when .sandcastle is a symlink"*
    (regression #470, WorktreeManager.test.ts).
 
 ---
@@ -209,7 +209,7 @@ Source: `WorktreeManager.ts`. Tests: WorktreeManager.test.ts.
   cherry-pick), where porcelain's `branch` field is `null`. Test: *"reuses
   preserved worktree when branch is mid-rebase (detached HEAD)"*. Branch-only
   matching wrecks a live worktree whose branch went detached.
-- 🟡 **Reuse only for *managed* worktrees** (path under `.sandcastle/worktrees/`).
+- 🟡 **Reuse only for *managed* worktrees** (path under `.sandbar/worktrees/`).
   A branch checked out in the main working tree or an external worktree →
   **throws** `"Branch '…' is already checked out…"`. Test: *"detects collision
   when branch is checked out in the main working tree"*.
@@ -230,7 +230,7 @@ Source: `WorktreeManager.ts`. Tests: WorktreeManager.test.ts.
   may be dirty / mid-operation.
 - 🟡 **`pruneStale` is two-stage and dir-only:** `git worktree prune` first
   (clears metadata for vanished dirs), *then* sweep entries under
-  `.sandcastle/worktrees/` that are directories and not in the active set
+  `.sandbar/worktrees/` that are directories and not in the active set
   (`rm -rf`). Non-dir entries are skipped; a missing worktrees dir is a no-op
   (only `NotFound` is swallowed — other read errors surface). Tests: *"runs git
   worktree prune…"*, *"removes orphaned directories…"*, *"removes orphaned dirs"*.
@@ -293,10 +293,10 @@ podman.test.ts, boundedTail.test.ts, mountUtils.test.ts.
   exact message is `Image '<img>' not found locally. Build it first with 'podman
   build -t <img> .'`. (macOS/Windows also do `podman machine list` first —
   skippable on Linux.) Fail fast here rather than on an opaque `podman run`.
-- ⚪ **`defaultImageName` = `sandcastle:<last-path-segment>`**, lowercased,
-  `[^a-z0-9_.-]→-`. `My Repo!` → `sandcastle:my-repo-` (trailing dash is real);
-  empty → `sandcastle:local`. Reproduce exactly or your computed tag won't match
-  a sandcastle-built image.
+- ⚪ **`defaultImageName` = `sandbar:<last-path-segment>`**, lowercased,
+  `[^a-z0-9_.-]→-`. `My Repo!` → `sandbar:my-repo-` (trailing dash is real);
+  empty → `sandbar:local`. Reproduce exactly or your computed tag won't match
+  a sandbar-built image.
 - ⚪ **No post-start `chown` for bind mounts** — `--userns=keep-id` maps the host
   UID directly. `mkdir+chown` only fires for file-mount parents (sandbar has
   none). Don't add a defensive `chown -R` (slow/destructive). Test: *"does not run
@@ -320,16 +320,17 @@ podman.test.ts, boundedTail.test.ts, mountUtils.test.ts.
 
 ## (G) Env resolution & copy (`EnvResolver.js`, `mergeProviderEnv.js`, `CopyToWorktree.js`)
 
-- 🔴 **`.sandcastle/.env` value wins over `process.env`, but only when truthy**
-  (`sandcastleEnv[key] || process.env[key]`). An **empty value in the file falls
+- 🔴 **`.sandbar/.env` value wins over `process.env`, but only when truthy**
+  (`fileEnv[key] || process.env[key]`). An **empty value in the file falls
   back to `process.env`** — you *cannot* force-set an empty string via the file.
-  Tests: *".sandcastle/.env takes precedence over process.env"*, *"falls back to
+  Tests (upstream names): *".sandcastle/.env takes precedence over process.env"*, *"falls back to
   process.env for keys declared…"*.
-- 🔴 **Only keys *declared* in `.sandcastle/.env` are read from `process.env`** —
+- 🔴 **Only keys *declared* in `.sandbar/.env` are read from `process.env`** —
   the resolver iterates the file's keys, never `process.env`. `PATH`/`HOME` never
-  leak through. **Do not leak the host environment into the container.** Test:
+  leak through. **Do not leak the host environment into the container.** Test
+  (upstream name):
   *"does NOT pull keys from process.env that are not in .sandcastle/.env"*.
-- 🟡 **Repo-root `.env` is completely ignored** — only `<repoDir>/.sandcastle/.env`.
+- 🟡 **Repo-root `.env` is completely ignored** — only `<repoDir>/.sandbar/.env`.
 - 🟡 **Falsy resolved values are omitted from the result object** (key absent, not
   `""`). Test: *"handles empty quoted values"* → `toEqual({})`.
 - ⚪ **Quote stripping needs matching first/last quotes**; escapes (`\n \r \t \\`)

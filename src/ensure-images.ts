@@ -2,10 +2,10 @@
 // gate runner, and the pg sidecar all use podman, so one image build
 // covers everything.
 //
-// We shell out to `podman build` directly rather than `sandcastle podman
-// build-image` to keep the build context scoped to the workDir (the
-// sandcastle CLI sets context = cwd when given a custom Dockerfile path,
-// which would tar the whole repo). The call is skipped when the image
+// We shell out to `podman build` directly rather than via a sandbox-provider
+// build-image helper, to keep the build context scoped to the workDir (the
+// upstream CLI set context = cwd when given a custom Dockerfile path, which
+// would tar the whole repo). The call is skipped when the image
 // already exists, so warm runs pay only one `image exists` call.
 
 import { execFile, spawn } from "node:child_process";
