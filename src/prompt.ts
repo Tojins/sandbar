@@ -3,7 +3,13 @@
 // Layer 1 (project anchor):    @CLAUDE.md, @CONTEXT.md (when present),
 //                              @docs/adr/* listing, last 10 commits on
 //                              sourceBranch. Shared verbatim by both agents.
-// Layer 2 (issue anchor):      `gh issue view <id> --comments` output verbatim.
+// Layer 2 (issue anchor):      `gh issue view <id> --json title,body,comments`
+//                              rendered deterministically (issue-anchor.ts).
+//                              NOT the human-readable `--comments` form, which
+//                              is TTY-sensitive and, when piped, omits the
+//                              body — a zero-comment issue produced an empty
+//                              anchor. A fetch failure throws (SandbarError)
+//                              instead of degrading to a placeholder.
 // Layer 3 (per-attempt slot):  implementer: attempt counter, full branch diff,
 //                              last 200 lines of the previous gate-1 trace,
 //                              the previous reviewer's prose (when the prior
@@ -24,6 +30,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 
 const exec = promisify(execFile);
@@ -135,14 +142,7 @@ export async function buildProjectAnchor(
 }
 
 async function buildIssueAnchor(issueId: string): Promise<string> {
-  let body: string;
-  try {
-    const { stdout } = await exec("gh", ["issue", "view", issueId, "--comments"]);
-    body = stdout;
-  } catch (e) {
-    body = `(failed to fetch issue: ${(e as Error).message})`;
-  }
-  return `# Issue anchor\n\n${body}`;
+  return `# Issue anchor\n\n${await fetchIssueText(issueId)}`;
 }
 
 async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {

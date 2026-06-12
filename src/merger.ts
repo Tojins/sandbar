@@ -47,6 +47,7 @@ import { promisify } from "node:util";
 import { type EnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
 import { type GateResult, runGate } from "./gate.js";
+import { fetchIssueText } from "./issue-anchor.js";
 import { gitMountsForWorktree } from "./merger-worktree.js";
 import type { GateCommand } from "./config.js";
 import { RUNTIME } from "./pg-sidecar.js";
@@ -531,18 +532,10 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       return { status: status.trim(), diff: diff.trim() };
     },
     async getIssueBody(issueId) {
-      try {
-        const { stdout } = await exec(
-          "gh",
-          ["issue", "view", issueId, "--comments"],
-          { cwd },
-        );
-        return stdout;
-      } catch (err) {
-        return `(failed to fetch issue #${issueId}: ${
-          err instanceof Error ? err.message : String(err)
-        })`;
-      }
+      // Throws (SandbarError) on fetch failure: a resolve agent reasoning
+      // about cross-branch intent without the issue specs is worse than a
+      // halted merge phase.
+      return fetchIssueText(issueId, cwd);
     },
     async getHeadSha() {
       const { stdout } = await exec("git", ["rev-parse", "HEAD"], { cwd });
