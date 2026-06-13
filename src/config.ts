@@ -81,8 +81,15 @@ export type RunConfig = {
   // OCI build recipe for `gateImage`. Default: "Containerfile".
   readonly containerfilePath?: string;
 
-  // Model id passed to the claude agent provider. Default: "claude-opus-4-8".
-  readonly modelId?: string;
+  // Model ids passed to the claude agent provider, one per role. There is no
+  // single global model knob: every agent role names its own model so the
+  // tiering is explicit at the call site. The implementer does the bulk coding
+  // work (sonnet for throughput); the reviewer is the sharp advisory bar and
+  // the merger resolves conflicts / gate-reds (both opus for judgement).
+  // Defaults: implementer "claude-sonnet-4-6", reviewer/merger "claude-opus-4-8".
+  readonly implementerModelId?: string;
+  readonly reviewerModelId?: string;
+  readonly mergerModelId?: string;
 
   // Trailer appended to merge commits. Default: a `Co-authored-by:` line built
   // from botName/botEmail.
@@ -133,7 +140,9 @@ export const DEFAULT_CWD = (): string => process.cwd();
 export const DEFAULT_WORK_DIR = ".sandbar";
 export const DEFAULT_SOURCE_BRANCH = "main";
 export const DEFAULT_CONTAINERFILE_PATH = "Containerfile";
-export const DEFAULT_MODEL_ID = "claude-opus-4-8";
+export const DEFAULT_IMPLEMENTER_MODEL_ID = "claude-sonnet-4-6";
+export const DEFAULT_REVIEWER_MODEL_ID = "claude-opus-4-8";
+export const DEFAULT_MERGER_MODEL_ID = "claude-opus-4-8";
 export const DEFAULT_CLAUDE_MD_PATH = "CLAUDE.md";
 export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
 export const DEFAULT_ADR_DIR = "docs/adr";
@@ -156,7 +165,9 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     workDir: config.workDir ?? DEFAULT_WORK_DIR,
     sourceBranch: config.sourceBranch ?? DEFAULT_SOURCE_BRANCH,
     containerfilePath: config.containerfilePath ?? DEFAULT_CONTAINERFILE_PATH,
-    modelId: config.modelId ?? DEFAULT_MODEL_ID,
+    implementerModelId: config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,
+    reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
+    mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     coauthorTrailer:
       config.coauthorTrailer ??
       defaultCoauthorTrailer(config.botName, config.botEmail),

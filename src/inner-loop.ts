@@ -64,7 +64,8 @@ export type InnerLoopConfig = {
   readonly sourceBranch: string;
   readonly workDir: string;
   readonly envFilePath: string;
-  readonly modelId: string;
+  readonly implementerModelId: string;
+  readonly reviewerModelId: string;
   readonly maxImplAttempts: number;
   readonly maxReviewRounds: number;
   readonly gateImage: string;
@@ -301,7 +302,7 @@ async function runImplementer(
   const run = await sandbox.run({
     name: `implementer-${issue.id}-attempt-${action.attempt}`,
     maxIterations: 1,
-    agent: agentSandbox.claudeCode(config.modelId),
+    agent: agentSandbox.claudeCode(config.implementerModelId),
     prompt,
   });
   if (opts.attemptLogger) {
@@ -355,7 +356,7 @@ async function runReviewer(
     const reviewerRun = await sandbox.run({
       name: `reviewer-${issue.id}-round-${action.reviewRound}`,
       maxIterations: 1,
-      agent: agentSandbox.claudeCode(config.modelId),
+      agent: agentSandbox.claudeCode(config.reviewerModelId),
       prompt: reviewerPrompt,
     });
     reviewerStdout = reviewerRun.stdout;

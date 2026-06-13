@@ -8,7 +8,9 @@ import {
   DEFAULT_MAX_IMPL_ATTEMPTS,
   DEFAULT_MAX_REVIEW_ROUNDS,
   DEFAULT_MAX_TOTAL_ISSUES,
-  DEFAULT_MODEL_ID,
+  DEFAULT_IMPLEMENTER_MODEL_ID,
+  DEFAULT_REVIEWER_MODEL_ID,
+  DEFAULT_MERGER_MODEL_ID,
   DEFAULT_SOURCE_BRANCH,
   DEFAULT_WORK_DIR,
   DEFAULT_LABELS,
@@ -38,7 +40,9 @@ describe("resolveConfig", () => {
     expect(r.workDir).toBe(DEFAULT_WORK_DIR);
     expect(r.sourceBranch).toBe(DEFAULT_SOURCE_BRANCH);
     expect(r.containerfilePath).toBe(DEFAULT_CONTAINERFILE_PATH);
-    expect(r.modelId).toBe(DEFAULT_MODEL_ID);
+    expect(r.implementerModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
+    expect(r.reviewerModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
+    expect(r.mergerModelId).toBe(DEFAULT_MERGER_MODEL_ID);
     expect(r.claudeMdPath).toBe(DEFAULT_CLAUDE_MD_PATH);
     expect(r.contextMdPath).toBe(DEFAULT_CONTEXT_MD_PATH);
     expect(r.adrDir).toBe(DEFAULT_ADR_DIR);
@@ -61,16 +65,38 @@ describe("resolveConfig", () => {
     const r = resolveConfig({
       ...minimal,
       sourceBranch: "develop",
-      modelId: "claude-sonnet-4-6",
+      implementerModelId: "claude-haiku-4-5-20251001",
       maxReviewRounds: 2,
       coauthorTrailer: "Co-authored-by: Someone Else <x@y.z>",
       copyToWorktree: [".npmrc"],
     });
     expect(r.sourceBranch).toBe("develop");
-    expect(r.modelId).toBe("claude-sonnet-4-6");
+    expect(r.implementerModelId).toBe("claude-haiku-4-5-20251001");
     expect(r.maxReviewRounds).toBe(2);
     expect(r.coauthorTrailer).toBe("Co-authored-by: Someone Else <x@y.z>");
     expect(r.copyToWorktree).toEqual([".npmrc"]);
+  });
+
+  it("defaults each agent role to its own model tier", () => {
+    const r = resolveConfig(minimal);
+    expect(r.implementerModelId).toBe("claude-sonnet-4-6");
+    expect(r.reviewerModelId).toBe("claude-opus-4-8");
+    expect(r.mergerModelId).toBe("claude-opus-4-8");
+    expect(r.implementerModelId).not.toBe(r.reviewerModelId);
+  });
+
+  it("resolves each role's model independently", () => {
+    const r = resolveConfig({
+      ...minimal,
+      implementerModelId: "claude-haiku-4-5-20251001",
+      mergerModelId: "claude-sonnet-4-6",
+    });
+    // Explicit knobs win for their own role...
+    expect(r.implementerModelId).toBe("claude-haiku-4-5-20251001");
+    expect(r.mergerModelId).toBe("claude-sonnet-4-6");
+    // ...and an unset role still falls through to its own default — there is
+    // no global model knob that could bleed across roles.
+    expect(r.reviewerModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
   });
 
   it("merges a partial label override onto the default vocabulary", () => {
