@@ -59,7 +59,7 @@ await run({
 | `containerfilePath` | `Containerfile` |
 | `implementerModelId` | `claude-sonnet-4-6` |
 | `reviewerModelId` | `claude-opus-4-8` |
-| `mergerModelId` | `claude-opus-4-8` |
+| `mergerModelId` | `claude-sonnet-4-6` |
 | `coauthorTrailer` | `Co-authored-by: <botName> <<botEmail>>` |
 | `claudeMdPath` | `CLAUDE.md` |
 | `contextMdPath` | `CONTEXT.md` (referenced only if the file exists) |

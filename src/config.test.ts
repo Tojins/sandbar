@@ -81,7 +81,7 @@ describe("resolveConfig", () => {
     const r = resolveConfig(minimal);
     expect(r.implementerModelId).toBe("claude-sonnet-4-6");
     expect(r.reviewerModelId).toBe("claude-opus-4-8");
-    expect(r.mergerModelId).toBe("claude-opus-4-8");
+    expect(r.mergerModelId).toBe("claude-sonnet-4-6");
     expect(r.implementerModelId).not.toBe(r.reviewerModelId);
   });
 
