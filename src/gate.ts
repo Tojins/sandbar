@@ -105,7 +105,7 @@ async function runStep(
     const { stdout, stderr } = await exec(RUNTIME, args, {
       maxBuffer: MAX_BUFFER,
     });
-    return { ok: true, stdout, stderr, exitCode: 0 };
+    return { ok: true, stdout: stripAnsi(stdout), stderr: stripAnsi(stderr), exitCode: 0 };
   } catch (err) {
     const e = err as {
       stdout?: string;
@@ -114,11 +114,24 @@ async function runStep(
     };
     return {
       ok: false,
-      stdout: e.stdout ?? "",
-      stderr: e.stderr ?? "",
+      stdout: stripAnsi(e.stdout ?? ""),
+      stderr: stripAnsi(e.stderr ?? ""),
       exitCode: typeof e.code === "number" ? e.code : 1,
     };
   }
+}
+
+// Gate tools (vitest et al.) emit ANSI SGR colour codes even when their
+// stdout is piped — the in-container colour heuristics misfire despite CI=true.
+// Those escapes are pure noise in every plain-text sink: the run-logs and,
+// worst, the failure-trace comment posted to the GitHub issue (#396), where a
+// raw `\x1b[90m` renders as literal `^[[90m` garbage. Strip every CSI escape
+// at the capture boundary so all downstream consumers get clean text.
+// eslint-disable-next-line no-control-regex
+const ANSI_CSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+
+export function stripAnsi(s: string): string {
+  return s.replace(ANSI_CSI, "");
 }
 
 export function lastNLines(s: string, n: number): string {
