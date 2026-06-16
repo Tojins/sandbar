@@ -77,12 +77,11 @@ describe("resolveConfig", () => {
     expect(r.copyToWorktree).toEqual([".npmrc"]);
   });
 
-  it("defaults each agent role to its own model tier", () => {
+  it("defaults every agent role to the version-agnostic opus alias", () => {
     const r = resolveConfig(minimal);
-    expect(r.implementerModelId).toBe("claude-sonnet-4-6");
-    expect(r.reviewerModelId).toBe("claude-opus-4-8");
-    expect(r.mergerModelId).toBe("claude-sonnet-4-6");
-    expect(r.implementerModelId).not.toBe(r.reviewerModelId);
+    expect(r.implementerModelId).toBe("opus");
+    expect(r.reviewerModelId).toBe("opus");
+    expect(r.mergerModelId).toBe("opus");
   });
 
   it("resolves each role's model independently", () => {

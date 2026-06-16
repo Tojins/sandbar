@@ -83,10 +83,10 @@ export type RunConfig = {
 
   // Model ids passed to the claude agent provider, one per role. There is no
   // single global model knob: every agent role names its own model so the
-  // tiering is explicit at the call site. The implementer does the bulk coding
-  // work (sonnet for throughput); the reviewer is the sharp advisory bar
-  // (opus for judgement); the merger resolves conflicts / gate-reds (sonnet).
-  // Defaults: implementer/merger "claude-sonnet-4-6", reviewer "claude-opus-4-8".
+  // tiering is explicit at the call site. Every role defaults to the version-
+  // agnostic "opus" alias, which the claude CLI resolves to the latest Opus —
+  // so the defaults don't pin a version and don't need bumping per release.
+  // Defaults: implementer/reviewer/merger all "opus".
   readonly implementerModelId?: string;
   readonly reviewerModelId?: string;
   readonly mergerModelId?: string;
@@ -140,9 +140,9 @@ export const DEFAULT_CWD = (): string => process.cwd();
 export const DEFAULT_WORK_DIR = ".sandbar";
 export const DEFAULT_SOURCE_BRANCH = "main";
 export const DEFAULT_CONTAINERFILE_PATH = "Containerfile";
-export const DEFAULT_IMPLEMENTER_MODEL_ID = "claude-sonnet-4-6";
-export const DEFAULT_REVIEWER_MODEL_ID = "claude-opus-4-8";
-export const DEFAULT_MERGER_MODEL_ID = "claude-sonnet-4-6";
+export const DEFAULT_IMPLEMENTER_MODEL_ID = "opus";
+export const DEFAULT_REVIEWER_MODEL_ID = "opus";
+export const DEFAULT_MERGER_MODEL_ID = "opus";
 export const DEFAULT_CLAUDE_MD_PATH = "CLAUDE.md";
 export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
 export const DEFAULT_ADR_DIR = "docs/adr";
