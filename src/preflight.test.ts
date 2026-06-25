@@ -16,6 +16,7 @@ const cleanState: RepoState = {
   envFilePath: ".sandbar/.env",
   unmergedIssueBranches: [],
   discardedIssueBranches: [],
+  resumableIssueBranches: [],
 };
 
 function failures(s: RepoState): string[] {
@@ -158,6 +159,27 @@ describe("checkInvariants", () => {
     expect(discardedMsg).toContain("sandbar/issue-43-bar");
     expect(discardedMsg).toContain("remote deleted");
     expect(discardedMsg).toContain("git branch -D");
+  });
+
+  it("does not flag resumable issue branches (open + queued → resumed, not refused)", () => {
+    // #13: stranded work from an interrupted run is handed back to the normal
+    // loop, so its branch must not be a hard pre-flight error.
+    const f = failures({
+      ...cleanState,
+      resumableIssueBranches: ["sandbar/issue-296-keyword-escape"],
+    });
+    expect(f).toEqual([]);
+  });
+
+  it("flags genuinely-unmerged branches but not resumable ones alongside them", () => {
+    const f = failures({
+      ...cleanState,
+      unmergedIssueBranches: ["sandbar/issue-99-stale"],
+      resumableIssueBranches: ["sandbar/issue-296-keyword-escape"],
+    });
+    expect(f.length).toBe(1);
+    expect(f[0]).toContain("sandbar/issue-99-stale");
+    expect(f[0]).not.toContain("sandbar/issue-296-keyword-escape");
   });
 
   it("returns multiple distinct failures when several invariants fail", () => {

@@ -14,6 +14,13 @@
 // tip is no longer an ancestor of HEAD and `-d` correctly refuses. We own
 // the certainty that the work is preserved on origin at this point.
 //
+// Human-handoff terminals are guarded on live issue state (#16): stamping
+// `agentStuck` + a failure comment on an already-CLOSED issue contradicts its
+// state and reads as "merged work is broken". The planner's stale-search
+// re-pick (the root cause) is fixed in plan-resolver, but a human can also
+// close an issue mid-run, so finalize re-checks `issueState` before any handoff
+// write and no-ops (skipped-closed) when the issue is closed.
+//
 // finalizeOne is pure orchestration over a FinalizeAdapter. realAdapter wires
 // the adapter to git/gh.
 //
@@ -71,6 +78,22 @@ export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
   `<details><summary>Last failure trace</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
+// Impl-attempt budget exhausted while the gate was GREEN and the reviewer was
+// the blocker (#17). Distinct from NEEDS_HUMAN_COMMENT_TEMPLATE (which claims
+// "without a green gate") and from REVIEW_BUDGET_EXHAUSTED (a different budget):
+// here the *attempt* budget ran out, not the reviewer-round budget.
+export const NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE = (
+  latestReviewerProse: string,
+  stuckLabel: string,
+  readyLabel: string,
+): string =>
+  `${BOT_COMMENT_PREFIX} exhausted the attempt budget with a green gate — the ` +
+  `build and tests pass; the code reviewer's \`CHANGES-REQUESTED\` is the blocker, ` +
+  `not a failing gate. The latest reviewer pass below is what the human needs to ` +
+  `resolve. Push a fix on this branch (or rewrite the standards if the reviewer ` +
+  `was wrong), then drop \`${stuckLabel}\` and re-apply \`${readyLabel}\` when ` +
+  `ready.\n\n---\n\n${latestReviewerProse}`;
+
 export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
   latestReviewerProse: string,
   stuckLabel: string,
@@ -100,9 +123,14 @@ export type FinalizeInput =
       readonly questions: string;
     }
   | {
+      // Impl-attempt budget exhausted. `cause` selects the comment so the human
+      // is pointed at the real blocker (#17): gate-red surfaces the failure
+      // trace; reviewer-blocked surfaces the reviewer's CHANGES-REQUESTED prose.
       readonly kind: "needs-human";
       readonly issue: IssueRef;
+      readonly cause: "gate-red" | "reviewer-blocked";
       readonly failureTrace: string;
+      readonly latestReviewerProse: string | null;
     }
   | {
       readonly kind: "review-budget-exhausted";
@@ -158,6 +186,10 @@ export type FinalizeAdapter = {
     remove: readonly string[],
     add: readonly string[],
   ): Promise<LabelEditResult>;
+  // Live issue state from the tracker. Read before any human-handoff write so a
+  // closed issue (merged earlier this run, or human-closed mid-run) never gets
+  // stamped with a handoff label + failure comment (#16).
+  issueState(issueNum: number): Promise<"OPEN" | "CLOSED">;
 };
 
 export type LabelEditResult = {
@@ -170,7 +202,23 @@ export type FinalizeAction =
   | { readonly kind: "deleted-local" }
   | { readonly kind: "delete-failed"; readonly error: string }
   | { readonly kind: "pushed" }
+  // A human-handoff terminal landed on an already-CLOSED issue, so the label
+  // flip + comment were skipped (the worktree was still reclaimed). See #16.
+  | { readonly kind: "skipped-closed" }
   | { readonly kind: "noop" };
+
+// Terminals that write a human-handoff annotation (handoff label + a comment)
+// to the issue. These are the kinds guarded against an already-CLOSED issue in
+// finalizeOne (#16); merged/hard-error/fresh-attempt touch no issue state and
+// are exempt.
+const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
+  "merge-conflict",
+  "merge-gate-red",
+  "needs-info",
+  "needs-human",
+  "review-budget-exhausted",
+  "silent-noop-exhausted",
+]);
 
 export type FinalizeResult = {
   readonly input: FinalizeInput;
@@ -205,6 +253,19 @@ export async function finalizeOne(
   adapter: FinalizeAdapter,
   labels: LabelConfig,
 ): Promise<FinalizeAction> {
+  // #16: never write a handoff annotation to an issue that's already CLOSED.
+  // The planner can re-pick a merged+closed issue while the `gh` search backend
+  // lags (root cause fixed in plan-resolver), and a human can close an issue
+  // mid-run — in both cases the handoff write would contradict the closed
+  // state. Reclaim the worktree (local hygiene, always safe) and skip the
+  // issue-facing side effects.
+  if (HANDOFF_KINDS.has(input.kind)) {
+    const n = issueNumberOf(input.issue);
+    if ((await adapter.issueState(n)) === "CLOSED") {
+      await adapter.removeWorktreeFor(input.issue.branch);
+      return { kind: "skipped-closed" };
+    }
+  }
   switch (input.kind) {
     case "merged": {
       // AC: worktree first, then branch — so an interrupt mid-cleanup never
@@ -273,14 +334,21 @@ export async function finalizeOne(
       const n = issueNumberOf(input.issue);
       await adapter.removeWorktreeFor(input.issue.branch);
       await adapter.pushBranch(input.issue.branch);
-      await adapter.postComment(
-        n,
-        NEEDS_HUMAN_COMMENT_TEMPLATE(
-          input.failureTrace,
-          labels.agentStuck,
-          READY_FOR_AGENT_LABEL,
-        ),
-      );
+      // #17: name the real blocker. reviewer-blocked → surface the reviewer's
+      // CHANGES-REQUESTED prose; gate-red → the gate failure trace.
+      const body =
+        input.cause === "reviewer-blocked"
+          ? NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE(
+              input.latestReviewerProse ?? "",
+              labels.agentStuck,
+              READY_FOR_AGENT_LABEL,
+            )
+          : NEEDS_HUMAN_COMMENT_TEMPLATE(
+              input.failureTrace,
+              labels.agentStuck,
+              READY_FOR_AGENT_LABEL,
+            );
+      await adapter.postComment(n, body);
       const r = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
@@ -495,6 +563,28 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       if (removeErr) parts.push(`remove [${remove.join(",")}]: ${removeErr}`);
       if (addErr) parts.push(`add [${add.join(",")}]: ${addErr}`);
       return { ok: false, error: parts.join("; ") };
+    },
+    async issueState(issueNum) {
+      // Required precondition for the handoff guard (#16): if we can't read the
+      // issue's state we don't guess — fail loud rather than risk stamping a
+      // closed issue or skipping a live handoff. `gh issue view` works on
+      // closed issues too.
+      try {
+        const { stdout } = await exec(
+          "gh",
+          ["issue", "view", String(issueNum), "--json", "state"],
+          { cwd },
+        );
+        const parsed = JSON.parse(stdout) as { state?: string };
+        return parsed.state === "CLOSED" ? "CLOSED" : "OPEN";
+      } catch (err) {
+        throw new SandbarError(
+          `Failed to read state of issue #${issueNum} before finalising: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          { cause: err },
+        );
+      }
     },
   };
 }

@@ -174,9 +174,34 @@ describe("resolvePlan", () => {
     const plan = resolvePlan(
       [issue(1, ""), issue(2, ""), issue(3, "")],
       new Map(),
+      new Set(),
       1,
     );
     expect(plan.length).toBe(1);
+  });
+
+  it("excludes issues in the in-run merged set (#16)", () => {
+    const plan = resolvePlan(
+      [issue(10, ""), issue(11, "")],
+      new Map(),
+      new Set([10]),
+    );
+    expect(plan.map((p) => p.id)).toEqual(["11"]);
+  });
+
+  it("drops a candidate the live tracker reports CLOSED — stale search re-pick (#16)", () => {
+    // The candidate surfaced from `gh issue list` (lagging search index) but its
+    // authoritative state is CLOSED: it was merged+closed earlier this run.
+    const plan = resolvePlan(
+      [issue(10, ""), issue(11, "")],
+      states({ 10: "CLOSED", 11: "OPEN" }),
+    );
+    expect(plan.map((p) => p.id)).toEqual(["11"]);
+  });
+
+  it("keeps a candidate whose own state is unknown (state-fetch miss → treat as open)", () => {
+    const plan = resolvePlan([issue(10, "")], new Map());
+    expect(plan.map((p) => p.id)).toEqual(["10"]);
   });
 
   it("emits branch names in the documented format", () => {

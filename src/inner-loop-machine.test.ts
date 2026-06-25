@@ -312,7 +312,12 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
       impl(complete),
       gate1Red("trace 3"),
     ]);
-    expect(verdict).toEqual({ type: "NEEDS-HUMAN", failureTrace: "trace 3" });
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "gate-red",
+      failureTrace: "trace 3",
+      latestReviewerProse: null,
+    });
   });
 
   it("repeated NO-SIGNAL over maxAttempts → NEEDS-HUMAN with sentinel (no trace recorded)", () => {
@@ -322,7 +327,9 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
     ]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN",
+      cause: "gate-red",
       failureTrace: NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE,
+      latestReviewerProse: null,
     });
   });
 
@@ -335,7 +342,9 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
     ]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN",
+      cause: "gate-red",
       failureTrace: "recorded trace",
+      latestReviewerProse: null,
     });
   });
 
@@ -344,7 +353,12 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
       impl(complete),
       gate1Red("trace"),
     ]);
-    expect(verdict).toEqual({ type: "NEEDS-HUMAN", failureTrace: "trace" });
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "gate-red",
+      failureTrace: "trace",
+      latestReviewerProse: null,
+    });
   });
 });
 
@@ -359,7 +373,33 @@ describe("inner-loop-machine — interleaved budgets", () => {
       impl(complete),
       gate1Red("trace"),
     ]);
-    expect(verdict).toEqual({ type: "NEEDS-HUMAN", failureTrace: "trace" });
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "gate-red",
+      failureTrace: "trace",
+      latestReviewerProse: null,
+    });
+  });
+
+  it("impl budget exhausted with a GREEN gate + CHANGES-REQUESTED → reviewer-blocked, not 'no green gate' (#17)", () => {
+    // The offergeist#404 shape: every attempt's gate is green, the reviewer
+    // keeps requesting changes, and the IMPL-attempt budget (not the
+    // review-round budget) runs out first. The terminal must name the reviewer
+    // as the blocker and carry its latest prose — never claim "no green gate".
+    const { verdict } = drive({ maxAttempts: 2, maxReviewRounds: 3 }, [
+      impl(complete),
+      gate1Ok,
+      changes("r1"),
+      impl(complete),
+      gate1Ok,
+      changes("r2"),
+    ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "reviewer-blocked",
+      failureTrace: "",
+      latestReviewerProse: "r2",
+    });
   });
 });
 
@@ -417,7 +457,12 @@ describe("decideAfterTerminal", () => {
     const verdicts: Verdict[] = [
       { type: "DONE" },
       { type: "NEEDS-INFO", questions: "q" },
-      { type: "NEEDS-HUMAN", failureTrace: "trace" },
+      {
+        type: "NEEDS-HUMAN",
+        cause: "gate-red",
+        failureTrace: "trace",
+        latestReviewerProse: null,
+      },
       { type: "NEEDS-HUMAN-REVIEW", latestReviewerProse: "prose" },
     ];
     for (const v of verdicts) {

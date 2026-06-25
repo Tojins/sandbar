@@ -13,6 +13,7 @@ import {
   LEGACY_BRANCH_PREFIXES,
   LEGACY_RESOURCE_PREFIXES,
   RESOURCE_PREFIX,
+  issueNumberFromBranch,
 } from "./naming.js";
 
 describe("naming transition contract", () => {
@@ -35,5 +36,35 @@ describe("naming transition contract", () => {
       RESOURCE_PREFIX,
       ...LEGACY_RESOURCE_PREFIXES,
     ]);
+  });
+});
+
+describe("issueNumberFromBranch", () => {
+  it("extracts the issue number from a sandbar branch", () => {
+    expect(issueNumberFromBranch("sandbar/issue-296-keyword-escape")).toBe(296);
+  });
+
+  it("recognizes the legacy sandcastle prefix", () => {
+    expect(issueNumberFromBranch("sandcastle/issue-42-foo")).toBe(42);
+  });
+
+  it("matches a bare `issue-<n>` with no slug", () => {
+    expect(issueNumberFromBranch("sandbar/issue-7")).toBe(7);
+  });
+
+  it("returns null for an unknown prefix", () => {
+    expect(issueNumberFromBranch("feature/issue-7-foo")).toBeNull();
+  });
+
+  it("returns null when the prefix matches but the shape doesn't", () => {
+    expect(issueNumberFromBranch("sandbar/hotfix-7")).toBeNull();
+    expect(issueNumberFromBranch("sandbar/issue-foo")).toBeNull();
+    expect(issueNumberFromBranch("sandbar/issue-")).toBeNull();
+  });
+
+  it("does not treat a non-separator suffix digit as part of the number", () => {
+    // `issue-12x-...` is malformed; the `(?:-|$)` boundary rejects it rather
+    // than silently parsing 12.
+    expect(issueNumberFromBranch("sandbar/issue-12x-foo")).toBeNull();
   });
 });

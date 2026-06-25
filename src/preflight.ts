@@ -4,6 +4,18 @@
 //   - checkInvariants(state)  — pure function over a captured RepoState.
 //                               Unit-tested with hand-built fixtures.
 //   - gatherState() / runPreflight() — I/O wrappers that shell out to git/gh.
+//
+// Leftover `sandbar/issue-*` branches are classified three ways (#13):
+//   - resumable — the branch maps to a still-open `ready-for-agent` issue, i.e.
+//                 stranded work from an interrupted run (killed after the issue
+//                 agents finished but before/inside the merger). NOT an error:
+//                 the planner re-picks the issue and the inner loop continues
+//                 from the branch's existing commits (ensureIssueBranch keeps
+//                 them), so a killed run just restarts and finishes.
+//   - discarded — the branch's upstream is `[gone]` (PR merged+deleted upstream
+//                 while local is behind). Local commits would be orphaned.
+//   - unmerged  — everything else: maps to a closed/unknown issue, or an open
+//                 issue no longer queued. Stays a hard error as before.
 
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -11,8 +23,9 @@ import { promisify } from "node:util";
 
 import { makeEnvReader } from "./env.js";
 import { worktreePathFor } from "./finalize.js";
-import { ALL_BRANCH_PREFIXES } from "./naming.js";
+import { ALL_BRANCH_PREFIXES, issueNumberFromBranch } from "./naming.js";
 import { PG_IMAGE, RUNTIME as SIDECAR_RUNTIME } from "./pg-sidecar.js";
+import { fetchCandidates } from "./plan-resolver.js";
 
 const exec = promisify(execFile);
 
@@ -43,6 +56,10 @@ export type RepoState = {
   readonly envFilePath: string;
   readonly unmergedIssueBranches: readonly string[];
   readonly discardedIssueBranches: readonly string[];
+  // Stranded branches that map to a still-open `ready-for-agent` issue — not a
+  // failure (resumed, not refused). Carried on the state purely so runPreflight
+  // can announce them; checkInvariants emits no Invariant for them.
+  readonly resumableIssueBranches: readonly string[];
 };
 
 export type Invariant = { ok: true } | { ok: false; message: string };
@@ -215,7 +232,9 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     `refs/remotes/origin/${cfg.sourceBranch}`,
   ]);
 
-  const { unmerged, discarded } = await classifyIssueBranches(cfg.sourceBranch);
+  const openReadyIssues = await fetchOpenReadyIssueNumbers();
+  const { unmerged, discarded, resumable } =
+    await classifyIssueBranches(openReadyIssues);
 
   return {
     hasGit,
@@ -232,7 +251,23 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     envFilePath: cfg.envFilePath,
     unmergedIssueBranches: unmerged,
     discardedIssueBranches: discarded,
+    resumableIssueBranches: resumable,
   };
+}
+
+// The set of issue numbers currently in the planner queue (open +
+// `ready-for-agent`). Reuses the planner's own candidate query so the resume
+// classification can never desync from what the next cycle actually picks up.
+// Fail-closed to an empty set: a gh hiccup just means no branch is treated as
+// resumable (they fall back to the existing hard error), and the ghAuthOk /
+// sandboxGhTokenOk invariants report the real problem.
+async function fetchOpenReadyIssueNumbers(): Promise<ReadonlySet<number>> {
+  try {
+    const candidates = await fetchCandidates();
+    return new Set(candidates.map((c) => c.number));
+  } catch {
+    return new Set();
+  }
 }
 
 async function checkSandboxGhToken(
@@ -305,24 +340,41 @@ async function branchUpstreamTracks(): Promise<ReadonlyMap<string, string>> {
   return out;
 }
 
-async function classifyIssueBranches(_sourceBranch: string): Promise<{
+async function classifyIssueBranches(
+  openReadyIssues: ReadonlySet<number>,
+): Promise<{
   unmerged: readonly string[];
   discarded: readonly string[];
+  resumable: readonly string[];
 }> {
   const all = await listIssueBranches();
   const tracks = await branchUpstreamTracks();
   const unmerged: string[] = [];
   const discarded: string[] = [];
+  const resumable: string[] = [];
   for (const branch of all) {
     // `[gone]` = the branch had an upstream and the remote deleted it (PR
     // closed/merged-and-deleted). If the work isn't on the source branch
     // either, the local commits are about to be orphaned — surface them
     // separately from genuinely-in-flight work so the user knows the loss
-    // is intentional.
-    if (tracks.get(branch) === "[gone]") discarded.push(branch);
-    else unmerged.push(branch);
+    // is intentional. (Resume branches are seeded `--no-track`, so they never
+    // carry an upstream and can't land here.)
+    if (tracks.get(branch) === "[gone]") {
+      discarded.push(branch);
+      continue;
+    }
+    // Stranded work from an interrupted run: the branch belongs to an issue the
+    // planner is still queued to work. Resume it rather than refusing to start
+    // (#13) — the next cycle re-picks the issue and the inner loop continues
+    // from this branch's accumulated commits.
+    const issueNum = issueNumberFromBranch(branch);
+    if (issueNum !== null && openReadyIssues.has(issueNum)) {
+      resumable.push(branch);
+    } else {
+      unmerged.push(branch);
+    }
   }
-  return { unmerged, discarded };
+  return { unmerged, discarded, resumable };
 }
 
 export async function deleteMergedIssueBranches(
@@ -374,6 +426,15 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
     console.log(`Cleaned up merged issue branches: ${deleted.join(", ")}`);
   }
   const state = await gatherState(cfg);
+  if (state.resumableIssueBranches.length > 0) {
+    console.log(
+      `Resuming ${state.resumableIssueBranches.length} stranded issue ` +
+        `branch(es) from an interrupted run: ` +
+        `${state.resumableIssueBranches.join(", ")}. The planner will re-pick ` +
+        "the matching open `ready-for-agent` issue(s) and the inner loop " +
+        "continues from each branch's existing commits.",
+    );
+  }
   const results = checkInvariants(state);
   const failures = results.flatMap((r) => (r.ok ? [] : [r.message]));
   if (failures.length > 0) throw new PreflightError(failures);

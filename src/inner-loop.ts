@@ -18,7 +18,7 @@ import { podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
 import type { GateCommand } from "./config.js";
-import { lastNLines, runGate } from "./gate.js";
+import { runGate, summarizeGateFailure } from "./gate.js";
 import { ensureIssueBranch } from "./git-ops.js";
 import {
   HARD_ERROR_MAX_RETRIES,
@@ -48,7 +48,12 @@ export type IssueRef = {
 export type Terminal =
   | { readonly type: "DONE"; readonly commits: readonly { sha: string }[] }
   | { readonly type: "NEEDS-INFO"; readonly questions: string }
-  | { readonly type: "NEEDS-HUMAN"; readonly failureTrace: string }
+  | {
+      readonly type: "NEEDS-HUMAN";
+      readonly cause: "gate-red" | "reviewer-blocked";
+      readonly failureTrace: string;
+      readonly latestReviewerProse: string | null;
+    }
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
@@ -114,7 +119,12 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
     case "NEEDS-INFO":
       return { type: "NEEDS-INFO", questions: verdict.questions };
     case "NEEDS-HUMAN":
-      return { type: "NEEDS-HUMAN", failureTrace: verdict.failureTrace };
+      return {
+        type: "NEEDS-HUMAN",
+        cause: verdict.cause,
+        failureTrace: verdict.failureTrace,
+        latestReviewerProse: verdict.latestReviewerProse,
+      };
     case "NEEDS-HUMAN-REVIEW":
       return {
         type: "NEEDS-HUMAN-REVIEW",
@@ -332,7 +342,7 @@ async function runGate1(
     ok: gate1.ok,
     failureTrace: gate1.ok
       ? ""
-      : lastNLines(`${gate1.stdout}\n${gate1.stderr}`, FAILURE_TAIL_LINES),
+      : summarizeGateFailure(`${gate1.stdout}\n${gate1.stderr}`, FAILURE_TAIL_LINES),
   };
 }
 

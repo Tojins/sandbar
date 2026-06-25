@@ -19,7 +19,7 @@
 // The agent never runs the gate itself; the orchestrator gates between
 // attempts so the agent can't talk a red tree into accepting itself.
 
-import { lastNLines } from "./gate.js";
+import { summarizeGateFailure } from "./gate.js";
 import type { MergerGateOutput } from "./merger.js";
 import { loadTemplate, render } from "./prompts.js";
 
@@ -118,7 +118,7 @@ export async function runResolveLoop(
   } else {
     trace = {
       kind: "gate-red",
-      trace: lastNLines(
+      trace: summarizeGateFailure(
         `${initialMode.initialOutput.stdout}\n${initialMode.initialOutput.stderr}`,
         TRACE_LINES,
       ),
@@ -198,7 +198,7 @@ export async function runResolveLoop(
     );
     trace = {
       kind: "gate-red",
-      trace: lastNLines(`${gate.stdout}\n${gate.stderr}`, TRACE_LINES),
+      trace: summarizeGateFailure(`${gate.stdout}\n${gate.stderr}`, TRACE_LINES),
     };
   }
 

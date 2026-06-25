@@ -4,9 +4,17 @@
 // `## Blocked by` section that /to-issues writes into every ready-for-agent
 // issue and batch-checking the referenced issues' state.
 //
+// `fetchCandidates` lists via the `gh` search backend, which lags label/close
+// writes by seconds. So an issue merged+closed (and de-queued) in a PRIOR
+// iteration of the same run can still surface as a candidate here. To stop the
+// planner re-picking it (#16) resolvePlan also drops (a) anything the caller
+// passes in `excluded` — the issues this run already merged — and (b) anything
+// whose authoritative state (fetched per-candidate alongside blocker states via
+// strongly-consistent GraphQL) reads CLOSED.
+//
 // All ranking logic lives in pure functions (parseBlockedBy, kebabSlug,
 // resolvePlan) so it can be table-driven tested. The I/O wrappers
-// (fetchCandidates, fetchBlockerStates) are thin adapters over `gh`.
+// (fetchCandidates, fetchIssueStates) are thin adapters over `gh`.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -61,13 +69,20 @@ export function kebabSlug(s: string): string {
 
 export function resolvePlan(
   candidates: readonly IssueSummary[],
-  blockerStates: ReadonlyMap<number, IssueState>,
+  issueStates: ReadonlyMap<number, IssueState>,
+  excluded: ReadonlySet<number> = new Set(),
   k: number = DEFAULT_K,
 ): Plan {
   const eligible = candidates.filter((c) => {
+    // Drop issues this run already merged, and issues the live tracker now
+    // reports CLOSED — both guard against the stale-search re-pick described in
+    // the module header (#16). Unknown state (absent from the map) is treated
+    // as OPEN so a single state-fetch miss never silently drops a ready issue.
+    if (excluded.has(c.number)) return false;
+    if (issueStates.get(c.number) === "CLOSED") return false;
     if (c.labels.includes(WAITING_LABEL)) return false;
     const blockers = parseBlockedBy(c.body);
-    return blockers.every((n) => blockerStates.get(n) === "CLOSED");
+    return blockers.every((n) => issueStates.get(n) === "CLOSED");
   });
   const sorted = [...eligible].sort((a, b) => a.number - b.number);
   return sorted.slice(0, k).map((c) => ({
@@ -108,7 +123,11 @@ export async function fetchCandidates(): Promise<readonly IssueSummary[]> {
   }));
 }
 
-export async function fetchBlockerStates(
+// Authoritative state for a set of issue numbers, via a single GraphQL batch.
+// Used for both blockers (the dependency gate) and the candidates themselves
+// (the stale-search CLOSED guard, #16). GraphQL node lookups are strongly
+// consistent, unlike the search backend `fetchCandidates` lists through.
+export async function fetchIssueStates(
   numbers: readonly number[],
   repo: RepoRef,
 ): Promise<ReadonlyMap<number, IssueState>> {
@@ -142,11 +161,17 @@ export async function fetchBlockerStates(
 
 export async function buildPlan(
   repo: RepoRef,
+  excluded: ReadonlySet<number> = new Set(),
   k: number = DEFAULT_K,
 ): Promise<Plan> {
   const candidates = await fetchCandidates();
-  const referenced = new Set<number>();
-  for (const c of candidates) for (const n of parseBlockedBy(c.body)) referenced.add(n);
-  const states = await fetchBlockerStates([...referenced], repo);
-  return resolvePlan(candidates, states, k);
+  // One GraphQL batch covers both the authoritative state of every candidate
+  // (the #16 stale-search CLOSED guard) and of every blocker they reference.
+  const wanted = new Set<number>();
+  for (const c of candidates) {
+    wanted.add(c.number);
+    for (const n of parseBlockedBy(c.body)) wanted.add(n);
+  }
+  const states = await fetchIssueStates([...wanted], repo);
+  return resolvePlan(candidates, states, excluded, k);
 }

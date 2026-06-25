@@ -40,6 +40,7 @@ type Calls = {
   comments: { n: number; msg: string }[];
   removedLabels: { n: number; label: string }[];
   closes: { n: number; comment: string }[];
+  closeAttempts: { n: number }[];
   pushes: number;
   pulls: number;
 };
@@ -52,6 +53,9 @@ type Script = {
   pushes?: PushResult[];
   pulls?: boolean[];
   heads?: string[];
+  // Per-issue number of leading close attempts that throw before one succeeds.
+  // A value >= total attempts means the close never succeeds. Default 0.
+  closeFailsBeforeSuccess?: Record<number, number>;
 };
 
 function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
@@ -69,9 +73,11 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     comments: [],
     removedLabels: [],
     closes: [],
+    closeAttempts: [],
     pushes: 0,
     pulls: 0,
   };
+  const closeAttemptsByIssue = new Map<number, number>();
   let mIdx = 0;
   let aIdx = 0;
   let iIdx = 0;
@@ -151,6 +157,15 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       calls.removedLabels.push({ n, label });
     },
     async closeIssue(n, comment) {
+      const prior = closeAttemptsByIssue.get(n) ?? 0;
+      closeAttemptsByIssue.set(n, prior + 1);
+      calls.closeAttempts.push({ n });
+      const threshold = script.closeFailsBeforeSuccess?.[n] ?? 0;
+      if (prior < threshold) {
+        throw new SandbarError(
+          `merger: failed to close issue #${n} (scripted transient)`,
+        );
+      }
       calls.closes.push({ n, comment });
     },
     async push() {
@@ -585,6 +600,115 @@ describe("runMergerWithAdapter — push lifecycle", () => {
       /handshake failed/,
     );
     expect(calls.closes).toEqual([]);
+  });
+});
+
+describe("runMergerWithAdapter — post-push close retries (#14)", () => {
+  // A no-op sleep that records the backoff durations it was asked to wait, so
+  // the suite never actually waits and we can assert the retry cadence.
+  function sleepSpy(): {
+    sleep: (ms: number) => Promise<void>;
+    waits: number[];
+  } {
+    const waits: number[] = [];
+    return {
+      sleep: async (ms: number) => {
+        waits.push(ms);
+      },
+      waits,
+    };
+  }
+
+  it("happy path leaves unclosed empty", async () => {
+    const { adapter } = makeAdapter({ merges: ["ok"], gates: [{ ok: true }] });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+    expect(summary.unclosed).toEqual([]);
+  });
+
+  it("transient close failure then success: retries with backoff, no unclosed", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      closeFailsBeforeSuccess: { 42: 2 }, // first two attempts throw
+    });
+    const spy = sleepSpy();
+    const summary = await runMergerWithAdapter(
+      [issue(42)],
+      adapter,
+      undefined,
+      undefined,
+      { sleep: spy.sleep },
+    );
+
+    expect(summary.unclosed).toEqual([]);
+    expect(calls.closeAttempts.filter((a) => a.n === 42).length).toBe(3);
+    expect(calls.closes).toEqual([{ n: 42, comment: "Completed by Sandbar" }]);
+    // Backoff slept between the three attempts (after attempt 1 and 2).
+    expect(spy.waits).toEqual([1000, 2000]);
+  });
+
+  it("close fails past the retry budget: records in unclosed, does not throw", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      closeFailsBeforeSuccess: { 42: 99 }, // never succeeds
+    });
+    const spy = sleepSpy();
+    const summary = await runMergerWithAdapter(
+      [issue(42)],
+      adapter,
+      undefined,
+      undefined,
+      { sleep: spy.sleep },
+    );
+
+    // Merge is still durable and pushed; only the close failed.
+    expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
+    expect(summary.pushed).toBe(true);
+    expect(summary.unclosed.map((u) => u.issue.id)).toEqual(["42"]);
+    expect(summary.unclosed[0]?.error).toContain("scripted transient");
+    // Initial attempt + CLOSE_MAX_RETRIES (2) = 3 attempts total.
+    expect(calls.closeAttempts.filter((a) => a.n === 42).length).toBe(3);
+  });
+
+  it("one close failure does not abort the close loop — siblings still close", async () => {
+    // The #14 bug: the first throw skipped the close of every remaining issue.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok", "ok"],
+      gates: [{ ok: true }, { ok: true }, { ok: true }],
+      closeFailsBeforeSuccess: { 10: 99 }, // the first issue (ascending) fails
+    });
+    const summary = await runMergerWithAdapter(
+      [issue(44), issue(10), issue(42)],
+      adapter,
+      undefined,
+      undefined,
+      { sleep: async () => {} },
+    );
+
+    expect(summary.unclosed.map((u) => u.issue.id)).toEqual(["10"]);
+    // 42 and 44 still get closed despite 10 failing first.
+    expect(calls.closes.map((c) => c.n).sort((a, b) => a - b)).toEqual([42, 44]);
+  });
+
+  it("close retries configurable to zero: single attempt, then unclosed", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      closeFailsBeforeSuccess: { 42: 99 },
+    });
+    const spy = sleepSpy();
+    const summary = await runMergerWithAdapter(
+      [issue(42)],
+      adapter,
+      undefined,
+      undefined,
+      { closeRetries: 0, sleep: spy.sleep },
+    );
+
+    expect(calls.closeAttempts.filter((a) => a.n === 42).length).toBe(1);
+    expect(spy.waits).toEqual([]); // no retries → no backoff waits
+    expect(summary.unclosed.map((u) => u.issue.id)).toEqual(["42"]);
   });
 });
 

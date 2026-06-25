@@ -35,3 +35,18 @@ export const ALL_RESOURCE_PREFIXES: readonly string[] = [
   RESOURCE_PREFIX,
   ...LEGACY_RESOURCE_PREFIXES,
 ];
+
+// Reverse of the branch-naming convention: pull the issue number out of a
+// per-issue branch name (`<prefix>issue-<n>-<slug>`), recognizing every
+// current + legacy prefix. Returns null for anything that doesn't match the
+// load-bearing shape — preflight's resume path treats those as unrecognized
+// (a hard error), never as resumable. A bare `<prefix>issue-<n>` with no slug
+// is still matched so the parser doesn't hinge on slug presence.
+export function issueNumberFromBranch(branch: string): number | null {
+  for (const prefix of ALL_BRANCH_PREFIXES) {
+    if (!branch.startsWith(prefix)) continue;
+    const m = branch.slice(prefix.length).match(/^issue-(\d+)(?:-|$)/);
+    return m ? Number(m[1]) : null;
+  }
+  return null;
+}

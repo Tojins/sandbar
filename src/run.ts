@@ -160,6 +160,13 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   const runState = newRunState({ maxTotalIssues: config.maxTotalIssues });
   let exitCode = 0;
 
+  // Issue numbers merged+closed earlier in THIS run. The `gh` search backend
+  // the planner lists through lags label/close writes, so without this an issue
+  // merged in a prior iteration can resurface as a candidate, get re-planned,
+  // and get stamped agent-stuck on a closed-COMPLETED issue (#16). Fed to
+  // buildPlan as a hard exclusion alongside its live-state CLOSED check.
+  const mergedThisRun = new Set<number>();
+
   const repo = { owner: config.ghOwner, name: config.ghRepo };
 
   const innerLoopCfg = {
@@ -217,7 +224,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // Phase 1: Plan
       // ---------------------------------------------------------------------
       const issues: { id: string; title: string; branch: string }[] = [
-        ...(await buildPlan(repo)),
+        ...(await buildPlan(repo, mergedThisRun)),
       ].slice(0, budget);
       const fingerprint = planFingerprint(issues.map((i) => i.id));
       await cycleLogger.writePlan(issues);
@@ -362,6 +369,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           if (err instanceof MergerError) {
             console.error(`Merger halted: ${err.message}`);
             halt = true;
+            cleanupReason = "merger-halted";
             await runLogger.appendOrchestrator(`merger halted: ${err.message}`);
           } else {
             throw err;
@@ -378,6 +386,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       const finalizeInputs: FinalizeInput[] = [];
       if (mergerSummary && !halt) {
         for (const m of mergerSummary.merged) {
+          mergedThisRun.add(issueNumberOf(m));
           finalizeInputs.push({ kind: "merged", issue: m });
         }
         for (const s of mergerSummary.skipped) {
@@ -414,7 +423,9 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           finalizeInputs.push({
             kind: "needs-human",
             issue: o.issue,
+            cause: t.cause,
             failureTrace: t.failureTrace,
+            latestReviewerProse: t.latestReviewerProse,
           });
         } else if (t.type === "NEEDS-HUMAN-REVIEW") {
           finalizeInputs.push({
@@ -454,7 +465,9 @@ export async function run(rawConfig: RunConfig): Promise<void> {
                 ? `delete failed (${r.action.error})`
                 : r.action.kind === "pushed"
                   ? "pushed branch"
-                  : "no action";
+                  : r.action.kind === "skipped-closed"
+                    ? "skipped (issue already closed)"
+                    : "no action";
           console.log(`  #${issueNumberOf(issue)} ${r.input.kind} → ${tag}`);
           await runLogger.appendOrchestrator(
             `finalise #${issueNumberOf(issue)} ${r.input.kind} → ${tag}`,
@@ -462,8 +475,30 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         }
       }
   
+      // Post-push close failures (issue #14): the merges are durable on origin
+      // and Phase 4 above already dropped `ready-for-agent` for every merged
+      // issue, so the planner won't re-pick them — but they're still OPEN on the
+      // tracker. Surface them as an operator-actionable list and halt loud,
+      // AFTER finalise so the merged work is fully reconciled locally.
+      if (mergerSummary && mergerSummary.unclosed.length > 0 && !halt) {
+        const list = mergerSummary.unclosed
+          .map((u) => `#${issueNumberOf(u.issue)} (${u.error})`)
+          .join(", ");
+        console.error(
+          `\nMerger pushed all merges but could not close ` +
+            `${mergerSummary.unclosed.length} issue(s) after retries: ${list}.\n` +
+            "Their merges are durable on origin and `ready-for-agent` was removed " +
+            "during finalise, so the planner will NOT re-pick them — but they " +
+            "remain OPEN. Close them manually to reconcile the tracker.",
+        );
+        await runLogger.appendOrchestrator(
+          `merger: unclosed after retries: ${list}`,
+        );
+        halt = true;
+        cleanupReason = "merger-close-failed";
+      }
+
       if (halt) {
-        cleanupReason = "merger-halted";
         exitCode = 1;
         break;
       }

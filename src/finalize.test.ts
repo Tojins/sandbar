@@ -7,6 +7,7 @@ import {
   type FinalizeAdapter,
   type FinalizeInput,
   NEEDS_HUMAN_COMMENT_TEMPLATE,
+  NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE,
   NEEDS_INFO_COMMENT_TEMPLATE,
   READY_FOR_AGENT_LABEL as READY_FOR_AGENT,
   REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE,
@@ -35,6 +36,7 @@ type Calls = {
   worktreeRemoves: string[];
   comments: { n: number; body: string }[];
   labelEdits: { n: number; remove: readonly string[]; add: readonly string[] }[];
+  stateChecks: number[];
 };
 
 type Script = {
@@ -44,6 +46,7 @@ type Script = {
   forceDeleteError?: string;
   labelEditOk?: boolean;
   labelEditError?: string;
+  issueState?: "OPEN" | "CLOSED";
 };
 
 function makeAdapter(
@@ -56,6 +59,7 @@ function makeAdapter(
     worktreeRemoves: [],
     comments: [],
     labelEdits: [],
+    stateChecks: [],
   };
   const adapter: FinalizeAdapter = {
     async pushBranch(branch) {
@@ -90,6 +94,10 @@ function makeAdapter(
         return { ok: false, error: script.labelEditError ?? "'agent-stuck' not found" };
       }
       return { ok: true };
+    },
+    async issueState(n) {
+      calls.stateChecks.push(n);
+      return script.issueState ?? "OPEN";
     },
   };
   return { adapter, calls };
@@ -260,7 +268,13 @@ describe("finalizeOne", () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "needs-human", issue: i, failureTrace: "AssertionError: red" },
+      {
+        kind: "needs-human",
+        issue: i,
+        cause: "gate-red",
+        failureTrace: "AssertionError: red",
+        latestReviewerProse: null,
+      },
       adapter,
       LABELS,
     );
@@ -270,7 +284,37 @@ describe("finalizeOne", () => {
     expect(calls.worktreeRemoves).toEqual([i.branch]);
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.body).toContain("AssertionError: red");
+    expect(calls.comments[0]!.body).toContain("without a green gate");
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+    ]);
+  });
+
+  it("needs-human reviewer-blocked: comments with the reviewer prose and names the green gate, not 'no green gate' (#17)", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "needs-human",
+        issue: i,
+        cause: "reviewer-blocked",
+        failureTrace: "",
+        latestReviewerProse: "## Extract the duplicated lifecycle dispatch",
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    expect(calls.pushes).toEqual([i.branch]);
+    expect(calls.comments.length).toBe(1);
+    const body = calls.comments[0]!.body;
+    expect(body).toContain("Extract the duplicated lifecycle dispatch");
+    expect(body).toContain("green gate");
+    expect(body).toContain("CHANGES-REQUESTED");
+    // Must NOT misreport the gate as the blocker.
+    expect(body).not.toContain("without a green gate");
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
@@ -409,7 +453,17 @@ describe("finalizeOne", () => {
     });
     const i = issue(45);
     await expect(
-      finalizeOne({ kind: "needs-human", issue: i, failureTrace: "boom" }, adapter, LABELS),
+      finalizeOne(
+        {
+          kind: "needs-human",
+          issue: i,
+          cause: "gate-red",
+          failureTrace: "boom",
+          latestReviewerProse: null,
+        },
+        adapter,
+        LABELS,
+      ),
     ).rejects.toThrow(SandbarError);
 
     // The push, comment, and the (remove-first) flip were all still attempted
@@ -424,7 +478,17 @@ describe("finalizeOne", () => {
   it("needs-human flip failure: the thrown error names the issue and the config cause", async () => {
     const { adapter } = makeAdapter({ labelEditOk: false, labelEditError: "'agent-stuck' not found" });
     await expect(
-      finalizeOne({ kind: "needs-human", issue: issue(45), failureTrace: "boom" }, adapter, LABELS),
+      finalizeOne(
+        {
+          kind: "needs-human",
+          issue: issue(45),
+          cause: "gate-red",
+          failureTrace: "boom",
+          latestReviewerProse: null,
+        },
+        adapter,
+        LABELS,
+      ),
     ).rejects.toThrow(/#45.*agent-stuck.*config/s);
   });
 
@@ -470,7 +534,17 @@ describe("finalizeOne", () => {
       },
     };
     await expect(
-      finalizeOne({ kind: "needs-human", issue: issue(45), failureTrace: "t" }, throwing, LABELS),
+      finalizeOne(
+        {
+          kind: "needs-human",
+          issue: issue(45),
+          cause: "gate-red",
+          failureTrace: "t",
+          latestReviewerProse: null,
+        },
+        throwing,
+        LABELS,
+      ),
     ).rejects.toThrow(SandbarError);
   });
 
@@ -481,7 +555,13 @@ describe("finalizeOne", () => {
       agentStuck: "human-takeover",
     };
     const action = await finalizeOne(
-      { kind: "needs-human", issue: issue(45), failureTrace: "boom" },
+      {
+        kind: "needs-human",
+        issue: issue(45),
+        cause: "gate-red",
+        failureTrace: "boom",
+        latestReviewerProse: null,
+      },
       adapter,
       custom,
     );
@@ -493,6 +573,54 @@ describe("finalizeOne", () => {
       { n: 45, remove: [READY_FOR_AGENT], add: ["human-takeover"] },
     ]);
     expect(calls.comments[0]!.body).toContain("human-takeover");
+  });
+
+  // #16: a handoff terminal must never annotate an already-CLOSED issue.
+  it("needs-human on a CLOSED issue: skips comment + labels + push, only reclaims the worktree", async () => {
+    const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "needs-human",
+        issue: i,
+        cause: "gate-red",
+        failureTrace: "boom",
+        latestReviewerProse: null,
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "skipped-closed" });
+    expect(calls.stateChecks).toEqual([45]);
+    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.labelEdits).toEqual([]);
+    expect(calls.pushes).toEqual([]);
+  });
+
+  it("merge-conflict on a CLOSED issue: skipped-closed, no handoff label flip", async () => {
+    const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
+    const action = await finalizeOne(
+      { kind: "merge-conflict", issue: issue(45) },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "skipped-closed" });
+    expect(calls.labelEdits).toEqual([]);
+    expect(calls.pushes).toEqual([]);
+  });
+
+  it("merged is exempt from the closed-issue guard (the merge closed it by design)", async () => {
+    // CLOSED is the expected state for a merged issue; it must still run its
+    // worktree+branch cleanup and the cosmetic ready-for-agent drop.
+    const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
+    const action = await finalizeOne({ kind: "merged", issue: issue(45) }, adapter, LABELS);
+
+    expect(action).toEqual({ kind: "deleted-local" });
+    expect(calls.stateChecks).toEqual([]);
+    expect(calls.labelEdits).toEqual([{ n: 45, remove: [READY_FOR_AGENT], add: [] }]);
   });
 });
 

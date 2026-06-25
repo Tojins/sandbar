@@ -33,8 +33,18 @@
 //
 // After all branches processed: a single `git push origin <sourceBranch>`. On
 // a push race (rejected/non-fast-forward), one retry via `git pull --ff-only`
-// then push again; pull-conflict is a hard fail (operator must resolve). Each
-// surviving merge → `gh issue close <n>`.
+// then push again; pull-conflict is a hard fail (operator must resolve).
+//
+// Each surviving merge → `gh issue close <n>`. The close runs AFTER the
+// irreversible push, so a transient gh/network blip on it must not strand the
+// merged work (issue #14): the close is retried with backoff, and the loop is
+// fault-tolerant — it attempts every merged issue and accumulates the ones that
+// could not be closed into `MergerSummary.unclosed` rather than throwing on the
+// first failure. The orchestrator still runs Phase 4 (label drop + branch
+// cleanup) for every merged issue, then halts loud on a non-empty `unclosed`
+// list so the operator can close those issues by hand. Dropping the queue label
+// is finalise's job, NOT the close's — an un-closed issue is left OPEN but
+// de-queued, so the planner never re-picks already-landed work.
 //
 // Merge commits and agent-authored commits inside the loop are attributed to
 // the configured bot identity with a co-author trailer.
@@ -139,7 +149,28 @@ export type MergerSummary = {
     readonly reason: SkipReason;
   }[];
   readonly pushed: boolean;
+  // Issues that merged + pushed but could NOT be closed on the tracker after
+  // the retry budget (issue #14). The merge is durable; the only residue is an
+  // OPEN issue. Phase 4 still drops `ready-for-agent` so these are never
+  // re-picked, but the orchestrator surfaces them as an operator-actionable
+  // list and halts. Empty on the happy path.
+  readonly unclosed: readonly {
+    readonly issue: IssueRef;
+    readonly error: string;
+  }[];
 };
+
+// The post-push close is a tracker side-effect that runs after the irreversible
+// push, so a transient gh/network failure on it is retried with exponential
+// backoff before the issue is recorded as un-closed (issue #14).
+export const CLOSE_MAX_RETRIES = 2; // 3 attempts total: initial + 2 retries
+const CLOSE_BACKOFF_BASE_MS = 1000;
+function closeBackoffMs(attempt: number): number {
+  // attempt is 1-based for retries (attempt 0 is the initial try, no wait).
+  return CLOSE_BACKOFF_BASE_MS * 2 ** (attempt - 1); // 1s, then 2s
+}
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 export class MergerError extends Error {
   constructor(message: string) {
@@ -176,6 +207,11 @@ export type RunMergerOptions = {
   // multi-issue context when reasoning about an integration failure.
   readonly cycleIssues?: readonly IssueRef[];
   readonly projectAnchor?: string;
+  // Overrides for the post-push close retry (issue #14). Default retries is
+  // CLOSE_MAX_RETRIES; default sleep is real setTimeout-backed. Tests inject a
+  // no-op sleep so the backoff doesn't slow the suite.
+  readonly closeRetries?: number;
+  readonly sleep?: (ms: number) => Promise<void>;
 };
 
 export async function runMergerWithAdapter(
@@ -189,6 +225,8 @@ export async function runMergerWithAdapter(
   const skipped: { issue: IssueRef; reason: SkipReason }[] = [];
   const cycle = opts.cycleIssues ?? issues;
   const projectAnchor = opts.projectAnchor ?? "";
+  const closeRetries = opts.closeRetries ?? CLOSE_MAX_RETRIES;
+  const sleep = opts.sleep ?? defaultSleep;
   const emit = async (line: string): Promise<void> => {
     if (log) await log(line);
   };
@@ -318,7 +356,7 @@ export async function runMergerWithAdapter(
 
   if (merged.length === 0) {
     await emit(`no merges, no push`);
-    return { merged, skipped, pushed: false };
+    return { merged, skipped, pushed: false, unclosed: [] };
   }
 
   await emit(`push attempt 1`);
@@ -348,12 +386,34 @@ export async function runMergerWithAdapter(
   }
 
   await emit(`push ok; closing ${merged.length} issue(s)`);
+  // Fault-tolerant close: the push already landed, so one issue's transient
+  // close failure must not skip the close of the rest (issue #14). Retry each
+  // with backoff, accumulate the persistent failures, never throw here.
+  const unclosed: { issue: IssueRef; error: string }[] = [];
   for (const issue of merged) {
     const n = issueNumberOf(issue);
-    await adapter.closeIssue(n, "Completed by Sandbar");
+    let lastErr = "";
+    let ok = false;
+    for (let attempt = 0; attempt <= closeRetries; attempt++) {
+      if (attempt > 0) await sleep(closeBackoffMs(attempt));
+      try {
+        await adapter.closeIssue(n, "Completed by Sandbar");
+        ok = true;
+        break;
+      } catch (err) {
+        lastErr = err instanceof Error ? err.message : String(err);
+        await emit(`close #${n} attempt ${attempt + 1} failed: ${lastErr}`);
+      }
+    }
+    if (!ok) {
+      unclosed.push({ issue, error: lastErr });
+      await emit(
+        `close #${n} giving up after ${closeRetries + 1} attempt(s): ${lastErr}`,
+      );
+    }
   }
 
-  return { merged, skipped, pushed: true };
+  return { merged, skipped, pushed: true, unclosed };
 }
 
 // ---------------------------------------------------------------------------
@@ -612,9 +672,11 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       }
     },
     async closeIssue(n, comment) {
-      // Required: the issue was merged to the source branch; leaving it open
-      // (and still queued) silently would let the planner re-pick already-landed
-      // work. Fail loud so the operator reconciles.
+      // Throws on a single failed attempt; the close loop in
+      // runMergerWithAdapter retries with backoff and, if every attempt fails,
+      // records the issue in MergerSummary.unclosed (issue #14). The queue label
+      // is dropped by Phase 4 regardless, so a persistently-un-closable issue is
+      // left OPEN but de-queued (never re-picked), and the operator is told.
       try {
         await exec(
           "gh",

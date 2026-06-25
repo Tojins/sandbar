@@ -8,6 +8,12 @@
 // review-round budget exhaustion — lives here and is table-driven tested in
 // inner-loop-machine.test.ts.
 //
+// Impl-attempt exhaustion carries a `cause` so the human-handoff message names
+// the real blocker (#17): `gate-red` (last gate failing / no green gate) vs.
+// `reviewer-blocked` (gate green, reviewer's last verdict CHANGES-REQUESTED).
+// Each advanceAttempt caller supplies the exhaustion verdict because only it
+// knows which case it's in.
+//
 // Reviewer is strictly advisory: it never commits and the SM never asks the
 // runner to revert anything. Convergence comes from the bar being sharp
 // enough for the reviewer to issue a deterministic verdict, not from
@@ -53,7 +59,20 @@ export type LoopState = {
 export type Verdict =
   | { readonly type: "DONE" }
   | { readonly type: "NEEDS-INFO"; readonly questions: string }
-  | { readonly type: "NEEDS-HUMAN"; readonly failureTrace: string }
+  | {
+      // Impl-attempt budget exhausted. `cause` names the real blocker so the
+      // human-handoff message is accurate (#17):
+      //   gate-red — ran out of attempts with the last gate failing, or never
+      //     reaching a green gate; `failureTrace` carries the gate trace.
+      //   reviewer-blocked — ran out of attempts while the gate was GREEN and
+      //     the reviewer's last verdict was CHANGES-REQUESTED;
+      //     `latestReviewerProse` carries that report (so the human is pointed
+      //     at the reviewer request, not a non-existent failing test).
+      readonly type: "NEEDS-HUMAN";
+      readonly cause: "gate-red" | "reviewer-blocked";
+      readonly failureTrace: string;
+      readonly latestReviewerProse: string | null;
+    }
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
@@ -174,12 +193,18 @@ function onImplementerResult(state: LoopState, signal: ParseSignal): StepResult 
       action: { kind: "run-gate-1", attempt: state.attempt },
     };
   }
-  // NO-SIGNAL — either re-prompt for next attempt or exhaust the budget.
-  return advanceAttempt(state, {
-    failureTrace: state.lastFailureTrace,
-    extraReprompt: signal.reprompt ?? null,
-    latestReviewerProse: state.latestReviewerProse,
-  });
+  // NO-SIGNAL — either re-prompt for next attempt or exhaust the budget. The
+  // implementer didn't reach a green gate this attempt, so exhaustion here is
+  // the gate-red flavour.
+  return advanceAttempt(
+    state,
+    {
+      failureTrace: state.lastFailureTrace,
+      extraReprompt: signal.reprompt ?? null,
+      latestReviewerProse: state.latestReviewerProse,
+    },
+    gateRedExhaustion(state),
+  );
 }
 
 function onGate1Result(
@@ -197,13 +222,15 @@ function onGate1Result(
       },
     };
   }
+  const advanced = { ...state, lastFailureTrace: failureTrace };
   return advanceAttempt(
-    { ...state, lastFailureTrace: failureTrace },
+    advanced,
     {
       failureTrace,
       extraReprompt: null,
       latestReviewerProse: state.latestReviewerProse,
     },
+    gateRedExhaustion(advanced),
   );
 }
 
@@ -226,6 +253,8 @@ function onReviewerResult(
       { type: "NEEDS-HUMAN-REVIEW", latestReviewerProse: prose },
     );
   }
+  // Gate was green this attempt; the reviewer is the blocker. If the impl-attempt
+  // budget is exhausted here, surface that — gate green, reviewer rejected (#17).
   return advanceAttempt(
     {
       ...state,
@@ -234,7 +263,24 @@ function onReviewerResult(
       lastFailureTrace: "",
     },
     { failureTrace: "", extraReprompt: null, latestReviewerProse: prose },
+    {
+      type: "NEEDS-HUMAN",
+      cause: "reviewer-blocked",
+      failureTrace: "",
+      latestReviewerProse: prose,
+    },
   );
+}
+
+// The gate-red flavour of impl-budget exhaustion: surface the last recorded
+// gate trace, or the sentinel when no gate ever ran (NO-SIGNAL only).
+function gateRedExhaustion(state: LoopState): Verdict {
+  return {
+    type: "NEEDS-HUMAN",
+    cause: "gate-red",
+    failureTrace: state.lastFailureTrace || NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE,
+    latestReviewerProse: null,
+  };
 }
 
 function advanceAttempt(
@@ -244,12 +290,13 @@ function advanceAttempt(
     readonly extraReprompt: string | null;
     readonly latestReviewerProse: string | null;
   },
+  // The verdict to emit if this attempt was the last. Caller-supplied because
+  // only the caller knows the terminal cause: a gate-red trace vs. a green-gate
+  // reviewer rejection (#17).
+  onExhausted: Verdict,
 ): StepResult {
   if (state.attempt >= state.maxAttempts) {
-    return terminate(state, {
-      type: "NEEDS-HUMAN",
-      failureTrace: state.lastFailureTrace || NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE,
-    });
+    return terminate(state, onExhausted);
   }
   const newAttempt = state.attempt + 1;
   const ns: LoopState = {
