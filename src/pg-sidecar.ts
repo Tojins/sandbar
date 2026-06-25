@@ -1,9 +1,21 @@
 // Per-issue postgres sidecar.
 //
 // Each issue's inner-loop owns a dedicated podman network and a postgres
-// container. The gate container joins the network at run-time and resolves
-// the sidecar by container name (no host port). One pg startup per issue,
+// container. The gate container joins the network at run-time and reaches the
+// sidecar by a PINNED IP — not by container name. One pg startup per issue,
 // reused across every gate-1 attempt and gate-2.
+//
+// Why a pinned IP and not name resolution (#18): name lookups on a rootless
+// podman bridge are served by aardvark-dns, which netavark launches via the
+// systemd *user* bus. On WSL2 that bus dies across suspend/resume, leaving the
+// bridge resolver a black hole — every gate db lookup then hangs on EAI_AGAIN
+// even though pg is Up. So the network is created with `--disable-dns` (no
+// aardvark dependency at all) and pg is launched on a fixed `--ip`; the gate
+// connects to that IP with zero name resolution. The subnet is left to podman's
+// IPAM rather than pinned, because issues run in PARALLEL (one network each):
+// a single hard-coded subnet would collide across the concurrent per-issue
+// networks. IPAM hands out non-overlapping subnets; we read the gateway back
+// and derive pg's address from it (`pgIpForGateway`).
 //
 // Naming uses the issue id (`sandbar-pg-<id>`, `sandbar-net-<id>`).
 // The orchestrator holds a single-instance lock, so the id collides only
@@ -61,6 +73,55 @@ export function containerNameFor(issueId: string): string {
   return `${RESOURCE_PREFIX}pg-${issueId}`;
 }
 
+// Derive pg's pinned address from the network gateway podman/IPAM assigned.
+// The gateway is the subnet's `.1`; pg takes the next host (`.2`), which is
+// always inside the subnet for the /24s podman's default pool hands out. Pure
+// and total over a well-formed IPv4 gateway; throws loudly otherwise rather
+// than handing the gate a bogus DB_HOST that would fail opaquely later.
+export function pgIpForGateway(gateway: string): string {
+  const parts = gateway.split(".");
+  const last = Number(parts[3]);
+  if (
+    parts.length !== 4 ||
+    !parts.every((p) => /^\d+$/.test(p) && Number(p) >= 0 && Number(p) <= 255) ||
+    !Number.isInteger(last) ||
+    last > 253
+  ) {
+    throw new Error(`cannot derive a pg IP from gateway "${gateway}"`);
+  }
+  return `${parts[0]}.${parts[1]}.${parts[2]}.${last + 1}`;
+}
+
+// Create the per-issue network `--disable-dns` (no aardvark; see header). A
+// namesake surviving from an older sandbar build may be DNS-enabled or
+// otherwise stale, and we must never reuse it — so force-remove any leftover
+// first, then create fresh. `network rm -f` no-ops when absent, so this is the
+// recreate-once migration and the first-time create in one idempotent step. No
+// container is attached yet at this point, so the force-remove is safe.
+async function createDnslessNetwork(networkName: string): Promise<void> {
+  await exec(RUNTIME, ["network", "rm", "-f", networkName]).catch(() => {});
+  await exec(RUNTIME, ["network", "create", "--disable-dns", networkName]);
+}
+
+// Read back the IPv4 gateway IPAM assigned to the freshly-created network.
+// Default podman networks carry exactly one IPv4 subnet, so the range template
+// yields a single gateway. Empty output means no subnet was allocated — a hard
+// failure, since pg can't be pinned without one.
+async function networkGateway(networkName: string): Promise<string> {
+  const { stdout } = await exec(RUNTIME, [
+    "network",
+    "inspect",
+    networkName,
+    "--format",
+    "{{range .Subnets}}{{.Gateway}}{{end}}",
+  ]);
+  const gateway = stdout.trim();
+  if (!gateway) {
+    throw new Error(`network ${networkName} has no IPv4 gateway to pin pg against`);
+  }
+  return gateway;
+}
+
 export async function startPgSidecar(cfg: SidecarConfig): Promise<Sidecar> {
   const networkName = networkNameFor(cfg.issueId);
   const containerName = containerNameFor(cfg.issueId);
@@ -88,7 +149,8 @@ export async function startPgSidecar(cfg: SidecarConfig): Promise<Sidecar> {
   // registering it before either resource exists is safe — the `rm`s no-op.
   onCleanup(stop);
 
-  await exec(RUNTIME, ["network", "create", networkName]);
+  await createDnslessNetwork(networkName);
+  const dbHost = pgIpForGateway(await networkGateway(networkName));
 
   try {
     await exec(RUNTIME, [
@@ -98,8 +160,8 @@ export async function startPgSidecar(cfg: SidecarConfig): Promise<Sidecar> {
       containerName,
       "--network",
       networkName,
-      "--network-alias",
-      containerName,
+      "--ip",
+      dbHost,
       "-e",
       `POSTGRES_USER=${PG_USER}`,
       "-e",
@@ -119,7 +181,7 @@ export async function startPgSidecar(cfg: SidecarConfig): Promise<Sidecar> {
   return {
     networkName,
     containerName,
-    dbHost: containerName,
+    dbHost,
     dbPort: 5432,
     dbUser: PG_USER,
     dbPassword: PG_PASSWORD,

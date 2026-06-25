@@ -1,7 +1,14 @@
 // Procedural gate. Runs the configured check + test commands against an
 // issue worktree inside an ephemeral one-shot container, joined to the
 // issue's per-issue podman network so test code reaches the postgres
-// sidecar by container name instead of the host's shared db.
+// sidecar by its pinned IP (`opts.dbHost`) instead of the host's shared db.
+//
+// That network is created `--disable-dns` (#18), so the bridge no longer runs
+// aardvark to forward external lookups. The gate's `check`/`test` commands may
+// still resolve public names (registry, fixtures), so we hand the container
+// explicit public resolvers via `--dns`, which write resolv.conf directly and
+// bypass aardvark entirely — preserving the external-DNS reach the DNS-enabled
+// network used to provide, without the WSL2-user-bus dependency that broke it.
 //
 // Two podman runs (check, then test) so the failedStep is unambiguous and
 // the failing run's output can be returned without re-parsing combined
@@ -22,6 +29,11 @@ import { RUNTIME } from "./pg-sidecar.js";
 const exec = promisify(execFile);
 
 const MAX_BUFFER = 50 * 1024 * 1024;
+
+// Public resolvers handed to the gate container so external name resolution
+// survives the `--disable-dns` per-issue network (#18). `--dns` writes these
+// into the container's resolv.conf, bypassing the (absent) aardvark resolver.
+const GATE_DNS_SERVERS: readonly string[] = ["1.1.1.1", "8.8.8.8"];
 
 export type GateOptions = {
   readonly worktreePath: string;
@@ -81,6 +93,7 @@ async function runStep(
     "1000:1000",
     "--network",
     opts.networkName,
+    ...GATE_DNS_SERVERS.flatMap((s) => ["--dns", s]),
     "-v",
     `${opts.worktreePath}:/workspace`,
     "-w",
