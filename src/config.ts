@@ -1,5 +1,6 @@
 import type { SandboxHooks } from "./agent-sandbox.js";
 import { SandbarError } from "./errors.js";
+import { BRANCH_PREFIX } from "./naming.js";
 
 export type GateCommand = {
   readonly check: { readonly cmd: string; readonly args: readonly string[] };
@@ -116,16 +117,26 @@ export type MergeModeConfig =
       // Scratch ref sandbar force-pushes each cycle's merge result to. Must not
       // be the source branch. Default: "sandbar/integration".
       readonly integrationBranch?: string;
-      // Check-run names that must conclude successfully. Default: [] — meaning
-      // EVERY check the forge reports on the sha must pass. Name them only to
-      // land while some unrelated check is still red/absent.
-      readonly requiredChecks?: readonly string[];
+      // Check-run names that must exist and pass before anything lands.
+      // REQUIRED and non-empty — this is the floor, and without it verified
+      // mode cannot tell "the check hasn't started" from "the check will never
+      // run", which is precisely the mis-triggered-workflow case the mode
+      // exists to catch. A check NOT named here still sinks the cycle if it
+      // fails; naming is about what must be waited for, not what may be
+      // ignored. Use the job names as the forge reports them.
+      readonly requiredChecks: readonly string[];
       // How long checks may take to conclude before the cycle is parked. Never
       // shortened into a "land anyway" — an unknown verdict is not a green one.
       // Default: 20 minutes.
       readonly checkTimeoutMs?: number;
       // Poll interval while checks are pending. Default: 15s.
       readonly pollIntervalMs?: number;
+      // How long a pushed sha may report ZERO check runs before sandbar
+      // concludes the forge does not build this ref at all — which is fatal,
+      // not a parked cycle (see forge-verify.ts). Widen it if the forge is slow
+      // to create runs under load; the run halts rather than lands either way.
+      // Default: 2 minutes.
+      readonly noChecksGraceMs?: number;
       // Also open a pull request for the integration branch, as a review/audit
       // handle. Landing is a fast-forward push either way (so commit
       // attribution never changes); the forge marks the PR merged once its
@@ -141,6 +152,7 @@ export type ResolvedMergeMode =
       readonly requiredChecks: readonly string[];
       readonly checkTimeoutMs: number;
       readonly pollIntervalMs: number;
+      readonly noChecksGraceMs: number;
       readonly openPullRequest: boolean;
     };
 
@@ -283,37 +295,106 @@ export const DEFAULT_INTEGRATION_BRANCH = "sandbar/integration";
 // genuinely slower should raise it rather than have sandbar park good cycles.
 export const DEFAULT_CHECK_TIMEOUT_MS = 20 * 60_000;
 export const DEFAULT_CHECK_POLL_INTERVAL_MS = 15_000;
+export const DEFAULT_NO_CHECKS_GRACE_MS = 120_000;
+
+// Non-negative, finite, real number. `> 0` alone lets NaN and Infinity through:
+// NaN fails every comparison, so `elapsed >= NaN` is never true and the check
+// poll would spin forever holding the single-instance lock; Infinity does the
+// same by construction. A host computing a timeout from `Number(process.env.X)`
+// on an unset var produces exactly NaN, so this is the likely typo, not an
+// exotic one.
+function requirePositiveMs(label: string, value: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new SandbarError(
+      `config.mergeMode: ${label} must be a positive, finite number of ` +
+        `milliseconds (got ${String(value)}).`,
+    );
+  }
+  return value;
+}
 
 export function resolveMergeMode(
   mode: MergeModeConfig | undefined,
   sourceBranch: string,
 ): ResolvedMergeMode {
   if (!mode || mode.kind === "direct") return { kind: "direct" };
-  const integrationBranch = mode.integrationBranch ?? DEFAULT_INTEGRATION_BRANCH;
+  const integrationBranch = (
+    mode.integrationBranch ?? DEFAULT_INTEGRATION_BRANCH
+  ).trim();
   // Same ref for both would make the "push somewhere safe, verify, then
   // fast-forward" sequence a direct push to the source branch with extra steps
   // — i.e. exactly the hole verified mode exists to close, silently.
-  if (integrationBranch === sourceBranch) {
+  if (integrationBranch === sourceBranch.trim()) {
     throw new SandbarError(
       `config.mergeMode: integrationBranch must differ from sourceBranch ` +
         `(both are '${sourceBranch}'). The integration branch is a scratch ref ` +
         `sandbar force-pushes unverified merge results to.`,
     );
   }
-  const checkTimeoutMs = mode.checkTimeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS;
-  const pollIntervalMs = mode.pollIntervalMs ?? DEFAULT_CHECK_POLL_INTERVAL_MS;
-  if (checkTimeoutMs <= 0 || pollIntervalMs <= 0) {
+  // An empty or refs/-prefixed value produces a ref nothing triggers CI for, and
+  // the symptom (a whole cycle's work parked, or now a fatal) would arrive long
+  // after the typo. `sandbar/issue-*` is reserved: the preflight cleanup deletes
+  // branches matching it.
+  if (integrationBranch === "") {
     throw new SandbarError(
-      `config.mergeMode: checkTimeoutMs and pollIntervalMs must be positive ` +
-        `(got ${checkTimeoutMs} and ${pollIntervalMs}).`,
+      `config.mergeMode: integrationBranch must not be empty.`,
+    );
+  }
+  if (integrationBranch.startsWith("refs/")) {
+    throw new SandbarError(
+      `config.mergeMode: integrationBranch must be a plain branch name, not a ` +
+        `full ref (got '${integrationBranch}'). Sandbar pushes it as ` +
+        `refs/heads/<name>.`,
+    );
+  }
+  if (integrationBranch.startsWith(`${BRANCH_PREFIX}issue-`)) {
+    throw new SandbarError(
+      `config.mergeMode: integrationBranch must not match '${BRANCH_PREFIX}issue-*' ` +
+        `(got '${integrationBranch}') — sandbar's preflight cleanup deletes ` +
+        `branches under that prefix.`,
+    );
+  }
+  // Verified mode's whole claim is that an unknown verdict never lands, and
+  // nothing else can distinguish a check that is merely late from one that will
+  // never be reported. Refusing to resolve is the only honest option: a default
+  // of [] would silently reduce "verified" to "nothing visible was failing at
+  // the moment I looked".
+  const requiredChecks = mode.requiredChecks.map((c) => c.trim());
+  if (requiredChecks.length === 0 || requiredChecks.some((c) => c === "")) {
+    throw new SandbarError(
+      `config.mergeMode: verified mode requires a non-empty requiredChecks — ` +
+        `the check-run names (as the forge reports them) that must exist and ` +
+        `pass before anything lands. Without them sandbar cannot tell a check ` +
+        `that hasn't started from one that will never run, which is the exact ` +
+        `failure verified mode exists to catch.`,
+    );
+  }
+  const checkTimeoutMs = requirePositiveMs(
+    "checkTimeoutMs",
+    mode.checkTimeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS,
+  );
+  const pollIntervalMs = requirePositiveMs(
+    "pollIntervalMs",
+    mode.pollIntervalMs ?? DEFAULT_CHECK_POLL_INTERVAL_MS,
+  );
+  const noChecksGraceMs = requirePositiveMs(
+    "noChecksGraceMs",
+    mode.noChecksGraceMs ?? DEFAULT_NO_CHECKS_GRACE_MS,
+  );
+  if (pollIntervalMs > checkTimeoutMs) {
+    throw new SandbarError(
+      `config.mergeMode: pollIntervalMs (${pollIntervalMs}) must not exceed ` +
+        `checkTimeoutMs (${checkTimeoutMs}) — the wait would overshoot the ` +
+        `timeout by a full interval before ever re-reading the checks.`,
     );
   }
   return {
     kind: "verified",
     integrationBranch,
-    requiredChecks: mode.requiredChecks ?? [],
+    requiredChecks,
     checkTimeoutMs,
     pollIntervalMs,
+    noChecksGraceMs,
     openPullRequest: mode.openPullRequest ?? false,
   };
 }

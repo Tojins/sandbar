@@ -48,7 +48,10 @@ import {
   finalizeAll,
   realAdapter as realFinalizeAdapter,
 } from "./finalize.js";
-import { realVerifyAdapter } from "./forge-verify.js";
+import {
+  realVerifyAdapter,
+  verifiedLandingOptionsFrom,
+} from "./forge-verify.js";
 import { startKeepawake, stopKeepawake } from "./keepawake.js";
 import { runInnerLoop, type Terminal } from "./inner-loop.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
@@ -56,6 +59,7 @@ import { startRunLogger } from "./logs.js";
 import {
   MergerError,
   type MergerSummary,
+  type SkipReason,
   issueNumberOf,
   realAdapter,
   runMergerWithAdapter,
@@ -73,6 +77,34 @@ import { buildProjectAnchor } from "./prompt.js";
 // (success / stuck / budget) — MAX_ITERATIONS just guarantees the loop is
 // bounded if those checks ever fail to fire.
 const MAX_ITERATIONS = 100;
+
+/**
+ * SkipReason → the Phase-4 handoff it earns.
+ *
+ * Exhaustive on purpose (the `never` assignment). A ternary chain with a
+ * catch-all silently gave every future skip reason `merge-gate-red`, which
+ * pushes the branch and applies `agent-stuck` — plausible for some reasons and
+ * wrong for others, with nothing to catch the difference. `silent-noop` is
+ * handled by the caller (it needs the per-issue retry count) and never reaches
+ * here.
+ */
+function finalizeKindForSkip(
+  reason: Exclude<SkipReason, "silent-noop">,
+): "merge-conflict" | "forge-unverified" | "merge-gate-red" {
+  switch (reason) {
+    case "conflict":
+      return "merge-conflict";
+    case "forge-unverified":
+      return "forge-unverified";
+    case "gate-red":
+    case "install-failed":
+      return "merge-gate-red";
+    default: {
+      const never: never = reason;
+      throw new Error(`Unhandled merger skip reason: ${String(never)}`);
+    }
+  }
+}
 
 export async function run(rawConfig: RunConfig): Promise<void> {
   const config = resolveConfig(rawConfig);
@@ -304,6 +336,9 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // Phase 3: Merge (procedural, in an isolated worktree off origin)
       // ---------------------------------------------------------------------
       let mergerSummary: MergerSummary | null = null;
+      // Tracker state the merger had already applied when it threw (see
+      // MergerError.partial). Finalised even though the run is stopping.
+      let haltPartial: MergerSummary | undefined;
       let halt = false;
       if (completedIssues.length > 0) {
         // The merger runs in a dedicated worktree detached at
@@ -362,14 +397,10 @@ export async function run(rawConfig: RunConfig): Promise<void> {
                     sourceBranch: config.sourceBranch,
                     repo: { owner: config.ghOwner, name: config.ghRepo },
                   }),
-                  options: {
-                    integrationBranch: config.mergeMode.integrationBranch,
-                    requiredChecks: config.mergeMode.requiredChecks,
-                    checkTimeoutMs: config.mergeMode.checkTimeoutMs,
-                    pollIntervalMs: config.mergeMode.pollIntervalMs,
-                    openPullRequest: config.mergeMode.openPullRequest,
-                    sourceBranch: config.sourceBranch,
-                  },
+                  options: verifiedLandingOptionsFrom(
+                    config.mergeMode,
+                    config.sourceBranch,
+                  ),
                 }
               : undefined;
 
@@ -404,6 +435,19 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             halt = true;
             cleanupReason = "merger-halted";
             await runLogger.appendOrchestrator(`merger halted: ${err.message}`);
+            // The halt stops the OUTER loop; it must not strand issues the
+            // merger already commented on and stripped `ready-for-agent` from.
+            // Those need their handoff label applied before we stop, or they
+            // sit on no queue at all — invisible to the planner and to a human
+            // filtering on `agent-stuck`. Nothing here lands code: `merged` is
+            // always empty on this path.
+            haltPartial = err.partial;
+            if (haltPartial && haltPartial.merged.length > 0) {
+              throw new Error(
+                "MergerError.partial must never report merged issues: a halt " +
+                  "means nothing landed.",
+              );
+            }
           } else {
             throw err;
           }
@@ -418,12 +462,16 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // Phase 4: Finalise
       // ---------------------------------------------------------------------
       const finalizeInputs: FinalizeInput[] = [];
-      if (mergerSummary && !halt) {
-        for (const m of mergerSummary.merged) {
+      // On a halt, `haltPartial` carries what the merger had already applied to
+      // the tracker; its `merged` is empty by construction (asserted above), so
+      // this only ever produces handoff inputs.
+      const mergerOutcome = halt ? haltPartial : mergerSummary;
+      if (mergerOutcome) {
+        for (const m of mergerOutcome.merged) {
           mergedThisRun.add(issueNumberOf(m));
           finalizeInputs.push({ kind: "merged", issue: m });
         }
-        for (const s of mergerSummary.skipped) {
+        for (const s of mergerOutcome.skipped) {
           if (s.reason === "silent-noop") {
             const prev = runState.silentNoopAttemptsByIssue.get(s.issue.id) ?? 0;
             const attempts = prev + 1;
@@ -440,12 +488,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             continue;
           }
           finalizeInputs.push({
-            kind:
-              s.reason === "conflict"
-                ? "merge-conflict"
-                : s.reason === "forge-unverified"
-                  ? "forge-unverified"
-                  : "merge-gate-red",
+            kind: finalizeKindForSkip(s.reason),
             issue: s.issue,
           });
         }

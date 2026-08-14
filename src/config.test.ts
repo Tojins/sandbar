@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { SandbarError } from "./errors.js";
 import {
   DEFAULT_ADR_DIR,
   DEFAULT_CHECK_POLL_INTERVAL_MS,
   DEFAULT_CHECK_TIMEOUT_MS,
   DEFAULT_INTEGRATION_BRANCH,
+  DEFAULT_NO_CHECKS_GRACE_MS,
   DEFAULT_DB_READINESS_TIMEOUT_MS,
   DEFAULT_CLAUDE_MD_PATH,
   DEFAULT_CONTAINERFILE_PATH,
@@ -159,13 +161,17 @@ describe("resolveMergeMode (#22)", () => {
   });
 
   it("fills the verified defaults", () => {
-    const r = resolveConfig({ ...minimal, mergeMode: { kind: "verified" } });
+    const r = resolveConfig({
+      ...minimal,
+      mergeMode: { kind: "verified", requiredChecks: ["tests"] },
+    });
     expect(r.mergeMode).toEqual({
       kind: "verified",
       integrationBranch: DEFAULT_INTEGRATION_BRANCH,
-      requiredChecks: [],
+      requiredChecks: ["tests"],
       checkTimeoutMs: DEFAULT_CHECK_TIMEOUT_MS,
       pollIntervalMs: DEFAULT_CHECK_POLL_INTERVAL_MS,
+      noChecksGraceMs: DEFAULT_NO_CHECKS_GRACE_MS,
       openPullRequest: false,
     });
   });
@@ -180,6 +186,7 @@ describe("resolveMergeMode (#22)", () => {
         requiredChecks: ["tests"],
         checkTimeoutMs: 1000,
         pollIntervalMs: 100,
+        noChecksGraceMs: 50,
         openPullRequest: true,
       },
     });
@@ -189,6 +196,7 @@ describe("resolveMergeMode (#22)", () => {
       requiredChecks: ["tests"],
       checkTimeoutMs: 1000,
       pollIntervalMs: 100,
+      noChecksGraceMs: 50,
       openPullRequest: true,
     });
   });
@@ -199,17 +207,75 @@ describe("resolveMergeMode (#22)", () => {
     expect(() =>
       resolveConfig({
         ...minimal,
-        mergeMode: { kind: "verified", integrationBranch: "main" },
+        mergeMode: {
+          kind: "verified",
+          integrationBranch: "main",
+          requiredChecks: ["tests"],
+        },
       }),
     ).toThrow(/must differ from sourceBranch/);
   });
 
   it.each([
+    { label: "empty", branch: "" },
+    { label: "whitespace-padded onto the source branch", branch: " main " },
+    { label: "a full ref", branch: "refs/heads/ci" },
+    { label: "inside the reaped issue-branch namespace", branch: "sandbar/issue-x" },
+  ])("refuses an integration branch that is $label", ({ branch }) => {
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        mergeMode: {
+          kind: "verified",
+          integrationBranch: branch,
+          requiredChecks: ["tests"],
+        },
+      }),
+    ).toThrow(SandbarError);
+  });
+
+  it("refuses verified mode with no requiredChecks", () => {
+    // Without a named floor, "verified" degrades to "nothing visible was
+    // failing at the instant I looked" — it cannot tell a check that has not
+    // started from one that will never run.
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        mergeMode: { kind: "verified", requiredChecks: [] },
+      }),
+    ).toThrow(/requiredChecks/);
+  });
+
+  it.each([
     { checkTimeoutMs: 0 },
     { pollIntervalMs: -1 },
-  ])("refuses a non-positive %o", (over) => {
+    // NaN passes a bare `<= 0` check, and `elapsed >= NaN` is never true — the
+    // poll loop would spin forever holding the single-instance lock. This is
+    // what `Number(process.env.UNSET)` produces.
+    { checkTimeoutMs: Number.NaN },
+    { pollIntervalMs: Number.NaN },
+    { checkTimeoutMs: Number.POSITIVE_INFINITY },
+    { noChecksGraceMs: Number.NaN },
+  ])("refuses a non-finite or non-positive %o", (over) => {
     expect(() =>
-      resolveConfig({ ...minimal, mergeMode: { kind: "verified", ...over } }),
-    ).toThrow(/must be positive/);
+      resolveConfig({
+        ...minimal,
+        mergeMode: { kind: "verified", requiredChecks: ["tests"], ...over },
+      }),
+    ).toThrow(/positive, finite|must be positive/);
+  });
+
+  it("refuses a poll interval longer than the whole timeout", () => {
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        mergeMode: {
+          kind: "verified",
+          requiredChecks: ["tests"],
+          checkTimeoutMs: 1_000,
+          pollIntervalMs: 5_000,
+        },
+      }),
+    ).toThrow(/must not exceed/);
   });
 });

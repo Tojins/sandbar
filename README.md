@@ -103,10 +103,11 @@ A direct push matches neither `pull_request` nor `push: branches-ignore:
 ```ts
 mergeMode: {
   kind: "verified",
+  requiredChecks: ["tests"],                // REQUIRED, non-empty — see below
   integrationBranch: "sandbar/integration", // default; must differ from sourceBranch
-  requiredChecks: [],                       // default: every check the forge reports must pass
   checkTimeoutMs: 20 * 60_000,              // default
   pollIntervalMs: 15_000,                   // default
+  noChecksGraceMs: 120_000,                 // default
   openPullRequest: false,                   // default
 }
 ```
@@ -114,9 +115,27 @@ mergeMode: {
 Per cycle, once the local merges + gate are green, sandbar force-pushes the
 merge result to `integrationBranch`, polls that sha's check runs, and only a
 green verdict earns the fast-forward onto `sourceBranch`. A red forge goes to
-the resolve loop (bounded rounds); checks that never conclude park the cycle —
-sandbar never lands on an unknown verdict. Cost is one CI run per cycle, not
-per implementer attempt.
+the resolve loop with the failing jobs' logs; checks that never conclude park
+the cycle. Sandbar never lands on an unknown verdict. Cost is one CI run per
+cycle when it passes first time, at most three when the agent is fixing — not
+one per implementer attempt.
+
+**`requiredChecks` is mandatory.** Name the check runs (as the forge reports
+them) that must exist *and* pass. It is the floor, not a filter: a check you
+did not name still sinks the cycle if it fails. Without it, sandbar cannot tell
+a check that hasn't started from one that will never run — which is exactly the
+mis-triggered-workflow case verified mode exists to catch — so resolving the
+config fails rather than quietly weakening to "nothing was failing when I
+looked".
+
+Two failure modes are deliberately **fatal** rather than parked, because they
+are properties of the repo rather than of the code under test, and would
+otherwise recur every cycle while converting the backlog into `agent-stuck`:
+the forge reporting no checks at all for the pushed sha (widen
+`noChecksGraceMs` if your forge is merely slow to create runs), and a rejected
+push to the integration branch. If `sourceBranch` moves during the CI wait, the
+new tip is merged in and the result is re-verified — a green verdict is never
+carried over to a result the forge has not seen.
 
 `openPullRequest: true` adds a pull request against the integration branch as a
 review/audit handle. Landing is a fast-forward push either way, so commit

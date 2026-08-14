@@ -142,6 +142,16 @@ export function buildForgeUnverifiedComment(args: {
   readonly siblings: readonly IssueRef[];
   readonly integrationBranch: string;
   readonly sourceBranch: string;
+  // The sha that was actually verified, when there was one. The comment cites
+  // it rather than the integration BRANCH, because that branch is force-pushed
+  // by the next cycle — a human reading this comment tomorrow would follow the
+  // ref to someone else's result. The sha keeps its check runs forever.
+  readonly verifiedSha: string | null;
+  // True when the resolve loop committed fixes during verification. Those
+  // commits live only on the reverted merge result and are NOT on the issue
+  // branch that is about to be handed over, so the comment has to say so —
+  // otherwise the agent's work silently evaporates.
+  readonly hasResolveCommits: boolean;
 }): string {
   const lines = [
     "Sandbar merged this branch into the source branch locally and the post-merge " +
@@ -151,9 +161,21 @@ export function buildForgeUnverifiedComment(args: {
     "",
     `Verification failure: ${args.detail}`,
     "",
-    `The result that failed is on \`${args.integrationBranch}\` — that ref is where the ` +
-      "failing check runs and their logs live.",
+    args.verifiedSha
+      ? `The check runs are on commit \`${args.verifiedSha}\` (pushed to \`${args.integrationBranch}\`, ` +
+        "a scratch ref the next cycle overwrites — follow the sha, not the branch)."
+      : `The result was pushed to \`${args.integrationBranch}\`, a scratch ref the next cycle overwrites.`,
   ];
+  if (args.hasResolveCommits) {
+    lines.push(
+      "",
+      "**Sandbar's resolve agent committed fix attempts during verification.** " +
+        "Those commits were made on the composed merge result, not on this " +
+        "issue's branch, and the revert discarded them — the branch handed back " +
+        "here does NOT contain them. They are still reachable from the commit " +
+        "above if any of that work is worth recovering.",
+    );
+  }
   if (args.siblings.length > 0) {
     lines.push(
       "",
@@ -239,9 +261,17 @@ const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 export class MergerError extends Error {
-  constructor(message: string) {
+  // What the merger had already DONE to the tracker before it halted. Issues
+  // skipped earlier in the cycle have a comment posted and `ready-for-agent`
+  // removed, so if the halt discarded them they would be invisible to the
+  // planner AND carry no handoff label — off every queue a human looks at.
+  // The orchestrator finalises this before it stops.
+  readonly partial: MergerSummary | undefined;
+
+  constructor(message: string, partial?: MergerSummary) {
     super(message);
     this.name = "MergerError";
+    this.partial = partial;
   }
 }
 
@@ -468,7 +498,16 @@ export async function runMergerWithAdapter(
 
     if (landing.kind === "fatal") {
       await emit(`verify fatal: ${landing.detail}`);
-      throw new MergerError(`Verified merge could not land: ${landing.detail}`);
+      // The merges are NOT reverted here: a fatal means we could not determine
+      // or could not act on the verdict, and the merger worktree is ephemeral
+      // anyway. What must survive is the tracker state for issues skipped
+      // earlier in this cycle — they are already commented and de-labelled.
+      throw new MergerError(`Verified merge could not land: ${landing.detail}`, {
+        merged: [],
+        skipped,
+        pushed: false,
+        unclosed: [],
+      });
     }
 
     if (landing.kind === "abandoned") {
@@ -486,6 +525,8 @@ export async function runMergerWithAdapter(
             siblings: merged.filter((m) => m.id !== issue.id),
             integrationBranch: verified.options.integrationBranch,
             sourceBranch: verified.options.sourceBranch,
+            verifiedSha: landing.lastSha,
+            hasResolveCommits: landing.resolveCommits,
           }),
         );
         await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
@@ -520,6 +561,7 @@ export async function runMergerWithAdapter(
       throw new MergerError(
         "Push to origin source branch was rejected and `git pull --ff-only` then failed " +
           "(origin source has diverged). Operator must reconcile manually.",
+        { merged: [], skipped, pushed: false, unclosed: [] },
       );
     }
     await emit(`push attempt 2`);
@@ -528,12 +570,18 @@ export async function runMergerWithAdapter(
       await emit(`push race retry exhausted`);
       throw new MergerError(
         "Push race retry exhausted: still rejected after one fast-forward pull and re-push.",
+        { merged: [], skipped, pushed: false, unclosed: [] },
       );
     }
   }
   if (push.kind === "fatal") {
     await emit(`push fatal: ${push.reason}`);
-    throw new MergerError(`Push to origin source branch failed: ${push.reason}`);
+    throw new MergerError(`Push to origin source branch failed: ${push.reason}`, {
+      merged: [],
+      skipped,
+      pushed: false,
+      unclosed: [],
+    });
   }
 
   await emit(`push ok; closing ${merged.length} issue(s)`);

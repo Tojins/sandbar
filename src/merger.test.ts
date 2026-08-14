@@ -776,15 +776,19 @@ function makeVerifyFake(opts: {
       return opts.integrationPush ?? { kind: "ok" };
     },
     async listCheckRuns() {
-      return [
-        {
-          id: 1,
-          name: "tests",
-          status: "completed",
-          conclusion: opts.checkConclusion ?? "success",
-          detailsUrl: "https://github.com/o/r/actions/runs/1/job/2",
-        },
-      ];
+      return {
+        runs: [
+          {
+            id: 1,
+            suiteId: 1,
+            name: "tests",
+            status: "completed",
+            conclusion: opts.checkConclusion ?? "success",
+            detailsUrl: "https://github.com/o/r/actions/runs/1/job/2",
+          },
+        ],
+        complete: true,
+      };
     },
     async fetchFailureLog() {
       return "ci log";
@@ -792,6 +796,9 @@ function makeVerifyFake(opts: {
     async fastForwardSource(sha) {
       vCalls.fastForwards.push(sha);
       return { kind: "ok" };
+    },
+    async syncWithSource() {
+      return { ok: true, reason: "" };
     },
     async ensurePullRequest() {
       vCalls.prs += 1;
@@ -804,6 +811,7 @@ function makeVerifyFake(opts: {
 
 const VERIFIED_OPTIONS = {
   integrationBranch: "sandbar/integration",
+  requiredChecks: ["tests"],
   checkTimeoutMs: 1000,
   pollIntervalMs: 10,
   sourceBranch: "main",
@@ -885,6 +893,90 @@ describe("runMergerWithAdapter — verified merge mode", () => {
         verified: { adapter: verify, options: VERIFIED_OPTIONS },
       }),
     ).rejects.toThrow(MergerError);
+  });
+
+  it("parks only the issues that actually merged, not the ones already skipped", async () => {
+    // #7 never merged (gate red, resolve abandoned) and has already been
+    // commented and de-labelled. Re-parking it as `forge-unverified` would
+    // post a second, contradictory comment and push TWO finalize inputs for
+    // one issue.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [gateRed(), { ok: true }],
+      agents: [{ stdout: "<reason>nope</reason>\n<promise>ABANDON</promise>" }],
+      heads: ["base", "p1", "p2", "landed"],
+    });
+    const { verify } = makeVerifyFake({ checkConclusion: "failure" });
+
+    const summary = await runMergerWithAdapter(
+      [issue(7), issue(9)],
+      adapter,
+      undefined,
+      undefined,
+      {
+        verified: {
+          adapter: verify,
+          options: { ...VERIFIED_OPTIONS, maxRounds: 1 },
+        },
+      },
+    );
+
+    expect(summary.skipped.map((s) => [s.issue.id, s.reason])).toEqual([
+      ["7", "gate-red"],
+      ["9", "forge-unverified"],
+    ]);
+    // One comment each, never two for #7.
+    expect(calls.comments.map((c) => c.n)).toEqual([7, 9]);
+  });
+
+  it("names the verified sha, not the scratch branch, and flags discarded agent work", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      heads: ["base", "p1", "landed"],
+    });
+    const { verify } = makeVerifyFake({ checkConclusion: "failure" });
+
+    await runMergerWithAdapter([issue(7)], adapter, undefined, undefined, {
+      verified: {
+        adapter: verify,
+        options: { ...VERIFIED_OPTIONS, maxRounds: 1 },
+      },
+    });
+
+    // The integration ref is force-pushed by the next cycle; the sha keeps its
+    // check runs forever.
+    expect(calls.comments[0]!.msg).toContain("landed");
+    expect(calls.comments[0]!.msg).toContain("follow the sha, not the branch");
+  });
+
+  it("hands back what it had already applied to the tracker when it halts", async () => {
+    // The halt stops the run, but #7 has already been commented and stripped
+    // of `ready-for-agent` — without this it would sit on no queue at all.
+    const { adapter } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [gateRed(), { ok: true }],
+      agents: [{ stdout: "<reason>nope</reason>\n<promise>ABANDON</promise>" }],
+      heads: ["base", "p1", "p2", "landed"],
+    });
+    const { verify } = makeVerifyFake({
+      integrationPush: { kind: "rejected", reason: "stale info" },
+    });
+
+    const err = await runMergerWithAdapter(
+      [issue(7), issue(9)],
+      adapter,
+      undefined,
+      undefined,
+      { verified: { adapter: verify, options: VERIFIED_OPTIONS } },
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(MergerError);
+    const partial = (err as MergerError).partial;
+    expect(partial?.merged).toEqual([]);
+    expect(partial?.skipped.map((s) => [s.issue.id, s.reason])).toEqual([
+      ["7", "gate-red"],
+    ]);
   });
 
   it("does not touch the forge when nothing merged", async () => {
