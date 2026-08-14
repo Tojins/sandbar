@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { renderReviewerSlot } from "./prompt.js";
+import { renderAttemptSlot, renderReviewerSlot } from "./prompt.js";
+import { parsePromise } from "./promise-parser.js";
 
 const baseInputs = {
   issue: { id: "42", title: "do the thing", branch: "sandbar/issue-42-do-the-thing" },
@@ -9,6 +10,41 @@ const baseInputs = {
   codingStandardsPath: "docs/CODING_STANDARDS.md",
   claudeMdPath: "CLAUDE.md",
 } as const;
+
+// The escalation contract is split across two files — the token/block names
+// live as prose in prompts/implementer.md and as regexes in promise-parser.ts.
+// These pin them together so a rename on one side can't silently make the
+// signal unemittable (#21).
+describe("renderAttemptSlot — UI-prototype escalation contract", () => {
+  const slot = renderAttemptSlot({
+    issue: baseInputs.issue,
+    attempt: 1,
+    maxAttempts: 8,
+    worktreePath: "/tmp/wt",
+    lastFailureTrace: "",
+    sourceBranch: "main",
+    diff: "",
+  });
+
+  it("instructs the agent to assess UI impact before implementing", () => {
+    expect(slot).toContain("## UI impact check — do this first");
+    expect(slot).toContain("non-trivial UI impact");
+    // The two escapes a human has, both of which the next run must recognise.
+    expect(slot).toContain("no prototype is needed");
+  });
+
+  it("documents a token + block pair the parser actually accepts", () => {
+    expect(slot).toContain("<promise>NEEDS-UI-PROTOTYPE</promise>");
+    expect(slot).toContain("`<ui-impact>`");
+    const emitted =
+      "<ui-impact>\nnew screen, layout invented\n</ui-impact>\n" +
+      "<promise>NEEDS-UI-PROTOTYPE</promise>";
+    expect(parsePromise(emitted, { commitsAccumulated: 0 })).toEqual({
+      kind: "NEEDS-UI-PROTOTYPE",
+      uiImpact: "new screen, layout invented",
+    });
+  });
+});
 
 describe("renderReviewerSlot", () => {
   it("embeds the built-in coding standards and references conventions", () => {

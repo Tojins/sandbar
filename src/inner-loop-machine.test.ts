@@ -48,6 +48,10 @@ const needsInfo = (questions: string): ParseSignal => ({
   kind: "NEEDS-INFO",
   questions,
 });
+const needsUiPrototype = (uiImpact: string): ParseSignal => ({
+  kind: "NEEDS-UI-PROTOTYPE",
+  uiImpact,
+});
 
 const gate1Ok: LoopEvent = { kind: "gate-1-result", ok: true, failureTrace: "" };
 const gate1Red = (trace: string): LoopEvent => ({
@@ -94,6 +98,35 @@ describe("inner-loop-machine — happy paths", () => {
     ]);
     expect(actions.map((a) => a.kind)).toEqual(["run-implementer", "terminate"]);
     expect(verdict).toEqual({ type: "NEEDS-INFO", questions: "what's the foo?" });
+  });
+
+  it("attempt 1 NEEDS-UI-PROTOTYPE short-circuits — no gate, no reviewer (#21)", () => {
+    const { actions, verdict } = drive(defaultOpts, [
+      impl(needsUiPrototype("new settings screen, layout invented")),
+    ]);
+    expect(actions.map((a) => a.kind)).toEqual(["run-implementer", "terminate"]);
+    expect(verdict).toEqual({
+      type: "NEEDS-UI-PROTOTYPE",
+      uiImpact: "new settings screen, layout invented",
+    });
+  });
+
+  it("a late NEEDS-UI-PROTOTYPE terminates mid-loop without burning further attempts", () => {
+    const { actions, verdict } = drive(defaultOpts, [
+      impl(complete),
+      gate1Red("trace A"),
+      impl(needsUiPrototype("only now do I see the invented flow")),
+    ]);
+    expect(actions.map((a) => a.kind)).toEqual([
+      "run-implementer",
+      "run-gate-1",
+      "run-implementer",
+      "terminate",
+    ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-UI-PROTOTYPE",
+      uiImpact: "only now do I see the invented flow",
+    });
   });
 });
 
@@ -457,6 +490,7 @@ describe("decideAfterTerminal", () => {
     const verdicts: Verdict[] = [
       { type: "DONE" },
       { type: "NEEDS-INFO", questions: "q" },
+      { type: "NEEDS-UI-PROTOTYPE", uiImpact: "invented screen" },
       {
         type: "NEEDS-HUMAN",
         cause: "gate-red",

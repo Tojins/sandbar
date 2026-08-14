@@ -67,6 +67,38 @@ export const NEEDS_INFO_COMMENT_TEMPLATE = (
   `questions below, then drop \`${needsInfoLabel}\` and re-apply \`${readyLabel}\` ` +
   `when the answers are ready.\n\n---\n\n${questions}`;
 
+// #21 — the implementer stopped before writing code because the issue implies
+// non-trivial user-visible UI and carries no prototype. Same human round-trip
+// as NEEDS-INFO (supply the missing artifact, re-label), so it reuses the
+// needsInfo label; the comment is what makes the ask concrete.
+//
+// The unblocking routes are spelled out because most of them silently don't
+// work: the agent reads this issue as text (`gh issue view --json`), so a
+// pasted screenshot is a URL it can neither authenticate to nor see. An
+// in-repo file must be on the source branch before re-labelling, because issue
+// branches seed from `origin/<sourceBranch>`, not the operator's local.
+export const NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE = (
+  uiImpact: string,
+  needsInfoLabel: string,
+  readyLabel: string,
+): string =>
+  `${BOT_COMMENT_PREFIX} the agent stopped before writing any code. This issue ` +
+  `implies user-visible UI that no human has seen, and no prototype was found in ` +
+  `the issue body or comments — implementing it would mean inventing the design ` +
+  `and merging it unseen. The agent's assessment is below.\n\n` +
+  `To unblock, either:\n\n` +
+  `1. **Give it a prototype it can read.** Suggested route: commit a file to the ` +
+  `repo (e.g. \`docs/prototypes/issue-<n>.html\`) and reference it by path here — ` +
+  `push it to the source branch first, because issue branches are seeded from ` +
+  `origin, not your local checkout. An inline fenced markup block or ASCII ` +
+  `wireframe in a comment works just as well, as does a prose spec precise enough ` +
+  `to pin the decisions listed below. A screenshot on its own does not: the agent ` +
+  `reads this issue as text and cannot see images.\n` +
+  `2. **Reply "no prototype needed"** if you're happy for the agent to make these ` +
+  `design decisions itself.\n\n` +
+  `Then drop \`${needsInfoLabel}\` and re-apply \`${readyLabel}\`.\n\n` +
+  `---\n\n${uiImpact}`;
+
 export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
   failureTrace: string,
   stuckLabel: string,
@@ -121,6 +153,17 @@ export type FinalizeInput =
       readonly kind: "needs-info";
       readonly issue: IssueRef;
       readonly questions: string;
+    }
+  // #21 — implementer escalated on non-trivial UI impact with no prototype.
+  // Same handoff shape as needs-info (comment + `ready-for-agent` → needsInfo),
+  // but the branch is pushed only when `hasCommits`: the escalation normally
+  // fires before any code exists, and pushing then would publish a remote
+  // branch identical to the source tip — one junk ref per escalation.
+  | {
+      readonly kind: "needs-ui-prototype";
+      readonly issue: IssueRef;
+      readonly uiImpact: string;
+      readonly hasCommits: boolean;
     }
   | {
       // Impl-attempt budget exhausted. `cause` selects the comment so the human
@@ -215,6 +258,7 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
   "merge-conflict",
   "merge-gate-red",
   "needs-info",
+  "needs-ui-prototype",
   "needs-human",
   "review-budget-exhausted",
   "silent-noop-exhausted",
@@ -329,6 +373,41 @@ export async function finalizeOne(
       );
       requireFlip(r, n);
       return { kind: "pushed" };
+    }
+    case "needs-ui-prototype": {
+      const n = issueNumberOf(input.issue);
+      await adapter.removeWorktreeFor(input.issue.branch);
+      if (input.hasCommits) {
+        // Late escalation: the agent had already committed before it realised
+        // it was inventing UI. Hand the partial work to the human.
+        await adapter.pushBranch(input.issue.branch);
+      }
+      await adapter.postComment(
+        n,
+        NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
+          input.uiImpact,
+          labels.needsInfo,
+          READY_FOR_AGENT_LABEL,
+        ),
+      );
+      const r = await adapter.editLabels(
+        n,
+        [READY_FOR_AGENT_LABEL],
+        [labels.needsInfo],
+      );
+      requireFlip(r, n);
+      if (input.hasCommits) return { kind: "pushed" };
+      // Nothing was written, so there is nothing to preserve — drop the local
+      // branch too. ensureIssueBranch reuses an existing branch verbatim, so
+      // keeping an empty one would pin the next run (after the human supplies
+      // the prototype) to a stale origin tip. `-D` fallback because `-d`
+      // refuses whenever local HEAD is behind the origin tip we seeded from.
+      const d = await adapter.deleteBranch(input.issue.branch);
+      if (d.ok) return { kind: "deleted-local" };
+      const f = await adapter.forceDeleteBranch(input.issue.branch);
+      return f.ok
+        ? { kind: "deleted-local" }
+        : { kind: "delete-failed", error: f.error ?? d.error ?? "" };
     }
     case "needs-human": {
       const n = issueNumberOf(input.issue);

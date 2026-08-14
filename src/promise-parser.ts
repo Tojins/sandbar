@@ -1,14 +1,25 @@
 // Promise-token parser.
 //
 // The agent signals state with a single `<promise>TOKEN</promise>` tag.
-// Two tokens are valid: `COMPLETE` (claims the work is done) and `NEEDS-INFO`
-// (asks the human for help, paired with a `<questions>` block). Anything else
-// is a no-signal — the inner loop keeps going, optionally with a re-prompt
-// hint payload that the next attempt's prompt should include.
+// Three tokens are valid: `COMPLETE` (claims the work is done), `NEEDS-INFO`
+// (asks the human for help, paired with a `<questions>` block) and
+// `NEEDS-UI-PROTOTYPE` (#21 — the issue implies non-trivial user-visible UI and
+// carries no prototype, paired with a `<ui-impact>` block). Anything else is a
+// no-signal — the inner loop keeps going, optionally with a re-prompt hint
+// payload that the next attempt's prompt should include.
+//
+// NEEDS-UI-PROTOTYPE is deliberately NOT guarded on `commitsAccumulated === 0`
+// (the mirror image of the COMPLETE guard). The prompt asks for the assessment
+// before any code is written, but an agent often only realises it is inventing
+// UI a few files in — and that is exactly when we most want it to stop.
+// Rejecting a late escalation would punish it for noticing, so "no commits
+// exist when this fires" stays a prompt-level expectation, never an invariant
+// downstream code relies on (finalize handles both cases).
 
 export type ParseSignal =
   | { readonly kind: "COMPLETE" }
   | { readonly kind: "NEEDS-INFO"; readonly questions: string }
+  | { readonly kind: "NEEDS-UI-PROTOTYPE"; readonly uiImpact: string }
   | { readonly kind: "NO-SIGNAL"; readonly reprompt?: string };
 
 export type ParseContext = {
@@ -29,6 +40,12 @@ const NEEDS_INFO_NO_QUESTIONS =
   "You declared `<promise>NEEDS-INFO</promise>` but no `<questions>` block " +
   "was provided. Either include the specific questions you need answered, " +
   "or continue implementing.";
+
+const NEEDS_UI_PROTOTYPE_NO_IMPACT =
+  "You declared `<promise>NEEDS-UI-PROTOTYPE</promise>` but no `<ui-impact>` " +
+  "block was provided. Either include the assessment — what visible UI this " +
+  "change would create or alter, which design decisions you would be " +
+  "inventing, and what artifact would unblock you — or continue implementing.";
 
 export function parsePromise(
   stdout: string,
@@ -57,10 +74,18 @@ export function parsePromise(
     return { kind: "NEEDS-INFO", questions: qm[1].trim() };
   }
 
+  if (token === "NEEDS-UI-PROTOTYPE") {
+    const im = stdout.match(/<ui-impact>([\s\S]*?)<\/ui-impact>/);
+    if (!im || !im[1] || !im[1].trim()) {
+      return { kind: "NO-SIGNAL", reprompt: NEEDS_UI_PROTOTYPE_NO_IMPACT };
+    }
+    return { kind: "NEEDS-UI-PROTOTYPE", uiImpact: im[1].trim() };
+  }
+
   return {
     kind: "NO-SIGNAL",
     reprompt:
-      `Unknown promise token: "${token}". Only \`COMPLETE\` and \`NEEDS-INFO\` ` +
-      "are valid. Continue working.",
+      `Unknown promise token: "${token}". Only \`COMPLETE\`, \`NEEDS-INFO\` ` +
+      "and `NEEDS-UI-PROTOTYPE` are valid. Continue working.",
   };
 }

@@ -14,6 +14,11 @@
 // Each advanceAttempt caller supplies the exhaustion verdict because only it
 // knows which case it's in.
 //
+// NEEDS-UI-PROTOTYPE (#21) is the second short-circuit terminal alongside
+// NEEDS-INFO: the implementer judged the issue to imply non-trivial
+// user-visible UI with no prototype to work from, so the loop stops before the
+// gate rather than let an invented design reach the merger.
+//
 // Reviewer is strictly advisory: it never commits and the SM never asks the
 // runner to revert anything. Convergence comes from the bar being sharp
 // enough for the reviewer to issue a deterministic verdict, not from
@@ -59,6 +64,16 @@ export type LoopState = {
 export type Verdict =
   | { readonly type: "DONE" }
   | { readonly type: "NEEDS-INFO"; readonly questions: string }
+  | {
+      // #21 — the implementer judged the issue to imply non-trivial
+      // user-visible UI with no prototype to work from. Immediate terminal:
+      // no gate, no reviewer, no further attempts (a second attempt would
+      // re-read the same issue and reach the same conclusion), and no
+      // retry-with-fresh-sandbox — the blocker is a missing human artifact,
+      // not anything the loop can produce.
+      readonly type: "NEEDS-UI-PROTOTYPE";
+      readonly uiImpact: string;
+    }
   | {
       // Impl-attempt budget exhausted. `cause` names the real blocker so the
       // human-handoff message is accurate (#17):
@@ -186,6 +201,12 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
 function onImplementerResult(state: LoopState, signal: ParseSignal): StepResult {
   if (signal.kind === "NEEDS-INFO") {
     return terminate(state, { type: "NEEDS-INFO", questions: signal.questions });
+  }
+  if (signal.kind === "NEEDS-UI-PROTOTYPE") {
+    return terminate(state, {
+      type: "NEEDS-UI-PROTOTYPE",
+      uiImpact: signal.uiImpact,
+    });
   }
   if (signal.kind === "COMPLETE") {
     return {

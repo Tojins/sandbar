@@ -53,6 +53,14 @@ export type Terminal =
   | { readonly type: "DONE"; readonly commits: readonly { sha: string }[] }
   | { readonly type: "NEEDS-INFO"; readonly questions: string }
   | {
+      // #21. `commits` is normally empty (the assessment happens before any
+      // code is written) but is carried because a late escalation is accepted:
+      // finalize pushes the branch only when the agent already committed.
+      readonly type: "NEEDS-UI-PROTOTYPE";
+      readonly uiImpact: string;
+      readonly commits: readonly { sha: string }[];
+    }
+  | {
       readonly type: "NEEDS-HUMAN";
       readonly cause: "gate-red" | "reviewer-blocked";
       readonly failureTrace: string;
@@ -123,6 +131,12 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
       return { type: "DONE", commits: accumulatedCommits };
     case "NEEDS-INFO":
       return { type: "NEEDS-INFO", questions: verdict.questions };
+    case "NEEDS-UI-PROTOTYPE":
+      return {
+        type: "NEEDS-UI-PROTOTYPE",
+        uiImpact: verdict.uiImpact,
+        commits: accumulatedCommits,
+      };
     case "NEEDS-HUMAN":
       return {
         type: "NEEDS-HUMAN",

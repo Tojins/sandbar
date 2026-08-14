@@ -9,6 +9,7 @@ import {
   NEEDS_HUMAN_COMMENT_TEMPLATE,
   NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE,
   NEEDS_INFO_COMMENT_TEMPLATE,
+  NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE,
   READY_FOR_AGENT_LABEL as READY_FOR_AGENT,
   REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE,
   finalizeAll,
@@ -137,6 +138,22 @@ describe("comment templates", () => {
     expect(body).toContain(NEEDS_INFO);
     expect(body).toContain(READY_FOR_AGENT);
   });
+  it("NEEDS-UI-PROTOTYPE body includes bot prefix, the impact prose, both unblock routes, and the configured labels", () => {
+    const body = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
+      "New settings screen; tab order and empty state invented.",
+      NEEDS_INFO,
+      READY_FOR_AGENT,
+    );
+    expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
+    expect(body).toContain("tab order and empty state invented");
+    // Both ways out must be stated: attach a readable artifact, or say the
+    // agent may decide for itself (#21 — the acknowledgement is what stops the
+    // next run from escalating again).
+    expect(body).toContain("no prototype needed");
+    expect(body).toContain("cannot see images");
+    expect(body).toContain(NEEDS_INFO);
+    expect(body).toContain(READY_FOR_AGENT);
+  });
   it("NEEDS-HUMAN body includes bot prefix, the failure trace, and the configured labels", () => {
     const body = NEEDS_HUMAN_COMMENT_TEMPLATE("E: boom\nstack…", AGENT_STUCK, READY_FOR_AGENT);
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
@@ -262,6 +279,83 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
     ]);
+  });
+
+  // #21. The escalation normally fires before a line of code exists, so there
+  // is nothing to push and nothing worth keeping on the branch.
+  it("needs-ui-prototype without commits: no push, comments, swaps labels, drops the local branch", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "needs-ui-prototype",
+        issue: i,
+        uiImpact: "New settings screen; tab order invented.",
+        hasCommits: false,
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "deleted-local" });
+    expect(calls.pushes).toEqual([]);
+    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.deletes).toEqual([i.branch]);
+    expect(calls.comments.length).toBe(1);
+    expect(calls.comments[0]!.n).toBe(45);
+    expect(calls.comments[0]!.body).toContain("New settings screen; tab order invented.");
+    expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
+    ]);
+  });
+
+  it("needs-ui-prototype without commits: force-deletes when -d refuses", async () => {
+    const { adapter, calls } = makeAdapter({ deleteOk: false });
+    const i = issue(45);
+    const action = await finalizeOne(
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: false },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "deleted-local" });
+    expect(calls.forceDeletes).toEqual([i.branch]);
+  });
+
+  // A late escalation: the agent committed before it realised it was inventing
+  // UI, so the partial work is handed to the human and the branch is kept.
+  it("needs-ui-prototype with commits: pushes and keeps the branch", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: true },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    expect(calls.pushes).toEqual([i.branch]);
+    expect(calls.deletes).toEqual([]);
+    expect(calls.forceDeletes).toEqual([]);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
+    ]);
+  });
+
+  it("needs-ui-prototype on an already-CLOSED issue: no comment, no label flip (#16)", async () => {
+    const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
+    const i = issue(45);
+    const action = await finalizeOne(
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: false },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "skipped-closed" });
+    expect(calls.comments).toEqual([]);
+    expect(calls.labelEdits).toEqual([]);
+    expect(calls.worktreeRemoves).toEqual([i.branch]);
   });
 
   it("needs-human: removes worktree, pushes, comments with failure trace, swaps labels", async () => {

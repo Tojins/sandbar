@@ -424,6 +424,13 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             issue: o.issue,
             questions: t.questions,
           });
+        } else if (t.type === "NEEDS-UI-PROTOTYPE") {
+          finalizeInputs.push({
+            kind: "needs-ui-prototype",
+            issue: o.issue,
+            uiImpact: t.uiImpact,
+            hasCommits: t.commits.length > 0,
+          });
         } else if (t.type === "NEEDS-HUMAN") {
           finalizeInputs.push({
             kind: "needs-human",
