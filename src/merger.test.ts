@@ -5,6 +5,7 @@ import type { PushOutcome, VerifyAdapter } from "./forge-verify.js";
 import type { MergerGateOutput } from "./merger.js";
 import {
   INSTALL_FAILED_COMMENT,
+  buildForgeUnverifiedComment,
   MergerError,
   READY_FOR_AGENT_LABEL,
   type IssueRef,
@@ -768,6 +769,9 @@ type VerifyFake = {
 function makeVerifyFake(opts: {
   checkConclusion?: string;
   integrationPush?: PushOutcome;
+  // Throw from a poll, the way an unreachable forge or an unreadable response
+  // does. These escape runVerifiedLanding as plain Errors, not MergerErrors.
+  listThrows?: Error;
 } = {}): VerifyFake {
   const vCalls = { integrationPushes: [] as string[], fastForwards: [] as string[], prs: 0 };
   const verify: VerifyAdapter = {
@@ -776,6 +780,7 @@ function makeVerifyFake(opts: {
       return opts.integrationPush ?? { kind: "ok" };
     },
     async listCheckRuns() {
+      if (opts.listThrows) throw opts.listThrows;
       return {
         runs: [
           {
@@ -933,7 +938,10 @@ describe("runMergerWithAdapter — verified merge mode", () => {
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
       gates: [{ ok: true }],
-      heads: ["base", "p1", "landed"],
+      // NOT an English word: "landed" also occurs in the comment's boilerplate
+      // ("nothing was landed on `main`"), so a sha spelled that way passes even
+      // if the builder cites the integration BRANCH instead of the sha.
+      heads: ["base", "p1", "deadbeef"],
     });
     const { verify } = makeVerifyFake({ checkConclusion: "failure" });
 
@@ -946,7 +954,12 @@ describe("runMergerWithAdapter — verified merge mode", () => {
 
     // The integration ref is force-pushed by the next cycle; the sha keeps its
     // check runs forever.
-    expect(calls.comments[0]!.msg).toContain("landed");
+    // The citation itself, not merely the sha somewhere in the message — the
+    // failure detail also quotes the sha, so a looser assertion passes even if
+    // the sentence names the scratch branch.
+    expect(calls.comments[0]!.msg).toContain(
+      "The check runs are on commit `deadbeef`",
+    );
     expect(calls.comments[0]!.msg).toContain("follow the sha, not the branch");
   });
 
@@ -996,5 +1009,129 @@ describe("runMergerWithAdapter — verified merge mode", () => {
     expect(summary.pushed).toBe(false);
     expect(vCalls.integrationPushes).toEqual([]);
     expect(calls.pushes).toBe(0);
+  });
+  it("wraps a raw throw from the landing so the tracker state still reaches Phase 4", async () => {
+    // The stranding this prevents: #7 has already been commented and stripped
+    // of `ready-for-agent` when the forge becomes unreachable. A plain Error
+    // escapes run.ts's `instanceof MergerError` check, Phase 4 never runs, and
+    // #7 ends on no queue and under no handoff label — invisible to the planner
+    // and to every human filter.
+    const { adapter } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [gateRed(), { ok: true }],
+      agents: [{ stdout: "<reason>nope</reason>\n<promise>ABANDON</promise>" }],
+      heads: ["base", "p1", "p2", "landed"],
+    });
+    const { verify } = makeVerifyFake({ listThrows: new Error("HTTP 502") });
+
+    const err = await runMergerWithAdapter(
+      [issue(7), issue(9)],
+      adapter,
+      undefined,
+      undefined,
+      { verified: { adapter: verify, options: VERIFIED_OPTIONS } },
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(MergerError);
+    // Still loud — the message names the underlying failure, it is not absorbed.
+    expect((err as MergerError).message).toContain("502");
+    expect((err as MergerError).partial?.skipped.map((sk) => sk.issue.id)).toEqual([
+      "7",
+    ]);
+  });
+
+  it("names the merged-but-unlanded issues when it halts", async () => {
+    // Their branches and labels survive, but nothing else tells the operator
+    // which work was composed and thrown away with the ephemeral worktree.
+    const { adapter } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      heads: ["base", "p1", "landed"],
+    });
+    const { verify } = makeVerifyFake({
+      integrationPush: { kind: "rejected", reason: "stale info" },
+    });
+
+    const err = await runMergerWithAdapter([issue(7)], adapter, undefined, undefined, {
+      verified: { adapter: verify, options: VERIFIED_OPTIONS },
+    }).catch((e: unknown) => e);
+
+    expect((err as MergerError).message).toContain("#7");
+    expect((err as MergerError).message).toMatch(/merged locally and NOT landed/);
+  });
+
+  it("does not tell the author their checks failed when the checks passed", async () => {
+    // source-moved: the forge went GREEN and the cycle was dropped over a race
+    // with a human push. Reporting that as a rejection sends the author to read
+    // a passing build looking for a failure that isn't there.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      heads: ["base", "p1", "deadbeef"],
+    });
+    const { verify } = makeVerifyFake();
+    verify.fastForwardSource = async () => ({
+      kind: "rejected",
+      reason: "non-fast-forward",
+    });
+
+    await runMergerWithAdapter([issue(7)], adapter, undefined, undefined, {
+      verified: {
+        adapter: verify,
+        options: { ...VERIFIED_OPTIONS, maxRounds: 1 },
+      },
+    });
+
+    const msg = calls.comments[0]!.msg;
+    expect(msg).toContain("checks PASSED");
+    expect(msg).not.toMatch(/checks rejected/);
+  });
+});
+
+describe("buildForgeUnverifiedComment", () => {
+  const base = {
+    detail: "d",
+    siblings: [],
+    integrationBranch: "sandbar/integration",
+    sourceBranch: "main",
+    verifiedSha: "abc123",
+    hasResolveCommits: false,
+  } as const;
+
+  it("warns that the resolve agent's commits are NOT on the branch being handed back", () => {
+    // They were made on the composed merge result, which the revert discarded.
+    // Without this the work silently evaporates and the author has no idea it
+    // ever existed.
+    const msg = buildForgeUnverifiedComment({
+      ...base,
+      reason: "checks-red",
+      hasResolveCommits: true,
+    });
+    expect(msg).toMatch(/does NOT contain them/);
+    expect(msg).toContain("abc123");
+  });
+
+  it("says nothing about discarded commits when there were none", () => {
+    const msg = buildForgeUnverifiedComment({ ...base, reason: "checks-red" });
+    expect(msg).not.toMatch(/does NOT contain them/);
+  });
+
+  it.each([
+    ["checks-red", /checks rejected/],
+    ["checks-timeout", /never concluded/],
+    ["source-moved", /checks PASSED/],
+    ["resolve-abandon", /gave up/],
+  ] as const)("describes %s accurately", (reason, pattern) => {
+    expect(buildForgeUnverifiedComment({ ...base, reason })).toMatch(pattern);
+  });
+
+  it("falls back to the branch only when there is no verified sha", () => {
+    const msg = buildForgeUnverifiedComment({
+      ...base,
+      reason: "checks-red",
+      verifiedSha: null,
+    });
+    expect(msg).not.toMatch(/on commit/);
+    expect(msg).toContain("sandbar/integration");
   });
 });

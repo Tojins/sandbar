@@ -40,8 +40,9 @@ await run({
     port: 3306,
     // Exec'd inside the container until exit 0; sees containerEnv above.
     readinessCommand: ["mysql", "-uroot", "-e", "SELECT 1"],
-    // Env injected into every gate run. DB_HOST and DB_PORT are RESERVED:
-    // sandbar always sets them to the sidecar's pinned IP + `port`.
+    // Env injected into every gate run. Four keys are RESERVED and always
+    // overwritten: DB_HOST and DB_PORT (the sidecar's pinned IP + `port`),
+    // plus CI=true and HOME=/tmp.
     gateEnv: { DB_USER: "root", DB_PASSWORD: "", DB_NAME: "app" },
     // Optional: containerArgs (image CMD args), initMounts (fixture files
     // mounted read-only, hostPath relative to the ISSUE WORKTREE),
@@ -49,7 +50,7 @@ await run({
     // readinessTimeoutMs (default 60000).
   },
 
-  // Everything below is OPTIONAL — shown here only to document the defaults.
+  // Everything else is OPTIONAL — see the tables below for the defaults.
   // Omit any line you're happy with.
 });
 ```
@@ -104,7 +105,7 @@ A direct push matches neither `pull_request` nor `push: branches-ignore:
 mergeMode: {
   kind: "verified",
   requiredChecks: ["tests"],                // REQUIRED, non-empty — see below
-  integrationBranch: "sandbar/integration", // default; must differ from sourceBranch
+  integrationBranch: "sandbar/integration", // default; must start with `sandbar/`
   checkTimeoutMs: 20 * 60_000,              // default
   pollIntervalMs: 15_000,                   // default
   noChecksGraceMs: 120_000,                 // default
@@ -116,9 +117,11 @@ Per cycle, once the local merges + gate are green, sandbar force-pushes the
 merge result to `integrationBranch`, polls that sha's check runs, and only a
 green verdict earns the fast-forward onto `sourceBranch`. A red forge goes to
 the resolve loop with the failing jobs' logs; checks that never conclude park
-the cycle. Sandbar never lands on an unknown verdict. Cost is one CI run per
-cycle when it passes first time, at most three when the agent is fixing — not
-one per implementer attempt.
+the cycle. Sandbar never lands on an unknown verdict — including a check that
+nobody named and that hasn't finished yet, which holds the verdict up exactly
+like a required one. Cost is one CI run per cycle when it passes first time and
+at most three otherwise (a re-merge after `sourceBranch` moves spends a round
+too, with no agent involved) — not one per implementer attempt.
 
 **`requiredChecks` is mandatory.** Name the check runs (as the forge reports
 them) that must exist *and* pass. It is the floor, not a filter: a check you
@@ -128,17 +131,38 @@ mis-triggered-workflow case verified mode exists to catch — so resolving the
 config fails rather than quietly weakening to "nothing was failing when I
 looked".
 
-Two failure modes are deliberately **fatal** rather than parked, because they
-are properties of the repo rather than of the code under test, and would
-otherwise recur every cycle while converting the backlog into `agent-stuck`:
-the forge reporting no checks at all for the pushed sha (widen
-`noChecksGraceMs` if your forge is merely slow to create runs), and a rejected
-push to the integration branch. If `sourceBranch` moves during the CI wait, the
+Some failures are deliberately **fatal** rather than parked, because they are
+properties of the repo rather than of the code under test, and would otherwise
+recur every cycle while converting the backlog into `agent-stuck`:
+
+- the forge reporting no checks at all for the pushed sha (widen
+  `noChecksGraceMs` if your forge is merely slow to create runs);
+- a name in `requiredChecks` that never appears while every other check on the
+  sha concludes — almost always a name that doesn't match what the forge
+  publishes, e.g. `test` where the job reports as `test (20.x)`, or the
+  workflow's name rather than the job's;
+- a rejected push to the integration branch;
+- a fast-forward the forge refuses when `sourceBranch` turns out not to have
+  moved (branch protection, a pre-receive hook, or a token without push
+  access);
+- an unreachable or unreadable forge across several consecutive polls.
+
+All of them halt the run loudly, after finalising the tracker state already
+applied in that cycle. If `sourceBranch` genuinely moves during the CI wait, the
 new tip is merged in and the result is re-verified — a green verdict is never
 carried over to a result the forge has not seen.
 
-`openPullRequest: true` adds a pull request against the integration branch as a
-review/audit handle. Landing is a fast-forward push either way, so commit
+`integrationBranch` must start with `sandbar/`. It is a scratch ref, force-pushed
+on every verification round, so it has to live in a namespace sandbar owns —
+pointing it at a branch anyone else uses would destroy that branch on the first
+cycle. Sandbar never deletes it; it simply gets overwritten each cycle. The other
+values are validated at startup too: every `*Ms` knob must be positive and
+finite, `pollIntervalMs` may not exceed `checkTimeoutMs`, and `noChecksGraceMs`
+must be less than it (otherwise the timeout always fires first and the no-checks
+halt becomes unreachable).
+
+`openPullRequest: true` adds a pull request — head `integrationBranch`, base
+`sourceBranch` — as a review/audit handle. Landing is a fast-forward push either way, so commit
 attribution is identical with it on or off; the forge marks the PR merged once
 its commits become ancestors of the base. Note that a repo whose CI triggers on
 both `pull_request` and `push` will run the suite twice per round with this on.
@@ -152,4 +176,10 @@ The host project also supplies on disk:
 - A `Containerfile` (at `containerfilePath`) for the sandbox image
 - Optionally, a `CODING_STANDARDS.md` (`codingStandardsPath`) — the reviewer ships with built-in default coding standards (`prompts/coding-standards.md`); this file *extends* them and is not required
 - `.env` (at `envFilePath`) with `GH_TOKEN` and either `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`
+
+`verified` mode additionally uses the host's own `gh` auth (not the container's
+`GH_TOKEN`) for `gh api .../check-runs`, `gh api .../commits/<sha>/status`,
+`gh run view --log-failed` and, with `openPullRequest`, `gh pr list/create/edit/close`.
+A token that cannot read Actions surfaces as repeated poll failures, which halt
+the run.
 - Project anchor docs (`CLAUDE.md`, optional `CONTEXT.md`, optional ADR directory)

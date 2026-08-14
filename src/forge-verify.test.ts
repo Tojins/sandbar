@@ -147,7 +147,11 @@ describe("aggregateCheckRuns", () => {
     expect(v.kind).toBe("red");
   });
 
-  it("with requiredChecks, does not wait for unrelated checks that are still running", () => {
+  it("waits for an UNRELATED check that is still running, not just the required ones", () => {
+    // The floor says what must exist and pass; it does not say which unknowns
+    // may be ignored. `codecov` will conclude, and it can conclude red — so a
+    // green here would be "everything that had finished when I looked was
+    // fine", which is the verdict this module exists not to give.
     const v = aggregateCheckRuns(
       [
         run({ name: "tests" }),
@@ -155,12 +159,34 @@ describe("aggregateCheckRuns", () => {
       ],
       ["tests"],
     );
-    expect(v).toEqual({ kind: "green", names: ["tests"] });
+    expect(v).toEqual({ kind: "pending", waitingOn: ["codecov"] });
+  });
+
+  it("goes green once the unrelated check concludes green too", () => {
+    const v = aggregateCheckRuns(
+      [run({ name: "tests" }), run({ name: "codecov", id: 2 })],
+      ["tests"],
+    );
+    expect(v.kind).toBe("green");
   });
 
   it("with requiredChecks, stays pending until a named check appears", () => {
     const v = aggregateCheckRuns([run({ name: "tests" })], ["tests", "browser"]);
-    expect(v).toEqual({ kind: "pending", waitingOn: ["browser"] });
+    expect(v).toEqual({
+      kind: "pending",
+      waitingOn: ["browser"],
+      // Separated from waitingOn so the poller can tell "never reported" from
+      // "still running" — the two need opposite handling.
+      missingRequired: ["browser"],
+    });
+  });
+
+  it("reports a still-running required check as waiting but NOT as missing", () => {
+    const v = aggregateCheckRuns(
+      [run({ name: "tests", status: "in_progress", conclusion: null })],
+      ["tests"],
+    );
+    expect(v).toEqual({ kind: "pending", waitingOn: ["tests"] });
   });
 
   it("with requiredChecks, requires EVERY suite reporting that name to pass", () => {
@@ -418,6 +444,7 @@ type VerifyCalls = {
   synced: number;
   prCreated: number;
   prTitles: string[];
+  prBodies: string[];
   prClosed: { number: number; comment: string }[];
   logsFetched: string[];
   agentPrompts: string[];
@@ -435,6 +462,7 @@ function makeVerify(script: VerifyScript): {
     synced: 0,
     prCreated: 0,
     prTitles: [],
+    prBodies: [],
     prClosed: [],
     logsFetched: [],
     agentPrompts: [],
@@ -457,6 +485,11 @@ function makeVerify(script: VerifyScript): {
     if (o.kind === "red")
       return [...o.failed, run({ name: "tests", id: 9999, suiteId: 999 })];
     if (o.kind === "no-checks") return [];
+    // A concluded check whose name is NOT the configured floor — the shape a
+    // matrix suffix or a workflow-vs-job name mix-up produces. The real
+    // waitForChecks logic has to derive `missing-required` from it; scripting
+    // the outcome directly would bypass the thing under test.
+    if (o.kind === "missing-required") return [run({ name: "test (20.x)" })];
     return [run({ name: "tests", status: "in_progress", conclusion: null })];
   };
 
@@ -484,9 +517,13 @@ function makeVerify(script: VerifyScript): {
       if (r.ok) round += 1;
       return r;
     },
-    async ensurePullRequest({ title }): Promise<PullRequestRef> {
+    async ensurePullRequest({ title, body }): Promise<PullRequestRef> {
       calls.prCreated += 1;
       calls.prTitles.push(title);
+      // Captured, not discarded: the body is built by pullRequestBody() inside
+      // runVerifiedLanding, so a fake that drops it leaves the only production
+      // caller of that function untested.
+      calls.prBodies.push(body);
       return { number: 99, url: "https://github.com/o/r/pull/99" };
     },
     async closePullRequest(number, comment) {
@@ -685,16 +722,31 @@ describe("runVerifiedLanding", () => {
   });
 
   it("closes an open pull request on a fatal too, rather than leaving it to be reused", async () => {
+    // A FATAL, not an abandon: the run stops here, so nothing else will ever
+    // tidy this PR up — and an open one is silently reused by the next run's
+    // first cycle, carrying this cycle's title into a PR about other issues.
+    const { result, calls } = await land(
+      { checks: [{ kind: "no-checks" }], heads: ["sha-A"] },
+      { openPullRequest: true, noChecksGraceMs: 10_000 },
+    );
+    expect(result.kind).toBe("fatal");
+    expect(calls.prClosed.map((p) => p.number)).toEqual([99]);
+  });
+
+  it("puts the real generated body on the pull request, with no auto-closing keyword", async () => {
+    // `Closes #n` would be a trap: GitHub only honours it on the default
+    // branch, so on any other sourceBranch the issues silently stay open while
+    // the body claims otherwise. Sandbar closes its own issues in Phase 4.
     const { calls } = await land(
-      {
-        checks: [{ kind: "green", names: ["tests"] }],
-        fastForward: [{ kind: "rejected", reason: "non-fast-forward" }],
-        sync: [{ ok: false, reason: "conflict" }],
-        heads: ["sha-A"],
-      },
+      { checks: [{ kind: "green", names: ["tests"] }], heads: ["sha-A"] },
       { openPullRequest: true },
     );
-    expect(calls.prClosed.map((p) => p.number)).toEqual([99]);
+    const body = calls.prBodies[0] ?? "";
+    expect(body).not.toMatch(/\b(Closes|Fixes|Resolves) #/i);
+    // …and it is the real generated body, not an empty string or a fixture
+    // that would satisfy the assertion above for free.
+    expect(body).toContain("#7 — t-7");
+    expect(body).toContain("#9 — t-9");
   });
 
   it("never fast-forwards on an unknown verdict (checks that never conclude)", async () => {
@@ -737,7 +789,9 @@ describe("runVerifiedLanding", () => {
         { kind: "green", names: ["tests"] },
       ],
       fastForward: [{ kind: "rejected", reason: "non-fast-forward" }, { kind: "ok" }],
-      heads: ["sha-A", "sha-B"],
+      // Three reads: round 1's HEAD, the post-sync check that the re-merge
+      // actually produced a commit, then round 2's HEAD.
+      heads: ["sha-A", "sha-B", "sha-B"],
     });
     expect(result).toMatchObject({ kind: "landed", sha: "sha-B", rounds: 2 });
     expect(calls.synced).toBe(1);
@@ -784,14 +838,17 @@ describe("runVerifiedLanding", () => {
 // refspec.
 // ---------------------------------------------------------------------------
 
-type ExecCall = { file: string; args: string[] };
+type ExecCall = { file: string; args: string[]; cwd: string | undefined };
 
 function fakeExec(
   handler: (call: ExecCall) => { stdout?: string; stderr?: string } | Error,
 ): { exec: ExecFn; calls: ExecCall[] } {
   const calls: ExecCall[] = [];
-  const exec: ExecFn = async (file, args) => {
-    const call = { file, args: [...args] };
+  const exec: ExecFn = async (file, args, opts) => {
+    // `cwd` is captured, not discarded: every git call here must run in the
+    // merger worktree, and a regression that dropped it would silently operate
+    // on the developer's own checkout.
+    const call = { file, args: [...args], cwd: opts?.cwd };
     calls.push(call);
     const r = handler(call);
     if (r instanceof Error) throw r;
@@ -806,7 +863,18 @@ function fakeExec(
 function adapterWith(exec: ExecFn, statuses: unknown[] = []) {
   const wrapped: ExecFn = async (file, args, opts) =>
     args.some((a) => a.includes("/status?"))
-      ? { stdout: JSON.stringify({ state: "success", statuses }), stderr: "" }
+      ? {
+          // The REAL shape: a commit with no statuses reports state "pending",
+          // not "success" (verified against the live API). Faking success here
+          // would hide the production rule that the `statuses` array — never
+          // the envelope's `state` — decides, and that rule is the difference
+          // between working normally and parking every ordinary commit forever.
+          stdout: JSON.stringify({
+            state: statuses.length > 0 ? "failure" : "pending",
+            statuses,
+          }),
+          stderr: "",
+        }
       : exec(file, args, opts);
   return realVerifyAdapter({
     cwd: "/wt",
@@ -1153,5 +1221,374 @@ describe("realVerifyAdapter — legacy commit statuses", () => {
         exec,
       }).listCheckRuns("sha1"),
     ).rejects.toThrow(/502/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The listing's completeness argument. Everything above trusts `complete`;
+// these are the tests that make it worth trusting.
+// ---------------------------------------------------------------------------
+
+describe("realVerifyAdapter.listCheckRuns — completeness", () => {
+  it("counts DISTINCT runs, so a duplicate across pages cannot fake a whole read", async () => {
+    // The listing has no documented order and page 2 is a separate request, so
+    // a run that shifts position between them is returned twice while another
+    // is never returned at all. Counting rows would hit total_count with a run
+    // missing — and the missing one is the one that could be red.
+    const page1 = Array.from({ length: 100 }, (_, i) =>
+      checkRunJson({ id: i + 1, name: `job-${i + 1}` }),
+    );
+    const page2 = [
+      checkRunJson({ id: 100, name: "job-100" }), // repeat of page 1
+      ...Array.from({ length: 49 }, (_, i) =>
+        checkRunJson({ id: 101 + i, name: `job-${101 + i}` }),
+      ),
+    ];
+    const { exec } = fakeExec((c) => ({
+      stdout: JSON.stringify({
+        total_count: 150,
+        check_runs: c.args.some((a) => a.includes("&page=1")) ? page1 : page2,
+      }),
+    }));
+    const out = await adapterWith(exec).listCheckRuns("sha1");
+    expect(out.runs).toHaveLength(149);
+    // 149 distinct < 150 claimed: the read is NOT whole, and a listing that is
+    // not whole can never produce a verdict.
+    expect(out.complete).toBe(false);
+    const clock = fakeClock(1_000);
+    expect(
+      await waitForChecks(
+        "sha1",
+        { timeoutMs: 10, pollIntervalMs: 5 },
+        { listCheckRuns: async () => out, now: clock.now, sleep: clock.sleep },
+      ),
+    ).toMatchObject({ kind: "timeout" });
+  });
+
+  it("throws rather than assuming zero when total_count is missing", async () => {
+    // Defaulting it to 0 makes `seen >= totalCount` true after page 1 and
+    // declares a 250-run sha whole at 100 — a failure in the one direction
+    // this module must never fail in.
+    const { exec } = fakeExec(() => ({
+      stdout: JSON.stringify({
+        check_runs: Array.from({ length: 100 }, (_, i) => checkRunJson({ id: i + 1 })),
+      }),
+    }));
+    await expect(adapterWith(exec).listCheckRuns("sha1")).rejects.toThrow(
+      /total_count/,
+    );
+  });
+
+  it("throws on a run with no numeric id rather than keying it as 0", async () => {
+    // Every unreadable id collapses onto key `0 <name>`, where `r.id > prev.id`
+    // is false and the FIRST row wins — landing a stale green over a later red.
+    const { exec } = fakeExec(() => ({
+      stdout: JSON.stringify({
+        total_count: 1,
+        check_runs: [checkRunJson({ id: null })],
+      }),
+    }));
+    await expect(adapterWith(exec).listCheckRuns("sha1")).rejects.toThrow(/id/);
+  });
+
+  it("runs every git and gh call in the merger worktree, never the operator's checkout", async () => {
+    const { exec, calls } = fakeExec(() => ({
+      stdout: JSON.stringify({ total_count: 0, check_runs: [] }),
+    }));
+    await adapterWith(exec).listCheckRuns("sha1");
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((c) => c.cwd === "/wt")).toBe(true);
+  });
+});
+
+describe("realVerifyAdapter — commit-status supersession", () => {
+  it("does not keep a status a later entry for the same context supersedes", async () => {
+    // The failure filter runs before anything can supersede, so without a
+    // per-context collapse a context that failed and was re-run green would
+    // read red forever — parking every cycle on a stale failure.
+    const { exec } = fakeExec(() => ({
+      stdout: JSON.stringify({ total_count: 1, check_runs: [checkRunJson()] }),
+    }));
+    const out = await adapterWith(exec, [
+      { id: 2, state: "success", context: "buildkite/build", target_url: "" },
+      { id: 1, state: "failure", context: "buildkite/build", target_url: "" },
+    ]).listCheckRuns("sha1");
+    expect(out.runs.some((r) => r.name.startsWith("status:"))).toBe(false);
+  });
+
+  it("folds an 'error' status, not just a 'failure' one", async () => {
+    // Jenkins and Buildkite both post `error` for infrastructure failures.
+    const { exec } = fakeExec(() => ({
+      stdout: JSON.stringify({ total_count: 1, check_runs: [checkRunJson()] }),
+    }));
+    const out = await adapterWith(exec, [
+      { id: 9, state: "error", context: "jenkins/pr", target_url: "" },
+    ]).listCheckRuns("sha1");
+    expect(aggregateCheckRuns(out.runs, ["tests"]).kind).toBe("red");
+  });
+
+  it("reads the statuses array, not the envelope state, so an ordinary commit is green", async () => {
+    // A commit with zero statuses reports state "pending". Trusting that would
+    // park every cycle on a status nobody is ever going to conclude.
+    const { exec } = fakeExec(() => ({
+      stdout: JSON.stringify({ total_count: 1, check_runs: [checkRunJson()] }),
+    }));
+    const out = await adapterWith(exec, []).listCheckRuns("sha1");
+    expect(out.runs.every((r) => !r.name.startsWith("status:"))).toBe(true);
+    expect(aggregateCheckRuns(out.runs, ["tests"]).kind).toBe("green");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The settle window, both words of it: green must hold across CONSECUTIVE
+// polls with an UNCHANGED run set. Each of these fails a different mutation.
+// ---------------------------------------------------------------------------
+
+describe("waitForChecks — settle semantics", () => {
+  const opts = { timeoutMs: 60_000, pollIntervalMs: 1_000 };
+
+  it("does not count a green snapshot that GREW between polls as settled", async () => {
+    // The exact shape of a workflow_run chain: poll 1 sees one green check,
+    // poll 2 sees it plus a new one that was created after it concluded. Both
+    // polls are green, but they are not the same verdict — and the third check
+    // this arrival implies could still be red.
+    const clock = fakeClock(1_000);
+    const pages: ForgeCheckRun[][] = [
+      [run({ name: "tests" })],
+      [run({ name: "tests" }), run({ name: "deploy", id: 2 })],
+      [run({ name: "tests" }), run({ name: "deploy", id: 2 })],
+    ];
+    let calls = 0;
+    const out = await waitForChecks("sha1", opts, {
+      listCheckRuns: async () => listing(pages[calls++] ?? []),
+      sleep: clock.sleep,
+      now: clock.now,
+    });
+    expect(out).toMatchObject({ kind: "green" });
+    // 3, not 2: the changed run set restarted the streak rather than
+    // completing it.
+    expect(calls).toBe(3);
+  });
+
+  it("requires the green polls to be CONSECUTIVE, not merely to total N", async () => {
+    const clock = fakeClock(1_000);
+    const pages: ForgeCheckRun[][] = [
+      [run({ name: "tests" })],
+      [run({ name: "tests", status: "in_progress", conclusion: null })],
+      [run({ name: "tests" })],
+      [run({ name: "tests" })],
+    ];
+    let calls = 0;
+    const out = await waitForChecks("sha1", opts, {
+      listCheckRuns: async () => listing(pages[calls++] ?? []),
+      sleep: clock.sleep,
+      now: clock.now,
+    });
+    expect(out).toMatchObject({ kind: "green" });
+    // The green at poll 1 does not combine with the green at poll 3.
+    expect(calls).toBe(4);
+  });
+
+  it("resets the error budget after a successful poll", async () => {
+    // Without the reset, two failures an hour apart on a long wait would spend
+    // the budget as if they were consecutive.
+    const clock = fakeClock(1_000);
+    const script: (ForgeCheckRun[] | "boom")[] = [
+      "boom",
+      [run({ name: "tests", status: "queued", conclusion: null })],
+      "boom",
+      "boom",
+      [run({ name: "tests" })],
+      [run({ name: "tests" })],
+    ];
+    let calls = 0;
+    const out = await waitForChecks("sha1", opts, {
+      listCheckRuns: async () => {
+        const s = script[calls++];
+        if (s === "boom" || s === undefined) throw new Error("502");
+        return listing(s);
+      },
+      sleep: clock.sleep,
+      now: clock.now,
+    });
+    expect(out).toMatchObject({ kind: "green" });
+  });
+
+  it("reports an unreachable forge at the deadline as a timeout, never as no-checks", async () => {
+    // no-checks is FATAL and means "your workflow isn't triggered". Reporting
+    // an unreachable API that way would halt the run on a misdiagnosis.
+    // (Sustained unreachability — CHECK_POLL_MAX_CONSECUTIVE_ERRORS in a row —
+    // throws instead; this is the deadline arriving first.)
+    const clock = fakeClock(1_000);
+    const out = await waitForChecks(
+      "sha1",
+      { timeoutMs: 1_000, pollIntervalMs: 1_500 },
+      {
+        listCheckRuns: async () => {
+          throw new Error("network down");
+        },
+        sleep: clock.sleep,
+        now: clock.now,
+      },
+    );
+    expect(out.kind).toBe("timeout");
+  });
+
+  it("never reports no-checks from an INCOMPLETE empty listing", async () => {
+    // An empty listing that could not be shown to be whole is not evidence
+    // that nothing runs for this ref — and no-checks halts the entire run.
+    const clock = fakeClock(1_000);
+    const out = await waitForChecks(
+      "sha1",
+      { timeoutMs: 5_000, pollIntervalMs: 1_000, noChecksGraceMs: 1_000 },
+      {
+        listCheckRuns: async () => ({ runs: [], complete: false }),
+        sleep: clock.sleep,
+        now: clock.now,
+      },
+    );
+    expect(out.kind).toBe("timeout");
+  });
+});
+
+describe("waitForChecks — a required check that never appears", () => {
+  const base = { timeoutMs: 600_000, pollIntervalMs: 1_000, noChecksGraceMs: 5_000 };
+
+  it("is missing-required, not a timeout, once everything else has concluded", async () => {
+    // The overwhelmingly likely cause is a name that doesn't match what the
+    // forge reports ("test" vs "test (20.x)"). Parking burns a full CI timeout
+    // every cycle and drains the backlog into agent-stuck for a typo.
+    const clock = fakeClock(1_000);
+    const out = await waitForChecks(
+      "sha1",
+      { ...base, requiredChecks: ["test"] },
+      {
+        listCheckRuns: async () => listing([run({ name: "test (20.x)" })]),
+        sleep: clock.sleep,
+        now: clock.now,
+      },
+    );
+    expect(out).toEqual({ kind: "missing-required", names: ["test"] });
+  });
+
+  it("keeps waiting while ANY check is still running", async () => {
+    // A chained workflow's check is created after the run that triggers it
+    // concludes, so "everything visible has finished and mine isn't here" is a
+    // routine transient — it must hold for the whole grace window to count.
+    const clock = fakeClock(1_000);
+    let calls = 0;
+    const out = await waitForChecks(
+      "sha1",
+      { ...base, timeoutMs: 30_000, requiredChecks: ["deploy"] },
+      {
+        listCheckRuns: async () => {
+          calls++;
+          return listing(
+            calls < 3
+              ? [run({ name: "build", status: "in_progress", conclusion: null })]
+              : [run({ name: "build" }), run({ name: "deploy", id: 2 })],
+          );
+        },
+        sleep: clock.sleep,
+        now: clock.now,
+      },
+    );
+    expect(out).toMatchObject({ kind: "green" });
+  });
+
+  it("resets the clock when the missing check finally turns up", async () => {
+    const clock = fakeClock(1_000);
+    let calls = 0;
+    const out = await waitForChecks(
+      "sha1",
+      { ...base, timeoutMs: 60_000, requiredChecks: ["deploy"] },
+      {
+        listCheckRuns: async () => {
+          calls++;
+          // Everything concluded and `deploy` absent for the first few polls —
+          // but it arrives before the grace window is out.
+          return listing(
+            calls < 4
+              ? [run({ name: "build" })]
+              : [run({ name: "build" }), run({ name: "deploy", id: 2 })],
+          );
+        },
+        sleep: clock.sleep,
+        now: clock.now,
+      },
+    );
+    expect(out).toMatchObject({ kind: "green" });
+  });
+});
+
+describe("runVerifiedLanding — repo-level faults halt instead of parking", () => {
+  it("is FATAL when a requiredChecks name matches nothing the forge reports", async () => {
+    const { result, calls } = await land(
+      { checks: [{ kind: "missing-required", names: ["test"] }], heads: ["sha-A"] },
+      { requiredChecks: ["test"], noChecksGraceMs: 10_000 },
+    );
+    expect(result.kind).toBe("fatal");
+    // The message has to be actionable: the operator's next move is to compare
+    // the configured name against the job name the forge publishes.
+    expect(result.kind === "fatal" && result.detail).toMatch(/test \(20\.x\)/);
+    expect(calls.fastForwarded).toEqual([]);
+  });
+
+  it("is FATAL when the push is rejected but the source branch never moved", async () => {
+    // `git merge` against a ref already an ancestor prints "Already up to
+    // date." and exits 0, so a successful sync that leaves HEAD alone proves
+    // this was never a race: branch protection, a hook, or a token without
+    // push access. Re-verifying would spend the whole budget on a byte-
+    // identical sha and then blame a branch that never moved.
+    const { result, calls } = await land({
+      checks: [{ kind: "green", names: ["tests"] }],
+      fastForward: [{ kind: "rejected", reason: "protected branch hook declined" }],
+      // Same sha before and after the sync: the re-merge produced nothing.
+      heads: ["sha-A", "sha-A"],
+    });
+    expect(result.kind).toBe("fatal");
+    expect(result.kind === "fatal" && result.detail).toMatch(/already an ancestor/);
+    expect(calls.synced).toBe(1);
+    // One round spent, not three.
+    expect(calls.pushIntegration).toHaveLength(1);
+  });
+
+  it("still treats a genuine source move as a re-verify, not a fatal", async () => {
+    const { result } = await land({
+      checks: [
+        { kind: "green", names: ["tests"] },
+        { kind: "green", names: ["tests"] },
+      ],
+      fastForward: [{ kind: "rejected", reason: "non-fast-forward" }, { kind: "ok" }],
+      heads: ["sha-A", "sha-B", "sha-B"],
+    });
+    expect(result).toMatchObject({ kind: "landed", sha: "sha-B" });
+  });
+});
+
+describe("realVerifyAdapter.fetchFailureLog — argv", () => {
+  it("asks for the FAILED steps of the specific job, not the whole run", async () => {
+    // `--log` instead of `--log-failed` buries the failure in megabytes of
+    // successful step output, and the prompt built from it is what the resolve
+    // agent has to work from.
+    const { exec, calls } = fakeExec(() => ({ stdout: "boom" }));
+    await adapterWith(exec).fetchFailureLog(
+      run({
+        name: "tests",
+        conclusion: "failure",
+        detailsUrl: "https://github.com/o/r/actions/runs/12/job/345",
+      }),
+    );
+    const gh = calls.find((c) => c.file === "gh");
+    expect(gh?.args).toEqual([
+      "run",
+      "view",
+      "--repo",
+      "o/r",
+      "--job",
+      "345",
+      "--log-failed",
+    ]);
+    expect(gh?.cwd).toBe("/wt");
   });
 });

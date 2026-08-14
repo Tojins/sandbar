@@ -257,9 +257,12 @@ export type RunConfig = {
   readonly mergeMode?: MergeModeConfig;
 };
 
-// After resolution every defaultable field is concrete. Only the two fields
-// with no default — `codingStandardsPath` (genuinely optional) — stays
-// optional; `labels` is widened from Partial to the fully-populated vocabulary.
+// After resolution every defaultable field is concrete. `codingStandardsPath`
+// is the only one that stays optional (genuinely absent on most hosts). The
+// other three are re-declared rather than merely `Required<>`d because
+// resolution changes their TYPE, not just their presence: `labels` widens from
+// Partial to the fully-populated vocabulary, `dbSidecar` and `mergeMode` become
+// their resolved-and-validated forms.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
@@ -354,6 +357,22 @@ export function resolveMergeMode(
         `branches under that prefix.`,
     );
   }
+  // Confined to sandbar's own namespace, because this ref is FORCE-PUSHED every
+  // round with an unverified merge result. The lease is no protection: it is
+  // read from ls-remote milliseconds before the push, so it only catches a
+  // change inside that window — by design, since the ref is sandbar's to
+  // clobber. Point it at a branch someone else uses (`integrationBranch: "main"`
+  // with `sourceBranch: "develop"` is the shape) and cycle 1 destroys that
+  // branch. Requiring the prefix makes "is this ref mine to overwrite?" a
+  // question config can actually answer.
+  if (!integrationBranch.startsWith(BRANCH_PREFIX)) {
+    throw new SandbarError(
+      `config.mergeMode: integrationBranch must start with '${BRANCH_PREFIX}' ` +
+        `(got '${integrationBranch}'). Sandbar force-pushes this ref on every ` +
+        `verification round, so it must live in a namespace sandbar owns — ` +
+        `otherwise a name collision silently overwrites a real branch.`,
+    );
+  }
   // Verified mode's whole claim is that an unknown verdict never lands, and
   // nothing else can distinguish a check that is merely late from one that will
   // never be reported. Refusing to resolve is the only honest option: a default
@@ -381,6 +400,15 @@ export function resolveMergeMode(
     "noChecksGraceMs",
     mode.noChecksGraceMs ?? DEFAULT_NO_CHECKS_GRACE_MS,
   );
+  if (noChecksGraceMs >= checkTimeoutMs) {
+    throw new SandbarError(
+      `config.mergeMode: noChecksGraceMs (${noChecksGraceMs}) must be less than ` +
+        `checkTimeoutMs (${checkTimeoutMs}) — otherwise the wait always times out ` +
+        `first and the "the forge does not build this ref" halt becomes ` +
+        `unreachable, quietly degrading a loud configuration failure into a ` +
+        `parked cycle every run.`,
+    );
+  }
   if (pollIntervalMs > checkTimeoutMs) {
     throw new SandbarError(
       `config.mergeMode: pollIntervalMs (${pollIntervalMs}) must not exceed ` +

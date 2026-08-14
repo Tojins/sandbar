@@ -2,10 +2,11 @@
 //
 // These are the calls the rest of the suite fakes out, and the ones whose
 // failure modes are defined by git's behaviour rather than by ours: whether a
-// lease-protected force-push actually protects, whether a sha-to-branch push
-// rejects a non-fast-forward instead of clobbering it, and whether a failed
-// re-merge leaves a half-merged worktree behind. None of that can be
-// established by asserting argv — it has to be run.
+// sha-to-branch push rejects a non-fast-forward instead of clobbering it,
+// whether a failed re-merge leaves a half-merged worktree behind, what git
+// actually writes (and to which stream) when a merge conflicts, and how much
+// the `--force-with-lease` on the scratch ref really protects. None of that
+// can be established by asserting argv — it has to be run.
 //
 // Everything happens in a temp dir: a bare repo standing in for origin, and a
 // detached worktree standing in for the merger's. No network, no forge.
@@ -160,9 +161,68 @@ describe("realVerifyAdapter git primitives (real repos)", () => {
 
     const sync = await adapter.syncWithSource();
     expect(sync.ok).toBe(false);
-    expect(sync.reason).toBeTruthy();
-    expect(existsSync(join(work, ".git", "MERGE_HEAD"))).toBe(false);
+    // The actual conflict text, not just "some non-empty string": git writes
+    // "CONFLICT (content): …" to STDOUT and leaves stderr empty, so a reason
+    // built from stderr alone degrades to "Command failed: git merge …" — and
+    // this string is the whole of what an operator sees on a parked cycle.
+    // (`toBeTruthy()` could not fail here: pushErrorReason always returns a
+    // non-empty string.)
+    expect(sync.reason).toContain("CONFLICT");
+    expect(sync.reason).toContain("a.txt");
+    // Resolved via git rather than assumed at `.git/MERGE_HEAD`: in a linked
+    // worktree — which is what the merger actually runs in — the merge state
+    // lives under `.git/worktrees/<name>/`, so the naive path is absent either
+    // way and would make this assertion pass for the wrong reason.
+    expect(existsSync(await git(work, "rev-parse", "--git-path", "MERGE_HEAD"))).toBe(
+      false,
+    );
     // Still on a usable HEAD, not mid-merge.
     await expect(git(work, "status", "--porcelain")).resolves.not.toContain("UU");
+  });
+  it("the lease on the scratch ref protects only against a change it cannot see", async () => {
+    // Worth running rather than reasoning about, because the argv assertion
+    // elsewhere makes this look like a guarantee it is not. The lease is read
+    // from ls-remote milliseconds before the push, so it only catches a
+    // competing write inside that window. Here the ref is moved right after
+    // the read: the push is REJECTED, which is the protection working.
+    await commit(work, "b.txt", "two\n");
+    await adapter.pushIntegration("sandbar/integration");
+    const before = await remoteSha("refs/heads/sandbar/integration");
+
+    // Same real adapter, but a third party moves the ref between the lease
+    // read and the push.
+    const raced = realVerifyAdapter({
+      cwd: work,
+      sourceBranch: "main",
+      repo: { owner: "o", name: "r" },
+      exec: async (file, args, opts) => {
+        const out = await exec(file, [...args], opts);
+        if (args[0] === "ls-remote") {
+          await commit(other, "race.txt", "theirs\n");
+          await git(other, "push", "-f", "origin", "HEAD:refs/heads/sandbar/integration");
+        }
+        return out;
+      },
+    });
+    await commit(work, "c.txt", "three\n");
+    const out = await raced.pushIntegration("sandbar/integration");
+    expect(out.kind).toBe("rejected");
+    // And it did NOT clobber the other write.
+    expect(await remoteSha("refs/heads/sandbar/integration")).not.toBe(before);
+    expect(await remoteSha("refs/heads/sandbar/integration")).toBe(
+      await git(other, "rev-parse", "HEAD"),
+    );
+  });
+
+  it("force-pushes past a ref that moved BEFORE the lease was read", async () => {
+    // The other half of the same fact, and the reason config confines
+    // integrationBranch to sandbar's own namespace: anything already on the
+    // scratch ref when the round starts is overwritten without complaint.
+    await commit(other, "theirs.txt", "theirs\n");
+    await git(other, "push", "origin", "HEAD:refs/heads/sandbar/integration");
+    const mine = await commit(work, "mine.txt", "mine\n");
+    const out = await adapter.pushIntegration("sandbar/integration");
+    expect(out.kind).toBe("ok");
+    expect(await remoteSha("refs/heads/sandbar/integration")).toBe(mine);
   });
 });

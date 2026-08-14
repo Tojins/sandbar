@@ -182,7 +182,7 @@ describe("resolveMergeMode (#22)", () => {
       sourceBranch: "trunk",
       mergeMode: {
         kind: "verified",
-        integrationBranch: "ci/staging",
+        integrationBranch: "sandbar/staging",
         requiredChecks: ["tests"],
         checkTimeoutMs: 1000,
         pollIntervalMs: 100,
@@ -192,7 +192,7 @@ describe("resolveMergeMode (#22)", () => {
     });
     expect(r.mergeMode).toEqual({
       kind: "verified",
-      integrationBranch: "ci/staging",
+      integrationBranch: "sandbar/staging",
       requiredChecks: ["tests"],
       checkTimeoutMs: 1000,
       pollIntervalMs: 100,
@@ -274,8 +274,42 @@ describe("resolveMergeMode (#22)", () => {
           requiredChecks: ["tests"],
           checkTimeoutMs: 1_000,
           pollIntervalMs: 5_000,
+          noChecksGraceMs: 500,
         },
       }),
     ).toThrow(/must not exceed/);
+  });
+
+  it("refuses a no-checks grace that outlasts the timeout, which would hide the halt", () => {
+    // With grace >= timeout the wait always hits the timeout branch first, so
+    // "the forge does not build this ref" degrades from a loud halt into a
+    // parked cycle — every run, forever.
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        mergeMode: {
+          kind: "verified",
+          requiredChecks: ["tests"],
+          checkTimeoutMs: 60_000,
+          noChecksGraceMs: 60_000,
+        },
+      }),
+    ).toThrow(/must be less than/);
+  });
+
+  it("refuses an integrationBranch outside sandbar's namespace", () => {
+    // It is force-pushed every round; a name collision with a real branch
+    // destroys that branch on the first cycle.
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        sourceBranch: "develop",
+        mergeMode: {
+          kind: "verified",
+          requiredChecks: ["tests"],
+          integrationBranch: "main",
+        },
+      }),
+    ).toThrow(/must start with 'sandbar\//);
   });
 });

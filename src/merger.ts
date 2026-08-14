@@ -73,12 +73,13 @@
 
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 
 import { type EnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
 import {
+  type VerifiedFailureReason,
   type VerifiedLandingOptions,
   type VerifyAdapter,
   runVerifiedLanding,
@@ -139,6 +140,13 @@ function buildAbandonComment(args: {
 // reading it on issue #7 needs to know the failure could belong to #9.
 export function buildForgeUnverifiedComment(args: {
   readonly detail: string;
+  // What actually went wrong. The lede is written from this, because three of
+  // the four reasons are not "the checks rejected your code": on `source-moved`
+  // the checks PASSED and the cycle was dropped over a race, and on
+  // `checks-timeout` nothing was rejected either. Telling an author their build
+  // failed when it went green sends them to read a passing log for a fault that
+  // isn't there.
+  readonly reason: VerifiedFailureReason;
   readonly siblings: readonly IssueRef[];
   readonly integrationBranch: string;
   readonly sourceBranch: string;
@@ -153,11 +161,23 @@ export function buildForgeUnverifiedComment(args: {
   // otherwise the agent's work silently evaporates.
   readonly hasResolveCommits: boolean;
 }): string {
+  const cause: Record<VerifiedFailureReason, string> = {
+    "checks-red": "the forge's checks rejected the cycle's composed merge result",
+    "checks-timeout":
+      "the forge's checks never concluded on the cycle's composed merge result " +
+      "(nothing was rejected — the verdict simply never arrived)",
+    "source-moved":
+      `the forge's checks PASSED, but \`${args.sourceBranch}\` moved before the result ` +
+      "could be landed and there were no rounds left to re-verify the re-merged " +
+      "result (this is a race, not a fault in the code)",
+    "resolve-abandon":
+      "the forge's checks were red and sandbar's resolve agent gave up on fixing them",
+  };
   const lines = [
     "Sandbar merged this branch into the source branch locally and the post-merge " +
-      "gate passed, but the forge's checks rejected the cycle's composed merge " +
-      `result — so **nothing was landed on \`${args.sourceBranch}\`** and the merge ` +
-      "has been reverted. `ready-for-agent` was removed.",
+      `gate passed, but ${cause[args.reason]} — so **nothing was landed on ` +
+      `\`${args.sourceBranch}\`** and the merge has been reverted. ` +
+      "`ready-for-agent` was removed.",
     "",
     `Verification failure: ${args.detail}`,
     "",
@@ -480,6 +500,29 @@ export async function runMergerWithAdapter(
   }
 
   if (verified) {
+    // Everything from here to the end of the cycle runs AFTER issues have been
+    // commented on and de-labelled earlier in this loop, so anything that
+    // escapes must still carry that tracker state to Phase 4 — otherwise those
+    // issues end with `ready-for-agent` stripped and no handoff label: off the
+    // planner's list and off every human's filter.
+    //
+    // This re-throws rather than absorbing: verified landing reaches the forge
+    // over the network and through `gh`, so unlike the local merge path it has
+    // genuine infrastructure failures (an unreachable API for three consecutive
+    // polls, an unreadable response, a `gh` without the right scope). Those must
+    // still stop the run loudly — MergerError is precisely a loud halt that
+    // finalises first.
+    const asHalt = (err: unknown): never => {
+      if (err instanceof MergerError) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new MergerError(`Verified merge failed: ${msg}`, {
+        merged: [],
+        skipped,
+        pushed: false,
+        unclosed: [],
+      });
+    };
+
     const landing = await runVerifiedLanding(
       {
         ...verified.options,
@@ -494,7 +537,7 @@ export async function runMergerWithAdapter(
         ...(verified.sleep ? { sleep: verified.sleep } : {}),
         ...(verified.now ? { now: verified.now } : {}),
       },
-    );
+    ).catch(asHalt);
 
     if (landing.kind === "fatal") {
       await emit(`verify fatal: ${landing.detail}`);
@@ -502,12 +545,26 @@ export async function runMergerWithAdapter(
       // or could not act on the verdict, and the merger worktree is ephemeral
       // anyway. What must survive is the tracker state for issues skipped
       // earlier in this cycle — they are already commented and de-labelled.
-      throw new MergerError(`Verified merge could not land: ${landing.detail}`, {
-        merged: [],
-        skipped,
-        pushed: false,
-        unclosed: [],
-      });
+      //
+      // The merged-but-unlanded issues are named in the message: they keep
+      // `ready-for-agent` and their branches (the next run's preflight picks
+      // them up as resumable), but nothing else tells the operator which work
+      // was composed and thrown away with the worktree.
+      const stranded = merged.map((m) => `#${issueNumberOf(m)}`).join(", ");
+      throw new MergerError(
+        `Verified merge could not land: ${landing.detail}` +
+          (stranded
+            ? ` — ${merged.length} issue(s) merged locally and NOT landed: ${stranded}. ` +
+              `They keep ready-for-agent and their branches; the merge result itself is discarded ` +
+              `with the ephemeral merger worktree.`
+            : ""),
+        {
+          merged: [],
+          skipped,
+          pushed: false,
+          unclosed: [],
+        },
+      );
     }
 
     if (landing.kind === "abandoned") {
@@ -515,21 +572,27 @@ export async function runMergerWithAdapter(
         `verify abandoned reason=${landing.reason} rounds=${landing.rounds}: ${landing.detail}`,
       );
       // Cycle-level revert: the forge judged all of these merges together.
-      await adapter.resetHardSha(verified.cycleBaseSha);
+      // Wrapped like the landing itself: this loop writes tracker state issue
+      // by issue, so a `gh` failure on the second of three must not discard
+      // what the first one already applied.
+      await adapter.resetHardSha(verified.cycleBaseSha).catch(asHalt);
       for (const issue of merged) {
         const n = issueNumberOf(issue);
-        await adapter.commentOnIssue(
-          n,
-          buildForgeUnverifiedComment({
-            detail: landing.detail,
-            siblings: merged.filter((m) => m.id !== issue.id),
-            integrationBranch: verified.options.integrationBranch,
-            sourceBranch: verified.options.sourceBranch,
-            verifiedSha: landing.lastSha,
-            hasResolveCommits: landing.resolveCommits,
-          }),
-        );
-        await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+        await adapter
+          .commentOnIssue(
+            n,
+            buildForgeUnverifiedComment({
+              detail: landing.detail,
+              reason: landing.reason,
+              siblings: merged.filter((m) => m.id !== issue.id),
+              integrationBranch: verified.options.integrationBranch,
+              sourceBranch: verified.options.sourceBranch,
+              verifiedSha: landing.lastSha,
+              hasResolveCommits: landing.resolveCommits,
+            }),
+          )
+          .catch(asHalt);
+        await adapter.removeLabel(n, READY_FOR_AGENT_LABEL).catch(asHalt);
         skipped.push({ issue, reason: "forge-unverified" });
         await emit(`skip #${n} reason=forge-unverified`);
       }
@@ -787,7 +850,27 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       return { stdout };
     },
     async isMergeInProgress() {
-      return existsSync(join(cwd, ".git", "MERGE_HEAD"));
+      // NOT `<cwd>/.git/MERGE_HEAD`. Since #10 the merger always runs in a
+      // LINKED WORKTREE, whose `.git` is a gitlink file, not a directory — the
+      // merge state lives at `.git/worktrees/<name>/MERGE_HEAD` in the parent
+      // repo. Testing the naive path returns false unconditionally in
+      // production, which silently disabled the resolve loop's "still
+      // conflicted, here is the digest" re-prompt. `--git-path` resolves it
+      // correctly in a worktree and in a plain checkout alike.
+      try {
+        const { stdout } = await exec(
+          "git",
+          ["rev-parse", "--git-path", "MERGE_HEAD"],
+          { cwd },
+        );
+        const p = stdout.trim();
+        if (!p) return false;
+        return existsSync(isAbsolute(p) ? p : join(cwd, p));
+      } catch {
+        // Not a git dir at all, or git is unusable — the caller's next git
+        // command will fail loudly with a better message than this one could.
+        return false;
+      }
     },
     async conflictDigest() {
       let status = "";

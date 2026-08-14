@@ -45,7 +45,13 @@
 //     the failing run is as likely to be on page 3 as page 1. The listing walks
 //     every page and cross-checks the count against the envelope's
 //     `total_count`; a short read is reported as INCOMPLETE and read as pending,
-//     never as "everything I can see passed".
+//     never as "everything I can see passed". The count is of DISTINCT run ids,
+//     because unordered pages fetched one after another can return the same run
+//     twice and omit another entirely — counting rows would then reach
+//     `total_count` with the red one never read. An envelope with no readable
+//     `total_count`, or a run with no readable id, is an unreadable response
+//     and throws: there is no safe default for the number the whole
+//     completeness argument rests on.
 //   * SUPERSESSION IS PER SUITE, NOT PER NAME. Re-running a job produces a
 //     newer run of the same name in the SAME check suite, and only then does the
 //     newer one supersede. Two different suites (`on: [push, pull_request]`, or
@@ -62,7 +68,19 @@
 //     verified mode requires `requiredChecks` to be named (enforced in
 //     config.ts). Those names are the floor: each must exist and pass. Nothing
 //     else can distinguish "the workflow isn't triggered for this ref" from
-//     "the workflow hasn't got here yet".
+//     "the workflow hasn't got here yet" — and the distinction is acted on, not
+//     merely recorded: a required name still absent while every other check on
+//     the sha has concluded, held for the grace window, is `missing-required`
+//     and FATAL. Waiting it out instead would spend a full CI timeout every
+//     cycle and drain the backlog into `agent-stuck` over a name that doesn't
+//     match what the forge publishes, which is the likeliest misconfiguration
+//     of the lot.
+//   * AN UNKNOWN IS AN UNKNOWN WHOEVER OWNS IT. A check outside
+//     `requiredChecks` that is still running holds the verdict up exactly like
+//     a required one: it will conclude, and it can conclude red. The floor says
+//     what must exist and pass, never which unknowns may be skipped past —
+//     otherwise green means "everything that happened to be finished when I
+//     looked was fine".
 //   * "SKIPPED" IS NOT "PASSED". A job gated by `if:` or a `paths` filter
 //     concludes `skipped` having run nothing. Branch protection counts that as
 //     satisfied; this module does not, because a skipped test job is precisely
@@ -169,7 +187,16 @@ export type CheckRunListing = {
 };
 
 export type ChecksVerdict =
-  | { readonly kind: "pending"; readonly waitingOn: readonly string[] }
+  | {
+      readonly kind: "pending";
+      readonly waitingOn: readonly string[];
+      // Required names that have not appeared on the sha AT ALL, as opposed to
+      // ones that are merely still running. The caller needs the distinction:
+      // a name that never appears while everything else concludes is a naming
+      // mistake, not a slow forge, and parking on it every cycle would drain
+      // the backlog into `agent-stuck` for a fault no agent can fix.
+      readonly missingRequired?: readonly string[];
+    }
   | { readonly kind: "green"; readonly names: readonly string[] }
   | { readonly kind: "red"; readonly failed: readonly ForgeCheckRun[] };
 
@@ -234,7 +261,9 @@ export function aggregateCheckRuns(
     const missing = requiredChecks.filter(
       (name) => !latest.some((r) => r.name === name),
     );
-    if (missing.length > 0) return { kind: "pending", waitingOn: missing };
+    if (missing.length > 0) {
+      return { kind: "pending", waitingOn: missing, missingRequired: missing };
+    }
     considered = latest.filter((r) => requiredChecks.includes(r.name));
   } else {
     if (latest.length === 0) {
@@ -250,7 +279,17 @@ export function aggregateCheckRuns(
   const failed = latest.filter(isFailed);
   if (failed.length > 0) return { kind: "red", failed };
 
-  const unfinished = considered.filter((r) => r.status !== "completed");
+  // Unfinished is counted over EVERY check on the sha, not just the required
+  // ones — the same asymmetry that makes an unnamed red sink the cycle. An
+  // `in_progress` run outside the floor is an UNKNOWN verdict, and unknown
+  // never lands: it WILL conclude, and it can conclude red. Waiting on it is
+  // the difference between "everything that had finished by the time I looked
+  // was green" and "everything is green".
+  //
+  // Legacy commit statuses are the deliberate exception, and can't reach here:
+  // only FAILING ones are folded into the run list at all (realVerifyAdapter),
+  // because third-party integrations leave statuses pending forever.
+  const unfinished = latest.filter((r) => r.status !== "completed");
   if (unfinished.length > 0) {
     return { kind: "pending", waitingOn: unfinished.map((r) => r.name) };
   }
@@ -306,7 +345,14 @@ export type ChecksOutcome =
   // from `timeout` because the operator action differs: this is "the workflow
   // isn't triggered for this ref" (paths filter, branch filter, Actions
   // disabled), not "CI is slow".
-  | { readonly kind: "no-checks" };
+  | { readonly kind: "no-checks" }
+  // A name in `requiredChecks` never appeared, while everything else on the sha
+  // finished and STAYED finished for the grace window. Also a repo-level fault
+  // rather than a slow one — almost always a name that doesn't match what the
+  // forge reports (`test` vs `test (20.x)`, or the workflow's name rather than
+  // the job's). Distinct from `timeout` because parking on it burns a full CI
+  // wait every cycle and converts the backlog into `agent-stuck` for a typo.
+  | { readonly kind: "missing-required"; readonly names: readonly string[] };
 
 // How long a sha may report zero check runs before we conclude nothing is going
 // to run for it. Long enough to cover queueing on a busy forge, short enough
@@ -359,6 +405,13 @@ export async function waitForChecks(
   let greenStreak = 0;
   let greenKey = "";
   let consecutiveErrors = 0;
+  // When "a required name is absent AND nothing else is still running" first
+  // became true. Held rather than acted on immediately, because that state is
+  // transient on any repo with chained workflows: a `workflow_run` job is
+  // created seconds AFTER the run that triggers it concludes, so between the
+  // two there is an instant where everything visible has finished and the
+  // chained check has yet to exist.
+  let missingStableSince: number | null = null;
 
   for (;;) {
     let listing: CheckRunListing;
@@ -429,6 +482,32 @@ export async function waitForChecks(
     if (listing.complete && runs.length === 0 && elapsed >= grace) {
       await log(`no check runs reported for ${sha} after ${elapsed}ms`);
       return { kind: "no-checks" };
+    }
+
+    // A required name that never appears is indistinguishable from a slow one
+    // at any single instant — so the test is not "is it absent now" but "has it
+    // been absent while the forge had nothing left to report". Requiring that
+    // to hold across the grace window lets a chained workflow's check turn up
+    // and reset the clock, while a name that simply doesn't exist on this repo
+    // halts instead of burning a full CI timeout every cycle forever.
+    const missingRequired =
+      verdict.kind === "pending" ? (verdict.missingRequired ?? []) : [];
+    const anyUnfinished = runs.some((r) => r.status !== "completed");
+    if (
+      listing.complete &&
+      runs.length > 0 &&
+      missingRequired.length > 0 &&
+      !anyUnfinished
+    ) {
+      missingStableSince ??= now();
+      if (now() - missingStableSince >= grace) {
+        await log(
+          `required check(s) never reported for ${sha} while all ${runs.length} other check(s) concluded: ${missingRequired.join(", ")}`,
+        );
+        return { kind: "missing-required", names: missingRequired };
+      }
+    } else {
+      missingStableSince = null;
     }
     // Green-but-unsettled counts as pending here on purpose: running out the
     // clock mid-settle parks the cycle rather than landing a verdict that was
@@ -742,6 +821,20 @@ export async function runVerifiedLanding(
           `or switch mergeMode back to "direct".`,
       );
     }
+    if (outcome.kind === "missing-required") {
+      // Same class as no-checks, and the likelier one: the forge IS building
+      // the ref, but a name in `requiredChecks` matches nothing it reports.
+      // Every cycle would wait out the full check timeout and park, so the
+      // backlog drains into `agent-stuck` at one CI wall-clock apiece for what
+      // is almost always a typo.
+      return fatal(
+        `required check(s) never reported for ${sha}: ${outcome.names.join(", ")}. ` +
+          `Every other check on the sha concluded, so these names do not match anything the forge ` +
+          `publishes for '${opts.integrationBranch}'. requiredChecks holds check-run names as the forge ` +
+          `reports them — the JOB name, including any matrix suffix (e.g. "test (20.x)"), not the ` +
+          `workflow name and not a legacy commit-status context.`,
+      );
+    }
 
     if (outcome.kind === "green") {
       const ff = await deps.verify.fastForwardSource(sha);
@@ -777,6 +870,26 @@ export async function runVerifiedLanding(
           `checks passed on ${sha} but '${opts.sourceBranch}' moved during verification, and re-merging ` +
             `the new tip failed: ${sync.reason}`,
           round,
+        );
+      }
+
+      // Did the re-merge actually produce anything? `git merge` against a ref
+      // that is already an ancestor prints "Already up to date.", exits 0 and
+      // creates no commit — so a successful sync that leaves HEAD where it was
+      // proves origin/<sourceBranch> never moved, and the push was rejected for
+      // some other reason entirely: branch protection, a pre-receive hook, a
+      // token without write scope. Those are repo-level faults that recur every
+      // cycle, so this is fatal for the same reason no-checks is. Treating them
+      // as a race would re-verify a byte-identical sha until the rounds ran out
+      // and then park the whole cycle blaming a branch that never moved.
+      const afterSync = await deps.resolve.getHeadSha();
+      if (afterSync === sha) {
+        return fatal(
+          `checks passed on ${sha}, but the fast-forward of '${opts.sourceBranch}' was rejected ` +
+            `(${ff.reason}) and re-merging origin/${opts.sourceBranch} produced no new commit — it was ` +
+            `already an ancestor. The branch did not move, so the push was refused for another reason: ` +
+            `branch protection or a required review on '${opts.sourceBranch}', a pre-receive hook, or a ` +
+            `token without push access. Verified mode cannot land while that holds.`,
         );
       }
       continue;
@@ -887,9 +1000,17 @@ export type RealVerifyAdapterDeps = {
   readonly exec?: ExecFn;
 };
 
+// Operator-facing reason out of a failed git invocation. BOTH streams matter:
+// push writes its rejection to stderr, but `git merge` writes "CONFLICT
+// (content): Merge conflict in <path>" to STDOUT and leaves stderr empty — so
+// reading stderr alone reduces a conflict to "Command failed: git merge …",
+// which is the one detail an operator reading a parked cycle actually needs.
 function pushErrorReason(err: unknown): string {
-  const e = err as { stderr?: string; message?: string };
-  return (e.stderr ?? "").trim() || e.message || "unknown push error";
+  const e = err as { stderr?: string; stdout?: string; message?: string };
+  const parts = [(e.stderr ?? "").trim(), (e.stdout ?? "").trim()].filter(
+    (p) => p.length > 0,
+  );
+  return parts.join("\n") || e.message || "unknown git error";
 }
 
 const defaultExec: ExecFn = (file, args, opts) =>
@@ -933,12 +1054,22 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
     const raw = (body as Record<string, unknown>)["statuses"];
     if (!Array.isArray(raw)) return [];
     const out: ForgeCheckRun[] = [];
+    // One entry per context: the combined endpoint is documented to return the
+    // latest status per context, in which case this changes nothing. It matters
+    // if that ever stops holding — the filter below drops successes, so without
+    // collapsing first, a context that failed and was re-run green would read
+    // red forever and park every cycle on a stale failure. Keeping the first
+    // occurrence is no worse than the status quo under any ordering, and right
+    // under the documented one.
+    const seen = new Set<string>();
     for (const s of raw) {
       const o = s as Record<string, unknown>;
       const state = typeof o["state"] === "string" ? o["state"] : "";
-      if (state !== "failure" && state !== "error") continue;
       const context =
         typeof o["context"] === "string" ? o["context"] : "(unnamed status)";
+      if (seen.has(context)) continue;
+      seen.add(context);
+      if (state !== "failure" && state !== "error") continue;
       out.push({
         id: typeof o["id"] === "number" ? o["id"] : 0,
         // Statuses have no check suite; 0 keeps them from ever colliding with
@@ -1000,8 +1131,15 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
       // `total_count` in reach, which is the only way to know the read was
       // whole — a truncated list of check runs is indistinguishable from a
       // green one.
-      const runs: ForgeCheckRun[] = [];
-      let totalCount = 0;
+      // Keyed by check-run id, NOT accumulated into an array: the listing has
+      // no documented ordering and page N+1 is a separate request, so a run
+      // whose sort position shifts between the two comes back twice while
+      // another is never returned at all. Counting rows would then reach
+      // `total_count` with a run missing — and the missing one is exactly the
+      // one that could be red. Counting DISTINCT ids makes that impossible:
+      // duplicates collapse, and the shortfall keeps the listing incomplete.
+      const byId = new Map<number, ForgeCheckRun>();
+      let totalCount: number | null = null;
       let complete = false;
       for (let page = 1; page <= CHECK_RUN_PAGE_LIMIT; page++) {
         const { stdout } = await exec(
@@ -1029,15 +1167,32 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
             `check-runs response for ${sha} (page ${page}) has no check_runs array.`,
           );
         }
-        totalCount =
-          typeof env["total_count"] === "number"
-            ? env["total_count"]
-            : totalCount;
+        // The completeness argument rests entirely on this number, so an
+        // envelope without it is an unreadable response, not a zero. Defaulting
+        // it to 0 would make `runs.length >= totalCount` true after page 1 and
+        // declare a 250-run sha whole at 100 — failing in the one direction
+        // this module must never fail in.
+        if (typeof env["total_count"] !== "number") {
+          throw new SandbarError(
+            `check-runs response for ${sha} (page ${page}) has no numeric total_count; ` +
+              `the read cannot be shown to be complete.`,
+          );
+        }
+        totalCount = env["total_count"];
         for (const r of rawRuns) {
           const o = r as Record<string, unknown>;
           const suite = o["check_suite"] as Record<string, unknown> | undefined;
-          runs.push({
-            id: typeof o["id"] === "number" ? o["id"] : 0,
+          // id and suite id are the supersession key. An unreadable one would
+          // silently join every other unreadable run under key `0 <name>`,
+          // where `r.id > prev.id` is false and the FIRST row wins — landing a
+          // stale green over a later red. Refuse the response instead.
+          if (typeof o["id"] !== "number") {
+            throw new SandbarError(
+              `check-runs response for ${sha} (page ${page}) contains a run with no numeric id.`,
+            );
+          }
+          byId.set(o["id"], {
+            id: o["id"],
             suiteId:
               suite && typeof suite["id"] === "number" ? suite["id"] : 0,
             name: typeof o["name"] === "string" ? o["name"] : "(unnamed)",
@@ -1048,13 +1203,14 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
               typeof o["details_url"] === "string" ? o["details_url"] : "",
           });
         }
-        // Done when the forge's own count is accounted for, or the page came
-        // back short (nothing further to fetch).
-        if (runs.length >= totalCount || rawRuns.length < CHECK_RUN_PAGE_SIZE) {
-          complete = runs.length >= totalCount;
+        // Done when the forge's own count is accounted for by DISTINCT runs, or
+        // the page came back short (nothing further to fetch).
+        if (byId.size >= totalCount || rawRuns.length < CHECK_RUN_PAGE_SIZE) {
+          complete = byId.size >= totalCount;
           break;
         }
       }
+      const runs: ForgeCheckRun[] = [...byId.values()];
       // The legacy commit-status API is a SECOND, separate place the forge
       // reports verdicts (Buildkite, Jenkins, older Vercel/Codecov apps all
       // POST /statuses/:sha and never create a check run). Ignoring it means a
@@ -1066,10 +1222,13 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
       // landing. Pending statuses are NOT waited for — third-party integrations
       // routinely leave one pending forever, and blocking on those would hang
       // cycles on state nobody is going to conclude. The floor that must
-      // actually pass is `requiredChecks`, which is check-run names; a repo
-      // whose entire CI reports through statuses cannot use verified mode, and
-      // finds that out immediately via the no-checks halt rather than by
-      // landing something.
+      // actually pass is `requiredChecks`, which is check-run names, so a repo
+      // whose entire CI reports through statuses cannot use verified mode. It
+      // halts rather than landing something: with no check runs at all that is
+      // the no-checks fatal, and otherwise — including when a status is already
+      // red, which puts a synthetic run in the list and takes the no-checks
+      // branch off the table — the required names never appear while everything
+      // else concludes, which is the missing-required fatal.
       runs.push(...(await failingStatuses(sha)));
 
       // `complete: false` reaches the poller as "keep waiting", never as a
