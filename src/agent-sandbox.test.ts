@@ -30,8 +30,10 @@ import {
   createSandbox,
   defaultImageName,
   parseStreamJsonLine,
+  prepareWorktree,
   registerShutdown,
 } from "./agent-sandbox.js";
+import { existsSync } from "node:fs";
 
 const execFileP = promisify(execFile);
 
@@ -517,5 +519,131 @@ describe("createSandbox integration (local provider)", () => {
     const env = provider.capturedEnv ?? {};
     expect(env.GH_TOKEN).toBe("from-custom"); // honoured the override
     expect(env.GH_TOKEN).not.toBe("stale-default"); // ignored the fixed path
+  });
+});
+
+// ---------------------------------------------------------------------------
+// prepareWorktree / preparedWorktreePath split (#20)
+// ---------------------------------------------------------------------------
+
+describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), "asb-prep-"));
+    await git(["init", "-b", "main"], dir);
+    await git(["config", "user.name", "Test Host"], dir);
+    await git(["config", "user.email", "host@test.com"], dir);
+    await writeFile(join(dir, "README.md"), "seed\n");
+    await writeFile(join(dir, "fixture.txt"), "copy me\n");
+    await git(["add", "."], dir);
+    await git(["commit", "-m", "seed"], dir);
+  });
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("runs copy + onWorktreeReady exactly once — createSandbox must not repeat worktree-side setup", async () => {
+    await git(["branch", "sandbar/issue-20-prep"], dir);
+    const hookLog = join(dir, "hook.log");
+    const hooks = {
+      host: {
+        onWorktreeReady: [{ command: `echo ran >> ${hookLog}` }],
+      },
+    };
+
+    const worktreePath = await prepareWorktree({
+      branch: "sandbar/issue-20-prep",
+      cwd: dir,
+      copyToWorktree: ["fixture.txt"],
+      hooks,
+    });
+    expect(worktreePath).toBe(
+      join(dir, ".sandbar", "worktrees", "sandbar-issue-20-prep"),
+    );
+    expect(existsSync(join(worktreePath, "fixture.txt"))).toBe(true);
+
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      branch: "sandbar/issue-20-prep",
+      sandbox: provider,
+      cwd: dir,
+      hooks,
+      preparedWorktreePath: worktreePath,
+    });
+    try {
+      expect(sandbox.worktreePath).toBe(worktreePath);
+      const log = await execFileP("cat", [hookLog]);
+      // One line: prepareWorktree ran the hook; createSandbox skipped it.
+      expect(log.stdout.trim().split("\n")).toHaveLength(1);
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  it("a container bringup failure leaves the caller-owned prepared worktree in place", async () => {
+    await git(["branch", "sandbar/issue-20-keep"], dir);
+    const worktreePath = await prepareWorktree({
+      branch: "sandbar/issue-20-keep",
+      cwd: dir,
+    });
+
+    const failingProvider: SandboxProvider = {
+      tag: "bind-mount",
+      name: "podman",
+      env: {},
+      sandboxHomedir: "/home/agent",
+      create: async () => {
+        throw new Error("bringup boom");
+      },
+    };
+    await expect(
+      createSandbox({
+        branch: "sandbar/issue-20-keep",
+        sandbox: failingProvider,
+        cwd: dir,
+        preparedWorktreePath: worktreePath,
+      }),
+    ).rejects.toThrow("bringup boom");
+    // The worktree survives: the concurrent db sidecar may be bind-mounting
+    // initMounts from it, and the caller (not createSandbox) owns it.
+    expect(existsSync(worktreePath)).toBe(true);
+
+    await git(["worktree", "remove", "--force", worktreePath], dir);
+  });
+
+  it("rejects copyToWorktree alongside preparedWorktreePath instead of silently skipping it", async () => {
+    await git(["branch", "sandbar/issue-20-guard"], dir);
+    const worktreePath = await prepareWorktree({
+      branch: "sandbar/issue-20-guard",
+      cwd: dir,
+    });
+    try {
+      await expect(
+        createSandbox({
+          branch: "sandbar/issue-20-guard",
+          sandbox: makeLocalProvider(),
+          cwd: dir,
+          copyToWorktree: ["fixture.txt"],
+          preparedWorktreePath: worktreePath,
+        }),
+      ).rejects.toThrow(/copyToWorktree is ignored/);
+    } finally {
+      await git(["worktree", "remove", "--force", worktreePath], dir);
+    }
+  });
+
+  it("removes the worktree when a host onWorktreeReady hook fails (F4)", async () => {
+    await git(["branch", "sandbar/issue-20-f4"], dir);
+    await expect(
+      prepareWorktree({
+        branch: "sandbar/issue-20-f4",
+        cwd: dir,
+        hooks: { host: { onWorktreeReady: [{ command: "exit 1" }] } },
+      }),
+    ).rejects.toThrow();
+    expect(
+      existsSync(join(dir, ".sandbar", "worktrees", "sandbar-issue-20-f4")),
+    ).toBe(false);
   });
 });

@@ -46,7 +46,7 @@ Of the `Sandbox` handle, sandbar uses only `run()`, `worktreePath`, and
 - **Always bind-mount + podman.** `podman()` is called with no options, so:
   default image name (`sandbar:<repo-dir>`), `--userns=keep-id`, uid/gid
   1000, SELinux label `z`, **no `--network`**. The agent container therefore
-  cannot reach the per-issue Postgres sidecar — only the gate container
+  cannot reach the per-issue DB sidecar — only the gate container
   (`src/gate.ts`) joins `sandbar-net-<id>`. Reproduce this: the agent
   sandbox stays networkless.
 - **Always an explicit, pre-existing branch.** Sandbar runs

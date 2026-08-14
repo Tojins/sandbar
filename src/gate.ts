@@ -4,10 +4,11 @@
 // by its pinned IP (`opts.dbHost`) instead of the host's shared db.
 //
 // DB env contract (#20): `opts.gateEnv` (the consumer's `dbSidecar.gateEnv` —
-// DB_USER, DB_PASSWORD, DB_NAME, …) is injected verbatim, then the two
-// RESERVED keys DB_HOST and DB_PORT are injected LAST from the live sidecar,
-// overriding any same-named gateEnv entry — the consumer can't know the
-// IPAM-pinned IP at config time, so sandbar always owns those two.
+// DB_USER, DB_PASSWORD, DB_NAME, …) is injected verbatim, then the RESERVED
+// keys are injected LAST so they override any same-named gateEnv entry:
+// DB_HOST/DB_PORT from the live sidecar (the consumer can't know the
+// IPAM-pinned IP at config time), and CI=true / HOME=/tmp, which the gate's
+// hermeticity and in-container writability are designed around.
 //
 // That network is created `--disable-dns` (#18), so the bridge no longer runs
 // aardvark to forward external lookups. The gate's `check`/`test` commands may
@@ -48,10 +49,31 @@ export type GateOptions = {
   readonly networkName: string;
   readonly dbHost: string;
   readonly dbPort: number;
-  // Consumer-defined DB env, injected verbatim (DB_HOST/DB_PORT reserved —
-  // see header).
+  // Consumer-defined DB env, injected verbatim (CI/HOME/DB_HOST/DB_PORT
+  // reserved — see header).
   readonly gateEnv: Readonly<Record<string, string>>;
 };
+
+// The ordered `-e` flag list for a gate step. Pure so the reserved-key
+// contract — gateEnv verbatim FIRST, sandbar-owned keys LAST (with repeated
+// -e flags podman keeps the final value, so last wins) — is table-testable.
+export function gateEnvFlags(opts: {
+  readonly dbHost: string;
+  readonly dbPort: number;
+  readonly gateEnv: Readonly<Record<string, string>>;
+}): string[] {
+  return [
+    ...Object.entries(opts.gateEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+    "-e",
+    "CI=true",
+    "-e",
+    "HOME=/tmp",
+    "-e",
+    `DB_HOST=${opts.dbHost}`,
+    "-e",
+    `DB_PORT=${opts.dbPort}`,
+  ];
+}
 
 export type GateResult = {
   readonly ok: boolean;
@@ -103,17 +125,7 @@ async function runStep(
     `${opts.worktreePath}:/workspace`,
     "-w",
     "/workspace",
-    "-e",
-    "CI=true",
-    "-e",
-    "HOME=/tmp",
-    ...Object.entries(opts.gateEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
-    // Reserved keys last: with repeated -e flags podman keeps the final value,
-    // so the live sidecar address always wins over a same-named gateEnv entry.
-    "-e",
-    `DB_HOST=${opts.dbHost}`,
-    "-e",
-    `DB_PORT=${opts.dbPort}`,
+    ...gateEnvFlags(opts),
     "--entrypoint",
     stepCmd.cmd,
     opts.gateImage,

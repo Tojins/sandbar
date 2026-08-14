@@ -205,6 +205,10 @@ export type CreateSandboxOptions = {
   // prepareWorktree) and only brings up the container. Lets the caller learn
   // the worktree path BEFORE parallelizing container bringup against other
   // work that needs it (the db sidecar's worktree-relative initMounts, #20).
+  // Ownership stays with the caller: createSandbox never removes a prepared
+  // worktree on bringup failure (the sidecar may be concurrently bind-mounting
+  // from it), and passing copyToWorktree alongside is a loud error — the copy
+  // belongs in prepareWorktree, silently skipping it would be worse.
   preparedWorktreePath?: string;
 };
 
@@ -1196,6 +1200,12 @@ export const createSandbox = async (
   const hostRepoDir = resolve(options.cwd ?? process.cwd());
   const workDir = options.workDir ?? DEFAULT_WORK_DIR;
 
+  const prepared = options.preparedWorktreePath !== undefined;
+  if (prepared && options.copyToWorktree && options.copyToWorktree.length > 0) {
+    throw new Error(
+      "createSandbox: copyToWorktree is ignored when preparedWorktreePath is set — pass it to prepareWorktree instead.",
+    );
+  }
   const worktreePath =
     options.preparedWorktreePath ??
     (await prepareWorktree({
@@ -1259,8 +1269,12 @@ export const createSandbox = async (
       }
     }
   } catch (e) {
-    // F4: any failure after worktree create removes the worktree first.
-    await worktreeRemove(worktreePath).catch(() => {});
+    // F4: a failure after worktree create removes the worktree first — but
+    // only when createSandbox created it. A prepared worktree belongs to the
+    // caller, who may be concurrently bind-mounting from it (the db sidecar's
+    // initMounts); deleting it here would corrupt that bringup's error into a
+    // bogus missing-mount-source failure (#20).
+    if (!prepared) await worktreeRemove(worktreePath).catch(() => {});
     throw e;
   }
 

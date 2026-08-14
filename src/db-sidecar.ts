@@ -20,11 +20,13 @@
 // concurrent per-issue networks. IPAM hands out non-overlapping subnets; we
 // read the gateway back and derive the DB's address from it (`dbIpForGateway`).
 //
-// initMounts resolve against the ISSUE WORKTREE (`cfg.worktreePath`), mounted
-// read-only — so a branch that edits its schema fixture gates against its own
-// version, and the operator's checkout never leaks into a gate (same isolation
-// argument as issue #10). Callers must therefore create the worktree BEFORE
-// starting the sidecar: bind-mount sources are read at container start.
+// initMounts resolve against the WORKTREE the run is gating (`cfg.worktreePath`
+// — the issue worktree in the inner loop, the merger worktree for gate-2),
+// mounted read-only, so a branch that edits its schema fixture gates against
+// its own version. This is a convention, not a jail: `..` and absolute
+// hostPaths are honored (consumer config is trusted). Callers must create the
+// worktree BEFORE starting the sidecar: bind-mount sources are read at
+// container start.
 //
 // Naming uses the issue id (`sandbar-db-<id>`, `sandbar-net-<id>`). Containers
 // from pre-#20 builds were `sandbar-pg-<id>` — still reaped by the orphan
@@ -49,6 +51,9 @@ const exec = promisify(execFile);
 
 export const RUNTIME = "podman";
 export const READY_POLL_INTERVAL_MS = 500;
+// Log tail surfaced when the sidecar container dies during bringup — enough
+// for the fatal line of a typical entrypoint error without flooding the trace.
+const DEAD_CONTAINER_LOG_TAIL = 15;
 
 export type SidecarConfig = {
   readonly issueId: string;
@@ -124,6 +129,53 @@ async function networkGateway(networkName: string): Promise<string> {
   return gateway;
 }
 
+// One `-v` volume spec for an init mount. Relative hostPaths resolve against
+// the worktree; absolute pass through. Always read-only. Podman's `-v` syntax
+// is colon-delimited with no escape mechanism, so a colon in either path would
+// silently re-split the spec — reject it loudly instead.
+export function initMountSpec(
+  worktreePath: string,
+  mount: { readonly hostPath: string; readonly containerPath: string },
+): string {
+  const hostPath = isAbsolute(mount.hostPath)
+    ? mount.hostPath
+    : resolve(worktreePath, mount.hostPath);
+  if (hostPath.includes(":") || mount.containerPath.includes(":")) {
+    throw new Error(
+      `initMounts paths must not contain ":" (podman -v specs are colon-delimited): ` +
+        `${hostPath} -> ${mount.containerPath}`,
+    );
+  }
+  return `${hostPath}:${mount.containerPath}:ro`;
+}
+
+// The full `podman run` argv (sans the runtime itself) for the sidecar
+// container. Pure over its inputs so the flag assembly — env, mounts, image
+// CMD args AFTER the image ref — is table-testable.
+export function sidecarRunArgs(opts: {
+  readonly containerName: string;
+  readonly networkName: string;
+  readonly dbHost: string;
+  readonly spec: ResolvedDbSidecarConfig;
+  readonly worktreePath: string;
+}): string[] {
+  const { spec } = opts;
+  return [
+    "run",
+    "-d",
+    "--name",
+    opts.containerName,
+    "--network",
+    opts.networkName,
+    "--ip",
+    opts.dbHost,
+    ...Object.entries(spec.containerEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+    ...spec.initMounts.flatMap((m) => ["-v", initMountSpec(opts.worktreePath, m)]),
+    spec.image,
+    ...spec.containerArgs,
+  ];
+}
+
 export async function startDbSidecar(cfg: SidecarConfig): Promise<Sidecar> {
   const { spec } = cfg;
   const networkName = networkNameFor(cfg.issueId);
@@ -156,23 +208,16 @@ export async function startDbSidecar(cfg: SidecarConfig): Promise<Sidecar> {
   const dbHost = dbIpForGateway(await networkGateway(networkName));
 
   try {
-    await exec(RUNTIME, [
-      "run",
-      "-d",
-      "--name",
-      containerName,
-      "--network",
-      networkName,
-      "--ip",
-      dbHost,
-      ...Object.entries(spec.containerEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
-      ...spec.initMounts.flatMap((m) => [
-        "-v",
-        `${isAbsolute(m.hostPath) ? m.hostPath : resolve(cfg.worktreePath, m.hostPath)}:${m.containerPath}:ro`,
-      ]),
-      spec.image,
-      ...spec.containerArgs,
-    ]);
+    await exec(
+      RUNTIME,
+      sidecarRunArgs({
+        containerName,
+        networkName,
+        dbHost,
+        spec,
+        worktreePath: cfg.worktreePath,
+      }),
+    );
 
     await waitForReady(containerName, spec);
     for (const command of spec.postReadyCommands) {
@@ -197,6 +242,13 @@ export async function startDbSidecar(cfg: SidecarConfig): Promise<Sidecar> {
 // Poll the consumer's readiness argv inside the container until it exits 0.
 // The probe doubles as the init-wait: official images process initdb.d before
 // serving on TCP, so a probe against the real listener naturally waits it out.
+//
+// The sidecar recipe is untrusted consumer input, so a container whose
+// entrypoint dies at startup (bad containerEnv, bad containerArgs) is an
+// EXPECTED failure mode — after each failed probe we check the container is
+// still running, and if not we fail immediately with its log tail instead of
+// polling a corpse for the full timeout and reporting a misleading
+// "did not become ready".
 async function waitForReady(
   containerName: string,
   spec: ResolvedDbSidecarConfig,
@@ -209,6 +261,7 @@ async function waitForReady(
       return;
     } catch (e) {
       lastErr = e;
+      await throwIfContainerDead(containerName, spec);
       await sleep(READY_POLL_INTERVAL_MS);
     }
   }
@@ -216,6 +269,38 @@ async function waitForReady(
     `db sidecar ${containerName} (${spec.image}) did not become ready within ${spec.readinessTimeoutMs}ms (last error: ${
       lastErr instanceof Error ? lastErr.message : String(lastErr)
     })`,
+  );
+}
+
+async function throwIfContainerDead(
+  containerName: string,
+  spec: ResolvedDbSidecarConfig,
+): Promise<void> {
+  let running: string;
+  try {
+    const { stdout } = await exec(RUNTIME, [
+      "inspect",
+      "--format",
+      "{{.State.Running}}",
+      containerName,
+    ]);
+    running = stdout.trim();
+  } catch {
+    // Inspect itself flaking is not evidence of death; let the poll continue
+    // and the deadline be the arbiter.
+    return;
+  }
+  if (running === "true") return;
+  const logs = await exec(RUNTIME, [
+    "logs",
+    "--tail",
+    String(DEAD_CONTAINER_LOG_TAIL),
+    containerName,
+  ]).catch(() => null);
+  const tail = logs ? `${logs.stdout}\n${logs.stderr}`.trim() : "(logs unavailable)";
+  throw new Error(
+    `db sidecar ${containerName} (${spec.image}) exited during startup — ` +
+      `check dbSidecar.containerEnv/containerArgs. Container log tail:\n${tail}`,
   );
 }
 

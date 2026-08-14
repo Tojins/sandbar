@@ -36,12 +36,14 @@ export const DEFAULT_LABELS: LabelConfig = {
 
 // A file made visible to the DB sidecar container at startup — the official
 // images' `/docker-entrypoint-initdb.d` convention (schema dumps, seed
-// fixtures). `hostPath` resolves against the ISSUE WORKTREE (not the
-// operator's checkout), so a branch that changes its fixture gates against its
-// own version, and the operator's dirty tree can never leak into a gate (the
-// same isolation argument as issue #10). Mounted read-only.
+// fixtures). `hostPath` resolves against the WORKTREE being gated (the issue
+// worktree in the inner loop; the merger worktree for gate-2), so a branch
+// that changes its fixture gates against its own version. Relative paths are
+// the convention, not a jail — `..` and absolute paths are honored, since
+// consumer config is trusted. Mounted read-only. Neither path may contain
+// `:` (podman `-v` specs are colon-delimited; enforced fail-loud).
 export type DbInitMount = {
-  // Path relative to the issue worktree root (absolute paths pass through).
+  // Path relative to the gated worktree root (absolute paths pass through).
   readonly hostPath: string;
   readonly containerPath: string;
 };
@@ -81,9 +83,10 @@ export type DbSidecarConfig = {
   // setup lives — e.g. "create the test database if absent". Default: [].
   readonly postReadyCommands?: ReadonlyArray<readonly string[]>;
   // Env injected into every gate container, verbatim (DB_USER, DB_PASSWORD,
-  // DB_NAME, …). Two keys are RESERVED and always overwritten by sandbar:
-  // DB_HOST (the sidecar's pinned IP) and DB_PORT (`port` above) — the
-  // consumer's test bootstrap reads those two and derives everything else.
+  // DB_NAME, …). Four keys are RESERVED and always overwritten by sandbar:
+  // DB_HOST (the sidecar's pinned IP) and DB_PORT (`port` above), which the
+  // consumer's test bootstrap reads to derive everything else, plus CI=true
+  // and HOME=/tmp, which the gate's hermeticity/writability depend on.
   readonly gateEnv: Readonly<Record<string, string>>;
 };
 

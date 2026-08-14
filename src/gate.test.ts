@@ -2,10 +2,57 @@ import { describe, expect, it } from "vitest";
 
 import {
   analyzeTimeouts,
+  gateEnvFlags,
   lastNLines,
   stripAnsi,
   summarizeGateFailure,
 } from "./gate.js";
+
+describe("gateEnvFlags (#20)", () => {
+  // Podman folds repeated -e flags in order, last value wins — so "reserved"
+  // means "appears after every gateEnv entry" in the flag list.
+  const lastValueOf = (flags: string[], key: string): string | undefined =>
+    flags
+      .filter((f, i) => i % 2 === 1 && flags[i - 1] === "-e" && f.startsWith(`${key}=`))
+      .at(-1)
+      ?.slice(key.length + 1);
+
+  it("passes consumer gateEnv through verbatim", () => {
+    const flags = gateEnvFlags({
+      dbHost: "10.89.0.2",
+      dbPort: 3306,
+      gateEnv: { DB_USER: "root", DB_PASSWORD: "", DB_NAME: "app" },
+    });
+    expect(lastValueOf(flags, "DB_USER")).toBe("root");
+    expect(lastValueOf(flags, "DB_PASSWORD")).toBe("");
+    expect(lastValueOf(flags, "DB_NAME")).toBe("app");
+  });
+
+  it("reserved keys win over same-named gateEnv entries", () => {
+    const flags = gateEnvFlags({
+      dbHost: "10.89.0.2",
+      dbPort: 5432,
+      gateEnv: {
+        DB_HOST: "localhost",
+        DB_PORT: "1234",
+        CI: "false",
+        HOME: "/root",
+      },
+    });
+    expect(lastValueOf(flags, "DB_HOST")).toBe("10.89.0.2");
+    expect(lastValueOf(flags, "DB_PORT")).toBe("5432");
+    expect(lastValueOf(flags, "CI")).toBe("true");
+    expect(lastValueOf(flags, "HOME")).toBe("/tmp");
+  });
+
+  it("always injects the four sandbar-owned keys even with an empty gateEnv", () => {
+    const flags = gateEnvFlags({ dbHost: "10.0.0.2", dbPort: 5432, gateEnv: {} });
+    expect(lastValueOf(flags, "DB_HOST")).toBe("10.0.0.2");
+    expect(lastValueOf(flags, "DB_PORT")).toBe("5432");
+    expect(lastValueOf(flags, "CI")).toBe("true");
+    expect(lastValueOf(flags, "HOME")).toBe("/tmp");
+  });
+});
 
 describe("stripAnsi", () => {
   it("removes SGR colour codes, leaving the text intact", () => {
