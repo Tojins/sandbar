@@ -4,6 +4,7 @@ import { SandbarError } from "./errors.js";
 import {
   type CheckRunListing,
   type ChecksOutcome,
+  type ExecFn,
   type ForgeCheckRun,
   type PullRequestRef,
   type PushOutcome,
@@ -14,6 +15,7 @@ import {
   buildForgeRedTrace,
   jobIdFromDetailsUrl,
   latestPerCheck,
+  realVerifyAdapter,
   runVerifiedLanding,
   verifiedLandingOptionsFrom,
   waitForChecks,
@@ -772,5 +774,296 @@ describe("runVerifiedLanding", () => {
       { maxRounds: 2 },
     );
     expect(result.kind === "abandoned" && result.reason).toBe("source-moved");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// realVerifyAdapter — the shell-out layer. These assert the ARGV and the
+// parsing, which is exactly what an adapter-shaped fake can never reach: every
+// test above this point would still pass with a missing page loop or a wrong
+// refspec.
+// ---------------------------------------------------------------------------
+
+type ExecCall = { file: string; args: string[] };
+
+function fakeExec(
+  handler: (call: ExecCall) => { stdout?: string; stderr?: string } | Error,
+): { exec: ExecFn; calls: ExecCall[] } {
+  const calls: ExecCall[] = [];
+  const exec: ExecFn = async (file, args) => {
+    const call = { file, args: [...args] };
+    calls.push(call);
+    const r = handler(call);
+    if (r instanceof Error) throw r;
+    return { stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  };
+  return { exec, calls };
+}
+
+function adapterWith(exec: ExecFn) {
+  return realVerifyAdapter({
+    cwd: "/wt",
+    sourceBranch: "main",
+    repo: { owner: "o", name: "r" },
+    exec,
+  });
+}
+
+function checkRunJson(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 1,
+    name: "tests",
+    status: "completed",
+    conclusion: "success",
+    details_url: "https://github.com/o/r/actions/runs/1/job/2",
+    check_suite: { id: 500 },
+    ...over,
+  };
+}
+
+describe("realVerifyAdapter.listCheckRuns", () => {
+  it("reads the envelope (not a --jq'd array) so total_count survives", async () => {
+    const { exec, calls } = fakeExec(() => ({
+      stdout: JSON.stringify({ total_count: 1, check_runs: [checkRunJson()] }),
+    }));
+    const out = await adapterWith(exec).listCheckRuns("sha1");
+    expect(out.complete).toBe(true);
+    expect(out.runs).toEqual([
+      {
+        id: 1,
+        suiteId: 500,
+        name: "tests",
+        status: "completed",
+        conclusion: "success",
+        detailsUrl: "https://github.com/o/r/actions/runs/1/job/2",
+      },
+    ]);
+    // No --jq: it would discard total_count, and truncation would be
+    // undetectable.
+    expect(calls[0]!.args).not.toContain("--jq");
+    expect(calls[0]!.args.join(" ")).toContain(
+      "repos/o/r/commits/sha1/check-runs?per_page=100&page=1",
+    );
+  });
+
+  it("walks every page when the sha carries more runs than one page holds", async () => {
+    const page = (n: number, count: number) =>
+      JSON.stringify({
+        total_count: 150,
+        check_runs: Array.from({ length: count }, (_, i) =>
+          checkRunJson({ id: n * 1000 + i, name: `job-${n}-${i}` }),
+        ),
+      });
+    const { exec, calls } = fakeExec((c) =>
+      c.args.some((a) => a.includes("&page=1"))
+        ? { stdout: page(1, 100) }
+        : { stdout: page(2, 50) },
+    );
+    const out = await adapterWith(exec).listCheckRuns("sha1");
+    expect(out.runs).toHaveLength(150);
+    expect(out.complete).toBe(true);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("reports INCOMPLETE when it cannot account for every run the forge says exists", async () => {
+    // The failing run may be exactly the one that went missing, so this must
+    // never reach the poller as a verdict.
+    const { exec } = fakeExec((c) =>
+      c.args.some((a) => a.includes("&page=1"))
+        ? {
+            stdout: JSON.stringify({
+              total_count: 150,
+              check_runs: Array.from({ length: 100 }, (_, i) =>
+                checkRunJson({ id: i }),
+              ),
+            }),
+          }
+        : { stdout: JSON.stringify({ total_count: 150, check_runs: [] }) },
+    );
+    const out = await adapterWith(exec).listCheckRuns("sha1");
+    expect(out.complete).toBe(false);
+  });
+
+  it("throws on an unreadable response rather than reporting zero checks", async () => {
+    // Zero checks is a *diagnosis* ("your workflow isn't triggered"), now
+    // fatal. A parse failure must not be able to masquerade as one.
+    const { exec } = fakeExec(() => ({ stdout: "null" }));
+    await expect(adapterWith(exec).listCheckRuns("sha1")).rejects.toThrow(
+      SandbarError,
+    );
+    const { exec: e2 } = fakeExec(() => ({ stdout: JSON.stringify({ ok: 1 }) }));
+    await expect(adapterWith(e2).listCheckRuns("sha1")).rejects.toThrow(
+      /check_runs/,
+    );
+  });
+
+  it("maps an absent or non-string conclusion to null, and a missing status to queued", async () => {
+    const { exec } = fakeExec(() => ({
+      stdout: JSON.stringify({
+        total_count: 1,
+        check_runs: [checkRunJson({ conclusion: null, status: undefined })],
+      }),
+    }));
+    const out = await adapterWith(exec).listCheckRuns("sha1");
+    expect(out.runs[0]!.conclusion).toBeNull();
+    expect(out.runs[0]!.status).toBe("queued");
+  });
+
+  it("survives a check run with no check_suite object", async () => {
+    const { exec } = fakeExec(() => ({
+      stdout: JSON.stringify({
+        total_count: 1,
+        check_runs: [checkRunJson({ check_suite: undefined })],
+      }),
+    }));
+    const out = await adapterWith(exec).listCheckRuns("sha1");
+    expect(out.runs[0]!.suiteId).toBe(0);
+  });
+});
+
+describe("realVerifyAdapter push primitives", () => {
+  it("lease-protects the force-push against the ref it observed", async () => {
+    const { exec, calls } = fakeExec((c) =>
+      c.args[0] === "ls-remote"
+        ? { stdout: "abc123\trefs/heads/sandbar/integration\n" }
+        : {},
+    );
+    const out = await adapterWith(exec).pushIntegration("sandbar/integration");
+    expect(out.kind).toBe("ok");
+    expect(calls[1]!.args).toEqual([
+      "push",
+      "--force-with-lease=refs/heads/sandbar/integration:abc123",
+      "origin",
+      "HEAD:refs/heads/sandbar/integration",
+    ]);
+  });
+
+  it("omits the lease when the ref does not exist yet", async () => {
+    const { exec, calls } = fakeExec(() => ({ stdout: "" }));
+    await adapterWith(exec).pushIntegration("sandbar/integration");
+    expect(calls[1]!.args).toEqual([
+      "push",
+      "origin",
+      "HEAD:refs/heads/sandbar/integration",
+    ]);
+  });
+
+  it("THROWS on an unreachable remote instead of calling it a rejected push", async () => {
+    // "The forge refused the ref" is a very different diagnosis from "I could
+    // not reach the forge", and only one of them is the operator's problem.
+    const { exec } = fakeExec(() => new Error("ssh: connect timeout"));
+    await expect(
+      adapterWith(exec).pushIntegration("sandbar/integration"),
+    ).rejects.toThrow(/timeout/);
+  });
+
+  it("reports a rejected push with the forge's own reason", async () => {
+    const err = Object.assign(new Error("exit 1"), {
+      stderr: "! [rejected] (stale info)",
+    });
+    const { exec } = fakeExec((c) => (c.args[0] === "ls-remote" ? { stdout: "" } : err));
+    const out = await adapterWith(exec).pushIntegration("b");
+    expect(out).toEqual({ kind: "rejected", reason: "! [rejected] (stale info)" });
+  });
+
+  it("fast-forwards by sha, unforced, so a moved origin is a rejection not a clobber", async () => {
+    const { exec, calls } = fakeExec(() => ({}));
+    await adapterWith(exec).fastForwardSource("deadbeef");
+    expect(calls[0]!.args).toEqual([
+      "push",
+      "origin",
+      "deadbeef:refs/heads/main",
+    ]);
+    expect(calls[0]!.args).not.toContain("--force");
+  });
+
+  it("re-merges the fetched source tip, and aborts a conflicting merge", async () => {
+    const conflict = Object.assign(new Error("exit 1"), {
+      stderr: "CONFLICT (content): Merge conflict in src/a.ts",
+    });
+    const { exec, calls } = fakeExec((c) =>
+      c.args[0] === "merge" && c.args[1] === "--no-ff" ? conflict : {},
+    );
+    const out = await adapterWith(exec).syncWithSource();
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("CONFLICT");
+    expect(calls.map((c) => c.args[0])).toEqual(["fetch", "merge", "merge"]);
+    expect(calls[0]!.args).toEqual(["fetch", "origin", "main"]);
+    expect(calls[1]!.args).toContain("FETCH_HEAD");
+    // Nothing half-merged left behind for the caller's reset to trip over.
+    expect(calls[2]!.args).toEqual(["merge", "--abort"]);
+  });
+});
+
+describe("realVerifyAdapter pull request handling", () => {
+  it("re-titles a reused PR instead of leaving it describing another cycle", async () => {
+    const { exec, calls } = fakeExec((c) =>
+      c.args[1] === "list"
+        ? { stdout: JSON.stringify([{ number: 42, url: "u42" }]) }
+        : {},
+    );
+    const out = await adapterWith(exec).ensurePullRequest({
+      head: "sandbar/integration",
+      title: "T2",
+      body: "B2",
+    });
+    expect(out).toEqual({ number: 42, url: "u42" });
+    expect(calls[1]!.args.slice(0, 3)).toEqual(["pr", "edit", "42"]);
+    expect(calls[1]!.args).toContain("T2");
+    expect(calls[1]!.args).toContain("B2");
+  });
+
+  it("creates a PR against the integration head and parses its number", async () => {
+    const { exec, calls } = fakeExec((c) =>
+      c.args[1] === "list"
+        ? { stdout: "[]" }
+        : { stdout: "https://github.com/o/r/pull/77\n" },
+    );
+    const out = await adapterWith(exec).ensurePullRequest({
+      head: "sandbar/integration",
+      title: "T",
+      body: "B",
+    });
+    expect(out.number).toBe(77);
+    const create = calls[1]!.args;
+    expect(create.slice(0, 2)).toEqual(["pr", "create"]);
+    expect(create[create.indexOf("--head") + 1]).toBe("sandbar/integration");
+    expect(create[create.indexOf("--base") + 1]).toBe("main");
+    // No `Closes #n`: auto-close only fires on the repo's DEFAULT branch, so
+    // on any other sourceBranch it would strand issues open.
+    expect(create.join(" ")).not.toContain("Closes #");
+  });
+
+  it("does not shell out to close a PR it never managed to identify", async () => {
+    const { exec, calls } = fakeExec(() => ({}));
+    await adapterWith(exec).closePullRequest(0, "why");
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("realVerifyAdapter.fetchFailureLog", () => {
+  it("does not call gh for a check that has no Actions job behind it", async () => {
+    const { exec, calls } = fakeExec(() => ({}));
+    const out = await adapterWith(exec).fetchFailureLog(
+      run({ name: "vercel", detailsUrl: "https://vercel.com/deploy/1" }),
+    );
+    expect(calls).toEqual([]);
+    expect(out).toContain("no Actions job");
+  });
+
+  it("names the conclusion when --log-failed comes back empty", async () => {
+    // A cancelled job, or a runner that never started: a bare heading would
+    // read as "the log was empty, so it probably passed".
+    const { exec } = fakeExec(() => ({ stdout: "   \n" }));
+    const out = await adapterWith(exec).fetchFailureLog(
+      run({ name: "tests", conclusion: "cancelled" }),
+    );
+    expect(out).toContain("cancelled");
+  });
+
+  it("degrades to a note rather than aborting the landing when the log is unreachable", async () => {
+    const { exec } = fakeExec(() => new Error("HTTP 404"));
+    const out = await adapterWith(exec).fetchFailureLog(run({ name: "tests" }));
+    expect(out).toContain("could not fetch log");
   });
 });

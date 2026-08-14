@@ -87,7 +87,7 @@ import {
   runResolveLoop,
 } from "./resolve-loop.js";
 
-const exec = promisify(execFile);
+const execFileAsync = promisify(execFile);
 
 const MAX_BUFFER = 50 * 1024 * 1024;
 
@@ -868,11 +868,23 @@ export async function runVerifiedLanding(
 // Real adapter — shells out to git + gh.
 // ---------------------------------------------------------------------------
 
+// The one process seam in this module. Production passes nothing and gets
+// execFile; tests pass a fake to assert the ARGV — which is where the bugs in a
+// shell-out layer live (a missing --paginate, a wrong refspec, a --jq that
+// yields null on a shape the API really returns) and which no amount of testing
+// against a hand-written adapter fake can reach.
+export type ExecFn = (
+  file: string,
+  args: readonly string[],
+  opts: { readonly cwd: string; readonly maxBuffer?: number },
+) => Promise<{ readonly stdout: string; readonly stderr: string }>;
+
 export type RealVerifyAdapterDeps = {
   // The merger worktree (detached at origin/<sourceBranch>).
   readonly cwd: string;
   readonly sourceBranch: string;
   readonly repo: { readonly owner: string; readonly name: string };
+  readonly exec?: ExecFn;
 };
 
 function pushErrorReason(err: unknown): string {
@@ -880,9 +892,13 @@ function pushErrorReason(err: unknown): string {
   return (e.stderr ?? "").trim() || e.message || "unknown push error";
 }
 
+const defaultExec: ExecFn = (file, args, opts) =>
+  execFileAsync(file, [...args], opts);
+
 export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
   const cwd = deps.cwd;
   const repoFlag = `${deps.repo.owner}/${deps.repo.name}`;
+  const exec: ExecFn = deps.exec ?? defaultExec;
 
   return {
     async pushIntegration(branch) {
