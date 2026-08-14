@@ -8,11 +8,15 @@
 // crashes or non-merged terminals would otherwise block the next run's
 // preflight cleanup (it can't `git branch -D` a branch a worktree is on).
 //
-// For the `merged` kind, `git branch -d` is escalated to `-D` on failure:
-// when the merger's resolve-loop lands a branch by producing different
-// bytes on the source branch (e.g., conflict resolution), the local branch
-// tip is no longer an ancestor of HEAD and `-d` correctly refuses. We own
-// the certainty that the work is preserved on origin at this point.
+// `git branch -d` is escalated to `-D` only where the caller owns the certainty
+// that the work is preserved elsewhere. For `merged`/`fresh-attempt` that
+// certainty is structural — the merger just landed the branch on the source
+// branch (producing different bytes, so the tip is no longer an ancestor of
+// HEAD and `-d` correctly refuses), or the silent-noop path is deliberately
+// discarding it. `needs-ui-prototype` has no such guarantee (its `hasCommits`
+// is per-sandbox-cycle, not per-branch), so it *verifies* containment via
+// branchIsContainedInOrigin before forcing, and keeps the branch otherwise.
+// `-d` refusing is never on its own a licence to force.
 //
 // Human-handoff terminals are guarded on live issue state (#16): stamping
 // `agentStuck` + a failure comment on an already-CLOSED issue contradicts its
@@ -77,25 +81,41 @@ export const NEEDS_INFO_COMMENT_TEMPLATE = (
 // pasted screenshot is a URL it can neither authenticate to nor see. An
 // in-repo file must be on the source branch before re-labelling, because issue
 // branches seed from `origin/<sourceBranch>`, not the operator's local.
+// The escape phrase is deliberately verbatim in both this comment and
+// prompts/implementer.md ("no prototype needed"): the human types it here and
+// the next run's implementer must recognise it in the issue anchor. That
+// coupling is pinned by a test.
+export const NO_PROTOTYPE_NEEDED_PHRASE = "no prototype needed";
+
 export const NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE = (
+  issueNum: number,
   uiImpact: string,
   needsInfoLabel: string,
   readyLabel: string,
+  // The escalation normally lands before a line of code exists, but a late one
+  // is accepted (see promise-parser) and then the branch was pushed. Saying
+  // "stopped before writing any code" in that case tells the human the opposite
+  // of what just happened.
+  branchPushed: string | null,
 ): string =>
-  `${BOT_COMMENT_PREFIX} the agent stopped before writing any code. This issue ` +
-  `implies user-visible UI that no human has seen, and no prototype was found in ` +
-  `the issue body or comments — implementing it would mean inventing the design ` +
-  `and merging it unseen. The agent's assessment is below.\n\n` +
+  `${BOT_COMMENT_PREFIX} the agent stopped ${
+    branchPushed === null
+      ? "before writing any code"
+      : `and pushed what it had to \`${branchPushed}\``
+  }. This issue implies user-visible UI that no human has seen, and no prototype ` +
+  `was found in the issue body or comments — continuing would mean inventing the ` +
+  `design and merging it unseen. The agent's assessment is below.\n\n` +
   `To unblock, either:\n\n` +
   `1. **Give it a prototype it can read.** Suggested route: commit a file to the ` +
-  `repo (e.g. \`docs/prototypes/issue-<n>.html\`) and reference it by path here — ` +
-  `push it to the source branch first, because issue branches are seeded from ` +
-  `origin, not your local checkout. An inline fenced markup block or ASCII ` +
+  `repo (e.g. \`docs/prototypes/issue-${issueNum}.html\`) and reference it by path ` +
+  `here — push it to the source branch first, because issue branches are seeded ` +
+  `from origin, not your local checkout. An inline fenced markup block or ASCII ` +
   `wireframe in a comment works just as well, as does a prose spec precise enough ` +
   `to pin the decisions listed below. A screenshot on its own does not: the agent ` +
   `reads this issue as text and cannot see images.\n` +
-  `2. **Reply "no prototype needed"** if you're happy for the agent to make these ` +
-  `design decisions itself.\n\n` +
+  `2. **Reply "${NO_PROTOTYPE_NEEDED_PHRASE}"** — in your own comment, not by ` +
+  `editing this one — if you're happy for the agent to make these design ` +
+  `decisions itself.\n\n` +
   `Then drop \`${needsInfoLabel}\` and re-apply \`${readyLabel}\`.\n\n` +
   `---\n\n${uiImpact}`;
 
@@ -216,6 +236,12 @@ export type FinalizeAdapter = {
   // Best-effort: sandbox.close() in the inner-loop usually has already removed
   // the worktree. Adapter swallows errors.
   removeWorktreeFor(branch: string): Promise<void>;
+  // True iff every commit on `branch` is already contained in
+  // origin/<sourceBranch> — i.e. deleting it destroys nothing. This is the
+  // *verified* form of the certainty forceDeleteBranch requires; `-d` refusing
+  // is NOT that certainty (it also refuses when the local source branch merely
+  // trails origin). Any error answers false: we never force-delete on a guess.
+  branchIsContainedInOrigin(branch: string): Promise<boolean>;
   postComment(issueNum: number, body: string): Promise<void>;
   // Removes then adds, as SEPARATE `gh issue edit` calls (remove first). A
   // single `gh issue edit` is atomic: if any --add-label target doesn't exist,
@@ -292,6 +318,22 @@ function requireFlip(r: LabelEditResult, issueNum: number): void {
   );
 }
 
+// `-d`, escalating to `-D` when it refuses. ONLY for callers that own the
+// certainty the work is preserved elsewhere — see the module header. Callers
+// without that certainty must verify it (branchIsContainedInOrigin) instead of
+// reaching for this.
+async function deleteBranchForcing(
+  adapter: FinalizeAdapter,
+  branch: string,
+): Promise<FinalizeAction> {
+  const d = await adapter.deleteBranch(branch);
+  if (d.ok) return { kind: "deleted-local" };
+  const f = await adapter.forceDeleteBranch(branch);
+  return f.ok
+    ? { kind: "deleted-local" }
+    : { kind: "delete-failed", error: f.error ?? d.error ?? "" };
+}
+
 export async function finalizeOne(
   input: FinalizeInput,
   adapter: FinalizeAdapter,
@@ -325,16 +367,11 @@ export async function finalizeOne(
         [READY_FOR_AGENT_LABEL],
         [],
       );
-      const r = await adapter.deleteBranch(input.issue.branch);
-      if (r.ok) return { kind: "deleted-local" };
-      // `-d` refused. The merger just landed this branch — if the resolve
-      // loop produced a different tree on the source branch than the branch's
-      // diff, the branch tip isn't an ancestor of HEAD and -d will always
-      // refuse here. We own the certainty, so escalate.
-      const f = await adapter.forceDeleteBranch(input.issue.branch);
-      return f.ok
-        ? { kind: "deleted-local" }
-        : { kind: "delete-failed", error: f.error ?? r.error ?? "" };
+      // `-d` may refuse: if the resolve loop produced a different tree on the
+      // source branch than the branch's diff, the branch tip isn't an ancestor
+      // of HEAD. The merger just landed this branch, so we own the certainty
+      // and escalate to `-D`.
+      return deleteBranchForcing(adapter, input.issue.branch);
     }
     case "merge-conflict": {
       const n = issueNumberOf(input.issue);
@@ -385,9 +422,11 @@ export async function finalizeOne(
       await adapter.postComment(
         n,
         NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
+          n,
           input.uiImpact,
           labels.needsInfo,
           READY_FOR_AGENT_LABEL,
+          input.hasCommits ? input.issue.branch : null,
         ),
       );
       const r = await adapter.editLabels(
@@ -397,13 +436,32 @@ export async function finalizeOne(
       );
       requireFlip(r, n);
       if (input.hasCommits) return { kind: "pushed" };
-      // Nothing was written, so there is nothing to preserve — drop the local
-      // branch too. ensureIssueBranch reuses an existing branch verbatim, so
-      // keeping an empty one would pin the next run (after the human supplies
-      // the prototype) to a stale origin tip. `-D` fallback because `-d`
-      // refuses whenever local HEAD is behind the origin tip we seeded from.
+      // Nothing was written this sandbox cycle, so drop the local branch:
+      // ensureIssueBranch reuses an existing branch verbatim, and keeping an
+      // empty one would pin the next run (after the human supplies the
+      // prototype) to a stale origin tip.
+      //
+      // `-d` refusing is not permission to force: it also refuses when the
+      // local source branch merely trails the origin tip we seeded from. And
+      // `hasCommits` is per-sandbox-cycle, not per-branch — a HARD-ERROR retry
+      // restarts the cycle with an empty commit list while the previous
+      // attempts' commits are still on the branch, as does a branch left by an
+      // interrupted earlier run. So escalate to `-D` only once the branch is
+      // *verified* to contain nothing that isn't already on origin; otherwise
+      // keep it and report the failure. The other force-deleting arms own that
+      // certainty by construction (the merger just landed the work, or the
+      // silent-noop path deliberately discards it) — this one does not.
       const d = await adapter.deleteBranch(input.issue.branch);
       if (d.ok) return { kind: "deleted-local" };
+      if (!(await adapter.branchIsContainedInOrigin(input.issue.branch))) {
+        return {
+          kind: "delete-failed",
+          error:
+            `${d.error ?? "branch -d refused"} — kept: it carries commits that ` +
+            `are not on origin (an earlier attempt's work), and this handoff ` +
+            `did not push it.`,
+        };
+      }
       const f = await adapter.forceDeleteBranch(input.issue.branch);
       return f.ok
         ? { kind: "deleted-local" }
@@ -475,12 +533,7 @@ export async function finalizeOne(
       // label flip — the issue stays `ready-for-agent` for the next cycle's
       // planner.
       await adapter.removeWorktreeFor(input.issue.branch);
-      const r = await adapter.deleteBranch(input.issue.branch);
-      if (r.ok) return { kind: "deleted-local" };
-      const f = await adapter.forceDeleteBranch(input.issue.branch);
-      return f.ok
-        ? { kind: "deleted-local" }
-        : { kind: "delete-failed", error: f.error ?? r.error ?? "" };
+      return deleteBranchForcing(adapter, input.issue.branch);
     }
     case "silent-noop-exhausted": {
       const n = issueNumberOf(input.issue);
@@ -540,6 +593,9 @@ export function worktreePathFor(
 export type RealFinalizeAdapterDeps = {
   readonly cwd: string;
   readonly workDir: string;
+  // Needed by branchIsContainedInOrigin: issue branches are seeded from
+  // origin/<sourceBranch>, so that ref is what "already preserved" means here.
+  readonly sourceBranch: string;
 };
 
 export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
@@ -578,6 +634,27 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
         const e = err as { stderr?: string; message?: string };
         const msg = (e.stderr ?? "").trim() || e.message || String(err);
         return { ok: false, error: msg };
+      }
+    },
+    async branchIsContainedInOrigin(branch) {
+      // Exit 0 iff the branch tip is an ancestor of (or equal to) the origin
+      // tip — every commit on it is already published. Any failure, including
+      // a missing remote-tracking ref, answers false: the caller only ever
+      // force-deletes on a true, so guessing wrong must not destroy work.
+      try {
+        await exec(
+          "git",
+          [
+            "merge-base",
+            "--is-ancestor",
+            branch,
+            `origin/${deps.sourceBranch}`,
+          ],
+          { cwd },
+        );
+        return true;
+      } catch {
+        return false;
       }
     },
     async removeWorktreeFor(branch) {

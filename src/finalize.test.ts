@@ -10,6 +10,7 @@ import {
   NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE,
   NEEDS_INFO_COMMENT_TEMPLATE,
   NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE,
+  NO_PROTOTYPE_NEEDED_PHRASE,
   READY_FOR_AGENT_LABEL as READY_FOR_AGENT,
   REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE,
   finalizeAll,
@@ -38,6 +39,7 @@ type Calls = {
   comments: { n: number; body: string }[];
   labelEdits: { n: number; remove: readonly string[]; add: readonly string[] }[];
   stateChecks: number[];
+  containmentChecks: string[];
 };
 
 type Script = {
@@ -48,6 +50,7 @@ type Script = {
   labelEditOk?: boolean;
   labelEditError?: string;
   issueState?: "OPEN" | "CLOSED";
+  containedInOrigin?: boolean;
 };
 
 function makeAdapter(
@@ -61,6 +64,7 @@ function makeAdapter(
     comments: [],
     labelEdits: [],
     stateChecks: [],
+    containmentChecks: [],
   };
   const adapter: FinalizeAdapter = {
     async pushBranch(branch) {
@@ -85,6 +89,12 @@ function makeAdapter(
     },
     async removeWorktreeFor(branch) {
       calls.worktreeRemoves.push(branch);
+    },
+    async branchIsContainedInOrigin(branch) {
+      calls.containmentChecks.push(branch);
+      // Default true: the common case is a branch still sitting at the origin
+      // tip it was seeded from. Cases that model leftover commits set it false.
+      return script.containedInOrigin ?? true;
     },
     async postComment(n, body) {
       calls.comments.push({ n, body });
@@ -140,19 +150,49 @@ describe("comment templates", () => {
   });
   it("NEEDS-UI-PROTOTYPE body includes bot prefix, the impact prose, both unblock routes, and the configured labels", () => {
     const body = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
+      45,
       "New settings screen; tab order and empty state invented.",
       NEEDS_INFO,
       READY_FOR_AGENT,
+      null,
     );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("tab order and empty state invented");
     // Both ways out must be stated: attach a readable artifact, or say the
     // agent may decide for itself (#21 — the acknowledgement is what stops the
     // next run from escalating again).
-    expect(body).toContain("no prototype needed");
+    expect(body).toContain(NO_PROTOTYPE_NEEDED_PHRASE);
     expect(body).toContain("cannot see images");
     expect(body).toContain(NEEDS_INFO);
     expect(body).toContain(READY_FOR_AGENT);
+    // The suggested path carries the real issue number, not a literal <n>.
+    expect(body).toContain("docs/prototypes/issue-45.html");
+    expect(body).not.toContain("issue-<n>");
+  });
+
+  // The escalation is accepted after commits (see promise-parser), and then the
+  // branch IS pushed — telling the human nothing was written would contradict
+  // the branch they've just been handed.
+  it("NEEDS-UI-PROTOTYPE body claims 'before writing any code' only when nothing was pushed", () => {
+    const early = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
+      45,
+      "x",
+      NEEDS_INFO,
+      READY_FOR_AGENT,
+      null,
+    );
+    expect(early).toContain("before writing any code");
+    expect(early).not.toContain("pushed");
+
+    const late = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
+      45,
+      "x",
+      NEEDS_INFO,
+      READY_FOR_AGENT,
+      "sandbar/issue-45-t-45",
+    );
+    expect(late).not.toContain("before writing any code");
+    expect(late).toContain("sandbar/issue-45-t-45");
   });
   it("NEEDS-HUMAN body includes bot prefix, the failure trace, and the configured labels", () => {
     const body = NEEDS_HUMAN_COMMENT_TEMPLATE("E: boom\nstack…", AGENT_STUCK, READY_FOR_AGENT);
@@ -310,8 +350,14 @@ describe("finalizeOne", () => {
     ]);
   });
 
-  it("needs-ui-prototype without commits: force-deletes when -d refuses", async () => {
-    const { adapter, calls } = makeAdapter({ deleteOk: false });
+  // `-d` also refuses when the local source branch merely trails the origin tip
+  // the branch was seeded from — so a refusal alone is not licence to force.
+  // Containment on origin is what makes forcing safe.
+  it("needs-ui-prototype without commits: force-deletes when -d refuses but the branch is contained in origin", async () => {
+    const { adapter, calls } = makeAdapter({
+      deleteOk: false,
+      containedInOrigin: true,
+    });
     const i = issue(45);
     const action = await finalizeOne(
       { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: false },
@@ -320,7 +366,88 @@ describe("finalizeOne", () => {
     );
 
     expect(action).toEqual({ kind: "deleted-local" });
+    expect(calls.containmentChecks).toEqual([i.branch]);
     expect(calls.forceDeletes).toEqual([i.branch]);
+  });
+
+  // The regression this guard exists for: `hasCommits` is per-sandbox-cycle, so
+  // a HARD-ERROR retry (or a branch left by an interrupted earlier run) reports
+  // false while unpushed commits sit on the branch. Forcing would destroy work
+  // that was never pushed anywhere.
+  it("needs-ui-prototype without commits: keeps the branch when it carries commits not on origin", async () => {
+    const { adapter, calls } = makeAdapter({
+      deleteOk: false,
+      deleteError: "not fully merged",
+      containedInOrigin: false,
+    });
+    const i = issue(45);
+    const action = await finalizeOne(
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: false },
+      adapter,
+      LABELS,
+    );
+
+    expect(action.kind).toBe("delete-failed");
+    if (action.kind === "delete-failed") {
+      expect(action.error).toContain("not on origin");
+    }
+    expect(calls.forceDeletes).toEqual([]);
+    // The handoff itself still completed — the human gets the comment and the
+    // label flip regardless of what happened to the local branch.
+    expect(calls.comments.length).toBe(1);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
+    ]);
+  });
+
+  it("needs-ui-prototype without commits: never checks containment when -d succeeds", async () => {
+    const { adapter, calls } = makeAdapter();
+    const action = await finalizeOne(
+      {
+        kind: "needs-ui-prototype",
+        issue: issue(45),
+        uiImpact: "x",
+        hasCommits: false,
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "deleted-local" });
+    expect(calls.containmentChecks).toEqual([]);
+  });
+
+  it("needs-ui-prototype: a failed label flip throws before the branch is deleted", async () => {
+    const { adapter, calls } = makeAdapter({ labelEditOk: false });
+    const i = issue(45);
+    await expect(
+      finalizeOne(
+        { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: false },
+        adapter,
+        LABELS,
+      ),
+    ).rejects.toBeInstanceOf(SandbarError);
+    // The branch survives the loud failure, so a re-run has something to work
+    // with once the operator fixes the label config.
+    expect(calls.deletes).toEqual([]);
+    expect(calls.forceDeletes).toEqual([]);
+  });
+
+  it("needs-ui-prototype with commits on an already-CLOSED issue: no push, branch kept (#16)", async () => {
+    const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
+    const i = issue(45);
+    const action = await finalizeOne(
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: true },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "skipped-closed" });
+    expect(calls.pushes).toEqual([]);
+    // Committed work is not pushed, but nothing destroys it either — the local
+    // branch is left intact for the operator.
+    expect(calls.deletes).toEqual([]);
+    expect(calls.forceDeletes).toEqual([]);
   });
 
   // A late escalation: the agent committed before it realised it was inventing

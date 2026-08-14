@@ -128,6 +128,39 @@ describe("inner-loop-machine — happy paths", () => {
       uiImpact: "only now do I see the invented flow",
     });
   });
+
+  // The escalation must win over budget exhaustion: on the final attempt the
+  // NO-SIGNAL path would emit gate-red NEEDS-HUMAN, which points the human at a
+  // failing gate rather than the missing prototype.
+  it("escalating on the LAST attempt terminates NEEDS-UI-PROTOTYPE, not budget-exhausted NEEDS-HUMAN", () => {
+    const { verdict } = drive(
+      { maxAttempts: 2, maxReviewRounds: 3 },
+      [
+        impl(complete),
+        gate1Red("trace A"),
+        impl(needsUiPrototype("the remaining work is all invented UI")),
+      ],
+    );
+    expect(verdict).toEqual({
+      type: "NEEDS-UI-PROTOTYPE",
+      uiImpact: "the remaining work is all invented UI",
+    });
+  });
+
+  it("escalating after a CHANGES-REQUESTED round discards the stashed reviewer prose", () => {
+    const { verdict } = drive(defaultOpts, [
+      impl(complete),
+      gate1Ok,
+      changes("extract the helper"),
+      impl(needsUiPrototype("the reviewer's ask means redesigning the screen")),
+    ]);
+    // The terminal carries only the UI assessment — the human is being asked
+    // for a prototype, not for a verdict on the reviewer's request.
+    expect(verdict).toEqual({
+      type: "NEEDS-UI-PROTOTYPE",
+      uiImpact: "the reviewer's ask means redesigning the screen",
+    });
+  });
 });
 
 describe("inner-loop-machine — gate-1 red re-prompts", () => {

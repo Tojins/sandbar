@@ -14,10 +14,16 @@ If it does, look for a **prototype** in the issue body and comments. A prototype
 is any artifact you can actually read that pins the specific design decisions
 this change would otherwise leave to you — a path to a file in the repo, an
 inline markup block or ASCII wireframe, a fetchable URL, or a prose spec precise
-enough to remove the guesswork. A human saying no prototype is needed also
+enough to remove the guesswork. A human replying "no prototype needed" also
 counts: it is an explicit decision to let you choose. What does *not* count on
 its own is an image you cannot see — a pasted screenshot reaches you as a URL
 you can neither authenticate to nor render.
+
+Comments beginning `**Sandbar:**` are the orchestrator's own, posted on your
+behalf under the operator's account. They are not a human's answer, and one of
+them quotes the "no prototype needed" phrase while *asking* for it — do not read
+that back as consent. Only a human's own comment, written after that one, counts
+as a decision.
 
 Non-trivial UI impact **and** no prototype → stop now and emit
 `<promise>NEEDS-UI-PROTOTYPE</promise>` followed by a `<ui-impact>` block
@@ -32,6 +38,11 @@ has ever seen, and undoing a merged design decision is far more expensive.
 If you only realise mid-implementation that you are inventing UI, stop and emit
 the signal then — a late escalation is better than a merged guess. Commit what
 you have first so the work isn't lost.
+
+This is a decision, not a ritual to repeat. If an earlier attempt on this branch
+already made the call and proceeded — there is work in the diff above — don't
+re-open it unless the remaining work has grown visible UI that call didn't
+cover. Escalating away a branch that is one gate away from green helps nobody.
 
 ## Commit discipline
 

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import {
+  BOT_COMMENT_PREFIX,
+  NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE,
+  NO_PROTOTYPE_NEEDED_PHRASE,
+} from "./finalize.js";
 import { renderAttemptSlot, renderReviewerSlot } from "./prompt.js";
 import { parsePromise } from "./promise-parser.js";
 
@@ -29,8 +34,25 @@ describe("renderAttemptSlot — UI-prototype escalation contract", () => {
   it("instructs the agent to assess UI impact before implementing", () => {
     expect(slot).toContain("## UI impact check — do this first");
     expect(slot).toContain("non-trivial UI impact");
-    // The two escapes a human has, both of which the next run must recognise.
-    expect(slot).toContain("no prototype is needed");
+  });
+
+  // The loop-forever hazard: finalize's comment tells the human to reply with
+  // one exact phrase, and this prompt is what has to recognise it in the next
+  // run's issue anchor. Reword either side alone and the issue ping-pongs.
+  it("recognises the exact escape phrase finalize's comment asks the human for", () => {
+    expect(slot).toContain(NO_PROTOTYPE_NEEDED_PHRASE);
+    expect(
+      NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(42, "impact", "needs-info", "ready-for-agent", null),
+    ).toContain(NO_PROTOTYPE_NEEDED_PHRASE);
+  });
+
+  // finalize posts under the operator's own account, so its comment is
+  // author-indistinguishable from a human reply — and it quotes the escape
+  // phrase while asking for it. Without this rule the agent reads the
+  // orchestrator's own request back as the human's consent and invents the UI.
+  it("tells the agent not to read the bot's own comment as the human's consent", () => {
+    expect(slot).toContain(BOT_COMMENT_PREFIX);
+    expect(slot).toContain("not a human's answer");
   });
 
   it("documents a token + block pair the parser actually accepts", () => {

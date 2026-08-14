@@ -416,41 +416,60 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           });
         }
       }
+      // Exhaustive over Terminal: a new terminal type that nobody maps here
+      // would silently skip finalise — no comment, no label flip — and the
+      // issue would keep `ready-for-agent` and be re-picked forever. The
+      // `never` assignment makes that a compile error instead.
       for (const o of outcomes) {
         const t = o.terminal;
-        if (t.type === "NEEDS-INFO") {
-          finalizeInputs.push({
-            kind: "needs-info",
-            issue: o.issue,
-            questions: t.questions,
-          });
-        } else if (t.type === "NEEDS-UI-PROTOTYPE") {
-          finalizeInputs.push({
-            kind: "needs-ui-prototype",
-            issue: o.issue,
-            uiImpact: t.uiImpact,
-            hasCommits: t.commits.length > 0,
-          });
-        } else if (t.type === "NEEDS-HUMAN") {
-          finalizeInputs.push({
-            kind: "needs-human",
-            issue: o.issue,
-            cause: t.cause,
-            failureTrace: t.failureTrace,
-            latestReviewerProse: t.latestReviewerProse,
-          });
-        } else if (t.type === "NEEDS-HUMAN-REVIEW") {
-          finalizeInputs.push({
-            kind: "review-budget-exhausted",
-            issue: o.issue,
-            latestReviewerProse: t.latestReviewerProse,
-          });
-        } else if (t.type === "HARD-ERROR") {
-          finalizeInputs.push({
-            kind: "hard-error",
-            issue: o.issue,
-            hasCommits: t.commits.length > 0,
-          });
+        switch (t.type) {
+          case "DONE":
+            // Handled by the merger above (merged / skipped).
+            break;
+          case "NEEDS-INFO":
+            finalizeInputs.push({
+              kind: "needs-info",
+              issue: o.issue,
+              questions: t.questions,
+            });
+            break;
+          case "NEEDS-UI-PROTOTYPE":
+            finalizeInputs.push({
+              kind: "needs-ui-prototype",
+              issue: o.issue,
+              uiImpact: t.uiImpact,
+              hasCommits: t.commits.length > 0,
+            });
+            break;
+          case "NEEDS-HUMAN":
+            finalizeInputs.push({
+              kind: "needs-human",
+              issue: o.issue,
+              cause: t.cause,
+              failureTrace: t.failureTrace,
+              latestReviewerProse: t.latestReviewerProse,
+            });
+            break;
+          case "NEEDS-HUMAN-REVIEW":
+            finalizeInputs.push({
+              kind: "review-budget-exhausted",
+              issue: o.issue,
+              latestReviewerProse: t.latestReviewerProse,
+            });
+            break;
+          case "HARD-ERROR":
+            finalizeInputs.push({
+              kind: "hard-error",
+              issue: o.issue,
+              hasCommits: t.commits.length > 0,
+            });
+            break;
+          default: {
+            const unhandled: never = t;
+            throw new Error(
+              `unhandled terminal in finalise: ${JSON.stringify(unhandled)}`,
+            );
+          }
         }
       }
   
@@ -458,6 +477,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         const finalizeAdapter = realFinalizeAdapter({
           cwd: config.cwd,
           workDir: config.workDir,
+          sourceBranch: config.sourceBranch,
         });
         // A required side-effect that fails (push/comment/label/close) throws
         // SandbarError out of finalizeAll — caught by the loud top-level handler

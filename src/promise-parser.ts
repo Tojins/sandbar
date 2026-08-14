@@ -28,8 +28,10 @@ export type ParseContext = {
 
 const STILL_WORKING =
   "Still working. Emit `<promise>COMPLETE</promise>` when the implementation " +
-  "is done and committed, or `<promise>NEEDS-INFO</promise>` with a " +
-  "`<questions>` block if you are blocked on missing information.";
+  "is done and committed, `<promise>NEEDS-INFO</promise>` with a " +
+  "`<questions>` block if you are blocked on missing information, or " +
+  "`<promise>NEEDS-UI-PROTOTYPE</promise>` with a `<ui-impact>` block if the " +
+  "work turns out to imply user-visible UI with no prototype to build from.";
 
 const COMPLETE_NO_COMMITS =
   "You declared `<promise>COMPLETE</promise>` but made no commits this run. " +
@@ -46,6 +48,18 @@ const NEEDS_UI_PROTOTYPE_NO_IMPACT =
   "block was provided. Either include the assessment — what visible UI this " +
   "change would create or alter, which design decisions you would be " +
   "inventing, and what artifact would unblock you — or continue implementing.";
+
+// Last occurrence of a paired block, trimmed; "" when absent or blank. Last —
+// not first — for the same reason the promise token is last-wins: an agent that
+// drafts a block, keeps working, then re-emits a revised one must have the
+// revision reach the human, not the draft it superseded.
+function lastBlock(stdout: string, tag: string): string {
+  const matches = [
+    ...stdout.matchAll(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "g")),
+  ];
+  const last = matches[matches.length - 1];
+  return (last?.[1] ?? "").trim();
+}
 
 export function parsePromise(
   stdout: string,
@@ -67,19 +81,19 @@ export function parsePromise(
   }
 
   if (token === "NEEDS-INFO") {
-    const qm = stdout.match(/<questions>([\s\S]*?)<\/questions>/);
-    if (!qm || !qm[1] || !qm[1].trim()) {
+    const questions = lastBlock(stdout, "questions");
+    if (!questions) {
       return { kind: "NO-SIGNAL", reprompt: NEEDS_INFO_NO_QUESTIONS };
     }
-    return { kind: "NEEDS-INFO", questions: qm[1].trim() };
+    return { kind: "NEEDS-INFO", questions };
   }
 
   if (token === "NEEDS-UI-PROTOTYPE") {
-    const im = stdout.match(/<ui-impact>([\s\S]*?)<\/ui-impact>/);
-    if (!im || !im[1] || !im[1].trim()) {
+    const uiImpact = lastBlock(stdout, "ui-impact");
+    if (!uiImpact) {
       return { kind: "NO-SIGNAL", reprompt: NEEDS_UI_PROTOTYPE_NO_IMPACT };
     }
-    return { kind: "NEEDS-UI-PROTOTYPE", uiImpact: im[1].trim() };
+    return { kind: "NEEDS-UI-PROTOTYPE", uiImpact };
   }
 
   return {

@@ -101,6 +101,42 @@ describe("parsePromise", () => {
     });
   });
 
+  // Blocks follow the same last-wins rule as the promise token: an agent that
+  // drafts an assessment, keeps working, then re-emits a revised one must have
+  // the revision reach the human.
+  it("takes the LAST ui-impact block when several are emitted", () => {
+    const out =
+      "<ui-impact>draft: maybe a modal</ui-impact>\n" +
+      "on reflection…\n" +
+      "<ui-impact>final: full-page wizard, 3 steps invented</ui-impact>\n" +
+      "<promise>NEEDS-UI-PROTOTYPE</promise>";
+    expect(parsePromise(out, noCommits)).toEqual({
+      kind: "NEEDS-UI-PROTOTYPE",
+      uiImpact: "final: full-page wizard, 3 steps invented",
+    });
+  });
+
+  it("takes the LAST questions block when several are emitted", () => {
+    const out =
+      "<questions>- draft Q</questions>\n" +
+      "<questions>- the actual Q</questions>\n" +
+      "<promise>NEEDS-INFO</promise>";
+    expect(parsePromise(out, withCommits)).toEqual({
+      kind: "NEEDS-INFO",
+      questions: "- the actual Q",
+    });
+  });
+
+  it("STILL_WORKING reprompt names all three valid tokens", () => {
+    const r = parsePromise("just thinking out loud", withCommits);
+    expect(r.kind).toBe("NO-SIGNAL");
+    if (r.kind === "NO-SIGNAL") {
+      expect(r.reprompt).toContain("COMPLETE");
+      expect(r.reprompt).toContain("NEEDS-INFO");
+      expect(r.reprompt).toContain("NEEDS-UI-PROTOTYPE");
+    }
+  });
+
   it("returns NO-SIGNAL with verbatim mention of an unknown token", () => {
     const r = parsePromise("<promise>FOOBAR</promise>", withCommits);
     expect(r.kind).toBe("NO-SIGNAL");

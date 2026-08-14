@@ -14,7 +14,9 @@
 //                              last 200 lines of the previous gate-1 trace,
 //                              the previous reviewer's prose (when the prior
 //                              round returned CHANGES-REQUESTED), escalation
-//                              language at attempts ≥ 6.
+//                              language at attempts ≥ 6, and the standing
+//                              UI-impact check (#21) that gates implementation
+//                              on a prototype existing for user-visible work.
 //                              reviewer: branch diff + commit list + the
 //                              built-in coding standards
 //                              (prompts/coding-standards.md) + optional project
