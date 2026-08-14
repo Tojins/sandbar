@@ -844,6 +844,17 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           clearTimeout(timer);
           resolve(buf);
         });
+        // A child that exits before reading its prompt — a missing binary, an
+        // agent that dies on startup, the SIGTERM above — makes this write
+        // fail with EPIPE. With no listener on the stream that is an UNCAUGHT
+        // exception: it would take the whole run down from inside a promise
+        // executor, skipping the orchestrator's structured handling entirely.
+        // Not swallowed — the exit/error handlers above still resolve with
+        // whatever was captured, and an agent that produced no promise token
+        // is re-prompted by the caller.
+        child.stdin.on("error", () => {
+          /* the child is gone; its exit handler is the reporting path */
+        });
         child.stdin.write(prompt);
         child.stdin.end();
       });

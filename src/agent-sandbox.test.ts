@@ -270,6 +270,14 @@ function makeLocalProvider(): SandboxProvider & {
               ],
             });
             if (execOpts?.stdin !== undefined && proc.stdin) {
+              // Same guard the real provider needs: `sh -c` can exit before
+              // reading stdin, and an unlistened EPIPE surfaces as an uncaught
+              // exception that fails the whole vitest run rather than any
+              // assertion. It showed up as a run that reported every test
+              // passing and still exited 1.
+              proc.stdin.on("error", () => {
+                /* child gone; its exit code is the reporting path */
+              });
               proc.stdin.write(execOpts.stdin);
               proc.stdin.end();
             }

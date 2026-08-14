@@ -938,6 +938,18 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
               stdio: [opts?.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
             });
             if (opts?.stdin !== undefined && proc.stdin) {
+              // Unlistened, a write to a child that already exited raises an
+              // UNCAUGHT EPIPE and kills the run rather than failing this one
+              // exec. EPIPE only means podman went away before reading stdin —
+              // its exit code is the real verdict and the close handler below
+              // reports it. Any other write error is genuine and rejects.
+              proc.stdin.on("error", (error: NodeJS.ErrnoException) => {
+                if (error.code !== "EPIPE") {
+                  rejectExec(
+                    new Error(`podman exec stdin failed: ${error.message}`),
+                  );
+                }
+              });
               proc.stdin.write(opts.stdin);
               proc.stdin.end();
             }
