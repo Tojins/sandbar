@@ -1,6 +1,6 @@
 // Centralized naming for sandbar's load-bearing identifiers.
 //
-// Branch names, container/network/pg names, and the resource label all share a
+// Branch names, container/network/db names, and the resource label all share a
 // common prefix that the planner (creation), the preflight cleanup, and the
 // orphan sweeper key on. Keeping them here makes the prefix a single knob.
 //
@@ -18,7 +18,7 @@ export const BRANCH_PREFIX = "sandbar/";
 // Old branch prefix, recognized (not created) during the transition window.
 export const LEGACY_BRANCH_PREFIXES: readonly string[] = ["sandcastle/"];
 
-// Container / network / pg / image / label prefix: `sandbar-*`.
+// Container / network / db / image / label prefix: `sandbar-*`.
 export const RESOURCE_PREFIX = "sandbar-";
 
 // Old resource prefix, recognized (not created) during the transition window.

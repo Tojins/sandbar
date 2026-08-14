@@ -24,7 +24,7 @@ import { promisify } from "node:util";
 import { makeEnvReader } from "./env.js";
 import { worktreePathFor } from "./finalize.js";
 import { ALL_BRANCH_PREFIXES, issueNumberFromBranch } from "./naming.js";
-import { PG_IMAGE, RUNTIME as SIDECAR_RUNTIME } from "./pg-sidecar.js";
+import { RUNTIME as SIDECAR_RUNTIME } from "./db-sidecar.js";
 import { fetchCandidates } from "./plan-resolver.js";
 
 const exec = promisify(execFile);
@@ -34,6 +34,9 @@ export type PreflightConfig = {
   readonly workDir: string;
   readonly envFilePath: string;
   readonly sourceBranch: string;
+  // The configured `dbSidecar.image` — preflight verifies it is already
+  // pulled, because the sidecar's `podman run` would otherwise fail mid-cycle.
+  readonly dbImage: string;
 };
 
 export type SandbarBranch = {
@@ -45,7 +48,8 @@ export type RepoState = {
   readonly hasGit: boolean;
   readonly hasGh: boolean;
   readonly hasContainerRuntime: boolean;
-  readonly hasPgImage: boolean;
+  readonly hasDbImage: boolean;
+  readonly dbImage: string;
   readonly ghAuthOk: boolean;
   readonly sandboxGhTokenOk: boolean;
   readonly hasAgentCredential: boolean;
@@ -74,15 +78,15 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
   if (!s.hasContainerRuntime) {
     out.push({
       ok: false,
-      message: `\`${SIDECAR_RUNTIME}\` is not on PATH. Sandbar uses ${SIDECAR_RUNTIME} for the agent sandbox, gate runner, and pg sidecar. Install it.`,
+      message: `\`${SIDECAR_RUNTIME}\` is not on PATH. Sandbar uses ${SIDECAR_RUNTIME} for the agent sandbox, gate runner, and db sidecar. Install it.`,
     });
   }
-  if (!s.hasPgImage) {
+  if (!s.hasDbImage) {
     out.push({
       ok: false,
       message:
-        `Postgres image \`${PG_IMAGE}\` is missing in ${SIDECAR_RUNTIME}. ` +
-        `Pull it with \`${SIDECAR_RUNTIME} pull ${PG_IMAGE}\`.`,
+        `DB sidecar image \`${s.dbImage}\` is missing in ${SIDECAR_RUNTIME}. ` +
+        `Pull it with \`${SIDECAR_RUNTIME} pull ${s.dbImage}\`.`,
     });
   }
   if (!s.ghAuthOk) {
@@ -205,8 +209,8 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
   const hasGh = which("gh");
   const hasContainerRuntime = which(SIDECAR_RUNTIME);
 
-  const hasPgImage = hasContainerRuntime
-    ? await runOk(SIDECAR_RUNTIME, ["image", "exists", PG_IMAGE])
+  const hasDbImage = hasContainerRuntime
+    ? await runOk(SIDECAR_RUNTIME, ["image", "exists", cfg.dbImage])
     : false;
 
   const ghAuthOk = hasGh ? await runOk("gh", ["auth", "status"]) : false;
@@ -240,7 +244,8 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     hasGit,
     hasGh,
     hasContainerRuntime,
-    hasPgImage,
+    hasDbImage,
+    dbImage: cfg.dbImage,
     ghAuthOk,
     sandboxGhTokenOk,
     hasAgentCredential,

@@ -2,7 +2,8 @@
 //
 // All sandbar containers and networks live in podman: the agent sandbox
 // (created by the in-house provider as `sandbar-<uuid>`), the gate runner, the
-// per-issue pg sidecar (`sandbar-pg-*`), and the per-issue network
+// per-issue db sidecar (`sandbar-db-*`; `sandbar-pg-*` on pre-#20 builds —
+// both match the bare prefix below), and the per-issue network
 // (`sandbar-net-*`). We identify orphans by name prefix; switching to
 // label-based filtering (`sandbar=true`, already applied by the merger) is a
 // one-line change.
@@ -19,7 +20,7 @@ import {
   LEGACY_RESOURCE_PREFIXES,
   RESOURCE_PREFIX,
 } from "./naming.js";
-import { RUNTIME } from "./pg-sidecar.js";
+import { RUNTIME } from "./db-sidecar.js";
 
 const exec = promisify(execFile);
 

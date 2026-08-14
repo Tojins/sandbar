@@ -60,7 +60,7 @@ import { type GateResult, runGate } from "./gate.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { gitMountsForWorktree } from "./merger-worktree.js";
 import type { GateCommand } from "./config.js";
-import { RUNTIME } from "./pg-sidecar.js";
+import { RUNTIME } from "./db-sidecar.js";
 import {
   RESOLVE_MAX_ATTEMPTS,
   type ResolveAdapter,
@@ -435,10 +435,7 @@ export type RealAdapterDeps = {
     readonly networkName: string;
     readonly dbHost: string;
     readonly dbPort: number;
-    readonly dbUser: string;
-    readonly dbPassword: string;
-    readonly dbName: string;
-    readonly dbNameTest: string;
+    readonly gateEnv: Readonly<Record<string, string>>;
   };
 };
 

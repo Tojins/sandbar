@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ADR_DIR,
+  DEFAULT_DB_READINESS_TIMEOUT_MS,
   DEFAULT_CLAUDE_MD_PATH,
   DEFAULT_CONTAINERFILE_PATH,
   DEFAULT_CONTEXT_MD_PATH,
@@ -31,6 +32,14 @@ const minimal: RunConfig = {
   botName: "sandbar-bot",
   botEmail: "bot@acme.dev",
   sandboxHooks: {},
+  // Required (#20): the engine is repo identity — sandbar ships no DB preset.
+  dbSidecar: {
+    image: "docker.io/library/mariadb:10.11",
+    containerEnv: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "widgets" },
+    port: 3306,
+    readinessCommand: ["mysql", "-uroot", "-e", "SELECT 1"],
+    gateEnv: { DB_USER: "root", DB_PASSWORD: "", DB_NAME: "widgets" },
+  },
 };
 
 describe("resolveConfig", () => {
@@ -104,5 +113,39 @@ describe("resolveConfig", () => {
       needsInfo: DEFAULT_LABELS.needsInfo,
       agentStuck: "blocked",
     });
+  });
+
+  it("fills the dbSidecar block's defaultable fields (#20)", () => {
+    const r = resolveConfig(minimal);
+    expect(r.dbSidecar.readinessTimeoutMs).toBe(DEFAULT_DB_READINESS_TIMEOUT_MS);
+    expect(r.dbSidecar.containerArgs).toEqual([]);
+    expect(r.dbSidecar.initMounts).toEqual([]);
+    expect(r.dbSidecar.postReadyCommands).toEqual([]);
+    // Required sub-fields pass through untouched.
+    expect(r.dbSidecar.image).toBe("docker.io/library/mariadb:10.11");
+    expect(r.dbSidecar.port).toBe(3306);
+    expect(r.dbSidecar.gateEnv).toEqual(minimal.dbSidecar.gateEnv);
+  });
+
+  it("honours explicit dbSidecar deviations", () => {
+    const r = resolveConfig({
+      ...minimal,
+      dbSidecar: {
+        ...minimal.dbSidecar,
+        readinessTimeoutMs: 120_000,
+        containerArgs: ["--sql-mode=NO_ENGINE_SUBSTITUTION"],
+        initMounts: [
+          {
+            hostPath: "tests/fixtures/schema.sql",
+            containerPath: "/docker-entrypoint-initdb.d/schema.sql",
+          },
+        ],
+        postReadyCommands: [["mysql", "-uroot", "-e", "CREATE DATABASE IF NOT EXISTS widgets_test"]],
+      },
+    });
+    expect(r.dbSidecar.readinessTimeoutMs).toBe(120_000);
+    expect(r.dbSidecar.containerArgs).toEqual(["--sql-mode=NO_ENGINE_SUBSTITUTION"]);
+    expect(r.dbSidecar.initMounts).toHaveLength(1);
+    expect(r.dbSidecar.postReadyCommands).toHaveLength(1);
   });
 });

@@ -5,7 +5,8 @@ const cleanState: RepoState = {
   hasGit: true,
   hasGh: true,
   hasContainerRuntime: true,
-  hasPgImage: true,
+  hasDbImage: true,
+  dbImage: "docker.io/library/mariadb:10.11",
   ghAuthOk: true,
   sandboxGhTokenOk: true,
   hasAgentCredential: true,
@@ -43,13 +44,13 @@ describe("checkInvariants", () => {
     expect(f.some((m) => m.includes("podman") && m.includes("PATH"))).toBe(true);
   });
 
-  it("flags missing postgres image", () => {
-    const f = failures({ ...cleanState, hasPgImage: false });
+  it("flags a missing db sidecar image, naming the CONFIGURED image (#20)", () => {
+    const f = failures({ ...cleanState, hasDbImage: false });
     expect(
       f.some(
         (m) =>
-          m.includes("Postgres image") &&
-          m.includes("pgvector/pgvector:pg18") &&
+          m.includes("DB sidecar image") &&
+          m.includes("docker.io/library/mariadb:10.11") &&
           m.includes("pull"),
       ),
     ).toBe(true);
@@ -197,7 +198,7 @@ describe("checkInvariants", () => {
       ...cleanState,
       hasGh: false,
       hasContainerRuntime: false,
-      hasPgImage: false,
+      hasDbImage: false,
       ghAuthOk: false,
       sandboxGhTokenOk: false,
       hasAgentCredential: false,

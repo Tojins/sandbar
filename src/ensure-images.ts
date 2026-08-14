@@ -1,5 +1,5 @@
 // Lazy-build the sandbar image in podman. The sandbox provider, the
-// gate runner, and the pg sidecar all use podman, so one image build
+// gate runner, and the db sidecar all use podman, so one image build
 // covers everything.
 //
 // We shell out to `podman build` directly rather than via a sandbox-provider
@@ -12,7 +12,7 @@ import { execFile, spawn } from "node:child_process";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
 
-import { RUNTIME } from "./pg-sidecar.js";
+import { RUNTIME } from "./db-sidecar.js";
 
 const exec = promisify(execFile);
 

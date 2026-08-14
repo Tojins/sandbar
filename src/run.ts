@@ -61,7 +61,7 @@ import {
   type MergerWorktree,
   createMergerWorktree,
 } from "./merger-worktree.js";
-import { startPgSidecar } from "./pg-sidecar.js";
+import { type Sidecar, startDbSidecar } from "./db-sidecar.js";
 import { buildPlan } from "./plan-resolver.js";
 import { PreflightError, runPreflight } from "./preflight.js";
 import { buildProjectAnchor } from "./prompt.js";
@@ -101,6 +101,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       workDir: config.workDir,
       envFilePath: config.envFilePath,
       sourceBranch: config.sourceBranch,
+      dbImage: config.dbSidecar.image,
     });
   } catch (err) {
     if (err instanceof PreflightError) {
@@ -179,6 +180,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     maxReviewRounds: config.maxReviewRounds,
     gateImage: config.gateImage,
     gateCommands: config.gateCommands,
+    dbSidecar: config.dbSidecar,
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
     adrDir: config.adrDir,
@@ -301,20 +303,25 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       let mergerSummary: MergerSummary | null = null;
       let halt = false;
       if (completedIssues.length > 0) {
-        // startPgSidecar registers mergerSidecar.stop with onCleanup itself,
-        // before creating any podman resource — no re-registration needed here.
-        const mergerSidecar = await startPgSidecar({ issueId: "merger" });
         // The merger runs in a dedicated worktree detached at
         // origin/<sourceBranch>, NOT config.cwd — so the operator's uncommitted
         // edits in their primary checkout can never be swept into a merge
-        // commit (issue #10). createMergerWorktree registers its own teardown
-        // with onCleanup; we also remove it in the finally below.
+        // commit (issue #10). Worktree BEFORE sidecar: the sidecar's initMounts
+        // bind-mount fixture files from it (#20). createMergerWorktree and
+        // startDbSidecar each register their own teardown with onCleanup; we
+        // also tear both down in the finally below.
         let mergerWorktree: MergerWorktree | null = null;
+        let mergerSidecar: Sidecar | null = null;
         try {
           mergerWorktree = await createMergerWorktree({
             cwd: config.cwd,
             workDir: config.workDir,
             sourceBranch: config.sourceBranch,
+          });
+          mergerSidecar = await startDbSidecar({
+            issueId: "merger",
+            spec: config.dbSidecar,
+            worktreePath: mergerWorktree.path,
           });
           const adapter = realAdapter({
             cwd: mergerWorktree.path,
@@ -331,10 +338,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
               networkName: mergerSidecar.networkName,
               dbHost: mergerSidecar.dbHost,
               dbPort: mergerSidecar.dbPort,
-              dbUser: mergerSidecar.dbUser,
-              dbPassword: mergerSidecar.dbPassword,
-              dbName: mergerSidecar.dbName,
-              dbNameTest: mergerSidecar.dbNameTest,
+              gateEnv: config.dbSidecar.gateEnv,
             },
           });
 
@@ -375,8 +379,9 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             throw err;
           }
         } finally {
+          // Sidecar first: it bind-mounts fixture files from the worktree.
+          if (mergerSidecar) await mergerSidecar.stop();
           if (mergerWorktree) await mergerWorktree.remove();
-          await mergerSidecar.stop();
         }
       }
   

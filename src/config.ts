@@ -34,6 +34,62 @@ export const DEFAULT_LABELS: LabelConfig = {
   agentStuck: "agent-stuck",
 };
 
+// A file made visible to the DB sidecar container at startup — the official
+// images' `/docker-entrypoint-initdb.d` convention (schema dumps, seed
+// fixtures). `hostPath` resolves against the ISSUE WORKTREE (not the
+// operator's checkout), so a branch that changes its fixture gates against its
+// own version, and the operator's dirty tree can never leak into a gate (the
+// same isolation argument as issue #10). Mounted read-only.
+export type DbInitMount = {
+  // Path relative to the issue worktree root (absolute paths pass through).
+  readonly hostPath: string;
+  readonly containerPath: string;
+};
+
+// Per-issue DB sidecar recipe (#20). Sandbar owns the container LIFECYCLE —
+// the --disable-dns network, the pinned IP, naming, teardown — while the
+// consumer owns everything engine-specific: which image, its env, its port,
+// how to probe readiness, and what env the gate's test-suite needs. There is
+// deliberately no engine enum and no built-in Postgres (or any other) preset:
+// the engine is repo identity, so `dbSidecar` is a REQUIRED RunConfig field.
+export type DbSidecarConfig = {
+  // Fully qualified image ref (hosts without unqualified-search registries
+  // can't resolve bare short names), e.g. "docker.io/library/mariadb:10.11".
+  readonly image: string;
+  // Env for the sidecar container itself (POSTGRES_USER=…, MYSQL_DATABASE=…).
+  readonly containerEnv: Readonly<Record<string, string>>;
+  // The port the server listens on inside the container (5432, 3306). The
+  // sidecar is reached by pinned IP on the per-issue network — no host port.
+  readonly port: number;
+  // Argv exec'd INSIDE the container until it exits 0 (the readiness probe).
+  // `podman exec` sessions see the containerEnv above, so a password can be
+  // referenced via `sh -c '… $POSTGRES_PASSWORD …'`. Probe the TCP listener
+  // the gate will actually connect to, not a unix socket (the official pg
+  // image serves init scripts on a socket first — pg_isready flickers green).
+  readonly readinessCommand: readonly string[];
+  // How long the readiness probe may poll before the sidecar counts as failed.
+  // Default: 60s. Raise it when initMounts load a large schema — the probe is
+  // what waits out `/docker-entrypoint-initdb.d` processing.
+  readonly readinessTimeoutMs?: number;
+  // Args appended after the image (the image CMD, not podman flags), e.g.
+  // --sql-mode=…. Default: [].
+  readonly containerArgs?: readonly string[];
+  // Fixture files mounted into the container before it starts. Default: [].
+  readonly initMounts?: readonly DbInitMount[];
+  // Argv lists exec'd in the container after readiness, in order, each
+  // required to exit 0 (fail-loud). This is where engine-specific one-shot
+  // setup lives — e.g. "create the test database if absent". Default: [].
+  readonly postReadyCommands?: ReadonlyArray<readonly string[]>;
+  // Env injected into every gate container, verbatim (DB_USER, DB_PASSWORD,
+  // DB_NAME, …). Two keys are RESERVED and always overwritten by sandbar:
+  // DB_HOST (the sidecar's pinned IP) and DB_PORT (`port` above) — the
+  // consumer's test bootstrap reads those two and derives everything else.
+  readonly gateEnv: Readonly<Record<string, string>>;
+};
+
+// dbSidecar with every defaultable field made concrete (see resolveDbSidecar).
+export type ResolvedDbSidecarConfig = Required<DbSidecarConfig>;
+
 // RunConfig is DEVIATIONS-ONLY by design. A consumer should write down two
 // kinds of thing and nothing else:
 //
@@ -49,8 +105,8 @@ export const DEFAULT_LABELS: LabelConfig = {
 //
 // The required/optional split is the contract: required ⇔ "no sensible default
 // exists" (repo identity, gate commands, the sandbox image, the bot identity,
-// the sandbox hooks). Optional ⇔ "has a de-facto-standard value sandbar fills
-// in".
+// the sandbox hooks, the DB sidecar recipe). Optional ⇔ "has a de-facto-
+// standard value sandbar fills in".
 export type RunConfig = {
   // ---- Required: repo-specific facts with no sensible default -------------
   readonly ghOwner: string;
@@ -68,6 +124,10 @@ export type RunConfig = {
 
   // Per-sandbox lifecycle hooks (build/setup). Host-specific; no default.
   readonly sandboxHooks: SandboxHooks;
+
+  // Per-issue DB sidecar recipe. Required: the engine, image, credentials,
+  // and probes are repo identity — sandbar ships no engine preset (#20).
+  readonly dbSidecar: DbSidecarConfig;
 
   // ---- Optional: tunable, with a documented default ------------------------
   // Where the host repo lives / where sandbar keeps its state. Defaults:
@@ -130,10 +190,11 @@ export type RunConfig = {
 // with no default — `codingStandardsPath` (genuinely optional) — stays
 // optional; `labels` is widened from Partial to the fully-populated vocabulary.
 export type ResolvedConfig = Required<
-  Omit<RunConfig, "codingStandardsPath" | "labels">
+  Omit<RunConfig, "codingStandardsPath" | "labels" | "dbSidecar">
 > & {
   readonly codingStandardsPath?: string;
   readonly labels: LabelConfig;
+  readonly dbSidecar: ResolvedDbSidecarConfig;
 };
 
 export const DEFAULT_CWD = (): string => process.cwd();
@@ -153,6 +214,17 @@ export const DEFAULT_MAX_IMPL_ATTEMPTS = 8;
 // the 4th round was APPROVED). 3 is marginal even for converging work (#8).
 export const DEFAULT_MAX_REVIEW_ROUNDS = 5;
 export const DEFAULT_MAX_TOTAL_ISSUES = 50;
+export const DEFAULT_DB_READINESS_TIMEOUT_MS = 60_000;
+
+export function resolveDbSidecar(db: DbSidecarConfig): ResolvedDbSidecarConfig {
+  return {
+    ...db,
+    readinessTimeoutMs: db.readinessTimeoutMs ?? DEFAULT_DB_READINESS_TIMEOUT_MS,
+    containerArgs: db.containerArgs ?? [],
+    initMounts: db.initMounts ?? [],
+    postReadyCommands: db.postReadyCommands ?? [],
+  };
+}
 
 export function defaultCoauthorTrailer(botName: string, botEmail: string): string {
   return `Co-authored-by: ${botName} <${botEmail}>`;
@@ -180,5 +252,6 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     maxTotalIssues: config.maxTotalIssues ?? DEFAULT_MAX_TOTAL_ISSUES,
     copyToWorktree: config.copyToWorktree ?? [],
     labels: { ...DEFAULT_LABELS, ...config.labels },
+    dbSidecar: resolveDbSidecar(config.dbSidecar),
   };
 }

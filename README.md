@@ -33,6 +33,21 @@ await run({
   botName: "your-bot",
   botEmail: "bot@your-org.dev",
   sandboxHooks: { /* per-sandbox build/setup commands */ },
+  dbSidecar: {
+    // Per-issue DB sidecar recipe — fully engine-agnostic, e.g. MariaDB:
+    image: "docker.io/library/mariadb:10.11",       // fully qualified
+    containerEnv: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "app" },
+    port: 3306,
+    // Exec'd inside the container until exit 0; sees containerEnv above.
+    readinessCommand: ["mysql", "-uroot", "-e", "SELECT 1"],
+    // Env injected into every gate run. DB_HOST and DB_PORT are RESERVED:
+    // sandbar always sets them to the sidecar's pinned IP + `port`.
+    gateEnv: { DB_USER: "root", DB_PASSWORD: "", DB_NAME: "app" },
+    // Optional: containerArgs (image CMD args), initMounts (fixture files
+    // mounted read-only, hostPath relative to the ISSUE WORKTREE),
+    // postReadyCommands (one-shot setup exec'd after readiness),
+    // readinessTimeoutMs (default 60000).
+  },
 
   // Everything below is OPTIONAL — shown here only to document the defaults.
   // Omit any line you're happy with.
@@ -48,6 +63,7 @@ await run({
 | `gateCommands` | The host's own `check` + `test` gate. |
 | `botName`, `botEmail` | Commit/author identity. |
 | `sandboxHooks` | Host-specific build/setup. |
+| `dbSidecar` | The per-issue DB sidecar recipe (image, env, port, probes). The engine is repo identity — sandbar ships no preset. |
 
 ### Optional fields and their defaults
 

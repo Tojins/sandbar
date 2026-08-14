@@ -1,7 +1,11 @@
 // Inner-loop runner — I/O glue around the pure state machine.
 //
 // Per issue:
-//   1. Setup an agent sandbox + Postgres sidecar.
+//   1. Prepare the issue worktree, then set up an agent sandbox + DB sidecar
+//      in parallel. The worktree comes FIRST (not in the parallel pair, #20):
+//      the sidecar's initMounts bind-mount fixture files from it, and mount
+//      sources are read at container start — only the expensive container
+//      bringups overlap.
 //   2. Drive the state machine (inner-loop-machine.ts) to a verdict by
 //      executing the action it emits and feeding the result back as an event.
 //   3. Translate the verdict to a Terminal.
@@ -17,7 +21,7 @@ import * as agentSandbox from "./agent-sandbox.js";
 import { podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
-import type { GateCommand } from "./config.js";
+import type { GateCommand, ResolvedDbSidecarConfig } from "./config.js";
 import { runGate, summarizeGateFailure } from "./gate.js";
 import { ensureIssueBranch } from "./git-ops.js";
 import {
@@ -32,7 +36,7 @@ import {
   step,
 } from "./inner-loop-machine.js";
 import type { AttemptLogger } from "./logs.js";
-import { type Sidecar, startPgSidecar } from "./pg-sidecar.js";
+import { type Sidecar, startDbSidecar } from "./db-sidecar.js";
 import { parsePromise } from "./promise-parser.js";
 import { buildPrompt, buildReviewerPrompt } from "./prompt.js";
 import { parseVerdict } from "./verdict-parser.js";
@@ -75,6 +79,7 @@ export type InnerLoopConfig = {
   readonly maxReviewRounds: number;
   readonly gateImage: string;
   readonly gateCommands: GateCommand;
+  readonly dbSidecar: ResolvedDbSidecarConfig;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
@@ -154,16 +159,30 @@ async function runSandboxCycle(
     // so the sandbox never inherits cwd's in-progress state. Idempotent.
     await ensureIssueBranch(issue.branch, config.sourceBranch);
 
+    // Worktree first (fast git ops), then container bringups in parallel: the
+    // sidecar's initMounts resolve against this worktree and must see its
+    // files on disk at container start (#20).
+    const worktreePath = await agentSandbox.prepareWorktree({
+      branch: issue.branch,
+      hooks: opts.hooks,
+      copyToWorktree: [...opts.copyToWorktree],
+      workDir: config.workDir,
+    });
+
     const [sandboxResult, sidecarResult] = await Promise.allSettled([
       agentSandbox.createSandbox({
         branch: issue.branch,
         sandbox: podman(),
         hooks: opts.hooks,
-        copyToWorktree: [...opts.copyToWorktree],
         envFilePath: config.envFilePath,
         workDir: config.workDir,
+        preparedWorktreePath: worktreePath,
       }),
-      startPgSidecar({ issueId: issue.id }),
+      startDbSidecar({
+        issueId: issue.id,
+        spec: config.dbSidecar,
+        worktreePath,
+      }),
     ]);
     if (sandboxResult.status === "fulfilled") sandbox = sandboxResult.value;
     if (sidecarResult.status === "fulfilled") sidecar = sidecarResult.value;
@@ -173,7 +192,7 @@ async function runSandboxCycle(
         : (sidecarResult as PromiseRejectedResult).reason;
     }
 
-    // startPgSidecar already registered sidecar.stop with onCleanup before it
+    // startDbSidecar already registered sidecar.stop with onCleanup before it
     // created any podman resource, so no re-registration is needed here.
     const gateOpts: SidecarGateOpts = {
       gateImage: config.gateImage,
@@ -181,10 +200,7 @@ async function runSandboxCycle(
       networkName: sidecar.networkName,
       dbHost: sidecar.dbHost,
       dbPort: sidecar.dbPort,
-      dbUser: sidecar.dbUser,
-      dbPassword: sidecar.dbPassword,
-      dbName: sidecar.dbName,
-      dbNameTest: sidecar.dbNameTest,
+      gateEnv: config.dbSidecar.gateEnv,
     };
 
     const anchorOpts = {
@@ -251,10 +267,7 @@ type SidecarGateOpts = {
   readonly networkName: string;
   readonly dbHost: string;
   readonly dbPort: number;
-  readonly dbUser: string;
-  readonly dbPassword: string;
-  readonly dbName: string;
-  readonly dbNameTest: string;
+  readonly gateEnv: Readonly<Record<string, string>>;
 };
 
 type ExecuteActionCtx = {

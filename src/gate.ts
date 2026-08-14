@@ -1,7 +1,13 @@
 // Procedural gate. Runs the configured check + test commands against an
 // issue worktree inside an ephemeral one-shot container, joined to the
-// issue's per-issue podman network so test code reaches the postgres
-// sidecar by its pinned IP (`opts.dbHost`) instead of the host's shared db.
+// issue's per-issue podman network so test code reaches the db sidecar
+// by its pinned IP (`opts.dbHost`) instead of the host's shared db.
+//
+// DB env contract (#20): `opts.gateEnv` (the consumer's `dbSidecar.gateEnv` —
+// DB_USER, DB_PASSWORD, DB_NAME, …) is injected verbatim, then the two
+// RESERVED keys DB_HOST and DB_PORT are injected LAST from the live sidecar,
+// overriding any same-named gateEnv entry — the consumer can't know the
+// IPAM-pinned IP at config time, so sandbar always owns those two.
 //
 // That network is created `--disable-dns` (#18), so the bridge no longer runs
 // aardvark to forward external lookups. The gate's `check`/`test` commands may
@@ -24,7 +30,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import type { GateCommand } from "./config.js";
-import { RUNTIME } from "./pg-sidecar.js";
+import { RUNTIME } from "./db-sidecar.js";
 
 const exec = promisify(execFile);
 
@@ -42,10 +48,9 @@ export type GateOptions = {
   readonly networkName: string;
   readonly dbHost: string;
   readonly dbPort: number;
-  readonly dbUser: string;
-  readonly dbPassword: string;
-  readonly dbName: string;
-  readonly dbNameTest: string;
+  // Consumer-defined DB env, injected verbatim (DB_HOST/DB_PORT reserved —
+  // see header).
+  readonly gateEnv: Readonly<Record<string, string>>;
 };
 
 export type GateResult = {
@@ -102,18 +107,13 @@ async function runStep(
     "CI=true",
     "-e",
     "HOME=/tmp",
+    ...Object.entries(opts.gateEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+    // Reserved keys last: with repeated -e flags podman keeps the final value,
+    // so the live sidecar address always wins over a same-named gateEnv entry.
     "-e",
     `DB_HOST=${opts.dbHost}`,
     "-e",
     `DB_PORT=${opts.dbPort}`,
-    "-e",
-    `DB_USER=${opts.dbUser}`,
-    "-e",
-    `DB_PASSWORD=${opts.dbPassword}`,
-    "-e",
-    `DB_NAME=${opts.dbName}`,
-    "-e",
-    `DB_NAME_TEST=${opts.dbNameTest}`,
     "--entrypoint",
     stepCmd.cmd,
     opts.gateImage,

@@ -200,6 +200,23 @@ export type CreateSandboxOptions = {
   // finalize.ts:worktreePathFor agree on where worktrees actually are — a
   // mismatch leaks the worktree+branch on successful merges (#7).
   workDir?: string;
+  // Worktree already created by prepareWorktree(). When set, createSandbox
+  // skips prune/create/copyToWorktree/onWorktreeReady (all done by
+  // prepareWorktree) and only brings up the container. Lets the caller learn
+  // the worktree path BEFORE parallelizing container bringup against other
+  // work that needs it (the db sidecar's worktree-relative initMounts, #20).
+  preparedWorktreePath?: string;
+};
+
+export type PrepareWorktreeOptions = {
+  branch: string;
+  baseBranch?: string;
+  cwd?: string;
+  workDir?: string;
+  copyToWorktree?: string[];
+  // Only host.onWorktreeReady runs here; sandbox-side hooks need the
+  // container and stay in createSandbox.
+  hooks?: SandboxHooks;
 };
 
 // ---------------------------------------------------------------------------
@@ -1132,13 +1149,18 @@ const invokeAgent = (
   });
 
 // ---------------------------------------------------------------------------
-// createSandbox — orchestration, lifecycle, commit capture, close
+// prepareWorktree / createSandbox — orchestration, lifecycle, commit capture
 // ---------------------------------------------------------------------------
 
-export const createSandbox = async (
-  options: CreateSandboxOptions,
-): Promise<Sandbox> => {
-  const { branch } = options;
+// Worktree-only setup: prune stale entries, create (or reuse) the branch's
+// managed worktree, copy host paths in, run host.onWorktreeReady hooks.
+// Returns the worktree path. Split out of createSandbox (#20) so callers can
+// know the path — with its files on disk — before container bringup, and hand
+// it to work that must bind-mount from it (the db sidecar's initMounts).
+// A failure after creation removes the worktree before rethrowing (F4).
+export const prepareWorktree = async (
+  options: PrepareWorktreeOptions,
+): Promise<string> => {
   const hostRepoDir = resolve(options.cwd ?? process.cwd());
   const workDir = options.workDir ?? DEFAULT_WORK_DIR;
 
@@ -1148,13 +1170,11 @@ export const createSandbox = async (
 
   const { path: worktreePath } = await worktreeCreate(
     hostRepoDir,
-    branch,
+    options.branch,
     workDir,
     options.baseBranch,
   );
 
-  let providerHandle: SandboxHandle;
-  let sandboxRepoDir: string;
   try {
     if (options.copyToWorktree && options.copyToWorktree.length > 0) {
       await copyToWorktree(options.copyToWorktree, hostRepoDir, worktreePath);
@@ -1162,7 +1182,34 @@ export const createSandbox = async (
     if (options.hooks?.host?.onWorktreeReady?.length) {
       await runHostHooks(options.hooks.host.onWorktreeReady, worktreePath);
     }
+  } catch (e) {
+    await worktreeRemove(worktreePath).catch(() => {});
+    throw e;
+  }
+  return worktreePath;
+};
 
+export const createSandbox = async (
+  options: CreateSandboxOptions,
+): Promise<Sandbox> => {
+  const { branch } = options;
+  const hostRepoDir = resolve(options.cwd ?? process.cwd());
+  const workDir = options.workDir ?? DEFAULT_WORK_DIR;
+
+  const worktreePath =
+    options.preparedWorktreePath ??
+    (await prepareWorktree({
+      branch,
+      baseBranch: options.baseBranch,
+      cwd: hostRepoDir,
+      workDir,
+      copyToWorktree: options.copyToWorktree,
+      hooks: options.hooks,
+    }));
+
+  let providerHandle: SandboxHandle;
+  let sandboxRepoDir: string;
+  try {
     const resolvedEnv = await resolveEnv(
       options.envFilePath ?? join(hostRepoDir, ".sandbar", ".env"),
     );
