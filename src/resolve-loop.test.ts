@@ -400,6 +400,63 @@ describe("runResolveLoop — gate-red mode", () => {
   });
 });
 
+describe("runResolveLoop — forge-red mode (#22)", () => {
+  const forgeRedMode: ResolveMode = {
+    kind: "forge-red",
+    initialTrace: "### browser\nplaywright: expected 1 got 0",
+    failedChecks: "browser, tests",
+  };
+
+  it("first prompt carries the CI trace and names the failing checks", async () => {
+    const { adapter, calls } = makeAdapter({
+      initiallyConflicted: false,
+      agentRuns: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+      heads: ["after-fix"],
+    });
+    await runResolveLoop(issue(42), [], forgeRedMode, adapter, {
+      projectAnchor,
+      preMergeSha: "before-fix",
+    });
+    expect(calls.prompts[0]).toContain("playwright: expected 1 got 0");
+    expect(calls.prompts[0]).toContain("browser, tests");
+    // The agent must be told the local gate's green is not evidence against
+    // the forge's red — otherwise "works on my machine" is the obvious move.
+    expect(calls.prompts[0]).toContain("evidence against this failure");
+    // No conflict digest is fetched: the tree is merged and clean.
+    expect(calls.conflictDigestCalls).toBe(0);
+  });
+
+  it("a green local gate after a real commit is 'worth re-asking the forge', i.e. resolved", async () => {
+    const { adapter } = makeAdapter({
+      initiallyConflicted: false,
+      agentRuns: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+      heads: ["after-fix"],
+    });
+    const out = await runResolveLoop(issue(42), [], forgeRedMode, adapter, {
+      projectAnchor,
+      preMergeSha: "before-fix",
+    });
+    expect(out).toEqual({ kind: "resolved" });
+  });
+
+  it("an agent that commits nothing is a silent abandon, not a re-push", async () => {
+    const { adapter } = makeAdapter({
+      initiallyConflicted: false,
+      agentRuns: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+      heads: ["before-fix"],
+    });
+    const out = await runResolveLoop(issue(42), [], forgeRedMode, adapter, {
+      projectAnchor,
+      preMergeSha: "before-fix",
+    });
+    expect(out.kind).toBe("abandon");
+    expect(out.kind === "abandon" && out.silent).toBe(true);
+  });
+});
+
 describe("runResolveLoop — multi-issue context", () => {
   it("fetches and embeds each related issue's body; skips self", async () => {
     const { adapter, calls } = makeAdapter({

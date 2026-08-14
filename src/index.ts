@@ -6,6 +6,7 @@ export type {
   LabelConfig,
   DbSidecarConfig,
   DbInitMount,
+  MergeModeConfig,
 } from "./config.js";
 // Every type a RunConfig field is declared with must be importable from the
 // package root (the exports map exposes only "."), or consumers can't

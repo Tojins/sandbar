@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ADR_DIR,
+  DEFAULT_CHECK_POLL_INTERVAL_MS,
+  DEFAULT_CHECK_TIMEOUT_MS,
+  DEFAULT_INTEGRATION_BRANCH,
   DEFAULT_DB_READINESS_TIMEOUT_MS,
   DEFAULT_CLAUDE_MD_PATH,
   DEFAULT_CONTAINERFILE_PATH,
@@ -147,5 +150,66 @@ describe("resolveConfig", () => {
     expect(r.dbSidecar.containerArgs).toEqual(["--sql-mode=NO_ENGINE_SUBSTITUTION"]);
     expect(r.dbSidecar.initMounts).toHaveLength(1);
     expect(r.dbSidecar.postReadyCommands).toHaveLength(1);
+  });
+});
+
+describe("resolveMergeMode (#22)", () => {
+  it("defaults to direct — an existing consumer keeps today's push", () => {
+    expect(resolveConfig(minimal).mergeMode).toEqual({ kind: "direct" });
+  });
+
+  it("fills the verified defaults", () => {
+    const r = resolveConfig({ ...minimal, mergeMode: { kind: "verified" } });
+    expect(r.mergeMode).toEqual({
+      kind: "verified",
+      integrationBranch: DEFAULT_INTEGRATION_BRANCH,
+      requiredChecks: [],
+      checkTimeoutMs: DEFAULT_CHECK_TIMEOUT_MS,
+      pollIntervalMs: DEFAULT_CHECK_POLL_INTERVAL_MS,
+      openPullRequest: false,
+    });
+  });
+
+  it("keeps deviating knobs", () => {
+    const r = resolveConfig({
+      ...minimal,
+      sourceBranch: "trunk",
+      mergeMode: {
+        kind: "verified",
+        integrationBranch: "ci/staging",
+        requiredChecks: ["tests"],
+        checkTimeoutMs: 1000,
+        pollIntervalMs: 100,
+        openPullRequest: true,
+      },
+    });
+    expect(r.mergeMode).toEqual({
+      kind: "verified",
+      integrationBranch: "ci/staging",
+      requiredChecks: ["tests"],
+      checkTimeoutMs: 1000,
+      pollIntervalMs: 100,
+      openPullRequest: true,
+    });
+  });
+
+  it("refuses an integration branch equal to the source branch", () => {
+    // Otherwise 'verify then fast-forward' degrades to an unverified direct
+    // push — the exact hole the mode exists to close.
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        mergeMode: { kind: "verified", integrationBranch: "main" },
+      }),
+    ).toThrow(/must differ from sourceBranch/);
+  });
+
+  it.each([
+    { checkTimeoutMs: 0 },
+    { pollIntervalMs: -1 },
+  ])("refuses a non-positive %o", (over) => {
+    expect(() =>
+      resolveConfig({ ...minimal, mergeMode: { kind: "verified", ...over } }),
+    ).toThrow(/must be positive/);
   });
 });

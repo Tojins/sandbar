@@ -30,9 +30,9 @@
 //
 // Handoff labels are configurable (LabelConfig in config.ts) and NOT
 // auto-created — a missing/misconfigured label is a host config error. Every
-// agent-failure terminal (merge-conflict, merge-gate-red, silent-noop-exhausted,
-// needs-human, review-budget-exhausted) parks the issue under the single
-// `agentStuck` label; the *reason* lives in the bot comment.
+// agent-failure terminal (merge-conflict, merge-gate-red, forge-unverified,
+// silent-noop-exhausted, needs-human, review-budget-exhausted) parks the issue
+// under the single `agentStuck` label; the *reason* lives in the bot comment.
 //
 // Required side-effects fail loud, they don't swallow (#8). The original bug was
 // `editLabels` catching a "label doesn't exist" error, logging it, and returning
@@ -169,6 +169,12 @@ export type FinalizeInput =
   | { readonly kind: "merged"; readonly issue: IssueRef }
   | { readonly kind: "merge-conflict"; readonly issue: IssueRef }
   | { readonly kind: "merge-gate-red"; readonly issue: IssueRef }
+  // Verified merge mode (#22): merged + locally gated green, but the forge
+  // rejected the cycle's composed result, so the merge was reverted and nothing
+  // landed. Same handoff shape as merge-gate-red — the merger already posted the
+  // explanatory comment and dropped the queue label; finalize pushes the branch
+  // (the human needs it on the forge to inspect) and parks it.
+  | { readonly kind: "forge-unverified"; readonly issue: IssueRef }
   | {
       readonly kind: "needs-info";
       readonly issue: IssueRef;
@@ -283,6 +289,7 @@ export type FinalizeAction =
 const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
   "merge-conflict",
   "merge-gate-red",
+  "forge-unverified",
   "needs-info",
   "needs-ui-prototype",
   "needs-human",
@@ -383,7 +390,8 @@ export async function finalizeOne(
       requireFlip(r, n);
       return { kind: "pushed" };
     }
-    case "merge-gate-red": {
+    case "merge-gate-red":
+    case "forge-unverified": {
       const n = issueNumberOf(input.issue);
       await adapter.removeWorktreeFor(input.issue.branch);
       await adapter.pushBranch(input.issue.branch);

@@ -1,15 +1,16 @@
-// Procedural merger — direct-to-source-branch, with an agentic resolve loop
-// covering both conflict and post-merge gate-red.
+// Procedural merger — lands DONE branches on the source branch, with an
+// agentic resolve loop covering conflict, post-merge gate-red, and (in verified
+// mode) a red forge.
 //
 // The merger runs in a dedicated, ephemeral worktree checked out (detached) at
 // `origin/<sourceBranch>` — NOT the operator's primary checkout (issue #10).
 // run.ts creates that worktree and points this adapter's `cwd` at it, so the
 // operator's uncommitted edits (and local-only commits) are physically absent
 // from the merge surface: they can never be staged into a merge commit, in the
-// clean path or the conflict-resolution path. The merge result is pushed with
-// `git push origin HEAD:<sourceBranch>`; the operator's local branch is left
-// untouched (it catches up on the next `git pull`, matching how issue branches
-// already seed from origin).
+// clean path or the conflict-resolution path. The merge result is pushed to
+// `origin/<sourceBranch>` (how, exactly, depends on the landing mode below);
+// the operator's local branch is left untouched (it catches up on the next
+// `git pull`, matching how issue branches already seed from origin).
 //
 // After phase 2 the orchestrator hands DONE branches to runMerger, which
 // iterates them in ascending issue-number order and, for each:
@@ -31,9 +32,30 @@
 // agent can reason about "branch B's intent collides with branch A — abandon
 // B" instead of being stuck inside a single-issue context.
 //
-// After all branches processed: a single `git push origin <sourceBranch>`. On
-// a push race (rejected/non-fast-forward), one retry via `git pull --ff-only`
-// then push again; pull-conflict is a hard fail (operator must resolve).
+// After all branches processed, the cycle's merge result is LANDED. Two modes
+// (config.mergeMode, #22):
+//
+//   direct   — the default and today's behaviour: a single
+//              `git push origin HEAD:<sourceBranch>`. On a push race
+//              (rejected/non-fast-forward), one retry via `git pull --ff-only`
+//              then push again; pull-conflict is a hard fail.
+//
+//   verified — nothing reaches the source branch until the FORGE agrees. The
+//              merge result goes to a scratch integration branch, sandbar polls
+//              that sha's check runs, and only a green verdict earns the
+//              fast-forward push to <sourceBranch>. Red feeds the failing job
+//              logs to the resolve loop for a bounded number of rounds. The
+//              mechanics live in forge-verify.ts; runMergerWithAdapter owns
+//              only what happens to the ISSUES when it fails.
+//
+// A failed verification is a CYCLE-level outcome, not a per-issue one: the
+// forge judged the composed result, and there is no sound way to attribute the
+// red to one of several merges that each passed the local gate individually. So
+// the whole cycle is reverted to the sha the merger worktree started at,
+// `merged` comes back empty, and every issue that had merged is parked under
+// `forge-unverified` with a comment saying so — including the possibility that
+// it wasn't its fault. Heavy-handed on purpose: the alternative is landing an
+// unverified sha, which in the consuming repo means deploying it.
 //
 // Each surviving merge → `gh issue close <n>`. The close runs AFTER the
 // irreversible push, so a transient gh/network blip on it must not strand the
@@ -56,6 +78,11 @@ import { promisify } from "node:util";
 
 import { type EnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
+import {
+  type VerifiedLandingOptions,
+  type VerifyAdapter,
+  runVerifiedLanding,
+} from "./forge-verify.js";
 import { type GateResult, runGate } from "./gate.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { gitMountsForWorktree } from "./merger-worktree.js";
@@ -106,6 +133,40 @@ function buildAbandonComment(args: {
   ].join("\n");
 }
 
+// Verified merge mode (#22). The forge rejected the cycle's composed merge
+// result, so nothing landed and every issue in that result is parked. The
+// comment says plainly that this issue may not be the one at fault — a human
+// reading it on issue #7 needs to know the failure could belong to #9.
+export function buildForgeUnverifiedComment(args: {
+  readonly detail: string;
+  readonly siblings: readonly IssueRef[];
+  readonly integrationBranch: string;
+  readonly sourceBranch: string;
+}): string {
+  const lines = [
+    "Sandbar merged this branch into the source branch locally and the post-merge " +
+      "gate passed, but the forge's checks rejected the cycle's composed merge " +
+      `result — so **nothing was landed on \`${args.sourceBranch}\`** and the merge ` +
+      "has been reverted. `ready-for-agent` was removed.",
+    "",
+    `Verification failure: ${args.detail}`,
+    "",
+    `The result that failed is on \`${args.integrationBranch}\` — that ref is where the ` +
+      "failing check runs and their logs live.",
+  ];
+  if (args.siblings.length > 0) {
+    lines.push(
+      "",
+      "This cycle merged more than one branch, and the forge judged them " +
+        "together, so the failure is not necessarily this issue's fault. The " +
+        "other issues in the same merge result were: " +
+        args.siblings.map((s) => `#${issueNumberOf(s)}`).join(", ") +
+        ". They were reverted and parked too.",
+    );
+  }
+  return lines.join("\n");
+}
+
 export type IssueRef = {
   readonly id: string;
   readonly title: string;
@@ -135,6 +196,11 @@ export type SkipReason =
   | "conflict"
   | "gate-red"
   | "install-failed"
+  // Verified merge mode (#22): this issue merged cleanly and passed the local
+  // post-merge gate, but the cycle's composed merge result failed forge
+  // verification, so nothing was landed. Cycle-level, so every issue that had
+  // merged carries it — the red is not attributable to one of them.
+  | "forge-unverified"
   // Resolve-loop's HEAD-advance invariant tripped: the agent gave up via a
   // silent `git merge --abort` rather than completing the merge. The branch
   // is intact, but no commit landed on the source branch. Orchestrator
@@ -212,6 +278,20 @@ export type RunMergerOptions = {
   // no-op sleep so the backoff doesn't slow the suite.
   readonly closeRetries?: number;
   readonly sleep?: (ms: number) => Promise<void>;
+  // Verified merge mode (#22). Absent → direct mode (today's push straight to
+  // the source branch). Present → the forge gates the landing. The adapter is
+  // required *by the type* exactly when the mode is on, so there is no
+  // "verified mode configured but nothing wired up" state to check at runtime.
+  readonly verified?: {
+    readonly adapter: VerifyAdapter;
+    readonly options: Omit<
+      VerifiedLandingOptions,
+      "mergedIssues" | "cycleIssues" | "projectAnchor"
+    >;
+    // Test seams for the check-poll clock.
+    readonly sleep?: (ms: number) => Promise<void>;
+    readonly now?: () => number;
+  };
 };
 
 export async function runMergerWithAdapter(
@@ -231,6 +311,16 @@ export async function runMergerWithAdapter(
     if (log) await log(line);
   };
   const resolveLog: ResolveLogger = (line) => emit(line);
+
+  // Verified mode only: capture the sha the merger worktree started at — the
+  // state to revert the WHOLE cycle to when the forge rejects the composed
+  // result. Carried on the mode object itself so the landing branch below can
+  // never see a null base sha and silently fall through to a direct push; and
+  // read only when the mode is on, so direct-mode callers (and their test
+  // fakes) don't pay an extra getHeadSha.
+  const verified = opts.verified
+    ? { ...opts.verified, cycleBaseSha: await adapter.getHeadSha() }
+    : null;
 
   for (const issue of sortIssuesAsc(issues)) {
     const n = issueNumberOf(issue);
@@ -359,6 +449,67 @@ export async function runMergerWithAdapter(
     return { merged, skipped, pushed: false, unclosed: [] };
   }
 
+  if (verified) {
+    const landing = await runVerifiedLanding(
+      {
+        ...verified.options,
+        mergedIssues: merged,
+        cycleIssues: cycle,
+        projectAnchor,
+      },
+      {
+        verify: verified.adapter,
+        resolve: adapter,
+        log: resolveLog,
+        ...(verified.sleep ? { sleep: verified.sleep } : {}),
+        ...(verified.now ? { now: verified.now } : {}),
+      },
+    );
+
+    if (landing.kind === "fatal") {
+      await emit(`verify fatal: ${landing.detail}`);
+      throw new MergerError(`Verified merge could not land: ${landing.detail}`);
+    }
+
+    if (landing.kind === "abandoned") {
+      await emit(
+        `verify abandoned reason=${landing.reason} rounds=${landing.rounds}: ${landing.detail}`,
+      );
+      // Cycle-level revert: the forge judged all of these merges together.
+      await adapter.resetHardSha(verified.cycleBaseSha);
+      for (const issue of merged) {
+        const n = issueNumberOf(issue);
+        await adapter.commentOnIssue(
+          n,
+          buildForgeUnverifiedComment({
+            detail: landing.detail,
+            siblings: merged.filter((m) => m.id !== issue.id),
+            integrationBranch: verified.options.integrationBranch,
+            sourceBranch: verified.options.sourceBranch,
+          }),
+        );
+        await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+        skipped.push({ issue, reason: "forge-unverified" });
+        await emit(`skip #${n} reason=forge-unverified`);
+      }
+      return { merged: [], skipped, pushed: false, unclosed: [] };
+    }
+
+    await emit(
+      `verify landed ${landing.sha} after ${landing.rounds} round(s); closing ${merged.length} issue(s)`,
+    );
+    return {
+      merged,
+      skipped,
+      pushed: true,
+      unclosed: await closeMergedIssues(merged, adapter, {
+        closeRetries,
+        sleep,
+        emit,
+      }),
+    };
+  }
+
   await emit(`push attempt 1`);
   let push = await adapter.push();
   if (push.kind === "race") {
@@ -386,34 +537,56 @@ export async function runMergerWithAdapter(
   }
 
   await emit(`push ok; closing ${merged.length} issue(s)`);
-  // Fault-tolerant close: the push already landed, so one issue's transient
-  // close failure must not skip the close of the rest (issue #14). Retry each
-  // with backoff, accumulate the persistent failures, never throw here.
+  return {
+    merged,
+    skipped,
+    pushed: true,
+    unclosed: await closeMergedIssues(merged, adapter, {
+      closeRetries,
+      sleep,
+      emit,
+    }),
+  };
+}
+
+// Fault-tolerant close: the landing already happened, so one issue's transient
+// close failure must not skip the close of the rest (issue #14). Retry each with
+// backoff, accumulate the persistent failures, never throw here. Shared by both
+// landing modes — the tracker reconciliation is identical once the source branch
+// has moved.
+async function closeMergedIssues(
+  merged: readonly IssueRef[],
+  adapter: MergerAdapter,
+  deps: {
+    readonly closeRetries: number;
+    readonly sleep: (ms: number) => Promise<void>;
+    readonly emit: (line: string) => Promise<void>;
+  },
+): Promise<{ issue: IssueRef; error: string }[]> {
   const unclosed: { issue: IssueRef; error: string }[] = [];
   for (const issue of merged) {
     const n = issueNumberOf(issue);
     let lastErr = "";
     let ok = false;
-    for (let attempt = 0; attempt <= closeRetries; attempt++) {
-      if (attempt > 0) await sleep(closeBackoffMs(attempt));
+    for (let attempt = 0; attempt <= deps.closeRetries; attempt++) {
+      if (attempt > 0) await deps.sleep(closeBackoffMs(attempt));
       try {
         await adapter.closeIssue(n, "Completed by Sandbar");
         ok = true;
         break;
       } catch (err) {
         lastErr = err instanceof Error ? err.message : String(err);
-        await emit(`close #${n} attempt ${attempt + 1} failed: ${lastErr}`);
+        await deps.emit(`close #${n} attempt ${attempt + 1} failed: ${lastErr}`);
       }
     }
     if (!ok) {
       unclosed.push({ issue, error: lastErr });
-      await emit(
-        `close #${n} giving up after ${closeRetries + 1} attempt(s): ${lastErr}`,
+      await deps.emit(
+        `close #${n} giving up after ${deps.closeRetries + 1} attempt(s): ${lastErr}`,
       );
     }
   }
-
-  return { merged, skipped, pushed: true, unclosed };
+  return unclosed;
 }
 
 // ---------------------------------------------------------------------------

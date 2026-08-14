@@ -11,7 +11,9 @@
 //                              CHANGES-REQUESTED loops back to a new impl
 //                              attempt carrying the reviewer's prose.
 //   Phase 3 (Merge):           Procedural merger lands DONE branches into
-//                              the source branch and pushes once.
+//                              the source branch and pushes once — directly,
+//                              or (config.mergeMode = verified, #22) only after
+//                              the forge's checks pass on the merge result.
 //   Phase 4 (Finalise):        Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels.
@@ -46,6 +48,7 @@ import {
   finalizeAll,
   realAdapter as realFinalizeAdapter,
 } from "./finalize.js";
+import { realVerifyAdapter } from "./forge-verify.js";
 import { startKeepawake, stopKeepawake } from "./keepawake.js";
 import { runInnerLoop, type Terminal } from "./inner-loop.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
@@ -348,12 +351,38 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             adrDir: config.adrDir,
             sourceBranch: config.sourceBranch,
           });
+          // Verified merge mode (#22): the forge gates the landing. Wired here
+          // rather than inside the merger so the merger stays adapter-driven —
+          // its type demands the verify adapter exactly when the mode is on.
+          const verified =
+            config.mergeMode.kind === "verified"
+              ? {
+                  adapter: realVerifyAdapter({
+                    cwd: mergerWorktree.path,
+                    sourceBranch: config.sourceBranch,
+                    repo: { owner: config.ghOwner, name: config.ghRepo },
+                  }),
+                  options: {
+                    integrationBranch: config.mergeMode.integrationBranch,
+                    requiredChecks: config.mergeMode.requiredChecks,
+                    checkTimeoutMs: config.mergeMode.checkTimeoutMs,
+                    pollIntervalMs: config.mergeMode.pollIntervalMs,
+                    openPullRequest: config.mergeMode.openPullRequest,
+                    sourceBranch: config.sourceBranch,
+                  },
+                }
+              : undefined;
+
           mergerSummary = await runMergerWithAdapter(
             completedIssues,
             adapter,
             (line) => cycleLogger.appendMerger(line),
             (issueId, gate) => cycleLogger.writeMergerGate(issueId, gate),
-            { cycleIssues: issues, projectAnchor },
+            {
+              cycleIssues: issues,
+              projectAnchor,
+              ...(verified ? { verified } : {}),
+            },
           );
           console.log(
             `\nMerger: ${mergerSummary.merged.length} merged, ${mergerSummary.skipped.length} skipped, pushed=${mergerSummary.pushed}.`,
@@ -411,7 +440,12 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             continue;
           }
           finalizeInputs.push({
-            kind: s.reason === "conflict" ? "merge-conflict" : "merge-gate-red",
+            kind:
+              s.reason === "conflict"
+                ? "merge-conflict"
+                : s.reason === "forge-unverified"
+                  ? "forge-unverified"
+                  : "merge-gate-red",
             issue: s.issue,
           });
         }

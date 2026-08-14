@@ -300,6 +300,40 @@ describe("finalizeOne", () => {
     ]);
   });
 
+  it("forge-unverified: pushes the branch + parks it (the merger already commented + dropped ready-for-agent)", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      { kind: "forge-unverified", issue: i },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    // The branch must reach the forge: it is what the human inspects against
+    // the failing check runs.
+    expect(calls.pushes).toEqual([i.branch]);
+    expect(calls.deletes).toEqual([]);
+    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [], add: [AGENT_STUCK] },
+    ]);
+  });
+
+  it("forge-unverified on an already-CLOSED issue: no push, no label flip (#16)", async () => {
+    const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
+    const action = await finalizeOne(
+      { kind: "forge-unverified", issue: issue(45) },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "skipped-closed" });
+    expect(calls.pushes).toEqual([]);
+    expect(calls.labelEdits).toEqual([]);
+  });
+
   it("needs-info: removes worktree, pushes, comments with questions, swaps labels in one editLabels call", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);

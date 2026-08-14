@@ -86,7 +86,48 @@ await run({
 | `maxReviewRounds` | `5` |
 | `maxTotalIssues` | `50` |
 | `labels` | `{ needsInfo: "needs-info", agentStuck: "agent-stuck" }` (override any subset) |
+| `mergeMode` | `{ kind: "direct" }` — see below |
 | `codingStandardsPath` | *(unset)* — no conventional path; see below |
+
+### `mergeMode` — who gets to say the merge result is good
+
+`direct` (the default) is what sandbar has always done: merge locally, run the
+post-merge gate locally, `git push origin HEAD:<sourceBranch>`. Nothing on the
+forge ever sees the result.
+
+Switch to `verified` when anything downstream of the source branch trusts it
+without re-checking — typically a deploy workflow on `push: branches: [main]`.
+A direct push matches neither `pull_request` nor `push: branches-ignore:
+[main]`, so CI silently never runs and the deploy ships an unverified sha.
+
+```ts
+mergeMode: {
+  kind: "verified",
+  integrationBranch: "sandbar/integration", // default; must differ from sourceBranch
+  requiredChecks: [],                       // default: every check the forge reports must pass
+  checkTimeoutMs: 20 * 60_000,              // default
+  pollIntervalMs: 15_000,                   // default
+  openPullRequest: false,                   // default
+}
+```
+
+Per cycle, once the local merges + gate are green, sandbar force-pushes the
+merge result to `integrationBranch`, polls that sha's check runs, and only a
+green verdict earns the fast-forward onto `sourceBranch`. A red forge goes to
+the resolve loop (bounded rounds); checks that never conclude park the cycle —
+sandbar never lands on an unknown verdict. Cost is one CI run per cycle, not
+per implementer attempt.
+
+`openPullRequest: true` adds a pull request against the integration branch as a
+review/audit handle. Landing is a fast-forward push either way, so commit
+attribution is identical with it on or off; the forge marks the PR merged once
+its commits become ancestors of the base. Note that a repo whose CI triggers on
+both `pull_request` and `push` will run the suite twice per round with this on.
+
+The point of `verified` is **independence, not coverage**: CI is a second,
+differently-authored implementation of "does this work", which is the one thing
+expanding the local gate can never buy. Coverage gaps should still be closed in
+`gateCommands` — that is cheaper and faster than a CI round-trip.
 
 The host project also supplies on disk:
 - A `Containerfile` (at `containerfilePath`) for the sandbox image

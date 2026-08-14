@@ -1,4 +1,5 @@
 import type { SandboxHooks } from "./agent-sandbox.js";
+import { SandbarError } from "./errors.js";
 
 export type GateCommand = {
   readonly check: { readonly cmd: string; readonly args: readonly string[] };
@@ -12,8 +13,9 @@ export type GateCommand = {
 //
 // `agentStuck` is the single "the agent gave up, a human needs to take over"
 // label. Every agent-failure terminal (merge-conflict, merge-gate-red,
-// silent-noop-exhausted, needs-human, review-budget-exhausted) parks the issue
-// here; the *reason* is carried in the bot comment, not encoded in the label.
+// forge-unverified, silent-noop-exhausted, needs-human, review-budget-exhausted)
+// parks the issue here; the *reason* is carried in the bot comment, not encoded
+// in the label.
 // `ready-for-human` is intentionally NOT in this set — it's reserved for
 // human-by-triage.
 //
@@ -92,6 +94,55 @@ export type DbSidecarConfig = {
 
 // dbSidecar with every defaultable field made concrete (see resolveDbSidecar).
 export type ResolvedDbSidecarConfig = Required<DbSidecarConfig>;
+
+// How a cycle's merge result reaches the source branch (#22).
+//
+// `direct` is the default and what sandbar has always done: merge locally, gate
+// locally, `git push origin HEAD:<sourceBranch>`. Nothing on the forge ever sees
+// the result. That is fine when the source branch is inert — and unsafe when
+// something downstream (a deploy workflow on `push: branches: [main]`, a release
+// job) trusts it blindly, because sandbar's push matches neither `pull_request`
+// nor `push: branches-ignore: [main]`, so CI silently never runs.
+//
+// `verified` makes the forge the gate: the merge result is pushed to a scratch
+// integration branch, sandbar polls that sha's check runs, and only green earns
+// the fast-forward onto the source branch. The point is INDEPENDENCE, not
+// coverage — CI is a second, differently-authored implementation of "does this
+// work", which is the one thing expanding the local gate can never buy.
+export type MergeModeConfig =
+  | { readonly kind: "direct" }
+  | {
+      readonly kind: "verified";
+      // Scratch ref sandbar force-pushes each cycle's merge result to. Must not
+      // be the source branch. Default: "sandbar/integration".
+      readonly integrationBranch?: string;
+      // Check-run names that must conclude successfully. Default: [] — meaning
+      // EVERY check the forge reports on the sha must pass. Name them only to
+      // land while some unrelated check is still red/absent.
+      readonly requiredChecks?: readonly string[];
+      // How long checks may take to conclude before the cycle is parked. Never
+      // shortened into a "land anyway" — an unknown verdict is not a green one.
+      // Default: 20 minutes.
+      readonly checkTimeoutMs?: number;
+      // Poll interval while checks are pending. Default: 15s.
+      readonly pollIntervalMs?: number;
+      // Also open a pull request for the integration branch, as a review/audit
+      // handle. Landing is a fast-forward push either way (so commit
+      // attribution never changes); the forge marks the PR merged once its
+      // commits become ancestors of the base. Default: false.
+      readonly openPullRequest?: boolean;
+    };
+
+export type ResolvedMergeMode =
+  | { readonly kind: "direct" }
+  | {
+      readonly kind: "verified";
+      readonly integrationBranch: string;
+      readonly requiredChecks: readonly string[];
+      readonly checkTimeoutMs: number;
+      readonly pollIntervalMs: number;
+      readonly openPullRequest: boolean;
+    };
 
 // RunConfig is DEVIATIONS-ONLY by design. A consumer should write down two
 // kinds of thing and nothing else:
@@ -187,17 +238,26 @@ export type RunConfig = {
 
   // Extra host paths copied into each issue worktree. Default: [].
   readonly copyToWorktree?: readonly string[];
+
+  // How the merge result lands on the source branch. Default: {kind:"direct"}.
+  // Turn on `verified` when anything downstream of the source branch trusts it
+  // without re-checking (a deploy on push, a release job).
+  readonly mergeMode?: MergeModeConfig;
 };
 
 // After resolution every defaultable field is concrete. Only the two fields
 // with no default — `codingStandardsPath` (genuinely optional) — stays
 // optional; `labels` is widened from Partial to the fully-populated vocabulary.
 export type ResolvedConfig = Required<
-  Omit<RunConfig, "codingStandardsPath" | "labels" | "dbSidecar">
+  Omit<
+    RunConfig,
+    "codingStandardsPath" | "labels" | "dbSidecar" | "mergeMode"
+  >
 > & {
   readonly codingStandardsPath?: string;
   readonly labels: LabelConfig;
   readonly dbSidecar: ResolvedDbSidecarConfig;
+  readonly mergeMode: ResolvedMergeMode;
 };
 
 export const DEFAULT_CWD = (): string => process.cwd();
@@ -218,6 +278,45 @@ export const DEFAULT_MAX_IMPL_ATTEMPTS = 8;
 export const DEFAULT_MAX_REVIEW_ROUNDS = 5;
 export const DEFAULT_MAX_TOTAL_ISSUES = 50;
 export const DEFAULT_DB_READINESS_TIMEOUT_MS = 60_000;
+export const DEFAULT_INTEGRATION_BRANCH = "sandbar/integration";
+// 20 minutes. Covers a queued runner plus a browser suite; a repo whose CI is
+// genuinely slower should raise it rather than have sandbar park good cycles.
+export const DEFAULT_CHECK_TIMEOUT_MS = 20 * 60_000;
+export const DEFAULT_CHECK_POLL_INTERVAL_MS = 15_000;
+
+export function resolveMergeMode(
+  mode: MergeModeConfig | undefined,
+  sourceBranch: string,
+): ResolvedMergeMode {
+  if (!mode || mode.kind === "direct") return { kind: "direct" };
+  const integrationBranch = mode.integrationBranch ?? DEFAULT_INTEGRATION_BRANCH;
+  // Same ref for both would make the "push somewhere safe, verify, then
+  // fast-forward" sequence a direct push to the source branch with extra steps
+  // — i.e. exactly the hole verified mode exists to close, silently.
+  if (integrationBranch === sourceBranch) {
+    throw new SandbarError(
+      `config.mergeMode: integrationBranch must differ from sourceBranch ` +
+        `(both are '${sourceBranch}'). The integration branch is a scratch ref ` +
+        `sandbar force-pushes unverified merge results to.`,
+    );
+  }
+  const checkTimeoutMs = mode.checkTimeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS;
+  const pollIntervalMs = mode.pollIntervalMs ?? DEFAULT_CHECK_POLL_INTERVAL_MS;
+  if (checkTimeoutMs <= 0 || pollIntervalMs <= 0) {
+    throw new SandbarError(
+      `config.mergeMode: checkTimeoutMs and pollIntervalMs must be positive ` +
+        `(got ${checkTimeoutMs} and ${pollIntervalMs}).`,
+    );
+  }
+  return {
+    kind: "verified",
+    integrationBranch,
+    requiredChecks: mode.requiredChecks ?? [],
+    checkTimeoutMs,
+    pollIntervalMs,
+    openPullRequest: mode.openPullRequest ?? false,
+  };
+}
 
 export function resolveDbSidecar(db: DbSidecarConfig): ResolvedDbSidecarConfig {
   return {
@@ -234,11 +333,12 @@ export function defaultCoauthorTrailer(botName: string, botEmail: string): strin
 }
 
 export function resolveConfig(config: RunConfig): ResolvedConfig {
+  const sourceBranch = config.sourceBranch ?? DEFAULT_SOURCE_BRANCH;
   return {
     ...config,
     cwd: config.cwd ?? DEFAULT_CWD(),
     workDir: config.workDir ?? DEFAULT_WORK_DIR,
-    sourceBranch: config.sourceBranch ?? DEFAULT_SOURCE_BRANCH,
+    sourceBranch,
     containerfilePath: config.containerfilePath ?? DEFAULT_CONTAINERFILE_PATH,
     implementerModelId: config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,
     reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
@@ -256,5 +356,6 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     copyToWorktree: config.copyToWorktree ?? [],
     labels: { ...DEFAULT_LABELS, ...config.labels },
     dbSidecar: resolveDbSidecar(config.dbSidecar),
+    mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
   };
 }

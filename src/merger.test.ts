@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { SandbarError } from "./errors.js";
+import type { PushOutcome, VerifyAdapter } from "./forge-verify.js";
 import type { MergerGateOutput } from "./merger.js";
 import {
   INSTALL_FAILED_COMMENT,
@@ -748,5 +749,160 @@ describe("runMergerWithAdapter — logging", () => {
     expect(lines.some((l) => l.startsWith("merged #10 (via resolve-loop)"))).toBe(true);
     expect(lines.some((l) => l.startsWith("gate-red #42"))).toBe(true);
     expect(lines.some((l) => l.startsWith("skip #42 reason=gate-red"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Verified merge mode (#22) — the forge gates the landing.
+// ---------------------------------------------------------------------------
+
+type VerifyFake = {
+  verify: VerifyAdapter;
+  vCalls: {
+    integrationPushes: string[];
+    fastForwards: string[];
+    prs: number;
+  };
+};
+
+function makeVerifyFake(opts: {
+  checkConclusion?: string;
+  integrationPush?: PushOutcome;
+} = {}): VerifyFake {
+  const vCalls = { integrationPushes: [] as string[], fastForwards: [] as string[], prs: 0 };
+  const verify: VerifyAdapter = {
+    async pushIntegration(branch) {
+      vCalls.integrationPushes.push(branch);
+      return opts.integrationPush ?? { kind: "ok" };
+    },
+    async listCheckRuns() {
+      return [
+        {
+          id: 1,
+          name: "tests",
+          status: "completed",
+          conclusion: opts.checkConclusion ?? "success",
+          detailsUrl: "https://github.com/o/r/actions/runs/1/job/2",
+        },
+      ];
+    },
+    async fetchFailureLog() {
+      return "ci log";
+    },
+    async fastForwardSource(sha) {
+      vCalls.fastForwards.push(sha);
+      return { kind: "ok" };
+    },
+    async ensurePullRequest() {
+      vCalls.prs += 1;
+      return { number: 5, url: "u" };
+    },
+    async closePullRequest() {},
+  };
+  return { verify, vCalls };
+}
+
+const VERIFIED_OPTIONS = {
+  integrationBranch: "sandbar/integration",
+  checkTimeoutMs: 1000,
+  pollIntervalMs: 10,
+  sourceBranch: "main",
+};
+
+describe("runMergerWithAdapter — verified merge mode", () => {
+  it("lands via the forge: no direct push, fast-forwards the verified sha, closes the issues", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      // cycle base, then each issue's preMergeSha, then the sha under test
+      heads: ["base", "p1", "p2", "landed"],
+    });
+    const { verify, vCalls } = makeVerifyFake();
+
+    const summary = await runMergerWithAdapter([issue(7), issue(9)], adapter, undefined, undefined, {
+      verified: { adapter: verify, options: VERIFIED_OPTIONS },
+    });
+
+    expect(summary.merged.map((m) => m.id)).toEqual(["7", "9"]);
+    expect(summary.pushed).toBe(true);
+    expect(summary.skipped).toEqual([]);
+    // The source branch is only ever reached through the verified fast-forward.
+    expect(calls.pushes).toBe(0);
+    expect(vCalls.integrationPushes).toEqual(["sandbar/integration"]);
+    expect(vCalls.fastForwards).toEqual(["landed"]);
+    expect(calls.closes.map((c) => c.n)).toEqual([7, 9]);
+  });
+
+  it("reverts the WHOLE cycle and parks every merged issue when the forge says no", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      heads: ["base", "p1", "p2", "landed"],
+    });
+    const { verify, vCalls } = makeVerifyFake({ checkConclusion: "failure" });
+
+    const summary = await runMergerWithAdapter([issue(7), issue(9)], adapter, undefined, undefined, {
+      verified: {
+        adapter: verify,
+        // One round: the red verdict is final, no resolve attempt.
+        options: { ...VERIFIED_OPTIONS, maxRounds: 1 },
+      },
+    });
+
+    expect(summary.merged).toEqual([]);
+    expect(summary.pushed).toBe(false);
+    expect(summary.skipped.map((s) => [s.issue.id, s.reason])).toEqual([
+      ["7", "forge-unverified"],
+      ["9", "forge-unverified"],
+    ]);
+    // Reverted to where the merger worktree started, not to a per-issue sha.
+    expect(calls.resets).toEqual([{ sha: "base" }]);
+    expect(vCalls.fastForwards).toEqual([]);
+    expect(calls.closes).toEqual([]);
+    expect(calls.removedLabels).toEqual([
+      { n: 7, label: READY_FOR_AGENT_LABEL },
+      { n: 9, label: READY_FOR_AGENT_LABEL },
+    ]);
+    // Each issue is told it may not be the one at fault, and names its siblings.
+    expect(calls.comments.map((c) => c.n)).toEqual([7, 9]);
+    expect(calls.comments[0]!.msg).toContain("#9");
+    expect(calls.comments[0]!.msg).toContain("not necessarily this issue's fault");
+    expect(calls.comments[1]!.msg).toContain("#7");
+  });
+
+  it("halts loud (MergerError) when the integration push is rejected", async () => {
+    const { adapter } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      heads: ["base", "p1", "landed"],
+    });
+    const { verify } = makeVerifyFake({
+      integrationPush: { kind: "rejected", reason: "stale info" },
+    });
+
+    await expect(
+      runMergerWithAdapter([issue(7)], adapter, undefined, undefined, {
+        verified: { adapter: verify, options: VERIFIED_OPTIONS },
+      }),
+    ).rejects.toThrow(MergerError);
+  });
+
+  it("does not touch the forge when nothing merged", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [gateRed()],
+      agents: [{ stdout: "<reason>no</reason>\n<promise>ABANDON</promise>" }],
+      heads: ["base", "p1"],
+    });
+    const { verify, vCalls } = makeVerifyFake();
+
+    const summary = await runMergerWithAdapter([issue(7)], adapter, undefined, undefined, {
+      verified: { adapter: verify, options: VERIFIED_OPTIONS },
+    });
+
+    expect(summary.merged).toEqual([]);
+    expect(summary.pushed).toBe(false);
+    expect(vCalls.integrationPushes).toEqual([]);
+    expect(calls.pushes).toBe(0);
   });
 });
