@@ -800,12 +800,19 @@ function fakeExec(
   return { exec, calls };
 }
 
-function adapterWith(exec: ExecFn) {
+// listCheckRuns also reads the legacy combined-status endpoint. Tests that are
+// about check runs answer it with "nothing failing" so their argv assertions
+// stay about the call they care about; the status behaviour has its own tests.
+function adapterWith(exec: ExecFn, statuses: unknown[] = []) {
+  const wrapped: ExecFn = async (file, args, opts) =>
+    args.some((a) => a.includes("/status?"))
+      ? { stdout: JSON.stringify({ state: "success", statuses }), stderr: "" }
+      : exec(file, args, opts);
   return realVerifyAdapter({
     cwd: "/wt",
     sourceBranch: "main",
     repo: { owner: "o", name: "r" },
-    exec,
+    exec: wrapped,
   });
 }
 
@@ -1065,5 +1072,86 @@ describe("realVerifyAdapter.fetchFailureLog", () => {
     const { exec } = fakeExec(() => new Error("HTTP 404"));
     const out = await adapterWith(exec).fetchFailureLog(run({ name: "tests" }));
     expect(out).toContain("could not fetch log");
+  });
+});
+
+describe("realVerifyAdapter — legacy commit statuses", () => {
+  it("folds a FAILING status into the verdict, so Actions-green + status-red is red", async () => {
+    // Buildkite/Jenkins/older deploy integrations report through the status
+    // API and never create a check run. Reading only check runs lands a sha
+    // the forge displays as failing.
+    const { exec } = fakeExec(() => ({
+      stdout: JSON.stringify({ total_count: 1, check_runs: [checkRunJson()] }),
+    }));
+    const out = await adapterWith(exec, [
+      {
+        id: 9,
+        state: "failure",
+        context: "buildkite/deploy",
+        target_url: "https://buildkite.com/x/1",
+      },
+    ]).listCheckRuns("sha1");
+
+    expect(aggregateCheckRuns(out.runs, ["tests"]).kind).toBe("red");
+    const status = out.runs.find((r) => r.name.startsWith("status:"));
+    expect(status).toMatchObject({
+      name: "status:buildkite/deploy",
+      suiteId: 0,
+      status: "completed",
+      conclusion: "failure",
+      detailsUrl: "https://buildkite.com/x/1",
+    });
+  });
+
+  it("does NOT wait on a pending status", async () => {
+    // Third-party integrations routinely leave a status pending forever;
+    // blocking on those would hang cycles on state nobody will conclude. The
+    // fold-in is deliberately one-way — it can turn a verdict red, never green,
+    // and never introduces a new way to hang.
+    const { exec } = fakeExec(() => ({
+      stdout: JSON.stringify({ total_count: 1, check_runs: [checkRunJson()] }),
+    }));
+    const out = await adapterWith(exec, [
+      { id: 9, state: "pending", context: "vercel", target_url: "" },
+    ]).listCheckRuns("sha1");
+
+    expect(out.runs.some((r) => r.name.startsWith("status:"))).toBe(false);
+    expect(aggregateCheckRuns(out.runs, ["tests"]).kind).toBe("green");
+  });
+
+  it("asks for the status of the same sha it asked check runs about", async () => {
+    const seen: string[] = [];
+    const { exec } = fakeExec((c) => {
+      seen.push(c.args.find((a) => a.startsWith("repos/")) ?? "");
+      return c.args.some((a) => a.includes("/status?"))
+        ? { stdout: JSON.stringify({ state: "success", statuses: [] }) }
+        : { stdout: JSON.stringify({ total_count: 0, check_runs: [] }) };
+    });
+    await realVerifyAdapter({
+      cwd: "/wt",
+      sourceBranch: "main",
+      repo: { owner: "o", name: "r" },
+      exec,
+    }).listCheckRuns("deadbeef");
+    expect(seen).toEqual([
+      "repos/o/r/commits/deadbeef/check-runs?per_page=100&page=1",
+      "repos/o/r/commits/deadbeef/status?per_page=100",
+    ]);
+  });
+
+  it("throws rather than guessing when the status half of the verdict is unreadable", async () => {
+    const { exec } = fakeExec((c) =>
+      c.args.some((a) => a.includes("/status?"))
+        ? new Error("HTTP 502")
+        : { stdout: JSON.stringify({ total_count: 0, check_runs: [] }) },
+    );
+    await expect(
+      realVerifyAdapter({
+        cwd: "/wt",
+        sourceBranch: "main",
+        repo: { owner: "o", name: "r" },
+        exec,
+      }).listCheckRuns("sha1"),
+    ).rejects.toThrow(/502/);
   });
 });

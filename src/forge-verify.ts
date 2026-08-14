@@ -900,6 +900,60 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
   const repoFlag = `${deps.repo.owner}/${deps.repo.name}`;
   const exec: ExecFn = deps.exec ?? defaultExec;
 
+  /**
+   * Failing entries from the legacy combined-status API, shaped as check runs
+   * so the pure aggregation has one kind of thing to reason about. A failure to
+   * READ this is not caught: an unreadable half of the verdict is an unknown
+   * verdict, and the poller's retry/throw is the right handling.
+   *
+   * One page of 100. More than 100 distinct status contexts on a single commit
+   * does not happen outside pathology, and unlike the check-runs walk a short
+   * read here can only lose a red we would otherwise have added — it cannot
+   * invent a green.
+   */
+  const failingStatuses = async (sha: string): Promise<ForgeCheckRun[]> => {
+    const { stdout } = await exec(
+      "gh",
+      [
+        "api",
+        "-H",
+        "Accept: application/vnd.github+json",
+        `repos/${repoFlag}/commits/${sha}/status?per_page=100`,
+      ],
+      { cwd, maxBuffer: MAX_BUFFER },
+    );
+    const body: unknown = JSON.parse(stdout.trim() || "{}");
+    if (typeof body !== "object" || body === null) {
+      throw new SandbarError(`Unreadable commit-status response for ${sha}.`);
+    }
+    // Read the `statuses` ARRAY, never the envelope's `state`: a commit with no
+    // statuses at all reports `state: "pending"` (verified against the live
+    // API), so a caller that trusted `state` would treat every ordinary commit
+    // as permanently unresolved and park every cycle.
+    const raw = (body as Record<string, unknown>)["statuses"];
+    if (!Array.isArray(raw)) return [];
+    const out: ForgeCheckRun[] = [];
+    for (const s of raw) {
+      const o = s as Record<string, unknown>;
+      const state = typeof o["state"] === "string" ? o["state"] : "";
+      if (state !== "failure" && state !== "error") continue;
+      const context =
+        typeof o["context"] === "string" ? o["context"] : "(unnamed status)";
+      out.push({
+        id: typeof o["id"] === "number" ? o["id"] : 0,
+        // Statuses have no check suite; 0 keeps them from ever colliding with
+        // a real suite's supersession key, and the `status:` prefix keeps them
+        // from colliding with a check-run name in requiredChecks.
+        suiteId: 0,
+        name: `status:${context}`,
+        status: "completed",
+        conclusion: state,
+        detailsUrl: typeof o["target_url"] === "string" ? o["target_url"] : "",
+      });
+    }
+    return out;
+  };
+
   return {
     async pushIntegration(branch) {
       // Observe the remote ref first so the force-push can be lease-protected:
@@ -937,8 +991,7 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
     async listCheckRuns(sha) {
       // Check runs are sha-scoped, which is exactly the guarantee this module
       // needs: a verdict can never be about a different commit than the one
-      // being landed. Legacy commit *statuses* (the pre-checks API) are not
-      // consulted — GitHub Actions reports check runs.
+      // being landed.
       //
       // Paged explicitly rather than with `gh --paginate`: `--paginate` with a
       // `--jq` filter emits one JSON document PER PAGE (concatenated, not
@@ -1002,6 +1055,23 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
           break;
         }
       }
+      // The legacy commit-status API is a SECOND, separate place the forge
+      // reports verdicts (Buildkite, Jenkins, older Vercel/Codecov apps all
+      // POST /statuses/:sha and never create a check run). Ignoring it means a
+      // sha whose Actions are green and whose deploy status is red reads as
+      // green here.
+      //
+      // Only FAILING statuses are folded in, deliberately asymmetric: they can
+      // turn a verdict red but never green, so this cannot manufacture a
+      // landing. Pending statuses are NOT waited for — third-party integrations
+      // routinely leave one pending forever, and blocking on those would hang
+      // cycles on state nobody is going to conclude. The floor that must
+      // actually pass is `requiredChecks`, which is check-run names; a repo
+      // whose entire CI reports through statuses cannot use verified mode, and
+      // finds that out immediately via the no-checks halt rather than by
+      // landing something.
+      runs.push(...(await failingStatuses(sha)));
+
       // `complete: false` reaches the poller as "keep waiting", never as a
       // verdict: it means either the page cap was hit or checks were being
       // created underneath the walk, and in both cases the runs we did not see
