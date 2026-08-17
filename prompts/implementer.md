@@ -56,9 +56,14 @@ cheap to resume.
 ## Done signal
 
 When the implementation is complete and committed, emit
-`<promise>COMPLETE</promise>`. Gate-1 (project's `check` + `test`) is the
-deciding authority on correctness — a passing claim with a red gate sends you to
-the next attempt with the failure output.
+`<promise>COMPLETE</promise>`. Gate-1 (the project's gate steps, run against
+your commits) is the deciding authority on correctness — a passing claim with a
+red gate sends you to the next attempt with the failure output.
+
+COMPLETE means the worktree is CLEAN: `git status` empty, everything committed.
+The gate runs against this worktree and the merger only ever sees commits, so a
+COMPLETE claim over uncommitted changes describes nothing that can be merged.
+It is not gated — it costs you an attempt and comes straight back.
 
 If you need information you cannot derive from the issue or codebase, emit
 `<promise>NEEDS-INFO</promise>` followed by a `<questions>` block.

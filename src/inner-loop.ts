@@ -1,11 +1,11 @@
 // Inner-loop runner — I/O glue around the pure state machine.
 //
 // Per issue:
-//   1. Prepare the issue worktree, then set up an agent sandbox + DB sidecar
-//      in parallel. The worktree comes FIRST (not in the parallel pair, #20):
-//      the sidecar's initMounts bind-mount fixture files from it, and mount
-//      sources are read at container start — only the expensive container
-//      bringups overlap.
+//   1. Prepare the issue worktree, then set up an agent sandbox + the gate
+//      stack in parallel. The worktree comes FIRST (not in the parallel pair,
+//      #20): stack mounts bind-mount fixture files from it, and mount sources
+//      are read at container start — only the expensive container bringups
+//      overlap.
 //   2. Drive the state machine (inner-loop-machine.ts) to a verdict by
 //      executing the action it emits and feeding the result back as an event.
 //   3. Translate the verdict to a Terminal.
@@ -21,9 +21,10 @@ import * as agentSandbox from "./agent-sandbox.js";
 import { podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
-import type { GateCommand, ResolvedDbSidecarConfig } from "./config.js";
-import { runGate, summarizeGateFailure } from "./gate.js";
-import { ensureIssueBranch } from "./git-ops.js";
+import type { ResolvedGateStack } from "./config.js";
+import { summarizeGateFailure } from "./gate.js";
+import { type Stack, startStack } from "./gate-stack.js";
+import { dirtyWorktreePaths, ensureIssueBranch } from "./git-ops.js";
 import {
   HARD_ERROR_MAX_RETRIES,
   type LoopAction,
@@ -36,7 +37,6 @@ import {
   step,
 } from "./inner-loop-machine.js";
 import type { AttemptLogger } from "./logs.js";
-import { type Sidecar, startDbSidecar } from "./db-sidecar.js";
 import { parsePromise } from "./promise-parser.js";
 import { buildPrompt, buildReviewerPrompt } from "./prompt.js";
 import { parseVerdict } from "./verdict-parser.js";
@@ -85,9 +85,8 @@ export type InnerLoopConfig = {
   readonly reviewerModelId: string;
   readonly maxImplAttempts: number;
   readonly maxReviewRounds: number;
-  readonly gateImage: string;
-  readonly gateCommands: GateCommand;
-  readonly dbSidecar: ResolvedDbSidecarConfig;
+  readonly sandboxImage: string;
+  readonly gateStack: ResolvedGateStack;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
@@ -165,7 +164,7 @@ async function runSandboxCycle(
 ): Promise<SandboxCycleOutcome> {
   const { config } = opts;
   let sandbox: Sandbox | null = null;
-  let sidecar: Sidecar | null = null;
+  let stack: Stack | null = null;
   const accumulated: { sha: string }[] = [];
 
   try {
@@ -174,8 +173,8 @@ async function runSandboxCycle(
     await ensureIssueBranch(issue.branch, config.sourceBranch);
 
     // Worktree first (fast git ops), then container bringups in parallel: the
-    // sidecar's initMounts resolve against this worktree and must see its
-    // files on disk at container start (#20).
+    // stack's mounts resolve against this worktree and must see its files on
+    // disk at container start (#20).
     const worktreePath = await agentSandbox.prepareWorktree({
       branch: issue.branch,
       hooks: opts.hooks,
@@ -183,39 +182,35 @@ async function runSandboxCycle(
       workDir: config.workDir,
     });
 
-    const [sandboxResult, sidecarResult] = await Promise.allSettled([
+    const [sandboxResult, stackResult] = await Promise.allSettled([
       agentSandbox.createSandbox({
         branch: issue.branch,
-        sandbox: podman(),
+        // Named explicitly rather than left to defaultImageName(repoDir): the
+        // implicit coupling between the sandbox image and the host's repo
+        // DIRECTORY NAME broke silently on a rename (#24 D7).
+        sandbox: podman({ imageName: config.sandboxImage }),
         hooks: opts.hooks,
         envFilePath: config.envFilePath,
         workDir: config.workDir,
         preparedWorktreePath: worktreePath,
       }),
-      startDbSidecar({
-        issueId: issue.id,
-        spec: config.dbSidecar,
+      startStack({
+        stackId: issue.id,
+        spec: config.gateStack,
         worktreePath,
       }),
     ]);
     if (sandboxResult.status === "fulfilled") sandbox = sandboxResult.value;
-    if (sidecarResult.status === "fulfilled") sidecar = sidecarResult.value;
-    if (sandbox === null || sidecar === null) {
+    if (stackResult.status === "fulfilled") stack = stackResult.value;
+    if (sandbox === null || stack === null) {
       throw sandboxResult.status === "rejected"
         ? sandboxResult.reason
-        : (sidecarResult as PromiseRejectedResult).reason;
+        : (stackResult as PromiseRejectedResult).reason;
     }
 
-    // startDbSidecar already registered sidecar.stop with onCleanup before it
-    // created any podman resource, so no re-registration is needed here.
-    const gateOpts: SidecarGateOpts = {
-      gateImage: config.gateImage,
-      gateCommands: config.gateCommands,
-      networkName: sidecar.networkName,
-      dbHost: sidecar.dbHost,
-      dbPort: sidecar.dbPort,
-      gateEnv: config.dbSidecar.gateEnv,
-    };
+    // startStack already registered stack.stop with onCleanup before it created
+    // any podman resource, so no re-registration is needed here.
+    const gateStack: Stack = stack;
 
     const anchorOpts = {
       claudeMdPath: config.claudeMdPath,
@@ -237,7 +232,8 @@ async function runSandboxCycle(
         opts,
         config,
         anchorOpts,
-        gateOpts,
+        gateStack,
+        worktreePath,
         accumulated,
       });
       const r = step(state, event);
@@ -265,24 +261,15 @@ async function runSandboxCycle(
         // ignore
       }
     }
-    if (sidecar) {
+    if (stack) {
       try {
-        await sidecar.stop();
+        await stack.stop();
       } catch {
         // ignore
       }
     }
   }
 }
-
-type SidecarGateOpts = {
-  readonly gateImage: string;
-  readonly gateCommands: GateCommand;
-  readonly networkName: string;
-  readonly dbHost: string;
-  readonly dbPort: number;
-  readonly gateEnv: Readonly<Record<string, string>>;
-};
 
 type ExecuteActionCtx = {
   readonly issue: IssueRef;
@@ -295,7 +282,10 @@ type ExecuteActionCtx = {
     readonly adrDir?: string;
     readonly sourceBranch: string;
   };
-  readonly gateOpts: SidecarGateOpts;
+  readonly gateStack: Stack;
+  // The issue worktree. Same tree the sandbox edits, the stack mounts and the
+  // clean-assert reads — one tree, which is the whole point of D1.
+  readonly worktreePath: string;
   readonly accumulated: { sha: string }[];
 };
 
@@ -350,15 +340,20 @@ async function runImplementer(
   const signal = parsePromise(run.stdout, {
     commitsAccumulated: accumulated.length,
   });
-  return { kind: "implementer-result", signal };
+  // Read here, not in the gate: a COMPLETE claim over a dirty tree should never
+  // cost a stack bringup, and the state machine wants the paths to re-prompt
+  // with (#24 D1). Read on every signal so the SM stays the only place that
+  // decides what dirt means.
+  const dirtyPaths = await dirtyWorktreePaths(ctx.worktreePath);
+  return { kind: "implementer-result", signal, dirtyPaths };
 }
 
 async function runGate1(
   action: Extract<LoopAction, { kind: "run-gate-1" }>,
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
-  const { issue, sandbox, opts, gateOpts } = ctx;
-  const gate1 = await runGate({ worktreePath: sandbox.worktreePath, ...gateOpts });
+  const { issue, opts, gateStack } = ctx;
+  const gate1 = await gateStack.runGate();
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(
       `issue=${issue.id} attempt=${action.attempt} gate-1 ok=${gate1.ok} exitCode=${gate1.exitCode} failedStep=${gate1.failedStep ?? "-"}`,
@@ -367,9 +362,13 @@ async function runGate1(
   return {
     kind: "gate-1-result",
     ok: gate1.ok,
+    // Summarize the STEP output, then append the container logs — never the
+    // other way round. The cascade collapse looks for many lines sharing one
+    // signature, and a service log is full of them (see GateResult.containerLogs).
     failureTrace: gate1.ok
       ? ""
-      : summarizeGateFailure(`${gate1.stdout}\n${gate1.stderr}`, FAILURE_TAIL_LINES),
+      : summarizeGateFailure(`${gate1.stdout}\n${gate1.stderr}`, FAILURE_TAIL_LINES) +
+        gate1.containerLogs,
   };
 }
 

@@ -24,7 +24,7 @@ import { promisify } from "node:util";
 import { makeEnvReader } from "./env.js";
 import { worktreePathFor } from "./finalize.js";
 import { ALL_BRANCH_PREFIXES, issueNumberFromBranch } from "./naming.js";
-import { RUNTIME as SIDECAR_RUNTIME } from "./db-sidecar.js";
+import { RUNTIME } from "./runtime.js";
 import { fetchCandidates } from "./plan-resolver.js";
 
 const exec = promisify(execFile);
@@ -34,9 +34,12 @@ export type PreflightConfig = {
   readonly workDir: string;
   readonly envFilePath: string;
   readonly sourceBranch: string;
-  // The configured `dbSidecar.image` — preflight verifies it is already
-  // pulled, because the sidecar's `podman run` would otherwise fail mid-cycle.
-  readonly dbImage: string;
+  // Every image the gate stack references that sandbar does NOT build itself
+  // (#24 D7). Preflight verifies each is already pulled and REFUSES rather than
+  // pulling: a run must not do silent network work at startup, and a missing
+  // image discovered mid-cycle fails a container bringup that then has to be
+  // triaged as infra-or-branch.
+  readonly pulledImages: readonly string[];
 };
 
 export type SandbarBranch = {
@@ -48,8 +51,8 @@ export type RepoState = {
   readonly hasGit: boolean;
   readonly hasGh: boolean;
   readonly hasContainerRuntime: boolean;
-  readonly hasDbImage: boolean;
-  readonly dbImage: string;
+  // Referenced-but-not-built images absent from the local store.
+  readonly missingImages: readonly string[];
   readonly ghAuthOk: boolean;
   readonly sandboxGhTokenOk: boolean;
   readonly hasAgentCredential: boolean;
@@ -78,15 +81,19 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
   if (!s.hasContainerRuntime) {
     out.push({
       ok: false,
-      message: `\`${SIDECAR_RUNTIME}\` is not on PATH. Sandbar uses ${SIDECAR_RUNTIME} for the agent sandbox, gate runner, and db sidecar. Install it.`,
+      message: `\`${RUNTIME}\` is not on PATH. Sandbar uses ${RUNTIME} for the agent sandbox and the gate stack. Install it.`,
     });
   }
-  if (!s.hasDbImage) {
+  if (s.missingImages.length > 0) {
+    const list = s.missingImages
+      .map((i) => `  ${RUNTIME} pull ${i}`)
+      .join("\n");
     out.push({
       ok: false,
       message:
-        `DB sidecar image \`${s.dbImage}\` is missing in ${SIDECAR_RUNTIME}. ` +
-        `Pull it with \`${SIDECAR_RUNTIME} pull ${s.dbImage}\`.`,
+        `${s.missingImages.length} gate-stack image(s) referenced by ` +
+        `config.gateStack are missing in ${RUNTIME}. Sandbar builds only what ` +
+        `config.images lists and refuses to pull the rest, so pull them:\n${list}`,
     });
   }
   if (!s.ghAuthOk) {
@@ -207,11 +214,16 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
   const env = makeEnvReader(cfg.envFilePath);
   const hasGit = which("git");
   const hasGh = which("gh");
-  const hasContainerRuntime = which(SIDECAR_RUNTIME);
+  const hasContainerRuntime = which(RUNTIME);
 
-  const hasDbImage = hasContainerRuntime
-    ? await runOk(SIDECAR_RUNTIME, ["image", "exists", cfg.dbImage])
-    : false;
+  const missingImages: string[] = [];
+  if (hasContainerRuntime) {
+    for (const image of cfg.pulledImages) {
+      if (!(await runOk(RUNTIME, ["image", "exists", image]))) {
+        missingImages.push(image);
+      }
+    }
+  }
 
   const ghAuthOk = hasGh ? await runOk("gh", ["auth", "status"]) : false;
   const sandboxGhTokenOk = hasGh ? await checkSandboxGhToken(env) : false;
@@ -244,8 +256,7 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     hasGit,
     hasGh,
     hasContainerRuntime,
-    hasDbImage,
-    dbImage: cfg.dbImage,
+    missingImages,
     ghAuthOk,
     sandboxGhTokenOk,
     hasAgentCredential,

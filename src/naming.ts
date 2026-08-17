@@ -36,6 +36,35 @@ export const ALL_RESOURCE_PREFIXES: readonly string[] = [
   ...LEGACY_RESOURCE_PREFIXES,
 ];
 
+// ---------------------------------------------------------------------------
+// Gate-stack resource names (#24)
+//
+// A stack is identified by a `stackId` — the issue id in the inner loop, the
+// literal "merger" for gate-2. Three shapes, all sharing RESOURCE_PREFIX so the
+// orphan sweeper's name filters reach them:
+//
+//   network    sandbar-net-<stackId>
+//   pod        sandbar-pod-<stackId>
+//   container  sandbar-<stackId>-<containerName>
+//
+// The pod's own INFRA container is the exception and the reason the sweeper
+// cannot be containers-and-networks-only: podman names it `<pod-id-prefix>-infra`
+// (a hash, e.g. `c5968a5425d7-infra`), which matches no sandbar prefix. Only
+// `podman pod rm` reaches it, so cleanupOrphanContainers sweeps pods too.
+// ---------------------------------------------------------------------------
+
+export function networkNameFor(stackId: string): string {
+  return `${RESOURCE_PREFIX}net-${stackId}`;
+}
+
+export function podNameFor(stackId: string): string {
+  return `${RESOURCE_PREFIX}pod-${stackId}`;
+}
+
+export function stackContainerNameFor(stackId: string, name: string): string {
+  return `${RESOURCE_PREFIX}${stackId}-${name}`;
+}
+
 // Reverse of the branch-naming convention: pull the issue number out of a
 // per-issue branch name (`<prefix>issue-<n>-<slug>`), recognizing every
 // current + legacy prefix. Returns null for anything that doesn't match the

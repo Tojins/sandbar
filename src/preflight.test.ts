@@ -5,8 +5,7 @@ const cleanState: RepoState = {
   hasGit: true,
   hasGh: true,
   hasContainerRuntime: true,
-  hasDbImage: true,
-  dbImage: "docker.io/library/mariadb:10.11",
+  missingImages: [],
   ghAuthOk: true,
   sandboxGhTokenOk: true,
   hasAgentCredential: true,
@@ -44,16 +43,23 @@ describe("checkInvariants", () => {
     expect(f.some((m) => m.includes("podman") && m.includes("PATH"))).toBe(true);
   });
 
-  it("flags a missing db sidecar image, naming the CONFIGURED image (#20)", () => {
-    const f = failures({ ...cleanState, hasDbImage: false });
-    expect(
-      f.some(
-        (m) =>
-          m.includes("DB sidecar image") &&
-          m.includes("docker.io/library/mariadb:10.11") &&
-          m.includes("pull"),
-      ),
-    ).toBe(true);
+  // The referenced-but-not-built images (#24 D7). Preflight refuses rather than
+  // pulling, so the message has to be the pull command itself — an operator who
+  // has to go and derive it from config is the failure mode this replaces.
+  it("flags every missing gate-stack image with the exact pull command", () => {
+    const f = failures({
+      ...cleanState,
+      missingImages: ["docker.io/library/mariadb:10.11", "docker.io/mailhog/mailhog:latest"],
+    });
+    const msg = f.find((m) => m.includes("gate-stack image"));
+    expect(msg).toBeDefined();
+    expect(msg).toContain("podman pull docker.io/library/mariadb:10.11");
+    expect(msg).toContain("podman pull docker.io/mailhog/mailhog:latest");
+    expect(msg).toContain("2 gate-stack image(s)");
+  });
+
+  it("does not flag images when none are missing", () => {
+    expect(failures({ ...cleanState, missingImages: [] })).toEqual([]);
   });
 
   it("flags failed gh auth", () => {
@@ -198,7 +204,7 @@ describe("checkInvariants", () => {
       ...cleanState,
       hasGh: false,
       hasContainerRuntime: false,
-      hasDbImage: false,
+      missingImages: ["docker.io/library/mariadb:10.11"],
       ghAuthOk: false,
       sandboxGhTokenOk: false,
       hasAgentCredential: false,

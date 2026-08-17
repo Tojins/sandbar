@@ -15,7 +15,13 @@ function issue(n: number): IssueRef {
 }
 
 function gateOut(): MergerGateOutput {
-  return { stdout: "test out", stderr: "test err", failedStep: "test", exitCode: 1 };
+  return {
+    stdout: "test out",
+    stderr: "test err",
+    failedStep: "test",
+    exitCode: 1,
+    containerLogs: "\n--- container db (last 40 lines) ---\nstack log line",
+  };
 }
 
 type AgentResult = { stdout: string };
@@ -235,6 +241,11 @@ describe("runResolveLoop — conflict mode", () => {
     expect(calls.agentRuns).toBe(2);
     expect(calls.gateCalls).toBe(2);
     expect(calls.prompts[1]).toContain("Gate output");
+    // #24 D9: the stack's container logs reach the agent alongside the step
+    // output. Without them a step that fails because a service is 500ing is
+    // undiagnosable from the step's own text.
+    expect(calls.prompts[1]).toContain("--- container db (last 40 lines) ---");
+    expect(calls.prompts[1]).toContain("stack log line");
   });
 
   it("gate green but HEAD didn't advance: returns silent abandon", async () => {

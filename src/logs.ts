@@ -32,10 +32,12 @@ export type AttemptLogger = {
   ): Promise<void>;
 };
 
+// `failedStep` is the name of the gate step that went red — free-form since
+// #24, since the steps are the consumer's.
 export type MergerGateRecord = {
   readonly stdout: string;
   readonly stderr: string;
-  readonly failedStep: "check" | "test" | null;
+  readonly failedStep: string | null;
   readonly exitCode: number;
 };
 

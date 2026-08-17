@@ -24,3 +24,35 @@ export async function ensureIssueBranch(
   // branches and (b) parallel `git branch` calls race on `.git/config`.
   await exec("git", ["branch", "--no-track", branch, `origin/${sourceBranch}`]);
 }
+
+// The paths `git status --porcelain` reports in a worktree — tracked
+// modifications and untracked, non-ignored files alike.
+//
+// This is what makes a gate verdict a statement about a COMMIT rather than
+// about a directory (#24 D1). The gate bind-mounts the worktree itself: it must,
+// because a repo's build artifacts (node_modules, vendor, dist) are gitignored
+// and have to survive between attempts, so a materialized `git archive` tree
+// would pay a cold build every attempt and a second reset-and-clean tree would
+// pay ~768M of copying per issue for an identical verdict. Asserting the tree
+// is clean gets the same guarantee for the cost of one `git status`.
+//
+// Refusing beats cleaning. The rejected alternative — `git clean -fd` before
+// each gate — deletes exactly the set this reports: untracked, non-ignored
+// files. That set is overwhelmingly a forgotten `git add`, and destroying the
+// agent's work silently is worse than telling it to commit.
+//
+// Corollary for consumers, enforced by nothing but stated here and in the gate
+// stack's docs: a gate step must write only into gitignored paths, or its own
+// exhaust is reported as uncommitted work on every attempt until the budget
+// dies.
+export async function dirtyWorktreePaths(
+  worktreePath: string,
+): Promise<readonly string[]> {
+  const { stdout } = await exec("git", ["status", "--porcelain"], {
+    cwd: worktreePath,
+  });
+  return stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+}

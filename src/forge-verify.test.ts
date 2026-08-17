@@ -558,6 +558,7 @@ function makeVerify(script: VerifyScript): {
             stderr: "",
             failedStep: "test" as const,
             exitCode: 1,
+            containerLogs: "",
           };
     },
     async getIssueBody(id) {

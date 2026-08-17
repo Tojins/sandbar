@@ -1,5 +1,5 @@
 This branch merged cleanly into the source branch, but the post-merge gate
-(project's `check` + `test`) is failing against the merged tree.
+(the project's gate steps) is failing against the merged tree.
 
 ## Gate output (last 200 lines)
 

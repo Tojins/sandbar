@@ -1,0 +1,95 @@
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { dirtyWorktreePaths } from "./git-ops.js";
+
+const exec = promisify(execFile);
+
+// Run against a real repo rather than a mocked `git status`. What counts as
+// "dirty" is git's definition, and the whole D1 argument turns on one detail of
+// it that no fake would preserve: ignored files are NOT reported, which is what
+// lets build artifacts survive between attempts while the tree still proves the
+// gate is testing a commit.
+describe("dirtyWorktreePaths (#24 D1)", () => {
+  let repo: string;
+
+  const git = (...args: string[]) => exec("git", args, { cwd: repo });
+
+  beforeEach(async () => {
+    repo = await mkdtemp(join(tmpdir(), "sandbar-gitops-"));
+    await git("init", "-q", "-b", "main");
+    await git("config", "user.email", "t@t");
+    await git("config", "user.name", "t");
+    await writeFile(join(repo, ".gitignore"), "node_modules/\ntest-results/\n");
+    await writeFile(join(repo, "app.ts"), "export const a = 1;\n");
+    await git("add", "-A");
+    await git("commit", "-qm", "init");
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it("is empty on a tree that equals HEAD", async () => {
+    expect(await dirtyWorktreePaths(repo)).toEqual([]);
+  });
+
+  it("reports a modified tracked file", async () => {
+    await writeFile(join(repo, "app.ts"), "export const a = 2;\n");
+    const dirty = await dirtyWorktreePaths(repo);
+    expect(dirty).toHaveLength(1);
+    expect(dirty[0]).toContain("app.ts");
+  });
+
+  // The forgotten `git add` — overwhelmingly the common case, and the reason
+  // the design refuses rather than running `git clean -fd`, which would have
+  // deleted exactly this file.
+  it("reports an untracked, non-ignored file", async () => {
+    await writeFile(join(repo, "new.ts"), "export const b = 2;\n");
+    const dirty = await dirtyWorktreePaths(repo);
+    expect(dirty).toHaveLength(1);
+    expect(dirty[0]).toContain("new.ts");
+  });
+
+  // The load-bearing half: a gate step's own exhaust and the repo's build
+  // artifacts live here. If these counted as dirty, every attempt after the
+  // first would be re-prompted to commit node_modules until the budget died —
+  // and the alternative design (a second, cleaned tree) would pay a cold build
+  // every attempt to avoid it.
+  it("does NOT report ignored artifacts", async () => {
+    await mkdir(join(repo, "node_modules/pkg"), { recursive: true });
+    await writeFile(join(repo, "node_modules/pkg/index.js"), "x\n");
+    await mkdir(join(repo, "test-results"), { recursive: true });
+    await writeFile(join(repo, "test-results/out.xml"), "<x/>\n");
+    expect(await dirtyWorktreePaths(repo)).toEqual([]);
+  });
+
+  it("is clean again once the work is committed", async () => {
+    await writeFile(join(repo, "new.ts"), "export const b = 2;\n");
+    expect(await dirtyWorktreePaths(repo)).toHaveLength(1);
+    await git("add", "-A");
+    await git("commit", "-qm", "work");
+    expect(await dirtyWorktreePaths(repo)).toEqual([]);
+  });
+
+  // A staged-but-uncommitted change is still not a commit: the gate would test
+  // it and the merger would never see it.
+  it("reports staged changes", async () => {
+    await writeFile(join(repo, "new.ts"), "export const b = 2;\n");
+    await git("add", "-A");
+    const dirty = await dirtyWorktreePaths(repo);
+    expect(dirty).toHaveLength(1);
+    expect(dirty[0]).toContain("new.ts");
+  });
+
+  it("reports a deleted tracked file", async () => {
+    await rm(join(repo, "app.ts"));
+    const dirty = await dirtyWorktreePaths(repo);
+    expect(dirty).toHaveLength(1);
+    expect(dirty[0]).toContain("app.ts");
+  });
+});

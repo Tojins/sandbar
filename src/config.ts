@@ -2,10 +2,8 @@ import type { SandboxHooks } from "./agent-sandbox.js";
 import { SandbarError } from "./errors.js";
 import { BRANCH_PREFIX } from "./naming.js";
 
-export type GateCommand = {
-  readonly check: { readonly cmd: string; readonly args: readonly string[] };
-  readonly test: { readonly cmd: string; readonly args: readonly string[] };
-};
+// The maximum a readiness probe may poll before its container counts as failed.
+export const DEFAULT_READINESS_TIMEOUT_MS = 60_000;
 
 // The handoff labels sandbar APPLIES when it parks an issue for a human. These
 // are NOT auto-created by sandbar (#8) — a host must define them in its repo,
@@ -37,64 +35,156 @@ export const DEFAULT_LABELS: LabelConfig = {
   agentStuck: "agent-stuck",
 };
 
-// A file made visible to the DB sidecar container at startup — the official
-// images' `/docker-entrypoint-initdb.d` convention (schema dumps, seed
-// fixtures). `hostPath` resolves against the WORKTREE being gated (the issue
-// worktree in the inner loop; the merger worktree for gate-2), so a branch
-// that changes its fixture gates against its own version. Relative paths are
-// the convention, not a jail — `..` and absolute paths are honored, since
-// consumer config is trusted. Mounted read-only. Neither path may contain
-// `:` (podman `-v` specs are colon-delimited; enforced fail-loud).
-export type DbInitMount = {
+// ---------------------------------------------------------------------------
+// The gate stack (#24)
+//
+// A verdict is about a COMMIT, and producing it may take several containers on
+// one network namespace plus an ordered list of steps that run in them. The
+// consumer declares that stack; sandbar owns only its lifecycle (pod, network,
+// naming, bringup order, teardown) and the fact that the steps' exit codes are
+// the verdict.
+//
+// This replaces the single `dbSidecar` + two fixed `gateCommands` of #20/#15.
+// The sidecar dissolved into `containers[]` the moment the pod removed the need
+// for a pinned IP: with every container sharing one namespace, the address the
+// consumer could not know at config time (`DB_HOST`) is the literal
+// `127.0.0.1` it writes in the container's own `env`. No reserved keys, no
+// `gateEnv` channel, no `port` that exists only to derive `DB_PORT`.
+// ---------------------------------------------------------------------------
+
+// A host file or directory made visible inside a stack container. `hostPath`
+// resolves against the WORKTREE being gated (the issue worktree in the inner
+// loop; the merger worktree for gate-2), so a branch that changes its schema
+// fixture gates against its own version. Relative paths are the convention, not
+// a jail — `..` and absolute paths are honored, since consumer config is
+// trusted. Always mounted read-only, always SELinux-relabelled (`ro,z`).
+// Neither path may contain `:` (podman `-v` specs are colon-delimited, with no
+// escape mechanism; enforced fail-loud).
+export type StackMount = {
   // Path relative to the gated worktree root (absolute paths pass through).
   readonly hostPath: string;
   readonly containerPath: string;
 };
 
-// Per-issue DB sidecar recipe (#20). Sandbar owns the container LIFECYCLE —
-// the --disable-dns network, the pinned IP, naming, teardown — while the
-// consumer owns everything engine-specific: which image, its env, its port,
-// how to probe readiness, and what env the gate's test-suite needs. There is
-// deliberately no engine enum and no built-in Postgres (or any other) preset:
-// the engine is repo identity, so `dbSidecar` is a REQUIRED RunConfig field.
-export type DbSidecarConfig = {
+// How sandbar decides a container is ready to be used.
+//
+//   tcp  — connect to the port from the HOST, through a loopback-only,
+//          podman-assigned ephemeral publish on the pod. The alternative
+//          (exec a probe inside the namespace) needs a shell and a socket tool
+//          in an image sandbar does not control — mailhog, pause images and
+//          most scratch-based services have neither. The publish is
+//          `127.0.0.1::<port>` with podman picking the host side, so two
+//          concurrent stacks cannot collide and nothing is reachable off-box.
+//   log  — a substring that must appear in the container's log.
+//   exec — argv run inside the container until it exits 0 (#20's
+//          `readinessCommand`). `podman exec` sessions see the container's own
+//          env, so a password can be referenced via `sh -c '… $PASSWORD …'`.
+//
+// Omitting readiness means "running is ready" — right for a held container
+// (`hold: true`), wrong for anything with a startup sequence.
+export type Readiness =
+  | { readonly kind: "tcp"; readonly port: number }
+  | { readonly kind: "log"; readonly pattern: string }
+  | { readonly kind: "exec"; readonly argv: readonly string[] };
+
+// One container in the stack.
+//
+// `lifecycle` is load-bearing beyond bringup order — it decides whose failure a
+// failed bringup is (#24 D5). An `issue` container depends only on its image
+// and its env, never on the branch's code, so it failing to start is INFRA:
+// HARD-ERROR, retry with a fresh stack. An `attempt` container mounts the
+// worktree and runs branch code, so it failing to start is the branch's fault
+// like any red test: gate red, with the container's log as the failure trace,
+// and the implementer gets another attempt to fix its own bootstrap. Getting
+// this backwards means an agent that breaks the service bootstrap burns two
+// fresh-stack retries reproducing the same failure and then lands on
+// NEEDS-HUMAN with an "environment" trace for a bug it could have fixed.
+export type StackContainer = {
+  // Becomes `sandbar-<stackId>-<name>`; also what a step's `in` refers to.
+  readonly name: string;
   // Fully qualified image ref (hosts without unqualified-search registries
-  // can't resolve bare short names), e.g. "docker.io/library/mariadb:10.11".
+  // can't resolve bare short names), or a tag built by `images[]`.
   readonly image: string;
-  // Env for the sidecar container itself (POSTGRES_USER=…, MYSQL_DATABASE=…).
-  readonly containerEnv: Readonly<Record<string, string>>;
-  // The port the server listens on inside the container (5432, 3306). The
-  // sidecar is reached by pinned IP on the per-issue network — no host port.
-  readonly port: number;
-  // Argv exec'd INSIDE the container until it exits 0 (the readiness probe).
-  // `podman exec` sessions see the containerEnv above, so a password can be
-  // referenced via `sh -c '… $POSTGRES_PASSWORD …'`. Probe the TCP listener
-  // the gate will actually connect to, not a unix socket (the official pg
-  // image serves init scripts on a socket first — pg_isready flickers green).
-  readonly readinessCommand: readonly string[];
-  // How long the readiness probe may poll before the sidecar counts as failed.
-  // Default: 60s. Raise it when initMounts load a large schema — the probe is
-  // what waits out `/docker-entrypoint-initdb.d` processing.
+  // Default: "attempt" — the safe side, since a container wrongly marked
+  // `issue` would be reused across attempts with stale branch code in it.
+  readonly lifecycle?: "issue" | "attempt";
+  readonly env?: Readonly<Record<string, string>>;
+  // Args appended AFTER the image ref (the image CMD, not podman flags), e.g.
+  // `--sql-mode=…`. Default: []. Mutually exclusive with `hold`.
+  readonly args?: readonly string[];
+  // Read-only fixture mounts. Default: [].
+  readonly mounts?: readonly StackMount[];
+  // Absolute container path to bind-mount the gated worktree at, `rw,z`, and
+  // the container's working directory. The image must run as root or as the
+  // host uid — `--userns=keep-id` cannot be combined with `--pod`, so a
+  // container running as an arbitrary non-root uid maps to a subuid and its
+  // writes to the worktree fail with EACCES. Checked empirically at startup
+  // (see ensure-images.ts) rather than left to fail mid-gate.
+  readonly mountWorktree?: string;
+  // The image has no long-running process of its own: hold it open with
+  // `sleep infinity` so steps can `podman exec` into it. This is what makes a
+  // one-shot task runner an ordinary container rather than a special case.
+  readonly hold?: boolean;
+  readonly readiness?: Readiness;
+  // How long `readiness` may poll before this container counts as failed.
+  // Default: 60s. Raise it when mounts load a large schema or the container
+  // builds an app on startup — the probe is what waits those out.
   readonly readinessTimeoutMs?: number;
-  // Args appended after the image (the image CMD, not podman flags), e.g.
-  // --sql-mode=…. Default: [].
-  readonly containerArgs?: readonly string[];
-  // Fixture files mounted into the container before it starts. Default: [].
-  readonly initMounts?: readonly DbInitMount[];
-  // Argv lists exec'd in the container after readiness, in order, each
-  // required to exit 0 (fail-loud). This is where engine-specific one-shot
-  // setup lives — e.g. "create the test database if absent". Default: [].
+  // Argv lists exec'd in the container after readiness, in order, each required
+  // to exit 0 (fail-loud). One-shot setup that genuinely cannot be a step,
+  // because steps run per gate run and this runs once per container. Default: [].
   readonly postReadyCommands?: ReadonlyArray<readonly string[]>;
-  // Env injected into every gate container, verbatim (DB_USER, DB_PASSWORD,
-  // DB_NAME, …). Four keys are RESERVED and always overwritten by sandbar:
-  // DB_HOST (the sidecar's pinned IP) and DB_PORT (`port` above), which the
-  // consumer's test bootstrap reads to derive everything else, plus CI=true
-  // and HOME=/tmp, which the gate's hermeticity/writability depend on.
-  readonly gateEnv: Readonly<Record<string, string>>;
 };
 
-// dbSidecar with every defaultable field made concrete (see resolveDbSidecar).
-export type ResolvedDbSidecarConfig = Required<DbSidecarConfig>;
+// One gate step: argv `podman exec`'d in a named container. The full list runs
+// in order on every gate run and stops at the first red — its exit code is the
+// verdict, its output is the failure trace.
+export type GateStep = {
+  readonly name: string;
+  // The `name` of a container declared in the same stack.
+  readonly in: string;
+  readonly command: readonly string[];
+};
+
+// An image sandbar builds before the run, if it isn't already present.
+export type BuiltImage = {
+  readonly tag: string;
+  readonly containerfile: string;
+  // Build with NO context: `podman build -t <tag> - < <containerfile>`. For a
+  // Containerfile that only pulls from a registry, this skips tarring the repo.
+  readonly stdinContext?: boolean;
+  // `--build-arg k=v` pairs. The intended use is uid alignment for an image
+  // that must run as the host user (`AGENT_UID: String(process.getuid?.() ?? 0)`);
+  // sandbar injects no magic ARG name, it passes exactly what is declared.
+  readonly buildArgs?: Readonly<Record<string, string>>;
+};
+
+export type GateStackConfig = {
+  readonly containers: readonly StackContainer[];
+  readonly steps: readonly GateStep[];
+};
+
+// Every defaultable field made concrete. Optional fields become `| null` rather
+// than staying optional so no consumer of the resolved shape has to re-decide
+// what absence means.
+export type ResolvedStackContainer = {
+  readonly name: string;
+  readonly image: string;
+  readonly lifecycle: "issue" | "attempt";
+  readonly env: Readonly<Record<string, string>>;
+  readonly args: readonly string[];
+  readonly mounts: readonly StackMount[];
+  readonly mountWorktree: string | null;
+  readonly hold: boolean;
+  readonly readiness: Readiness | null;
+  readonly readinessTimeoutMs: number;
+  readonly postReadyCommands: ReadonlyArray<readonly string[]>;
+};
+
+export type ResolvedGateStack = {
+  readonly containers: readonly ResolvedStackContainer[];
+  readonly steps: readonly GateStep[];
+};
 
 // How a cycle's merge result reaches the source branch (#22).
 //
@@ -178,9 +268,18 @@ export type RunConfig = {
   readonly ghOwner: string;
   readonly ghRepo: string;
 
-  // The sandbox/gate image tag and the one-shot gate the host's CI would run.
-  readonly gateImage: string;
-  readonly gateCommands: GateCommand;
+  // The image the AGENT runs in — the one with claude, git and the repo's
+  // toolchain installed. Also the image the merger's resolve agent runs in.
+  //
+  // Explicit and required since #24: the sandbox provider previously fell
+  // through to `defaultImageName(hostRepoPath)` = `sandbar:<repo-dir-name>`,
+  // which happened to equal the configured `gateImage` only because someone had
+  // written the two to match. Renaming the repo directory broke it silently.
+  readonly sandboxImage: string;
+
+  // The containers and steps that produce a verdict about a commit (#24). No
+  // default: what it takes to test this repo is repo identity.
+  readonly gateStack: GateStackConfig;
 
   // Commit/author identity for the bot. `coauthorTrailer` defaults to a
   // `Co-authored-by:` line derived from these two (see resolveConfig), so a
@@ -191,10 +290,6 @@ export type RunConfig = {
   // Per-sandbox lifecycle hooks (build/setup). Host-specific; no default.
   readonly sandboxHooks: SandboxHooks;
 
-  // Per-issue DB sidecar recipe. Required: the engine, image, credentials,
-  // and probes are repo identity — sandbar ships no engine preset (#20).
-  readonly dbSidecar: DbSidecarConfig;
-
   // ---- Optional: tunable, with a documented default ------------------------
   // Where the host repo lives / where sandbar keeps its state. Defaults:
   // cwd = process.cwd(), workDir = ".sandbar".
@@ -204,8 +299,12 @@ export type RunConfig = {
   // Branch issue worktrees seed from and merges land on. Default: "main".
   readonly sourceBranch?: string;
 
-  // OCI build recipe for `gateImage`. Default: "Containerfile".
-  readonly containerfilePath?: string;
+  // Images sandbar builds before the run (skipped when the tag already exists).
+  // Default: the single `{ tag: sandboxImage, containerfile: "Containerfile" }`
+  // that a one-image repo would have written itself. Every OTHER image the
+  // stack references must already be pulled — preflight refuses rather than
+  // pulls, so no run does silent network work at startup.
+  readonly images?: readonly BuiltImage[];
 
   // Model ids passed to the claude agent provider, one per role. There is no
   // single global model knob: every agent role names its own model so the
@@ -261,17 +360,17 @@ export type RunConfig = {
 // is the only one that stays optional (genuinely absent on most hosts). The
 // other three are re-declared rather than merely `Required<>`d because
 // resolution changes their TYPE, not just their presence: `labels` widens from
-// Partial to the fully-populated vocabulary, `dbSidecar` and `mergeMode` become
+// Partial to the fully-populated vocabulary, `gateStack` and `mergeMode` become
 // their resolved-and-validated forms.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
-    "codingStandardsPath" | "labels" | "dbSidecar" | "mergeMode"
+    "codingStandardsPath" | "labels" | "gateStack" | "mergeMode"
   >
 > & {
   readonly codingStandardsPath?: string;
   readonly labels: LabelConfig;
-  readonly dbSidecar: ResolvedDbSidecarConfig;
+  readonly gateStack: ResolvedGateStack;
   readonly mergeMode: ResolvedMergeMode;
 };
 
@@ -292,7 +391,6 @@ export const DEFAULT_MAX_IMPL_ATTEMPTS = 8;
 // the 4th round was APPROVED). 3 is marginal even for converging work (#8).
 export const DEFAULT_MAX_REVIEW_ROUNDS = 5;
 export const DEFAULT_MAX_TOTAL_ISSUES = 50;
-export const DEFAULT_DB_READINESS_TIMEOUT_MS = 60_000;
 export const DEFAULT_INTEGRATION_BRANCH = "sandbar/integration";
 // 20 minutes. Covers a queued runner plus a browser suite; a repo whose CI is
 // genuinely slower should raise it rather than have sandbar park good cycles.
@@ -427,14 +525,208 @@ export function resolveMergeMode(
   };
 }
 
-export function resolveDbSidecar(db: DbSidecarConfig): ResolvedDbSidecarConfig {
+// Podman container-name grammar, and also what makes `sandbar-<id>-<name>`
+// parseable back into its parts by a human reading `podman ps`.
+const CONTAINER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+
+// Every validation below is a config mistake that would otherwise surface as an
+// opaque podman error minutes into a run, or — worse — as a gate that reports a
+// verdict about the wrong thing. They are checked at resolve time, before the
+// lock is taken, so a typo costs a second rather than a cycle.
+export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
+  if (stack.containers.length === 0) {
+    throw new SandbarError(
+      "config.gateStack: containers must not be empty — a stack with no " +
+        "containers has nowhere to run a step.",
+    );
+  }
+  if (stack.steps.length === 0) {
+    throw new SandbarError(
+      "config.gateStack: steps must not be empty — a gate that runs no steps " +
+        "would report success for every commit.",
+    );
+  }
+
+  const seen = new Set<string>();
+  const containers = stack.containers.map((c) => resolveStackContainer(c, seen));
+
+  // A stack where nothing mounts the worktree gates the same bytes on every
+  // attempt: it can go green while the branch under test is broken, which is
+  // the one failure mode the whole gate exists to prevent.
+  if (!containers.some((c) => c.mountWorktree !== null)) {
+    throw new SandbarError(
+      "config.gateStack: no container declares `mountWorktree`, so no step can " +
+        "see the code under test. The gate would return the same verdict for " +
+        "every commit.",
+    );
+  }
+
+  const byName = new Set(containers.map((c) => c.name));
+  const stepNames = new Set<string>();
+  for (const step of stack.steps) {
+    if (!step.name.trim()) {
+      throw new SandbarError("config.gateStack: every step needs a name.");
+    }
+    if (stepNames.has(step.name)) {
+      throw new SandbarError(
+        `config.gateStack: duplicate step name '${step.name}'. Step names ` +
+          "identify the failing step in the trace, so they must be unique.",
+      );
+    }
+    stepNames.add(step.name);
+    if (!byName.has(step.in)) {
+      throw new SandbarError(
+        `config.gateStack: step '${step.name}' runs in '${step.in}', which is ` +
+          `not a declared container (have: ${[...byName].join(", ")}).`,
+      );
+    }
+    if (step.command.length === 0) {
+      throw new SandbarError(
+        `config.gateStack: step '${step.name}' has an empty command.`,
+      );
+    }
+  }
+
+  return { containers, steps: stack.steps };
+}
+
+function resolveStackContainer(
+  c: StackContainer,
+  seen: Set<string>,
+): ResolvedStackContainer {
+  if (!CONTAINER_NAME_RE.test(c.name)) {
+    throw new SandbarError(
+      `config.gateStack: container name '${c.name}' is not a valid podman name ` +
+        "(alphanumeric first character, then alphanumerics, '_', '.' or '-').",
+    );
+  }
+  if (seen.has(c.name)) {
+    throw new SandbarError(
+      `config.gateStack: duplicate container name '${c.name}'. Names become ` +
+        "container names and are what a step's `in` refers to.",
+    );
+  }
+  seen.add(c.name);
+
+  if (!c.image.trim()) {
+    throw new SandbarError(
+      `config.gateStack: container '${c.name}' has no image.`,
+    );
+  }
+  const hold = c.hold ?? false;
+  // `hold` replaces the entrypoint with `sleep infinity`; `args` would be
+  // appended after `infinity` and silently ignored, so the consumer's CMD
+  // arguments would vanish rather than fail.
+  if (hold && (c.args?.length ?? 0) > 0) {
+    throw new SandbarError(
+      `config.gateStack: container '${c.name}' sets both 'hold' and 'args'. ` +
+        "'hold' overrides the entrypoint with `sleep infinity`, so 'args' would " +
+        "never reach the image.",
+    );
+  }
+  if (c.mountWorktree !== undefined && !c.mountWorktree.startsWith("/")) {
+    throw new SandbarError(
+      `config.gateStack: container '${c.name}' has a relative mountWorktree ` +
+        `('${c.mountWorktree}'). It is a path inside the container and must be ` +
+        "absolute.",
+    );
+  }
+  for (const m of c.mounts ?? []) {
+    // podman's `-v` spec is colon-delimited with no escape mechanism, so a
+    // colon anywhere would re-split the spec into different paths + options.
+    if (m.hostPath.includes(":") || m.containerPath.includes(":")) {
+      throw new SandbarError(
+        `config.gateStack: container '${c.name}' has a mount path containing ` +
+          `":" (${m.hostPath} -> ${m.containerPath}). podman -v specs are ` +
+          "colon-delimited and offer no escape.",
+      );
+    }
+  }
+  const readiness = c.readiness ?? null;
+  if (readiness?.kind === "tcp") {
+    if (
+      !Number.isInteger(readiness.port) ||
+      readiness.port < 1 ||
+      readiness.port > 65535
+    ) {
+      throw new SandbarError(
+        `config.gateStack: container '${c.name}' has an out-of-range tcp ` +
+          `readiness port (${readiness.port}).`,
+      );
+    }
+  }
+  if (readiness?.kind === "exec" && readiness.argv.length === 0) {
+    throw new SandbarError(
+      `config.gateStack: container '${c.name}' has an empty exec readiness argv.`,
+    );
+  }
+  if (readiness?.kind === "log" && !readiness.pattern) {
+    throw new SandbarError(
+      `config.gateStack: container '${c.name}' has an empty log readiness pattern.`,
+    );
+  }
+  const readinessTimeoutMs = c.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+  if (!Number.isFinite(readinessTimeoutMs) || readinessTimeoutMs <= 0) {
+    throw new SandbarError(
+      `config.gateStack: container '${c.name}' has a non-positive or ` +
+        `non-finite readinessTimeoutMs (${String(readinessTimeoutMs)}). NaN — ` +
+        "the shape `Number(process.env.X)` produces on an unset var — would " +
+        "make the readiness poll spin forever holding the run's lock.",
+    );
+  }
+
   return {
-    ...db,
-    readinessTimeoutMs: db.readinessTimeoutMs ?? DEFAULT_DB_READINESS_TIMEOUT_MS,
-    containerArgs: db.containerArgs ?? [],
-    initMounts: db.initMounts ?? [],
-    postReadyCommands: db.postReadyCommands ?? [],
+    name: c.name,
+    image: c.image,
+    lifecycle: c.lifecycle ?? "attempt",
+    env: c.env ?? {},
+    args: c.args ?? [],
+    mounts: c.mounts ?? [],
+    mountWorktree: c.mountWorktree ?? null,
+    hold,
+    readiness,
+    readinessTimeoutMs,
+    postReadyCommands: c.postReadyCommands ?? [],
   };
+}
+
+export function resolveImages(
+  images: readonly BuiltImage[] | undefined,
+  sandboxImage: string,
+): readonly BuiltImage[] {
+  const resolved = images ?? [
+    { tag: sandboxImage, containerfile: DEFAULT_CONTAINERFILE_PATH },
+  ];
+  const seen = new Set<string>();
+  for (const img of resolved) {
+    if (!img.tag.trim()) {
+      throw new SandbarError("config.images: every entry needs a tag.");
+    }
+    if (seen.has(img.tag)) {
+      throw new SandbarError(
+        `config.images: duplicate tag '${img.tag}'. The second build would ` +
+          "overwrite the first, so only one of the two Containerfiles would " +
+          "ever be the image that runs.",
+      );
+    }
+    seen.add(img.tag);
+    if (!img.containerfile.trim()) {
+      throw new SandbarError(
+        `config.images: entry '${img.tag}' has no containerfile.`,
+      );
+    }
+  }
+  // A consumer listing images at all must still build the sandbox image: it is
+  // what the agent and the merger's resolve agent run in, and its absence is a
+  // hard failure at the first `createSandbox`, long after the run started.
+  if (!seen.has(sandboxImage)) {
+    throw new SandbarError(
+      `config.images: no entry builds sandboxImage '${sandboxImage}'. The agent ` +
+        "sandbox and the merger's resolve agent both run in it; sandbar builds " +
+        "only what `images` lists.",
+    );
+  }
+  return resolved;
 }
 
 export function defaultCoauthorTrailer(botName: string, botEmail: string): string {
@@ -448,7 +740,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     cwd: config.cwd ?? DEFAULT_CWD(),
     workDir: config.workDir ?? DEFAULT_WORK_DIR,
     sourceBranch,
-    containerfilePath: config.containerfilePath ?? DEFAULT_CONTAINERFILE_PATH,
+    images: resolveImages(config.images, config.sandboxImage),
     implementerModelId: config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,
     reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
@@ -464,7 +756,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     maxTotalIssues: config.maxTotalIssues ?? DEFAULT_MAX_TOTAL_ISSUES,
     copyToWorktree: config.copyToWorktree ?? [],
     labels: { ...DEFAULT_LABELS, ...config.labels },
-    dbSidecar: resolveDbSidecar(config.dbSidecar),
+    gateStack: resolveGateStack(config.gateStack),
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
   };
 }

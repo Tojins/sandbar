@@ -6,7 +6,7 @@ import {
   DEFAULT_CHECK_TIMEOUT_MS,
   DEFAULT_INTEGRATION_BRANCH,
   DEFAULT_NO_CHECKS_GRACE_MS,
-  DEFAULT_DB_READINESS_TIMEOUT_MS,
+  DEFAULT_READINESS_TIMEOUT_MS,
   DEFAULT_CLAUDE_MD_PATH,
   DEFAULT_CONTAINERFILE_PATH,
   DEFAULT_CONTEXT_MD_PATH,
@@ -29,21 +29,33 @@ import {
 const minimal: RunConfig = {
   ghOwner: "acme",
   ghRepo: "widgets",
-  gateImage: "localhost/sandbar:latest",
-  gateCommands: {
-    check: { cmd: "npm", args: ["run", "check"] },
-    test: { cmd: "npm", args: ["test"] },
-  },
+  sandboxImage: "localhost/sandbar:widgets",
   botName: "sandbar-bot",
   botEmail: "bot@acme.dev",
   sandboxHooks: {},
-  // Required (#20): the engine is repo identity — sandbar ships no DB preset.
-  dbSidecar: {
-    image: "docker.io/library/mariadb:10.11",
-    containerEnv: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "widgets" },
-    port: 3306,
-    readinessCommand: ["mysql", "-uroot", "-e", "SELECT 1"],
-    gateEnv: { DB_USER: "root", DB_PASSWORD: "", DB_NAME: "widgets" },
+  // Required (#24): what it takes to test this repo is repo identity — sandbar
+  // ships no preset. Two containers and two steps is the smallest thing that
+  // still exercises both lifecycles.
+  gateStack: {
+    containers: [
+      {
+        name: "db",
+        image: "docker.io/library/mariadb:10.11",
+        lifecycle: "issue",
+        env: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "widgets" },
+        readiness: { kind: "exec", argv: ["mysql", "-uroot", "-e", "SELECT 1"] },
+      },
+      {
+        name: "app",
+        image: "localhost/sandbar:widgets",
+        mountWorktree: "/workspace",
+        hold: true,
+      },
+    ],
+    steps: [
+      { name: "check", in: "app", command: ["npm", "run", "check"] },
+      { name: "test", in: "app", command: ["npm", "test"] },
+    ],
   },
 };
 
@@ -53,7 +65,6 @@ describe("resolveConfig", () => {
     expect(r.cwd).toBe(process.cwd());
     expect(r.workDir).toBe(DEFAULT_WORK_DIR);
     expect(r.sourceBranch).toBe(DEFAULT_SOURCE_BRANCH);
-    expect(r.containerfilePath).toBe(DEFAULT_CONTAINERFILE_PATH);
     expect(r.implementerModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
     expect(r.reviewerModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
     expect(r.mergerModelId).toBe(DEFAULT_MERGER_MODEL_ID);
@@ -120,38 +131,32 @@ describe("resolveConfig", () => {
     });
   });
 
-  it("fills the dbSidecar block's defaultable fields (#20)", () => {
+  it("defaults images to building the sandbox image from ./Containerfile", () => {
     const r = resolveConfig(minimal);
-    expect(r.dbSidecar.readinessTimeoutMs).toBe(DEFAULT_DB_READINESS_TIMEOUT_MS);
-    expect(r.dbSidecar.containerArgs).toEqual([]);
-    expect(r.dbSidecar.initMounts).toEqual([]);
-    expect(r.dbSidecar.postReadyCommands).toEqual([]);
-    // Required sub-fields pass through untouched.
-    expect(r.dbSidecar.image).toBe("docker.io/library/mariadb:10.11");
-    expect(r.dbSidecar.port).toBe(3306);
-    expect(r.dbSidecar.gateEnv).toEqual(minimal.dbSidecar.gateEnv);
+    expect(r.images).toEqual([
+      { tag: "localhost/sandbar:widgets", containerfile: DEFAULT_CONTAINERFILE_PATH },
+    ]);
   });
 
-  it("honours explicit dbSidecar deviations", () => {
-    const r = resolveConfig({
-      ...minimal,
-      dbSidecar: {
-        ...minimal.dbSidecar,
-        readinessTimeoutMs: 120_000,
-        containerArgs: ["--sql-mode=NO_ENGINE_SUBSTITUTION"],
-        initMounts: [
-          {
-            hostPath: "tests/fixtures/schema.sql",
-            containerPath: "/docker-entrypoint-initdb.d/schema.sql",
-          },
-        ],
-        postReadyCommands: [["mysql", "-uroot", "-e", "CREATE DATABASE IF NOT EXISTS widgets_test"]],
-      },
-    });
-    expect(r.dbSidecar.readinessTimeoutMs).toBe(120_000);
-    expect(r.dbSidecar.containerArgs).toEqual(["--sql-mode=NO_ENGINE_SUBSTITUTION"]);
-    expect(r.dbSidecar.initMounts).toHaveLength(1);
-    expect(r.dbSidecar.postReadyCommands).toHaveLength(1);
+  it("fills each stack container's defaultable fields (#24)", () => {
+    const r = resolveConfig(minimal);
+    const db = r.gateStack.containers[0]!;
+    expect(db.readinessTimeoutMs).toBe(DEFAULT_READINESS_TIMEOUT_MS);
+    expect(db.env).toEqual({ MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "widgets" });
+    expect(db.args).toEqual([]);
+    expect(db.mounts).toEqual([]);
+    expect(db.mountWorktree).toBeNull();
+    expect(db.hold).toBe(false);
+    expect(db.postReadyCommands).toEqual([]);
+  });
+
+  // The safe side: a container wrongly treated as `issue` is reused across
+  // attempts with stale branch code in it, and the gate silently re-tests an
+  // earlier attempt.
+  it("defaults lifecycle to attempt, not issue", () => {
+    const r = resolveConfig(minimal);
+    expect(r.gateStack.containers[1]!.lifecycle).toBe("attempt");
+    expect(r.gateStack.containers[0]!.lifecycle).toBe("issue");
   });
 });
 

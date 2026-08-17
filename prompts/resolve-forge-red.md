@@ -1,5 +1,5 @@
 This cycle's merge result is already on the source branch **locally**, and the
-project's own `check` + `test` gate passed against it. It has not been landed:
+project's own gate steps passed against it. It has not been landed:
 the merge result was pushed to a scratch integration branch and the forge's CI
 disagreed.
 

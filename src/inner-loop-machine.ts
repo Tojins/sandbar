@@ -14,6 +14,12 @@
 // Each advanceAttempt caller supplies the exhaustion verdict because only it
 // knows which case it's in.
 //
+// A COMPLETE claim is routed on TWO inputs, not one (#24 D1): the promise token
+// and whether the worktree is clean. The gate bind-mounts the worktree, so a
+// verdict over a dirty tree is not a verdict about any commit — and the merger
+// only ever sees commits. COMPLETE + dirty therefore spends an attempt on a
+// re-prompt to commit rather than dispatching the gate.
+//
 // NEEDS-UI-PROTOTYPE (#21) is the second short-circuit terminal alongside
 // NEEDS-INFO: the implementer judged the issue to imply non-trivial
 // user-visible UI with no prototype to work from, so the loop stops before the
@@ -111,7 +117,15 @@ export type LoopAction =
   | { readonly kind: "terminate"; readonly verdict: Verdict };
 
 export type LoopEvent =
-  | { readonly kind: "implementer-result"; readonly signal: ParseSignal }
+  | {
+      readonly kind: "implementer-result";
+      readonly signal: ParseSignal;
+      // `git status --porcelain` lines in the issue worktree after the attempt
+      // (#24 D1). A COMPLETE claim over a dirty tree is not a claim about any
+      // commit — the gate bind-mounts this worktree, so gating it would produce
+      // a verdict the merger cannot reproduce from the branch.
+      readonly dirtyPaths: readonly string[];
+    }
   | {
       readonly kind: "gate-1-result";
       readonly ok: boolean;
@@ -178,7 +192,7 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
           `implementer-result event in phase ${state.phase}; expected needs-implementer`,
         );
       }
-      return onImplementerResult(state, event.signal);
+      return onImplementerResult(state, event.signal, event.dirtyPaths);
 
     case "gate-1-result":
       if (state.phase !== "needs-gate-1") {
@@ -198,7 +212,39 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
   }
 }
 
-function onImplementerResult(state: LoopState, signal: ParseSignal): StepResult {
+// How many dirty paths to name before eliding. The list is a prompt to an
+// agent that can run `git status` itself; twenty is enough to make the problem
+// concrete without spending the context window on it.
+const MAX_DIRTY_PATHS_SHOWN = 20;
+
+// The re-prompt for a COMPLETE claim over a dirty worktree (#24 D1). Exported
+// so the wording is asserted where the routing is.
+export function uncommittedWorkReprompt(
+  dirtyPaths: readonly string[],
+): string {
+  const shown = dirtyPaths.slice(0, MAX_DIRTY_PATHS_SHOWN);
+  const elided = dirtyPaths.length - shown.length;
+  return [
+    "You reported COMPLETE, but the worktree still has uncommitted changes, so",
+    "there is no commit that means what you said. The gate runs against this",
+    "worktree and the merger will only ever see your commits — anything left",
+    "uncommitted is invisible to it and would be lost.",
+    "",
+    "`git status --porcelain` reports:",
+    ...shown.map((p) => `  ${p}`),
+    ...(elided > 0 ? [`  … and ${elided} more`] : []),
+    "",
+    "Commit the work that belongs to this issue (or remove what does not), then",
+    "report COMPLETE again. Note that build artifacts your gate steps produce",
+    "must be gitignored — if they are showing up here, that is the bug to fix.",
+  ].join("\n");
+}
+
+function onImplementerResult(
+  state: LoopState,
+  signal: ParseSignal,
+  dirtyPaths: readonly string[],
+): StepResult {
   if (signal.kind === "NEEDS-INFO") {
     return terminate(state, { type: "NEEDS-INFO", questions: signal.questions });
   }
@@ -209,6 +255,22 @@ function onImplementerResult(state: LoopState, signal: ParseSignal): StepResult 
     });
   }
   if (signal.kind === "COMPLETE") {
+    // Dirty tree: another attempt with "commit your work", NOT the gate. Cheaper
+    // than letting the gate refuse (no attempt containers get built) and far
+    // more actionable than a red verdict, and it is the only routing that keeps
+    // the forgotten `git add` — the overwhelmingly common cause — rather than
+    // letting a `git clean` destroy it.
+    if (dirtyPaths.length > 0) {
+      return advanceAttempt(
+        state,
+        {
+          failureTrace: state.lastFailureTrace,
+          extraReprompt: uncommittedWorkReprompt(dirtyPaths),
+          latestReviewerProse: state.latestReviewerProse,
+        },
+        gateRedExhaustion(state),
+      );
+    }
     return {
       state: { ...state, phase: "needs-gate-1", extraReprompt: null },
       action: { kind: "run-gate-1", attempt: state.attempt },

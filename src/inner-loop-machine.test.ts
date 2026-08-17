@@ -69,9 +69,15 @@ const changes = (prose: string): LoopEvent => ({
   verdict: "CHANGES-REQUESTED",
   prose,
 });
-const impl = (signal: ParseSignal): LoopEvent => ({
+// Clean tree unless a case says otherwise — the dirty routing (#24 D1) has its
+// own describe block below.
+const impl = (
+  signal: ParseSignal,
+  dirtyPaths: readonly string[] = [],
+): LoopEvent => ({
   kind: "implementer-result",
   signal,
+  dirtyPaths,
 });
 
 const defaultOpts = { maxAttempts: 8, maxReviewRounds: 3 } as const;
@@ -562,5 +568,76 @@ describe("decideAfterTerminal", () => {
       kind: "retry-with-fresh-sandbox",
       nextRetriesUsed: 1,
     });
+  });
+});
+
+// A verdict is about a COMMIT (#24 D1). The gate bind-mounts the worktree, so a
+// COMPLETE claim over a dirty tree would produce a verdict the merger — which
+// only ever sees commits — cannot reproduce.
+describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () => {
+  const dirty = ["?? src/new-file.ts", " M src/existing.ts"];
+
+  it("routes back to the implementer instead of the gate", () => {
+    const r = step(initialState(defaultOpts), impl(complete, dirty));
+    expect(r.action.kind).toBe("run-implementer");
+    // Not run-gate-1: the whole point is that no stack bringup is paid for a
+    // claim that cannot be gated.
+    expect(r.state.phase).toBe("needs-implementer");
+    expect(r.state.attempt).toBe(2);
+  });
+
+  it("names the dirty paths in the re-prompt", () => {
+    const r = step(initialState(defaultOpts), impl(complete, dirty));
+    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
+    expect(r.action.extraReprompt).toContain("?? src/new-file.ts");
+    expect(r.action.extraReprompt).toContain(" M src/existing.ts");
+    expect(r.action.extraReprompt).toContain("uncommitted");
+  });
+
+  it("elides a long dirty list rather than filling the prompt with it", () => {
+    const many = Array.from({ length: 25 }, (_, i) => `?? f${i}.ts`);
+    const r = step(initialState(defaultOpts), impl(complete, many));
+    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
+    expect(r.action.extraReprompt).toContain("?? f19.ts");
+    expect(r.action.extraReprompt).not.toContain("?? f20.ts");
+    expect(r.action.extraReprompt).toContain("… and 5 more");
+  });
+
+  it("tells the agent its gate artifacts must be gitignored", () => {
+    // The consumer-side corollary of mounting the worktree: a step that writes
+    // outside .gitignore reports its own exhaust as uncommitted work on every
+    // attempt, and the loop dies of budget exhaustion with no other symptom.
+    const r = step(initialState(defaultOpts), impl(complete, dirty));
+    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
+    expect(r.action.extraReprompt).toContain("gitignored");
+  });
+
+  it("gates normally once the tree is clean", () => {
+    let state = initialState(defaultOpts);
+    state = step(state, impl(complete, dirty)).state;
+    const r = step(state, impl(complete));
+    expect(r.action.kind).toBe("run-gate-1");
+  });
+
+  it("spends an attempt, and exhausting the budget on dirt is NEEDS-HUMAN", () => {
+    const { actions, verdict } = drive({ maxAttempts: 2, maxReviewRounds: 3 }, [
+      impl(complete, dirty),
+      impl(complete, dirty),
+    ]);
+    expect(actions.map((a) => a.kind)).toEqual([
+      "run-implementer",
+      "run-implementer",
+      "terminate",
+    ]);
+    expect(verdict.type).toBe("NEEDS-HUMAN");
+    if (verdict.type !== "NEEDS-HUMAN") throw new Error("unreachable");
+    expect(verdict.cause).toBe("gate-red");
+  });
+
+  it("does not block the short-circuit terminals — dirt is irrelevant to them", () => {
+    // NEEDS-INFO / NEEDS-UI-PROTOTYPE hand the issue to a human with a question,
+    // not a verdict, so there is nothing for a clean tree to be a proof of.
+    const info = drive(defaultOpts, [impl(needsInfo("which currency?"), dirty)]);
+    expect(info.verdict.type).toBe("NEEDS-INFO");
   });
 });

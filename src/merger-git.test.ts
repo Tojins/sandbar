@@ -71,11 +71,9 @@ describe("realAdapter.isMergeInProgress (real linked worktree)", () => {
       mergerModelId: "opus",
       ghOwner: "o",
       ghRepo: "r",
-      gateImage: "img",
-      gateCommands: {
-        check: { cmd: "true", args: [] },
-        test: { cmd: "true", args: [] },
-      },
+      sandboxImage: "img",
+      // These cases exercise only the git primitives; the cast covers the
+      // adapter deps they never reach.
     } as unknown as Parameters<typeof realAdapter>[0]);
 
   it("is false on a clean worktree", async () => {

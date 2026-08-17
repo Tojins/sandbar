@@ -33,6 +33,19 @@ import { loadTemplate, render } from "./prompts.js";
 export const RESOLVE_MAX_ATTEMPTS = 4;
 const TRACE_LINES = 200;
 
+// The gate trace the resolve agent is shown: the failing STEP's output, cascade-
+// collapsed and tail-truncated, then the stack's container logs verbatim.
+//
+// Order and separation both matter. `summarizeGateFailure` collapses lines that
+// share a timeout signature; a service log is full of near-identical lines, so
+// folding the container logs in first would have it collapsing text that was
+// never one test run. And the logs go AFTER, because the answer to "the browser
+// step got a 500" is in the backend container the step never touched — it is
+// context for a diagnosis, not the diagnosis.
+function withStackLogs(gate: MergerGateOutput, stepOutput: string): string {
+  return summarizeGateFailure(stepOutput, TRACE_LINES) + gate.containerLogs;
+}
+
 // Prose templates, loaded once at import (see prompts.ts). The pure prompt
 // builders below substitute into these in-memory strings.
 const RELATED_INTRO_TPL = loadTemplate("resolve-related-intro");
@@ -146,9 +159,9 @@ export async function runResolveLoop(
   } else {
     trace = {
       kind: "gate-red",
-      trace: summarizeGateFailure(
+      trace: withStackLogs(
+        initialMode.initialOutput,
         `${initialMode.initialOutput.stdout}\n${initialMode.initialOutput.stderr}`,
-        TRACE_LINES,
       ),
     };
   }
@@ -226,7 +239,7 @@ export async function runResolveLoop(
     );
     trace = {
       kind: "gate-red",
-      trace: summarizeGateFailure(`${gate.stdout}\n${gate.stderr}`, TRACE_LINES),
+      trace: withStackLogs(gate, `${gate.stdout}\n${gate.stderr}`),
     };
   }
 

@@ -1,155 +1,39 @@
-// Procedural gate. Runs the configured check + test commands against an
-// issue worktree inside an ephemeral one-shot container, joined to the
-// issue's per-issue podman network so test code reaches the db sidecar
-// by its pinned IP (`opts.dbHost`) instead of the host's shared db.
+// Gate verdicts: the RESULT shape, and the diagnostics applied to a red one.
 //
-// DB env contract (#20): `opts.gateEnv` (the consumer's `dbSidecar.gateEnv` —
-// DB_USER, DB_PASSWORD, DB_NAME, …) is injected verbatim, then the RESERVED
-// keys are injected LAST so they override any same-named gateEnv entry:
-// DB_HOST/DB_PORT from the live sidecar (the consumer can't know the
-// IPAM-pinned IP at config time), and CI=true / HOME=/tmp, which the gate's
-// hermeticity and in-container writability are designed around.
-//
-// That network is created `--disable-dns` (#18), so the bridge no longer runs
-// aardvark to forward external lookups. The gate's `check`/`test` commands may
-// still resolve public names (registry, fixtures), so we hand the container
-// explicit public resolvers via `--dns`, which write resolv.conf directly and
-// bypass aardvark entirely — preserving the external-DNS reach the DNS-enabled
-// network used to provide, without the WSL2-user-bus dependency that broke it.
-//
-// Two podman runs (check, then test) so the failedStep is unambiguous and
-// the failing run's output can be returned without re-parsing combined
-// output. The host is never asked to run npm scripts; gate verdicts are
-// hermetic per issue.
+// Since #24 the gate is a stack of containers and an ordered list of steps, and
+// running it lives in `gate-stack.ts`. What stays here is everything that turns
+// a failed run's raw output into something a human — or the next implementer
+// attempt — can act on, which is pure text processing and therefore directly
+// table-testable.
 //
 // `summarizeGateFailure` (#15) post-processes a failed run's output before it
 // reaches a human (NEEDS-HUMAN trace) or the resolve agent: it collapses
 // uninformative timeout cascades to the root failure + a count and a hint, so
 // an environment/setup failure doesn't read as N independent flaky tests.
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-import type { GateCommand } from "./config.js";
-import { RUNTIME } from "./db-sidecar.js";
-
-const exec = promisify(execFile);
-
-const MAX_BUFFER = 50 * 1024 * 1024;
-
-// Public resolvers handed to the gate container so external name resolution
-// survives the `--disable-dns` per-issue network (#18). `--dns` writes these
-// into the container's resolv.conf, bypassing the (absent) aardvark resolver.
-const GATE_DNS_SERVERS: readonly string[] = ["1.1.1.1", "8.8.8.8"];
-
-export type GateOptions = {
-  readonly worktreePath: string;
-  readonly gateImage: string;
-  readonly gateCommands: GateCommand;
-  readonly networkName: string;
-  readonly dbHost: string;
-  readonly dbPort: number;
-  // Consumer-defined DB env, injected verbatim (CI/HOME/DB_HOST/DB_PORT
-  // reserved — see header).
-  readonly gateEnv: Readonly<Record<string, string>>;
-};
-
-// The ordered `-e` flag list for a gate step. Pure so the reserved-key
-// contract — gateEnv verbatim FIRST, sandbar-owned keys LAST (with repeated
-// -e flags podman keeps the final value, so last wins) — is table-testable.
-export function gateEnvFlags(opts: {
-  readonly dbHost: string;
-  readonly dbPort: number;
-  readonly gateEnv: Readonly<Record<string, string>>;
-}): string[] {
-  return [
-    ...Object.entries(opts.gateEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
-    "-e",
-    "CI=true",
-    "-e",
-    "HOME=/tmp",
-    "-e",
-    `DB_HOST=${opts.dbHost}`,
-    "-e",
-    `DB_PORT=${opts.dbPort}`,
-  ];
-}
-
+// `failedStep` names the step from the consumer's `gateStack.steps`, or one of
+// two sandbar-owned pseudo-steps: `worktree-clean` (the tree held uncommitted
+// changes, so no verdict about a commit was possible) and
+// `container:<name>` (an attempt-lifecycle container failed to come up, which
+// is the branch's fault — see gate-stack.ts). `null` only when ok.
 export type GateResult = {
   readonly ok: boolean;
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number;
-  readonly failedStep: "check" | "test" | null;
+  readonly failedStep: string | null;
+  // Labelled log tails for every container in the stack, on a red gate (#24 D9).
+  // Empty on green.
+  //
+  // A SEPARATE field, not appended to stderr, and that separation is what makes
+  // it safe: `summarizeGateFailure` collapses a repeated-signature timeout
+  // cascade, and it must see the failing STEP's output only. Fold N container
+  // logs into the same string and the collapse is reasoning about text that was
+  // never one test run — a mariadb log full of identical connection lines is
+  // exactly the shape it looks for. Callers summarize the step output, then
+  // append this.
+  readonly containerLogs: string;
 };
-
-export async function runGate(opts: GateOptions): Promise<GateResult> {
-  const check = await runStep(opts, "check");
-  if (!check.ok) {
-    return { ...check, failedStep: "check" };
-  }
-  const test = await runStep(opts, "test");
-  if (!test.ok) {
-    return {
-      ok: false,
-      stdout: check.stdout + "\n" + test.stdout,
-      stderr: check.stderr + "\n" + test.stderr,
-      exitCode: test.exitCode,
-      failedStep: "test",
-    };
-  }
-  return {
-    ok: true,
-    stdout: check.stdout + "\n" + test.stdout,
-    stderr: check.stderr + "\n" + test.stderr,
-    exitCode: 0,
-    failedStep: null,
-  };
-}
-
-async function runStep(
-  opts: GateOptions,
-  step: "check" | "test",
-): Promise<{ ok: boolean; stdout: string; stderr: string; exitCode: number }> {
-  const stepCmd = opts.gateCommands[step];
-  const args = [
-    "run",
-    "--rm",
-    "--userns=keep-id",
-    "--user",
-    "1000:1000",
-    "--network",
-    opts.networkName,
-    ...GATE_DNS_SERVERS.flatMap((s) => ["--dns", s]),
-    "-v",
-    `${opts.worktreePath}:/workspace`,
-    "-w",
-    "/workspace",
-    ...gateEnvFlags(opts),
-    "--entrypoint",
-    stepCmd.cmd,
-    opts.gateImage,
-    ...stepCmd.args,
-  ];
-  try {
-    const { stdout, stderr } = await exec(RUNTIME, args, {
-      maxBuffer: MAX_BUFFER,
-    });
-    return { ok: true, stdout: stripAnsi(stdout), stderr: stripAnsi(stderr), exitCode: 0 };
-  } catch (err) {
-    const e = err as {
-      stdout?: string;
-      stderr?: string;
-      code?: number | string;
-    };
-    return {
-      ok: false,
-      stdout: stripAnsi(e.stdout ?? ""),
-      stderr: stripAnsi(e.stderr ?? ""),
-      exitCode: typeof e.code === "number" ? e.code : 1,
-    };
-  }
-}
 
 // Gate tools (vitest et al.) emit ANSI SGR colour codes even when their
 // stdout is piped — the in-container colour heuristics misfire despite CI=true.

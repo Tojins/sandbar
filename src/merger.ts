@@ -84,11 +84,10 @@ import {
   type VerifyAdapter,
   runVerifiedLanding,
 } from "./forge-verify.js";
-import { type GateResult, runGate } from "./gate.js";
+import type { GateResult } from "./gate.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { gitMountsForWorktree } from "./merger-worktree.js";
-import type { GateCommand } from "./config.js";
-import { RUNTIME } from "./db-sidecar.js";
+import { RUNTIME } from "./runtime.js";
 import {
   RESOLVE_MAX_ATTEMPTS,
   type ResolveAdapter,
@@ -96,11 +95,18 @@ import {
   runResolveLoop,
 } from "./resolve-loop.js";
 
+// `failedStep` is a free-form step name since #24 — it comes from the
+// consumer's `gateStack.steps`, or is one of sandbar's own pseudo-steps
+// (`worktree-clean`, `container:<name>`). It is a label in a trace, never
+// branched on.
 export type MergerGateOutput = {
   readonly stdout: string;
   readonly stderr: string;
-  readonly failedStep: "check" | "test" | null;
+  readonly failedStep: string | null;
   readonly exitCode: number;
+  // Carried separately from stdout/stderr all the way to the resolve agent, so
+  // the cascade collapse only ever sees step output (see GateResult).
+  readonly containerLogs: string;
 };
 
 const exec = promisify(execFile);
@@ -441,6 +447,7 @@ export async function runMergerWithAdapter(
           stderr: g.stderr,
           failedStep: g.failedStep,
           exitCode: g.exitCode,
+          containerLogs: g.containerLogs,
         });
       }
       await emit(
@@ -456,6 +463,7 @@ export async function runMergerWithAdapter(
             stderr: g.stderr,
             failedStep: g.failedStep,
             exitCode: g.exitCode,
+            containerLogs: g.containerLogs,
           },
         },
         adapter,
@@ -711,16 +719,14 @@ export type RealAdapterDeps = {
   readonly botEmail: string;
   readonly coauthorTrailer: string;
   readonly modelId: string;
-  readonly gateImage: string;
-  readonly gateCommands: GateCommand;
+  // The image the resolve agent runs in — claude is installed there, not in
+  // any gate-stack image (#24 D7).
+  readonly sandboxImage: string;
   readonly env: EnvReader;
-  readonly gateOpts: {
-    readonly worktreePath: string;
-    readonly networkName: string;
-    readonly dbHost: string;
-    readonly dbPort: number;
-    readonly gateEnv: Readonly<Record<string, string>>;
-  };
+  // Gate-2, already bound to the merger worktree's stack. The merger does not
+  // build the stack itself: run.ts owns the stack's lifecycle for the whole
+  // merge phase, so a single bringup covers every branch in the cycle.
+  readonly runStackGate: () => Promise<GateResult>;
 };
 
 function mergeMessageFor(issue: IssueRef): string {
@@ -767,8 +773,9 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       }
     },
     async runResolveAgent(prompt) {
-      // Runs claude inside a podman container off the gate image (claude is
-      // pre-installed there). Bind-mounts the merger worktree at /workspace so
+      // Runs claude inside a podman container off the SANDBOX image (claude is
+      // pre-installed there; no gate-stack image is required to have it).
+      // Bind-mounts the merger worktree at /workspace so
       // the agent's edits and commits are live on host. `cwd` is a git worktree
       // (detached at origin/<sourceBranch>), so its `.git` is a gitlink file
       // pointing at the parent repo's common git dir — that dir is identity-
@@ -814,7 +821,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         args.push(
           "--entrypoint",
           "claude",
-          deps.gateImage,
+          deps.sandboxImage,
           "--print",
           "--dangerously-skip-permissions",
           "--model",
@@ -935,17 +942,14 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       }
     },
     async runGate() {
-      const r: GateResult = await runGate({
-        ...deps.gateOpts,
-        gateImage: deps.gateImage,
-        gateCommands: deps.gateCommands,
-      });
+      const r: GateResult = await deps.runStackGate();
       if (r.ok) return { ok: true };
       return {
         ok: false,
         stdout: r.stdout,
         stderr: r.stderr,
         failedStep: r.failedStep,
+        containerLogs: r.containerLogs,
         exitCode: r.exitCode,
       };
     },

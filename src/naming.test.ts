@@ -7,6 +7,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  networkNameFor,
+  podNameFor,
+  stackContainerNameFor,
   ALL_BRANCH_PREFIXES,
   ALL_RESOURCE_PREFIXES,
   BRANCH_PREFIX,
@@ -66,5 +69,30 @@ describe("issueNumberFromBranch", () => {
     // `issue-12x-...` is malformed; the `(?:-|$)` boundary rejects it rather
     // than silently parsing 12.
     expect(issueNumberFromBranch("sandbar/issue-12x-foo")).toBeNull();
+  });
+});
+
+// The sweeper finds orphans by name prefix, so the names have to carry it.
+// The one resource that CANNOT be found that way is the pod's infra container
+// (`<pod-id-prefix>-infra`, a podman-assigned hash) — which is why the sweep
+// removes pods, not just containers, and why the pod name is what has to match.
+describe("gate-stack resource names (#24)", () => {
+  it("prefixes every name so the orphan sweep can find it", () => {
+    expect(networkNameFor("42").startsWith(RESOURCE_PREFIX)).toBe(true);
+    expect(podNameFor("42").startsWith(RESOURCE_PREFIX)).toBe(true);
+    expect(stackContainerNameFor("42", "db").startsWith(RESOURCE_PREFIX)).toBe(true);
+  });
+
+  it("gives networks and pods their own sub-prefixes", () => {
+    expect(networkNameFor("42")).toBe("sandbar-net-42");
+    expect(podNameFor("42")).toBe("sandbar-pod-42");
+    expect(stackContainerNameFor("42", "db")).toBe("sandbar-42-db");
+  });
+
+  it("keeps the merger's stack disjoint from every issue's", () => {
+    // Issue ids are numeric, so "merger" can never collide — the two stacks run
+    // in the same process and would otherwise tear each other's pods down.
+    expect(podNameFor("merger")).not.toBe(podNameFor("42"));
+    expect(stackContainerNameFor("merger", "db")).toBe("sandbar-merger-db");
   });
 });

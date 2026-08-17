@@ -1,6 +1,6 @@
 # sandbar
 
-Issue-tracker-driven coding agent orchestrator. Plans unblocked issues, runs an inner-loop implementer (and reviewer) per issue inside an isolated sandbox, gates with the project's own `check + test`, and merges DONE branches into the source branch.
+Issue-tracker-driven coding agent orchestrator. Plans unblocked issues, runs an inner-loop implementer (and reviewer) per issue inside an isolated sandbox, gates with the project's own **gate stack** — the containers and steps that produce a verdict about a commit — and merges DONE branches into the source branch.
 
 ## Releasing
 
@@ -25,29 +25,45 @@ await run({
   // Required — no sensible default exists:
   ghOwner: "your-org",
   ghRepo: "your-repo",
-  gateImage: "localhost/your-repo-sandbar:latest",
-  gateCommands: {
-    check: { cmd: "npm", args: ["run", "check"] },
-    test: { cmd: "npm", args: ["test"] },
-  },
+  // The image the AGENT runs in (claude + your toolchain). Built from
+  // ./Containerfile unless you override `images` below.
+  sandboxImage: "localhost/your-repo-sandbar:latest",
   botName: "your-bot",
   botEmail: "bot@your-org.dev",
   sandboxHooks: { /* per-sandbox build/setup commands */ },
-  dbSidecar: {
-    // Per-issue DB sidecar recipe — fully engine-agnostic, e.g. MariaDB:
-    image: "docker.io/library/mariadb:10.11",       // fully qualified
-    containerEnv: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "app" },
-    port: 3306,
-    // Exec'd inside the container until exit 0; sees containerEnv above.
-    readinessCommand: ["mysql", "-uroot", "-e", "SELECT 1"],
-    // Env injected into every gate run. Four keys are RESERVED and always
-    // overwritten: DB_HOST and DB_PORT (the sidecar's pinned IP + `port`),
-    // plus CI=true and HOME=/tmp.
-    gateEnv: { DB_USER: "root", DB_PASSWORD: "", DB_NAME: "app" },
-    // Optional: containerArgs (image CMD args), initMounts (fixture files
-    // mounted read-only, hostPath relative to the ISSUE WORKTREE),
-    // postReadyCommands (one-shot setup exec'd after readiness),
-    // readinessTimeoutMs (default 60000).
+
+  // What it takes to produce a verdict about a commit. Every container joins
+  // one podman pod, so the stack addresses itself as 127.0.0.1 and publishes
+  // nothing — a gate run can't collide with your dev stack or another issue's.
+  gateStack: {
+    containers: [
+      {
+        name: "db",
+        image: "docker.io/library/mariadb:10.11",  // must be fully qualified
+        lifecycle: "issue",                        // started once per issue
+        env: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "app" },
+        readiness: { kind: "tcp", port: 3306 },
+        readinessTimeoutMs: 120_000,               // default 60_000
+        // Optional: args (image CMD args), mounts (fixture files mounted
+        // read-only, hostPath relative to the GATED WORKTREE),
+        // postReadyCommands (one-shot setup exec'd after readiness).
+      },
+      {
+        name: "runner",
+        image: "localhost/your-repo-sandbar:latest",
+        // Default lifecycle "attempt": recreated every gate run, because it
+        // mounts the worktree and runs the branch's code.
+        mountWorktree: "/workspace",  // rw; also the working directory
+        hold: true,                   // no long-running process of its own
+      },
+    ],
+    steps: [
+      // Run in order, stopping at the first red. Each is `podman exec`'d in
+      // the named container; its exit code is the verdict. The db is reachable
+      // at 127.0.0.1:3306 — one namespace, so the address is knowable here.
+      { name: "check", in: "runner", command: ["npm", "run", "check"] },
+      { name: "test", in: "runner", command: ["npm", "test"] },
+    ],
   },
 
   // Everything else is OPTIONAL — see the tables below for the defaults.
@@ -60,11 +76,10 @@ await run({
 | Field | Why it can't default |
 | --- | --- |
 | `ghOwner`, `ghRepo` | Repo identity. |
-| `gateImage` | The sandbox/gate image tag. |
-| `gateCommands` | The host's own `check` + `test` gate. |
+| `sandboxImage` | The image the agent (and the merger's resolve agent) runs in. |
 | `botName`, `botEmail` | Commit/author identity. |
 | `sandboxHooks` | Host-specific build/setup. |
-| `dbSidecar` | The per-issue DB sidecar recipe (image, env, port, probes). The engine is repo identity — sandbar ships no preset. |
+| `gateStack` | The containers and steps that produce a verdict. What it takes to test this repo is repo identity — sandbar ships no preset. |
 
 ### Optional fields and their defaults
 
@@ -73,7 +88,7 @@ await run({
 | `cwd` | `process.cwd()` |
 | `workDir` | `.sandbar` |
 | `sourceBranch` | `main` |
-| `containerfilePath` | `Containerfile` |
+| `images` | `[{ tag: sandboxImage, containerfile: "Containerfile" }]` — see below |
 | `implementerModelId` | `opus` |
 | `reviewerModelId` | `opus` |
 | `mergerModelId` | `opus` |
@@ -170,10 +185,51 @@ both `pull_request` and `push` will run the suite twice per round with this on.
 The point of `verified` is **independence, not coverage**: CI is a second,
 differently-authored implementation of "does this work", which is the one thing
 expanding the local gate can never buy. Coverage gaps should still be closed in
-`gateCommands` — that is cheaper and faster than a CI round-trip.
+`gateStack.steps` — that is cheaper and faster than a CI round-trip.
+
+### `images` — what sandbar builds
+
+By default sandbar builds one image: `sandboxImage`, from `./Containerfile`.
+List `images` explicitly when the stack needs more than one:
+
+```ts
+images: [
+  { tag: "localhost/your-repo-sandbar:latest", containerfile: "Containerfile" },
+  // No build context at all — right for a Containerfile that only pulls from a
+  // registry and installs packages; tarring the repo up for it is pure latency.
+  { tag: "localhost/app-php:gate", containerfile: "gate/Containerfile.php", stdinContext: true },
+  // buildArgs are passed through verbatim; sandbar injects no magic ARG name.
+  { tag: "localhost/app-runner:gate", containerfile: "gate/Containerfile.runner",
+    buildArgs: { AGENT_UID: String(process.getuid?.() ?? 0) } },
+]
+```
+
+An entry is skipped when its tag already exists, so warm runs pay one
+`image exists` per entry. The list must include `sandboxImage`. Every *other*
+image the stack references must already be pulled — preflight refuses with the
+exact `podman pull` command rather than pulling it, so no run does silent
+network work at startup.
+
+### Two constraints the gate stack imposes on your images and steps
+
+**A worktree-mounting image must run as root, or as your uid.** Stack containers
+run inside a pod, and podman refuses `--userns=keep-id` alongside `--pod`; inside
+the pod's userns, uid 1000 maps to a subuid rather than to you, so writes into
+the mounted worktree fail with EACCES. Container root under rootless podman maps
+to the invoking user, so files still land owned by you. Sandbar checks this
+before the run by running each such image (`podman run --rm --entrypoint id <img> -u`)
+and refuses with both remedies named: drop the `USER` directive, or align the
+image to your uid at build time via `buildArgs`.
+
+**A gate step must write only into gitignored paths.** The gate is a verdict
+about a *commit*, so sandbar refuses to run it against a worktree with
+uncommitted changes — including untracked files. Ignored build artifacts are
+exempt (that is what lets `node_modules` survive between attempts), but a step
+that writes anywhere else reports its own exhaust as uncommitted work on every
+attempt until the issue's budget dies.
 
 The host project also supplies on disk:
-- A `Containerfile` (at `containerfilePath`) for the sandbox image
+- A `Containerfile` for the sandbox image (or whatever `images` names)
 - Optionally, a `CODING_STANDARDS.md` (`codingStandardsPath`) — the reviewer ships with built-in default coding standards (`prompts/coding-standards.md`); this file *extends* them and is not required
 - `.env` (at `envFilePath`) with `GH_TOKEN` and either `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`
 

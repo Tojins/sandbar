@@ -192,6 +192,7 @@ function gateRed(): { ok: false } & MergerGateOutput {
     stderr: "y",
     failedStep: "test",
     exitCode: 1,
+    containerLogs: "",
   };
 }
 

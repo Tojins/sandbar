@@ -29,10 +29,10 @@
 
 import { join } from "node:path";
 
-import { type RunConfig, resolveConfig } from "./config.js";
+import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
 import { cleanupOrphanContainers } from "./containers.js";
 import { installCleanupTraps, onCleanup, runCleanup } from "./cleanup.js";
-import { ensureImages } from "./ensure-images.js";
+import { checkWorktreeImageUids, ensureImages } from "./ensure-images.js";
 import { makeEnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
 import {
@@ -68,7 +68,7 @@ import {
   type MergerWorktree,
   createMergerWorktree,
 } from "./merger-worktree.js";
-import { type Sidecar, startDbSidecar } from "./db-sidecar.js";
+import { type Stack, startStack } from "./gate-stack.js";
 import { buildPlan } from "./plan-resolver.js";
 import { PreflightError, runPreflight } from "./preflight.js";
 import { buildProjectAnchor } from "./prompt.js";
@@ -77,6 +77,20 @@ import { buildProjectAnchor } from "./prompt.js";
 // (success / stuck / budget) — MAX_ITERATIONS just guarantees the loop is
 // bounded if those checks ever fail to fire.
 const MAX_ITERATIONS = 100;
+
+// The merge phase's stack id. Distinct from every issue id (which are numeric),
+// so its pod, network and containers can never collide with an issue's.
+const MERGER_STACK_ID = "merger";
+
+// Images the gate stack references that sandbar does NOT build. Preflight
+// refuses when one is missing rather than pulling it (#24 D7) — a run must not
+// do silent network work at startup, and a `podman pull` behind the lock turns
+// a config error into a slow one.
+function pulledImagesOf(config: ResolvedConfig): readonly string[] {
+  const built = new Set(config.images.map((i) => i.tag));
+  const referenced = new Set(config.gateStack.containers.map((c) => c.image));
+  return [...referenced].filter((i) => !built.has(i));
+}
 
 /**
  * SkipReason → the Phase-4 handoff it earns.
@@ -136,7 +150,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       workDir: config.workDir,
       envFilePath: config.envFilePath,
       sourceBranch: config.sourceBranch,
-      dbImage: config.dbSidecar.image,
+      pulledImages: pulledImagesOf(config),
     });
   } catch (err) {
     if (err instanceof PreflightError) {
@@ -171,10 +185,13 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   // Build the sandbar image in the runtime if missing. No-op when it already
   // exists, so warm runs pay only one `image exists` call. After lock
   // acquisition so concurrent launches can't race the build.
-  await ensureImages({
-    gateImage: config.gateImage,
-    containerfilePath: config.containerfilePath,
-  });
+  await ensureImages(config.images);
+
+  // After the builds, because the images have to exist to be probed and a
+  // freshly-built one is the likeliest to be wrong. Before any stack starts,
+  // because the alternative is an unexplained EACCES twenty minutes into a gate
+  // (#24 D3).
+  await checkWorktreeImageUids(config.gateStack, process.getuid?.() ?? 0);
 
   startKeepawake();
   onCleanup(stopKeepawake);
@@ -213,9 +230,8 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     reviewerModelId: config.reviewerModelId,
     maxImplAttempts: config.maxImplAttempts,
     maxReviewRounds: config.maxReviewRounds,
-    gateImage: config.gateImage,
-    gateCommands: config.gateCommands,
-    dbSidecar: config.dbSidecar,
+    sandboxImage: config.sandboxImage,
+    gateStack: config.gateStack,
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
     adrDir: config.adrDir,
@@ -344,23 +360,25 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         // The merger runs in a dedicated worktree detached at
         // origin/<sourceBranch>, NOT config.cwd — so the operator's uncommitted
         // edits in their primary checkout can never be swept into a merge
-        // commit (issue #10). Worktree BEFORE sidecar: the sidecar's initMounts
+        // commit (issue #10). Worktree BEFORE stack: the stack's mounts
         // bind-mount fixture files from it (#20). createMergerWorktree and
-        // startDbSidecar each register their own teardown with onCleanup; we
-        // also tear both down in the finally below.
+        // startStack each register their own teardown with onCleanup; we
+        // also tear both down in the finally below. One stack serves gate-2 for
+        // every branch in the cycle — its issue-lifecycle containers start once.
         let mergerWorktree: MergerWorktree | null = null;
-        let mergerSidecar: Sidecar | null = null;
+        let mergerStack: Stack | null = null;
         try {
           mergerWorktree = await createMergerWorktree({
             cwd: config.cwd,
             workDir: config.workDir,
             sourceBranch: config.sourceBranch,
           });
-          mergerSidecar = await startDbSidecar({
-            issueId: "merger",
-            spec: config.dbSidecar,
+          mergerStack = await startStack({
+            stackId: MERGER_STACK_ID,
+            spec: config.gateStack,
             worktreePath: mergerWorktree.path,
           });
+          const stackForGate2 = mergerStack;
           const adapter = realAdapter({
             cwd: mergerWorktree.path,
             sourceBranch: config.sourceBranch,
@@ -368,16 +386,9 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             botEmail: config.botEmail,
             coauthorTrailer: config.coauthorTrailer,
             modelId: config.mergerModelId,
-            gateImage: config.gateImage,
-            gateCommands: config.gateCommands,
+            sandboxImage: config.sandboxImage,
             env,
-            gateOpts: {
-              worktreePath: mergerWorktree.path,
-              networkName: mergerSidecar.networkName,
-              dbHost: mergerSidecar.dbHost,
-              dbPort: mergerSidecar.dbPort,
-              gateEnv: config.dbSidecar.gateEnv,
-            },
+            runStackGate: () => stackForGate2.runGate(),
           });
 
           const projectAnchor = await buildProjectAnchor({
@@ -452,8 +463,8 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             throw err;
           }
         } finally {
-          // Sidecar first: it bind-mounts fixture files from the worktree.
-          if (mergerSidecar) await mergerSidecar.stop();
+          // Stack first: its containers bind-mount the worktree.
+          if (mergerStack) await mergerStack.stop();
           if (mergerWorktree) await mergerWorktree.remove();
         }
       }
