@@ -78,6 +78,7 @@ import { promisify } from "node:util";
 
 import { type EnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
+import { dirtyWorktreePaths } from "./git-ops.js";
 import {
   type VerifiedFailureReason,
   type VerifiedLandingOptions,
@@ -930,16 +931,59 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         /* best-effort */
       }
     },
+    // `npm install` is sandbar's own step, and it WRITES TRACKED FILES: it
+    // rewrites package-lock.json whenever the lock is out of sync with
+    // package.json, which is exactly the state merging two branches that both
+    // touched dependencies produces. The gate that runs next refuses a dirty
+    // tree (#24 D1) — so without this the merge of two perfectly good branches
+    // reds with `failedStep: worktree-clean` and a message about uncommitted
+    // changes that never mentions npm, then burns the resolve budget while
+    // every retry re-runs the install and re-creates the condition.
+    //
+    // The lockfile update genuinely belongs in the merge result, so commit it.
+    // Only when the tree was CLEAN beforehand, though: a dirty tree on entry
+    // means someone else's uncommitted work is in there (the resolve agent
+    // leaving edits is the case gate-2's check exists to catch), and sweeping
+    // that into a lockfile commit would both mislabel it and defeat the check.
+    // In that case leave it alone and let the gate refuse, as it should.
     async npmInstall() {
+      const dirtyBefore = await dirtyWorktreePaths(cwd);
       try {
         await exec("npm", ["install", "--no-audit", "--no-fund"], {
           cwd,
           maxBuffer: 50 * 1024 * 1024,
         });
-        return { ok: true };
       } catch {
         return { ok: false };
       }
+      if (dirtyBefore.length > 0) return { ok: true };
+      const dirtyAfter = await dirtyWorktreePaths(cwd);
+      if (dirtyAfter.length === 0) return { ok: true };
+      try {
+        await exec("git", ["add", "-A"], { cwd });
+        await exec(
+          "git",
+          [
+            "commit",
+            "--no-verify",
+            "-m",
+            "chore: sync dependency lockfile after merge\n\n" +
+              "Written by `npm install` in the merger worktree, committed so " +
+              "the gate's verdict is about a commit (#24 D1).",
+          ],
+          { cwd },
+        );
+      } catch (err) {
+        // Committing sandbar's own install output is not optional — leaving it
+        // uncommitted hands the next gate a guaranteed `worktree-clean` red
+        // that no agent can fix. Fail loud rather than proceed into it.
+        throw new SandbarError(
+          "merger: `npm install` modified tracked files and they could not be " +
+            `committed: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      }
+      return { ok: true };
     },
     async runGate() {
       const r: GateResult = await deps.runStackGate();

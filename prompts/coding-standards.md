@@ -1,9 +1,11 @@
 ## Coding standards
 
-Gate-1 already proved the branch compiles and its tests pass. Review for what
-the gate can't see: structural health and correctness the tests miss. Be
-ambitious about simplification — prefer deleting a branch, helper, or layer
-over polishing it.
+Gate-1 is green: every step this project defines as its gate passed on this
+branch, over a clean worktree. What those steps cover is the project's choice —
+usually a build and a test suite, but do not assume any particular one ran.
+Review for what the gate can't see: structural health and correctness the tests
+miss. Be ambitious about simplification — prefer deleting a branch, helper, or
+layer over polishing it.
 
 ### Block on these (each is a CHANGES-REQUESTED reason)
 

@@ -130,6 +130,28 @@ export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
   `<details><summary>Last failure trace</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
+// The worktree could not be brought to a committed state, so no gate ever ran
+// (#24 D1). Distinct from NEEDS_HUMAN_COMMENT_TEMPLATE, which says "exhausted
+// the attempt budget without a green gate" — true-ish but it sends the reader
+// looking for a failing test, and this terminal usually fires after two
+// attempts rather than the full budget. What the human needs is the path list
+// and the knowledge that the cause is almost never the branch's code.
+export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
+  failureTrace: string,
+  stuckLabel: string,
+  readyLabel: string,
+): string =>
+  `${BOT_COMMENT_PREFIX} stopped: the worktree kept the same uncommitted ` +
+  `changes across attempts, so no gate could run — a gate verdict is about a ` +
+  `commit, and there was never one to judge. The implementer was asked to ` +
+  `commit and came back with an identical dirty set, which usually means the ` +
+  `files are not its to remove: a gate step writing outside a gitignored ` +
+  `path, or a container writing into the tree as another uid. Fix that (or ` +
+  `commit/ignore the paths below), then drop \`${stuckLabel}\` and re-apply ` +
+  `\`${readyLabel}\`.\n\n` +
+  `<details><summary>Uncommitted paths</summary>\n\n` +
+  `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
+
 // Impl-attempt budget exhausted while the gate was GREEN and the reviewer was
 // the blocker (#17). Distinct from NEEDS_HUMAN_COMMENT_TEMPLATE (which claims
 // "without a green gate") and from REVIEW_BUDGET_EXHAUSTED (a different budget):
@@ -192,12 +214,15 @@ export type FinalizeInput =
       readonly hasCommits: boolean;
     }
   | {
-      // Impl-attempt budget exhausted. `cause` selects the comment so the human
-      // is pointed at the real blocker (#17): gate-red surfaces the failure
-      // trace; reviewer-blocked surfaces the reviewer's CHANGES-REQUESTED prose.
+      // Impl-attempt budget exhausted, or a blocker the agent cannot clear.
+      // `cause` selects the comment so the human is pointed at the real blocker
+      // (#17): gate-red surfaces the failure trace; reviewer-blocked surfaces
+      // the reviewer's CHANGES-REQUESTED prose; uncommittable-worktree surfaces
+      // the paths that stayed dirty across attempts (no gate ever ran, so a
+      // gate-red comment would describe a failure that did not happen).
       readonly kind: "needs-human";
       readonly issue: IssueRef;
-      readonly cause: "gate-red" | "reviewer-blocked";
+      readonly cause: "gate-red" | "reviewer-blocked" | "uncommittable-worktree";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
     }
@@ -480,7 +505,8 @@ export async function finalizeOne(
       await adapter.removeWorktreeFor(input.issue.branch);
       await adapter.pushBranch(input.issue.branch);
       // #17: name the real blocker. reviewer-blocked → surface the reviewer's
-      // CHANGES-REQUESTED prose; gate-red → the gate failure trace.
+      // CHANGES-REQUESTED prose; uncommittable-worktree → the dirty paths, and
+      // say that no gate ran; gate-red → the gate failure trace.
       const body =
         input.cause === "reviewer-blocked"
           ? NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE(
@@ -488,11 +514,17 @@ export async function finalizeOne(
               labels.agentStuck,
               READY_FOR_AGENT_LABEL,
             )
-          : NEEDS_HUMAN_COMMENT_TEMPLATE(
-              input.failureTrace,
-              labels.agentStuck,
-              READY_FOR_AGENT_LABEL,
-            );
+          : input.cause === "uncommittable-worktree"
+            ? NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE(
+                input.failureTrace,
+                labels.agentStuck,
+                READY_FOR_AGENT_LABEL,
+              )
+            : NEEDS_HUMAN_COMMENT_TEMPLATE(
+                input.failureTrace,
+                labels.agentStuck,
+                READY_FOR_AGENT_LABEL,
+              );
       await adapter.postComment(n, body);
       const r = await adapter.editLabels(
         n,

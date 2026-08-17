@@ -34,7 +34,9 @@ await run({
 
   // What it takes to produce a verdict about a commit. Every container joins
   // one podman pod, so the stack addresses itself as 127.0.0.1 and publishes
-  // nothing — a gate run can't collide with your dev stack or another issue's.
+  // no fixed ports — a gate run can't collide with your dev stack or another
+  // issue's. (A `tcp` readiness port is published loopback-only on an
+  // ephemeral host port, since sandbar probes it from the host.)
   gateStack: {
     containers: [
       {
@@ -225,8 +227,19 @@ image to your uid at build time via `buildArgs`.
 about a *commit*, so sandbar refuses to run it against a worktree with
 uncommitted changes — including untracked files. Ignored build artifacts are
 exempt (that is what lets `node_modules` survive between attempts), but a step
-that writes anywhere else reports its own exhaust as uncommitted work on every
-attempt until the issue's budget dies.
+that writes anywhere else reports its own exhaust as uncommitted work. The
+implementer is asked to commit and gets another attempt; if it comes back with
+the *same* dirty set — which is what happens when the files are not the agent's
+to remove — the issue stops immediately as `NEEDS-HUMAN`, naming the paths,
+rather than spending the rest of its budget on it.
+
+> **Note.** Between the merge and gate-2 the merge phase runs
+> `npm install --no-audit --no-fund` in its own ephemeral worktree. If that
+> rewrites `package-lock.json` (merging two branches that both changed
+> dependencies usually does), the update is committed into the merge result —
+> otherwise the clean-tree rule above would refuse the very merge sandbar just
+> made. Non-npm projects are unaffected; the install failing is a skip, not a
+> hard error.
 
 The host project also supplies on disk:
 - A `Containerfile` for the sandbox image (or whatever `images` names)

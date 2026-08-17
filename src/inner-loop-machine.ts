@@ -60,6 +60,10 @@ export type LoopState = {
   readonly lastFailureTrace: string;
   readonly extraReprompt: string | null;
   readonly latestReviewerProse: string | null;
+  // The dirty set that sent the PREVIOUS attempt back to commit its work, or
+  // null if the last attempt didn't end that way. Only used to detect that an
+  // attempt changed nothing — see onImplementerResult.
+  readonly lastDirtyPaths: readonly string[] | null;
   readonly phase: LoopPhase;
 };
 
@@ -89,8 +93,14 @@ export type Verdict =
       //     the reviewer's last verdict was CHANGES-REQUESTED;
       //     `latestReviewerProse` carries that report (so the human is pointed
       //     at the reviewer request, not a non-existent failing test).
+      //   uncommittable-worktree — the implementer reported COMPLETE over a
+      //     dirty tree and a further attempt left the dirty set UNCHANGED, so
+      //     it is something the agent cannot remove (a file written by a gate
+      //     container under another uid, a step's non-gitignored exhaust).
+      //     `failureTrace` carries the paths. Distinct from gate-red because
+      //     no gate ever ran.
       readonly type: "NEEDS-HUMAN";
-      readonly cause: "gate-red" | "reviewer-blocked";
+      readonly cause: "gate-red" | "reviewer-blocked" | "uncommittable-worktree";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
     }
@@ -166,6 +176,7 @@ export function initialState(opts: InitialStateOptions): LoopState {
     lastFailureTrace: "",
     extraReprompt: null,
     latestReviewerProse: null,
+    lastDirtyPaths: null,
     phase: "needs-implementer",
   };
 }
@@ -240,6 +251,18 @@ export function uncommittedWorkReprompt(
   ].join("\n");
 }
 
+// Order-insensitive: `git status --porcelain` order is stable in practice, but
+// "the same files are still dirty" is the question being asked, and a reordering
+// is not progress.
+function sameDirtySet(
+  a: readonly string[],
+  b: readonly string[],
+): boolean {
+  if (a.length !== b.length) return false;
+  const seen = new Set(a);
+  return b.every((p) => seen.has(p));
+}
+
 function onImplementerResult(
   state: LoopState,
   signal: ParseSignal,
@@ -261,18 +284,55 @@ function onImplementerResult(
     // the forgotten `git add` — the overwhelmingly common cause — rather than
     // letting a `git clean` destroy it.
     if (dirtyPaths.length > 0) {
+      const trace = uncommittedWorkReprompt(dirtyPaths);
+      // An attempt that was told to commit and came back with the IDENTICAL
+      // dirty set did not fail to try — it cannot succeed. The realistic causes
+      // are all outside the implementer's reach: a file a gate container wrote
+      // as a uid the sandbox user cannot unlink, a path an issue-lifecycle
+      // container keeps recreating, a gate step's non-gitignored exhaust.
+      // Without this check every one of the remaining attempts is a full agent
+      // run ending in the same reprompt, and the budget dies pointing at a gate
+      // that never ran.
+      if (
+        state.lastDirtyPaths !== null &&
+        sameDirtySet(state.lastDirtyPaths, dirtyPaths)
+      ) {
+        return terminate(state, {
+          type: "NEEDS-HUMAN",
+          cause: "uncommittable-worktree",
+          failureTrace: trace,
+          latestReviewerProse: state.latestReviewerProse,
+        });
+      }
       return advanceAttempt(
         state,
         {
-          failureTrace: state.lastFailureTrace,
-          extraReprompt: uncommittedWorkReprompt(dirtyPaths),
+          // Becomes the NEEDS-HUMAN trace if the budget runs out here, so the
+          // human gets the paths rather than "budget exhausted with no green
+          // gate" for a run in which the gate never executed.
+          failureTrace: trace,
+          extraReprompt: trace,
           latestReviewerProse: state.latestReviewerProse,
+          dirtyPaths,
         },
-        gateRedExhaustion(state),
+        // Built from the dirty trace, not from state.lastFailureTrace: the gate
+        // never ran on this route, so the generic "budget exhausted with no
+        // green gate" would describe a failure that did not happen.
+        {
+          type: "NEEDS-HUMAN",
+          cause: "uncommittable-worktree",
+          failureTrace: trace,
+          latestReviewerProse: null,
+        },
       );
     }
     return {
-      state: { ...state, phase: "needs-gate-1", extraReprompt: null },
+      state: {
+        ...state,
+        phase: "needs-gate-1",
+        extraReprompt: null,
+        lastDirtyPaths: null,
+      },
       action: { kind: "run-gate-1", attempt: state.attempt },
     };
   }
@@ -372,6 +432,10 @@ function advanceAttempt(
     readonly failureTrace: string;
     readonly extraReprompt: string | null;
     readonly latestReviewerProse: string | null;
+    // Carried only by the COMPLETE-over-a-dirty-tree route, so the next
+    // attempt can tell "still dirty in a new way" from "changed nothing".
+    // Every other route clears it.
+    readonly dirtyPaths?: readonly string[];
   },
   // The verdict to emit if this attempt was the last. Caller-supplied because
   // only the caller knows the terminal cause: a gate-red trace vs. a green-gate
@@ -388,6 +452,7 @@ function advanceAttempt(
     phase: "needs-implementer",
     extraReprompt: next.extraReprompt,
     latestReviewerProse: next.latestReviewerProse,
+    lastDirtyPaths: next.dirtyPaths ?? null,
   };
   return {
     state: ns,

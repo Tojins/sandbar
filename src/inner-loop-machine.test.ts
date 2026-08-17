@@ -620,9 +620,11 @@ describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () =>
   });
 
   it("spends an attempt, and exhausting the budget on dirt is NEEDS-HUMAN", () => {
+    // Each attempt leaves a DIFFERENT dirty set, so the agent is visibly still
+    // working and the loop lets it run to the end of the budget.
     const { actions, verdict } = drive({ maxAttempts: 2, maxReviewRounds: 3 }, [
-      impl(complete, dirty),
-      impl(complete, dirty),
+      impl(complete, ["?? a.ts"]),
+      impl(complete, ["?? b.ts"]),
     ]);
     expect(actions.map((a) => a.kind)).toEqual([
       "run-implementer",
@@ -631,7 +633,52 @@ describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () =>
     ]);
     expect(verdict.type).toBe("NEEDS-HUMAN");
     if (verdict.type !== "NEEDS-HUMAN") throw new Error("unreachable");
-    expect(verdict.cause).toBe("gate-red");
+    expect(verdict.cause).toBe("uncommittable-worktree");
+    // Not the generic "budget exhausted with no green gate": no gate ran.
+    expect(verdict.failureTrace).toContain("?? b.ts");
+  });
+
+  it("stops immediately when an attempt leaves the dirty set unchanged", () => {
+    // The realistic causes — a gate step's non-gitignored exhaust, a file a
+    // container wrote as another uid — are not the implementer's to remove, so
+    // every remaining attempt would be a full agent run ending in the identical
+    // reprompt. Terminates on attempt 2 of a budget of 8.
+    const { actions, verdict } = drive({ maxAttempts: 8, maxReviewRounds: 3 }, [
+      impl(complete, dirty),
+      impl(complete, dirty),
+    ]);
+    expect(actions.map((a) => a.kind)).toEqual([
+      "run-implementer",
+      "run-implementer",
+      "terminate",
+    ]);
+    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
+    expect(verdict.cause).toBe("uncommittable-worktree");
+  });
+
+  it("treats a reordered dirty set as unchanged", () => {
+    const { actions } = drive({ maxAttempts: 8, maxReviewRounds: 3 }, [
+      impl(complete, ["?? a.ts", "?? b.ts"]),
+      impl(complete, ["?? b.ts", "?? a.ts"]),
+    ]);
+    expect(actions.filter((a) => a.kind === "run-implementer")).toHaveLength(2);
+    expect(actions[actions.length - 1]?.kind).toBe("terminate");
+  });
+
+  it("keeps going when the agent commits SOME of the dirt", () => {
+    // Shrinking the set is progress, so the budget is not cut short.
+    const r1 = step(initialState(defaultOpts), impl(complete, ["?? a.ts", "?? b.ts"]));
+    const r2 = step(r1.state, impl(complete, ["?? b.ts"]));
+    expect(r2.action.kind).toBe("run-implementer");
+  });
+
+  it("clears the dirty memory once the tree comes back clean", () => {
+    // A later dirty attempt must not be compared against a stale set from
+    // before a green run — that would terminate on a first offence.
+    let state = initialState(defaultOpts);
+    state = step(state, impl(complete, dirty)).state;
+    state = step(state, impl(complete)).state; // clean → gate
+    expect(state.lastDirtyPaths).toBeNull();
   });
 
   it("does not block the short-circuit terminals — dirt is irrelevant to them", () => {

@@ -5,7 +5,7 @@
 //   appendOrchestrator(line)              → run-<UTC>/orchestrator.log
 //   cycle(n).writePlan(plan)              → run-<UTC>/cycle-<n>/plan.json
 //   cycle(n).appendMerger(line)           → run-<UTC>/cycle-<n>/merger.log
-//   cycle(n).writeMergerGate(id, gate)    → run-<UTC>/cycle-<n>/merger-gate-<id>.{out,err,meta}
+//   cycle(n).writeMergerGate(id, gate)    → run-<UTC>/cycle-<n>/merger-gate-<id>.{out,err,meta.json,containers.log}
 //   cycle(n).writeAttempt(id, m, content) → run-<UTC>/cycle-<n>/issue-<id>/attempt-<m>.log
 //   cycle(n).writeAttemptReviewer(...)    → run-<UTC>/cycle-<n>/issue-<id>/attempt-<m>-reviewer.log
 //
@@ -39,6 +39,11 @@ export type MergerGateRecord = {
   readonly stderr: string;
   readonly failedStep: string | null;
   readonly exitCode: number;
+  // The #24 D9 per-container log tails. Persisted, not just passed to the
+  // resolve agent in-prompt: this file is the only offline artefact, and D9's
+  // motivating case — the browser step failed because the backend was 500ing —
+  // is undiagnosable without it after the run.
+  readonly containerLogs: string;
 };
 
 export type CycleLogger = AttemptLogger & {
@@ -149,6 +154,13 @@ function makeCycleLogger(runDir: string, n: number): CycleLogger {
       const base = join(cycleDir, `merger-gate-${issueId}`);
       await writeFile(`${base}.out`, gate.stdout);
       await writeFile(`${base}.err`, gate.stderr);
+      // Its own file, never appended to `.err`: `summarizeGateFailure`
+      // collapses lines that share a timeout signature, and a service log is
+      // full of near-identical lines. Keeping them apart on disk mirrors why
+      // GateResult keeps them apart in memory.
+      if (gate.containerLogs) {
+        await writeFile(`${base}.containers.log`, gate.containerLogs);
+      }
       await writeFile(
         `${base}.meta.json`,
         JSON.stringify(

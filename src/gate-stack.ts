@@ -58,6 +58,32 @@
 // "environment" trace — for a bug the implementer could have fixed on the next
 // attempt if it had been shown the log.
 //
+// The mapping has to hold for the whole life of the stack, not just its first
+// second, and two liveness checks are what make it. A container with no
+// `readiness` declared is still asserted alive after a grace interval —
+// `podman run -d` exits 0 for an entrypoint that dies immediately, so without
+// that check a dead mail catcher passes bringup and is then blamed on the
+// branch by every step that talks to it. And the `issue` containers are
+// re-checked before EVERY gate run: a database OOM-killed at attempt 4 is still
+// infrastructure, so it throws rather than reddening, and the fresh-stack retry
+// does what it exists to do instead of burning the rest of the budget against a
+// corpse.
+//
+// ---------------------------------------------------------------------------
+// Nothing here may hang
+// ---------------------------------------------------------------------------
+// This module holds the run's single-instance lock while it works, and node's
+// execFile has NO default timeout, so an unbounded exec is not a slow gate —
+// it is a run that never ends and never tears down. Readiness probes and
+// postReadyCommands are bounded by the container's own readiness budget;
+// sandbar's own `logs`/`inspect` calls by LOG_READ_TIMEOUT_MS; and the tcp
+// probe carries a socket timeout because a dropped SYN produces neither
+// `connect` nor `error`. Note that `readinessTimeoutMs` alone does not do this:
+// the poll loop only tests its deadline BETWEEN probes, so one probe that never
+// returns hangs forever inside a perfectly valid budget. Steps are the
+// exception — a legitimate test suite has no defensible default ceiling, and
+// per-step timeouts are #26.
+//
 // ---------------------------------------------------------------------------
 // Readiness
 // ---------------------------------------------------------------------------
@@ -114,6 +140,12 @@ const DNS_SERVERS: readonly string[] = ["1.1.1.1", "8.8.8.8"];
 // Lines of each container's log appended to a red gate's trace (#24 D9), and
 // the tail shown when a container dies during bringup.
 export const CONTAINER_LOG_TAIL = 40;
+
+// Bound for the podman calls sandbar makes ABOUT a container rather than
+// through it — `logs`, `inspect`. These answer from local state and are fast or
+// broken; the point is only that none of them can hang the run. Consumer-facing
+// execs are bounded by the readiness budget instead.
+export const LOG_READ_TIMEOUT_MS = 15_000;
 
 // The one env key sandbar owns in the stack. Everything else a step needs —
 // DB_HOST, credentials, ports — is now literal config the consumer writes,
@@ -301,8 +333,36 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // The infra container is named `<pod-id-prefix>-infra`, which matches no
     // sandbar prefix — removing containers by name would leave it, and the pod,
     // behind.
-    await exec(RUNTIME, POD_RM_ARGS(podName)).catch(() => {});
-    await exec(RUNTIME, ["network", "rm", networkName]).catch(() => {});
+    //
+    // Failures here are NOT swallowed. A `pod rm` that fails leaks the pod, its
+    // members, that unreachably-named infra container and its network, and the
+    // only backstop (`cleanupOrphanContainers`) does not run until the top of
+    // the next cycle — so on the last cycle, or on any halt, the leak outlives
+    // the process. `-f` on the network too, matching the create path: at this
+    // point the pod is meant to be gone and a lingering endpoint is exactly
+    // what needs forcing.
+    const failures: string[] = [];
+    const attempt = async (args: string[]): Promise<void> => {
+      try {
+        await exec(RUNTIME, args, { timeout: LOG_READ_TIMEOUT_MS });
+      } catch (err) {
+        failures.push(
+          `  ${RUNTIME} ${args.join(" ")}\n    ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    };
+    await attempt(POD_RM_ARGS(podName));
+    await attempt(["network", "rm", "-f", networkName]);
+    if (failures.length > 0) {
+      throw new SandbarError(
+        `gate stack: teardown of pod '${podName}' / network '${networkName}' ` +
+          `failed, leaking podman resources:\n${failures.join("\n")}\n` +
+          `Clean up with: ${RUNTIME} ${POD_RM_ARGS(podName).join(" ")} && ` +
+          `${RUNTIME} network rm -f ${networkName}`,
+      );
+    }
   };
   // Registered before the first resource exists, so a signal anywhere in the
   // bringup window below still sweeps whatever was created. The local catch
@@ -350,6 +410,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
         runStackGate({
           spec: opts.spec,
           attemptContainers,
+          issueContainers,
           podName,
           stackId: opts.stackId,
           worktreePath: opts.worktreePath,
@@ -358,7 +419,13 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
         }),
     };
   } catch (err) {
-    await stop();
+    // The bringup failure is the diagnosis; a teardown failure on top of it is
+    // reported but must not replace it.
+    await stop().catch((stopErr: unknown) => {
+      console.error(
+        stopErr instanceof Error ? stopErr.message : String(stopErr),
+      );
+    });
     throw err;
   }
 }
@@ -424,8 +491,14 @@ async function bringUp(
     const containerName = stackContainerNameFor(ctx.stackId, c.name);
     for (const command of c.postReadyCommands) {
       try {
-        await exec(RUNTIME, ["exec", containerName, ...command], {
+        // Bounded by the container's readiness budget: post-ready setup is
+        // bringup, and an unbounded exec here hangs the run holding the lock
+        // exactly as a hung probe would. `CI=true` is passed for the same
+        // reason steps get it — a migration or seed script that branches on it
+        // must not see a different environment than the steps that follow.
+        await exec(RUNTIME, stepExecArgs(containerName, command), {
           maxBuffer: MAX_BUFFER,
+          timeout: c.readinessTimeoutMs,
         });
       } catch (err) {
         // Post-ready setup is part of the container's contract — a failing
@@ -443,17 +516,47 @@ async function bringUp(
   }
 }
 
+// Milliseconds left before `deadline`, floored at 1 — node reads `timeout: 0`
+// as "no timeout", which is the one value that must never reach an exec here.
+function remainingMs(deadline: number): number {
+  return Math.max(1, deadline - Date.now());
+}
+
 async function waitForReady(
   containerName: string,
   c: ResolvedStackContainer,
   ctx: BringUpCtx,
 ): Promise<void> {
-  if (c.readiness === null) return;
+  if (c.readiness === null) {
+    // No probe was declared, so nothing else ever looks at this container: the
+    // loop below is the only site that would, and `throwIfDead` is reachable
+    // only from inside it. Skip that and a container whose entrypoint dies at
+    // startup passes bringup — `podman run -d` exits 0 for it — and its death
+    // is then charged to the branch by every step that talks to it, which is
+    // D5's blame mapping running backwards. One grace interval (the container
+    // has to get far enough to fail) and then the same liveness assert every
+    // probed container gets.
+    await sleep(READY_POLL_INTERVAL_MS);
+    await throwIfDead(containerName, c);
+    return;
+  }
   const readiness = c.readiness;
   const deadline = Date.now() + c.readinessTimeoutMs;
   let lastErr = "";
   while (Date.now() < deadline) {
-    const probe = await probeOnce(containerName, readiness, ctx);
+    // Bounded by what is LEFT of the readiness budget, not by the budget: the
+    // loop's `Date.now() < deadline` is only tested between probes, so a single
+    // probe that never returns — an `exec` curl against a service that accepts
+    // and then never answers, the very accept-first behaviour this module's
+    // header documents — hangs the run forever, holding the single-instance
+    // lock, with no HARD-ERROR and no teardown. config.ts rejects a NaN
+    // readinessTimeoutMs for exactly this hang; a valid one must not reach it.
+    const probe = await probeOnce(
+      containerName,
+      readiness,
+      ctx,
+      remainingMs(deadline),
+    );
     if (probe.ready) return;
     lastErr = probe.detail;
     // The recipe is untrusted consumer input and the branch's own code, so a
@@ -487,12 +590,14 @@ async function probeOnce(
   containerName: string,
   readiness: NonNullable<ResolvedStackContainer["readiness"]>,
   ctx: BringUpCtx,
+  timeoutMs: number,
 ): Promise<{ ready: boolean; detail: string }> {
   switch (readiness.kind) {
     case "exec": {
       try {
         await exec(RUNTIME, ["exec", containerName, ...readiness.argv], {
           maxBuffer: MAX_BUFFER,
+          timeout: timeoutMs,
         });
         return { ready: true, detail: "" };
       } catch (err) {
@@ -507,6 +612,7 @@ async function probeOnce(
       // SIGPIPE, and on a long enough log the probe never succeeds.
       const r = await exec(RUNTIME, ["logs", containerName], {
         maxBuffer: MAX_BUFFER,
+        timeout: timeoutMs,
       }).catch(() => null);
       if (r === null) return { ready: false, detail: "logs unavailable" };
       const found = `${r.stdout}${r.stderr}`.includes(readiness.pattern);
@@ -524,7 +630,7 @@ async function probeOnce(
             "tcp readiness port, so this is an internal inconsistency.",
         );
       }
-      return probeTcp(hostPort);
+      return probeTcp(hostPort, timeoutMs);
     }
   }
 }
@@ -532,7 +638,10 @@ async function probeOnce(
 // Connect, then require the socket to stay open (see the header): the rootless
 // port forwarder accepts at the host before it learns the backend is refusing,
 // so "connected" alone is not a listener.
-function probeTcp(hostPort: number): Promise<{ ready: boolean; detail: string }> {
+function probeTcp(
+  hostPort: number,
+  timeoutMs: number,
+): Promise<{ ready: boolean; detail: string }> {
   return new Promise((resolveProbe) => {
     const socket = connect({ port: hostPort, host: "127.0.0.1" });
     let settled = false;
@@ -545,6 +654,12 @@ function probeTcp(hostPort: number): Promise<{ ready: boolean; detail: string }>
       socket.destroy();
       resolveProbe({ ready, detail });
     };
+    // A dropped SYN produces neither `connect` nor `error` — the socket just
+    // sits there. Without this the probe never resolves and `waitForReady`
+    // never regains control to notice its deadline passed.
+    socket.setTimeout(timeoutMs, () =>
+      finish(false, `no response within ${timeoutMs}ms`),
+    );
     socket.on("connect", () => {
       connected = true;
       settleTimer = setTimeout(
@@ -566,24 +681,27 @@ function probeTcp(hostPort: number): Promise<{ ready: boolean; detail: string }>
   });
 }
 
+// Whether the container is up right now. `null` means the question could not be
+// answered — inspect itself flaked — which is never treated as evidence either way.
+async function isRunning(containerName: string): Promise<boolean | null> {
+  try {
+    const { stdout } = await exec(
+      RUNTIME,
+      ["inspect", "--format", "{{.State.Running}}", containerName],
+      { timeout: LOG_READ_TIMEOUT_MS },
+    );
+    return stdout.trim() === "true";
+  } catch {
+    return null;
+  }
+}
+
 async function throwIfDead(
   containerName: string,
   c: ResolvedStackContainer,
 ): Promise<void> {
-  let running: string;
-  try {
-    const { stdout } = await exec(RUNTIME, [
-      "inspect",
-      "--format",
-      "{{.State.Running}}",
-      containerName,
-    ]);
-    running = stdout.trim();
-  } catch {
-    // Inspect itself flaking is not evidence of death; let the deadline arbitrate.
-    return;
-  }
-  if (running === "true") return;
+  // Inspect flaking is not evidence of death; let the deadline arbitrate.
+  if ((await isRunning(containerName)) !== false) return;
   throw new ContainerBringupError(
     containerName,
     `gate stack: container '${c.name}' (${c.image}) exited during startup.`,
@@ -595,12 +713,15 @@ async function logTail(
   containerName: string,
   lines = CONTAINER_LOG_TAIL,
 ): Promise<string> {
-  const r = await exec(RUNTIME, [
-    "logs",
-    "--tail",
-    String(lines),
-    containerName,
-  ]).catch(() => null);
+  // MAX_BUFFER, not node's 1MB default: `--tail 40` bounds the LINE count, not
+  // the byte count, and 40 lines of a JSON dump or a minified bundle overflows
+  // it — losing the one diagnostic D9 exists to provide, precisely when the log
+  // is biggest.
+  const r = await exec(
+    RUNTIME,
+    ["logs", "--tail", String(lines), containerName],
+    { maxBuffer: MAX_BUFFER, timeout: LOG_READ_TIMEOUT_MS },
+  ).catch(() => null);
   if (r === null) return "(logs unavailable)";
   const text = stripAnsi(`${r.stdout}${r.stderr}`).trim();
   return text || "(empty)";
@@ -613,6 +734,7 @@ async function logTail(
 type RunGateCtx = {
   readonly spec: ResolvedGateStack;
   readonly attemptContainers: readonly ResolvedStackContainer[];
+  readonly issueContainers: readonly ResolvedStackContainer[];
   readonly podName: string;
   readonly stackId: string;
   readonly worktreePath: string;
@@ -620,7 +742,37 @@ type RunGateCtx = {
   readonly nameOf: (c: ResolvedStackContainer) => string;
 };
 
+// The long-lived half of the stack, re-checked before every gate run.
+//
+// `lifecycle` was consulted only at bringup, which made the blame mapping hold
+// for exactly as long as the first attempt. A database OOM-killed (or left dead
+// by a host suspend) at attempt 4 is still an INFRA failure, but every later
+// step fails talking to it, so the gate reds, the implementer is asked to fix a
+// service it never touched, the rest of the budget burns against a corpse and
+// the run lands on NEEDS-HUMAN with an "environment" trace. That is D5 running
+// backwards, and the fix is to ask. Throwing (rather than reddening) puts it
+// back on the HARD-ERROR path, where the outer layer retries with a fresh stack.
+async function assertIssueContainersAlive(ctx: RunGateCtx): Promise<void> {
+  for (const c of ctx.issueContainers) {
+    const containerName = ctx.nameOf(c);
+    if ((await isRunning(containerName)) !== false) continue;
+    throw new ContainerBringupError(
+      containerName,
+      `gate stack: issue-lifecycle container '${c.name}' (${c.image}) is no ` +
+        "longer running. It came up once for this issue and every attempt " +
+        "since has depended on it, so this is an infrastructure failure and " +
+        "not a verdict about the branch.",
+      await logTail(containerName),
+    );
+  }
+}
+
 async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
+  // Before anything else, and deliberately OUTSIDE the try that converts
+  // bringup failures to gate red: a dead issue container must reach the caller
+  // as a throw.
+  await assertIssueContainersAlive(ctx);
+
   // The verdict is about a commit, so the tree had better BE the commit. This
   // also covers gate-2 in the merger worktree, where the resolve agent can
   // leave edits behind; the inner loop short-circuits earlier (the state
@@ -691,14 +843,26 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
         stderr?: string;
         code?: number | string;
       };
+      // Node reports a maxBuffer kill with a STRING code, so it would otherwise
+      // land below as a plain `exitCode: 1` with silently truncated output —
+      // a verbose but passing suite reading as a real, unexplained failure that
+      // reproduces identically every attempt until the budget dies. Name it.
+      const overflowed = e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+      const note = overflowed
+        ? `\n\n[sandbar] step '${step.name}' produced more than ` +
+          `${MAX_BUFFER} bytes of output and was killed; the output above is ` +
+          "truncated and the exit code is unknown. This is an output-volume " +
+          "failure, not necessarily a test failure — quieten the step's " +
+          "reporter.\n"
+        : "";
       // Stop at the first red. Every later step tends to read what an earlier
       // one built, so running them would bury the real failure under derived
-      // ones — the same reason gate.sh refuses to run suites after a failed
-      // prepare.
+      // ones: a test suite that fails because the build step before it never
+      // produced anything reports N failures that are all one failure.
       return withContainerLogs(
         {
           ok: false,
-          stdout: stdout + banner + stripAnsi(e.stdout ?? ""),
+          stdout: stdout + banner + stripAnsi(e.stdout ?? "") + note,
           stderr: stderr + stripAnsi(e.stderr ?? ""),
           exitCode: typeof e.code === "number" ? e.code : 1,
           failedStep: step.name,

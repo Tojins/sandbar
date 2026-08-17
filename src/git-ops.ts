@@ -45,12 +45,25 @@ export async function ensureIssueBranch(
 // stack's docs: a gate step must write only into gitignored paths, or its own
 // exhaust is reported as uncommitted work on every attempt until the budget
 // dies.
+//
+// `-c status.showUntrackedFiles=normal` is load-bearing, not boilerplate. A bare
+// `git status --porcelain` HONOURS that setting, and `no` is common in big
+// repos; it reaches a per-issue worktree from `~/.gitconfig`, from
+// `$GIT_CONFIG_GLOBAL`, or from the repo's own `.git/config`, which every linked
+// worktree shares. Inherit it and this function returns empty for a forgotten
+// `git add`: the tree reads clean, the gate bind-mounts files that are in no
+// commit, green means nothing, and the merger lands a branch that does not
+// contain what was tested. It fails OPEN and silently, and both D1 entry points
+// go blind together, so gate-2 does not catch it either. Pinning the value on
+// the command line costs nothing and cannot be overridden from config.
 export async function dirtyWorktreePaths(
   worktreePath: string,
 ): Promise<readonly string[]> {
-  const { stdout } = await exec("git", ["status", "--porcelain"], {
-    cwd: worktreePath,
-  });
+  const { stdout } = await exec(
+    "git",
+    ["-c", "status.showUntrackedFiles=normal", "status", "--porcelain"],
+    { cwd: worktreePath },
+  );
   return stdout
     .split("\n")
     .map((l) => l.trim())

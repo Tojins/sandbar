@@ -38,6 +38,45 @@ describe("dirtyWorktreePaths (#24 D1)", () => {
     expect(await dirtyWorktreePaths(repo)).toEqual([]);
   });
 
+  // The whole D1 invariant fails OPEN on this one setting, so it is asserted
+  // against a repo that has it. `git status --porcelain` honours
+  // status.showUntrackedFiles, and `no` is common in large repos — it reaches a
+  // per-issue worktree from ~/.gitconfig, from $GIT_CONFIG_GLOBAL, or from the
+  // repo's own .git/config, which every linked worktree shares. Inherit it and
+  // a forgotten `git add` reads clean: the gate then mounts files that are in
+  // no commit, goes green, and the merger lands a branch that does not contain
+  // what was tested. Nothing else in the system notices.
+  it("still reports untracked files when the repo sets showUntrackedFiles=no", async () => {
+    await git("config", "status.showUntrackedFiles", "no");
+    await writeFile(join(repo, "forgotten.ts"), "export const b = 2;\n");
+    // Proof the setting is live, so this test cannot silently stop testing it.
+    const { stdout } = await exec("git", ["status", "--porcelain"], { cwd: repo });
+    expect(stdout.trim()).toBe("");
+
+    const dirty = await dirtyWorktreePaths(repo);
+    expect(dirty).toHaveLength(1);
+    expect(dirty[0]).toContain("forgotten.ts");
+  });
+
+  it("still reports untracked files when showUntrackedFiles=no is global", async () => {
+    // The likelier route in practice: the operator's own ~/.gitconfig.
+    const home = await mkdtemp(join(tmpdir(), "sandbar-gitconfig-"));
+    const cfg = join(home, "gitconfig");
+    await writeFile(cfg, "[status]\n\tshowUntrackedFiles = no\n");
+    const prev = process.env["GIT_CONFIG_GLOBAL"];
+    process.env["GIT_CONFIG_GLOBAL"] = cfg;
+    try {
+      await writeFile(join(repo, "forgotten.ts"), "export const b = 2;\n");
+      const dirty = await dirtyWorktreePaths(repo);
+      expect(dirty).toHaveLength(1);
+      expect(dirty[0]).toContain("forgotten.ts");
+    } finally {
+      if (prev === undefined) delete process.env["GIT_CONFIG_GLOBAL"];
+      else process.env["GIT_CONFIG_GLOBAL"] = prev;
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it("reports a modified tracked file", async () => {
     await writeFile(join(repo, "app.ts"), "export const a = 2;\n");
     const dirty = await dirtyWorktreePaths(repo);

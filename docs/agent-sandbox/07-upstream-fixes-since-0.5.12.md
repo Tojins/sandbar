@@ -111,7 +111,7 @@ expose first if sandbar ever needs to tune under load. → [01 §default timeout
 ### F9 ⚪ Resource caps on `podman()` · 0.6.0 `c878b14`/`15d70ef`/`2318bb4`
 `cpus` (→ `--cpus`, fractional), `groups` (→ `--group-add`), `devices` (→
 `--device`) added to `PodmanOptions`. Not bugs. `cpus` is the only one with
-plausible sandbar value (N agent sandboxes + N DB sidecars can oversubscribe
+plausible sandbar value (N agent sandboxes + N gate stacks can oversubscribe
 CPU); `groups`/`devices` are irrelevant. → [02 §options](./02-podman-provider.md).
 
 ## What the re-baseline did NOT change

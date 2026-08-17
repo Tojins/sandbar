@@ -43,12 +43,16 @@ Of the `Sandbox` handle, sandbar uses only `run()`, `worktreePath`, and
 
 ### The exact shape of sandbar's usage
 
-- **Always bind-mount + podman.** `podman()` is called with no options, so:
-  default image name (`sandbar:<repo-dir>`), `--userns=keep-id`, uid/gid
-  1000, SELinux label `z`, **no `--network`**. The agent container therefore
-  cannot reach the per-issue DB sidecar — only the gate container
-  (`src/gate.ts`) joins `sandbar-net-<id>`. Reproduce this: the agent
-  sandbox stays networkless.
+- **Always bind-mount + podman.** `podman()` is called with an explicit
+  `imageName: config.sandboxImage` (since #24 D7 — the implicit
+  `defaultImageName(repoDir)` coupled the image to the host's *directory name*
+  and broke silently on a rename), plus the defaults `--userns=keep-id`,
+  uid/gid 1000, SELinux label `z`, **no `--network`**. The agent container
+  therefore cannot reach the per-issue gate stack — the stack's containers all
+  join a pod on `sandbar-net-<id>` (`src/gate-stack.ts`), and the agent sandbox
+  stays networkless. Note `--userns=keep-id` is available here precisely
+  *because* the sandbox is not in a pod; podman refuses to combine the two,
+  which is why gate-stack containers have the uid rule instead.
 - **Always an explicit, pre-existing branch.** Sandbar runs
   `ensureIssueBranch(issue.branch, sourceBranch)` (seeding from
   `origin/<sourceBranch>`) *before* `createSandbox`, and passes `branch` but no

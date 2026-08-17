@@ -55,7 +55,8 @@ export function lastNLines(s: string, n: number): string {
 
 // Cascade diagnostics (#15).
 //
-// When a shared resource (DB sidecar, network, fixture) isn't ready, one slow
+// When a shared resource (a stack container, the network, a fixture) isn't
+// ready, one slow
 // root operation trips the per-test timeout and every dependent test then times
 // out waiting on it. Vitest renders that as an N-line wall of byte-identical
 // `Test timed out in 5000ms` lines with no summary — and because the human
@@ -200,9 +201,10 @@ export function summarizeGateFailure(combined: string, tailLines: number): strin
   const header = [
     `⚠ Probable environment/setup failure (timeout cascade), not ${a.dominantCount} independent test bugs.`,
     `${a.dominantCount} tests failed with the identical signature "timed out in ${a.dominantMs}ms".`,
-    "A single slow or unavailable shared resource (DB sidecar, network, fixture) that trips the",
-    "per-test timeout makes every dependent test time out too. Check the gate environment",
-    "(e.g. DB readiness / migrations) before treating these as real test failures.",
+    "A single slow or unavailable shared resource (a gate-stack container, the network, a",
+    "fixture) that trips the per-test timeout makes every dependent test time out too. Check",
+    "the container logs below and the stack's readiness/postReadyCommands before treating",
+    "these as real test failures.",
     "",
     "Earliest timeout (likely root):",
     ...(a.firstDominantContext ? [`  ${a.firstDominantContext}`] : []),

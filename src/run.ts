@@ -246,8 +246,10 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
       // -----------------------------------------------------------------------
       // Between-cycle orphan sweep. Phase 2/3/4 already tear down their own
-      // resources in finally blocks, but a crash between sidecar create and the
-      // cleanup-trap registration can leak a network or container that would
+      // resources in finally blocks, and startStack registers its teardown
+      // BEFORE creating any podman resource — but a signal in the window where
+      // the pod exists and the process is already unwinding can still leave a
+      // pod, its invisible infra container or a network behind, which would
       // then collide with the next cycle's create. Cheap insurance.
       // -----------------------------------------------------------------------
       if (iteration > 1) {

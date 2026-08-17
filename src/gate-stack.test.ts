@@ -2,11 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   type GateStackConfig,
+  type ResolvedGateStack,
   type ResolvedStackContainer,
   resolveGateStack,
   resolveImages,
 } from "./config.js";
-import { buildArgv } from "./ensure-images.js";
+import {
+  buildArgv,
+  checkWorktreeImageUids,
+  effectiveUidArgv,
+} from "./ensure-images.js";
 import {
   containerRunArgs,
   mountSpec,
@@ -347,6 +352,145 @@ describe("resolveGateStack validation", () => {
     ).toThrow(/mountWorktree/);
   });
 
+  // podman's -v spec is colon-delimited with no escape. `mounts` was checked
+  // for this from the start; mountWorktree — the one every valid stack has, and
+  // therefore the most-travelled spec sandbar builds — was not.
+  it("refuses a colon in mountWorktree", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [{ name: "app", image: "a", mountWorktree: "/ap:p" }],
+      }),
+    ).toThrow(/colon-delimited/);
+  });
+
+  it("refuses mounting the worktree at /", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [{ name: "app", image: "a", mountWorktree: "/" }],
+      }),
+    ).toThrow(/shadow/);
+  });
+
+  // Resolved against the worktree, so "" is the worktree ROOT — the whole tree
+  // bind-mounted somewhere nobody asked for, silently.
+  it("refuses an empty mount hostPath", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "app",
+            image: "a",
+            mountWorktree: "/app",
+            mounts: [{ hostPath: "", containerPath: "/seed.sql" }],
+          },
+        ],
+      }),
+    ).toThrow(/empty.*hostPath/i);
+  });
+
+  it("refuses a relative mount containerPath", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "app",
+            image: "a",
+            mountWorktree: "/app",
+            mounts: [{ hostPath: "seed.sql", containerPath: "rel/seed.sql" }],
+          },
+        ],
+      }),
+    ).toThrow(/must be absolute/);
+  });
+
+  // Pod members share a network namespace, so only one of them can be
+  // listening — and one publish would report BOTH ready as soon as either
+  // binds, re-opening the green-on-red TCP_SETTLE_MS exists to close.
+  it("refuses two containers with the same tcp readiness port", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "app",
+            image: "a",
+            mountWorktree: "/app",
+            readiness: { kind: "tcp", port: 3306 },
+          },
+          { name: "db", image: "b", readiness: { kind: "tcp", port: 3306 } },
+        ],
+      }),
+    ).toThrow(/both declare tcp readiness on port 3306/);
+  });
+
+  it("allows the same tcp port to reappear once the other container is gone", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "app",
+            image: "a",
+            mountWorktree: "/app",
+            readiness: { kind: "tcp", port: 3306 },
+          },
+          { name: "db", image: "b", readiness: { kind: "tcp", port: 5432 } },
+        ],
+      }),
+    ).not.toThrow();
+  });
+
+  it("refuses an empty postReadyCommand", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "app",
+            image: "a",
+            mountWorktree: "/app",
+            postReadyCommands: [["migrate"], []],
+          },
+        ],
+      }),
+    ).toThrow(/empty postReadyCommand/);
+  });
+
+  // sandbar applies CI=true last, so a consumer value would be silently lost.
+  it("refuses a container that sets the reserved CI env key", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "app",
+            image: "a",
+            mountWorktree: "/app",
+            env: { CI: "false" },
+          },
+        ],
+      }),
+    ).toThrow(/reserved env key/);
+  });
+
+  // The uniqueness rule exists so the failing step is identifiable in the
+  // trace, and "test" and "test " render identically there.
+  it("refuses step names that differ only in whitespace", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        steps: [
+          { name: "test", in: "app", command: ["a"] },
+          { name: "test ", in: "app", command: ["b"] },
+        ],
+      }),
+    ).toThrow(/duplicate step name/);
+  });
+
   it("refuses a step targeting an undeclared container", () => {
     expect(() =>
       resolveGateStack({
@@ -456,6 +600,92 @@ describe("resolveGateStack validation", () => {
         containers: [{ name: "-bad", image: "a", mountWorktree: "/app" }],
       }),
     ).toThrow(/valid podman name/);
+  });
+});
+
+// #24 D3. A worktree-mounting container cannot use `--userns=keep-id` (podman
+// refuses it alongside `--pod`) and `--user 1000:1000` maps to a subuid, so the
+// image must run as root or as the host uid. Getting this wrong does not fail
+// at bringup — it fails as a silent EACCES mid-gate, which is why the check is
+// a preflight refusal, and why it needs to be pinned.
+describe("checkWorktreeImageUids", () => {
+  const stackWith = (
+    containers: readonly {
+      name: string;
+      image: string;
+      mountWorktree?: string;
+    }[],
+  ): ResolvedGateStack =>
+    resolveGateStack({
+      containers: containers.map((c) => ({ ...c, hold: true })),
+      steps: [{ name: "test", in: containers[0]!.name, command: ["true"] }],
+    });
+
+  const oneMounter = stackWith([
+    { name: "app", image: "app:gate", mountWorktree: "/app" },
+  ]);
+
+  it("builds the uid argv with --entrypoint, not a trailing command", () => {
+    // `run --rm <image> id -u` passes `id -u` as ARGUMENTS to the image's own
+    // ENTRYPOINT, which answers a different question — or none. The whole
+    // check rests on this argv.
+    expect(effectiveUidArgv("mariadb:10.11")).toEqual([
+      "run",
+      "--rm",
+      "--entrypoint",
+      "id",
+      "mariadb:10.11",
+      "-u",
+    ]);
+  });
+
+  it("accepts root — rootless podman maps it to the invoking user", async () => {
+    await expect(
+      checkWorktreeImageUids(oneMounter, 1000, async () => 0),
+    ).resolves.toBeUndefined();
+  });
+
+  it("accepts an image already aligned to the host uid", async () => {
+    await expect(
+      checkWorktreeImageUids(oneMounter, 1000, async () => 1000),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses any other uid, naming the container and the fix", async () => {
+    await expect(
+      checkWorktreeImageUids(oneMounter, 1000, async () => 1001),
+    ).rejects.toThrow(/uid 1001.*neither root.*nor the host uid \(1000\)/s);
+    await expect(
+      checkWorktreeImageUids(oneMounter, 1000, async () => 1001),
+    ).rejects.toThrow(/'app'/);
+  });
+
+  // Widening the check to every image would hard-halt every run whose mariadb
+  // happens to run as uid 999 and never touches the tree.
+  it("ignores images behind containers that do not mount the worktree", async () => {
+    const stack = stackWith([
+      { name: "app", image: "app:gate", mountWorktree: "/app" },
+      { name: "db", image: "mariadb:10.11" },
+    ]);
+    const probed: string[] = [];
+    await checkWorktreeImageUids(stack, 1000, async (image) => {
+      probed.push(image);
+      return 0;
+    });
+    expect(probed).toEqual(["app:gate"]);
+  });
+
+  it("probes each distinct image once, however many containers use it", async () => {
+    const stack = stackWith([
+      { name: "app", image: "app:gate", mountWorktree: "/app" },
+      { name: "worker", image: "app:gate", mountWorktree: "/worker" },
+    ]);
+    const probed: string[] = [];
+    await checkWorktreeImageUids(stack, 1000, async (image) => {
+      probed.push(image);
+      return 0;
+    });
+    expect(probed).toEqual(["app:gate"]);
   });
 });
 

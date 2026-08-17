@@ -22,8 +22,9 @@ import { podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
 import type { ResolvedGateStack } from "./config.js";
+import { SandbarError } from "./errors.js";
 import { summarizeGateFailure } from "./gate.js";
-import { type Stack, startStack } from "./gate-stack.js";
+import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
 import { dirtyWorktreePaths, ensureIssueBranch } from "./git-ops.js";
 import {
   HARD_ERROR_MAX_RETRIES,
@@ -62,7 +63,7 @@ export type Terminal =
     }
   | {
       readonly type: "NEEDS-HUMAN";
-      readonly cause: "gate-red" | "reviewer-blocked";
+      readonly cause: "gate-red" | "reviewer-blocked" | "uncommittable-worktree";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
     }
@@ -243,6 +244,22 @@ async function runSandboxCycle(
 
     return { verdict: action.verdict, accumulatedCommits: accumulated };
   } catch (err) {
+    // HARD-ERROR is for INFRA failures — podman, setup, a container that would
+    // not come up — which the outer layer retries with a fresh sandbox. A
+    // SandbarError is sandbar's own bug (`gate-stack.ts` raises them for an
+    // internal inconsistency in the port publish and for a step targeting a
+    // container `resolveGateStack` already proved exists). Converting those to
+    // HARD-ERROR buys two fresh-stack retries that reproduce the identical bug
+    // and then stamps NEEDS-HUMAN on an innocent issue with an infra-flavoured
+    // trace. Let it out to the loud top-level handler instead.
+    //
+    // ContainerBringupError is the deliberate exception: it EXTENDS
+    // SandbarError but reports infrastructure — a container that would not
+    // start, or an issue-lifecycle container found dead before a gate run —
+    // which is precisely what HARD-ERROR's fresh-stack retry exists for.
+    if (err instanceof SandbarError && !(err instanceof ContainerBringupError)) {
+      throw err;
+    }
     // Setup failure or any other unhandled exception inside the cycle.
     // Surface as HARD-ERROR so the outer loop can decide whether to retry
     // with a fresh sandbox.
@@ -254,16 +271,26 @@ async function runSandboxCycle(
       accumulatedCommits: accumulated,
     };
   } finally {
-    if (sandbox) {
-      try {
-        await sandbox.close();
-      } catch {
-        // ignore
-      }
-    }
+    // Stack first: its containers bind-mount the worktree read-write, and
+    // `sandbox.close()` ends in `git worktree remove --force`. Tearing the
+    // sandbox down first leaves a still-running attempt container (an app
+    // server, a watcher) writing into the tree while it is being removed —
+    // and a write between the last gate and `close()` flips the
+    // uncommitted-changes check, so the worktree is PRESERVED instead and
+    // leaks for the rest of the run. run.ts:466 already orders the merge
+    // phase this way, with the same reasoning.
     if (stack) {
       try {
         await stack.stop();
+      } catch (err) {
+        // Never mask the verdict with a teardown failure, but never hide it
+        // either — it means leaked podman resources.
+        console.error(err instanceof Error ? err.message : String(err));
+      }
+    }
+    if (sandbox) {
+      try {
+        await sandbox.close();
       } catch {
         // ignore
       }

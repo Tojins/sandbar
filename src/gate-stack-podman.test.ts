@@ -276,11 +276,194 @@ describe.runIf(available)(
         });
 
         expect((await stack.runGate()).ok).toBe(true);
-        // Second run: `attempt` containers are recreated, `issue` ones are not —
-        // so the database is not paying a 15s bringup per attempt.
+
+        // `ok` twice proves nothing about the lifecycle split: a re-created
+        // mariadb answers SELECT 1 just as well, and a REUSED attempt container
+        // still execs fine. Both regressions — the 15s-per-attempt bringup, and
+        // gating an earlier attempt's source — pass an ok-only assertion. So
+        // observe identity and state directly.
+        const idOf = async (name: string): Promise<string> =>
+          (
+            await exec(RUNTIME, [
+              "inspect",
+              "--format",
+              "{{.Id}}",
+              `sandbar-${STACK_ID}-${name}`,
+            ])
+          ).stdout.trim();
+
+        const dbIdBefore = await idOf("db");
+        const runnerIdBefore = await idOf("runner");
+
+        // State written into the issue container must survive to the next gate
+        // run. A recreated database would answer the SELECT with an error.
+        await exec(RUNTIME, [
+          "exec",
+          `sandbar-${STACK_ID}-runner`,
+          "mariadb",
+          "-h",
+          "127.0.0.1",
+          "-uroot",
+          "app",
+          "-e",
+          "CREATE TABLE persisted (id INT)",
+        ]);
+
         expect((await stack.runGate()).ok).toBe(true);
+
+        expect(await idOf("db")).toBe(dbIdBefore);
+        // …and the attempt container is a DIFFERENT container, or it would be
+        // gating whatever source it started with.
+        expect(await idOf("runner")).not.toBe(runnerIdBefore);
+
+        const { stdout } = await exec(RUNTIME, [
+          "exec",
+          `sandbar-${STACK_ID}-runner`,
+          "mariadb",
+          "-h",
+          "127.0.0.1",
+          "-uroot",
+          "app",
+          "-e",
+          "SHOW TABLES",
+        ]);
+        expect(stdout).toContain("persisted");
       },
       240_000,
+    );
+
+    // #24 D5, the half with no coverage at all: an `attempt` container runs the
+    // branch's code, so failing to bring it up is a verdict about the BRANCH,
+    // not infrastructure. Getting this backwards sends an agent-broken service
+    // bootstrap through two fresh-stack retries that reproduce it exactly, then
+    // lands NEEDS-HUMAN with an "environment" trace.
+    it(
+      "an attempt container that will not come up is a gate red, not a throw",
+      async () => {
+        stack = await startStack({
+          stackId: STACK_ID,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+              {
+                name: "broken",
+                image: IMAGE,
+                // Dies immediately, the way a branch that breaks its own
+                // service bootstrap does.
+                args: ["sh", "-c", "echo bootstrap-failed >&2; exit 1"],
+                readiness: { kind: "tcp", port: 9999 },
+                readinessTimeoutMs: 4_000,
+              },
+            ],
+            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+          }),
+        });
+
+        const red = await stack.runGate();
+        expect(red.ok).toBe(false);
+        expect(red.failedStep).toBe(`container:sandbar-${STACK_ID}-broken`);
+        // The container's own log is the trace — without it the agent is told
+        // only that something failed to start.
+        expect(red.containerLogs).toContain("bootstrap-failed");
+      },
+      180_000,
+    );
+
+    // D9's actual claim: the answer is in a container the failing step never
+    // touched. Asserted on a single-container stack it is vacuous.
+    it(
+      "a red gate carries the logs of containers the failing step never ran in",
+      async () => {
+        stack = await startStack({
+          stackId: STACK_ID,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "backend",
+                image: IMAGE,
+                lifecycle: "issue",
+                // Written by the container's MAIN process — `podman logs` shows
+                // that, not the output of `podman exec`, so a postReadyCommand
+                // would not have appeared here.
+                args: [
+                  "sh",
+                  "-c",
+                  "echo BACKEND-IS-ANGRY >&2; sleep infinity",
+                ],
+              },
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            steps: [
+              { name: "browser", in: "runner", command: ["sh", "-c", "exit 1"] },
+            ],
+          }),
+        });
+
+        const red = await stack.runGate();
+        expect(red.ok).toBe(false);
+        expect(red.failedStep).toBe("browser");
+        // The step ran in `runner`; the diagnosis is in `backend`.
+        expect(red.containerLogs).toContain("--- container backend (last");
+        expect(red.containerLogs).toContain("BACKEND-IS-ANGRY");
+      },
+      180_000,
+    );
+
+    // A container with no readiness declared was never inspected at all, so a
+    // dead one passed bringup and its failure was charged to the branch by
+    // every step that talked to it.
+    it(
+      "a readiness-less container that dies at startup fails bringup",
+      async () => {
+        await expect(
+          startStack({
+            stackId: STACK_ID,
+            worktreePath: repo,
+            spec: resolveGateStack({
+              containers: [
+                { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+                {
+                  name: "mail",
+                  image: IMAGE,
+                  lifecycle: "issue",
+                  args: ["sh", "-c", "echo mail-died >&2; exit 1"],
+                },
+              ],
+              steps: [{ name: "ok", in: "runner", command: ["true"] }],
+            }),
+          }),
+        ).rejects.toThrow(/exited during startup/);
+      },
+      180_000,
+    );
+
+    // The other half of the lifecycle blame mapping, which held only for as
+    // long as the first attempt: an issue container that dies MID-RUN is still
+    // infrastructure, so it must throw (→ HARD-ERROR → fresh stack) rather than
+    // red the gate and hand the implementer a database it never touched.
+    it(
+      "an issue container that dies between gate runs throws instead of reddening",
+      async () => {
+        stack = await startStack({
+          stackId: STACK_ID,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              { name: "svc", image: IMAGE, lifecycle: "issue", hold: true },
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+          }),
+        });
+        expect((await stack.runGate()).ok).toBe(true);
+
+        await exec(RUNTIME, ["stop", "-t", "0", `sandbar-${STACK_ID}-svc`]);
+
+        await expect(stack.runGate()).rejects.toThrow(/no longer running/);
+      },
+      180_000,
     );
   },
 );

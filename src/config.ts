@@ -260,9 +260,9 @@ export type ResolvedMergeMode =
 // it.
 //
 // The required/optional split is the contract: required ⇔ "no sensible default
-// exists" (repo identity, gate commands, the sandbox image, the bot identity,
-// the sandbox hooks, the DB sidecar recipe). Optional ⇔ "has a de-facto-
-// standard value sandbar fills in".
+// exists" (repo identity, the sandbox image, the gate stack, the bot identity,
+// the sandbox hooks). Optional ⇔ "has a de-facto-standard value sandbar fills
+// in".
 export type RunConfig = {
   // ---- Required: repo-specific facts with no sensible default -------------
   readonly ghOwner: string;
@@ -561,19 +561,45 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
     );
   }
 
+  // Two containers cannot both bind the same port inside one network namespace,
+  // so a repeated tcp readiness port is always a config error. It has to be
+  // rejected rather than tolerated: the pod publishes ONE host port per distinct
+  // container port, so both containers would probe the same forwarded socket and
+  // whichever one actually listens marks BOTH ready — handing the other to a
+  // step, or to a dependant, mid-initialisation. That is exactly the green-on-red
+  // TCP_SETTLE_MS was added to close, re-entering through config.
+  const tcpPorts = new Map<number, string>();
+  for (const c of containers) {
+    if (c.readiness?.kind !== "tcp") continue;
+    const prior = tcpPorts.get(c.readiness.port);
+    if (prior !== undefined) {
+      throw new SandbarError(
+        `config.gateStack: containers '${prior}' and '${c.name}' both declare ` +
+          `tcp readiness on port ${c.readiness.port}. Pod members share one ` +
+          "network namespace, so only one of them can be listening — and a " +
+          "single publish would report both ready as soon as either binds.",
+      );
+    }
+    tcpPorts.set(c.readiness.port, c.name);
+  }
+
   const byName = new Set(containers.map((c) => c.name));
   const stepNames = new Set<string>();
   for (const step of stack.steps) {
-    if (!step.name.trim()) {
+    const stepName = step.name.trim();
+    if (!stepName) {
       throw new SandbarError("config.gateStack: every step needs a name.");
     }
-    if (stepNames.has(step.name)) {
+    // Compared trimmed, because the uniqueness rule exists so the failing step
+    // is identifiable in the trace, and "test" and "test " render identically
+    // there. Container names get this for free from CONTAINER_NAME_RE.
+    if (stepNames.has(stepName)) {
       throw new SandbarError(
         `config.gateStack: duplicate step name '${step.name}'. Step names ` +
           "identify the failing step in the trace, so they must be unique.",
       );
     }
-    stepNames.add(step.name);
+    stepNames.add(stepName);
     if (!byName.has(step.in)) {
       throw new SandbarError(
         `config.gateStack: step '${step.name}' runs in '${step.in}', which is ` +
@@ -624,12 +650,32 @@ function resolveStackContainer(
         "never reach the image.",
     );
   }
-  if (c.mountWorktree !== undefined && !c.mountWorktree.startsWith("/")) {
-    throw new SandbarError(
-      `config.gateStack: container '${c.name}' has a relative mountWorktree ` +
-        `('${c.mountWorktree}'). It is a path inside the container and must be ` +
-        "absolute.",
-    );
+  if (c.mountWorktree !== undefined) {
+    if (!c.mountWorktree.startsWith("/")) {
+      throw new SandbarError(
+        `config.gateStack: container '${c.name}' has a relative mountWorktree ` +
+          `('${c.mountWorktree}'). It is a path inside the container and must be ` +
+          "absolute.",
+      );
+    }
+    // Same colon rule as `mounts` below, and it belongs here MORE: every valid
+    // stack has at least one mountWorktree (a stack where nothing mounts the
+    // worktree is rejected outright), so this is the most-travelled `-v` spec
+    // sandbar builds. It was the one left unchecked.
+    if (c.mountWorktree.includes(":")) {
+      throw new SandbarError(
+        `config.gateStack: container '${c.name}' has a mountWorktree ` +
+          `containing ":" ('${c.mountWorktree}'). podman -v specs are ` +
+          "colon-delimited and offer no escape, so this would re-split into a " +
+          "different path and mount options.",
+      );
+    }
+    if (c.mountWorktree === "/") {
+      throw new SandbarError(
+        `config.gateStack: container '${c.name}' mounts the worktree at '/', ` +
+          "which would shadow the image's entire filesystem.",
+      );
+    }
   }
   for (const m of c.mounts ?? []) {
     // podman's `-v` spec is colon-delimited with no escape mechanism, so a
@@ -639,6 +685,26 @@ function resolveStackContainer(
         `config.gateStack: container '${c.name}' has a mount path containing ` +
           `":" (${m.hostPath} -> ${m.containerPath}). podman -v specs are ` +
           "colon-delimited and offer no escape.",
+      );
+    }
+    // An empty hostPath resolves to the worktree ROOT, so the whole tree gets
+    // bind-mounted read-only somewhere nobody asked for — silently, since
+    // podman is perfectly happy to do it.
+    if (!m.hostPath.trim()) {
+      throw new SandbarError(
+        `config.gateStack: container '${c.name}' has a mount with an empty ` +
+          `hostPath (-> ${m.containerPath}). It is resolved against the ` +
+          "worktree, and empty resolves to the worktree root.",
+      );
+    }
+    // The mirror of the mountWorktree rule: podman rejects a relative
+    // destination at container-create time, which for an `attempt` container
+    // arrives as a gate red blamed on the branch.
+    if (!m.containerPath.startsWith("/")) {
+      throw new SandbarError(
+        `config.gateStack: container '${c.name}' has a mount with a relative ` +
+          `containerPath ('${m.containerPath}'). It is a path inside the ` +
+          "container and must be absolute.",
       );
     }
   }
@@ -664,6 +730,29 @@ function resolveStackContainer(
     throw new SandbarError(
       `config.gateStack: container '${c.name}' has an empty log readiness pattern.`,
     );
+  }
+  for (const command of c.postReadyCommands ?? []) {
+    // Checked like `step.command` and `readiness.exec.argv`, which it sits
+    // beside: an empty argv reaches podman as a bare `exec <container>` and
+    // fails as a bringup error — two wasted HARD-ERROR retries for an
+    // `issue` container, a branch-blamed gate red for an `attempt` one.
+    if (command.length === 0) {
+      throw new SandbarError(
+        `config.gateStack: container '${c.name}' has an empty postReadyCommand.`,
+      );
+    }
+  }
+  // The one env key sandbar owns is applied AFTER the consumer's, so a
+  // consumer-set CI would be silently discarded. Some runners genuinely change
+  // behaviour on it, so say so rather than quietly winning.
+  for (const key of Object.keys(c.env ?? {})) {
+    if (key === "CI") {
+      throw new SandbarError(
+        `config.gateStack: container '${c.name}' sets the reserved env key ` +
+          "'CI'. sandbar sets CI=true for every stack container and step, and " +
+          "a value here would be silently overridden.",
+      );
+    }
   }
   const readinessTimeoutMs = c.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
   if (!Number.isFinite(readinessTimeoutMs) || readinessTimeoutMs <= 0) {
@@ -734,7 +823,12 @@ export function defaultCoauthorTrailer(botName: string, botEmail: string): strin
 }
 
 export function resolveConfig(config: RunConfig): ResolvedConfig {
-  const sourceBranch = config.sourceBranch ?? DEFAULT_SOURCE_BRANCH;
+  // Trimmed HERE, not just where it is compared. `resolveMergeMode` tests
+  // `integrationBranch === sourceBranch.trim()`, so trimming only in the guard
+  // made the guard describe a value that never existed: `" main "` would pass
+  // the must-differ check against `"main"` and then reach every git and gh call
+  // with the spaces still on it.
+  const sourceBranch = (config.sourceBranch ?? DEFAULT_SOURCE_BRANCH).trim();
   return {
     ...config,
     cwd: config.cwd ?? DEFAULT_CWD(),

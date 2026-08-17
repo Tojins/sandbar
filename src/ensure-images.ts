@@ -114,27 +114,29 @@ export async function ensureImages(
   }
 }
 
+// `--entrypoint id` rather than `run <image> id -u`: with a plain command the
+// image's own ENTRYPOINT receives `id -u` as ARGUMENTS, and an entrypoint that
+// ignores them (or interprets them) answers a different question than the one
+// asked. The whole D3 check rests on this argv, so it is a pure builder that
+// can be asserted rather than a literal buried in a call.
+export function effectiveUidArgv(image: string): string[] {
+  return ["run", "--rm", "--entrypoint", "id", image, "-u"];
+}
+
+// Resolves the uid an image runs as. Injectable so the uid RULE can be tested
+// without podman — the rule is the part that decides whether a run proceeds.
+export type UidProbe = (image: string) => Promise<number>;
+
 // The effective uid an image runs as, resolved by running it. Throws rather
 // than guessing: an image that cannot even run `id` is not one the gate can use.
 async function effectiveUid(image: string): Promise<number> {
   let stdout: string;
   try {
-    // `--entrypoint id` rather than `run <image> id -u`: with a plain command
-    // the image's own ENTRYPOINT receives `id -u` as ARGUMENTS, and an
-    // entrypoint that ignores them (or interprets them) answers a different
-    // question than the one asked.
-    ({ stdout } = await exec(RUNTIME, [
-      "run",
-      "--rm",
-      "--entrypoint",
-      "id",
-      image,
-      "-u",
-    ]));
+    ({ stdout } = await exec(RUNTIME, effectiveUidArgv(image)));
   } catch (err) {
     throw new SandbarError(
       `could not determine the user image '${image}' runs as: ` +
-        `\`${RUNTIME} run --rm --entrypoint id ${image} -u\` failed (${
+        `\`${RUNTIME} ${effectiveUidArgv(image).join(" ")}\` failed (${
           err instanceof Error ? err.message : String(err)
         }). A container that mounts the worktree must run as root or as the ` +
         "host uid, and sandbar resolves that by running the image.",
@@ -158,12 +160,16 @@ async function effectiveUid(image: string): Promise<number> {
 export async function checkWorktreeImageUids(
   stack: ResolvedGateStack,
   hostUid: number,
+  probe: UidProbe = effectiveUid,
 ): Promise<void> {
+  // Only worktree-mounting containers. Widening this to every image would
+  // refuse a perfectly good stack whose mariadb runs as uid 999 and never
+  // writes to the tree — a hard, wrong halt on every run.
   const images = new Set(
     stack.containers.filter((c) => c.mountWorktree !== null).map((c) => c.image),
   );
   for (const image of images) {
-    const uid = await effectiveUid(image);
+    const uid = await probe(image);
     if (uid === 0 || uid === hostUid) continue;
     const names = stack.containers
       .filter((c) => c.mountWorktree !== null && c.image === image)

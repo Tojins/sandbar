@@ -112,9 +112,13 @@ async function listPodOrphans(): Promise<string[]> {
   return [...found];
 }
 
+// `-t 0` for the same reason gate-stack.ts uses it on teardown: without it
+// podman waits out its 10-second graceful stop PER CONTAINER, and a leaked pod
+// with four members costs ~40s of dead time at the top of a cycle. Nothing
+// being swept here has state worth flushing — it is by definition debris.
 async function removePod(name: string): Promise<boolean> {
   try {
-    await exec(RUNTIME, ["pod", "rm", "-f", name]);
+    await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", name]);
     return true;
   } catch {
     return false;
@@ -123,7 +127,7 @@ async function removePod(name: string): Promise<boolean> {
 
 async function removeContainer(name: string): Promise<boolean> {
   try {
-    await exec(RUNTIME, ["rm", "-f", name]);
+    await exec(RUNTIME, ["rm", "-f", "-t", "0", name]);
     return true;
   } catch {
     return false;

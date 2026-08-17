@@ -204,10 +204,11 @@ export type CreateSandboxOptions = {
   // skips prune/create/copyToWorktree/onWorktreeReady (all done by
   // prepareWorktree) and only brings up the container. Lets the caller learn
   // the worktree path BEFORE parallelizing container bringup against other
-  // work that needs it (the db sidecar's worktree-relative initMounts, #20).
-  // Ownership stays with the caller: createSandbox never removes a prepared
-  // worktree on bringup failure (the sidecar may be concurrently bind-mounting
-  // from it), and passing copyToWorktree alongside is a loud error — the copy
+  // work that needs it (the gate stack's worktree-relative mounts and
+  // mountWorktree, #20/#24). Ownership stays with the caller: createSandbox
+  // never removes a prepared worktree on bringup failure (the stack may be
+  // concurrently bind-mounting from it), and passing copyToWorktree alongside
+  // is a loud error — the copy
   // belongs in prepareWorktree, silently skipping it would be worse.
   preparedWorktreePath?: string;
 };
@@ -573,8 +574,16 @@ const findCollidingWorktree = (
   existing.find((wt) => wt.branch === branch) ??
   existing.find((wt) => normalizePath(wt.path) === normalizePath(worktreePath));
 
+// `-c status.showUntrackedFiles=normal`: a bare `git status --porcelain` honours
+// that setting, and a repo (or user) that sets it to `no` would make this report
+// a worktree holding a forgotten `git add` as clean — so the worktree gets
+// DELETED on close with the agent's uncommitted work in it. Same reasoning as
+// `dirtyWorktreePaths` in git-ops.ts; see the long comment there.
 const hasUncommittedChanges = async (worktreePath: string): Promise<boolean> => {
-  const output = await execGit(["status", "--porcelain"], worktreePath);
+  const output = await execGit(
+    ["-c", "status.showUntrackedFiles=normal", "status", "--porcelain"],
+    worktreePath,
+  );
   return output.trim().length > 0;
 };
 
@@ -1172,7 +1181,7 @@ const invokeAgent = (
 // managed worktree, copy host paths in, run host.onWorktreeReady hooks.
 // Returns the worktree path. Split out of createSandbox (#20) so callers can
 // know the path — with its files on disk — before container bringup, and hand
-// it to work that must bind-mount from it (the db sidecar's initMounts).
+// it to work that must bind-mount from it (the gate stack's mounts, #24).
 // A failure after creation removes the worktree before rethrowing (F4).
 export const prepareWorktree = async (
   options: PrepareWorktreeOptions,
@@ -1283,8 +1292,8 @@ export const createSandbox = async (
   } catch (e) {
     // F4: a failure after worktree create removes the worktree first — but
     // only when createSandbox created it. A prepared worktree belongs to the
-    // caller, who may be concurrently bind-mounting from it (the db sidecar's
-    // initMounts); deleting it here would corrupt that bringup's error into a
+    // caller, who may be concurrently bind-mounting from it (the gate stack's
+    // mounts); deleting it here would corrupt that bringup's error into a
     // bogus missing-mount-source failure (#20).
     if (!prepared) await worktreeRemove(worktreePath).catch(() => {});
     throw e;

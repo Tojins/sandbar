@@ -35,7 +35,7 @@ Fixed: `sandboxHomedir = "/home/agent"`.
 The last four (`maxOutputTailChars`, `cpus`, `groups`, `devices`) are `0.6.x`
 additions that did not exist in `0.5.12`. Sandbar passes none of them, but
 `cpus` is the one with plausible value: a `--cpus` cap is a cheap stability lever
-when N agent sandboxes plus N DB sidecars run at once. The port's minimum
+when N agent sandboxes plus N gate stacks run at once. The port's minimum
 `PodmanOptions` can omit `groups`/`devices` (irrelevant to sandbar) but **must**
 keep `maxOutputTailChars` wired into `exec` (below).
 
