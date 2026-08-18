@@ -143,22 +143,21 @@ export async function run(rawConfig: RunConfig): Promise<void> {
 
   installCleanupTraps();
 
-  try {
-    await runPreflight({
-      cwd: config.cwd,
-      workDir: config.workDir,
-      envFilePath: config.envFilePath,
-      sourceBranch: config.sourceBranch,
-      pulledImages: pulledImagesOf(config),
-    });
-  } catch (err) {
-    if (err instanceof PreflightError) {
-      console.error(err.message);
-      process.exit(1);
-    }
-    throw err;
-  }
-
+  // The lock comes BEFORE preflight (#32). Preflight is not read-only: it
+  // fetches, and it `git branch -D`s every `sandbar/issue-*` branch it finds
+  // merged. That delete was the one operation in the whole startup path that
+  // mutates the repo, and it was the one operation the single-instance lock did
+  // not cover — two launches racing on the same workdir, precisely what the
+  // lock exists to stop, both reached it and the loser was only turned away
+  // afterwards. Preflight's *reads* need the lock just as much: a concurrent
+  // run's in-flight issue branches would otherwise be classified `unmerged` and
+  // refuse a start that has nothing wrong with it.
+  //
+  // Ordering it this way costs nothing. `acquireLock` is `retries: 0`, so a
+  // held lock fails immediately — there is no "lock wait" for a config error to
+  // avoid by running first. All it changes is which of two true complaints a
+  // second launch hears first, and "another sandbar is running" is the
+  // actionable one.
   const lockPaths = lockPathsFor(join(config.cwd, config.workDir));
   let release: (() => Promise<void>) | null = null;
   try {
@@ -174,7 +173,30 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     if (release) await release();
   });
 
-  // Derived from the CANONICAL path the lock was just taken on, so lock and
+  // Still ahead of the sweep and every container operation below, which is the
+  // dependency that matters: those assume a working container runtime because
+  // this is what hard-fails when there isn't one. `runCleanup` before the exit
+  // releases the lock we now hold — `process.exit` runs no cleanup handler, and
+  // while lock.ts's stale-PID takeover would eventually reclaim it, leaving a
+  // lock behind over a typo'd config is not a thing to rely on that for.
+  try {
+    await runPreflight({
+      cwd: config.cwd,
+      workDir: config.workDir,
+      envFilePath: config.envFilePath,
+      sourceBranch: config.sourceBranch,
+      pulledImages: pulledImagesOf(config),
+    });
+  } catch (err) {
+    if (err instanceof PreflightError) {
+      console.error(err.message);
+      await runCleanup();
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  // Derived from the CANONICAL path the lock is held on, so lock and
   // scope agree: one lock ⇔ one namespace of podman names (#28). Everything
   // this run creates lives under it, and the sweep below reaches nothing else
   // — a concurrent run against another workdir is invisible to us and we to it.

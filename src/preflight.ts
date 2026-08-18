@@ -1,5 +1,14 @@
 // Pre-flight invariants for sandbar runs.
 //
+// Runs UNDER the single-instance lock (#32), and must keep doing so. This
+// module is not read-only: it fetches, and `deleteMergedIssueBranches` runs
+// `git branch -D` over every `sandbar/issue-*` branch it finds merged. It used
+// to run before the lock was taken, which made the one destructive step in
+// startup the one step the lock did not cover — two launches on the same
+// workdir both reached it, and the loser was not turned away until afterwards.
+// The reads want the lock too: a concurrent run's in-flight issue branches
+// would classify `unmerged` and refuse a start with nothing wrong with it.
+//
 // Two layers:
 //   - checkInvariants(state)  — pure function over a captured RepoState.
 //                               Unit-tested with hand-built fixtures.

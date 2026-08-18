@@ -119,7 +119,7 @@ const KINDS: readonly ResourceKind[] = [
 //
 // A failure here PROPAGATES. It used to be caught and reported as "runtime not
 // installed", which preflight has already made unreachable — it hard-fails on a
-// missing container runtime before the lock is taken, so anything that fails
+// missing container runtime before the sweep runs, so anything that fails
 // here is a real podman fault (storage-lock contention, a broken
 // `podman system`, EPERM). Swallowing those was silent in the worst way: the
 // sweep claimed to have removed nothing, debris accumulated, and the first

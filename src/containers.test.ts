@@ -166,7 +166,7 @@ describe("cleanupOrphanContainers", () => {
   });
 
   it("throws rather than silently sweeping nothing when podman fails", async () => {
-    // Preflight hard-fails on a missing runtime before the lock, so a failure
+    // Preflight hard-fails on a missing runtime before the sweep, so a failure
     // here is a real podman fault. Swallowed, it read as "no debris found" and
     // surfaced later as an unrelated-looking startStack collision.
     const broken: RuntimeExec = async () => {
