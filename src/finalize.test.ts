@@ -575,6 +575,37 @@ describe("finalizeOne", () => {
     ]);
   });
 
+  it("needs-human off-branch-head: names the branch, the stranded sha, and how to rescue it (#27)", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "needs-human",
+        issue: i,
+        cause: "off-branch-head",
+        failureTrace:
+          "You are not on the issue branch. HEAD is DETACHED at deadbeef1234,",
+        latestReviewerProse: null,
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    const body = calls.comments[0]!.body;
+    expect(body).toContain(i.branch);
+    // The comment is the last place this sha survives: removeWorktreeFor takes
+    // the per-worktree HEAD reflog with it.
+    expect(body).toContain("deadbeef1234");
+    expect(body).toContain("git branch <rescue-name> <sha>");
+    // No gate ran, so neither of the other two blockers may be claimed.
+    expect(body).not.toContain("without a green gate");
+    expect(body).not.toContain("CHANGES-REQUESTED");
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+    ]);
+  });
+
   it("review-budget-exhausted: removes worktree, pushes, comments with latest reviewer prose, swaps labels to needs-human", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);

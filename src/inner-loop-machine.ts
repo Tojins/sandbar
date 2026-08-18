@@ -14,11 +14,25 @@
 // Each advanceAttempt caller supplies the exhaustion verdict because only it
 // knows which case it's in.
 //
-// A COMPLETE claim is routed on TWO inputs, not one (#24 D1): the promise token
-// and whether the worktree is clean. The gate bind-mounts the worktree, so a
-// verdict over a dirty tree is not a verdict about any commit — and the merger
-// only ever sees commits. COMPLETE + dirty therefore spends an attempt on a
-// re-prompt to commit rather than dispatching the gate.
+// A COMPLETE claim is routed on THREE inputs, not one: the promise token,
+// whether the worktree is clean (#24 D1), and whether HEAD is still the issue
+// branch (#27).
+//
+// The gate bind-mounts the worktree, so a verdict over a dirty tree is not a
+// verdict about any commit — and the merger only ever sees commits. COMPLETE +
+// dirty therefore spends an attempt on a re-prompt to commit rather than
+// dispatching the gate.
+//
+// The branch check (#27) is the same argument one level up, and it is checked
+// FIRST because it subsumes the other: commits on a detached HEAD leave a CLEAN
+// tree, so the dirty check passes, the gate goes green on a tree the branch does
+// not contain, and DONE closes an issue that landed nothing. It is applied to
+// NO-SIGNAL as well as COMPLETE — every attempt spent off the branch produces
+// work the merger can never see, so the sooner the agent is told, the fewer
+// commits are stranded. The two hand-to-human terminals (NEEDS-INFO,
+// NEEDS-UI-PROTOTYPE) are deliberately exempt: they land nothing by
+// construction, the issue is parked for a human either way, and re-prompting
+// would risk burning the budget on a question the agent had already formed.
 //
 // NEEDS-UI-PROTOTYPE (#21) is the second short-circuit terminal alongside
 // NEEDS-INFO: the implementer judged the issue to imply non-trivial
@@ -36,6 +50,7 @@
 // itself — it's how the runner wraps unhandled exceptions (setup failures,
 // container errors, etc.) so the outer loop can decide whether to retry.
 
+import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";
 
 export const HARD_ERROR_MAX_RETRIES = 2;
@@ -64,6 +79,10 @@ export type LoopState = {
   // null if the last attempt didn't end that way. Only used to detect that an
   // attempt changed nothing — see onImplementerResult.
   readonly lastDirtyPaths: readonly string[] | null;
+  // Whether the PREVIOUS attempt was sent back because HEAD was not the issue
+  // branch (#27). One re-prompt is offered; a second consecutive off-branch
+  // attempt terminates — see onImplementerResult.
+  readonly lastOffBranch: boolean;
   readonly phase: LoopPhase;
 };
 
@@ -99,8 +118,17 @@ export type Verdict =
       //     container under another uid, a step's non-gitignored exhaust).
       //     `failureTrace` carries the paths. Distinct from gate-red because
       //     no gate ever ran.
+      //   off-branch-head — the implementer committed somewhere other than
+      //     `refs/heads/<branch>` (detached HEAD, or a branch of its own) and a
+      //     second consecutive attempt was still off it (#27). `failureTrace`
+      //     carries where HEAD actually is, which is the only handle anyone has
+      //     on the stranded commits once the worktree is removed.
       readonly type: "NEEDS-HUMAN";
-      readonly cause: "gate-red" | "reviewer-blocked" | "uncommittable-worktree";
+      readonly cause:
+        | "gate-red"
+        | "reviewer-blocked"
+        | "uncommittable-worktree"
+        | "off-branch-head";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
     }
@@ -135,6 +163,9 @@ export type LoopEvent =
       // commit — the gate bind-mounts this worktree, so gating it would produce
       // a verdict the merger cannot reproduce from the branch.
       readonly dirtyPaths: readonly string[];
+      // Where HEAD is, when it is not `refs/heads/<branch>`; null when it is
+      // (#27). A clean tree says nothing about this — that is the whole gap.
+      readonly offBranch: HeadMismatch | null;
     }
   | {
       readonly kind: "gate-1-result";
@@ -177,6 +208,7 @@ export function initialState(opts: InitialStateOptions): LoopState {
     extraReprompt: null,
     latestReviewerProse: null,
     lastDirtyPaths: null,
+    lastOffBranch: false,
     phase: "needs-implementer",
   };
 }
@@ -203,7 +235,12 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
           `implementer-result event in phase ${state.phase}; expected needs-implementer`,
         );
       }
-      return onImplementerResult(state, event.signal, event.dirtyPaths);
+      return onImplementerResult(
+        state,
+        event.signal,
+        event.dirtyPaths,
+        event.offBranch,
+      );
 
     case "gate-1-result":
       if (state.phase !== "needs-gate-1") {
@@ -251,6 +288,43 @@ export function uncommittedWorkReprompt(
   ].join("\n");
 }
 
+// The re-prompt for a HEAD that is not the issue branch (#27). Exported so the
+// wording is asserted where the routing is, and reused verbatim as the
+// NEEDS-HUMAN trace — the shas in it are the only handle on the stranded
+// commits once the worktree (and its HEAD reflog) is removed.
+//
+// It deliberately does NOT tell the agent to run `git branch -f` unconditionally.
+// Nothing here has inspected the two histories: if HEAD was detached at an OLDER
+// commit, or the branch carries commits from an earlier attempt that HEAD does
+// not, forcing the ref silently drops them — trading a visible failure for an
+// invisible one. That is the same reason the orchestrator does not move the ref
+// itself: it would be rewriting history it never authored, on evidence it never
+// gathered.
+export function offBranchHeadReprompt(m: HeadMismatch): string {
+  const where =
+    m.headRef === null
+      ? `HEAD is DETACHED at ${m.headSha ?? "an unknown commit"}`
+      : `HEAD is on \`${m.headRef}\`, at ${m.headSha ?? "an unknown commit"}`;
+  return [
+    `You are not on the issue branch. ${where}, but this issue's branch is`,
+    `\`${m.branch}\`, still at ${m.branchSha ?? "(the branch does not exist)"}.`,
+    "",
+    "Any commit you made is therefore not on `" + m.branch + "`. The merger only",
+    "ever reads that branch, so as things stand your work would be silently",
+    "dropped and the issue closed with nothing landed.",
+    "",
+    "Get back onto `" + m.branch + "` with your commits on it:",
+    "  - If `" + m.branch + "` is an ancestor of your current HEAD, nothing is at",
+    "    risk: `git branch -f " + m.branch + " HEAD && git checkout " + m.branch + "`.",
+    "  - Otherwise do NOT force the ref — it would discard whatever is on the",
+    "    branch that your HEAD does not have. Check the branch out and bring your",
+    "    commits over with `git cherry-pick` or `git merge`.",
+    "",
+    "Verify with `git rev-parse --symbolic-full-name HEAD` before you report",
+    "again. Do not report COMPLETE until that prints `refs/heads/" + m.branch + "`.",
+  ].join("\n");
+}
+
 // Order-insensitive: `git status --porcelain` order is stable in practice, but
 // "the same files are still dirty" is the question being asked, and a reordering
 // is not progress.
@@ -267,6 +341,7 @@ function onImplementerResult(
   state: LoopState,
   signal: ParseSignal,
   dirtyPaths: readonly string[],
+  offBranch: HeadMismatch | null,
 ): StepResult {
   if (signal.kind === "NEEDS-INFO") {
     return terminate(state, { type: "NEEDS-INFO", questions: signal.questions });
@@ -276,6 +351,44 @@ function onImplementerResult(
       type: "NEEDS-UI-PROTOTYPE",
       uiImpact: signal.uiImpact,
     });
+  }
+  // #27 — before anything that treats this attempt's work as real. A detached
+  // HEAD leaves a CLEAN tree, so the dirty check below cannot see it, and the
+  // gate would go green on a tree `refs/heads/<branch>` does not contain.
+  //
+  // ONE re-prompt, then terminate — and the asymmetry with the dirty-set rule
+  // above is deliberate. There, "the same paths are still dirty" is what proves
+  // the agent cannot win, because partial progress is possible and worth waiting
+  // for. Here there is no partial progress: either HEAD is the branch or it is
+  // not, and the corrective is two mechanical git commands that were spelled out
+  // in full. An attempt that had those instructions and is still off the branch
+  // is not one that needs another go — and each further attempt buries the
+  // stranded commits under more stranded commits. Note the test is on the
+  // PREVIOUS attempt having been off-branch, not on it having been off-branch in
+  // the same PLACE: a new detached sha is not progress toward being on the
+  // branch, so comparing positions would let an agent grind the whole budget by
+  // committing again.
+  if (offBranch !== null) {
+    const trace = offBranchHeadReprompt(offBranch);
+    const exhausted: Verdict = {
+      type: "NEEDS-HUMAN",
+      cause: "off-branch-head",
+      failureTrace: trace,
+      latestReviewerProse: state.latestReviewerProse,
+    };
+    if (state.lastOffBranch) return terminate(state, exhausted);
+    return advanceAttempt(
+      state,
+      {
+        // Becomes the NEEDS-HUMAN trace if this was the last attempt, so the
+        // handoff names where the commits went rather than a gate that never ran.
+        failureTrace: trace,
+        extraReprompt: trace,
+        latestReviewerProse: state.latestReviewerProse,
+        offBranch: true,
+      },
+      exhausted,
+    );
   }
   if (signal.kind === "COMPLETE") {
     // Dirty tree: another attempt with "commit your work", NOT the gate. Cheaper
@@ -332,6 +445,7 @@ function onImplementerResult(
         phase: "needs-gate-1",
         extraReprompt: null,
         lastDirtyPaths: null,
+        lastOffBranch: false,
       },
       action: { kind: "run-gate-1", attempt: state.attempt },
     };
@@ -436,6 +550,10 @@ function advanceAttempt(
     // attempt can tell "still dirty in a new way" from "changed nothing".
     // Every other route clears it.
     readonly dirtyPaths?: readonly string[];
+    // Same shape for #27: only the off-branch route sets it, so "the previous
+    // attempt was told to get back on the branch" stays a statement about the
+    // attempt immediately before this one.
+    readonly offBranch?: boolean;
   },
   // The verdict to emit if this attempt was the last. Caller-supplied because
   // only the caller knows the terminal cause: a gate-red trace vs. a green-gate
@@ -453,6 +571,7 @@ function advanceAttempt(
     extraReprompt: next.extraReprompt,
     latestReviewerProse: next.latestReviewerProse,
     lastDirtyPaths: next.dirtyPaths ?? null,
+    lastOffBranch: next.offBranch ?? false,
   };
   return {
     state: ns,

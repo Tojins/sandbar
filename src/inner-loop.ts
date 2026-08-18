@@ -25,7 +25,7 @@ import type { ResolvedGateStack } from "./config.js";
 import { SandbarError } from "./errors.js";
 import { summarizeGateFailure } from "./gate.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
-import { dirtyWorktreePaths, ensureIssueBranch } from "./git-ops.js";
+import { dirtyWorktreePaths, ensureIssueBranch, headMismatch } from "./git-ops.js";
 import {
   HARD_ERROR_MAX_RETRIES,
   type LoopAction,
@@ -64,7 +64,11 @@ export type Terminal =
     }
   | {
       readonly type: "NEEDS-HUMAN";
-      readonly cause: "gate-red" | "reviewer-blocked" | "uncommittable-worktree";
+      readonly cause:
+        | "gate-red"
+        | "reviewer-blocked"
+        | "uncommittable-worktree"
+        | "off-branch-head";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
     }
@@ -379,8 +383,17 @@ async function runImplementer(
   // cost a stack bringup, and the state machine wants the paths to re-prompt
   // with (#24 D1). Read on every signal so the SM stays the only place that
   // decides what dirt means.
-  const dirtyPaths = await dirtyWorktreePaths(ctx.worktreePath);
-  return { kind: "implementer-result", signal, dirtyPaths };
+  //
+  // The branch position (#27) is read at the same point and for the same
+  // reason, and it is NOT implied by the clean tree: an agent that committed on
+  // a detached HEAD leaves the tree spotless while `refs/heads/<branch>` — the
+  // only thing the merger ever reads — has not moved. Read together, both on
+  // every signal, so the SM stays the only place that decides what either means.
+  const [dirtyPaths, offBranch] = await Promise.all([
+    dirtyWorktreePaths(ctx.worktreePath),
+    headMismatch(ctx.worktreePath, issue.branch),
+  ]);
+  return { kind: "implementer-result", signal, dirtyPaths, offBranch };
 }
 
 async function runGate1(

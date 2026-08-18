@@ -11,8 +11,10 @@ import {
   decideAfterTerminal,
   initialAction,
   initialState,
+  offBranchHeadReprompt,
   step,
 } from "./inner-loop-machine.js";
+import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";
 
 // Tiny driver: runs the machine to completion given a script of events. Each
@@ -69,15 +71,29 @@ const changes = (prose: string): LoopEvent => ({
   verdict: "CHANGES-REQUESTED",
   prose,
 });
-// Clean tree unless a case says otherwise — the dirty routing (#24 D1) has its
-// own describe block below.
+// Clean tree and HEAD on the issue branch unless a case says otherwise — the
+// dirty routing (#24 D1) and the off-branch routing (#27) each have their own
+// describe block below.
 const impl = (
   signal: ParseSignal,
   dirtyPaths: readonly string[] = [],
+  offBranch: HeadMismatch | null = null,
 ): LoopEvent => ({
   kind: "implementer-result",
   signal,
   dirtyPaths,
+  offBranch,
+});
+
+// A HEAD that is detached, i.e. the #27 shape that leaves a CLEAN tree.
+const detached = (
+  headSha = "dead1",
+  branchSha = "base0",
+): HeadMismatch => ({
+  branch: "sandbar/issue-1-x",
+  headRef: null,
+  headSha,
+  branchSha,
 });
 
 const defaultOpts = { maxAttempts: 8, maxReviewRounds: 3 } as const;
@@ -686,5 +702,149 @@ describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () =>
     // not a verdict, so there is nothing for a clean tree to be a proof of.
     const info = drive(defaultOpts, [impl(needsInfo("which currency?"), dirty)]);
     expect(info.verdict.type).toBe("NEEDS-INFO");
+  });
+});
+
+// #27. The failure this block pins is the one every OTHER check agrees with:
+// commits on a detached HEAD leave the worktree CLEAN, so the D1 assert passes,
+// gate-1 mounts a tree that has the work and goes green, the reviewer reads the
+// commits and approves, and DONE closes an issue whose branch never moved.
+describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
+  const onBranchScratch: HeadMismatch = {
+    branch: "sandbar/issue-1-x",
+    headRef: "refs/heads/scratch",
+    headSha: "aaa1",
+    branchSha: "base0",
+  };
+
+  it("does NOT dispatch the gate for COMPLETE over a clean tree off the branch", () => {
+    // The whole bug in one assertion: dirtyPaths is [], so nothing else in the
+    // system would object.
+    const r = step(initialState(defaultOpts), impl(complete, [], detached()));
+    expect(r.action.kind).toBe("run-implementer");
+    expect(r.state.attempt).toBe(2);
+  });
+
+  it("names where HEAD actually is, and where the branch still is", () => {
+    const r = step(
+      initialState(defaultOpts),
+      impl(complete, [], detached("dead1", "base0")),
+    );
+    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
+    expect(r.action.extraReprompt).toContain("DETACHED at dead1");
+    expect(r.action.extraReprompt).toContain("sandbar/issue-1-x");
+    expect(r.action.extraReprompt).toContain("base0");
+  });
+
+  it("names the scratch branch when HEAD is on one", () => {
+    const r = step(initialState(defaultOpts), impl(complete, [], onBranchScratch));
+    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
+    expect(r.action.extraReprompt).toContain("refs/heads/scratch");
+  });
+
+  it("warns against a blind `git branch -f`", () => {
+    // The correction is only safe when the branch is an ancestor of HEAD.
+    // Telling the agent to force the ref unconditionally would swap a visible
+    // failure for a silent one — commits already on the branch, dropped.
+    const text = offBranchHeadReprompt(detached());
+    expect(text).toContain("do NOT force the ref");
+    expect(text).toContain("cherry-pick");
+  });
+
+  it("also fires on NO-SIGNAL, replacing the generic hint", () => {
+    // An off-branch agent usually reads as "made no commits this run" (commit
+    // capture reads refs/heads/<branch>), which sends it to fix the wrong thing.
+    const r = step(
+      initialState(defaultOpts),
+      impl({ kind: "NO-SIGNAL", reprompt: "Still working." }, [], detached()),
+    );
+    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
+    expect(r.action.extraReprompt).toContain("not on the issue branch");
+    expect(r.action.extraReprompt).not.toContain("Still working.");
+  });
+
+  it("gates normally once HEAD is back on the branch", () => {
+    let state = initialState(defaultOpts);
+    state = step(state, impl(complete, [], detached())).state;
+    const r = step(state, impl(complete));
+    expect(r.action.kind).toBe("run-gate-1");
+  });
+
+  it("terminates on a SECOND consecutive off-branch attempt, well inside the budget", () => {
+    // One correction, not a whole budget: unlike a dirty set there is no partial
+    // progress to wait for, and each further attempt buries the stranded commits
+    // under more stranded commits.
+    const { actions, verdict } = drive({ maxAttempts: 8, maxReviewRounds: 3 }, [
+      impl(complete, [], detached("dead1")),
+      impl(complete, [], detached("dead2")),
+    ]);
+    expect(actions.map((a) => a.kind)).toEqual([
+      "run-implementer",
+      "run-implementer",
+      "terminate",
+    ]);
+    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
+    expect(verdict.cause).toBe("off-branch-head");
+    // The sha is the only handle on the stranded commits once the worktree goes.
+    expect(verdict.failureTrace).toContain("dead2");
+  });
+
+  it("a NEW detached sha is not progress — position is not compared", () => {
+    // Deliberately unlike sameDirtySet: committing again while detached moves
+    // HEAD, and treating that as progress would let the agent grind the whole
+    // budget while every commit lands nowhere.
+    const { actions } = drive({ maxAttempts: 8, maxReviewRounds: 3 }, [
+      impl(complete, [], detached("dead1")),
+      impl(complete, [], detached("dead2")),
+    ]);
+    expect(actions.filter((a) => a.kind === "run-implementer")).toHaveLength(2);
+  });
+
+  it("counts CONSECUTIVE attempts, so a later relapse gets its own correction", () => {
+    // Off-branch, back on (no signal), off-branch again: the third attempt is
+    // the first of a new run, so it is re-prompted rather than terminated.
+    let state = initialState({ maxAttempts: 8, maxReviewRounds: 3 });
+    state = step(state, impl(complete, [], detached())).state;
+    state = step(state, impl({ kind: "NO-SIGNAL" })).state;
+    const relapse = step(state, impl(complete, [], detached()));
+    expect(relapse.action.kind).toBe("run-implementer");
+    // And the one after THAT does terminate.
+    const r = step(relapse.state, impl(complete, [], detached()));
+    expect(r.action.kind).toBe("terminate");
+  });
+
+  it("exhausting the budget off-branch is off-branch-head, not gate-red", () => {
+    // No gate ever ran, so the generic "budget exhausted with no green gate"
+    // would describe a failure that did not happen.
+    const { verdict } = drive({ maxAttempts: 1, maxReviewRounds: 3 }, [
+      impl(complete, [], detached()),
+    ]);
+    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
+    expect(verdict.cause).toBe("off-branch-head");
+    expect(verdict.failureTrace).not.toContain(NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE);
+  });
+
+  it("is checked BEFORE the dirty tree — the branch is the deeper problem", () => {
+    // Committing first would only put the commit further off the branch.
+    const r = step(
+      initialState(defaultOpts),
+      impl(complete, ["?? src/new.ts"], detached()),
+    );
+    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
+    expect(r.action.extraReprompt).toContain("not on the issue branch");
+  });
+
+  it("does not block the two hand-to-human terminals", () => {
+    // They land nothing by construction and the issue is parked for a human
+    // either way; re-prompting risks spending the budget on a question the
+    // agent had already formed.
+    const info = drive(defaultOpts, [
+      impl(needsInfo("which currency?"), [], detached()),
+    ]);
+    expect(info.verdict.type).toBe("NEEDS-INFO");
+    const ui = drive(defaultOpts, [
+      impl({ kind: "NEEDS-UI-PROTOTYPE", uiImpact: "a modal" }, [], detached()),
+    ]);
+    expect(ui.verdict.type).toBe("NEEDS-UI-PROTOTYPE");
   });
 });

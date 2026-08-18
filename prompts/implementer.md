@@ -46,6 +46,16 @@ cover. Escalating away a branch that is one gate away from green helps nobody.
 
 ## Commit discipline
 
+**Commit on `{{branch}}`, and stay on it.** Everything downstream reads that ref
+and nothing else: the merger runs `git merge {{branch}}`, and a commit that is
+not reachable from it does not exist as far as this system is concerned. Do not
+detach HEAD and do not work on a branch of your own — a detached HEAD leaves the
+worktree perfectly clean, so nothing about your session will look wrong while
+every commit you make goes nowhere. If you need to look at another commit, use
+`git show`/`git log` rather than checking it out. `git rev-parse
+--symbolic-full-name HEAD` must print `refs/heads/{{branch}}`; this is checked
+after every attempt.
+
 Commit each coherent unit of work as soon as it holds together — don't save
 everything for one final commit at the end. If this session dies mid-task
 (context limit, timeout), only commits survive: the next attempt is shown the
@@ -64,6 +74,10 @@ COMPLETE means the worktree is CLEAN: `git status` empty, everything committed.
 The gate runs against this worktree and the merger only ever sees commits, so a
 COMPLETE claim over uncommitted changes describes nothing that can be merged.
 It is not gated — it costs you an attempt and comes straight back.
+
+COMPLETE also means the commits are on `{{branch}}` — see commit discipline
+above. That is checked too, and unlike the clean-tree check you get exactly one
+correction: a second attempt still off the branch hands the issue to a human.
 
 If you need information you cannot derive from the issue or codebase, emit
 `<promise>NEEDS-INFO</promise>` followed by a `<questions>` block.

@@ -68,6 +68,44 @@ describe("renderAttemptSlot — UI-prototype escalation contract", () => {
   });
 });
 
+// #27. The check that catches an off-branch HEAD costs the agent an attempt and
+// then the issue; the prompt is the only chance to prevent it. These pin the
+// instruction to the branch the orchestrator actually compares against — a
+// prompt that names the wrong ref, or names none, is worse than no prompt.
+describe("renderAttemptSlot — commit-on-the-issue-branch rule (#27)", () => {
+  const slot = renderAttemptSlot({
+    issue: baseInputs.issue,
+    attempt: 1,
+    maxAttempts: 8,
+    worktreePath: "/tmp/wt",
+    lastFailureTrace: "",
+    sourceBranch: "main",
+    diff: "",
+  });
+
+  it("names the issue branch as the ref to commit on", () => {
+    expect(slot).toContain("Commit on `sandbar/issue-42-do-the-thing`");
+  });
+
+  it("says why a detached HEAD is invisible rather than just forbidding it", () => {
+    // The agent has to know the worktree will look perfectly clean, or the
+    // absence of any complaint reads as confirmation.
+    expect(slot).toContain("detach HEAD");
+    expect(slot).toContain("clean");
+  });
+
+  it("gives the exact command the orchestrator's check is equivalent to", () => {
+    expect(slot).toContain("git rev-parse");
+    expect(slot).toContain("refs/heads/sandbar/issue-42-do-the-thing");
+  });
+
+  it("warns that the correction is a single one", () => {
+    expect(slot).toContain(
+      "a second attempt still off the branch hands the issue to a human",
+    );
+  });
+});
+
 describe("renderReviewerSlot", () => {
   it("embeds the built-in coding standards and references conventions", () => {
     const slot = renderReviewerSlot({

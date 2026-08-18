@@ -157,6 +157,37 @@ export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
   `<details><summary>Uncommitted paths</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
+// The implementer committed off the issue branch and stayed off it (#27). No
+// gate ran, so neither the gate-red nor the reviewer-blocked comment applies —
+// and neither would mention the one fact that matters, which is that the work
+// exists and is not where anyone will look for it.
+//
+// The trace carries the shas on purpose. `removeWorktreeFor` deletes the
+// worktree and with it the per-worktree HEAD reflog, so once this comment is
+// posted the sha printed in it is the only remaining handle on those commits.
+// They stay in the object store as unreachable objects — recoverable with
+// `git branch <name> <sha>` until a `git gc` prunes them — which is why the
+// comment says to do it rather than leaving the reader to infer it.
+export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
+  branch: string,
+  failureTrace: string,
+  stuckLabel: string,
+  readyLabel: string,
+): string =>
+  `${BOT_COMMENT_PREFIX} stopped: the implementer committed somewhere other ` +
+  `than \`${branch}\` — a detached HEAD or a branch of its own — and was still ` +
+  `off the branch after being told. No gate ran and nothing was merged: the ` +
+  `worktree was clean every time, so the failure was invisible to every other ` +
+  `check, and \`${branch}\` never moved.\n\n` +
+  `Those commits are NOT lost yet. They are unreachable objects in this repo ` +
+  `and a \`git gc\` will eventually prune them — recover them now with ` +
+  `\`git branch <rescue-name> <sha>\` using the sha below, then fold them into ` +
+  `\`${branch}\` (\`cherry-pick\`/\`merge\`, not \`branch -f\`, unless ` +
+  `\`${branch}\` is an ancestor). Then drop \`${stuckLabel}\` and re-apply ` +
+  `\`${readyLabel}\`.\n\n` +
+  `<details><summary>Where HEAD was</summary>\n\n` +
+  `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
+
 // Impl-attempt budget exhausted while the gate was GREEN and the reviewer was
 // the blocker (#17). Distinct from NEEDS_HUMAN_COMMENT_TEMPLATE (which claims
 // "without a green gate") and from REVIEW_BUDGET_EXHAUSTED (a different budget):
@@ -224,10 +255,16 @@ export type FinalizeInput =
       // (#17): gate-red surfaces the failure trace; reviewer-blocked surfaces
       // the reviewer's CHANGES-REQUESTED prose; uncommittable-worktree surfaces
       // the paths that stayed dirty across attempts (no gate ever ran, so a
-      // gate-red comment would describe a failure that did not happen).
+      // gate-red comment would describe a failure that did not happen);
+      // off-branch-head surfaces where HEAD went (#27) — likewise no gate ran,
+      // and the comment is the only place the stranded commit's sha survives.
       readonly kind: "needs-human";
       readonly issue: IssueRef;
-      readonly cause: "gate-red" | "reviewer-blocked" | "uncommittable-worktree";
+      readonly cause:
+        | "gate-red"
+        | "reviewer-blocked"
+        | "uncommittable-worktree"
+        | "off-branch-head";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
     }
@@ -511,7 +548,8 @@ export async function finalizeOne(
       await adapter.pushBranch(input.issue.branch);
       // #17: name the real blocker. reviewer-blocked → surface the reviewer's
       // CHANGES-REQUESTED prose; uncommittable-worktree → the dirty paths, and
-      // say that no gate ran; gate-red → the gate failure trace.
+      // say that no gate ran; off-branch-head → where HEAD went and how to
+      // rescue the commits (#27); gate-red → the gate failure trace.
       const body =
         input.cause === "reviewer-blocked"
           ? NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE(
@@ -525,11 +563,18 @@ export async function finalizeOne(
                 labels.agentStuck,
                 READY_FOR_AGENT_LABEL,
               )
-            : NEEDS_HUMAN_COMMENT_TEMPLATE(
-                input.failureTrace,
-                labels.agentStuck,
-                READY_FOR_AGENT_LABEL,
-              );
+            : input.cause === "off-branch-head"
+              ? NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE(
+                  input.issue.branch,
+                  input.failureTrace,
+                  labels.agentStuck,
+                  READY_FOR_AGENT_LABEL,
+                )
+              : NEEDS_HUMAN_COMMENT_TEMPLATE(
+                  input.failureTrace,
+                  labels.agentStuck,
+                  READY_FOR_AGENT_LABEL,
+                );
       await adapter.postComment(n, body);
       const r = await adapter.editLabels(
         n,

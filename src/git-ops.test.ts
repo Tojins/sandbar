@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { dirtyWorktreePaths } from "./git-ops.js";
+import { dirtyWorktreePaths, headMismatch } from "./git-ops.js";
 
 const exec = promisify(execFile);
 
@@ -130,5 +130,102 @@ describe("dirtyWorktreePaths (#24 D1)", () => {
     const dirty = await dirtyWorktreePaths(repo);
     expect(dirty).toHaveLength(1);
     expect(dirty[0]).toContain("app.ts");
+  });
+});
+
+// #27. Run against real repos — and specifically against a real LINKED
+// worktree, because that is the only shape the inner loop ever sees and it is
+// the one where HEAD is per-worktree rather than shared. A fake `git` would
+// preserve none of that.
+describe("headMismatch (#27)", () => {
+  let repo: string;
+  let wt: string;
+
+  const git = (...args: string[]) => exec("git", args, { cwd: repo });
+  const inWt = (...args: string[]) => exec("git", args, { cwd: wt });
+
+  beforeEach(async () => {
+    repo = await mkdtemp(join(tmpdir(), "sandbar-head-"));
+    await git("init", "-q", "-b", "main");
+    await git("config", "user.email", "t@t");
+    await git("config", "user.name", "t");
+    await writeFile(join(repo, "app.ts"), "export const a = 1;\n");
+    await git("add", "-A");
+    await git("commit", "-qm", "init");
+    await git("branch", "--no-track", "sandbar/issue-1-x", "main");
+    wt = join(repo, "wt");
+    await git("worktree", "add", "-q", wt, "sandbar/issue-1-x");
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it("is null in the worktree git worktree add just created", async () => {
+    expect(await headMismatch(wt, "sandbar/issue-1-x")).toBeNull();
+  });
+
+  it("is null after committing normally on the branch", async () => {
+    await writeFile(join(wt, "b.ts"), "export const b = 2;\n");
+    await inWt("add", "-A");
+    await inWt("commit", "-qm", "work");
+    expect(await headMismatch(wt, "sandbar/issue-1-x")).toBeNull();
+  });
+
+  // The bug verbatim: commits on a detached HEAD, worktree spotless, branch
+  // unmoved. dirtyWorktreePaths — every other check the loop has — sees nothing.
+  it("reports a detached HEAD that carries commits over a CLEAN tree", async () => {
+    await inWt("checkout", "-q", "--detach");
+    await writeFile(join(wt, "b.ts"), "export const b = 2;\n");
+    await inWt("add", "-A");
+    await inWt("commit", "-qm", "stranded");
+
+    expect(await dirtyWorktreePaths(wt)).toEqual([]);
+
+    const m = await headMismatch(wt, "sandbar/issue-1-x");
+    expect(m).not.toBeNull();
+    expect(m?.headRef).toBeNull();
+    expect(m?.branch).toBe("sandbar/issue-1-x");
+    // Distinct shas: the commit exists, the branch does not contain it.
+    expect(m?.headSha).not.toBe(m?.branchSha);
+    const tip = (await git("rev-parse", "sandbar/issue-1-x")).stdout.trim();
+    expect(m?.branchSha).toBe(tip);
+  });
+
+  it("reports a scratch branch the agent created for itself", async () => {
+    await inWt("checkout", "-q", "-b", "my-work");
+    const m = await headMismatch(wt, "sandbar/issue-1-x");
+    expect(m?.headRef).toBe("refs/heads/my-work");
+  });
+
+  // A sha comparison would call this on-branch. It is one commit away from the
+  // bug and the correction is identical, so the symbolic ref is what is asked.
+  it("reports a HEAD detached exactly AT the branch tip", async () => {
+    await inWt("checkout", "-q", "--detach");
+    const m = await headMismatch(wt, "sandbar/issue-1-x");
+    expect(m).not.toBeNull();
+    expect(m?.headSha).toBe(m?.branchSha);
+  });
+
+  it("reports a missing branch ref rather than throwing", async () => {
+    // Not reachable through the inner loop (ensureIssueBranch runs first), but
+    // the message must degrade to something readable rather than a stack trace.
+    await inWt("checkout", "-q", "--detach");
+    const m = await headMismatch(wt, "no-such-branch");
+    expect(m?.branchSha).toBeNull();
+    expect(m?.headSha).not.toBeNull();
+  });
+
+  // The distinction the exit-code check exists for: `symbolic-ref -q` exits 1
+  // with an EMPTY stderr to say "detached", and 128 with a message to say the
+  // repo is broken. Swallowing the second would report a broken repo as a
+  // detached HEAD — a different bug with a different fix.
+  it("throws rather than reporting a detached HEAD when the path is not a repo", async () => {
+    const notARepo = await mkdtemp(join(tmpdir(), "sandbar-norepo-"));
+    try {
+      await expect(headMismatch(notARepo, "sandbar/issue-1-x")).rejects.toThrow();
+    } finally {
+      await rm(notARepo, { recursive: true, force: true });
+    }
   });
 });

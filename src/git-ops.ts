@@ -1,4 +1,7 @@
-// Thin git wrapper for inner-loop branch seeding.
+// Thin git wrapper for the inner loop: branch seeding, and the two asserts
+// that make a gate verdict a statement about a commit ON THE ISSUE BRANCH —
+// `dirtyWorktreePaths` (tree ≡ HEAD, #24 D1) and `headMismatch` (HEAD ≡
+// refs/heads/<branch>, #27). Neither is optional and neither implies the other.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -68,4 +71,96 @@ export async function dirtyWorktreePaths(
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
+}
+
+// --------------------------------------------------------------------------
+// #27 — HEAD must BE the issue branch, not merely agree with it.
+// --------------------------------------------------------------------------
+//
+// `dirtyWorktreePaths` proves the tree equals HEAD. Nothing proved HEAD equals
+// `refs/heads/<branch>`, and the whole system downstream assumes it does. An
+// implementer that commits on a detached HEAD — or on a scratch branch it
+// created itself — leaves a perfectly CLEAN worktree, so every existing check
+// agrees with it: gate-1 mounts that tree and goes green, the reviewer reads
+// those commits and can APPROVE, the loop terminates DONE. The merge phase then
+// reads the *branch*, which never moved: `git merge --no-ff` says "Already up to
+// date", the merger records ok, and the issue is closed as completed with
+// nothing on origin. The work is not destroyed, but it is unreachable and the
+// tracker says it shipped.
+//
+// The check is on the SYMBOLIC ref, not on `rev-parse HEAD == rev-parse
+// refs/heads/<branch>` as the issue first proposed. Comparing shas accepts a
+// HEAD detached exactly AT the branch tip, which is honest for the commits that
+// already exist and is one commit away from the bug for every commit that comes
+// next — and the corrective instruction is identical either way, so there is
+// nothing to gain by waiting for the divergence. The shas are still read, for
+// the message: they are what tells the agent (and later a human) where the work
+// actually went.
+//
+// Only the inner loop asks this. The merger's worktree is detached at
+// `origin/<sourceBranch>` BY DESIGN (merger-worktree.ts), so unlike D1's
+// clean-tree assert this cannot move into the shared `stack.runGate()` — there
+// is no branch it should be on. Nor does it need a second entry point there:
+// nothing runs between the implementer result and gate-1.
+export type HeadMismatch = {
+  // The branch HEAD was supposed to be on — carried so the re-prompt can name
+  // it without the pure state machine having to know the issue.
+  readonly branch: string;
+  // The ref HEAD points at, or null when HEAD is detached.
+  readonly headRef: string | null;
+  readonly headSha: string | null;
+  // The issue branch's tip, or null when the ref is missing entirely.
+  readonly branchSha: string | null;
+};
+
+// The ref HEAD symbolically points at, or null when HEAD is detached.
+//
+// `git symbolic-ref -q HEAD` answers "detached" with exit 1 and an EMPTY
+// stderr; every real failure (not a repo, unreadable HEAD) exits 128 and says
+// why. Distinguishing them is the point of reading the code rather than
+// catch-and-return-null: a swallowed 128 would report a broken repo as a
+// detached HEAD, which is a different bug with a different fix.
+async function symbolicHead(worktreePath: string): Promise<string | null> {
+  try {
+    const { stdout } = await exec("git", ["symbolic-ref", "-q", "HEAD"], {
+      cwd: worktreePath,
+    });
+    return stdout.trim() || null;
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    const stderr = String((err as { stderr?: unknown }).stderr ?? "").trim();
+    if (code === 1 && stderr === "") return null;
+    throw err;
+  }
+}
+
+// `git rev-parse --verify <rev>`, or null when the rev does not resolve. Used
+// only to enrich the mismatch message, so a missing ref is data, not an error.
+async function revParseOrNull(
+  worktreePath: string,
+  rev: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await exec("git", ["rev-parse", "--verify", rev], {
+      cwd: worktreePath,
+    });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// null when HEAD is exactly `refs/heads/<branch>`; otherwise where it actually
+// is, for the re-prompt.
+export async function headMismatch(
+  worktreePath: string,
+  branch: string,
+): Promise<HeadMismatch | null> {
+  const headRef = await symbolicHead(worktreePath);
+  if (headRef === `refs/heads/${branch}`) return null;
+  const [headSha, branchSha] = await Promise.all([
+    revParseOrNull(worktreePath, "HEAD"),
+    revParseOrNull(worktreePath, `refs/heads/${branch}`),
+  ]);
+  return { branch, headRef, headSha, branchSha };
 }
