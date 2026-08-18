@@ -84,12 +84,41 @@
 // exception — a legitimate test suite has no defensible default ceiling, and
 // per-step timeouts are #26.
 //
+// The `log` follower (#31) is the second exception, and its bound is a kill
+// rather than a timeout: `podman logs -f` is unbounded BY DESIGN, so what makes
+// it safe is that `waitForReady` owns it in a `finally` and kills it on every
+// path out — ready, timeout, or throw. It is deliberately not registered with
+// `onCleanup`: that registry never forgets an action, so one entry per
+// container per bringup would grow without limit, and a signal is already
+// covered transitively — the pod teardown removes the container, and a follower
+// whose container is gone exits on its own.
+//
 // ---------------------------------------------------------------------------
 // Readiness
 // ---------------------------------------------------------------------------
-// `exec` and `log` are direct. `tcp` is the interesting one: the port is
-// probed from the HOST, through a loopback-only publish with a podman-assigned
-// ephemeral host port. Probing from inside the namespace would need a shell and
+// `exec` is direct. `log` FOLLOWS the log with `podman logs -f` and scans the
+// stream as it arrives, because the obvious implementation — re-read the whole
+// log every poll — is quadratic in the log's size and, past `MAX_BUFFER`, node
+// kills every read so the container can never become ready EVEN AFTER the
+// pattern is printed, and reports it as "logs unavailable", which reads as
+// "the pattern never appeared" and sends the operator to the wrong place
+// (#31). Following also means a genuine podman failure is reported as what
+// podman said rather than flattened into that same string.
+//
+// A followed stream delivers a line in as many chunks as it likes — an
+// unterminated partial line arrives as its own chunk under the `k8s-file`
+// driver, pinned in gate-stack-podman.test.ts — so the scan carries the last
+// `pattern.length - 1` bytes of each stream across chunk boundaries. Without
+// that carry, a pattern written as `PAR` then `TIAL` is missed forever: a new
+// silent failure, and exactly the one that makes the cheap `--tail N` fix
+// unacceptable. The carry is sound here only because a followed stream is
+// delivered ONCE, in order — the other candidate fix, a rolling `--since`
+// cursor, must re-read an overlap window to avoid losing lines, and re-delivery
+// makes `carry + chunk` manufacture matches that were never in the log.
+//
+// `tcp` is the interesting one: the port is probed from the HOST, through a
+// loopback-only publish with a podman-assigned ephemeral host port. Probing
+// from inside the namespace would need a shell and
 // a socket tool in an image sandbar does not control, and the images that most
 // need a TCP probe (mail catchers, scratch-based services) are exactly the ones
 // that have neither.
@@ -104,7 +133,7 @@
 // and immediately hangs up for its own reasons would read as not-ready
 // forever — such a service should use `exec` readiness instead.
 
-import { execFile } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { connect } from "node:net";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
@@ -557,6 +586,24 @@ async function waitForReady(
     return;
   }
   const readiness = c.readiness;
+  // Started before the loop and killed in the `finally`: the follower is the
+  // one thing here that is unbounded by design, so its bound is this ownership.
+  const watcher =
+    readiness.kind === "log" ? watchLog(containerName, readiness.pattern) : null;
+  try {
+    await pollUntilReady(containerName, c, ctx, readiness, watcher);
+  } finally {
+    watcher?.stop();
+  }
+}
+
+async function pollUntilReady(
+  containerName: string,
+  c: ResolvedStackContainer,
+  ctx: BringUpCtx,
+  readiness: NonNullable<ResolvedStackContainer["readiness"]>,
+  watcher: LogWatcher | null,
+): Promise<void> {
   const deadline = Date.now() + c.readinessTimeoutMs;
   let lastErr = "";
   while (Date.now() < deadline) {
@@ -572,6 +619,7 @@ async function waitForReady(
       readiness,
       ctx,
       remainingMs(deadline),
+      watcher,
     );
     if (probe.ready) return;
     lastErr = probe.detail;
@@ -607,6 +655,7 @@ async function probeOnce(
   readiness: NonNullable<ResolvedStackContainer["readiness"]>,
   ctx: BringUpCtx,
   timeoutMs: number,
+  watcher: LogWatcher | null,
 ): Promise<{ ready: boolean; detail: string }> {
   switch (readiness.kind) {
     case "exec": {
@@ -624,15 +673,17 @@ async function probeOnce(
       }
     }
     case "log": {
-      // Not `logs | grep -q`: a match would close the pipe, the writer takes
-      // SIGPIPE, and on a long enough log the probe never succeeds.
-      const r = await exec(RUNTIME, ["logs", containerName], {
-        maxBuffer: MAX_BUFFER,
-        timeout: timeoutMs,
-      }).catch(() => null);
-      if (r === null) return { ready: false, detail: "logs unavailable" };
-      const found = `${r.stdout}${r.stderr}`.includes(readiness.pattern);
-      return { ready: found, detail: found ? "" : "pattern not in log yet" };
+      if (watcher === null) {
+        // waitForReady starts a follower for every log readiness, so its
+        // absence is a sandbar bug. Never a silent unready: that would spend
+        // the whole budget and then blame the consumer's pattern.
+        throw new SandbarError(
+          `gate stack: no log follower for container ${containerName}. ` +
+            "waitForReady starts one for every log readiness, so this is an " +
+            "internal inconsistency.",
+        );
+      }
+      return watcher.poll();
     }
     case "tcp": {
       const hostPort = ctx.hostPorts.get(readiness.port);
@@ -649,6 +700,126 @@ async function probeOnce(
       return probeTcp(hostPort, timeoutMs);
     }
   }
+}
+
+// The follower's argv. `-f` from the container's first log line, never a
+// `--tail`/`--since` window: a window can only be justified by a bound on how
+// far back the pattern might be, and there is none — a container that printed
+// "ready" before the first poll is the ordinary case, not an edge one.
+export function logFollowArgs(containerName: string): string[] {
+  return ["logs", "-f", containerName];
+}
+
+// Scan one chunk of a followed stream for the pattern, carrying whatever suffix
+// could still be the head of a match into the next chunk.
+//
+// The carry is the whole point. A followed stream splits a line wherever the
+// driver feels like it — `podman logs -f` under `k8s-file` emits an
+// unterminated partial line as its own chunk, verified in
+// gate-stack-podman.test.ts — so a per-chunk `includes` alone never sees a
+// pattern written as `PAR` then `TIAL`, and reports a timeout against a
+// container that printed exactly what was asked for.
+//
+// `pattern.length - 1` is exactly the right amount to keep and no more: a match
+// straddling the boundary can overlap the previous chunk by at most that, and
+// keeping more is the unbounded retention this whole change exists to remove.
+export function scanChunk(
+  carry: string,
+  chunk: string,
+  pattern: string,
+): { found: boolean; carry: string } {
+  const text = carry + chunk;
+  if (text.includes(pattern)) return { found: true, carry: "" };
+  const keep = Math.min(pattern.length - 1, text.length);
+  return { found: false, carry: keep === 0 ? "" : text.slice(-keep) };
+}
+
+// A running `podman logs -f`, scanning for the readiness pattern as the log
+// arrives. Owned by waitForReady, which kills it on every path out.
+type LogWatcher = {
+  readonly poll: () => { ready: boolean; detail: string };
+  readonly stop: () => void;
+};
+
+function watchLog(containerName: string, pattern: string): LogWatcher {
+  let found = false;
+  let child: ChildProcess | null = null;
+  let lastDeath = "";
+  let stopped = false;
+
+  const start = (): void => {
+    // Carries are per-START, not per-watcher: a restart re-reads the log from
+    // the beginning, so anything they held is about to arrive again.
+    let outCarry = "";
+    let errCarry = "";
+    const ch = spawn(RUNTIME, logFollowArgs(containerName));
+    child = ch;
+    // Scanned per stream rather than on a concatenation of the two. `podman
+    // logs` keeps the container's stdout and stderr separate (verified), so
+    // joining them manufactures a seam that no reader of the log would ever
+    // see and that a pattern could straddle.
+    ch.stdout?.on("data", (b: Buffer) => {
+      const r = scanChunk(outCarry, b.toString("utf8"), pattern);
+      outCarry = r.carry;
+      if (r.found) found = true;
+    });
+    ch.stderr?.on("data", (b: Buffer) => {
+      const r = scanChunk(errCarry, b.toString("utf8"), pattern);
+      errCarry = r.carry;
+      if (r.found) found = true;
+    });
+    ch.on("error", (err: Error) => {
+      if (child === ch) child = null;
+      lastDeath = `could not run ${RUNTIME} logs (${err.message})`;
+    });
+    // An 'error' on a child's stdio stream is an UNHANDLED event otherwise, and
+    // an unhandled event takes the whole run down — a readiness follower must
+    // never be able to do that. Recorded rather than swallowed: it is what the
+    // timeout will report, and `close` follows it, so the next poll restarts.
+    for (const stream of [ch.stdout, ch.stderr]) {
+      stream?.on("error", (err: Error) => {
+        lastDeath = `${RUNTIME} logs stream failed (${err.message})`;
+      });
+    }
+    // `close`, not `exit`: `exit` fires while stdout may still have undelivered
+    // data, so a container that prints the pattern and immediately exits would
+    // be declared dead before the chunk carrying it was scanned.
+    ch.on("close", (code: number | null) => {
+      if (child === ch) child = null;
+      lastDeath =
+        code === 0
+          ? "log stream ended"
+          : `${RUNTIME} logs exited ${String(code)}`;
+    });
+  };
+
+  start();
+
+  return {
+    poll: () => {
+      if (found) return { ready: true, detail: "" };
+      if (child === null && !stopped) {
+        // Restart rather than latch unready. `podman logs -f` ends when the
+        // CONTAINER ends, and it can also die of a podman hiccup — under the
+        // old re-read both became a permanent "logs unavailable" (#31). Re-
+        // reading from the start is idempotent for a substring test, so the
+        // only cost is the reread; the poll interval rate-limits it for free,
+        // and a container that is actually dead throws from throwIfDead in
+        // this same iteration rather than restarting forever.
+        const detail = lastDeath;
+        start();
+        return { ready: false, detail };
+      }
+      return { ready: false, detail: "pattern not in log yet" };
+    },
+    stop: () => {
+      stopped = true;
+      // SIGKILL: there is nothing to flush, and a follower that ignored SIGTERM
+      // would outlive the run holding a pipe to a container being torn down.
+      child?.kill("SIGKILL");
+      child = null;
+    },
+  };
 }
 
 // Connect, then require the socket to stay open (see the header): the rootless

@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +6,12 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
-import { type Stack, startStack } from "./gate-stack.js";
+import {
+  logFollowArgs,
+  scanChunk,
+  type Stack,
+  startStack,
+} from "./gate-stack.js";
 import {
   networkNameFor,
   podNameFor,
@@ -488,5 +493,142 @@ describe.runIf(available)(
       },
       180_000,
     );
+
+    // #31. `log` readiness had no end-to-end coverage at all — this is that,
+    // not a regression test for the buffer wall it fixes: reproducing that
+    // needs 50MB of log, which journald would rate-limit (dropping the pattern
+    // line and failing for an unrelated reason) and which no test should write
+    // to an operator's journal. What actually removes the wall — that the
+    // reader retains a bounded carry rather than the stream — is pinned in
+    // gate-stack.test.ts, where it costs nothing.
+    it(
+      "log readiness goes green on a pattern printed after startup, under a noisy log",
+      async () => {
+        stack = await startStack({
+          stackId: STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+              {
+                name: "svc",
+                image: IMAGE,
+                lifecycle: "issue",
+                // Chatty first, pattern last: the shape of a frontend dev
+                // server printing a build, which is exactly the container
+                // someone gives a `log` readiness to.
+                args: [
+                  "sh",
+                  "-c",
+                  "i=0; while [ $i -lt 4000 ]; do echo \"building chunk $i\"; i=$((i+1)); done; " +
+                    "sleep 2; echo SERVICE-READY; sleep 300",
+                ],
+                readiness: { kind: "log", pattern: "SERVICE-READY" },
+                readinessTimeoutMs: 60_000,
+              },
+            ],
+            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+          }),
+        });
+        expect((await stack.runGate()).ok).toBe(true);
+      },
+      180_000,
+    );
+
+    // The half of #31 that misdirected the operator: a pattern that genuinely
+    // never appears must say so. Under the old read this same message was
+    // produced by a log that had merely outgrown node's buffer.
+    it(
+      "log readiness that never matches times out naming the pattern",
+      async () => {
+        await expect(
+          startStack({
+            stackId: STACK_ID,
+            scope: SCOPE,
+            worktreePath: repo,
+            spec: resolveGateStack({
+              containers: [
+                { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+                {
+                  name: "svc",
+                  image: IMAGE,
+                  lifecycle: "issue",
+                  args: ["sh", "-c", "echo starting-up; sleep 300"],
+                  readiness: { kind: "log", pattern: "NEVER-PRINTED" },
+                  readinessTimeoutMs: 3_000,
+                },
+              ],
+              steps: [{ name: "ok", in: "runner", command: ["true"] }],
+            }),
+          }),
+        ).rejects.toThrow(/NEVER-PRINTED.*pattern not in log yet/s);
+      },
+      180_000,
+    );
   },
 );
+
+// The reason scanChunk carries bytes between chunks, asserted against podman
+// rather than argued from a man page: a followed log delivers an unterminated
+// partial line as its own chunk, so the two halves of a readiness pattern can
+// arrive seconds apart. The host's own log driver decides this — journald
+// buffers per line and would never split — so the driver is pinned explicitly
+// here. Without the carry the container never goes ready and the operator is
+// told the pattern never appeared.
+describe.runIf(available)("podman logs -f chunking", () => {
+  const NAME = "sandbar-logsplit-test";
+
+  afterEach(async () => {
+    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
+  });
+
+  it(
+    "delivers an unterminated partial line as its own chunk",
+    async () => {
+      await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
+      await exec(RUNTIME, [
+        "run",
+        "-d",
+        "--log-driver",
+        "k8s-file",
+        "--name",
+        NAME,
+        IMAGE,
+        "sh",
+        "-c",
+        'printf PAR; sleep 3; printf "TIAL-READY\n"; sleep 30',
+      ]);
+
+      const chunks = await new Promise<string[]>((resolveChunks, rejectChunks) => {
+        const seen: string[] = [];
+        const ch = spawn(RUNTIME, logFollowArgs(NAME));
+        const done = setTimeout(() => {
+          ch.kill("SIGKILL");
+          resolveChunks(seen);
+        }, 8_000);
+        ch.stdout.on("data", (b: Buffer) => seen.push(b.toString("utf8")));
+        ch.on("error", (err) => {
+          clearTimeout(done);
+          rejectChunks(err);
+        });
+      });
+
+      // Two chunks, neither containing the pattern; concatenated they do.
+      expect(chunks.length).toBeGreaterThan(1);
+      expect(chunks.some((c) => c.includes("PARTIAL-READY"))).toBe(false);
+      expect(chunks.join("")).toContain("PARTIAL-READY");
+
+      // And that is precisely what scanChunk is for.
+      let carry = "";
+      let found = false;
+      for (const c of chunks) {
+        const r = scanChunk(carry, c, "PARTIAL-READY");
+        carry = r.carry;
+        found = found || r.found;
+      }
+      expect(found).toBe(true);
+    },
+    60_000,
+  );
+});

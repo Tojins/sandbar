@@ -14,9 +14,11 @@ import {
 } from "./ensure-images.js";
 import {
   containerRunArgs,
+  logFollowArgs,
   mountSpec,
   parsePortBindings,
   podCreateArgs,
+  scanChunk,
   stepExecArgs,
   tcpProbePorts,
 } from "./gate-stack.js";
@@ -868,5 +870,85 @@ describe("resolveImages", () => {
         "sandbar:app",
       ),
     ).toThrow(/duplicate tag/);
+  });
+});
+
+describe("logFollowArgs", () => {
+  // No `--tail`/`--since` window: the pattern may already have been printed
+  // before the first poll, and a window is a bound on how far back it can be.
+  it("follows from the first log line", () => {
+    expect(logFollowArgs("sandbar-w0000000-abc-app")).toEqual([
+      "logs",
+      "-f",
+      "sandbar-w0000000-abc-app",
+    ]);
+  });
+});
+
+// A followed stream splits lines wherever the log driver feels like it, so
+// these are the whole readiness verdict for a `log` container (#31).
+describe("scanChunk", () => {
+  const feed = (
+    chunks: readonly string[],
+    pattern: string,
+  ): { found: boolean; carry: string } => {
+    let carry = "";
+    let found = false;
+    for (const chunk of chunks) {
+      const r = scanChunk(carry, chunk, pattern);
+      carry = r.carry;
+      found = found || r.found;
+    }
+    return { found, carry };
+  };
+
+  it("finds a pattern contained in one chunk", () => {
+    expect(scanChunk("", "server listening on 3000\n", "listening").found).toBe(
+      true,
+    );
+  });
+
+  // The reason the carry exists. `podman logs -f` under the k8s-file driver
+  // emits an unterminated partial line as its own chunk (pinned in
+  // gate-stack-podman.test.ts), so without this the container never goes ready
+  // and the operator is told the pattern never appeared.
+  it("finds a pattern split across two chunks", () => {
+    expect(feed(["boot: PAR", "TIAL-READY\n"], "PARTIAL-READY").found).toBe(true);
+  });
+
+  it("finds a pattern split one character at a time", () => {
+    expect(feed([..."xx ready yy"], "ready").found).toBe(true);
+  });
+
+  // A chunk boundary must not manufacture a match either: the carry is a
+  // suffix of what really arrived, never a re-delivery of it.
+  it("does not match text that never appeared in the stream", () => {
+    expect(feed(["abc", "def"], "cD").found).toBe(false);
+    // "bab" appears only if the carry were RE-delivered ("ab" + "abcd"), which
+    // is why this design follows the stream instead of re-reading a window.
+    expect(feed(["ab", "cd"], "bab").found).toBe(false);
+  });
+
+  it("keeps at most pattern.length - 1 bytes between chunks", () => {
+    const r = scanChunk("", "x".repeat(10_000), "ready");
+    expect(r.found).toBe(false);
+    expect(r.carry).toBe("xxxx");
+  });
+
+  it("carries nothing for a single-character pattern", () => {
+    expect(scanChunk("", "abc", "z")).toEqual({ found: false, carry: "" });
+  });
+
+  it("never carries more than it has seen", () => {
+    expect(scanChunk("", "ab", "ready")).toEqual({ found: false, carry: "ab" });
+  });
+
+  // Once found the carry is irrelevant, and holding it would keep bytes alive
+  // for a watcher that is about to be killed.
+  it("drops the carry on a match", () => {
+    expect(scanChunk("rea", "dy now", "ready")).toEqual({
+      found: true,
+      carry: "",
+    });
   });
 });
