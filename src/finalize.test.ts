@@ -586,6 +586,12 @@ describe("finalizeOne", () => {
         failureTrace:
           "You are not on the issue branch. HEAD is DETACHED at deadbeef1234,",
         latestReviewerProse: null,
+        strandedHead: {
+          branch: `sandbar/issue-45-t-45`,
+          headRef: null,
+          headSha: "deadbeef1234",
+          branchSha: "base00",
+        },
       },
       adapter,
       LABELS,
@@ -597,13 +603,115 @@ describe("finalizeOne", () => {
     // The comment is the last place this sha survives: removeWorktreeFor takes
     // the per-worktree HEAD reflog with it.
     expect(body).toContain("deadbeef1234");
-    expect(body).toContain("git branch <rescue-name> <sha>");
-    // No gate ran, so neither of the other two blockers may be claimed.
+    expect(body).toContain("git branch <rescue-name> deadbeef1234");
+    // Must NOT claim no gate ran / the branch never moved: on the path that
+    // actually reaches this terminal, attempt 1 committed on the branch and a
+    // gate went green on it.
     expect(body).not.toContain("without a green gate");
-    expect(body).not.toContain("CHANGES-REQUESTED");
+    expect(body).not.toContain("No gate ran");
+    expect(body).not.toContain("never moved");
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
+  });
+
+  // #27. The exemption that lets an off-branch NEEDS-UI-PROTOTYPE through must
+  // not also lose the work: hasCommits is false (commits are counted on the
+  // branch), so this arm deletes the branch, and without the note the detached
+  // sha would appear in no comment, no log and no ref.
+  it("needs-ui-prototype: names the stranded sha even though it deletes the branch (#27)", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "needs-ui-prototype",
+        issue: i,
+        uiImpact: "a new settings screen",
+        hasCommits: false,
+        strandedHead: {
+          branch: i.branch,
+          headRef: null,
+          headSha: "abc9999",
+          branchSha: "base00",
+        },
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "deleted-local" });
+    expect(calls.pushes).toEqual([]);
+    const body = calls.comments[0]!.body;
+    expect(body).toContain("a new settings screen");
+    expect(body).toContain("abc9999");
+    expect(body).toContain("git branch <rescue-name> abc9999");
+  });
+
+  it("needs-info: appends the stranded-commits note when the run went off-branch (#27)", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    await finalizeOne(
+      {
+        kind: "needs-info",
+        issue: i,
+        questions: "which currency?",
+        strandedHead: {
+          branch: i.branch,
+          headRef: null,
+          headSha: "abc9999",
+          branchSha: "base00",
+        },
+      },
+      adapter,
+      LABELS,
+    );
+    const body = calls.comments[0]!.body;
+    expect(body).toContain("which currency?");
+    expect(body).toContain("abc9999");
+  });
+
+  it("says nothing about stranded work on an ordinary on-branch handoff", async () => {
+    const { adapter, calls } = makeAdapter();
+    await finalizeOne(
+      {
+        kind: "needs-info",
+        issue: issue(45),
+        questions: "which currency?",
+        strandedHead: null,
+      },
+      adapter,
+      LABELS,
+    );
+    expect(calls.comments[0]!.body).not.toContain("Work was left off");
+  });
+
+  // A scratch branch is a real local ref: it survives worktree removal and gc.
+  // Telling that reader the commits are unreachable and about to be pruned
+  // sends them to rescue something in no danger, under a false description of
+  // their own repo.
+  it("does not claim a scratch branch's commits are unreachable (#27)", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    await finalizeOne(
+      {
+        kind: "needs-info",
+        issue: i,
+        questions: "which currency?",
+        strandedHead: {
+          branch: i.branch,
+          headRef: "refs/heads/my-work",
+          headSha: "abc9999",
+          branchSha: "base00",
+        },
+      },
+      adapter,
+      LABELS,
+    );
+    const body = calls.comments[0]!.body;
+    expect(body).toContain("refs/heads/my-work");
+    expect(body).not.toContain("git gc");
+    expect(body).not.toContain("rescue-name");
+    expect(body).toContain("cherry-pick");
   });
 
   it("review-budget-exhausted: removes worktree, pushes, comments with latest reviewer prose, swaps labels to needs-human", async () => {

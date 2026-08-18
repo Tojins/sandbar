@@ -119,7 +119,7 @@ describe("inner-loop-machine — happy paths", () => {
       impl(needsInfo("what's the foo?")),
     ]);
     expect(actions.map((a) => a.kind)).toEqual(["run-implementer", "terminate"]);
-    expect(verdict).toEqual({ type: "NEEDS-INFO", questions: "what's the foo?" });
+    expect(verdict).toEqual({ type: "NEEDS-INFO", questions: "what's the foo?", strandedHead: null });
   });
 
   it("attempt 1 NEEDS-UI-PROTOTYPE short-circuits — no gate, no reviewer (#21)", () => {
@@ -130,6 +130,7 @@ describe("inner-loop-machine — happy paths", () => {
     expect(verdict).toEqual({
       type: "NEEDS-UI-PROTOTYPE",
       uiImpact: "new settings screen, layout invented",
+      strandedHead: null,
     });
   });
 
@@ -148,6 +149,7 @@ describe("inner-loop-machine — happy paths", () => {
     expect(verdict).toEqual({
       type: "NEEDS-UI-PROTOTYPE",
       uiImpact: "only now do I see the invented flow",
+      strandedHead: null,
     });
   });
 
@@ -166,6 +168,7 @@ describe("inner-loop-machine — happy paths", () => {
     expect(verdict).toEqual({
       type: "NEEDS-UI-PROTOTYPE",
       uiImpact: "the remaining work is all invented UI",
+      strandedHead: null,
     });
   });
 
@@ -181,6 +184,7 @@ describe("inner-loop-machine — happy paths", () => {
     expect(verdict).toEqual({
       type: "NEEDS-UI-PROTOTYPE",
       uiImpact: "the reviewer's ask means redesigning the screen",
+      strandedHead: null,
     });
   });
 });
@@ -405,6 +409,7 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
       cause: "gate-red",
       failureTrace: "trace 3",
       latestReviewerProse: null,
+      strandedHead: null,
     });
   });
 
@@ -418,6 +423,7 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
       cause: "gate-red",
       failureTrace: NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE,
       latestReviewerProse: null,
+      strandedHead: null,
     });
   });
 
@@ -433,6 +439,7 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
       cause: "gate-red",
       failureTrace: "recorded trace",
       latestReviewerProse: null,
+      strandedHead: null,
     });
   });
 
@@ -446,6 +453,7 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
       cause: "gate-red",
       failureTrace: "trace",
       latestReviewerProse: null,
+      strandedHead: null,
     });
   });
 });
@@ -466,6 +474,7 @@ describe("inner-loop-machine — interleaved budgets", () => {
       cause: "gate-red",
       failureTrace: "trace",
       latestReviewerProse: null,
+      strandedHead: null,
     });
   });
 
@@ -487,6 +496,7 @@ describe("inner-loop-machine — interleaved budgets", () => {
       cause: "reviewer-blocked",
       failureTrace: "",
       latestReviewerProse: "r2",
+      strandedHead: null,
     });
   });
 });
@@ -544,13 +554,14 @@ describe("decideAfterTerminal", () => {
   it("surfaces any non-HARD-ERROR verdict regardless of retries", () => {
     const verdicts: Verdict[] = [
       { type: "DONE" },
-      { type: "NEEDS-INFO", questions: "q" },
-      { type: "NEEDS-UI-PROTOTYPE", uiImpact: "invented screen" },
+      { type: "NEEDS-INFO", questions: "q", strandedHead: null },
+      { type: "NEEDS-UI-PROTOTYPE", uiImpact: "invented screen", strandedHead: null },
       {
         type: "NEEDS-HUMAN",
         cause: "gate-red",
         failureTrace: "trace",
         latestReviewerProse: null,
+      strandedHead: null,
       },
       { type: "NEEDS-HUMAN-REVIEW", latestReviewerProse: "prose" },
     ];
@@ -835,9 +846,9 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
   });
 
   it("does not block the two hand-to-human terminals", () => {
-    // They land nothing by construction and the issue is parked for a human
-    // either way; re-prompting risks spending the budget on a question the
-    // agent had already formed.
+    // Re-prompting would risk spending the budget on a question the agent had
+    // already formed, and would swap a precise handoff (the question, the UI
+    // assessment) for a generic one.
     const info = drive(defaultOpts, [
       impl(needsInfo("which currency?"), [], detached()),
     ]);
@@ -846,5 +857,48 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
       impl({ kind: "NEEDS-UI-PROTOTYPE", uiImpact: "a modal" }, [], detached()),
     ]);
     expect(ui.verdict.type).toBe("NEEDS-UI-PROTOTYPE");
+  });
+
+  // Exempt must not mean silent. The commits are counted on the BRANCH, so an
+  // off-branch escalation reports zero, and finalize then deletes the branch and
+  // posts a comment about the UI question only — the sha would exist nowhere and
+  // the work would go at the next gc. That is the loss #27 exists to prevent,
+  // arriving through the terminal the check chose not to guard.
+  it("carries the mismatch into both exempted terminals so the sha survives", () => {
+    const m = detached("stranded1");
+    const info = drive(defaultOpts, [impl(needsInfo("which currency?"), [], m)]);
+    if (info.verdict.type !== "NEEDS-INFO") throw new Error("expected NEEDS-INFO");
+    expect(info.verdict.strandedHead?.headSha).toBe("stranded1");
+
+    const ui = drive(defaultOpts, [
+      impl({ kind: "NEEDS-UI-PROTOTYPE", uiImpact: "a modal" }, [], m),
+    ]);
+    if (ui.verdict.type !== "NEEDS-UI-PROTOTYPE") throw new Error("expected UI");
+    expect(ui.verdict.strandedHead?.headSha).toBe("stranded1");
+  });
+
+  it("leaves strandedHead null on the ordinary on-branch escalations", () => {
+    const info = drive(defaultOpts, [impl(needsInfo("which currency?"))]);
+    if (info.verdict.type !== "NEEDS-INFO") throw new Error("expected NEEDS-INFO");
+    expect(info.verdict.strandedHead).toBeNull();
+  });
+
+  it("carries the mismatch on the off-branch-head terminal too", () => {
+    const { verdict } = drive({ maxAttempts: 8, maxReviewRounds: 3 }, [
+      impl(complete, [], detached("dead1")),
+      impl(complete, [], detached("dead2")),
+    ]);
+    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
+    expect(verdict.strandedHead?.headSha).toBe("dead2");
+  });
+
+  it("leaves strandedHead null on the other NEEDS-HUMAN causes", () => {
+    const { verdict } = drive({ maxAttempts: 1, maxReviewRounds: 3 }, [
+      impl(complete),
+      gate1Red("boom"),
+    ]);
+    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
+    expect(verdict.cause).toBe("gate-red");
+    expect(verdict.strandedHead).toBeNull();
   });
 });

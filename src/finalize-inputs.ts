@@ -79,6 +79,7 @@ export function terminalFinalizeInputs(
           kind: "needs-info",
           issue: o.issue,
           questions: t.questions,
+          strandedHead: t.strandedHead,
         });
         break;
       case "NEEDS-UI-PROTOTYPE":
@@ -87,6 +88,7 @@ export function terminalFinalizeInputs(
           issue: o.issue,
           uiImpact: t.uiImpact,
           hasCommits: t.commits.length > 0,
+          strandedHead: t.strandedHead,
         });
         break;
       case "NEEDS-HUMAN":
@@ -96,6 +98,7 @@ export function terminalFinalizeInputs(
           cause: t.cause,
           failureTrace: t.failureTrace,
           latestReviewerProse: t.latestReviewerProse,
+          strandedHead: t.strandedHead,
         });
         break;
       case "NEEDS-HUMAN-REVIEW":

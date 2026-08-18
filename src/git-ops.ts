@@ -81,12 +81,32 @@ export async function dirtyWorktreePaths(
 // `refs/heads/<branch>`, and the whole system downstream assumes it does. An
 // implementer that commits on a detached HEAD — or on a scratch branch it
 // created itself — leaves a perfectly CLEAN worktree, so every existing check
-// agrees with it: gate-1 mounts that tree and goes green, the reviewer reads
-// those commits and can APPROVE, the loop terminates DONE. The merge phase then
-// reads the *branch*, which never moved: `git merge --no-ff` says "Already up to
-// date", the merger records ok, and the issue is closed as completed with
-// nothing on origin. The work is not destroyed, but it is unreachable and the
-// tracker says it shipped.
+// agrees with it: gate-1 mounts that tree and goes green, and the reviewer reads
+// those commits and can APPROVE. Meanwhile the merger only ever reads the
+// branch, which did not move.
+//
+// Be precise about how far that gets, because the two reachable shapes want
+// different words and #27 describes only the one that is currently unreachable:
+//
+//   - The agent detaches from its FIRST attempt and never commits on the branch.
+//     Commit capture reads `refs/heads/<branch>` (agent-sandbox.ts), so
+//     `commitsAccumulated` stays 0 and `parsePromise` already downgrades
+//     COMPLETE to NO-SIGNAL. The loop cannot reach DONE — it burns all eight
+//     attempts being told "you made no commits this run" while the agent can see
+//     the commits it made, and dies as `NEEDS-HUMAN gate-red` naming a gate that
+//     never ran. Wrong diagnosis, wasted budget, but nothing lands.
+//
+//   - The agent commits on the branch, THEN detaches — the review round-trip
+//     makes this the ordinary case: attempt 1 lands work, the reviewer asks for
+//     changes, attempt 2 writes the fix on a detached HEAD. Now
+//     `commitsAccumulated` is already positive, so COMPLETE stands, gate-1 goes
+//     green on a tree containing the fix, the reviewer approves, DONE — and the
+//     merger lands attempt 1's commits WITHOUT the fix. A green gate certifying
+//     a tree the branch does not contain, and a partial land presented as a
+//     complete one. This is the live bug.
+//
+// Neither shape is one an existing check can see, and the fix is the same
+// question for both.
 //
 // The check is on the SYMBOLIC ref, not on `rev-parse HEAD == rev-parse
 // refs/heads/<branch>` as the issue first proposed. Comparing shas accepts a
@@ -108,42 +128,56 @@ export type HeadMismatch = {
   readonly branch: string;
   // The ref HEAD points at, or null when HEAD is detached.
   readonly headRef: string | null;
-  readonly headSha: string | null;
+  readonly headSha: string;
   // The issue branch's tip, or null when the ref is missing entirely.
   readonly branchSha: string | null;
 };
 
-// The ref HEAD symbolically points at, or null when HEAD is detached.
+// The ref HEAD points at, or null when HEAD is detached.
 //
-// `git symbolic-ref -q HEAD` answers "detached" with exit 1 and an EMPTY
-// stderr; every real failure (not a repo, unreadable HEAD) exits 128 and says
-// why. Distinguishing them is the point of reading the code rather than
-// catch-and-return-null: a swallowed 128 would report a broken repo as a
-// detached HEAD, which is a different bug with a different fix.
-async function symbolicHead(worktreePath: string): Promise<string | null> {
-  try {
-    const { stdout } = await exec("git", ["symbolic-ref", "-q", "HEAD"], {
-      cwd: worktreePath,
-    });
-    return stdout.trim() || null;
-  } catch (err) {
-    const code = (err as { code?: unknown }).code;
-    const stderr = String((err as { stderr?: unknown }).stderr ?? "").trim();
-    if (code === 1 && stderr === "") return null;
-    throw err;
-  }
+// `git rev-parse --symbolic-full-name HEAD` and NOT `git symbolic-ref -q HEAD`.
+// The obvious reading of symbolic-ref is that exit 1 means detached and exit 128
+// means broken, so the two can be told apart by the code — but `-q` suppresses
+// only git's OWN message, and anything else writing to stderr still comes
+// through. `GIT_TRACE=1` in the operator's environment is enough: the command
+// then exits 1 with 82 bytes of trace on stderr, an exit-code-plus-empty-stderr
+// test rethrows, `runImplementer` throws, and a detached HEAD is reported as an
+// infra HARD-ERROR — two pointless fresh-sandbox retries, then a terminal that
+// deletes the branch and posts no comment at all. Exactly the failure this
+// module exists to make visible, made invisible again by an env var.
+//
+// rev-parse has no such fork: inside a valid repo it exits 0 either way and
+// prints the literal `HEAD` when detached, so a non-zero exit is unambiguously a
+// real failure and is left to throw. It is also, not incidentally, the command
+// prompts/implementer.md tells the agent to verify itself with — the check and
+// the instruction are now the same question.
+async function headRef(worktreePath: string): Promise<string | null> {
+  const { stdout } = await exec(
+    "git",
+    ["rev-parse", "--symbolic-full-name", "HEAD"],
+    { cwd: worktreePath },
+  );
+  const ref = stdout.trim();
+  // Detached: rev-parse echoes the input rather than naming a ref.
+  return ref === "HEAD" || ref === "" ? null : ref;
 }
 
-// `git rev-parse --verify <rev>`, or null when the rev does not resolve. Used
-// only to enrich the mismatch message, so a missing ref is data, not an error.
-async function revParseOrNull(
+// The issue branch's tip, or null when the ref does not exist. Null-on-failure
+// ONLY here: a missing branch is data the message should report, not an error.
+// The HEAD sha is read with a plain `exec` that throws, because it is the whole
+// payload — once the worktree is removed, the sha printed in the handoff comment
+// is the only remaining handle on the stranded commits, and degrading it to "an
+// unknown commit" would lose the work quietly rather than loudly.
+async function branchTip(
   worktreePath: string,
-  rev: string,
+  branch: string,
 ): Promise<string | null> {
   try {
-    const { stdout } = await exec("git", ["rev-parse", "--verify", rev], {
-      cwd: worktreePath,
-    });
+    const { stdout } = await exec(
+      "git",
+      ["rev-parse", "--verify", `refs/heads/${branch}`],
+      { cwd: worktreePath },
+    );
     return stdout.trim() || null;
   } catch {
     return null;
@@ -156,11 +190,16 @@ export async function headMismatch(
   worktreePath: string,
   branch: string,
 ): Promise<HeadMismatch | null> {
-  const headRef = await symbolicHead(worktreePath);
-  if (headRef === `refs/heads/${branch}`) return null;
+  const ref = await headRef(worktreePath);
+  if (ref === `refs/heads/${branch}`) return null;
   const [headSha, branchSha] = await Promise.all([
-    revParseOrNull(worktreePath, "HEAD"),
-    revParseOrNull(worktreePath, `refs/heads/${branch}`),
+    exec("git", ["rev-parse", "HEAD"], { cwd: worktreePath }),
+    branchTip(worktreePath, branch),
   ]);
-  return { branch, headRef, headSha, branchSha };
+  return {
+    branch,
+    headRef: ref,
+    headSha: headSha.stdout.trim(),
+    branchSha,
+  };
 }

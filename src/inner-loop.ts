@@ -25,7 +25,12 @@ import type { ResolvedGateStack } from "./config.js";
 import { SandbarError } from "./errors.js";
 import { summarizeGateFailure } from "./gate.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
-import { dirtyWorktreePaths, ensureIssueBranch, headMismatch } from "./git-ops.js";
+import {
+  type HeadMismatch,
+  dirtyWorktreePaths,
+  ensureIssueBranch,
+  headMismatch,
+} from "./git-ops.js";
 import {
   HARD_ERROR_MAX_RETRIES,
   type LoopAction,
@@ -53,7 +58,12 @@ export type IssueRef = {
 
 export type Terminal =
   | { readonly type: "DONE"; readonly commits: readonly { sha: string }[] }
-  | { readonly type: "NEEDS-INFO"; readonly questions: string }
+  | {
+      readonly type: "NEEDS-INFO";
+      readonly questions: string;
+      // #27 — where the agent's commits went, when it asked from off the branch.
+      readonly strandedHead: HeadMismatch | null;
+    }
   | {
       // #21. `commits` is normally empty (the assessment happens before any
       // code is written) but is carried because a late escalation is accepted:
@@ -61,6 +71,10 @@ export type Terminal =
       readonly type: "NEEDS-UI-PROTOTYPE";
       readonly uiImpact: string;
       readonly commits: readonly { sha: string }[];
+      // #27. Note this is NOT redundant with an empty `commits`: commits are
+      // counted on the branch, so an off-branch escalation reports none and
+      // finalize would delete the branch and post nothing about the work.
+      readonly strandedHead: HeadMismatch | null;
     }
   | {
       readonly type: "NEEDS-HUMAN";
@@ -71,6 +85,7 @@ export type Terminal =
         | "off-branch-head";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
+      readonly strandedHead: HeadMismatch | null;
     }
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
@@ -138,12 +153,17 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
     case "DONE":
       return { type: "DONE", commits: accumulatedCommits };
     case "NEEDS-INFO":
-      return { type: "NEEDS-INFO", questions: verdict.questions };
+      return {
+        type: "NEEDS-INFO",
+        questions: verdict.questions,
+        strandedHead: verdict.strandedHead,
+      };
     case "NEEDS-UI-PROTOTYPE":
       return {
         type: "NEEDS-UI-PROTOTYPE",
         uiImpact: verdict.uiImpact,
         commits: accumulatedCommits,
+        strandedHead: verdict.strandedHead,
       };
     case "NEEDS-HUMAN":
       return {
@@ -151,6 +171,7 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
         cause: verdict.cause,
         failureTrace: verdict.failureTrace,
         latestReviewerProse: verdict.latestReviewerProse,
+        strandedHead: verdict.strandedHead,
       };
     case "NEEDS-HUMAN-REVIEW":
       return {

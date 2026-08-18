@@ -404,6 +404,60 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
+  // #27 follow-up. The commit range is anchored at `refs/heads/<branch>`, not at
+  // the worktree's HEAD. With HEAD on the branch the two are the same commit and
+  // nothing changes; they diverge only when HEAD has wandered off, and there the
+  // HEAD anchor is actively wrong. The correction sandbar prompts for is
+  // `git branch -f <branch> HEAD && git checkout <branch>` — which moves the
+  // branch forward WITHOUT creating a commit. Anchored at HEAD, `rev-list
+  // <detached>..<branch>` is empty, so an agent that rescues its work exactly as
+  // instructed is told it "made no commits this run" (promise-parser's
+  // zero-commit guard) and burns another attempt — the very message the #27
+  // check exists to stop sending.
+  it("counts commits the branch GAINED, so an off-branch rescue is not invisible", async () => {
+    await git(["branch", "sandbar/issue-9-rescue"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      branch: "sandbar/issue-9-rescue",
+      sandbox: provider,
+      cwd: dir,
+    });
+    try {
+      // Attempt 1: the agent detaches and commits there. Nothing reaches the
+      // branch, so nothing is counted — that is correct and is what #27 detects.
+      const stray = await sandbox.run({
+        agent: scriptedAgent(
+          `git checkout --detach >/dev/null 2>&1 && ` +
+            `git commit --allow-empty -m "stranded" >/dev/null 2>&1 && ` +
+            `printf '%s\n' '${JSON.stringify({ type: "result", result: "x" })}'`,
+        ),
+        prompt: "go",
+        maxIterations: 1,
+      });
+      expect(stray.commits).toEqual([]);
+
+      // Attempt 2: the agent follows the re-prompt verbatim. It creates no new
+      // commit — it moves the ref — and the rescued commit must still be counted.
+      const rescued = await sandbox.run({
+        agent: scriptedAgent(
+          `git branch -f sandbar/issue-9-rescue HEAD >/dev/null 2>&1 && ` +
+            `git checkout sandbar/issue-9-rescue >/dev/null 2>&1 && ` +
+            `printf '%s\n' '${JSON.stringify({ type: "result", result: "y" })}'`,
+        ),
+        prompt: "go",
+        maxIterations: 1,
+      });
+      expect(rescued.commits).toHaveLength(1);
+      const tip = await git(
+        ["log", "-1", "--format=%H", "sandbar/issue-9-rescue"],
+        dir,
+      );
+      expect(rescued.commits[0]!.sha).toBe(tip.stdout.trim());
+    } finally {
+      await sandbox.close();
+    }
+  });
+
   it("falls back to raw stdout when no result event is emitted, and reports zero commits for a no-op", async () => {
     await git(["branch", "sandbar/issue-2-noop"], dir);
     const provider = makeLocalProvider();

@@ -25,8 +25,11 @@
 //
 // The branch check (#27) is the same argument one level up, and it is checked
 // FIRST because it subsumes the other: commits on a detached HEAD leave a CLEAN
-// tree, so the dirty check passes, the gate goes green on a tree the branch does
-// not contain, and DONE closes an issue that landed nothing. It is applied to
+// tree, so the dirty check passes and the gate goes green on a tree the branch
+// does not contain. What DONE then lands is whatever the branch happens to hold
+// — in the ordinary review round-trip, attempt 1's work without attempt 2's fix
+// (git-ops.ts spells out why that, and not "nothing at all", is the reachable
+// shape). It is applied to
 // NO-SIGNAL as well as COMPLETE — every attempt spent off the branch produces
 // work the merger can never see, so the sooner the agent is told, the fewer
 // commits are stranded. The two hand-to-human terminals (NEEDS-INFO,
@@ -92,7 +95,16 @@ export type LoopState = {
 // lives in this type only so decideAfterTerminal can pattern-match on it.
 export type Verdict =
   | { readonly type: "DONE" }
-  | { readonly type: "NEEDS-INFO"; readonly questions: string }
+  | {
+      readonly type: "NEEDS-INFO";
+      readonly questions: string;
+      // Where HEAD was when the agent asked, if it was not the issue branch
+      // (#27). These two terminals are exempt from the off-branch correction —
+      // see onImplementerResult — but exempt must not mean silent: whatever the
+      // agent committed off the branch is about to be deleted along with the
+      // worktree, and this is the only record of where it went.
+      readonly strandedHead: HeadMismatch | null;
+    }
   | {
       // #21 — the implementer judged the issue to imply non-trivial
       // user-visible UI with no prototype to work from. Immediate terminal:
@@ -102,6 +114,11 @@ export type Verdict =
       // not anything the loop can produce.
       readonly type: "NEEDS-UI-PROTOTYPE";
       readonly uiImpact: string;
+      // As NEEDS-INFO above, and the case is sharper here: #21 accepts a LATE
+      // escalation precisely so an agent that has already written code can stop,
+      // and finalize pushes the branch when it has commits. Off the branch it
+      // has none to push, so without this the partial work vanishes unrecorded.
+      readonly strandedHead: HeadMismatch | null;
     }
   | {
       // Impl-attempt budget exhausted. `cause` names the real blocker so the
@@ -131,6 +148,9 @@ export type Verdict =
         | "off-branch-head";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
+      // Set only by `off-branch-head`, so finalize can render the rescue note
+      // from structure rather than parse it back out of the trace prose.
+      readonly strandedHead: HeadMismatch | null;
     }
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
@@ -303,8 +323,8 @@ export function uncommittedWorkReprompt(
 export function offBranchHeadReprompt(m: HeadMismatch): string {
   const where =
     m.headRef === null
-      ? `HEAD is DETACHED at ${m.headSha ?? "an unknown commit"}`
-      : `HEAD is on \`${m.headRef}\`, at ${m.headSha ?? "an unknown commit"}`;
+      ? `HEAD is DETACHED at ${m.headSha}`
+      : `HEAD is on \`${m.headRef}\`, at ${m.headSha}`;
   return [
     `You are not on the issue branch. ${where}, but this issue's branch is`,
     `\`${m.branch}\`, still at ${m.branchSha ?? "(the branch does not exist)"}.`,
@@ -343,13 +363,24 @@ function onImplementerResult(
   dirtyPaths: readonly string[],
   offBranch: HeadMismatch | null,
 ): StepResult {
+  // These two hand the issue to a human and land nothing, so they are exempt
+  // from the off-branch correction below (re-prompting would risk spending the
+  // budget on a question the agent had already formed, and would swap a precise
+  // handoff — the question, the UI assessment — for a generic one). They carry
+  // the mismatch instead, so the commits the agent stranded are named in the
+  // handoff rather than deleted in silence.
   if (signal.kind === "NEEDS-INFO") {
-    return terminate(state, { type: "NEEDS-INFO", questions: signal.questions });
+    return terminate(state, {
+      type: "NEEDS-INFO",
+      questions: signal.questions,
+      strandedHead: offBranch,
+    });
   }
   if (signal.kind === "NEEDS-UI-PROTOTYPE") {
     return terminate(state, {
       type: "NEEDS-UI-PROTOTYPE",
       uiImpact: signal.uiImpact,
+      strandedHead: offBranch,
     });
   }
   // #27 — before anything that treats this attempt's work as real. A detached
@@ -375,6 +406,7 @@ function onImplementerResult(
       cause: "off-branch-head",
       failureTrace: trace,
       latestReviewerProse: state.latestReviewerProse,
+      strandedHead: offBranch,
     };
     if (state.lastOffBranch) return terminate(state, exhausted);
     return advanceAttempt(
@@ -415,6 +447,7 @@ function onImplementerResult(
           cause: "uncommittable-worktree",
           failureTrace: trace,
           latestReviewerProse: state.latestReviewerProse,
+          strandedHead: null,
         });
       }
       return advanceAttempt(
@@ -436,6 +469,7 @@ function onImplementerResult(
           cause: "uncommittable-worktree",
           failureTrace: trace,
           latestReviewerProse: null,
+          strandedHead: null,
         },
       );
     }
@@ -525,6 +559,7 @@ function onReviewerResult(
       cause: "reviewer-blocked",
       failureTrace: "",
       latestReviewerProse: prose,
+      strandedHead: null,
     },
   );
 }
@@ -537,6 +572,7 @@ function gateRedExhaustion(state: LoopState): Verdict {
     cause: "gate-red",
     failureTrace: state.lastFailureTrace || NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE,
     latestReviewerProse: null,
+    strandedHead: null,
   };
 }
 

@@ -53,8 +53,14 @@ detach HEAD and do not work on a branch of your own — a detached HEAD leaves t
 worktree perfectly clean, so nothing about your session will look wrong while
 every commit you make goes nowhere. If you need to look at another commit, use
 `git show`/`git log` rather than checking it out. `git rev-parse
---symbolic-full-name HEAD` must print `refs/heads/{{branch}}`; this is checked
-after every attempt.
+--symbolic-full-name HEAD` must print `refs/heads/{{branch}}`; that exact command
+is what is checked after every attempt.
+
+If you do end up off the branch, do not reach for `git branch -f` reflexively —
+it is only safe when `{{branch}}` is an ancestor of your current HEAD. If it is
+not, forcing the ref throws away whatever was already on the branch. Check the
+branch out and bring your commits over with `git cherry-pick` or `git merge`
+instead.
 
 Commit each coherent unit of work as soon as it holds together — don't save
 everything for one final commit at the end. If this session dies mid-task

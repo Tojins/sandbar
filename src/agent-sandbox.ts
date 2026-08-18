@@ -1346,9 +1346,29 @@ export const createSandbox = async (
       );
     }
 
-    // baseHead from the HOST worktree before the agent runs — the left edge of
-    // the rev-list range.
-    const baseHead = (await execGit(["rev-parse", "HEAD"], worktreePath)).trim();
+    // Left edge of the rev-list range, read before the agent runs. Taken from
+    // the BRANCH REF, not from the worktree's HEAD, so that both edges name the
+    // same thing and `commits` means exactly "what `refs/heads/<branch>` gained
+    // this iteration".
+    //
+    // With HEAD on the branch — every ordinary iteration — the two are the same
+    // commit and this is a no-op. They diverge only when HEAD has wandered off
+    // (#27), and there the HEAD-based read is actively wrong: the correction
+    // sandbar prompts for is `git branch -f <branch> HEAD && git checkout
+    // <branch>`, which moves the branch forward to the detached sha WITHOUT
+    // creating a commit. Anchor the range at HEAD and `rev-list <detached>..
+    // <branch>` is empty, so an agent that rescues its work exactly as
+    // instructed is told it "made no commits this run" and has to burn another
+    // attempt — the very message #27's check exists to stop sending. Anchored at
+    // the branch, the rescued commits are counted, which is what every consumer
+    // of this list already assumes it is looking at.
+    //
+    // Falls back to the worktree HEAD if the ref is unreadable; ensureIssueBranch
+    // has created it by now, so this is belt-and-braces rather than a real path.
+    const baseHead = (
+      await execGit(["rev-parse", "--verify", `refs/heads/${branch}`], hostRepoDir)
+        .catch(() => execGit(["rev-parse", "HEAD"], worktreePath))
+    ).trim();
 
     const { result } = await invokeAgent(
       providerHandle,

@@ -216,15 +216,41 @@ describe("headMismatch (#27)", () => {
     expect(m?.headSha).not.toBeNull();
   });
 
-  // The distinction the exit-code check exists for: `symbolic-ref -q` exits 1
-  // with an EMPTY stderr to say "detached", and 128 with a message to say the
-  // repo is broken. Swallowing the second would report a broken repo as a
-  // detached HEAD — a different bug with a different fix.
+  // Regression: the first cut used `git symbolic-ref -q HEAD` and read "exit 1
+  // with empty stderr" as "detached". `-q` suppresses only git's OWN message —
+  // GIT_TRACE writes to the same stream, so a detached HEAD then exits 1 with
+  // ~80 bytes of trace, the discrimination fails, headMismatch throws, and
+  // runImplementer's caller turns it into an infra HARD-ERROR: two pointless
+  // fresh-sandbox retries, then a terminal that deletes the branch and posts no
+  // comment. An env var in the operator's shell was enough to re-hide exactly
+  // the failure this module exists to expose.
+  it("still reports a detached HEAD when git's stderr is noisy (GIT_TRACE)", async () => {
+    await inWt("checkout", "-q", "--detach");
+    const prev = process.env["GIT_TRACE"];
+    process.env["GIT_TRACE"] = "1";
+    try {
+      const m = await headMismatch(wt, "sandbar/issue-1-x");
+      expect(m).not.toBeNull();
+      expect(m?.headRef).toBeNull();
+    } finally {
+      if (prev === undefined) delete process.env["GIT_TRACE"];
+      else process.env["GIT_TRACE"] = prev;
+    }
+  });
+
+  // A broken repo is a different bug with a different fix, so it must not
+  // degrade into "detached HEAD". GIT_CEILING_DIRECTORIES keeps the test
+  // hermetic: without it, a TMPDIR that happens to sit inside a git repo would
+  // have git resolve the PARENT repo and return a mismatch instead of throwing.
   it("throws rather than reporting a detached HEAD when the path is not a repo", async () => {
     const notARepo = await mkdtemp(join(tmpdir(), "sandbar-norepo-"));
+    const prev = process.env["GIT_CEILING_DIRECTORIES"];
+    process.env["GIT_CEILING_DIRECTORIES"] = notARepo;
     try {
       await expect(headMismatch(notARepo, "sandbar/issue-1-x")).rejects.toThrow();
     } finally {
+      if (prev === undefined) delete process.env["GIT_CEILING_DIRECTORIES"];
+      else process.env["GIT_CEILING_DIRECTORIES"] = prev;
       await rm(notARepo, { recursive: true, force: true });
     }
   });

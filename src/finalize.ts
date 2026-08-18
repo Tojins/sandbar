@@ -56,7 +56,13 @@ import { promisify } from "node:util";
 
 import type { LabelConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
+import type { HeadMismatch } from "./git-ops.js";
 import type { IssueRef } from "./merger.js";
+
+// Where an implementer's commits ended up when it worked off the issue branch
+// (#27). Structural alias of git-ops' HeadMismatch — finalize only ever reads
+// it, and only to name a sha nothing else will ever mention again.
+type StrandedHead = HeadMismatch;
 
 const exec = promisify(execFile);
 
@@ -157,17 +163,54 @@ export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
   `<details><summary>Uncommitted paths</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
-// The implementer committed off the issue branch and stayed off it (#27). No
-// gate ran, so neither the gate-red nor the reviewer-blocked comment applies —
-// and neither would mention the one fact that matters, which is that the work
-// exists and is not where anyone will look for it.
+// Appended to any handoff comment whose run left commits off the issue branch
+// (#27). Split out because three arms need it and only one of them is the
+// off-branch terminal itself: NEEDS-INFO and NEEDS-UI-PROTOTYPE are exempt from
+// the correction, so for them this note is the ONLY place the work is recorded.
 //
-// The trace carries the shas on purpose. `removeWorktreeFor` deletes the
-// worktree and with it the per-worktree HEAD reflog, so once this comment is
-// posted the sha printed in it is the only remaining handle on those commits.
-// They stay in the object store as unreachable objects — recoverable with
-// `git branch <name> <sha>` until a `git gc` prunes them — which is why the
-// comment says to do it rather than leaving the reader to infer it.
+// The prose branches on `headRef`, and that distinction is not cosmetic. A
+// DETACHED head leaves the commits unreachable, so they are on gc's clock and
+// the reader has to act. A scratch BRANCH is a real local ref that survives
+// `worktree remove`, branch deletion of the issue branch, and gc indefinitely —
+// telling that reader their work is about to be pruned would send them to
+// perform an urgent rescue of something in no danger, and telling them to
+// `git branch <name> <sha>` would have them create a second name for a commit
+// that already has one.
+export const STRANDED_COMMITS_NOTE = (m: StrandedHead): string =>
+  m.headRef === null
+    ? `\n\n---\n\n**Work was left off \`${m.branch}\`.** This run committed on a ` +
+      `detached HEAD at \`${m.headSha}\`, so none of it is on the branch and ` +
+      `nothing above includes it. Those commits are reachable from no ref: they ` +
+      `survive in this repo until a \`git gc\` prunes them, and \`${m.headSha}\` ` +
+      `is the only remaining handle on them once the worktree is removed. ` +
+      `Recover them with \`git branch <rescue-name> ${m.headSha}\`, then fold ` +
+      `them into \`${m.branch}\` with \`cherry-pick\`/\`merge\` — not ` +
+      `\`branch -f\`, unless \`${m.branch}\` is an ancestor of ${m.headSha}.`
+    : `\n\n---\n\n**Work was left off \`${m.branch}\`.** This run committed on ` +
+      `\`${m.headRef}\` (at \`${m.headSha}\`) instead, so none of it is on the ` +
+      `branch and nothing above includes it. That ref is a normal local branch ` +
+      `and is not at risk — nothing here deletes it — but it is local to the ` +
+      `machine that ran sandbar. Fold it into \`${m.branch}\` with ` +
+      `\`cherry-pick\`/\`merge\`.`;
+
+// The implementer committed off the issue branch and stayed off it after being
+// told (#27). Neither the gate-red nor the reviewer-blocked comment applies —
+// and neither would mention the fact that matters, which is that work exists and
+// is not where anyone will look for it.
+//
+// Deliberately says NOTHING about whether a gate ran, whether the branch moved,
+// or whether anything merged. The tempting version of this comment asserts all
+// three ("no gate ran, the branch never moved, nothing was merged") because that
+// is true of the case #27 describes — an agent detached from its first attempt.
+// But that case cannot reach this terminal *or* any other interesting one: with
+// no commit on the branch, `parsePromise`'s zero-commit guard downgrades every
+// COMPLETE. The path that actually gets here is the ordinary review round-trip,
+// where attempt 1 committed on the branch, a gate ran and went green, and only
+// the later attempts wandered off — so all three claims would be false, and the
+// author would be sent to look for a failing gate that passed.
+//
+// What is invariant is the part worth saying: the later work is not on the
+// branch. STRANDED_COMMITS_NOTE says where it is instead.
 export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
   branch: string,
   failureTrace: string,
@@ -175,17 +218,14 @@ export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} stopped: the implementer committed somewhere other ` +
-  `than \`${branch}\` — a detached HEAD or a branch of its own — and was still ` +
-  `off the branch after being told. No gate ran and nothing was merged: the ` +
-  `worktree was clean every time, so the failure was invisible to every other ` +
-  `check, and \`${branch}\` never moved.\n\n` +
-  `Those commits are NOT lost yet. They are unreachable objects in this repo ` +
-  `and a \`git gc\` will eventually prune them — recover them now with ` +
-  `\`git branch <rescue-name> <sha>\` using the sha below, then fold them into ` +
-  `\`${branch}\` (\`cherry-pick\`/\`merge\`, not \`branch -f\`, unless ` +
-  `\`${branch}\` is an ancestor). Then drop \`${stuckLabel}\` and re-apply ` +
-  `\`${readyLabel}\`.\n\n` +
-  `<details><summary>Where HEAD was</summary>\n\n` +
+  `than \`${branch}\` — a detached HEAD, or a branch of its own — and was still ` +
+  `off the branch on the following attempt, after being told exactly how to get ` +
+  `back. Whatever had already landed on \`${branch}\` is untouched and correct; ` +
+  `what the off-branch attempts wrote is not part of it, and no gate verdict on ` +
+  `this issue covers that work.\n\n` +
+  `Fold the stranded commits in (see below), then drop \`${stuckLabel}\` and ` +
+  `re-apply \`${readyLabel}\`.\n\n` +
+  `<details><summary>What the implementer was told</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
 // Impl-attempt budget exhausted while the gate was GREEN and the reviewer was
@@ -237,6 +277,9 @@ export type FinalizeInput =
       readonly kind: "needs-info";
       readonly issue: IssueRef;
       readonly questions: string;
+      // #27 — see needs-ui-prototype. This arm always pushes, but an off-branch
+      // agent moved nothing, so the push carries none of what it wrote.
+      readonly strandedHead: StrandedHead | null;
     }
   // #21 — implementer escalated on non-trivial UI impact with no prototype.
   // Same handoff shape as needs-info (comment + `ready-for-agent` → needsInfo),
@@ -248,6 +291,10 @@ export type FinalizeInput =
       readonly issue: IssueRef;
       readonly uiImpact: string;
       readonly hasCommits: boolean;
+      // #27 — the agent escalated from off the branch. `hasCommits` is false in
+      // that case (commits are counted on the branch), so this arm is about to
+      // delete a branch while the work sits on an unnamed dangling commit.
+      readonly strandedHead: StrandedHead | null;
     }
   | {
       // Impl-attempt budget exhausted, or a blocker the agent cannot clear.
@@ -267,6 +314,7 @@ export type FinalizeInput =
         | "off-branch-head";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
+      readonly strandedHead: StrandedHead | null;
     }
   | {
       readonly kind: "review-budget-exhausted";
@@ -476,7 +524,8 @@ export async function finalizeOne(
           input.questions,
           labels.needsInfo,
           READY_FOR_AGENT_LABEL,
-        ),
+        ) +
+          (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : ""),
       );
       const r = await adapter.editLabels(
         n,
@@ -502,7 +551,8 @@ export async function finalizeOne(
           labels.needsInfo,
           READY_FOR_AGENT_LABEL,
           input.hasCommits ? input.issue.branch : null,
-        ),
+        ) +
+          (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : ""),
       );
       const r = await adapter.editLabels(
         n,
@@ -569,7 +619,10 @@ export async function finalizeOne(
                   input.failureTrace,
                   labels.agentStuck,
                   READY_FOR_AGENT_LABEL,
-                )
+                ) +
+                (input.strandedHead
+                  ? STRANDED_COMMITS_NOTE(input.strandedHead)
+                  : "")
               : NEEDS_HUMAN_COMMENT_TEMPLATE(
                   input.failureTrace,
                   labels.agentStuck,
