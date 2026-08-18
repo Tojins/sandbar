@@ -5,6 +5,19 @@ import { BRANCH_PREFIX } from "./naming.js";
 // The maximum a readiness probe may poll before its container counts as failed.
 export const DEFAULT_READINESS_TIMEOUT_MS = 60_000;
 
+// The maximum a gate STEP may run before it is killed and the gate goes red
+// (#26), when the step doesn't name its own bound.
+//
+// The number only has to be "obviously longer than any step a working repo has,
+// and finite". 15 minutes clears a full browser suite on a cold cache several
+// times over, so a default-bounded step that trips this has hung rather than
+// been slow — which matters, because a spurious timeout is a false red that
+// costs the issue one of its eight implementation attempts. It also keeps the
+// worst case legible: a gate run stops at the first red, so one hung step costs
+// one bound, and the whole attempt budget cannot burn more than a couple of
+// hours against a wedged suite.
+export const DEFAULT_STEP_TIMEOUT_MS = 900_000;
+
 // The handoff labels sandbar APPLIES when it parks an issue for a human. These
 // are NOT auto-created by sandbar (#8) — a host must define them in its repo,
 // and a missing/misconfigured label fails loud at finalize time rather than
@@ -155,6 +168,18 @@ export type GateStep = {
   // The `name` of a container declared in the same stack.
   readonly in: string;
   readonly command: readonly string[];
+  // How long this step may run before it is killed and the gate goes red (#26).
+  // Default: 15 minutes. A lint step and a browser suite do not want the same
+  // bound and the consumer is the only one who knows which is which, so this is
+  // per step — but it is not optional in the resolved shape, because an
+  // unbounded step hangs the inner loop, the outer loop and the single-instance
+  // lock forever, with no HARD-ERROR and no teardown.
+  //
+  // Milliseconds, matching `readinessTimeoutMs` in the same config object.
+  // #26 proposed `timeoutSeconds`; two units inside one `gateStack` literal is
+  // a footgun worth more than the ergonomic win of writing 900 instead of
+  // 900_000.
+  readonly timeoutMs?: number;
 };
 
 // An image sandbar builds before the run, if it isn't already present.
@@ -193,9 +218,16 @@ export type ResolvedStackContainer = {
   readonly postReadyCommands: ReadonlyArray<readonly string[]>;
 };
 
+export type ResolvedGateStep = {
+  readonly name: string;
+  readonly in: string;
+  readonly command: readonly string[];
+  readonly timeoutMs: number;
+};
+
 export type ResolvedGateStack = {
   readonly containers: readonly ResolvedStackContainer[];
-  readonly steps: readonly GateStep[];
+  readonly steps: readonly ResolvedGateStep[];
 };
 
 // How a cycle's merge result reaches the source branch (#22).
@@ -597,6 +629,7 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
 
   const byName = new Set(containers.map((c) => c.name));
   const stepNames = new Set<string>();
+  const steps: ResolvedGateStep[] = [];
   for (const step of stack.steps) {
     const stepName = step.name.trim();
     if (!stepName) {
@@ -623,6 +656,25 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
         `config.gateStack: step '${step.name}' has an empty command.`,
       );
     }
+    // Same shape as readinessTimeoutMs, and rejected for the same reason: NaN
+    // and 0 both mean "no bound" once they reach the runner (node reads
+    // `timeout: 0` as unbounded), which is the one value a bound must never
+    // silently become.
+    const timeoutMs = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new SandbarError(
+        `config.gateStack: step '${step.name}' has a non-positive or ` +
+          `non-finite timeoutMs (${String(timeoutMs)}). NaN — from a ` +
+          "misparsed env var — reads as 'no bound', and an unbounded step " +
+          "hangs the run holding the single-instance lock.",
+      );
+    }
+    steps.push({
+      name: step.name,
+      in: step.in,
+      command: step.command,
+      timeoutMs,
+    });
   }
 
   // The check above only asks whether SOMETHING mounts the worktree, which a
@@ -691,7 +743,7 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
     );
   }
 
-  return { containers, steps: stack.steps };
+  return { containers, steps };
 }
 
 function resolveStackContainer(

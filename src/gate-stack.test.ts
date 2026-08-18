@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_STEP_TIMEOUT_MS,
   type GateStackConfig,
   type ResolvedGateStack,
   type ResolvedStackContainer,
@@ -645,6 +646,38 @@ describe("resolveGateStack validation", () => {
       }),
     ).toThrow(/duplicate step name/);
   });
+
+  // #26. An unbounded step is not a slow gate, it is a run that never ends and
+  // never releases the single-instance lock, so the resolved shape has no
+  // "absent" case — a step that names no bound gets sandbar's.
+  it("gives every step a timeout, defaulting when it names none", () => {
+    const resolved = resolveGateStack({
+      ...ok,
+      steps: [
+        { name: "lint", in: "app", command: ["npm", "run", "lint"] },
+        { name: "e2e", in: "app", command: ["npx", "playwright", "test"], timeoutMs: 45_000 },
+      ],
+    });
+    expect(resolved.steps.map((s) => s.timeoutMs)).toEqual([
+      DEFAULT_STEP_TIMEOUT_MS,
+      45_000,
+    ]);
+  });
+
+  // Both reach the runner as "no bound": node reads `timeout: 0` as unbounded,
+  // and NaN — a misparsed `process.env.STEP_TIMEOUT` — compares false against
+  // every deadline. The one value a bound must never silently become.
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "refuses a step timeoutMs of %s",
+    (timeoutMs) => {
+      expect(() =>
+        resolveGateStack({
+          ...ok,
+          steps: [{ name: "test", in: "app", command: ["a"], timeoutMs }],
+        }),
+      ).toThrow(/timeoutMs/);
+    },
+  );
 
   it("refuses a step targeting an undeclared container", () => {
     expect(() =>

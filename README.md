@@ -63,8 +63,15 @@ await run({
       // Run in order, stopping at the first red. Each is `podman exec`'d in
       // the named container; its exit code is the verdict. The db is reachable
       // at 127.0.0.1:3306 — one namespace, so the address is knowable here.
+      //
+      // Every step is time-bounded (default 15 min). Exceeding the bound kills
+      // the step, removes the container the work was running in, and reds the
+      // gate with a trace naming the step — a hung suite spends an attempt and
+      // moves instead of hanging the run and holding the lock forever.
       { name: "check", in: "runner", command: ["npm", "run", "check"] },
       { name: "test", in: "runner", command: ["npm", "test"] },
+      { name: "e2e", in: "runner", command: ["npx", "playwright", "test"],
+        timeoutMs: 1_800_000 },  // default 900_000
     ],
   },
 

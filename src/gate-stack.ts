@@ -74,22 +74,50 @@
 // ---------------------------------------------------------------------------
 // This module holds the run's single-instance lock while it works, and node's
 // execFile has NO default timeout, so an unbounded exec is not a slow gate —
-// it is a run that never ends and never tears down. Readiness probes and
-// postReadyCommands are bounded by the container's own readiness budget;
-// sandbar's own `logs`/`inspect` calls by LOG_READ_TIMEOUT_MS; and the tcp
-// probe carries a socket timeout because a dropped SYN produces neither
-// `connect` nor `error`. Note that `readinessTimeoutMs` alone does not do this:
-// the poll loop only tests its deadline BETWEEN probes, so one probe that never
-// returns hangs forever inside a perfectly valid budget. Steps are the
-// exception — a legitimate test suite has no defensible default ceiling, and
-// per-step timeouts are #26.
+// it is a run that never ends and never tears down. Every such call goes
+// through `boundedPodman`, which does its OWN timing rather than passing node's
+// `timeout:` option — see that function, and note that the option it replaces
+// did not merely fail to bound a `podman exec`, it reported the hung call as a
+// SUCCESS. Steps are bounded by `step.timeoutMs` (#26, per step because a lint
+// step and a browser suite do not want the same ceiling); readiness probes and
+// postReadyCommands by the container's own readiness budget; sandbar's own
+// `logs`/`inspect` calls by LOG_READ_TIMEOUT_MS; and the tcp probe carries a
+// socket timeout because a dropped SYN produces neither `connect` nor `error`.
+// Note that `readinessTimeoutMs` alone does not do this: the poll loop only
+// tests its deadline BETWEEN probes, so one probe that never returns hangs
+// forever inside a perfectly valid budget.
 //
-// The `log` follower (#31) is the second exception, and its bound is a kill
-// rather than a timeout: `podman logs -f` is unbounded BY DESIGN, so what makes
-// it safe is that `waitForReady` owns it in a `finally` and kills it on every
-// path out — ready, timeout, or throw. It is deliberately not registered with
-// `onCleanup`: that registry never forgets an action, so one entry per
-// container per bringup would grow without limit.
+// A step that exceeds its bound is a gate RED, not a HARD-ERROR — the same
+// argument as D5. A suite that hangs is nearly always the branch's own code (a
+// test awaiting a promise that never resolves, a reporter that never exits),
+// not the environment, so the implementer gets another attempt with a trace
+// naming the step and the bound; a hang that IS environmental recurs, exhausts
+// the attempt budget and lands on NEEDS-HUMAN carrying that same trace.
+//
+// There is deliberately no bound on the gate as a WHOLE. A gate run stops at
+// the first red, so one hung step costs exactly one step's bound; a second
+// number would only add a way to kill a legitimately slow run without being
+// able to say which step it killed. The residual is that a stack of N slow but
+// PASSING steps can run for the sum of their bounds — finite, and computable by
+// the operator from the config in front of them.
+//
+// Killing the step is not the end of it: killing the `podman exec` CLIENT does
+// not touch the process inside the container (also pinned against real podman),
+// so a timed-out step leaves its work running, burning CPU beside the next
+// attempt and skewing whatever the next gate run measures. The only handle
+// podman offers that is total, and that needs no tools in an image sandbar does
+// not control, is the container itself: `reapTimedOutStep` removes it. For an
+// `attempt` container that is free — the next gate run recreates it anyway —
+// and for an `issue` one it is recreated on the spot, so the "it came up once
+// and every attempt depends on it" contract still holds when the next gate run
+// asserts it.
+//
+// The `log` follower (#31) is the one thing here with no deadline at all, and
+// its bound is a kill rather than a timeout: `podman logs -f` is unbounded BY
+// DESIGN, so what makes it safe is that `waitForReady` owns it in a `finally`
+// and kills it on every path out — ready, timeout, or throw. It is deliberately
+// not registered with `onCleanup`: that registry never forgets an action, so
+// one entry per container per bringup would grow without limit.
 //
 // What covers a SIGNAL is weaker, and worth stating exactly rather than
 // waving at. On SIGINT/SIGTERM the trapped cleanup tears the pod down, and a
@@ -180,6 +208,84 @@ import { RUNTIME } from "./runtime.js";
 const exec = promisify(execFile);
 
 const MAX_BUFFER = 50 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// Bounded podman calls (#26)
+// ---------------------------------------------------------------------------
+// Every podman call that could take arbitrarily long goes through
+// `boundedPodman`, and it does the timing ITSELF rather than passing node's
+// `timeout:` option — because on a `podman exec` that option is a green-on-red.
+//
+// Node's timeout kills the child with SIGTERM, and `podman exec` EXITS 0 on
+// SIGTERM. Node's exit handler reports an error only for a non-zero code or a
+// non-null signal, so the call RESOLVES, with whatever partial output had been
+// flushed and no indication anything went wrong. A hung test suite would be a
+// GREEN gate; a hung `exec` readiness probe would mark its container ready; a
+// hung postReadyCommand would report a seeded database. All three were live —
+// the readiness probe and the postReadyCommands have carried `timeout:` since
+// #24 and neither has ever been able to fail. Pinned in
+// gate-stack-podman.test.ts, because it is a fact about podman, not about node.
+//
+// So the deadline is ours, the signal is SIGKILL (which podman cannot exit 0
+// from, and which cannot be ignored — a client that swallowed SIGTERM would
+// reintroduce the very hang this closes), and `timedOut` is a flag set by the
+// timer, never inferred from the exit code.
+//
+// It also never throws for a process-level failure. Every caller here has to
+// tell "it failed" from "it never answered" — a readiness probe that exits 1 is
+// not ready, one that hangs is not ready AND has left a process behind — and an
+// exception collapses those into one channel.
+type BoundedResult = {
+  readonly stdout: string;
+  readonly stderr: string;
+  // null when the process was killed rather than exiting on its own.
+  readonly exitCode: number | null;
+  readonly timedOut: boolean;
+  readonly maxBufferExceeded: boolean;
+  // Node's own message ("Command failed: …"), for prose. "" on success.
+  readonly errorMessage: string;
+};
+
+function boundedPodman(
+  args: readonly string[],
+  timeoutMs: number,
+): Promise<BoundedResult> {
+  return new Promise((resolve) => {
+    let killedByTimer = false;
+    const child = execFile(
+      RUNTIME,
+      [...args],
+      { maxBuffer: MAX_BUFFER },
+      (err, stdout, stderr) => {
+        clearTimeout(timer);
+        const e = err as
+          | (Error & { code?: number | string; signal?: string })
+          | null;
+        resolve({
+          stdout,
+          stderr,
+            exitCode:
+            e === null ? 0 : typeof e.code === "number" ? e.code : null,
+          // `err !== null` closes the boundary race: a step that exits 0 in the
+          // same tick the timer fires was not killed, and reporting it as a
+          // timeout would be a false red costing an implementation attempt.
+          timedOut: killedByTimer && e !== null,
+          maxBufferExceeded: e?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+          errorMessage: e?.message ?? "",
+        });
+      },
+    );
+    const timer = setTimeout(() => {
+      killedByTimer = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+  });
+}
+
+// Did the call exit 0 on its own?
+function boundedOk(r: BoundedResult): boolean {
+  return r.exitCode === 0 && !r.timedOut && !r.maxBufferExceeded;
+}
 
 export const READY_POLL_INTERVAL_MS = 500;
 
@@ -496,14 +602,25 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
 }
 
 async function readPortBindings(podName: string): Promise<Map<number, number>> {
-  const { stdout } = await exec(RUNTIME, [
-    "pod",
-    "inspect",
-    podName,
-    "--format",
-    "{{json .InfraConfig.PortBindings}}",
-  ]);
-  return parsePortBindings(stdout);
+  const r = await boundedPodman(
+    [
+      "pod",
+      "inspect",
+      podName,
+      "--format",
+      "{{json .InfraConfig.PortBindings}}",
+    ],
+    LOG_READ_TIMEOUT_MS,
+  );
+  if (!boundedOk(r)) {
+    throw new SandbarError(
+      `gate stack: could not read the port bindings of pod ${podName}` +
+        (r.timedOut
+          ? ` (${RUNTIME} pod inspect timed out)`
+          : `: ${r.errorMessage}`),
+    );
+  }
+  return parsePortBindings(r.stdout);
 }
 
 type BringUpCtx = {
@@ -557,28 +674,32 @@ async function bringUp(
   for (const c of containers) {
     const containerName = ctx.nameOf(c);
     for (const command of c.postReadyCommands) {
-      try {
-        // Bounded by the container's readiness budget: post-ready setup is
-        // bringup, and an unbounded exec here hangs the run holding the lock
-        // exactly as a hung probe would. `CI=true` is passed for the same
-        // reason steps get it — a migration or seed script that branches on it
-        // must not see a different environment than the steps that follow.
-        await exec(RUNTIME, stepExecArgs(containerName, command), {
-          maxBuffer: MAX_BUFFER,
-          timeout: c.readinessTimeoutMs,
-        });
-      } catch (err) {
-        // Post-ready setup is part of the container's contract — a failing
-        // command means every step runs against a half-initialized service.
-        throw new ContainerBringupError(
-          containerName,
-          `gate stack: postReadyCommand ${JSON.stringify(command)} failed in ` +
-            `container '${c.name}': ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          await logTail(containerName),
-        );
-      }
+      // Bounded by the container's readiness budget: post-ready setup is
+      // bringup, and an unbounded exec here hangs the run holding the lock
+      // exactly as a hung probe would. `CI=true` is passed for the same
+      // reason steps get it — a migration or seed script that branches on it
+      // must not see a different environment than the steps that follow.
+      const r = await boundedPodman(
+        stepExecArgs(containerName, command),
+        c.readinessTimeoutMs,
+      );
+      if (boundedOk(r)) continue;
+      // Post-ready setup is part of the container's contract — a failing
+      // command means every step runs against a half-initialized service. A
+      // command that HANGS is the same thing and used to be worse than a slow
+      // one: with node's `timeout:` doing the killing, a seed script that
+      // never returned was reported as having succeeded.
+      throw new ContainerBringupError(
+        containerName,
+        `gate stack: postReadyCommand ${JSON.stringify(command)} ` +
+          (r.timedOut
+            ? `did not finish within the container's ${c.readinessTimeoutMs}ms ` +
+              `readiness budget and was killed, in container '${c.name}'. ` +
+              "Raise `readinessTimeoutMs` if the setup is genuinely this slow."
+            : `failed in container '${c.name}': ${r.errorMessage}`) +
+          (r.stderr.trim() ? `\n${stripAnsi(r.stderr).trim()}` : ""),
+        await logTail(containerName),
+      );
     }
   }
 }
@@ -681,18 +802,22 @@ async function probeOnce(
 ): Promise<{ ready: boolean; detail: string }> {
   switch (readiness.kind) {
     case "exec": {
-      try {
-        await exec(RUNTIME, ["exec", containerName, ...readiness.argv], {
-          maxBuffer: MAX_BUFFER,
-          timeout: timeoutMs,
-        });
-        return { ready: true, detail: "" };
-      } catch (err) {
-        return {
-          ready: false,
-          detail: err instanceof Error ? err.message : String(err),
-        };
-      }
+      const r = await boundedPodman(
+        ["exec", containerName, ...readiness.argv],
+        timeoutMs,
+      );
+      if (boundedOk(r)) return { ready: true, detail: "" };
+      // A probe that never returns is NOT ready, and saying so is the whole
+      // point of doing the timing here rather than through node's `timeout:`,
+      // which would have killed the client, seen it exit 0, and reported the
+      // container ready — an `exec` curl against a service that accepts and
+      // then never answers is the exact shape this module's header describes.
+      return {
+        ready: false,
+        detail: r.timedOut
+          ? `probe did not return within ${timeoutMs}ms`
+          : r.errorMessage,
+      };
     }
     case "log": {
       if (watcher === null) {
@@ -964,16 +1089,15 @@ function probeTcp(
 // Whether the container is up right now. `null` means the question could not be
 // answered — inspect itself flaked — which is never treated as evidence either way.
 async function isRunning(containerName: string): Promise<boolean | null> {
-  try {
-    const { stdout } = await exec(
-      RUNTIME,
-      ["inspect", "--format", "{{.State.Running}}", containerName],
-      { timeout: LOG_READ_TIMEOUT_MS },
-    );
-    return stdout.trim() === "true";
-  } catch {
-    return null;
-  }
+  const r = await boundedPodman(
+    ["inspect", "--format", "{{.State.Running}}", containerName],
+    LOG_READ_TIMEOUT_MS,
+  );
+  // A timed-out inspect is the flake case, not a "false": read as one it would
+  // report a live container as having exited, which is a HARD-ERROR from
+  // `assertIssueContainersAlive` and a bringup failure from `throwIfDead`.
+  if (!boundedOk(r)) return null;
+  return r.stdout.trim() === "true";
 }
 
 async function throwIfDead(
@@ -997,13 +1121,22 @@ async function logTail(
   // the byte count, and 40 lines of a JSON dump or a minified bundle overflows
   // it — losing the one diagnostic D9 exists to provide, precisely when the log
   // is biggest.
-  const r = await exec(
-    RUNTIME,
+  const r = await boundedPodman(
     ["logs", "--tail", String(lines), containerName],
-    { maxBuffer: MAX_BUFFER, timeout: LOG_READ_TIMEOUT_MS },
-  ).catch(() => null);
-  if (r === null) return "(logs unavailable)";
+    LOG_READ_TIMEOUT_MS,
+  );
   const text = stripAnsi(`${r.stdout}${r.stderr}`).trim();
+  // A timed-out read keeps whatever it got — this is the diagnostic a hung
+  // step's trace leans on entirely, so half of it beats none — but says that
+  // it is partial, because a tail silently cut short reads as a log that just
+  // stopped.
+  if (r.timedOut) {
+    const note =
+      `(log read timed out after ${LOG_READ_TIMEOUT_MS}ms; this tail may be ` +
+      "incomplete)";
+    return text ? `${text}\n${note}` : note;
+  }
+  if (!boundedOk(r)) return "(logs unavailable)";
   return text || "(empty)";
 }
 
@@ -1110,46 +1243,63 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     }
     const containerName = ctx.nameOf(container);
     const banner = `\n== ${step.name} (${step.in})\n`;
-    try {
-      const r = await exec(RUNTIME, stepExecArgs(containerName, step.command), {
-        maxBuffer: MAX_BUFFER,
-      });
+    const r = await boundedPodman(
+      stepExecArgs(containerName, step.command),
+      step.timeoutMs,
+    );
+    if (boundedOk(r)) {
       stdout += banner + stripAnsi(r.stdout);
       stderr += stripAnsi(r.stderr);
-    } catch (err) {
-      const e = err as {
-        stdout?: string;
-        stderr?: string;
-        code?: number | string;
-      };
-      // Node reports a maxBuffer kill with a STRING code, so it would otherwise
-      // land below as a plain `exitCode: 1` with silently truncated output —
-      // a verbose but passing suite reading as a real, unexplained failure that
-      // reproduces identically every attempt until the budget dies. Name it.
-      const overflowed = e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
-      const note = overflowed
+      continue;
+    }
+
+    // Named, because otherwise the two kills below are indistinguishable from
+    // an ordinary red: node reports a maxBuffer kill with a STRING code, so it
+    // would land as a plain `exitCode: 1` with silently truncated output — a
+    // verbose but PASSING suite reading as a real, unexplained failure that
+    // reproduces identically every attempt until the budget dies — and a
+    // timeout arrives with no output and no exit code at all.
+    const note = r.timedOut
+      ? `\n\n[sandbar] step '${step.name}' was still running after ` +
+        `${step.timeoutMs}ms and was killed (this step's \`timeoutMs\`, or ` +
+        "sandbar's default for one). A step that exceeds its bound is a red " +
+        "gate, not an infrastructure failure: the usual cause is the branch's " +
+        "own code — a test awaiting a promise that never resolves, a suite " +
+        "whose reporter never exits. The step's own output above is only what " +
+        "it had flushed before the kill and is often empty, so the diagnosis " +
+        "is usually in the container logs. Raise `timeoutMs` for this step if " +
+        "the work is genuinely this slow.\n"
+      : r.maxBufferExceeded
         ? `\n\n[sandbar] step '${step.name}' produced more than ` +
           `${MAX_BUFFER} bytes of output and was killed; the output above is ` +
           "truncated and the exit code is unknown. This is an output-volume " +
           "failure, not necessarily a test failure — quieten the step's " +
           "reporter.\n"
         : "";
-      // Stop at the first red. Every later step tends to read what an earlier
-      // one built, so running them would bury the real failure under derived
-      // ones: a test suite that fails because the build step before it never
-      // produced anything reports N failures that are all one failure.
-      return withContainerLogs(
-        {
-          ok: false,
-          stdout: stdout + banner + stripAnsi(e.stdout ?? "") + note,
-          stderr: stderr + stripAnsi(e.stderr ?? ""),
-          exitCode: typeof e.code === "number" ? e.code : 1,
-          failedStep: step.name,
-          containerLogs: "",
-        },
-        ctx,
-      );
-    }
+
+    // Stop at the first red. Every later step tends to read what an earlier
+    // one built, so running them would bury the real failure under derived
+    // ones: a test suite that fails because the build step before it never
+    // produced anything reports N failures that are all one failure.
+    //
+    // The container logs are collected BEFORE the reap below — removing the
+    // container first would throw away the one diagnostic a hang leaves.
+    const red = await withContainerLogs(
+      {
+        ok: false,
+        stdout: stdout + banner + stripAnsi(r.stdout) + note,
+        stderr: stderr + stripAnsi(r.stderr),
+        // 124 is GNU `timeout`'s convention, and the alternative is worse than
+        // arbitrary: a killed process has no exit code, so the honest-looking
+        // `1` is indistinguishable from a suite that ran and failed once.
+        exitCode: r.timedOut ? 124 : (r.exitCode ?? 1),
+        failedStep: step.name,
+        containerLogs: "",
+      },
+      ctx,
+    );
+    if (r.timedOut) await reapTimedOutStep(container, containerName, ctx);
+    return red;
   }
   return {
     ok: true,
@@ -1159,6 +1309,71 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     failedStep: null,
     containerLogs: "",
   };
+}
+
+// Kill the work a timed-out step left running inside its container (#26).
+//
+// The `podman exec` client is dead by the time this runs, and that is all the
+// kill accomplished: the process it started keeps running in the container
+// (pinned in gate-stack-podman.test.ts). Leaving it there means a wedged suite
+// burning CPU beside the next attempt's gate and, for anything stateful,
+// skewing what that gate measures — the failure the timeout was supposed to
+// END, made quieter rather than fixed.
+//
+// The container is the only handle that is total. Killing the process directly
+// would mean either a `kill` binary in an image sandbar does not control, or
+// matching argv against `podman top` output and walking its PPID column — both
+// of which fail exactly where a hang is most likely, on a test runner that has
+// spawned children of its own.
+async function reapTimedOutStep(
+  container: ResolvedStackContainer,
+  containerName: string,
+  ctx: RunGateCtx,
+): Promise<void> {
+  const removed = await boundedPodman(
+    ["rm", "-f", "-t", "0", containerName],
+    LOG_READ_TIMEOUT_MS,
+  );
+  if (!boundedOk(removed)) {
+    // Not fatal, and not silent. The verdict is already decided, and the next
+    // gate run force-removes this container by name before recreating it — so
+    // throwing here would trade a red gate for a HARD-ERROR over a leftover
+    // that clears itself. But a survivor burns CPU until then, so say so.
+    const why = removed.timedOut
+      ? `\`${RUNTIME} rm\` timed out`
+      : removed.stderr.trim() || removed.errorMessage;
+    console.error(
+      `gate stack: could not remove container '${containerName}' after its ` +
+        "step timed out, so the timed-out work may still be running inside " +
+        `it: ${why}`,
+    );
+  }
+  // An `attempt` container is recreated by the next gate run anyway. An
+  // `issue` one is not — and `assertIssueContainersAlive` would then find it
+  // missing and report an infrastructure failure that this reap, not the
+  // environment, caused. Put it back, at the cost of re-running its
+  // postReadyCommands.
+  if (container.lifecycle !== "issue") return;
+  try {
+    await bringUp([container], {
+      podName: ctx.podName,
+      worktreePath: ctx.worktreePath,
+      nameOf: ctx.nameOf,
+      hostPorts: ctx.hostPorts,
+    });
+  } catch (err) {
+    // Deliberately not swallowed, even though it costs the red gate we were
+    // about to return: a stack whose issue container will not come back up IS
+    // an infrastructure failure, and HARD-ERROR retries it on a fresh stack.
+    // The context is printed because the throw alone reads as a spontaneous
+    // bringup failure with no mention of the timeout that caused it.
+    console.error(
+      `gate stack: step timed out in issue-lifecycle container ` +
+        `'${container.name}', and recreating it failed. The gate's timeout ` +
+        "verdict is being discarded in favour of the bringup failure below.",
+    );
+    throw err;
+  }
 }
 
 // Collect a labelled log tail for every stack container onto a RED gate (#24 D9).

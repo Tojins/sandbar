@@ -568,8 +568,178 @@ describe.runIf(available)(
       },
       180_000,
     );
+
+    // #26. Before this, a step that hung hung the issue, the outer loop and the
+    // single-instance lock forever, and the operator's only signal was a run
+    // that had printed nothing for hours. A red gate at least spends an attempt
+    // and moves.
+    it(
+      "a step that exceeds its timeout is a red gate naming the step and the bound",
+      async () => {
+        stack = await startStack({
+          stackId: STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            steps: [
+              {
+                name: "hangs",
+                in: "runner",
+                // Prints, then never returns: a suite whose reporter never
+                // exits, which is the shape that actually happens.
+                command: ["sh", "-c", "echo about-to-hang; sleep 600"],
+                timeoutMs: 3_000,
+              },
+              { name: "never", in: "runner", command: ["sh", "-c", "echo RAN-ANYWAY"] },
+            ],
+          }),
+        });
+
+        const started = Date.now();
+        const red = await stack.runGate();
+        // The bound is real, not just reported: the call returned near it.
+        expect(Date.now() - started).toBeLessThan(60_000);
+        expect(red.ok).toBe(false);
+        expect(red.failedStep).toBe("hangs");
+        // A killed process has no exit code, and `1` would be indistinguishable
+        // from a suite that ran and failed.
+        expect(red.exitCode).toBe(124);
+        expect(red.stdout).toContain("was still running after 3000ms");
+        // Stops at the first red like any other failure.
+        expect(`${red.stdout}${red.stderr}`).not.toContain("RAN-ANYWAY");
+        // D9, and it matters most here: a hang's own output is usually empty,
+        // so the container logs are the whole diagnosis. They are collected
+        // BEFORE the reap below removes the container.
+        expect(red.containerLogs).toContain("--- container runner (last");
+      },
+      180_000,
+    );
+
+    // The note #26 makes about killing the step: the `podman exec` CLIENT dying
+    // does nothing to the process in the container (pinned below), so without
+    // a reap the timed-out work keeps running — burning CPU beside the next
+    // attempt and skewing whatever the next gate run measures.
+    it(
+      "the timed-out work is reaped: an attempt container is removed, an issue one recreated",
+      async () => {
+        stack = await startStack({
+          stackId: STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              // `issue` + `hold` is the one shape that may legally be stepped
+              // into and survive attempts, so it is where a runaway would
+              // otherwise live for the whole issue.
+              {
+                name: "held",
+                image: IMAGE,
+                lifecycle: "issue",
+                mounts: [{ hostPath: "marker.txt", containerPath: "/fixture/marker.txt" }],
+                hold: true,
+              },
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            steps: [
+              // Satisfies the #29 reachability rule; also proves the timeout
+              // stops the run rather than the run never getting that far.
+              { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
+              { name: "hangs-in-held", in: "held", command: ["sleep", "601"], timeoutMs: 2_000 },
+            ],
+          }),
+        });
+
+        const idOf = async (name: string): Promise<string | null> =>
+          await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", cName(name)])
+            .then((r) => r.stdout.trim())
+            .catch(() => null);
+        const heldBefore = await idOf("held");
+        expect(heldBefore).not.toBeNull();
+
+        expect((await stack.runGate()).failedStep).toBe("hangs-in-held");
+
+        // Recreated, not merely restarted and not left with the runaway in it:
+        // a new id is what proves the reap happened, and `assertIssueContainersAlive`
+        // would otherwise find it missing on the next gate run and report an
+        // infrastructure failure this reap had caused.
+        const heldAfter = await idOf("held");
+        expect(heldAfter).not.toBeNull();
+        expect(heldAfter).not.toBe(heldBefore);
+        const { stdout } = await exec(RUNTIME, ["exec", cName("held"), "ps", "-eo", "args"]);
+        expect(stdout).not.toContain("sleep 601");
+
+        // …and the stack still works, which is the point of recreating rather
+        // than leaving a hole where the container was.
+        const after = await stack.runGate();
+        expect(after.failedStep).toBe("hangs-in-held");
+      },
+      240_000,
+    );
   },
 );
+
+// Why `boundedPodman` does its own timing instead of passing node's `timeout:`
+// option (#26). Both facts below are about PODMAN, not about node, and both
+// were discovered by running it — which is the only reason the option looks
+// safe in a diff.
+describe.runIf(available)("podman exec under a killed client", () => {
+  const NAME = cName("killprobe");
+
+  beforeEach(async () => {
+    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
+    await exec(RUNTIME, ["run", "-d", "--name", NAME, IMAGE, "sleep", "infinity"]);
+  }, 60_000);
+
+  afterEach(async () => {
+    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
+  }, 60_000);
+
+  // The green-on-red this whole mechanism exists to avoid. Node's `timeout:`
+  // kills the child with SIGTERM; `podman exec` EXITS 0 on SIGTERM; node
+  // reports an error only for a non-zero code or a non-null signal — so the
+  // call RESOLVES. A hung test suite would have been a GREEN gate, a hung
+  // `exec` readiness probe a container reported ready, a hung postReadyCommand
+  // a database reported seeded.
+  it(
+    "node's `timeout:` option reports a hung `podman exec` as SUCCESS",
+    async () => {
+      const r = await exec(RUNTIME, ["exec", NAME, "sleep", "600"], {
+        timeout: 1_500,
+      });
+      // Not a rejection. This is the assertion.
+      expect(r.stdout).toBe("");
+    },
+    60_000,
+  );
+
+  // …and the kill bought nothing either way, which is why a timeout has to
+  // reap the container rather than just report.
+  it.each(["SIGTERM", "SIGKILL"] as const)(
+    "the in-container process survives the client dying of %s",
+    async (signal) => {
+      const marker = `sleep 60${signal === "SIGTERM" ? 2 : 3}`;
+      const child = spawn(RUNTIME, ["exec", NAME, ...marker.split(" ")]);
+      const closed = new Promise((r) => child.on("close", r));
+      await new Promise((r) => setTimeout(r, 800));
+      child.kill(signal);
+      await closed;
+      await new Promise((r) => setTimeout(r, 500));
+
+      const { stdout } = await exec(RUNTIME, ["exec", NAME, "ps", "-eo", "args"]);
+      expect(stdout).toContain(marker);
+
+      // Removing the container IS total, which is what `reapTimedOutStep` uses.
+      await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]);
+      await expect(
+        exec(RUNTIME, ["exec", NAME, "ps", "-eo", "args"]),
+      ).rejects.toThrow();
+    },
+    60_000,
+  );
+});
 
 // The follower itself (#31), against real podman. The end-to-end log-readiness
 // tests above are coverage, not regression tests: on this host the log driver
