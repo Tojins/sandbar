@@ -137,6 +137,16 @@ export async function runResolveLoop(
   log: ResolveLogger = () => undefined,
 ): Promise<ResolveOutcome> {
   const primaryIssueAnchor = await adapter.getIssueBody(issue.id);
+  // getIssueBody renders title + body + COMMENTS (issue-anchor.ts), and since
+  // #30 Phase 4a runs before the merge — so a sibling that terminated
+  // NEEDS-INFO / NEEDS-HUMAN / NEEDS-UI-PROTOTYPE this cycle already carries
+  // sandbar's handoff comment by the time this reads it, which it did not when
+  // finalise ran after the merge. That is the right side of the trade (knowing
+  // a sibling did not land is context, not noise), and the comments are all
+  // BOT_COMMENT_PREFIX-stamped so their provenance is legible — but they are
+  // written TO A HUMAN and contain imperatives ("push a fix on this branch",
+  // "reply 'no prototype needed'"). If a resolve agent is ever seen acting on
+  // one, this is the line that let it see it.
   const relatedIssueAnchors: { issue: IssueRef; body: string }[] = [];
   for (const r of relatedIssues) {
     if (r.id === issue.id) continue;
