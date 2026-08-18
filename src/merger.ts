@@ -57,17 +57,26 @@
 // it wasn't its fault. Heavy-handed on purpose: the alternative is landing an
 // unverified sha, which in the consuming repo means deploying it.
 //
-// EVERY throw out of this function is a `MergerError` (#33). The loop writes to
-// the tracker as it goes — a branch it cannot land is commented on and stripped
+// Every throw that can follow a tracker write is a `MergerError` (#33). The
+// loop writes as it goes — a branch it cannot land is commented on and stripped
 // of `ready-for-agent` on the spot, while applying the handoff label is Phase
 // 4b's job — so from the first skip onward there are issues sitting on no queue
 // at all until finalise runs. `MergerError.partial` is the only thing that
 // survives a halt, and run.ts reaches it through `instanceof MergerError`, so a
-// raw `SandbarError` out of `getIssueBody` (which throws by design) or a raw
+// raw `SandbarError` out of `getIssueBody` (which throws by design), a raw
 // throw out of `runGate` (#24 D5: a dead issue-lifecycle container is infra,
-// not a red) would leave every issue parked earlier in the cycle commented,
-// un-queued and unlabelled. Wrapping is not absorbing: the run still halts
-// loud and the message still names the underlying failure.
+// not a red), or a raw ENOSPC out of the log sink would leave every issue
+// parked earlier in the cycle commented, un-queued and unlabelled. Wrapping is
+// not absorbing: the run still halts loud, the message still names the
+// underlying failure, and the original error rides along as `cause`.
+//
+// Two exclusions, both deliberate. Throws BEFORE the first write (a malformed
+// issue id out of `sortIssuesAsc`, the opening `getHeadSha`) are left raw —
+// there is nothing to carry, and the top-level handler prints a stack this
+// branch does not. Throws AFTER the cycle lands are left raw for the opposite
+// reason: a partial claiming `merged: []` would then be false, and a partial
+// that lies is worse than none. `landed` in runMergerWithAdapter is the line
+// between them.
 //
 // Each surviving merge → `gh issue close <n>`. The close runs AFTER the
 // irreversible push, so a transient gh/network blip on it must not strand the
@@ -307,8 +316,14 @@ export class MergerError extends Error {
   // The orchestrator finalises this before it stops.
   readonly partial: MergerSummary | undefined;
 
-  constructor(message: string, partial?: MergerSummary) {
-    super(message);
+  constructor(
+    message: string,
+    partial?: MergerSummary,
+    // The error this one wraps, when it wraps one (see `asHalt`). run.ts prints
+    // its stack for anything that isn't an operator-actionable SandbarError.
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
     this.name = "MergerError";
     this.partial = partial;
   }
@@ -376,11 +391,6 @@ export async function runMergerWithAdapter(
   const projectAnchor = opts.projectAnchor ?? "";
   const closeRetries = opts.closeRetries ?? CLOSE_MAX_RETRIES;
   const sleep = opts.sleep ?? defaultSleep;
-  const emit = async (line: string): Promise<void> => {
-    if (log) await log(line);
-  };
-  const resolveLog: ResolveLogger = (line) => emit(line);
-
   // Every exit from this function after its first tracker write has to carry
   // that write to Phase 4. The loop below comments on an issue and drops
   // `ready-for-agent`, but applying the HANDOFF label is Phase 4b's job — so
@@ -392,26 +402,57 @@ export async function runMergerWithAdapter(
   // rather than absorbed: the run still halts loud and the message still names
   // the underlying failure, but the tracker state reaches Phase 4 first (#33).
   //
-  // `merged` is always `[]`, never the local array. A halt means nothing
-  // landed, and that is true by construction here: the merges exist only in the
-  // ephemeral merger worktree, which run.ts removes in its `finally`. run.ts
-  // asserts it, so a copy that "helpfully" forwarded them would trade one halt
-  // for a more confusing one. An unexpected throw can leave that worktree
-  // mid-merge with MERGE_HEAD present; that has no bearing on the partial,
-  // which describes tracker writes already durable on the forge, not the state
-  // of a directory about to be deleted.
+  // `merged` is `[]` on every one of these, never the local array — see
+  // `landed` for the exact reason that is a fact rather than a hope, and for
+  // the one window where it stops being one.
+  //
+  // The original error rides along as `cause`. Without it an unexpected bug —
+  // as opposed to a designed `SandbarError` — arrives at run.ts's merger-halted
+  // branch as a bare message, and that branch is precisely the one that does
+  // NOT reach the top-level handler that would have printed a stack.
   const asHalt =
     (context: string) =>
     (err: unknown): never => {
       if (err instanceof MergerError) throw err;
       const msg = err instanceof Error ? err.message : String(err);
-      throw new MergerError(`${context}: ${msg}`, {
-        merged: [],
-        skipped,
-        pushed: false,
-        unclosed: [],
-      });
+      throw new MergerError(
+        `${context}: ${msg}`,
+        { merged: [], skipped, pushed: false, unclosed: [] },
+        { cause: err },
+      );
     };
+
+  // Flipped the instant this cycle's work reaches origin. Before that point a
+  // halt provably landed nothing — the merges exist only in the ephemeral
+  // merger worktree run.ts removes in its `finally` — so `merged: []` and
+  // `pushed: false` in a partial are facts. After it they would be lies, and a
+  // partial that lies is worse than no partial: run.ts would report a halt,
+  // finalise only the skipped, and leave the landed issues open, queued and
+  // unclosed while the source branch has already moved. So past that point
+  // failures are NOT wrapped — they go to the top-level handler with their
+  // stack intact.
+  //
+  // Residual window, accepted: the verified path's fast-forward happens INSIDE
+  // runVerifiedLanding, which logs one line after it (`verify: fast-forwarded
+  // …`). A throw from that single log write is still wrapped and would report
+  // `merged: []` against a source branch that did move. `fastForwardSource`
+  // itself cannot throw (it catches and returns `rejected`), so that log line
+  // is the whole of it. The direct path has no such window — `adapter.push()`
+  // sits out here, and `landed` flips before anything else runs.
+  let landed = false;
+  const emit = async (line: string): Promise<void> => {
+    if (!log) return;
+    try {
+      await log(line);
+    } catch (err) {
+      // #33 entered through the log sink instead of `gh`: an ENOSPC on the run
+      // log after the loop's first skip strands every issue parked so far, and
+      // `no merges, no push` below fires exactly when EVERY issue was parked.
+      if (landed) throw err;
+      asHalt("Merger log write failed")(err);
+    }
+  };
+  const resolveLog: ResolveLogger = (line) => emit(line);
 
   // Verified mode only: capture the sha the merger worktree started at — the
   // state to revert the WHOLE cycle to when the forge rejects the composed
@@ -629,9 +670,13 @@ export async function runMergerWithAdapter(
       // what the first one already applied.
       await adapter.resetHardSha(verified.cycleBaseSha).catch(haltVerified);
       for (const issue of merged) {
-        const n = issueNumberOf(issue);
-        await adapter
-          .commentOnIssue(
+        // The whole body, not a `.catch` per call: `buildForgeUnverifiedComment`
+        // is evaluated as an ARGUMENT, so it runs before the promise it feeds
+        // exists and a throw from it lands outside any `.catch` attached to
+        // that promise. Same for `issueNumberOf`.
+        try {
+          const n = issueNumberOf(issue);
+          await adapter.commentOnIssue(
             n,
             buildForgeUnverifiedComment({
               detail: landing.detail,
@@ -642,15 +687,20 @@ export async function runMergerWithAdapter(
               verifiedSha: landing.lastSha,
               hasResolveCommits: landing.resolveCommits,
             }),
-          )
-          .catch(haltVerified);
-        await adapter.removeLabel(n, READY_FOR_AGENT_LABEL).catch(haltVerified);
-        skipped.push({ issue, reason: "forge-unverified" });
-        await emit(`skip #${n} reason=forge-unverified`);
+          );
+          await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+          skipped.push({ issue, reason: "forge-unverified" });
+          await emit(`skip #${n} reason=forge-unverified`);
+        } catch (err) {
+          haltVerified(err);
+        }
       }
       return { merged: [], skipped, pushed: false, unclosed: [] };
     }
 
+    // Origin has moved. From here `merged: []` would be a lie, so nothing below
+    // is wrapped — see `landed`.
+    landed = true;
     await emit(
       `verify landed ${landing.sha} after ${landing.rounds} round(s); closing ${merged.length} issue(s)`,
     );
@@ -699,6 +749,8 @@ export async function runMergerWithAdapter(
     });
   }
 
+  // Origin has moved — see `landed`.
+  landed = true;
   await emit(`push ok; closing ${merged.length} issue(s)`);
   return {
     merged,

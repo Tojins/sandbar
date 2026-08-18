@@ -587,10 +587,23 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           );
         } catch (err) {
           if (err instanceof MergerError) {
-            console.error(`Merger halted: ${err.message}`);
+            // A MergerError built by the merger's `asHalt` wraps an underlying
+            // error as `cause`. When that was an unexpected bug rather than an
+            // operator-actionable SandbarError, its stack is the only thing
+            // that locates it — and THIS branch is the one that does not reach
+            // the top-level handler below, which would have printed it. Same
+            // rule as that handler: SandbarError prints as its message alone.
+            const cause = err.cause;
+            const trace =
+              cause instanceof Error && !(cause instanceof SandbarError)
+                ? `\n${cause.stack ?? cause.message}`
+                : "";
+            console.error(`Merger halted: ${err.message}${trace}`);
             halt = true;
             cleanupReason = "merger-halted";
-            await runLogger.appendOrchestrator(`merger halted: ${err.message}`);
+            await runLogger.appendOrchestrator(
+              `merger halted: ${err.message}${trace}`,
+            );
             // The halt stops the OUTER loop; it must not strand issues the
             // merger already commented on and stripped `ready-for-agent` from.
             // Those need their handoff label applied before we stop, or they

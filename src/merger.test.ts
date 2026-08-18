@@ -788,9 +788,10 @@ describe("runMergerWithAdapter — an unexpected throw inside the loop (#33)", (
     const throwing: MergerAdapter = {
       ...adapter,
       async getIssueBody(id) {
-        // Gated on #40 having been de-labelled, because the resolve loop for
-        // #40 reads #42's body first as sibling context — a throw there would
-        // strand nothing and would not exercise this at all.
+        // Gated on #40 having been parked, because #42's body is ALSO read as
+        // sibling context during #40's own resolve loop, before anything has
+        // been written — a throw there strands nothing and would exercise none
+        // of this.
         if (id === "42" && calls.removedLabels.length > 0) {
           throw new SandbarError("gh: API rate limit exceeded");
         }
@@ -877,10 +878,81 @@ describe("runMergerWithAdapter — an unexpected throw inside the loop (#33)", (
     ]);
   });
 
+  it("halts with the partial when the LOG SINK throws after a skip", async () => {
+    // #33 entered through `emit` instead of `gh`. `no merges, no push` fires
+    // exactly when every issue in the cycle was parked, and it is the first
+    // thing after the loop — an ENOSPC on the run-log volume there would strand
+    // all of them.
+    const { adapter } = makeAdapter({
+      merges: ["conflict"],
+      agents: [
+        {
+          stdout: "<reason>collide</reason>\n<promise>ABANDON</promise>",
+          leavesConflict: true,
+        },
+      ],
+    });
+
+    const err = await runMergerWithAdapter([issue(40)], adapter, (line) => {
+      if (line === "no merges, no push") {
+        throw new Error("ENOSPC: no space left on device, write");
+      }
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(MergerError);
+    expect((err as MergerError).message).toContain("ENOSPC");
+    expect((err as MergerError).partial?.skipped.map((s) => s.issue.id)).toEqual([
+      "40",
+    ]);
+  });
+
+  it("does NOT wrap a log failure once the push has landed", async () => {
+    // The other side of the boundary. Past the push, `merged: []` and
+    // `pushed: false` would both be false, and a partial that lies is worse
+    // than none: run.ts would report a halt, finalise only the skipped, and
+    // leave the landed issues open, queued and unclosed against a source branch
+    // that has already moved. Raw throw → top-level handler, stack intact.
+    const { adapter } = makeAdapter({ merges: ["ok"], gates: [{ ok: true }] });
+
+    const err = await runMergerWithAdapter([issue(40)], adapter, (line) => {
+      if (line.startsWith("push ok;")) {
+        throw new Error("ENOSPC: no space left on device, write");
+      }
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(MergerError);
+    expect((err as Error).message).toContain("ENOSPC");
+  });
+
+  it("carries the original error as `cause` so run.ts can print a stack", async () => {
+    // Without it an unexpected BUG (not a designed SandbarError) reaches
+    // run.ts's merger-halted branch as a bare message — and that branch is the
+    // one that does not reach the top-level handler that prints stacks. The
+    // fix would otherwise have made unexpected failures quieter than before it.
+    const { adapter } = makeAdapter({ merges: ["ok"], gates: [{ ok: true }] });
+    const bug = new TypeError("Cannot read properties of undefined (reading 'ok')");
+    const throwing: MergerAdapter = {
+      ...adapter,
+      async npmInstall() {
+        throw bug;
+      },
+    };
+
+    const err = await runMergerWithAdapter([issue(40)], throwing).catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(MergerError);
+    expect((err as MergerError).cause).toBe(bug);
+  });
+
   it("passes a MergerError through untouched rather than re-wrapping it", async () => {
-    // Only one call inside the loop can raise one today (`closeMergedIssues`
-    // runs after it), but double-wrapping would bury the partial the inner
-    // error already carries.
+    // A GUARD, not a pin: nothing inside the loop constructs a MergerError
+    // today (every `new MergerError` is post-loop, and `closeMergedIssues` is
+    // documented never to throw), so this also passes against the pre-fix code.
+    // It is here because double-wrapping would bury the partial the inner error
+    // already carries, and the wrapper is now applied in two nested places.
     const { adapter } = makeAdapter({ merges: ["ok"], gates: [{ ok: true }] });
     const inner = new MergerError("inner halt", {
       merged: [],
@@ -902,7 +974,6 @@ describe("runMergerWithAdapter — an unexpected throw inside the loop (#33)", (
     expect(err).toBe(inner);
   });
 });
-
 
 // ---------------------------------------------------------------------------
 // Verified merge mode (#22) — the forge gates the landing.
