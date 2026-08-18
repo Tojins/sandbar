@@ -57,6 +57,18 @@
 // it wasn't its fault. Heavy-handed on purpose: the alternative is landing an
 // unverified sha, which in the consuming repo means deploying it.
 //
+// EVERY throw out of this function is a `MergerError` (#33). The loop writes to
+// the tracker as it goes — a branch it cannot land is commented on and stripped
+// of `ready-for-agent` on the spot, while applying the handoff label is Phase
+// 4b's job — so from the first skip onward there are issues sitting on no queue
+// at all until finalise runs. `MergerError.partial` is the only thing that
+// survives a halt, and run.ts reaches it through `instanceof MergerError`, so a
+// raw `SandbarError` out of `getIssueBody` (which throws by design) or a raw
+// throw out of `runGate` (#24 D5: a dead issue-lifecycle container is infra,
+// not a red) would leave every issue parked earlier in the cycle commented,
+// un-queued and unlabelled. Wrapping is not absorbing: the run still halts
+// loud and the message still names the underlying failure.
+//
 // Each surviving merge → `gh issue close <n>`. The close runs AFTER the
 // irreversible push, so a transient gh/network blip on it must not strand the
 // merged work (issue #14): the close is retried with backoff, and the loop is
@@ -369,6 +381,38 @@ export async function runMergerWithAdapter(
   };
   const resolveLog: ResolveLogger = (line) => emit(line);
 
+  // Every exit from this function after its first tracker write has to carry
+  // that write to Phase 4. The loop below comments on an issue and drops
+  // `ready-for-agent`, but applying the HANDOFF label is Phase 4b's job — so
+  // between those two moments the issue is on no queue at all, invisible to
+  // the planner and to a human filtering on `agent-stuck`. `MergerError.partial`
+  // is the only channel that survives a halt (run.ts finalises it, then stops),
+  // and run.ts's `instanceof MergerError` check is what routes to it, so
+  // anything else thrown out of the loop or the landing is re-thrown WRAPPED
+  // rather than absorbed: the run still halts loud and the message still names
+  // the underlying failure, but the tracker state reaches Phase 4 first (#33).
+  //
+  // `merged` is always `[]`, never the local array. A halt means nothing
+  // landed, and that is true by construction here: the merges exist only in the
+  // ephemeral merger worktree, which run.ts removes in its `finally`. run.ts
+  // asserts it, so a copy that "helpfully" forwarded them would trade one halt
+  // for a more confusing one. An unexpected throw can leave that worktree
+  // mid-merge with MERGE_HEAD present; that has no bearing on the partial,
+  // which describes tracker writes already durable on the forge, not the state
+  // of a directory about to be deleted.
+  const asHalt =
+    (context: string) =>
+    (err: unknown): never => {
+      if (err instanceof MergerError) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new MergerError(`${context}: ${msg}`, {
+        merged: [],
+        skipped,
+        pushed: false,
+        unclosed: [],
+      });
+    };
+
   // Verified mode only: capture the sha the merger worktree started at — the
   // state to revert the WHOLE cycle to when the forge rejects the composed
   // result. Carried on the mode object itself so the landing branch below can
@@ -380,127 +424,136 @@ export async function runMergerWithAdapter(
     : null;
 
   for (const issue of sortIssuesAsc(issues)) {
-    const n = issueNumberOf(issue);
-    const relatedIssues = cycle.filter((c) => c.id !== issue.id);
+    try {
+      const n = issueNumberOf(issue);
+      const relatedIssues = cycle.filter((c) => c.id !== issue.id);
 
-    await emit(`merge-attempt #${n} ${issue.branch}`);
-    const preMergeSha = await adapter.getHeadSha();
-    const m = await adapter.mergeNoFf(issue);
+      await emit(`merge-attempt #${n} ${issue.branch}`);
+      const preMergeSha = await adapter.getHeadSha();
+      const m = await adapter.mergeNoFf(issue);
 
-    if (!m.ok) {
-      await emit(`conflict #${n} entering resolve-loop`);
-      const outcome = await runResolveLoop(
-        issue,
-        relatedIssues,
-        { kind: "conflict" },
-        adapter,
-        { projectAnchor, preMergeSha },
-        resolveLog,
-      );
-      if (outcome.kind === "abandon") {
-        if (outcome.mergeInProgress) {
-          await adapter.abortMerge();
-        } else {
-          await adapter.resetHardSha(preMergeSha);
-        }
-        if (outcome.silent) {
-          // Silent abandon: no comment, no label flip. The orchestrator's
-          // finalize will either delete the branch + leave it on the queue
-          // (fresh attempt next cycle) or escalate to human attention, based
-          // on the per-issue retry count it tracks in runState.
-          skipped.push({ issue, reason: "silent-noop" });
-          await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
+      if (!m.ok) {
+        await emit(`conflict #${n} entering resolve-loop`);
+        const outcome = await runResolveLoop(
+          issue,
+          relatedIssues,
+          { kind: "conflict" },
+          adapter,
+          { projectAnchor, preMergeSha },
+          resolveLog,
+        );
+        if (outcome.kind === "abandon") {
+          if (outcome.mergeInProgress) {
+            await adapter.abortMerge();
+          } else {
+            await adapter.resetHardSha(preMergeSha);
+          }
+          if (outcome.silent) {
+            // Silent abandon: no comment, no label flip. The orchestrator's
+            // finalize will either delete the branch + leave it on the queue
+            // (fresh attempt next cycle) or escalate to human attention, based
+            // on the per-issue retry count it tracks in runState.
+            skipped.push({ issue, reason: "silent-noop" });
+            await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
+            continue;
+          }
+          await adapter.commentOnIssue(
+            n,
+            buildAbandonComment({
+              mode: "conflict",
+              reason: outcome.reason,
+              attempts: RESOLVE_MAX_ATTEMPTS,
+            }),
+          );
+          await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+          skipped.push({ issue, reason: "conflict" });
+          await emit(`skip #${n} reason=conflict resolve-abandon: ${outcome.reason}`);
           continue;
         }
-        await adapter.commentOnIssue(
-          n,
-          buildAbandonComment({
-            mode: "conflict",
-            reason: outcome.reason,
-            attempts: RESOLVE_MAX_ATTEMPTS,
-          }),
-        );
-        await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
-        skipped.push({ issue, reason: "conflict" });
-        await emit(`skip #${n} reason=conflict resolve-abandon: ${outcome.reason}`);
+        merged.push(issue);
+        await emit(`merged #${n} (via resolve-loop)`);
         continue;
       }
-      merged.push(issue);
-      await emit(`merged #${n} (via resolve-loop)`);
-      continue;
-    }
 
-    const inst = await adapter.npmInstall();
-    if (!inst.ok) {
-      await adapter.resetHardSha(preMergeSha);
-      await adapter.commentOnIssue(n, INSTALL_FAILED_COMMENT);
-      await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
-      skipped.push({ issue, reason: "install-failed" });
-      await emit(`skip #${n} reason=install-failed`);
-      continue;
-    }
-
-    const g = await adapter.runGate();
-    if (!g.ok) {
-      if (onGateRed) {
-        await onGateRed(issue.id, {
-          stdout: g.stdout,
-          stderr: g.stderr,
-          failedStep: g.failedStep,
-          exitCode: g.exitCode,
-          containerLogs: g.containerLogs,
-        });
+      const inst = await adapter.npmInstall();
+      if (!inst.ok) {
+        await adapter.resetHardSha(preMergeSha);
+        await adapter.commentOnIssue(n, INSTALL_FAILED_COMMENT);
+        await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+        skipped.push({ issue, reason: "install-failed" });
+        await emit(`skip #${n} reason=install-failed`);
+        continue;
       }
-      await emit(
-        `gate-red #${n} failedStep=${g.failedStep ?? "-"} exitCode=${g.exitCode}; entering resolve-loop`,
-      );
-      const outcome = await runResolveLoop(
-        issue,
-        relatedIssues,
-        {
-          kind: "gate-red",
-          initialOutput: {
+
+      const g = await adapter.runGate();
+      if (!g.ok) {
+        if (onGateRed) {
+          await onGateRed(issue.id, {
             stdout: g.stdout,
             stderr: g.stderr,
             failedStep: g.failedStep,
             exitCode: g.exitCode,
             containerLogs: g.containerLogs,
+          });
+        }
+        await emit(
+          `gate-red #${n} failedStep=${g.failedStep ?? "-"} exitCode=${g.exitCode}; entering resolve-loop`,
+        );
+        const outcome = await runResolveLoop(
+          issue,
+          relatedIssues,
+          {
+            kind: "gate-red",
+            initialOutput: {
+              stdout: g.stdout,
+              stderr: g.stderr,
+              failedStep: g.failedStep,
+              exitCode: g.exitCode,
+              containerLogs: g.containerLogs,
+            },
           },
-        },
-        adapter,
-        { projectAnchor, preMergeSha },
-        resolveLog,
-      );
-      if (outcome.kind === "abandon") {
-        await adapter.resetHardSha(preMergeSha);
-        if (outcome.silent) {
-          // Same silent-abandon handling as the conflict path — the agent
-          // reverted the merge commit instead of fixing the gate. Treat as a
-          // fresh-attempt candidate.
-          skipped.push({ issue, reason: "silent-noop" });
-          await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
+          adapter,
+          { projectAnchor, preMergeSha },
+          resolveLog,
+        );
+        if (outcome.kind === "abandon") {
+          await adapter.resetHardSha(preMergeSha);
+          if (outcome.silent) {
+            // Same silent-abandon handling as the conflict path — the agent
+            // reverted the merge commit instead of fixing the gate. Treat as a
+            // fresh-attempt candidate.
+            skipped.push({ issue, reason: "silent-noop" });
+            await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
+            continue;
+          }
+          await adapter.commentOnIssue(
+            n,
+            buildAbandonComment({
+              mode: "gate-red",
+              reason: outcome.reason,
+              attempts: RESOLVE_MAX_ATTEMPTS,
+            }),
+          );
+          await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+          skipped.push({ issue, reason: "gate-red" });
+          await emit(`skip #${n} reason=gate-red resolve-abandon: ${outcome.reason}`);
           continue;
         }
-        await adapter.commentOnIssue(
-          n,
-          buildAbandonComment({
-            mode: "gate-red",
-            reason: outcome.reason,
-            attempts: RESOLVE_MAX_ATTEMPTS,
-          }),
-        );
-        await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
-        skipped.push({ issue, reason: "gate-red" });
-        await emit(`skip #${n} reason=gate-red resolve-abandon: ${outcome.reason}`);
+        merged.push(issue);
+        await emit(`merged #${n} (gate-red recovered via resolve-loop)`);
         continue;
       }
-      merged.push(issue);
-      await emit(`merged #${n} (gate-red recovered via resolve-loop)`);
-      continue;
-    }
 
-    merged.push(issue);
-    await emit(`merged #${n}`);
+      merged.push(issue);
+      await emit(`merged #${n}`);
+    } catch (err) {
+      // Not a hypothetical throw site: `getIssueBody` throws by design when
+      // `gh` fails (see realAdapter below), and `runGate` throws — rather than
+      // reddening — when an issue-lifecycle container has died under it
+      // (#24 D5). Either lands here AFTER an earlier issue in this same cycle
+      // was commented on and de-labelled.
+      asHalt(`Merge loop failed on issue #${issue.id}`)(err);
+    }
   }
 
   if (merged.length === 0) {
@@ -515,22 +568,12 @@ export async function runMergerWithAdapter(
     // issues end with `ready-for-agent` stripped and no handoff label: off the
     // planner's list and off every human's filter.
     //
-    // This re-throws rather than absorbing: verified landing reaches the forge
-    // over the network and through `gh`, so unlike the local merge path it has
-    // genuine infrastructure failures (an unreachable API for three consecutive
-    // polls, an unreadable response, a `gh` without the right scope). Those must
-    // still stop the run loudly — MergerError is precisely a loud halt that
-    // finalises first.
-    const asHalt = (err: unknown): never => {
-      if (err instanceof MergerError) throw err;
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new MergerError(`Verified merge failed: ${msg}`, {
-        merged: [],
-        skipped,
-        pushed: false,
-        unclosed: [],
-      });
-    };
+    // Wrapping matters at least as much here as in the loop: verified landing
+    // reaches the forge over the network and through `gh`, so unlike the local
+    // merge path it has genuine infrastructure failures (an unreachable API for
+    // three consecutive polls, an unreadable response, a `gh` without the right
+    // scope).
+    const haltVerified = asHalt("Verified merge failed");
 
     const landing = await runVerifiedLanding(
       {
@@ -546,7 +589,7 @@ export async function runMergerWithAdapter(
         ...(verified.sleep ? { sleep: verified.sleep } : {}),
         ...(verified.now ? { now: verified.now } : {}),
       },
-    ).catch(asHalt);
+    ).catch(haltVerified);
 
     if (landing.kind === "fatal") {
       await emit(`verify fatal: ${landing.detail}`);
@@ -584,7 +627,7 @@ export async function runMergerWithAdapter(
       // Wrapped like the landing itself: this loop writes tracker state issue
       // by issue, so a `gh` failure on the second of three must not discard
       // what the first one already applied.
-      await adapter.resetHardSha(verified.cycleBaseSha).catch(asHalt);
+      await adapter.resetHardSha(verified.cycleBaseSha).catch(haltVerified);
       for (const issue of merged) {
         const n = issueNumberOf(issue);
         await adapter
@@ -600,8 +643,8 @@ export async function runMergerWithAdapter(
               hasResolveCommits: landing.resolveCommits,
             }),
           )
-          .catch(asHalt);
-        await adapter.removeLabel(n, READY_FOR_AGENT_LABEL).catch(asHalt);
+          .catch(haltVerified);
+        await adapter.removeLabel(n, READY_FOR_AGENT_LABEL).catch(haltVerified);
         skipped.push({ issue, reason: "forge-unverified" });
         await emit(`skip #${n} reason=forge-unverified`);
       }

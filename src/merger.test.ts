@@ -306,7 +306,12 @@ describe("runMergerWithAdapter — conflict enters resolve loop", () => {
     ]);
   });
 
-  it("abandon path + removeLabel fails: mergeAll propagates the error (fail loud, does not swallow)", async () => {
+  it("abandon path + removeLabel fails: halts loud, naming the underlying failure (#33)", async () => {
+    // Still fail-loud, still not swallowed — but as a MergerError, because that
+    // is the only class run.ts routes to Phase 4 (#33). Nothing is stranded in
+    // this particular arrangement: the label removal is what de-queues an
+    // issue, and it is the call that failed, so #42 is still `ready-for-agent`
+    // and needs no handoff — hence an empty partial rather than a missing one.
     const { adapter } = makeAdapter({
       merges: ["conflict"],
       agents: [
@@ -322,7 +327,15 @@ describe("runMergerWithAdapter — conflict enters resolve loop", () => {
         throw new SandbarError(`merger: failed to remove label from issue #${n}`);
       },
     };
-    await expect(runMergerWithAdapter([issue(42)], throwing)).rejects.toThrow(SandbarError);
+    const err = await runMergerWithAdapter([issue(42)], throwing).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(MergerError);
+    expect((err as MergerError).message).toContain(
+      "failed to remove label from issue #42",
+    );
+    expect((err as MergerError).partial?.merged).toEqual([]);
+    expect((err as MergerError).partial?.skipped).toEqual([]);
   });
 
   it("conflict + silent abort (agent COMMITTED, no merge in progress, HEAD unchanged): skips with reason silent-noop, NO comment or label change", async () => {
@@ -753,6 +766,143 @@ describe("runMergerWithAdapter — logging", () => {
     expect(lines.some((l) => l.startsWith("skip #42 reason=gate-red"))).toBe(true);
   });
 });
+
+describe("runMergerWithAdapter — an unexpected throw inside the loop (#33)", () => {
+  it("carries the issues it already parked out on MergerError.partial", async () => {
+    // The concrete cycle from #33: #40 conflicts and the resolve loop abandons,
+    // so the merger comments on it and strips `ready-for-agent` — Phase 4b has
+    // not yet applied the handoff label. Then #42 conflicts too and the `gh`
+    // call for its sibling context fails. Unwrapped, that SandbarError skips
+    // run.ts's `instanceof MergerError` branch entirely and #40 ends commented,
+    // un-queued and unlabelled: off the planner's list and off every human
+    // filter.
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict", "conflict"],
+      agents: [
+        {
+          stdout: "<reason>collide</reason>\n<promise>ABANDON</promise>",
+          leavesConflict: true,
+        },
+      ],
+    });
+    const throwing: MergerAdapter = {
+      ...adapter,
+      async getIssueBody(id) {
+        // Gated on #40 having been de-labelled, because the resolve loop for
+        // #40 reads #42's body first as sibling context — a throw there would
+        // strand nothing and would not exercise this at all.
+        if (id === "42" && calls.removedLabels.length > 0) {
+          throw new SandbarError("gh: API rate limit exceeded");
+        }
+        return adapter.getIssueBody(id);
+      },
+    };
+
+    const err = await runMergerWithAdapter(
+      [issue(40), issue(42)],
+      throwing,
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(MergerError);
+    // Loud: the halt names what actually failed, it is not absorbed into a
+    // generic "merge phase failed".
+    expect((err as MergerError).message).toContain("rate limit");
+    expect((err as MergerError).message).toContain("#42");
+    const partial = (err as MergerError).partial;
+    expect(partial?.skipped.map((s) => [s.issue.id, s.reason])).toEqual([
+      ["40", "conflict"],
+    ]);
+    // The tracker writes the partial describes genuinely happened.
+    expect(calls.comments.map((c) => c.n)).toEqual([40]);
+    expect(calls.removedLabels).toEqual([{ n: 40, label: READY_FOR_AGENT_LABEL }]);
+  });
+
+  it("reports no merges even when branches had merged before the throw", async () => {
+    // run.ts asserts `partial.merged` is empty on the grounds that a halt means
+    // nothing landed — true here because the merge commits live only in the
+    // ephemeral merger worktree, which is removed in run.ts's `finally`.
+    // Forwarding the local `merged` array would trip that assertion and replace
+    // this halt with a more confusing one.
+    const { adapter } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, gateRed()],
+    });
+    const throwing: MergerAdapter = {
+      ...adapter,
+      async getIssueBody(id) {
+        throw new SandbarError(`no body for #${id}`);
+      },
+    };
+
+    const err = await runMergerWithAdapter(
+      [issue(40), issue(42)],
+      throwing,
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(MergerError);
+    expect((err as MergerError).partial?.merged).toEqual([]);
+    expect((err as MergerError).partial?.pushed).toBe(false);
+  });
+
+  it("wraps a throwing gate — #24 D5 throws rather than reddens on a dead issue container", async () => {
+    // The second live throw site from #33: `adapter.runGate` is the merger
+    // stack's, and a container whose lifecycle is `issue` dying mid-cycle
+    // (the OOM-killed database) is infra, so it throws instead of returning a
+    // red. By then #40 has already been parked.
+    const { adapter } = makeAdapter({
+      merges: ["conflict", "ok"],
+      agents: [
+        {
+          stdout: "<reason>collide</reason>\n<promise>ABANDON</promise>",
+          leavesConflict: true,
+        },
+      ],
+    });
+    const throwing: MergerAdapter = {
+      ...adapter,
+      async runGate() {
+        throw new Error("container db is not running");
+      },
+    };
+
+    const err = await runMergerWithAdapter(
+      [issue(40), issue(42)],
+      throwing,
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(MergerError);
+    expect((err as MergerError).message).toContain("container db is not running");
+    expect((err as MergerError).partial?.skipped.map((s) => s.issue.id)).toEqual([
+      "40",
+    ]);
+  });
+
+  it("passes a MergerError through untouched rather than re-wrapping it", async () => {
+    // Only one call inside the loop can raise one today (`closeMergedIssues`
+    // runs after it), but double-wrapping would bury the partial the inner
+    // error already carries.
+    const { adapter } = makeAdapter({ merges: ["ok"], gates: [{ ok: true }] });
+    const inner = new MergerError("inner halt", {
+      merged: [],
+      skipped: [{ issue: issue(40), reason: "conflict" }],
+      pushed: false,
+      unclosed: [],
+    });
+    const throwing: MergerAdapter = {
+      ...adapter,
+      async mergeNoFf() {
+        throw inner;
+      },
+    };
+
+    const err = await runMergerWithAdapter([issue(40)], throwing).catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBe(inner);
+  });
+});
+
 
 // ---------------------------------------------------------------------------
 // Verified merge mode (#22) — the forge gates the landing.
