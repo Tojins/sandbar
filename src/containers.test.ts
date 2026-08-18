@@ -21,6 +21,7 @@ import {
   networkNameFor,
   podNameFor,
   runScope,
+  scopedResourcePrefix,
   stackContainerNameFor,
 } from "./naming.js";
 
@@ -163,11 +164,90 @@ describe("cleanupOrphanContainers", () => {
     expect(calls).toContainEqual(["pod", "rm", "-f", "-t", "0", podNameFor(A, "42")]);
   });
 
-  it("returns empty when the runtime is not installed", async () => {
-    const missing: RuntimeExec = async () => {
-      throw new Error("spawn podman ENOENT");
+  it("throws rather than silently sweeping nothing when podman fails", async () => {
+    // Preflight hard-fails on a missing runtime before the lock, so a failure
+    // here is a real podman fault. Swallowed, it read as "no debris found" and
+    // surfaced later as an unrelated-looking startStack collision.
+    const broken: RuntimeExec = async () => {
+      throw new Error("podman: database is locked");
     };
-    expect(await cleanupOrphanContainers(A, missing)).toEqual([]);
+    await expect(cleanupOrphanContainers(A, broken)).rejects.toThrow(
+      /database is locked/,
+    );
+  });
+
+  // The production shape, which no single-population test exercises: our own
+  // debris, a live sibling's stack, and pre-#28 leftovers all on one host.
+  // Asserted on the surviving world rather than on `removed`, because a pod's
+  // members go with the pod and never appear in the returned list.
+  it("in a mixed world, clears exactly its own and nothing else", async () => {
+    const mine = [
+      podNameFor(A, "42"),
+      networkNameFor(A, "42"),
+      stackContainerNameFor(A, "42", "db"),
+    ];
+    const theirs = [
+      podNameFor(B, "42"),
+      networkNameFor(B, "42"),
+      stackContainerNameFor(B, "42", "db"),
+    ];
+    const legacy = [
+      "sandbar-pod-9",
+      "sandbar-net-9",
+      "sandbar-9-db",
+      "sandcastle-pod-1",
+    ];
+    const { run, state } = fakeRuntime({
+      pods: [podNameFor(A, "42"), podNameFor(B, "42"), "sandbar-pod-9", "sandcastle-pod-1"],
+      containers: [
+        stackContainerNameFor(A, "42", "db"),
+        stackContainerNameFor(B, "42", "db"),
+        "sandbar-9-db",
+      ],
+      networks: [networkNameFor(A, "42"), networkNameFor(B, "42"), "sandbar-net-9"],
+    });
+    await cleanupOrphanContainers(A, run);
+    const surviving = [...state.pods, ...state.containers, ...state.networks];
+    for (const n of mine) expect(surviving).not.toContain(n);
+    for (const n of [...theirs, ...legacy]) expect(surviving).toContain(n);
+  });
+
+  // The joint invariant the whole safety story rests on, and the one thing
+  // neither function can guarantee alone: nothing falls between them. Every
+  // sandbar-named resource on the host is cleared by the sweep, reported by the
+  // debris report, or provably another run's — never silently unaccounted for.
+  it("leaves nothing unaccounted for between the sweep and the report", async () => {
+    const world = {
+      pods: [podNameFor(A, "42"), podNameFor(B, "7"), "sandbar-pod-9", "sandcastle-pod-1"],
+      containers: [
+        stackContainerNameFor(A, "42", "db"),
+        `sandbar-${A}-someuuid`,
+        stackContainerNameFor(B, "7", "db"),
+        "sandbar-9-db",
+        "sandbar-1a2b3c4d-5e6f-7081-9234-56789abcdef0",
+        "sandcastle-1-db",
+      ],
+      networks: [networkNameFor(A, "42"), networkNameFor(B, "7"), "sandbar-net-9"],
+    };
+    const all = [...world.pods, ...world.containers, ...world.networks];
+
+    const swept = fakeRuntime(world);
+    await cleanupOrphanContainers(A, swept.run);
+    const cleared = (name: string): boolean =>
+      ![...swept.state.pods, ...swept.state.containers, ...swept.state.networks].includes(
+        name,
+      );
+    const reported = (await findUnattributableResources(fakeRuntime(world).run)).names;
+
+    for (const name of all) {
+      const accounted =
+        cleared(name) ||
+        reported.includes(name) ||
+        name.startsWith(scopedResourcePrefix(B));
+      expect({ name, accounted }).toEqual({ name, accounted: true });
+    }
+    // ...and the two sets are disjoint: nothing is both cleared and reported.
+    for (const name of reported) expect(cleared(name)).toBe(false);
   });
 });
 
@@ -207,13 +287,17 @@ describe("findUnattributableResources", () => {
     ]);
   });
 
-  it("reports nothing when the runtime is not installed", async () => {
-    const missing: RuntimeExec = async () => {
-      throw new Error("spawn podman ENOENT");
+  it("throws rather than reporting a partial read as 'nothing to see'", async () => {
+    // The worst version of the swallowed error: it had already collected names
+    // and discarded them, so an operator was told there was no debris.
+    let calls = 0;
+    const flaky: RuntimeExec = async (args) => {
+      calls += 1;
+      if (calls === 1) return { stdout: "sandbar-pod-42" };
+      throw new Error("podman: database is locked");
     };
-    expect(await findUnattributableResources(missing)).toEqual({
-      names: [],
-      removalCommands: [],
-    });
+    await expect(findUnattributableResources(flaky)).rejects.toThrow(
+      /database is locked/,
+    );
   });
 });

@@ -27,6 +27,7 @@
 // → stuck, issuesAttempted hits maxTotalIssues → budget. MAX_ITERATIONS is a
 // defensive ceiling — the conditions above terminate first.
 
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 
 import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
@@ -179,12 +180,24 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     if (release) await release();
   });
 
-  // Derived from the string the lock was just taken on, so lock and scope
-  // agree by construction: one lock ⇔ one namespace of podman names (#28).
-  // Everything this run creates lives under it, and the sweep below reaches
-  // nothing else — a concurrent run against another workdir is invisible to us
-  // and we to it.
-  const scope = runScope(lockPaths.workDir);
+  // Derived from the CANONICAL path the lock was just taken on, so lock and
+  // scope agree: one lock ⇔ one namespace of podman names (#28). Everything
+  // this run creates lives under it, and the sweep below reaches nothing else
+  // — a concurrent run against another workdir is invisible to us and we to it.
+  //
+  // `realpathSync`, not the raw string, and not `resolve` either. The two have
+  // to partition the host IDENTICALLY, and proper-lockfile resolves symlinks on
+  // the path it locks (`realpath: true` is its default). Hash the raw string
+  // and the agreement is a coincidence of how the host spelled `config.cwd`,
+  // which `resolveConfig` passes through untouched:
+  //   - Two repos both configured `cwd: "."` hash the same `.sandbar` and share
+  //     one scope while correctly holding two locks — #28, verbatim, with this
+  //     module's own comments asserting it cannot happen.
+  //   - One workdir reached through a symlink is one lock but two scopes, so a
+  //     crashed run's debris lands in a scope no later run computes and no
+  //     report names (it IS scoped, just not ours) — invisible and unreapable.
+  // acquireLock has already mkdirSync'd the directory, so this cannot ENOENT.
+  const scope = runScope(realpathSync(lockPaths.workDir));
 
   const orphans = await cleanupOrphanContainers(scope);
   if (orphans.length > 0) {
@@ -196,7 +209,8 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   // Debris no run's scope claims: from a build predating #28, or the sandcastle
   // era. Reported rather than removed, because a bare-prefix match cannot tell
   // it from a concurrently-running old sandbar's LIVE resources — which is the
-  // failure #28 exists to end. One-time, and the commands are copy-pasteable.
+  // failure #28 exists to end. Nothing clears it but the operator, so this
+  // repeats every startup until they run the commands.
   const unattributable = await findUnattributableResources();
   if (unattributable.names.length > 0) {
     console.warn(
@@ -211,7 +225,13 @@ export async function run(rawConfig: RunConfig): Promise<void> {
 
   // Build the sandbar image in the runtime if missing. No-op when it already
   // exists, so warm runs pay only one `image exists` call. After lock
-  // acquisition so concurrent launches can't race the build.
+  // acquisition so concurrent launches against THIS workdir can't race the
+  // build — note that is all the lock buys here. Image tags are the one podman
+  // resource class the run scope does not partition (they are host-supplied
+  // names, and `config.images` maps tag → Containerfile), so two workdirs
+  // sharing a `sandboxImage` tag on one host will race the build and then
+  // silently share whichever image won. On a shared host, give each workdir its
+  // own tag.
   await ensureImages(config.images);
 
   // After the builds, because the images have to exist to be probed and a

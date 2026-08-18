@@ -36,6 +36,7 @@ import { promisify } from "node:util";
 
 import {
   ALL_RESOURCE_PREFIXES,
+  type RunScope,
   isScopedResourceName,
   scopedResourcePrefix,
 } from "./naming.js";
@@ -115,21 +116,26 @@ const KINDS: readonly ResourceKind[] = [
 // `startsWith` re-check stays: podman's name filter is a regex, so a prefix
 // containing regex metacharacters would match more than intended, and the
 // filter has historically been substring-matched on some versions.
+//
+// A failure here THROWS. It used to be swallowed as "runtime not installed",
+// which preflight has already made unreachable — it hard-fails on a missing
+// container runtime before the lock is taken, so anything reaching this catch
+// is a real podman fault (storage-lock contention, a broken `podman system`,
+// EPERM). Swallowing those was silent in the worst way: the sweep reported
+// having removed nothing, debris accumulated, and the first visible symptom was
+// an unrelated-looking `startStack` collision. Worse for the debris report,
+// which returned an empty result and thereby claimed there was nothing to see
+// while discarding names it had already collected.
 async function listByPrefix(
   kind: ResourceKind,
   prefix: string,
   run: RuntimeExec,
-): Promise<string[] | null> {
-  try {
-    const { stdout } = await run(kind.listArgs(prefix));
-    return stdout
-      .split("\n")
-      .map((s) => s.trim())
-      .filter((n) => n.startsWith(prefix));
-  } catch {
-    // runtime not installed — nothing to list, and nothing to clean
-    return null;
-  }
+): Promise<string[]> {
+  const { stdout } = await run(kind.listArgs(prefix));
+  return stdout
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((n) => n.startsWith(prefix));
 }
 
 async function remove(
@@ -147,7 +153,7 @@ async function remove(
 
 // Sweep this run's scope. Returns the names actually removed.
 export async function cleanupOrphanContainers(
-  scope: string,
+  scope: RunScope,
   run: RuntimeExec = defaultExec,
 ): Promise<readonly string[]> {
   const removed: string[] = [];
@@ -157,7 +163,6 @@ export async function cleanupOrphanContainers(
       `${scopedResourcePrefix(scope)}${kind.infix}`,
       run,
     );
-    if (names === null) return removed;
     for (const name of names) {
       if (await remove(kind, name, run)) removed.push(name);
     }
@@ -168,6 +173,9 @@ export async function cleanupOrphanContainers(
 export type UnattributableResources = {
   readonly names: readonly string[];
   // Copy-pasteable, in the order that actually works (pods before networks).
+  // A pod's members are listed separately even though `pod rm` already took
+  // them; podman's `rm -f` exits 0 on a name that is already gone, so the list
+  // stays paste-and-forget rather than needing membership resolved first.
   readonly removalCommands: readonly string[];
 };
 
@@ -185,7 +193,6 @@ export async function findUnattributableResources(
       // Note the prefix is the BARE one — an unscoped pod is `sandbar-pod-42`,
       // with the infix straight after the prefix, exactly as it was before #28.
       const listed = await listByPrefix(kind, `${prefix}${kind.infix}`, run);
-      if (listed === null) return { names: [], removalCommands: [] };
       for (const n of listed) {
         if (!isScopedResourceName(n)) found.add(n);
       }

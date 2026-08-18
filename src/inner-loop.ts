@@ -38,7 +38,7 @@ import {
   step,
 } from "./inner-loop-machine.js";
 import type { AttemptLogger } from "./logs.js";
-import { scopedResourcePrefix } from "./naming.js";
+import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { parsePromise } from "./promise-parser.js";
 import { buildPrompt, buildReviewerPrompt } from "./prompt.js";
 import { parseVerdict } from "./verdict-parser.js";
@@ -90,7 +90,7 @@ export type InnerLoopConfig = {
   readonly sandboxImage: string;
   // This run's podman resource scope (#28) — see naming.ts. Both the agent
   // sandbox container and the gate stack are named under it.
-  readonly scope: string;
+  readonly scope: RunScope;
   readonly gateStack: ResolvedGateStack;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;

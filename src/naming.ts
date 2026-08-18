@@ -7,10 +7,18 @@
 // Transition note (sandcastle → sandbar, issue #11): repos that ran an older
 // sandbar may still carry `sandcastle/issue-*` branches and `sandcastle-*`
 // containers/networks. New resources are always created with the current
-// prefixes, but the sweep/clean paths additionally recognize the LEGACY_*
-// prefixes so pre-existing artifacts are reaped rather than orphaned. Once all
-// hosts have drained their `sandcastle/*` resources, delete the LEGACY_*
-// exports and their call-site uses for a clean cutover.
+// prefixes; the LEGACY_* prefixes exist so those artifacts are not simply
+// forgotten. What happens to them differs by kind, and since #28 the two are
+// no longer the same:
+//   - BRANCHES are still cleaned automatically. They are in this repo, which
+//     this run holds the lock on, so they are unambiguously ours.
+//   - RESOURCES (containers, pods, networks) are only REPORTED, by
+//     `findUnattributableResources`. A legacy name carries no run scope, so
+//     nothing distinguishes a dead run's debris from a concurrently-running
+//     OLD sandbar's live stack — and force-removing on that guess is the #28
+//     bug itself. See containers.ts.
+// Once all hosts have drained their `sandcastle/*` artifacts, delete the
+// LEGACY_* exports and their call-site uses for a clean cutover.
 
 import { createHash } from "node:crypto";
 
@@ -60,10 +68,11 @@ export const ALL_RESOURCE_PREFIXES: readonly string[] = [
 //      predecessor of the same workdir. Nothing else is ever its business.
 //
 // The scope is derived (not random) precisely so a crashed run's debris is
-// found by the NEXT run of the same workdir. It hashes the same string the
-// lock is taken on, so the two agree by construction: same path ⇒ same lock ⇒
-// same scope; a different spelling of the same directory would already have
-// produced a second lock, so it correctly gets a second scope too.
+// found by the NEXT run of the same workdir. For that to be worth anything the
+// scope and the lock must partition the host IDENTICALLY, which is a property
+// of the CALLER, not of this function: proper-lockfile resolves symlinks on the
+// path it locks, so the caller must hand the canonical path here too. run.ts
+// realpaths it, and says why.
 //
 // Residual, accepted: a scope whose workdir is never run again leaks its
 // debris forever, because no live run may claim it. That is the price of never
@@ -75,26 +84,42 @@ export const ALL_RESOURCE_PREFIXES: readonly string[] = [
 // exactly the pre-#28 behaviour, for two specific directories on one host.
 const SCOPE_HEX_CHARS = 8;
 
-// Leading `w` (for workdir) is load-bearing, not decoration: it is what makes
-// a scoped name distinguishable from an unscoped legacy one. Hex can never
-// start with `w`, so `sandbar-w1a2b3c4d-...` cannot be confused with the old
-// agent-sandbox name `sandbar-<uuid>`, whose first segment is also 8 hex.
-export function runScope(lockedWorkDir: string): string {
+// Branded, because every guarantee below rests on the string having come from
+// `runScope`. `scopedResourcePrefix` and `isScopedResourceName` partition the
+// host's resources into "ours" and "not ours" and the sweeper force-removes the
+// first set, so a caller passing any other string (a stackId, a branch name, a
+// raw workdir) silently redraws that line. The brand makes the four consumers
+// checkable instead of leaving the invariant to a comment.
+export type RunScope = string & { readonly __runScope: unique symbol };
+
+// The leading `w` (for workdir) is load-bearing, not decoration: it is what
+// makes a scoped name distinguishable from an unscoped legacy one. Hex can
+// never start with `w`, so `sandbar-w1a2b3c4d-...` cannot be confused with the
+// pre-#28 agent-sandbox name `sandbar-<uuid>`, whose first segment is also 8
+// hex — without it, that container would read as scoped and never be reported.
+//
+// `lockedWorkDir` must be the CANONICAL path the run holds its lock on — see
+// the call in run.ts for why realpath and not the configured string.
+export function runScope(lockedWorkDir: string): RunScope {
   const hex = createHash("sha256")
     .update(lockedWorkDir)
     .digest("hex")
     .slice(0, SCOPE_HEX_CHARS);
-  return `w${hex}`;
+  return `w${hex}` as RunScope;
 }
 
 // Everything this run creates starts with this, and the sweeper's name filters
 // key on exactly this. `sandbar-w1a2b3c4d-`.
-export function scopedResourcePrefix(scope: string): string {
+export function scopedResourcePrefix(scope: RunScope): string {
   return `${RESOURCE_PREFIX}${scope}-`;
 }
 
+// The prefix is interpolated into a regex, so it is escaped — `containers.ts`
+// declines to trust podman's own name filter for exactly this reason, and it
+// would be odd to build the local check less carefully than the remote one.
 const SCOPED_NAME_RE = new RegExp(
-  `^${RESOURCE_PREFIX}w[0-9a-f]{${SCOPE_HEX_CHARS}}-`,
+  `^${RESOURCE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}` +
+    `w[0-9a-f]{${SCOPE_HEX_CHARS}}-`,
 );
 
 // True for a resource belonging to SOME run's scope — not necessarily ours.
@@ -120,16 +145,16 @@ export function isScopedResourceName(name: string): boolean {
 // `podman pod rm` reaches it, so cleanupOrphanContainers sweeps pods too.
 // ---------------------------------------------------------------------------
 
-export function networkNameFor(scope: string, stackId: string): string {
+export function networkNameFor(scope: RunScope, stackId: string): string {
   return `${scopedResourcePrefix(scope)}net-${stackId}`;
 }
 
-export function podNameFor(scope: string, stackId: string): string {
+export function podNameFor(scope: RunScope, stackId: string): string {
   return `${scopedResourcePrefix(scope)}pod-${stackId}`;
 }
 
 export function stackContainerNameFor(
-  scope: string,
+  scope: RunScope,
   stackId: string,
   name: string,
 ): string {

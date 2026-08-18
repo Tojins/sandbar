@@ -118,7 +118,12 @@ import type {
 import { SandbarError } from "./errors.js";
 import { type GateResult, stripAnsi } from "./gate.js";
 import { dirtyWorktreePaths } from "./git-ops.js";
-import { networkNameFor, podNameFor, stackContainerNameFor } from "./naming.js";
+import {
+  type RunScope,
+  networkNameFor,
+  podNameFor,
+  stackContainerNameFor,
+} from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -173,7 +178,7 @@ export type StackOptions = {
   // concurrent run against a different workdir cannot be a namesake — the
   // `pod rm -f` that recycles a stale pod below would otherwise be reaching
   // into a live sibling's stack.
-  readonly scope: string;
+  readonly scope: RunScope;
   readonly spec: ResolvedGateStack;
   // The worktree the gate is a verdict about. Must exist, with its files, before
   // this call — bind-mount sources are read at container start.

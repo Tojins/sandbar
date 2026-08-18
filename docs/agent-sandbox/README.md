@@ -53,8 +53,8 @@ Of the `Sandbox` handle, sandbar uses only `run()`, `worktreePath`, and
   defaults `--userns=keep-id`,
   uid/gid 1000, SELinux label `z`, **no `--network`**. The agent container
   therefore cannot reach the per-issue gate stack — the stack's containers all
-  join a pod on `sandbar-net-<id>` (`src/gate-stack.ts`), and the agent sandbox
-  stays networkless. Note `--userns=keep-id` is available here precisely
+  join a pod on `sandbar-<scope>-net-<id>` (`src/gate-stack.ts`), and the agent
+  sandbox stays networkless. Note `--userns=keep-id` is available here precisely
   *because* the sandbox is not in a pod; podman refuses to combine the two,
   which is why gate-stack containers have the uid rule instead.
 - **Always an explicit, pre-existing branch.** Sandbar runs
@@ -124,9 +124,12 @@ temp-branch / merge-to-host cherry-pick path in the lifecycle (only reached when
 These strings are matched by sandbar code *outside* the agent-sandbox boundary,
 so the replacement must preserve them (or update every matcher in lockstep — see
 [05](./05-reimplementation-spec.md)). Naming prefixes are now centralized in
-`src/naming.ts`; during the transition window the cleanup paths also recognize
-the legacy `sandcastle-*` / `sandcastle/*` prefixes so old artifacts on existing
-repos get swept rather than orphaned:
+`src/naming.ts`. During the transition window the cleanup paths still recognize
+the legacy `sandcastle-*` / `sandcastle/*` prefixes, but what they do with them
+differs by kind since #28: legacy **branches** are still deleted automatically,
+while legacy **podman resources** are only reported for manual removal — an
+unscoped name cannot be told apart from a concurrently-running old sandbar's
+live stack, and guessing is the bug #28 fixed:
 
 - Worktree dir layout: `<repoDir>/.sandbar/worktrees/<branch-with-slashes-as-dashes>`
   — `src/finalize.ts:283` (`worktreePathFor`) mirrors `WorktreeManager.create`.

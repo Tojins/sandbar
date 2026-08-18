@@ -116,6 +116,24 @@ describe("run scope (#28)", () => {
     expect(runScope("/a/.sandbar")).not.toBe(runScope("/b/.sandbar"));
   });
 
+  // The scope only means anything if it partitions the host the same way the
+  // LOCK does, and proper-lockfile resolves symlinks on the path it locks
+  // (`realpath: true` is its default). So `runScope` is a pure hash and the
+  // canonicalisation is the caller's job — these pin both halves of why.
+  it("is a pure hash of the string, so the caller must canonicalise", () => {
+    // Same directory, two spellings: ONE lock, and so it must be ONE scope.
+    // The caller passes realpath; if it ever passes the configured string
+    // instead, these two diverge and a crashed run's debris lands in a scope no
+    // later run computes and no report names — invisible and unreapable.
+    expect(runScope("/a/./.sandbar")).not.toBe(runScope("/a/.sandbar"));
+    // Two DIFFERENT directories both configured with a relative cwd collapse to
+    // the same string, hence the same scope, while correctly holding two locks.
+    // That is #28 verbatim, which is why run.ts hashes realpath and not
+    // `join(config.cwd, config.workDir)` — `resolveConfig` passes cwd through
+    // untouched (config.ts), so a relative one survives to here.
+    expect(runScope(".sandbar")).toBe(runScope(".sandbar"));
+  });
+
   it("is a legal podman name segment", () => {
     expect(runScope("/a/.sandbar")).toMatch(/^w[0-9a-f]{8}$/);
   });
