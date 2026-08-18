@@ -16,7 +16,13 @@
 //                              the forge's checks pass on the merge result.
 //   Phase 4 (Finalise):        Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
-//                              flip labels.
+//                              flip labels. Runs in TWO passes (#30): 4a
+//                              finalises the agent terminals BEFORE the merge
+//                              (they don't depend on it, and a merge phase that
+//                              throws something other than MergerError must not
+//                              discard a full attempt budget's worth of
+//                              questions, traces and reviewer prose), 4b
+//                              finalises the merger's own outcomes after.
 //
 // A per-run log tree at <cwd>/<workDir>/logs/run-<UTC-ISO>/ captures decisions
 // and agent output: orchestrator.log at the run root, plan.json + merger.log
@@ -42,7 +48,6 @@ import { makeEnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
 import {
   EXIT_CODE_BUDGET,
-  SILENT_NOOP_RETRY_LIMIT,
   applyCycle,
   newRunState,
   planFingerprint,
@@ -53,6 +58,10 @@ import {
   finalizeAll,
   realAdapter as realFinalizeAdapter,
 } from "./finalize.js";
+import {
+  mergeFinalizeInputs,
+  terminalFinalizeInputs,
+} from "./finalize-inputs.js";
 import {
   realVerifyAdapter,
   verifiedLandingOptionsFrom,
@@ -96,34 +105,6 @@ function pulledImagesOf(config: ResolvedConfig): readonly string[] {
   const built = new Set(config.images.map((i) => i.tag));
   const referenced = new Set(config.gateStack.containers.map((c) => c.image));
   return [...referenced].filter((i) => !built.has(i));
-}
-
-/**
- * SkipReason → the Phase-4 handoff it earns.
- *
- * Exhaustive on purpose (the `never` assignment). A ternary chain with a
- * catch-all silently gave every future skip reason `merge-gate-red`, which
- * pushes the branch and applies `agent-stuck` — plausible for some reasons and
- * wrong for others, with nothing to catch the difference. `silent-noop` is
- * handled by the caller (it needs the per-issue retry count) and never reaches
- * here.
- */
-function finalizeKindForSkip(
-  reason: Exclude<SkipReason, "silent-noop">,
-): "merge-conflict" | "forge-unverified" | "merge-gate-red" {
-  switch (reason) {
-    case "conflict":
-      return "merge-conflict";
-    case "forge-unverified":
-      return "forge-unverified";
-    case "gate-red":
-    case "install-failed":
-      return "merge-gate-red";
-    default: {
-      const never: never = reason;
-      throw new Error(`Unhandled merger skip reason: ${String(never)}`);
-    }
-  }
 }
 
 // A leaked resource is recoverable — the next cycle's `startStack` force-removes
@@ -275,6 +256,49 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   const runState = newRunState({ maxTotalIssues: config.maxTotalIssues });
   let exitCode = 0;
 
+  // One Phase-4 pass. Called twice per cycle (#30): once for the agent
+  // terminals before the merge, once for the merger's own outcomes after. The
+  // `label` is only there so the two are distinguishable in the console and the
+  // orchestrator log.
+  //
+  // A required side-effect that fails (push/comment/label/close) throws
+  // SandbarError out of finalizeAll — caught by the loud top-level handler,
+  // never swallowed here.
+  const runFinalize = async (
+    label: string,
+    inputs: readonly FinalizeInput[],
+  ): Promise<void> => {
+    if (inputs.length === 0) return;
+    const finalizeAdapter = realFinalizeAdapter({
+      cwd: config.cwd,
+      workDir: config.workDir,
+      sourceBranch: config.sourceBranch,
+    });
+    const finalizeResults = await finalizeAll(
+      inputs,
+      finalizeAdapter,
+      config.labels,
+    );
+    console.log(`\nFinalise (${label}): ${finalizeResults.length} issue(s).`);
+    for (const r of finalizeResults) {
+      const issue = r.input.issue;
+      const tag =
+        r.action.kind === "deleted-local"
+          ? "deleted local branch"
+          : r.action.kind === "delete-failed"
+            ? `delete failed (${r.action.error})`
+            : r.action.kind === "pushed"
+              ? "pushed branch"
+              : r.action.kind === "skipped-closed"
+                ? "skipped (issue already closed)"
+                : "no action";
+      console.log(`  #${issueNumberOf(issue)} ${r.input.kind} → ${tag}`);
+      await runLogger.appendOrchestrator(
+        `finalise #${issueNumberOf(issue)} ${r.input.kind} → ${tag}`,
+      );
+    }
+  };
+
   // Issue numbers merged+closed earlier in THIS run. The `gh` search backend
   // the planner lists through lags label/close writes, so without this an issue
   // merged in a prior iteration can resurface as a candidate, get re-planned,
@@ -415,6 +439,29 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       }
   
       // ---------------------------------------------------------------------
+      // Phase 4a: Finalise the agent terminals — BEFORE the merge (#30)
+      //
+      // Nothing here depends on the merge having happened: these are the
+      // issues the merger will never see. Running them after it meant any
+      // throw the merge phase produced that was not a MergerError — since #24,
+      // a ContainerBringupError from the merger stack is the live example —
+      // escaped to the top-level handler and exited before a single one was
+      // written. The cost was the whole cycle's Phase-2 output for a failure
+      // that happened after all of it: NEEDS-INFO questions never posted,
+      // NEEDS-HUMAN traces never posted and never parked (so the issue kept
+      // `ready-for-agent` and burned another full attempt budget next run),
+      // reviewer prose never posted, branches never pushed.
+      //
+      // The mirror-image risk is real but strictly smaller: a required
+      // side-effect failing here now stops the cycle before the merge. A DONE
+      // branch that misses its merge keeps its commits and its
+      // `ready-for-agent` label, so preflight classifies it `resumable` (#13)
+      // and the next run continues from where it got to — whereas the prose an
+      // agent produced once and nobody stored is simply gone.
+      // ---------------------------------------------------------------------
+      await runFinalize("agent terminals", terminalFinalizeInputs(outcomes));
+  
+      // ---------------------------------------------------------------------
       // Phase 3: Merge (procedural, in an isolated worktree off origin)
       // ---------------------------------------------------------------------
       let mergerSummary: MergerSummary | null = null;
@@ -537,133 +584,28 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       }
   
       // ---------------------------------------------------------------------
-      // Phase 4: Finalise
+      // Phase 4b: Finalise the merge outcomes
       // ---------------------------------------------------------------------
-      const finalizeInputs: FinalizeInput[] = [];
       // On a halt, `haltPartial` carries what the merger had already applied to
       // the tracker; its `merged` is empty by construction (asserted above), so
       // this only ever produces handoff inputs.
       const mergerOutcome = halt ? haltPartial : mergerSummary;
       if (mergerOutcome) {
+        const { inputs, bumpedSilentNoop } = mergeFinalizeInputs(
+          mergerOutcome,
+          runState.silentNoopAttemptsByIssue,
+        );
+        for (const [issueId, attempts] of bumpedSilentNoop) {
+          runState.silentNoopAttemptsByIssue.set(issueId, attempts);
+        }
         for (const m of mergerOutcome.merged) {
           mergedThisRun.add(issueNumberOf(m));
-          finalizeInputs.push({ kind: "merged", issue: m });
         }
-        for (const s of mergerOutcome.skipped) {
-          if (s.reason === "silent-noop") {
-            const prev = runState.silentNoopAttemptsByIssue.get(s.issue.id) ?? 0;
-            const attempts = prev + 1;
-            runState.silentNoopAttemptsByIssue.set(s.issue.id, attempts);
-            if (attempts < SILENT_NOOP_RETRY_LIMIT) {
-              finalizeInputs.push({ kind: "fresh-attempt", issue: s.issue });
-            } else {
-              finalizeInputs.push({
-                kind: "silent-noop-exhausted",
-                issue: s.issue,
-                attempts,
-              });
-            }
-            continue;
-          }
-          finalizeInputs.push({
-            kind: finalizeKindForSkip(s.reason),
-            issue: s.issue,
-          });
-        }
-      }
-      // Exhaustive over Terminal: a new terminal type that nobody maps here
-      // would silently skip finalise — no comment, no label flip — and the
-      // issue would keep `ready-for-agent` and be re-picked forever. The
-      // `never` assignment makes that a compile error instead.
-      for (const o of outcomes) {
-        const t = o.terminal;
-        switch (t.type) {
-          case "DONE":
-            // Handled by the merger above (merged / skipped).
-            break;
-          case "NEEDS-INFO":
-            finalizeInputs.push({
-              kind: "needs-info",
-              issue: o.issue,
-              questions: t.questions,
-            });
-            break;
-          case "NEEDS-UI-PROTOTYPE":
-            finalizeInputs.push({
-              kind: "needs-ui-prototype",
-              issue: o.issue,
-              uiImpact: t.uiImpact,
-              hasCommits: t.commits.length > 0,
-            });
-            break;
-          case "NEEDS-HUMAN":
-            finalizeInputs.push({
-              kind: "needs-human",
-              issue: o.issue,
-              cause: t.cause,
-              failureTrace: t.failureTrace,
-              latestReviewerProse: t.latestReviewerProse,
-            });
-            break;
-          case "NEEDS-HUMAN-REVIEW":
-            finalizeInputs.push({
-              kind: "review-budget-exhausted",
-              issue: o.issue,
-              latestReviewerProse: t.latestReviewerProse,
-            });
-            break;
-          case "HARD-ERROR":
-            finalizeInputs.push({
-              kind: "hard-error",
-              issue: o.issue,
-              hasCommits: t.commits.length > 0,
-            });
-            break;
-          default: {
-            const unhandled: never = t;
-            throw new Error(
-              `unhandled terminal in finalise: ${JSON.stringify(unhandled)}`,
-            );
-          }
-        }
-      }
-  
-      if (finalizeInputs.length > 0) {
-        const finalizeAdapter = realFinalizeAdapter({
-          cwd: config.cwd,
-          workDir: config.workDir,
-          sourceBranch: config.sourceBranch,
-        });
-        // A required side-effect that fails (push/comment/label/close) throws
-        // SandbarError out of finalizeAll — caught by the loud top-level handler
-        // below, never swallowed here.
-        const finalizeResults = await finalizeAll(
-          finalizeInputs,
-          finalizeAdapter,
-          config.labels,
-        );
-        console.log(`\nFinalise: ${finalizeResults.length} issue(s).`);
-        for (const r of finalizeResults) {
-          const issue = r.input.issue;
-          const tag =
-            r.action.kind === "deleted-local"
-              ? "deleted local branch"
-              : r.action.kind === "delete-failed"
-                ? `delete failed (${r.action.error})`
-                : r.action.kind === "pushed"
-                  ? "pushed branch"
-                  : r.action.kind === "skipped-closed"
-                    ? "skipped (issue already closed)"
-                    : "no action";
-          console.log(`  #${issueNumberOf(issue)} ${r.input.kind} → ${tag}`);
-          await runLogger.appendOrchestrator(
-            `finalise #${issueNumberOf(issue)} ${r.input.kind} → ${tag}`,
-          );
-        }
+        await runFinalize("merge outcomes", inputs);
       }
   
       // Post-push close failures (issue #14): the merges are durable on origin
-      // and Phase 4 above already dropped `ready-for-agent` for every merged
+      // and Phase 4b above already dropped `ready-for-agent` for every merged
       // issue, so the planner won't re-pick them — but they're still OPEN on the
       // tracker. Surface them as an operator-actionable list and halt loud,
       // AFTER finalise so the merged work is fully reconciled locally.

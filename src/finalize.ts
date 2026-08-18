@@ -1,7 +1,12 @@
 // Per-issue branch lifecycle + label flips + issue annotations.
 //
-// Runs after the merger. For each issue the orchestrator touched this
-// iteration, dispatches to the right side-effects given its terminal state.
+// For each issue the orchestrator touched this iteration, dispatches to the
+// right side-effects given its terminal state. Run in two passes per cycle
+// (#30): the agent terminals are finalised BEFORE the merge phase — they do not
+// depend on it, and a merge phase that dies must not take a full attempt
+// budget's worth of questions, traces and reviewer prose with it — and the
+// merger's own outcomes after. The inputs for each pass are built by
+// finalize-inputs.ts; nothing here cares which pass it is in.
 //
 // Every kind calls removeWorktreeFor — sandbox.close() in the inner-loop
 // usually has already removed the worktree, but leftover worktrees from
