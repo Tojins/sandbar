@@ -59,6 +59,45 @@ const minimal: RunConfig = {
   },
 };
 
+// #37 — `rebuildOn` on an image nothing in the gate stack runs is inert, and
+// inertness is the failure itself: the operator wrote down what the image is a
+// function of and sandbar would silently never act on it.
+describe("resolveConfig: rebuildOn must reach a gate container", () => {
+  it("accepts rebuildOn on an image the gate stack runs", () => {
+    const r = resolveConfig({
+      ...minimal,
+      images: [
+        {
+          tag: "localhost/sandbar:widgets",
+          containerfile: "Containerfile",
+          rebuildOn: ["package-lock.json"],
+        },
+      ],
+    });
+    expect(r.images[0]?.rebuildOn).toEqual(["package-lock.json"]);
+  });
+
+  it("refuses rebuildOn on an image only the agent sandbox uses", () => {
+    // The sandbox image is resolved once, when the sandbox is created — before
+    // the branch it would be a function of exists. Honouring `rebuildOn` there
+    // would be a promise sandbar cannot keep.
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        sandboxImage: "localhost/sandbar:agent",
+        images: [
+          {
+            tag: "localhost/sandbar:agent",
+            containerfile: "Containerfile",
+            rebuildOn: ["package-lock.json"],
+          },
+          { tag: "localhost/sandbar:widgets", containerfile: "Containerfile.gate" },
+        ],
+      }),
+    ).toThrow(SandbarError);
+  });
+});
+
 describe("resolveConfig", () => {
   it("fills every defaultable field from a deviations-only config", () => {
     const r = resolveConfig(minimal);
@@ -134,7 +173,11 @@ describe("resolveConfig", () => {
   it("defaults images to building the sandbox image from ./Containerfile", () => {
     const r = resolveConfig(minimal);
     expect(r.images).toEqual([
-      { tag: "localhost/sandbar:widgets", containerfile: DEFAULT_CONTAINERFILE_PATH },
+      {
+        tag: "localhost/sandbar:widgets",
+        containerfile: DEFAULT_CONTAINERFILE_PATH,
+        rebuildOn: [],
+      },
     ]);
   });
 

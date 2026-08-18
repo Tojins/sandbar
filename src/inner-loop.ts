@@ -22,6 +22,7 @@ import { podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
 import type { ResolvedGateStack } from "./config.js";
+import type { BranchImages } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { summarizeGateFailure } from "./gate.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
@@ -121,6 +122,10 @@ export type InnerLoopOptions = {
   readonly config: InnerLoopConfig;
   readonly hooks: SandboxHooks;
   readonly copyToWorktree: readonly string[];
+  // Per-branch gate images (#37). Shared across every issue in the run, because
+  // its build cache is: two branches that make the same lockfile change produce
+  // the same content-addressed tag and must not build it twice.
+  readonly branchImages?: BranchImages;
   readonly attemptLogger?: AttemptLogger;
   readonly onOrchestratorLog?: (line: string) => Promise<void> | void;
 };
@@ -193,6 +198,7 @@ async function runSandboxCycle(
   opts: InnerLoopOptions,
 ): Promise<SandboxCycleOutcome> {
   const { config } = opts;
+  const branchImages = opts.branchImages;
   let sandbox: Sandbox | null = null;
   let stack: Stack | null = null;
   const accumulated: { sha: string }[] = [];
@@ -232,6 +238,9 @@ async function runSandboxCycle(
         scope: config.scope,
         spec: config.gateStack,
         worktreePath,
+        // A thunk, not a value: the stack calls it before every gate run, and
+        // the answer changes as the agent commits (#37).
+        ...(branchImages ? { images: () => branchImages.resolve(worktreePath) } : {}),
       }),
     ]);
     if (sandboxResult.status === "fulfilled") sandbox = sandboxResult.value;

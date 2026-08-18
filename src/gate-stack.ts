@@ -205,6 +205,7 @@ import type {
   ResolvedStackContainer,
   StackMount,
 } from "./config.js";
+import { type ImageMap, ImageBuildError } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { type GateResult, stripAnsi } from "./gate.js";
 import { dirtyWorktreePaths } from "./git-ops.js";
@@ -393,6 +394,15 @@ export type StackOptions = {
   // The worktree the gate is a verdict about. Must exist, with its files, before
   // this call — bind-mount sources are read at container start.
   readonly worktreePath: string;
+  // Which image each container should actually run, for THIS worktree as it is
+  // right now (#37). Called at the top of every gate run, never cached: an
+  // image that bakes a lockfile is a function of the branch, and the branch
+  // grows between attempts — an implementer that adds a dependency in attempt 2
+  // must be gated against an image that has it.
+  //
+  // Omitted, every container runs the image its config names, which is what
+  // every stack without a `rebuildOn` image does.
+  readonly images?: () => Promise<ImageMap>;
 };
 
 export type Stack = {
@@ -489,6 +499,34 @@ export function containerRunArgs(opts: {
     args.push(c.image, ...c.args);
   }
   return args;
+}
+
+// The image a container should run under a given map (#37). An unmapped
+// container runs exactly what its config names, which is every container in
+// every stack that declares no `rebuildOn` image.
+export function imageFor(
+  container: ResolvedStackContainer,
+  map: ImageMap,
+): string {
+  return map.get(container.image) ?? container.image;
+}
+
+// The container specs as they should actually run, with images substituted
+// where the branch changed one. A pure remap rather than an extra argument on
+// every call: `containerRunArgs`, the readiness probes and the bringup error
+// messages all read `c.image`, and threading an override past each of them is
+// four chances to leave one reading the declared tag.
+export function withImages(
+  containers: readonly ResolvedStackContainer[],
+  map: ImageMap,
+): readonly ResolvedStackContainer[] {
+  if (map.size === 0) return containers;
+  return containers.map((c) => {
+    const mapped = map.get(c.image);
+    return mapped === undefined || mapped === c.image
+      ? c
+      : { ...c, image: mapped };
+  });
 }
 
 export function stepExecArgs(
@@ -628,6 +666,18 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     const issueContainers = opts.spec.containers.filter(
       (c) => c.lifecycle === "issue",
     );
+    // Brought up with the images config NAMES, deliberately, even when some of
+    // them are `rebuildOn` images the branch may already have changed (#37).
+    // Resolving here would put a per-branch build — which can fail because of
+    // the branch — outside every gate run, where its only exit is a throw, i.e.
+    // HARD-ERROR: two fresh-stack retries reproducing the same broken lockfile
+    // and then `agent-stuck` with an "environment" trace. Leaving it to the
+    // first `runGate` gives that failure the one exit that names the branch,
+    // and costs at most one extra container start on a resumed issue.
+    //
+    // Nothing of the branch runs at this point in any case: `resolveGateStack`
+    // refuses `lifecycle: "issue"` on an un-held container that mounts the
+    // worktree, and a held one's entrypoint is `sleep infinity`.
     await bringUp(issueContainers, {
       podName,
       worktreePath: opts.worktreePath,
@@ -638,6 +688,12 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     const attemptContainers = opts.spec.containers.filter(
       (c) => c.lifecycle === "attempt",
     );
+
+    // What the long-lived containers are currently running, as a tag->tag map
+    // in the same shape `opts.images` returns. Mutable and owned by the stack:
+    // it is how `runGate` knows which issue containers a changed image leaves
+    // stale, and the empty map above is the honest starting value.
+    const running = { map: new Map<string, string>() as ImageMap };
 
     return {
       podName,
@@ -652,6 +708,8 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
           worktreePath: opts.worktreePath,
           hostPorts,
           nameOf,
+          images: opts.images ?? (async () => new Map()),
+          running,
         }),
     };
   } catch (err) {
@@ -1326,6 +1384,9 @@ type RunGateCtx = {
   readonly worktreePath: string;
   readonly hostPorts: ReadonlyMap<number, number>;
   readonly nameOf: (c: ResolvedStackContainer) => string;
+  readonly images: () => Promise<ImageMap>;
+  // Mutable, owned by `startStack`: what the issue containers are running now.
+  readonly running: { map: ImageMap };
 };
 
 // The long-lived half of the stack, re-checked before every gate run.
@@ -1345,8 +1406,9 @@ type RunGateCtx = {
 // and was waved through, which is the exact failure above reached through the
 // check meant to prevent it.
 //
-// Residual, stated rather than hidden: this runs ONCE, at the top of the gate
-// run. An issue container that dies after it and before step N still reds that
+// Residual, stated rather than hidden: this runs ONCE per gate run (just after
+// the per-branch image recreate, for the reason given at the call site). An
+// issue container that dies after it and before step N still reds that
 // gate against the branch — the misblame is narrowed from "every remaining
 // attempt" to "exactly one", not eliminated. Re-checking between steps would
 // cost a podman call per step per gate run to shave one attempt off a failure
@@ -1378,11 +1440,6 @@ async function assertIssueContainersAlive(ctx: RunGateCtx): Promise<void> {
 }
 
 async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
-  // Before anything else, and deliberately OUTSIDE the try that converts
-  // bringup failures to gate red: a dead issue container must reach the caller
-  // as a throw.
-  await assertIssueContainersAlive(ctx);
-
   // The verdict is about a commit, so the tree had better BE the commit. This
   // also covers gate-2 in the merger worktree, where the resolve agent can
   // leave edits behind; the inner loop short-circuits earlier (the state
@@ -1402,11 +1459,102 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     };
   }
 
+  // Which images this commit should be gated with (#37). After the cheap
+  // checks above — a dirty tree gets no verdict at all, so there is no reason
+  // to pay a build for it — and before any container is created.
+  //
+  // A build that fails is a RED GATE, not an infrastructure failure, and this
+  // is the same argument D5 makes about `attempt` containers: the image is a
+  // function of the branch, so a lockfile that does not install is the branch's
+  // to fix. Routed to HARD-ERROR it would buy two fresh-stack retries that
+  // reproduce it exactly and then park the issue with a trace blaming the
+  // environment for a dependency the agent chose.
+  let images: ImageMap;
+  try {
+    images = await ctx.images();
+  } catch (err) {
+    if (err instanceof ImageBuildError) {
+      return {
+        ok: false,
+        stdout: "",
+        stderr:
+          `Refusing to gate: image '${err.tag}' could not be built from this ` +
+          "worktree. It declares `rebuildOn` paths that this branch changed, " +
+          "so the gate needs an image built from the branch's own " +
+          "dependencies and this branch does not produce one.\n\n" +
+          err.message,
+        exitCode: 1,
+        failedStep: `image:${err.tag}`,
+        // Deliberately empty. D9 collects container logs because the diagnosis
+        // of a failing step is often in a container the step never touched;
+        // here nothing has run yet and the build's own output is the whole
+        // diagnosis, already above.
+        containerLogs: "",
+      };
+    }
+    throw err;
+  }
+
+  // The `issue` containers are normally NOT recreated — that is the whole point
+  // of the lifecycle — but one whose image the branch just changed is running
+  // the wrong bytes, which is the same staleness the recreate-every-run rule
+  // below exists to prevent one level down. Its bringup failure is a red rather
+  // than a HARD-ERROR, and that is a deliberate exception to D5: D5 maps
+  // `issue` to infra because such a container depends only on image + env, and
+  // an image the branch authored is precisely where that stops being true.
+  const staleIssueContainers = ctx.issueContainers.filter(
+    (c) => imageFor(c, images) !== imageFor(c, ctx.running.map),
+  );
+  if (staleIssueContainers.length > 0) {
+    try {
+      await bringUp(withImages(staleIssueContainers, images), {
+        podName: ctx.podName,
+        worktreePath: ctx.worktreePath,
+        nameOf: ctx.nameOf,
+        hostPorts: ctx.hostPorts,
+      });
+    } catch (err) {
+      if (err instanceof ContainerBringupError) {
+        return withContainerLogs(
+          {
+            ok: false,
+            stdout: "",
+            stderr: err.message,
+            exitCode: 1,
+            failedStep: `container:${err.containerName}`,
+            containerLogs: "",
+          },
+          ctx,
+        );
+      }
+      throw err;
+    }
+    // Only after they are actually up. A failed recreate leaves the previous
+    // map in place so the NEXT gate run recreates them again rather than
+    // recording a state the containers never reached — which is also what keeps
+    // `assertIssueContainersAlive` honest below: `bringUp` removes before it
+    // creates, so a recreate that died left the container GONE, and a run that
+    // reported that as an infrastructure death would be blaming the environment
+    // for a container sandbar removed on the branch's behalf.
+    ctx.running.map = images;
+  }
+
+  // Deliberately OUTSIDE the try blocks that convert bringup failures to a gate
+  // red: a dead issue container must reach the caller as a throw.
+  //
+  // After the recreate above, not before it. Ordered the other way, a container
+  // the previous gate run removed and failed to recreate reads as "it came up
+  // once and something killed it" — an infra HARD-ERROR — when the truth is
+  // that the branch's own image would not start and this run was about to try
+  // again. What it still catches is unchanged: a container nothing here touched
+  // that died on its own between gate runs.
+  await assertIssueContainersAlive(ctx);
+
   // Recreated every gate run: they mount the worktree and run the branch's
   // code, so reusing one would gate an earlier attempt's process against a
   // later attempt's source.
   try {
-    await bringUp(ctx.attemptContainers, {
+    await bringUp(withImages(ctx.attemptContainers, images), {
       podName: ctx.podName,
       worktreePath: ctx.worktreePath,
       nameOf: ctx.nameOf,

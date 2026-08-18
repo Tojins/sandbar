@@ -219,6 +219,61 @@ image the stack references must already be pulled — preflight refuses with the
 exact `podman pull` command rather than pulling it, so no run does silent
 network work at startup.
 
+### `rebuildOn` — images that are a function of the branch
+
+If a gate image bakes dependencies (a `node_modules` layer, a browser, vendored
+packages) so a gate attempt installs nothing, that image is a **function of the
+branch**. The tag alone cannot express that: it exists, so it is reused, and an
+issue branch that changes the lockfile gets gated against dependencies built
+from the source branch. Both directions are silent false verdicts — a branch
+that *adds* a dependency reds with a module-not-found nobody can reproduce (and
+can burn its whole attempt budget onto `agent-stuck` for it), and a branch that
+*removes* one greens against a dependency it deleted.
+
+Declare what the image is built from and sandbar owns the rest:
+
+```ts
+images: [
+  { tag: "localhost/app-runner:gate", containerfile: "gate/Containerfile.runner",
+    rebuildOn: ["package-lock.json", "bower.json"] },
+]
+```
+
+Sandbar hashes those paths — plus the Containerfile's own bytes and the entry's
+`buildArgs` — and uses the hash, not the tag, as the cache key:
+
+- at startup the tag is rebuilt when the hash no longer matches your checkout,
+  instead of being reused because the name exists (the hash is recorded as an
+  image label, so no state file is involved);
+- before **every** gate run, including gate-2 on the merge result, the gated
+  worktree is hashed. One that matches uses the base image; one that differs
+  gets its own content-addressed tag, built from that worktree, and the stack's
+  containers — `issue`-lifecycle ones included — are recreated from it.
+
+Per-gate-run rather than per-issue on purpose: the branch grows under the loop,
+so an implementer that adds a dependency in attempt 2 must be gated against an
+image that has it. The common cases stay free — a gate run that changed nothing
+rebuilds nothing, two issues that make the same change share one build, and a
+rebuild that *is* needed hits podman's layer cache above the changed `COPY`,
+which is the work your CI does anyway. The per-branch tags are removed at the
+end of the run.
+
+An image that will not build from the branch is a **red gate** naming the image
+and carrying the build's output, not an infrastructure failure: a lockfile that
+does not install is the branch's to fix, and routing it to a retry would
+reproduce it twice and then park the issue with a trace blaming the environment.
+
+Rules: `rebuildOn` paths are repo-relative (no `..`, no leading `/`), they must
+exist in your checkout (a path that matches nothing makes the whole declaration
+inert, which is the failure above), it cannot be combined with `stdinContext`
+(that build has no context, so nothing in the repo can change it) or with an
+absolute `containerfile` (the rebuild re-roots the build at the worktree), and
+the image must be one a `gateStack` container runs. Declaring it on the agent
+sandbox's image alone is rejected: that image is resolved once, when the sandbox
+is created, before the branch it would depend on exists — and the agent can
+install into its own sandbox, so a stale layer there costs it a command rather
+than a verdict.
+
 ### Three constraints the gate stack imposes on your images and steps
 
 **A worktree-mounting image must run as root, or as your uid.** Stack containers

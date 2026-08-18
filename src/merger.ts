@@ -119,8 +119,8 @@ import {
 
 // `failedStep` is a free-form step name since #24 — it comes from the
 // consumer's `gateStack.steps`, or is one of sandbar's own pseudo-steps
-// (`worktree-clean`, `container:<name>`). It is a label in a trace, never
-// branched on.
+// (`worktree-clean`, `container:<name>`, `image:<tag>`). It is a label in a
+// trace, never branched on.
 export type MergerGateOutput = {
   readonly stdout: string;
   readonly stderr: string;

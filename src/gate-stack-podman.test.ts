@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
+import { ImageBuildError } from "./ensure-images.js";
 import {
   ContainerBringupError,
   type LogWatcher,
@@ -824,6 +825,194 @@ describe.runIf(available)(
         expect((await stack.runGate()).failedStep).toBe("hangs");
       },
       240_000,
+    );
+
+    // #37. An image that bakes a lockfile is a function of the branch, so the
+    // stack has to be able to change which image it runs BETWEEN gate runs —
+    // the branch grows under the loop, and an attempt that adds a dependency
+    // must be gated against an image that has it.
+    //
+    // The interesting half is the `issue` container. `attempt` ones are
+    // recreated every gate run regardless, so a swap could not fail to reach
+    // them; an `issue` container is deliberately long-lived, which is exactly
+    // how it would go on running the old image forever.
+    it(
+      "a changed image recreates the issue container, and an unchanged one leaves it alone",
+      async () => {
+        // `podman tag` rather than a build: the assertion is about which image
+        // the container was created from, and an alias answers it without
+        // making the test pay for a build.
+        const ALIAS = `localhost/sandbar-image-swap-test:${STACK_ID}`;
+        await exec(RUNTIME, ["tag", IMAGE, ALIAS]);
+        let swap = new Map<string, string>();
+        stack = await startStack({
+          stackId: STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          images: async () => swap,
+          spec: resolveGateStack({
+            containers: [
+              { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            steps: [
+              { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
+            ],
+          }),
+        });
+
+        const inspectOf = async (
+          name: string,
+          field: string,
+        ): Promise<string> =>
+          (
+            await exec(RUNTIME, ["inspect", "--format", field, cName(name)])
+          ).stdout.trim();
+
+        expect((await stack.runGate()).ok).toBe(true);
+        const idBefore = await inspectOf("held", "{{.Id}}");
+        expect(await inspectOf("held", "{{.ImageName}}")).toContain("mariadb");
+
+        // A second gate run with the same (empty) map must NOT churn it — the
+        // whole value of `lifecycle: "issue"` is that a database keeps its
+        // state across attempts.
+        expect((await stack.runGate()).ok).toBe(true);
+        expect(await inspectOf("held", "{{.Id}}")).toBe(idBefore);
+
+        // Now the branch changes what the image is built from.
+        swap = new Map([[IMAGE, ALIAS]]);
+        expect((await stack.runGate()).ok).toBe(true);
+        const idAfter = await inspectOf("held", "{{.Id}}");
+        expect(idAfter).not.toBe(idBefore);
+        expect(await inspectOf("held", "{{.ImageName}}")).toBe(ALIAS);
+        expect(await inspectOf("runner", "{{.ImageName}}")).toBe(ALIAS);
+
+        // …and it settles: a further run with the SAME map recreates nothing,
+        // which is the bookkeeping that keeps a per-branch image from
+        // restarting the stack on every attempt.
+        expect((await stack.runGate()).ok).toBe(true);
+        expect(await inspectOf("held", "{{.Id}}")).toBe(idAfter);
+
+        await exec(RUNTIME, ["rmi", ALIAS]).catch(() => {});
+      },
+      300_000,
+    );
+
+    // The ordering trap the recreate introduces. `bringUp` removes before it
+    // creates, so a recreate that fails leaves the issue container GONE — and
+    // `assertIssueContainersAlive` would then read sandbar's own removal as
+    // "it came up once and something killed it", i.e. an infra HARD-ERROR
+    // blaming the environment for an image the branch authored.
+    it(
+      "a failing issue-container recreate reds, and the next gate run retries it instead of reporting infra death",
+      async () => {
+        stack = await startStack({
+          stackId: STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          // An invalid reference, so `podman run` refuses instantly instead of
+          // spending a pull timeout. WHY the run fails is not what is under
+          // test — the blame path is: whatever kills a recreate leaves the
+          // container removed, and that is the state the next gate run has to
+          // read correctly.
+          images: async () => new Map([[IMAGE, "localhost/Bad_Name:nope"]]),
+          spec: resolveGateStack({
+            containers: [
+              { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            steps: [
+              { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
+            ],
+          }),
+        });
+
+        const first = await stack.runGate();
+        expect(first.ok).toBe(false);
+        expect(first.failedStep).toBe(`container:${cName("held")}`);
+
+        // The container is gone, and the second run must NOT call that an
+        // infrastructure failure — it must try the recreate again and red the
+        // same way, so the implementer keeps getting a verdict it can act on.
+        await expect(
+          exec(RUNTIME, ["inspect", "--format", "{{.Id}}", cName("held")]),
+        ).rejects.toThrow();
+        const second = await stack.runGate();
+        expect(second.ok).toBe(false);
+        expect(second.failedStep).toBe(`container:${cName("held")}`);
+      },
+      300_000,
+    );
+
+    // The blame mapping, and the reason this is not simply left to throw. A
+    // lockfile that does not install is the branch's to fix; as an infra
+    // failure it would buy two fresh-stack retries reproducing it exactly and
+    // then park the issue with a trace blaming the environment.
+    it(
+      "an image that will not build is a gate RED naming the image, not a throw",
+      async () => {
+        stack = await startStack({
+          stackId: STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          images: async () => {
+            throw new ImageBuildError(
+              "app",
+              "`podman build ...` exited with code 1.",
+              "npm error code EUSAGE\nnpm error `npm ci` can only install...",
+            );
+          },
+          spec: resolveGateStack({
+            containers: [
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            steps: [
+              { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
+            ],
+          }),
+        });
+
+        const red = await stack.runGate();
+        expect(red.ok).toBe(false);
+        expect(red.failedStep).toBe("image:app");
+        // The build's own output is the diagnosis and has to survive into the
+        // trace the implementer reads.
+        expect(red.stderr).toContain("npm error code EUSAGE");
+        // No step ran, so nothing else should look like a verdict about one.
+        expect(red.stdout).toBe("");
+      },
+      180_000,
+    );
+
+    // The dirty-tree refusal is CHEAPER than a build and comes first: a tree
+    // that gets no verdict at all should not pay for an image.
+    it(
+      "does not resolve images for a worktree it is going to refuse anyway",
+      async () => {
+        let asked = 0;
+        stack = await startStack({
+          stackId: STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          images: async () => {
+            asked += 1;
+            return new Map();
+          },
+          spec: resolveGateStack({
+            containers: [
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            steps: [
+              { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
+            ],
+          }),
+        });
+
+        await writeFile(join(repo, "uncommitted.txt"), "x\n");
+        expect((await stack.runGate()).failedStep).toBe("worktree-clean");
+        expect(asked).toBe(0);
+      },
+      180_000,
     );
   },
 );

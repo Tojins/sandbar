@@ -12,10 +12,12 @@
 // an environment/setup failure doesn't read as N independent flaky tests.
 
 // `failedStep` names the step from the consumer's `gateStack.steps`, or one of
-// two sandbar-owned pseudo-steps: `worktree-clean` (the tree held uncommitted
-// changes, so no verdict about a commit was possible) and
-// `container:<name>` (an attempt-lifecycle container failed to come up, which
-// is the branch's fault — see gate-stack.ts). `null` only when ok.
+// three sandbar-owned pseudo-steps: `worktree-clean` (the tree held uncommitted
+// changes, so no verdict about a commit was possible), `container:<name>` (an
+// attempt-lifecycle container failed to come up, which is the branch's fault —
+// see gate-stack.ts) and `image:<tag>` (an image the branch is a `rebuildOn`
+// input of would not build from this worktree, #37 — the branch's fault for the
+// same reason). `null` only when ok.
 export type GateResult = {
   readonly ok: boolean;
   readonly stdout: string;

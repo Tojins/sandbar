@@ -193,6 +193,29 @@ export type BuiltImage = {
   // that must run as the host user (`AGENT_UID: String(process.getuid?.() ?? 0)`);
   // sandbar injects no magic ARG name, it passes exactly what is declared.
   readonly buildArgs?: Readonly<Record<string, string>>;
+
+  // Repo-relative paths this image is a FUNCTION OF (#37) — a lockfile, a
+  // manifest, a patch directory. Sandbar hashes them (plus the Containerfile's
+  // own bytes, since an image is also a function of its recipe) and treats the
+  // hash as the real cache key:
+  //
+  //   - at startup, the tag is rebuilt when its recorded hash no longer matches
+  //     the build context, instead of being reused because the NAME exists;
+  //   - before every gate run, the gated worktree's hash is compared against
+  //     the base image's. A branch that changed one of these paths gets its own
+  //     image, built from that worktree, and the stack's containers are
+  //     recreated from it.
+  //
+  // Undeclared, an image that bakes dependencies is pinned to the source branch
+  // for the whole run, so a branch that adds a dependency reds the gate with a
+  // module-not-found nobody can reproduce and a branch that removes one greens
+  // against a dependency it deleted. Both are silent.
+  //
+  // Declare only what the image actually bakes. Every path listed is hashed on
+  // every gate run and a change forces a rebuild, so listing a source directory
+  // buys nothing the worktree mount doesn't already give and costs a build per
+  // attempt.
+  readonly rebuildOn?: readonly string[];
 };
 
 export type GateStackConfig = {
@@ -942,15 +965,75 @@ function resolveStackContainer(
   };
 }
 
+// The `rebuildOn` paths of one image entry, validated and deduplicated.
+//
+// They are joined against a worktree root and hashed, so every rejection here
+// is a path that would either escape that root or name nothing. Deduplicated
+// rather than rejected on repeats: the same file listed twice is a harmless
+// copy-paste, and hashing it twice would make the fingerprint depend on how
+// many times it was written down.
+function resolveRebuildOn(img: BuiltImage): readonly string[] {
+  const paths = img.rebuildOn ?? [];
+  if (paths.length === 0) return [];
+  if (img.stdinContext) {
+    throw new SandbarError(
+      `config.images: entry '${img.tag}' sets both \`stdinContext\` and ` +
+        "`rebuildOn`. A stdin-context build has no context at all, so nothing " +
+        "in the repo can enter the image and no path can change it. Drop one.",
+    );
+  }
+  // The per-branch rebuild re-roots the build at the gated worktree
+  // (`<worktree>/<containerfile>`), which an absolute path cannot express: it
+  // would rebuild from the host checkout and answer the same wrong question
+  // the whole feature exists to stop answering.
+  if (img.containerfile.startsWith("/")) {
+    throw new SandbarError(
+      `config.images: entry '${img.tag}' declares \`rebuildOn\` but its ` +
+        `containerfile ('${img.containerfile}') is absolute. A per-branch ` +
+        "rebuild builds it from the gated worktree, so the path has to be " +
+        "relative to the repo root.",
+    );
+  }
+  const out: string[] = [];
+  for (const raw of paths) {
+    const path = raw.trim();
+    if (!path) {
+      throw new SandbarError(
+        `config.images: entry '${img.tag}' has an empty \`rebuildOn\` path.`,
+      );
+    }
+    if (path.startsWith("/")) {
+      throw new SandbarError(
+        `config.images: entry '${img.tag}' has an absolute \`rebuildOn\` path ` +
+          `('${path}'). These are repo-relative — they are resolved against ` +
+          "the host checkout and against each gated worktree in turn, and an " +
+          "absolute path would name the same file both times.",
+      );
+    }
+    const segments = path.split("/");
+    if (segments.some((seg) => seg === "" || seg === "." || seg === "..")) {
+      throw new SandbarError(
+        `config.images: entry '${img.tag}' has a \`rebuildOn\` path with a ` +
+          `'.', '..' or empty segment ('${path}'). It is resolved against a ` +
+          "worktree root and must stay inside it; write the plain relative " +
+          "path (`package-lock.json`, `packages/api/bun.lock`).",
+      );
+    }
+    if (!out.includes(path)) out.push(path);
+  }
+  return out;
+}
+
 export function resolveImages(
   images: readonly BuiltImage[] | undefined,
   sandboxImage: string,
 ): readonly BuiltImage[] {
-  const resolved = images ?? [
+  const declared = images ?? [
     { tag: sandboxImage, containerfile: DEFAULT_CONTAINERFILE_PATH },
   ];
   const seen = new Set<string>();
-  for (const img of resolved) {
+  const resolved: BuiltImage[] = [];
+  for (const img of declared) {
     if (!img.tag.trim()) {
       throw new SandbarError("config.images: every entry needs a tag.");
     }
@@ -967,6 +1050,7 @@ export function resolveImages(
         `config.images: entry '${img.tag}' has no containerfile.`,
       );
     }
+    resolved.push({ ...img, rebuildOn: resolveRebuildOn(img) });
   }
   // A consumer listing images at all must still build the sandbox image: it is
   // what the agent and the merger's resolve agent run in, and its absence is a
@@ -981,6 +1065,34 @@ export function resolveImages(
   return resolved;
 }
 
+// `rebuildOn` on an image no gate-stack container runs is inert, and inertness
+// is exactly the failure mode #37 is about: the operator has written down what
+// the image is a function of, and sandbar would silently never act on it.
+//
+// The agent sandbox is deliberately NOT counted as a use. Its image is resolved
+// once, when the sandbox is created, and the branch it would be a function of
+// does not exist yet at that point — the agent writes it during the run. It is
+// also an environment the agent controls and can install into, so a stale baked
+// dependency there costs it a command, not a false verdict. Rebuilding it
+// mid-cycle would mean disposing the sandbox the attempts accumulate in.
+export function checkRebuildOnIsUsed(
+  images: readonly BuiltImage[],
+  gateStack: ResolvedGateStack,
+): void {
+  const gated = new Set(gateStack.containers.map((c) => c.image));
+  for (const img of images) {
+    if ((img.rebuildOn ?? []).length === 0) continue;
+    if (gated.has(img.tag)) continue;
+    throw new SandbarError(
+      `config.images: entry '${img.tag}' declares \`rebuildOn\`, but no ` +
+        "`gateStack.containers` entry runs that image, so nothing would ever " +
+        "act on it. `rebuildOn` governs the per-branch rebuild of gate " +
+        "images; the agent sandbox's image is resolved once, before the branch " +
+        "it would depend on exists.",
+    );
+  }
+}
+
 export function defaultCoauthorTrailer(botName: string, botEmail: string): string {
   return `Co-authored-by: ${botName} <${botEmail}>`;
 }
@@ -992,12 +1104,15 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   // the must-differ check against `"main"` and then reach every git and gh call
   // with the spaces still on it.
   const sourceBranch = (config.sourceBranch ?? DEFAULT_SOURCE_BRANCH).trim();
+  const gateStack = resolveGateStack(config.gateStack);
+  const images = resolveImages(config.images, config.sandboxImage);
+  checkRebuildOnIsUsed(images, gateStack);
   return {
     ...config,
     cwd: config.cwd ?? DEFAULT_CWD(),
     workDir: config.workDir ?? DEFAULT_WORK_DIR,
     sourceBranch,
-    images: resolveImages(config.images, config.sandboxImage),
+    images,
     implementerModelId: config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,
     reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
@@ -1013,7 +1128,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     maxTotalIssues: config.maxTotalIssues ?? DEFAULT_MAX_TOTAL_ISSUES,
     copyToWorktree: config.copyToWorktree ?? [],
     labels: { ...DEFAULT_LABELS, ...config.labels },
-    gateStack: resolveGateStack(config.gateStack),
+    gateStack,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
   };
 }

@@ -43,7 +43,13 @@ import {
   findUnattributableResources,
 } from "./containers.js";
 import { installCleanupTraps, onCleanup, runCleanup } from "./cleanup.js";
-import { checkWorktreeImageUids, ensureImages } from "./ensure-images.js";
+import {
+  type BranchImages,
+  checkWorktreeImageUids,
+  createBranchImages,
+  ensureImages,
+  removeBranchImages,
+} from "./ensure-images.js";
 import { makeEnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
 import {
@@ -253,12 +259,45 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   // sharing a `sandboxImage` tag on one host will race the build and then
   // silently share whichever image won. On a shared host, give each workdir its
   // own tag.
-  await ensureImages(config.images);
+  const baseFingerprints = await ensureImages(config.images, config.cwd);
+
+  // Per-branch gate images (#37). One instance for the whole run — every issue
+  // and the merger share it, because the per-branch tag is content-addressed
+  // and two branches that make the same dependency change must produce one
+  // build rather than two.
+  //
+  // Registered for cleanup HERE, before the first stack exists, so LIFO order
+  // puts the image removal after every container that could still be running
+  // one of them.
+  const branchImages: BranchImages = createBranchImages({
+    images: config.images,
+    scope,
+    baseFingerprints,
+  });
+  onCleanup(async () => {
+    const tags = branchImages.builtTags();
+    if (tags.length === 0) return;
+    const failures = await removeBranchImages(tags);
+    if (failures.length > 0) {
+      console.warn(
+        `Could not remove ${failures.length} per-branch gate image(s) built ` +
+          "for this run. They cost disk and nothing else — the tags are " +
+          "content-addressed and scoped, so a leftover is reused rather than " +
+          `mistaken for something current:\n${failures.join("\n")}`,
+      );
+    }
+  });
 
   // After the builds, because the images have to exist to be probed and a
   // freshly-built one is the likeliest to be wrong. Before any stack starts,
   // because the alternative is an unexplained EACCES twenty minutes into a gate
   // (#24 D3).
+  //
+  // The declared images only. A per-branch variant is built from the same
+  // Containerfile, so a uid the branch could change is a uid the branch changed
+  // in that recipe — the rebuild path has no cheap way to re-probe (the image
+  // does not exist until mid-gate) and the declared image is the honest thing
+  // to hold consumers to.
   await checkWorktreeImageUids(config.gateStack, process.getuid?.() ?? 0);
 
   startKeepawake();
@@ -425,6 +464,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             config: innerLoopCfg,
             hooks: config.sandboxHooks,
             copyToWorktree: config.copyToWorktree,
+            branchImages,
             attemptLogger: cycleLogger,
             onOrchestratorLog: (line) => runLogger.appendOrchestrator(line),
           }),
@@ -517,11 +557,17 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             workDir: config.workDir,
             sourceBranch: config.sourceBranch,
           });
+          const mergerWorktreePath = mergerWorktree.path;
           mergerStack = await startStack({
             stackId: MERGER_STACK_ID,
             scope,
             spec: config.gateStack,
             worktreePath: mergerWorktree.path,
+            // gate-2 needs this as much as gate-1 does (#37): the merge result
+            // is a tree neither branch had, and two branches that each touched
+            // the lockfile compose into a third lockfile. Resolved per gate
+            // run, so each merge in the cycle is gated against its own.
+            images: () => branchImages.resolve(mergerWorktreePath),
           });
           const stackForGate2 = mergerStack;
           const adapter = realAdapter({

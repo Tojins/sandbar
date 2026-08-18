@@ -16,6 +16,8 @@ import {
 import {
   type BoundedResult,
   containerRunArgs,
+  imageFor,
+  withImages,
   containerState,
   logFollowArgs,
   mountSpec,
@@ -324,6 +326,39 @@ describe("buildArgv", () => {
       "Containerfile",
       ".",
     ]);
+  });
+});
+
+describe("withImages / imageFor (#37)", () => {
+  const c = (name: string, image: string): ResolvedStackContainer =>
+    resolveGateStack({
+      containers: [{ name, image, mountWorktree: "/w" }],
+      steps: [{ name: "s", in: name, command: ["true"] }],
+    }).containers[0]!;
+
+  it("substitutes only the mapped image, and returns the SAME array when nothing maps", () => {
+    const containers = [c("app", "app:base"), c("db", "mariadb")];
+    // Identity on an empty map matters: it is the ordinary case, and the
+    // stack compares mapped images to decide what to recreate.
+    expect(withImages(containers, new Map())).toBe(containers);
+    const mapped = withImages(containers, new Map([["app:base", "app:sb-x"]]));
+    expect(mapped.map((x) => x.image)).toEqual(["app:sb-x", "mariadb"]);
+    // Untouched entries are not copied, so nothing downstream can accidentally
+    // depend on object identity changing.
+    expect(mapped[1]).toBe(containers[1]);
+  });
+
+  it("maps by the DECLARED image, so two containers sharing one image both move", () => {
+    const containers = [c("app", "app:base"), c("worker", "app:base")];
+    const mapped = withImages(containers, new Map([["app:base", "app:sb-x"]]));
+    expect(mapped.map((x) => x.image)).toEqual(["app:sb-x", "app:sb-x"]);
+  });
+
+  it("imageFor falls back to the declared image", () => {
+    expect(imageFor(c("app", "app:base"), new Map())).toBe("app:base");
+    expect(
+      imageFor(c("app", "app:base"), new Map([["app:base", "app:sb-x"]])),
+    ).toBe("app:sb-x");
   });
 });
 
@@ -881,10 +916,70 @@ describe("checkWorktreeImageUids", () => {
   });
 });
 
+describe("resolveImages: rebuildOn (#37)", () => {
+  const img = (extra: Record<string, unknown>) =>
+    resolveImages(
+      [{ tag: "sandbar:app", containerfile: "Containerfile", ...extra }],
+      "sandbar:app",
+    );
+
+  it("normalises and deduplicates the declared paths", () => {
+    // Sorted only at hash time; here the point is that a path written twice
+    // does not become two records, which would make the fingerprint depend on
+    // how many times someone wrote it down.
+    expect(
+      img({ rebuildOn: ["package-lock.json", " package-lock.json ", "bower.json"] })[0]
+        ?.rebuildOn,
+    ).toEqual(["package-lock.json", "bower.json"]);
+  });
+
+  // Every rejection below is a declaration that would either escape the
+  // worktree root it is resolved against, or silently name nothing — and an
+  // inert declaration is the #37 failure itself: the operator has written down
+  // what the image is a function of and sandbar never acts on it.
+  it("refuses stdinContext alongside rebuildOn — that build has no context to change", () => {
+    expect(() => img({ rebuildOn: ["package-lock.json"], stdinContext: true })).toThrow(
+      /stdinContext/,
+    );
+  });
+
+  it("refuses an absolute containerfile, which cannot be re-rooted at a worktree", () => {
+    expect(() =>
+      resolveImages(
+        [
+          {
+            tag: "sandbar:app",
+            containerfile: "/etc/Containerfile",
+            rebuildOn: ["package-lock.json"],
+          },
+        ],
+        "sandbar:app",
+      ),
+    ).toThrow(/absolute/);
+  });
+
+  it("refuses absolute, empty, and traversing paths", () => {
+    expect(() => img({ rebuildOn: ["/etc/passwd"] })).toThrow(/absolute/);
+    expect(() => img({ rebuildOn: ["  "] })).toThrow(/empty/);
+    expect(() => img({ rebuildOn: ["../other/package-lock.json"] })).toThrow(
+      /'\.', '\.\.' or empty segment/,
+    );
+    expect(() => img({ rebuildOn: ["./package-lock.json"] })).toThrow(
+      /'\.', '\.\.' or empty segment/,
+    );
+    expect(() => img({ rebuildOn: ["a//b"] })).toThrow(
+      /'\.', '\.\.' or empty segment/,
+    );
+  });
+});
+
 describe("resolveImages", () => {
   it("defaults to building the sandbox image from ./Containerfile", () => {
     expect(resolveImages(undefined, "sandbar:app")).toEqual([
-      { tag: "sandbar:app", containerfile: "Containerfile" },
+      // `rebuildOn` is normalised to the empty list rather than left absent:
+      // resolution validated and deduplicated it, and the two readers should
+      // not have to re-decide what absence means (#37).
+      { tag: "sandbar:app", containerfile: "Containerfile", rebuildOn: [] },
     ]);
   });
 

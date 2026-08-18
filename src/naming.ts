@@ -175,3 +175,45 @@ export function issueNumberFromBranch(branch: string): number | null {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Per-branch image tags (#37)
+//
+// An image that bakes dependencies from a lockfile is a function of the branch,
+// so a branch that changes that lockfile needs its own image. The variant's tag
+// is derived from the base tag, the run scope and the hash of the image's
+// declared inputs:
+//
+//   sandbar-outdoor           -> sandbar-outdoor:sb-w1a2b3c4-9f2e1d70
+//   sandbar-outdoor:latest    -> sandbar-outdoor:latest-sb-w1a2b3c4-9f2e1d70
+//   localhost/x/y:v1          -> localhost/x/y:v1-sb-w1a2b3c4-9f2e1d70
+//
+// Both halves of the suffix earn their place. The FINGERPRINT makes the tag
+// content-addressed, which is what lets the ordinary `image exists` skip do the
+// right thing: two issues that make the same lockfile change share one build,
+// and a gate run that changes nothing rebuilds nothing. The SCOPE keeps the tag
+// attributable to a run, so debris a crash leaves behind can be named — image
+// tags are otherwise the one podman resource class no scope partitions, and a
+// content hash alone would leave an orphan nobody could tie to a workdir.
+//
+// The suffix goes on the TAG component, never the name: a reference is
+// `[registry/]name[:tag]`, so appending to `localhost/x/y` unqualified would
+// silently invent a different repository rather than a different tag.
+// ---------------------------------------------------------------------------
+
+// Podman tag components are limited to 128 chars; the fingerprint is truncated
+// so a long base tag plus this suffix stays well inside that.
+const IMAGE_FINGERPRINT_CHARS = 8;
+
+export function variantImageTag(
+  baseTag: string,
+  scope: RunScope,
+  fingerprint: string,
+): string {
+  const suffix = `sb-${scope}-${fingerprint.slice(0, IMAGE_FINGERPRINT_CHARS)}`;
+  // A `:` only introduces a tag when it comes after the last `/` — otherwise it
+  // is a registry port (`registry.example:5000/x`), and the reference is
+  // untagged.
+  const hasTag = baseTag.lastIndexOf(":") > baseTag.lastIndexOf("/");
+  return hasTag ? `${baseTag}-${suffix}` : `${baseTag}:${suffix}`;
+}
