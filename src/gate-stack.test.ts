@@ -14,11 +14,14 @@ import {
   effectiveUidArgv,
 } from "./ensure-images.js";
 import {
+  type BoundedResult,
   containerRunArgs,
+  containerState,
   logFollowArgs,
   mountSpec,
   parsePortBindings,
   podCreateArgs,
+  type PodmanProbe,
   scanChunk,
   stepExecArgs,
   tcpProbePorts,
@@ -986,5 +989,125 @@ describe("scanChunk", () => {
       found: true,
       carry: "",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// containerState (#36)
+//
+// The classification, not podman: gate-stack-podman.test.ts pins what a real
+// podman ANSWERS (`exists` 0 in any state, 1 for gone, `inspect` 125 for both
+// gone and unwell), and this pins what sandbar concludes from each answer.
+// Neither file can substitute for the other — a real podman will not produce a
+// timed-out inspect or a SIGKILLed `exists` on demand, and those are exactly
+// the answers whose misreading is the retry storm issue #36's notes warn
+// against. Hence the probe seam.
+// ---------------------------------------------------------------------------
+
+const podmanSaid = (over: Partial<BoundedResult>): BoundedResult => ({
+  stdout: "",
+  stderr: "",
+  exitCode: 0,
+  timedOut: false,
+  maxBufferExceeded: false,
+  errorMessage: "",
+  ...over,
+});
+
+// A probe that answers each subcommand once, and records what it was asked —
+// "was `exists` consulted at all" is half of what these tests assert.
+const probeOf = (
+  answers: Record<string, BoundedResult>,
+): { probe: PodmanProbe; calls: string[] } => {
+  const calls: string[] = [];
+  const probe: PodmanProbe = (args) => {
+    const key = args[0] === "container" ? "exists" : String(args[0]);
+    calls.push(key);
+    const answer = answers[key];
+    if (!answer) throw new Error(`unexpected podman call: ${key}`);
+    return Promise.resolve(answer);
+  };
+  return { probe, calls };
+};
+
+describe("containerState", () => {
+  it("reads a clean inspect directly, without asking `exists`", async () => {
+    for (const [stdout, expected] of [
+      ["true\n", "running"],
+      ["false\n", "stopped"],
+    ] as const) {
+      const { probe, calls } = probeOf({ inspect: podmanSaid({ stdout }) });
+      expect(await containerState("c", probe)).toBe(expected);
+      // The ordinary case, and the cost argument for the whole change: one
+      // call, exactly as before #36.
+      expect(calls).toEqual(["inspect"]);
+    }
+  });
+
+  // The bug. Inspect exits 125 for a removed container AND for a podman that
+  // is unwell, so this pairing is the only thing that separates them.
+  it("is `gone` when inspect exits non-zero and `exists` says 1", async () => {
+    const { probe, calls } = probeOf({
+      inspect: podmanSaid({ exitCode: 125, errorMessage: "no such object" }),
+      exists: podmanSaid({ exitCode: 1 }),
+    });
+    expect(await containerState("c", probe)).toBe("gone");
+    expect(calls).toEqual(["inspect", "exists"]);
+  });
+
+  // The second producer of `unknown`, and the one the watchLog restart trade
+  // leans on: the container demonstrably EXISTS, we just cannot say whether it
+  // is running. Reading this as death would be the retry storm.
+  it("is `unknown` when inspect fails but `exists` says the container is there", async () => {
+    const { probe } = probeOf({
+      inspect: podmanSaid({ exitCode: 125 }),
+      exists: podmanSaid({ exitCode: 0 }),
+    });
+    expect(await containerState("c", probe)).toBe("unknown");
+  });
+
+  // An exit code `exists` does not document is podman being unreliable, not
+  // podman saying no. `exists` answers 125 for a malformed invocation.
+  it("is `unknown` for an `exists` exit code that is neither 0 nor 1", async () => {
+    const { probe } = probeOf({
+      inspect: podmanSaid({ exitCode: 125 }),
+      exists: podmanSaid({ exitCode: 125 }),
+    });
+    expect(await containerState("c", probe)).toBe("unknown");
+  });
+
+  // `exists` exiting 1 is only evidence if it exited on its own. Under the
+  // timer's SIGKILL boundedPodman reports exitCode null, but the guard tests
+  // the flags too, so a 1 that arrived in the same tick the timer fired is
+  // still not death.
+  it("is `unknown` when `exists` was killed or overflowed, whatever the code", async () => {
+    for (const over of [
+      { exitCode: null },
+      { exitCode: 1, timedOut: true },
+      { exitCode: 1, maxBufferExceeded: true },
+    ] as Partial<BoundedResult>[]) {
+      const { probe } = probeOf({
+        inspect: podmanSaid({ exitCode: 125 }),
+        exists: podmanSaid(over),
+      });
+      expect(await containerState("c", probe)).toBe("unknown");
+    }
+  });
+
+  // A wedged podman is asked once, not twice. `exists` would be answered
+  // through the same wedged podman and cannot change the verdict, and the
+  // second 15s would come straight off the readiness budget — pollUntilReady
+  // tests its deadline only BETWEEN probes, so a doubled worst case doubles
+  // the overshoot and halves how many polls a 60s budget buys.
+  it("does not consult `exists` when inspect never returned", async () => {
+    for (const over of [
+      { exitCode: null, timedOut: true },
+      { exitCode: null },
+      { exitCode: 1, maxBufferExceeded: true },
+    ] as Partial<BoundedResult>[]) {
+      const { probe, calls } = probeOf({ inspect: podmanSaid(over) });
+      expect(await containerState("c", probe)).toBe("unknown");
+      expect(calls).toEqual(["inspect"]);
+    }
   });
 });

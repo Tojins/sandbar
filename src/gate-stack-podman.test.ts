@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import {
+  ContainerBringupError,
   type LogWatcher,
   logFollowArgs,
   scanChunk,
@@ -511,6 +512,12 @@ describe.runIf(available)(
 
         await exec(RUNTIME, ["stop", "-t", "0", cName("svc")]);
 
+        // The CLASS is the load-bearing half, not just the prose:
+        // `inner-loop.ts` rethrows a bare SandbarError PAST HARD-ERROR, which
+        // would drop the issue for the cycle with no terminal, no comment and
+        // no label flip — the opposite of the fresh-stack retry this throw
+        // exists to trigger.
+        await expect(stack.runGate()).rejects.toThrow(ContainerBringupError);
         await expect(stack.runGate()).rejects.toThrow(/no longer running/);
       },
       180_000,
@@ -543,9 +550,12 @@ describe.runIf(available)(
 
         await exec(RUNTIME, ["rm", "-f", "-t", "0", cName("svc")]);
 
-        // Not `.ok === false`: reddening is precisely the bug. And the prose
-        // has to say REMOVED — "no longer running" sends the operator to
-        // `podman logs` for a container that answers "no such object".
+        // Not `.ok === false`: reddening is precisely the bug — and pre-fix
+        // this was not even a red, it was a fully GREEN gate, because no step
+        // in this stack execs into `svc`. And the prose has to say REMOVED:
+        // "no longer running" sends the operator to `podman logs` for a
+        // container that answers "no container with name or ID ... found".
+        await expect(stack.runGate()).rejects.toThrow(ContainerBringupError);
         await expect(stack.runGate()).rejects.toThrow(/no longer exists/);
       },
       180_000,

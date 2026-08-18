@@ -81,7 +81,9 @@
 // the hung call as a SUCCESS. Steps are bounded by `step.timeoutMs` (#26, per
 // step because a lint step and a browser suite do not want the same ceiling);
 // readiness probes and postReadyCommands by the container's own readiness
-// budget; `logs`/`inspect` by LOG_READ_TIMEOUT_MS; everything that creates or
+// budget; the calls sandbar makes ABOUT a container rather than through it
+// (`logs`, `inspect`, `container exists`) by LOG_READ_TIMEOUT_MS; everything
+// that creates or
 // destroys a pod, network or container by CONTROL_TIMEOUT_MS; and the tcp probe
 // carries a socket timeout because a dropped SYN produces neither `connect` nor
 // `error`. The one thing a gate run still shells out to unbounded is not
@@ -111,9 +113,11 @@
 // podman offers that is total, and that needs no tools in an image sandbar does
 // not control, is the container itself: `reapKilledStep` removes it. For an
 // `attempt` container that is free — the next gate run recreates it anyway —
-// and an `issue` one is recreated on the spot, since nothing else would: read
-// that function for why `assertIssueContainersAlive` does NOT cover the hole,
-// and for what the recreate costs. The same reap runs on a maxBuffer kill,
+// and an `issue` one is recreated on the spot. That recreate used to be the
+// only thing between this reap and a verdict misblamed on the branch, because
+// `assertIssueContainersAlive` could not see a REMOVED container at all; since
+// #36 it can, so the recreate is now an optimisation — read that function for
+// what it saves and what it costs. The same reap runs on a maxBuffer kill,
 // which strands a process for exactly the same reason.
 //
 // A recreate that fails is the one case where a killed step does not produce a
@@ -242,7 +246,7 @@ const MAX_BUFFER = 50 * 1024 * 1024;
 // tell "it failed" from "it never answered" — a readiness probe that exits 1 is
 // not ready, one that hangs is not ready AND has left a process behind — and an
 // exception collapses those into one channel.
-type BoundedResult = {
+export type BoundedResult = {
   readonly stdout: string;
   readonly stderr: string;
   // null when the process was killed rather than exiting on its own.
@@ -1097,10 +1101,11 @@ export function watchLog(containerName: string, pattern: string): LogWatcher {
         // only cost is the reread, and the poll interval rate-limits it.
         //
         // It can still restart for the whole budget, but only for a container
-        // whose state podman genuinely will not report: `throwIfDead` ends the
-        // wait for one that EXITED and, since #36, for one that was REMOVED,
-        // leaving only `unknown` — inspect AND `container exists` both failing
-        // — to poll to the deadline. That is the right trade, since the
+        // whose state podman will not report: `throwIfDead` ends the wait for
+        // one that EXITED and, since #36, for one that was REMOVED, leaving
+        // only `unknown` to poll to the deadline — podman refusing to answer,
+        // or answering that the container is there while inspect still cannot
+        // say whether it is running. That is the right trade, since the
         // alternative is treating a flaked podman as a corpse, and deathNote is
         // what stops it being mysterious: the timeout says podman kept dying on
         // this container rather than blaming the consumer's pattern.
@@ -1172,11 +1177,15 @@ function probeTcp(
 
 // What podman says about a container right now.
 //
-// `unknown` means the question could not be answered — the call itself flaked —
-// and is never evidence either way: read as death it would report a live
-// container as a corpse, which is a HARD-ERROR from
-// `assertIssueContainersAlive` and a bringup failure from `throwIfDead`, i.e. a
-// slow host turned into a retry storm.
+// `unknown` means the question could not be answered, and is never evidence
+// either way: read as death it would report a live container as a corpse,
+// which is a HARD-ERROR from `assertIssueContainersAlive` and a bringup failure
+// from `throwIfDead` — a slow host turned into a retry storm. It has two
+// producers, and the second is the one worth naming: podman would not answer at
+// all, OR it answered that the container EXISTS while `inspect` still could not
+// say whether it is running. The latter is a real pairing (a 15s inspect
+// timeout under load, a cheap `exists` answering 0) and it is the case the
+// follower-restart trade in `watchLog` leans on.
 //
 // `gone` is the state this used to lose (#36). A container that no longer
 // EXISTS is the strongest evidence of death there is, but `inspect` reports it
@@ -1185,40 +1194,70 @@ function probeTcp(
 // it through. It is not exotic: an operator's `podman rm` on a wedged stack, a
 // `podman system prune`, an OOM kill under a removing restart policy, and —
 // since #26 — `reapKilledStep` itself.
-type ContainerState = "running" | "stopped" | "gone" | "unknown";
+export type ContainerState = "running" | "stopped" | "gone" | "unknown";
 
-// What `logTail` would return for a container that is not there. Skipping the
-// read is not just an optimisation: `logs` against a removed container answers
-// "(logs unavailable)", which reads as "the log could not be retrieved" and
-// sends the operator looking for a log that does not exist.
-const GONE_LOG_NOTE = "(container no longer exists — there is no log to read)";
+// The seam these liveness reads are tested through. `containerState`'s whole
+// job is to classify what podman answers, and the answers that matter most are
+// the ones a real podman will not produce on demand — a timed-out inspect, a
+// kill, an exit code `exists` does not document. Every other podman call in
+// this module is exercised against a live podman in gate-stack-podman.test.ts;
+// this one branch cannot be, and it is the branch whose misfire is a
+// HARD-ERROR storm, so it gets an injectable probe instead (the same argument
+// `realVerifyAdapter`'s `exec` and `checkWorktreeImageUids`' `UidProbe` make).
+export type PodmanProbe = (
+  args: readonly string[],
+  timeoutMs: number,
+) => Promise<BoundedResult>;
 
-async function containerState(containerName: string): Promise<ContainerState> {
-  const r = await boundedPodman(
+// Does this container exist at all, in any state? Exit 1 and nothing else: 0
+// means it is there, and a timeout, a kill, or an exit code `exists` does not
+// document is podman being unreliable. The point is to shrink `unknown`
+// honestly, not to let failure fall through to death.
+async function containerGone(
+  containerName: string,
+  probe: PodmanProbe,
+): Promise<boolean> {
+  const e = await probe(
+    ["container", "exists", containerName],
+    LOG_READ_TIMEOUT_MS,
+  );
+  return e.exitCode === 1 && !e.timedOut && !e.maxBufferExceeded;
+}
+
+// What `logTail` puts in the tail slot for a container that is not there.
+// Skipping the read is not just an optimisation: `logs` against a removed
+// container fails, and the "(logs unavailable)" that produces reads as "the log
+// could not be retrieved" and sends the reader looking for a log that does not
+// exist. Phrased to sit under `ContainerBringupError`'s "Container log tail:"
+// header without contradicting it.
+const GONE_LOG_NOTE = "(none — the container no longer exists)";
+
+export async function containerState(
+  containerName: string,
+  probe: PodmanProbe = boundedPodman,
+): Promise<ContainerState> {
+  const r = await probe(
     ["inspect", "--format", "{{.State.Running}}", containerName],
     LOG_READ_TIMEOUT_MS,
   );
   if (boundedOk(r)) return r.stdout.trim() === "true" ? "running" : "stopped";
-  // Inspect did not answer. Ask the question podman has a purpose-built answer
-  // for rather than matching its stderr: the wording differs per subcommand
-  // (`inspect` says "no such object", `exec` says "no container with name or
-  // ID ... found"), so a string test would be both fragile and version-bound.
-  // `container exists` exits 0 for a container that exists in ANY state,
-  // stopped included, and 1 for one that does not.
-  //
-  // One extra call, only on the path where inspect already failed — which in
-  // the ordinary case is never.
-  const e = await boundedPodman(
-    ["container", "exists", containerName],
-    LOG_READ_TIMEOUT_MS,
-  );
-  // Exit 1 and nothing else. 0 means it is still there and inspect flaked over
-  // a container whose running-ness we therefore still do not know; a timeout, a
-  // kill, or an exit code `exists` does not document is podman being
-  // unreliable, and the whole point of this change is to shrink `unknown`
-  // honestly, not to let failure fall through to death.
-  if (e.exitCode === 1 && !e.timedOut && !e.maxBufferExceeded) return "gone";
-  return "unknown";
+  // Only when inspect RETURNED and said no. An inspect that timed out or was
+  // killed is podman being unresponsive, not podman answering ambiguously —
+  // `exists` would be asked to answer through the same wedged podman, and the
+  // classification is `unknown` whatever it says. Skipping it there keeps this
+  // function's worst case at one LOG_READ_TIMEOUT_MS rather than two, which
+  // matters because `pollUntilReady` only tests its deadline BETWEEN probes:
+  // doubling the worst case would double how far a readiness wait overshoots
+  // its budget and halve how many polls a 60s budget buys.
+  if (r.timedOut || r.maxBufferExceeded || r.exitCode === null) return "unknown";
+  // Inspect exited non-zero on its own. That is 125 both for a container that
+  // is GONE and for a podman that is unwell, so ask the question podman has a
+  // purpose-built answer for rather than matching its stderr: the wording
+  // differs per subcommand (`inspect` says "no such object", the exec family
+  // says "no container with name or ID ... found"), so a string test would be
+  // both fragile and version-bound. One extra call, only on a path where
+  // inspect already failed — which in the ordinary case is never.
+  return (await containerGone(containerName, probe)) ? "gone" : "unknown";
 }
 
 async function throwIfDead(
@@ -1232,7 +1271,7 @@ async function throwIfDead(
     containerName,
     state === "gone"
       ? `gate stack: container '${c.name}' (${c.image}) no longer exists — ` +
-        "something removed it while sandbar was waiting for it to become ready."
+        "something removed it during startup."
       : `gate stack: container '${c.name}' (${c.image}) exited during startup.`,
     state === "gone" ? GONE_LOG_NOTE : await logTail(containerName),
   );
@@ -1261,7 +1300,17 @@ async function logTail(
       "incomplete)";
     return text ? `${text}\n${note}` : note;
   }
-  if (!boundedOk(r)) return "(logs unavailable)";
+  // "(logs unavailable)" reads as "the log could not be retrieved", which is
+  // the wrong thing to hand an implementer agent reading a red gate's D9 block
+  // about a container that is simply not there any more. The extra call is on a
+  // path where `logs` has already failed, so it costs nothing in the ordinary
+  // case. (`throwIfDead` and `assertIssueContainersAlive` do not reach this:
+  // they already know the state and pass GONE_LOG_NOTE without reading.)
+  if (!boundedOk(r)) {
+    return (await containerGone(containerName, boundedPodman))
+      ? GONE_LOG_NOTE
+      : "(logs unavailable)";
+  }
   return text || "(empty)";
 }
 
@@ -1295,6 +1344,13 @@ type RunGateCtx = {
 // there (#36): a removed one used to be indistinguishable from a flaked inspect
 // and was waved through, which is the exact failure above reached through the
 // check meant to prevent it.
+//
+// Residual, stated rather than hidden: this runs ONCE, at the top of the gate
+// run. An issue container that dies after it and before step N still reds that
+// gate against the branch — the misblame is narrowed from "every remaining
+// attempt" to "exactly one", not eliminated. Re-checking between steps would
+// cost a podman call per step per gate run to shave one attempt off a failure
+// that is already rare, and would still leave a window inside the step itself.
 async function assertIssueContainersAlive(ctx: RunGateCtx): Promise<void> {
   for (const c of ctx.issueContainers) {
     const containerName = ctx.nameOf(c);
@@ -1304,8 +1360,8 @@ async function assertIssueContainersAlive(ctx: RunGateCtx): Promise<void> {
     // next steps: a stopped container is still there to be inspected and its
     // log read, whereas a removed one cannot be looked at at all and the
     // operator's question is who removed it. Reporting a removal as "no longer
-    // running" sends them to `podman logs` for a container that will answer
-    // "no such object".
+    // running" sends them to `podman logs` for a container that answers "no
+    // container with name or ID ... found".
     const what =
       state === "gone"
         ? "no longer exists — someone or something removed it"
@@ -1491,8 +1547,9 @@ async function reapKilledStep(
     // so throwing here would trade a red gate for a HARD-ERROR over a leftover
     // that clears itself. But a survivor burns CPU until then, so say so.
     // For an `issue` container it does not even reach the next run: the
-    // recreate below runs `podman run` with the same name and fails loudly on
-    // the conflict.
+    // recreate below force-removes this name before running, so a remove that
+    // failed here fails there too and takes the run down with a bringup error
+    // rather than silently gating against a survivor.
     const why = removed.timedOut
       ? `\`${RUNTIME} rm\` timed out`
       : removed.stderr.trim() || removed.errorMessage;
