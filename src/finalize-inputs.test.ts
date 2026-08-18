@@ -112,16 +112,6 @@ describe("terminalFinalizeInputs", () => {
       false,
     ]);
   });
-
-  // #30: these inputs are built from Phase 2 alone, so the orchestrator can
-  // (and does) finalise them before the merge phase runs at all.
-  it("depends on nothing the merger produces", () => {
-    const outcomes: IssueOutcome[] = [
-      { issue: issue("1"), terminal: { type: "NEEDS-INFO", questions: "q?" } },
-      { issue: issue("9"), terminal: { type: "DONE", commits: [] } },
-    ];
-    expect(terminalFinalizeInputs(outcomes)).toHaveLength(1);
-  });
 });
 
 describe("finalizeKindForSkip", () => {
@@ -201,6 +191,23 @@ describe("mergeFinalizeInputs", () => {
       prior,
     );
     expect(prior.get("7")).toBe(1);
+  });
+
+  // Not functionally load-bearing — finalizeAll's inputs are independent — but
+  // it is the ordering run.ts printed before the builder was extracted, and a
+  // silent flip is exactly what an extraction can do.
+  it("emits merged issues before skipped ones", () => {
+    const { inputs } = mergeFinalizeInputs(
+      summary({
+        merged: [issue("3")],
+        skipped: [{ issue: issue("1"), reason: "conflict" }],
+      }),
+      new Map(),
+    );
+    expect(inputs.map((i) => [i.kind, i.issue.id])).toEqual([
+      ["merged", "3"],
+      ["merge-conflict", "1"],
+    ]);
   });
 
   it("reports no bumps when nothing silent-nooped", () => {

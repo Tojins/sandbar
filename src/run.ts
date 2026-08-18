@@ -74,7 +74,6 @@ import { startRunLogger } from "./logs.js";
 import {
   MergerError,
   type MergerSummary,
-  type SkipReason,
   issueNumberOf,
   realAdapter,
   runMergerWithAdapter,
@@ -453,11 +452,17 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // reviewer prose never posted, branches never pushed.
       //
       // The mirror-image risk is real but strictly smaller: a required
-      // side-effect failing here now stops the cycle before the merge. A DONE
-      // branch that misses its merge keeps its commits and its
-      // `ready-for-agent` label, so preflight classifies it `resumable` (#13)
-      // and the next run continues from where it got to — whereas the prose an
-      // agent produced once and nobody stored is simply gone.
+      // side-effect failing here now stops the cycle before the merge, and a
+      // DONE branch that misses its merge is not merely re-planned — it keeps
+      // its commits and its `ready-for-agent` label, so preflight classifies it
+      // `resumable` (#13) and the next run continues from where it got to.
+      // That resume is not automatic if this pass parked anything first: an
+      // `agent-stuck` issue is an open issue no longer queued, so its leftover
+      // local branch is preflight-`unmerged` and refuses the next run until the
+      // operator clears it. That is the steady state EVERY successful parking
+      // cycle already produces, and the branch is on origin by then, so it
+      // costs a `git branch -D` — not the commits. The prose an agent produced
+      // once and nobody stored has no such fallback.
       // ---------------------------------------------------------------------
       await runFinalize("agent terminals", terminalFinalizeInputs(outcomes));
   
