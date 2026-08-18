@@ -1430,7 +1430,12 @@ async function assertIssueContainersAlive(ctx: RunGateCtx): Promise<void> {
         : "is no longer running";
     throw new ContainerBringupError(
       containerName,
-      `gate stack: issue-lifecycle container '${c.name}' (${c.image}) ${what}. ` +
+      // The image it is actually RUNNING, which since #37 is not always the one
+      // config names — sending the operator to inspect the declared tag when a
+      // per-branch variant is what died is a wrong answer to the first question
+      // they will ask.
+      `gate stack: issue-lifecycle container '${c.name}' ` +
+        `(${imageFor(c, ctx.running.map)}) ${what}. ` +
         "It came up once for this issue and every attempt since has depended " +
         "on it, so this is an infrastructure failure and not a verdict about " +
         "the branch.",
@@ -1730,7 +1735,16 @@ async function reapKilledStep(
   // rest of the issue, or reporting a red the branch cannot act on.
   if (container.lifecycle !== "issue") return;
   try {
-    await bringUp([container], {
+    // `ctx.running.map`, not the declared spec and not a fresh `ctx.images()`.
+    // The declared spec is #37 reintroduced through the one bringup that
+    // neither precedes nor follows a `running.map` update: a container recreated
+    // from the base image while the map still says it is on the branch's
+    // variant is never seen as stale again, so every remaining attempt gates
+    // against the source branch's dependencies — silently, green included. And
+    // it must be the map as it STANDS: this is a restore of what was running,
+    // not a new resolution, and re-resolving mid-red would pay a build for a
+    // gate whose verdict is already decided.
+    await bringUp(withImages([container], ctx.running.map), {
       podName: ctx.podName,
       worktreePath: ctx.worktreePath,
       nameOf: ctx.nameOf,

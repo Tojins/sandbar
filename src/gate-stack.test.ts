@@ -958,6 +958,50 @@ describe("resolveImages: rebuildOn (#37)", () => {
     ).toThrow(/absolute/);
   });
 
+  it("refuses a path outside the containerfile's own directory — the build context", () => {
+    // `buildArgv` sets the context to `dirname(containerfile)`, so a path
+    // outside it cannot be COPYd and the image cannot be a function of it.
+    // Unchecked, that config passes everything else, changes its fingerprint on
+    // every edit, pays a variant build per gate run, and produces an image
+    // byte-identical to the base — #37 exactly, wearing the fix.
+    expect(() =>
+      resolveImages(
+        [
+          {
+            tag: "sandbar:app",
+            containerfile: "gate/Containerfile.runner",
+            rebuildOn: ["package-lock.json"],
+          },
+        ],
+        "sandbar:app",
+      ),
+    ).toThrow(/outside its build context/);
+    // Inside it is fine, and so is a root containerfile with a nested input.
+    expect(() =>
+      resolveImages(
+        [
+          {
+            tag: "sandbar:app",
+            containerfile: "gate/Containerfile.runner",
+            rebuildOn: ["gate/package-lock.json"],
+          },
+        ],
+        "sandbar:app",
+      ),
+    ).not.toThrow();
+    expect(() => img({ rebuildOn: ["packages/api/bun.lock"] })).not.toThrow();
+  });
+
+  it("refuses a non-positive, NaN or infinite buildTimeoutMs", () => {
+    // Same rule and reason as `step.timeoutMs` (#26): the deadline is a
+    // setTimeout sandbar owns, so 0 and NaN fire on the next tick — every build
+    // killed before it starts — and Infinity never fires.
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => img({ buildTimeoutMs: bad })).toThrow(/buildTimeoutMs/);
+    }
+    expect(() => img({ buildTimeoutMs: 60_000 })).not.toThrow();
+  });
+
   it("refuses absolute, empty, and traversing paths", () => {
     expect(() => img({ rebuildOn: ["/etc/passwd"] })).toThrow(/absolute/);
     expect(() => img({ rebuildOn: ["  "] })).toThrow(/empty/);

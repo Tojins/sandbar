@@ -234,10 +234,17 @@ Declare what the image is built from and sandbar owns the rest:
 
 ```ts
 images: [
-  { tag: "localhost/app-runner:gate", containerfile: "gate/Containerfile.runner",
+  { tag: "localhost/app-runner:gate", containerfile: "Containerfile.runner",
     rebuildOn: ["package-lock.json", "bower.json"] },
 ]
 ```
+
+Note the containerfile is at the repo root here, and that is not incidental:
+sandbar builds with the containerfile's **own directory** as the context, so a
+`rebuildOn` path outside it could never be `COPY`d and the image could not be a
+function of it. That config is rejected rather than accepted-and-ignored — it
+would rebuild on every change and produce a byte-identical image, which is the
+silent no-op this whole feature exists to remove.
 
 Sandbar hashes those paths — plus the Containerfile's own bytes and the entry's
 `buildArgs` — and uses the hash, not the tag, as the cache key:
@@ -262,8 +269,17 @@ An image that will not build from the branch is a **red gate** naming the image
 and carrying the build's output, not an infrastructure failure: a lockfile that
 does not install is the branch's to fix, and routing it to a retry would
 reproduce it twice and then park the issue with a trace blaming the environment.
+The same applies to a variant whose recipe the branch changed such that it no
+longer runs as root or as your uid — the D3 check is re-asked for every image
+sandbar builds from a branch, not just the declared ones.
+
+An image that will not build in time is the same: `images[].buildTimeoutMs`
+(default 45 minutes) bounds it, because since this feature the recipe and its
+inputs are written by the implementer agent and the build runs inside a gate
+run while sandbar holds its single-instance lock.
 
 Rules: `rebuildOn` paths are repo-relative (no `..`, no leading `/`), they must
+sit inside the containerfile's own directory (the build context), they must
 exist in your checkout (a path that matches nothing makes the whole declaration
 inert, which is the failure above), it cannot be combined with `stdinContext`
 (that build has no context, so nothing in the repo can change it) or with an

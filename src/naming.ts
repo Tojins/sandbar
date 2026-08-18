@@ -217,3 +217,20 @@ export function variantImageTag(
   const hasTag = baseTag.lastIndexOf(":") > baseTag.lastIndexOf("/");
   return hasTag ? `${baseTag}-${suffix}` : `${baseTag}:${suffix}`;
 }
+
+// True for a reference `variantImageTag` produced under THIS scope. It is what
+// makes the scope segment more than a comment: a crashed run's variant images
+// are ~6GB-class and the run-end removal does not run on SIGKILL, so the next
+// run of the same workdir has to be able to find them. Scoped, it can, and by
+// the same argument the container sweep uses — one lock ⇔ one scope, so a tag
+// in our scope is ours or a dead predecessor's on this workdir. Another scope's
+// variants are not ours to reap and are left alone.
+export function isVariantImageTagIn(scope: RunScope, ref: string): boolean {
+  const colon = ref.lastIndexOf(":");
+  // No tag component at all (`localhost/x`, or `registry.example:5000/x` where
+  // the colon is a port) — `variantImageTag` always writes one.
+  if (colon <= ref.lastIndexOf("/")) return false;
+  return new RegExp(
+    `(^|-)sb-${scope}-[0-9a-f]{${IMAGE_FINGERPRINT_CHARS}}$`,
+  ).test(ref.slice(colon + 1));
+}

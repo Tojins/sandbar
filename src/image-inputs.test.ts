@@ -22,7 +22,12 @@ import {
 } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { fingerprintImageInputs } from "./image-inputs.js";
-import { type RunScope, runScope, variantImageTag } from "./naming.js";
+import {
+  type RunScope,
+  isVariantImageTagIn,
+  runScope,
+  variantImageTag,
+} from "./naming.js";
 
 const roots: string[] = [];
 
@@ -212,6 +217,31 @@ describe("variantImageTag", () => {
     );
   });
 
+  it("recognises its own output under the same scope, and nothing else", () => {
+    // What makes the scope segment more than a comment: the startup sweep uses
+    // this to reclaim ~6GB-class images a crashed run left, and it must not
+    // reach another workdir's live ones.
+    const other = runScope("/elsewhere") as RunScope;
+    for (const base of [
+      "sandbar-outdoor",
+      "sandbar-outdoor:latest",
+      "localhost/x/y:v1",
+      "registry.example:5000/x",
+    ]) {
+      const tag = variantImageTag(base, scope, "9f2e1d70ab");
+      expect(isVariantImageTagIn(scope, tag)).toBe(true);
+      expect(isVariantImageTagIn(other, tag)).toBe(false);
+      // The base image itself is never swept — it is what `ensureImages` built.
+      expect(isVariantImageTagIn(scope, base)).toBe(false);
+    }
+    // An untagged reference and a coincidental lookalike are not ours.
+    expect(isVariantImageTagIn(scope, "localhost/x/y")).toBe(false);
+    expect(isVariantImageTagIn(scope, `app:sb-${scope}-nothex12`)).toBe(false);
+    expect(isVariantImageTagIn(scope, `app:sb-${scope}-9f2e1d70-more`)).toBe(
+      false,
+    );
+  });
+
   it("stays inside podman's 128-char tag limit for a realistic base tag", () => {
     const tag = variantImageTag("sandbar-outdoor:latest", scope, "9f2e1d70ab");
     expect(tag.slice(tag.lastIndexOf(":") + 1).length).toBeLessThan(128);
@@ -225,15 +255,17 @@ describe("createBranchImages", () => {
   // the reuse/rebuild decision is asserted rather than the argv.
   function harness(images: readonly BuiltImage[], base: Map<string, string>) {
     const built: { tag: string; root: string }[] = [];
-    const present = new Set<string>();
+    // tag -> the fingerprint that tag was built from, i.e. what podman would
+    // report from the image's `sandbar.inputs` label.
+    const present = new Map<string, string>();
     const branchImages = createBranchImages({
       images,
       scope,
       baseFingerprints: base,
-      exists: async (tag) => present.has(tag),
+      inputsLabel: async (tag) => present.get(tag) ?? null,
       build: async (image: BuiltImage, opts: BuildOptions) => {
         built.push({ tag: image.tag, root: opts.root });
-        present.add(image.tag);
+        present.set(image.tag, opts.fingerprint ?? "");
       },
       log: () => {},
     });
@@ -304,12 +336,116 @@ describe("createBranchImages", () => {
     const branch = await tree({ Containerfile: "FROM x", "package-lock.json": "b" });
     const base = new Map([["app", (await fp(source))!]]);
     const { branchImages, built, present } = harness([IMAGE], base);
-    present.add(variantImageTag("app", scope, (await fp(branch))!));
+    const fingerprint = (await fp(branch))!;
+    present.set(variantImageTag("app", scope, fingerprint), fingerprint);
 
     expect((await branchImages.resolve(branch)).size).toBe(1);
     expect(built).toEqual([]);
     // Still reported as this run's, so cleanup reaches it.
     expect(branchImages.builtTags()).toHaveLength(1);
+  });
+
+  it("rebuilds a namesake tag whose recorded inputs do not match — the tag is only 32 bits of the hash", () => {
+    // The variant tag carries 8 hex of the fingerprint, so the NAME is a 32-bit
+    // cache key. Trusting it would gate against whatever a colliding (or
+    // crashed-run) tag happens to hold. The full fingerprint is on the image's
+    // label, and this is the same check the base-image path already makes.
+    return (async () => {
+      const source = await tree({ Containerfile: "FROM x", "package-lock.json": "{}" });
+      const branch = await tree({ Containerfile: "FROM x", "package-lock.json": "b" });
+      const base = new Map([["app", (await fp(source))!]]);
+      const { branchImages, built, present } = harness([IMAGE], base);
+      present.set(
+        variantImageTag("app", scope, (await fp(branch))!),
+        "a-different-fingerprint-entirely",
+      );
+
+      expect((await branchImages.resolve(branch)).size).toBe(1);
+      expect(built).toHaveLength(1);
+    })();
+  });
+
+  it("retries a build that failed, rather than caching the rejection for the run", async () => {
+    // Cached, one transient failure (a registry 5xx on the FROM pull, ENOSPC)
+    // is a DEAD END: the fingerprint does not move unless the agent touches the
+    // lockfile again, so every remaining attempt re-throws the same stale error
+    // and no build is ever attempted again — the issue lands on agent-stuck
+    // with a trace telling its author their dependencies do not install.
+    const source = await tree({ Containerfile: "FROM x", "package-lock.json": "{}" });
+    const branch = await tree({ Containerfile: "FROM x", "package-lock.json": "b" });
+    const base = new Map([["app", (await fp(source))!]]);
+    let attempts = 0;
+    const branchImages = createBranchImages({
+      images: [IMAGE],
+      scope,
+      baseFingerprints: base,
+      inputsLabel: async () => null,
+      build: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new SandbarError("registry 503");
+      },
+      log: () => {},
+    });
+
+    await expect(branchImages.resolve(branch)).rejects.toThrow("registry 503");
+    // The next gate run gets a real attempt, not the corpse of the last one.
+    await expect(branchImages.resolve(branch)).resolves.toEqual(
+      new Map([["app", variantImageTag("app", scope, (await fp(branch))!)]]),
+    );
+    expect(attempts).toBe(2);
+  });
+
+  it("re-probes the D3 uid of a variant it just built, as a build failure", async () => {
+    // The Containerfile's own bytes are in the fingerprint, so a branch is free
+    // to change the recipe's USER. The startup check runs once over the
+    // DECLARED images and would never see it, and the result is a silent
+    // mid-gate EACCES — the one failure D3 exists to convert into a refusal.
+    const source = await tree({ Containerfile: "FROM x", "package-lock.json": "{}" });
+    const branch = await tree({ Containerfile: "FROM x", "package-lock.json": "b" });
+    const base = new Map([["app", (await fp(source))!]]);
+    const make = (uid: number) =>
+      createBranchImages({
+        images: [IMAGE],
+        scope,
+        baseFingerprints: base,
+        inputsLabel: async () => null,
+        build: async () => {},
+        log: () => {},
+        worktreeMountingTags: new Set(["app"]),
+        hostUid: 1000,
+        probeUid: async () => uid,
+      });
+
+    await expect(make(1234).resolve(branch)).rejects.toThrow(/uid 1234/);
+    // Root and the host uid are both fine — rootless podman maps container root
+    // to the invoking user.
+    await expect(make(0).resolve(branch)).resolves.toBeInstanceOf(Map);
+    await expect(make(1000).resolve(branch)).resolves.toBeInstanceOf(Map);
+  });
+
+  it("does not probe the uid of an image no worktree-mounting container runs", async () => {
+    const source = await tree({ Containerfile: "FROM x", "package-lock.json": "{}" });
+    const branch = await tree({ Containerfile: "FROM x", "package-lock.json": "b" });
+    const base = new Map([["app", (await fp(source))!]]);
+    let probed = 0;
+    const branchImages = createBranchImages({
+      images: [IMAGE],
+      scope,
+      baseFingerprints: base,
+      inputsLabel: async () => null,
+      build: async () => {},
+      log: () => {},
+      worktreeMountingTags: new Set(["something-else"]),
+      hostUid: 1000,
+      probeUid: async () => {
+        probed += 1;
+        return 999;
+      },
+    });
+    // Widening the check to every image would refuse a perfectly good stack
+    // whose mariadb runs as uid 999 and never writes to the tree.
+    await expect(branchImages.resolve(branch)).resolves.toBeInstanceOf(Map);
+    expect(probed).toBe(0);
   });
 
   it("ignores images that declare no inputs", async () => {
@@ -329,7 +465,7 @@ describe("createBranchImages", () => {
       images: [IMAGE],
       scope,
       baseFingerprints: base,
-      exists: async () => false,
+      inputsLabel: async () => null,
       build: async () => {
         throw new SandbarError("npm ci failed");
       },

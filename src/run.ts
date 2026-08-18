@@ -49,6 +49,7 @@ import {
   createBranchImages,
   ensureImages,
   removeBranchImages,
+  sweepBranchImages,
 } from "./ensure-images.js";
 import { makeEnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
@@ -233,6 +234,20 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   }
   reportSweepFailures(orphans);
 
+  // The image half of the same sweep (#37). Per-branch gate images are removed
+  // at the end of a run, but that removal is an `onCleanup` action and so does
+  // not run on SIGKILL, a hard crash, or a `podman build` that outlived its
+  // parent — and these are the largest things sandbar creates. Startup only:
+  // within a run they are reused, and they carry this scope, so anything found
+  // here belongs to a predecessor of this workdir that is provably not running.
+  const staleImages = await sweepBranchImages(scope);
+  if (staleImages.removed.length > 0) {
+    console.log(
+      `Removed ${staleImages.removed.length} per-branch gate image(s) left by a prior run.`,
+    );
+  }
+  reportSweepFailures(staleImages);
+
   // Debris no run's scope claims: from a build predating #28, or the sandcastle
   // era. Reported rather than removed, because a bare-prefix match cannot tell
   // it from a concurrently-running old sandbar's LIVE resources — which is the
@@ -273,6 +288,15 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     images: config.images,
     scope,
     baseFingerprints,
+    // D3, re-asked for anything the branch rebuilds. The startup check below
+    // covers the declared images once; a variant is built from a Containerfile
+    // the branch may have edited, so its uid is not the one that was probed.
+    worktreeMountingTags: new Set(
+      config.gateStack.containers
+        .filter((c) => c.mountWorktree !== null)
+        .map((c) => c.image),
+    ),
+    hostUid: process.getuid?.() ?? 0,
   });
   onCleanup(async () => {
     const tags = branchImages.builtTags();
@@ -293,11 +317,10 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   // because the alternative is an unexplained EACCES twenty minutes into a gate
   // (#24 D3).
   //
-  // The declared images only. A per-branch variant is built from the same
-  // Containerfile, so a uid the branch could change is a uid the branch changed
-  // in that recipe — the rebuild path has no cheap way to re-probe (the image
-  // does not exist until mid-gate) and the declared image is the honest thing
-  // to hold consumers to.
+  // The declared images. A per-branch variant is not covered here — it does not
+  // exist yet — but it is not exempt: `createBranchImages` re-probes one it has
+  // just built, and reports a bad uid as a gate red, because the recipe that
+  // changed the uid came from the branch.
   await checkWorktreeImageUids(config.gateStack, process.getuid?.() ?? 0);
 
   startKeepawake();

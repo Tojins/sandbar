@@ -216,6 +216,14 @@ export type BuiltImage = {
   // buys nothing the worktree mount doesn't already give and costs a build per
   // attempt.
   readonly rebuildOn?: readonly string[];
+
+  // Deadline for this entry's `podman build`, in milliseconds. Default 45
+  // minutes. It exists because a `rebuildOn` build runs INSIDE a gate run from
+  // a recipe the implementer agent wrote, while the run holds the
+  // single-instance lock — an unbounded one is a run that never ends. Per entry
+  // for the same reason `step.timeoutMs` is per step: a `FROM alpine` and a 6GB
+  // browser image do not want the same ceiling.
+  readonly buildTimeoutMs?: number;
 };
 
 export type GateStackConfig = {
@@ -994,6 +1002,10 @@ function resolveRebuildOn(img: BuiltImage): readonly string[] {
         "relative to the repo root.",
     );
   }
+  // `dirname` of the containerfile, normalised to "" for the repo root — which
+  // is what `buildArgv` passes podman as the context.
+  const slash = img.containerfile.lastIndexOf("/");
+  const context = slash === -1 ? "" : img.containerfile.slice(0, slash);
   const out: string[] = [];
   for (const raw of paths) {
     const path = raw.trim();
@@ -1017,6 +1029,24 @@ function resolveRebuildOn(img: BuiltImage): readonly string[] {
           `'.', '..' or empty segment ('${path}'). It is resolved against a ` +
           "worktree root and must stay inside it; write the plain relative " +
           "path (`package-lock.json`, `packages/api/bun.lock`).",
+      );
+    }
+    // The build context is the containerfile's OWN directory (see
+    // `buildArgv`), so a declared path outside it cannot be `COPY`d and the
+    // image cannot be a function of it. Unchecked, that config passes
+    // everything else here, changes its fingerprint on every edit, pays a
+    // variant build per gate run, and produces an image byte-identical to the
+    // base — the gate still pinned to the source branch, which is #37 exactly.
+    // A silent no-op wearing the fix.
+    if (context && !`${path}/`.startsWith(`${context}/`)) {
+      throw new SandbarError(
+        `config.images: entry '${img.tag}' declares \`rebuildOn\` path ` +
+          `'${path}', which is outside its build context ('${context}/'). ` +
+          "The context is the containerfile's own directory, so that path " +
+          "cannot be COPYd into the image and the image cannot be a function " +
+          "of it — sandbar would rebuild on every change and produce the same " +
+          "image. Move the containerfile up to the directory that holds the " +
+          "inputs, or list inputs from inside its own.",
       );
     }
     if (!out.includes(path)) out.push(path);
@@ -1049,6 +1079,18 @@ export function resolveImages(
       throw new SandbarError(
         `config.images: entry '${img.tag}' has no containerfile.`,
       );
+    }
+    // Same rule and same reason as `step.timeoutMs` (#26): the deadline is a
+    // `setTimeout` sandbar owns, so 0 and NaN fire on the next tick — every
+    // build killed before it starts — and Infinity never fires at all.
+    if (img.buildTimeoutMs !== undefined) {
+      if (!Number.isFinite(img.buildTimeoutMs) || img.buildTimeoutMs <= 0) {
+        throw new SandbarError(
+          `config.images: entry '${img.tag}' has a non-positive, NaN or ` +
+            `infinite buildTimeoutMs (${img.buildTimeoutMs}). A build deadline ` +
+            "must be a positive, finite number of milliseconds.",
+        );
+      }
     }
     resolved.push({ ...img, rebuildOn: resolveRebuildOn(img) });
   }

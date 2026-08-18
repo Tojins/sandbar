@@ -23,13 +23,18 @@ import {
   buildImage,
   ensureImages,
   readInputsLabel,
+  sweepBranchImages,
 } from "./ensure-images.js";
+import { runScope, variantImageTag } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
 
 const BASE = "docker.io/library/mariadb:10.11";
 const TAG = "localhost/sandbar-ensure-images-test:probe";
+const SCOPE = runScope("/ensure-images.test");
+// Any other workdir's scope. The sweep must be blind to it.
+const OTHER_SCOPE = runScope("/ensure-images.test.sibling");
 
 // Collection time, not beforeAll: vitest evaluates `runIf` while building the
 // suite, so a flag set in a hook arrives too late and silently skips
@@ -72,6 +77,13 @@ describe.runIf(available)("ensureImages against real podman", () => {
   }, 60_000);
 
   afterAll(async () => {
+    for (const scope of [SCOPE, OTHER_SCOPE]) {
+      await exec(RUNTIME, [
+        "rmi",
+        "-f",
+        variantImageTag(TAG, scope, "deadbeefcafe"),
+      ]).catch(() => {});
+    }
     await exec(RUNTIME, ["rmi", "-f", TAG]).catch(() => {});
   }, 120_000);
 
@@ -152,6 +164,38 @@ describe.runIf(available)("ensureImages against real podman", () => {
       await expect(ensureImages([image], root)).rejects.toBeInstanceOf(
         ImageBuildError,
       );
+    },
+    600_000,
+  );
+
+  it(
+    "sweeps this scope's leftover per-branch images and leaves another scope's alone",
+    async () => {
+      // The run-end removal is an `onCleanup` action, so it does not run on
+      // SIGKILL or a hard crash — and these are the largest things sandbar
+      // creates. This sweep is what makes the scope segment in the tag mean
+      // something, and it must not reach a concurrent run's live images.
+      const ours = variantImageTag(TAG, SCOPE, "deadbeefcafe");
+      const theirs = variantImageTag(TAG, OTHER_SCOPE, "deadbeefcafe");
+      await ensureImages([image], root);
+      await exec(RUNTIME, ["tag", TAG, ours]);
+      await exec(RUNTIME, ["tag", TAG, theirs]);
+
+      const result = await sweepBranchImages(SCOPE);
+      expect(result.failures).toEqual([]);
+      expect(result.removed).toContain(ours);
+      expect(result.removed).not.toContain(theirs);
+
+      const listed = (
+        await exec(RUNTIME, ["images", "--format", "{{.Repository}}:{{.Tag}}"])
+      ).stdout;
+      expect(listed).not.toContain(ours);
+      expect(listed).toContain(theirs);
+      // The BASE tag is untouched — `podman rmi -f` on a multi-tagged image
+      // untags rather than deleting, and the base is what `ensureImages` built.
+      expect(listed).toContain(TAG);
+
+      await exec(RUNTIME, ["rmi", "-f", theirs]).catch(() => {});
     },
     600_000,
   );

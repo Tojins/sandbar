@@ -62,15 +62,21 @@
 // fails as a silent EACCES twenty minutes into a gate. One throwaway container
 // per image answers it exactly, and preflight already pays comparable costs.
 
-import { execFile, spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { dirname, isAbsolute, join } from "node:path";
 import { createReadStream } from "node:fs";
 import { promisify } from "node:util";
 
+import { onCleanup } from "./cleanup.js";
 import type { BuiltImage, ResolvedGateStack } from "./config.js";
+import type { RuntimeExec, SweepResult } from "./containers.js";
 import { SandbarError } from "./errors.js";
 import { IMAGE_INPUTS_LABEL, fingerprintImageInputs } from "./image-inputs.js";
-import { type RunScope, variantImageTag } from "./naming.js";
+import {
+  type RunScope,
+  isVariantImageTagIn,
+  variantImageTag,
+} from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -81,10 +87,40 @@ const exec = promisify(execFile);
 export const BUILD_OUTPUT_TAIL_BYTES = 64 * 1024;
 
 // Bound on the podman calls this module makes ABOUT an image rather than to
-// build one: `image exists`, `image inspect`, `rmi`. Builds themselves are
-// deliberately unbounded — a cold ~6GB image is minutes of legitimate work and
-// there is no honest number to pick.
+// build one: `image exists`, `image inspect`, `rmi`.
 const IMAGE_QUERY_TIMEOUT_MS = 30_000;
+
+// Default deadline for a build. Generous, because a cold ~6GB image really is
+// minutes of legitimate work — but not absent, which is what it was when the
+// only builds were base builds running at startup in front of an operator
+// watching progress. Since #37 a build also runs INSIDE a gate run, from a
+// Containerfile and a lockfile the implementer agent wrote, while the run holds
+// the single-instance lock. An unbounded one there is not a slow gate but a run
+// that never ends and never tears down — gate-stack.ts's own rule, arriving in
+// a second module. `images[].buildTimeoutMs` overrides it per entry, for the
+// same reason #26 made the step bound per step: a `FROM alpine` and a 6GB
+// browser image do not want the same ceiling and only the consumer knows which
+// is which.
+export const DEFAULT_BUILD_TIMEOUT_MS = 45 * 60_000;
+
+// Builds currently running, so a signal can reap them. ONE cleanup entry for
+// the whole process rather than one per build: `onCleanup` never forgets an
+// action, and gate-stack.ts declines to register its log followers there for
+// exactly that reason.
+const liveBuilds = new Set<ChildProcess>();
+let buildReaperInstalled = false;
+
+function trackBuild(child: ChildProcess): () => void {
+  if (!buildReaperInstalled) {
+    buildReaperInstalled = true;
+    onCleanup(() => {
+      for (const c of liveBuilds) c.kill("SIGKILL");
+      liveBuilds.clear();
+    });
+  }
+  liveBuilds.add(child);
+  return () => liveBuilds.delete(child);
+}
 
 // A `podman build` that failed. Carries the build's own output, because the
 // usual cause is the branch's dependencies rather than anything an operator can
@@ -161,6 +197,8 @@ export type BuildOptions = {
   // into a gate trace; a base build inherits so a cold multi-minute build shows
   // progress.
   readonly capture?: boolean;
+  // Deadline for the whole build. Defaults to DEFAULT_BUILD_TIMEOUT_MS.
+  readonly timeoutMs?: number;
 };
 
 // The `podman build` argv for one entry. Pure so the stdin-context, build-arg
@@ -210,7 +248,9 @@ export async function buildImage(
 ): Promise<string> {
   const args = buildArgv(image, opts);
   const capture = opts.capture ?? true;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS;
   let output = "";
+  let timedOut = false;
   await new Promise<void>((resolve, reject) => {
     const child = spawn(RUNTIME, args, {
       stdio: [
@@ -219,6 +259,19 @@ export async function buildImage(
         capture ? "pipe" : "inherit",
       ],
     });
+    // SIGKILL, and a flag the timer sets rather than anything inferred from an
+    // exit code — the same discipline `boundedPodman` uses in gate-stack.ts,
+    // for the same reason: a signal a child can report as a clean exit is a
+    // bound that cannot fail.
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    // Tracked for the run's cleanup, because a signal during a build would
+    // otherwise leave `podman build` running detached: it finishes minutes
+    // after sandbar exited and applies a tag `builtTags()` never saw, so the
+    // startup sweep is the only thing that ever reclaims it.
+    const untrack = trackBuild(child);
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (c: string) => {
@@ -227,20 +280,34 @@ export async function buildImage(
     child.stderr?.on("data", (c: string) => {
       output = appendTail(output, c);
     });
-    child.on("error", reject);
-    child.on("exit", (code) =>
-      code === 0
-        ? resolve()
-        : reject(
-            new ImageBuildError(
-              image.tag,
-              `\`${RUNTIME} ${args.join(" ")}\` exited with code ${code}.`,
-              output.length === BUILD_OUTPUT_TAIL_BYTES
-                ? `[output truncated to the last ${BUILD_OUTPUT_TAIL_BYTES} bytes]\n${output}`
-                : output,
-            ),
-          ),
-    );
+    child.on("error", (err) => {
+      untrack();
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("exit", (code) => {
+      untrack();
+      clearTimeout(timer);
+      if (code === 0 && !timedOut) {
+        resolve();
+        return;
+      }
+      const note = timedOut
+        ? `did not finish within ${timeoutMs}ms and was killed. A build that ` +
+          "exceeds its bound is a gate red, not an infrastructure failure — " +
+          "since #37 the recipe and its inputs are the branch's. Raise " +
+          "`images[].buildTimeoutMs` if the build is genuinely this slow."
+        : `exited with code ${code}.`;
+      reject(
+        new ImageBuildError(
+          image.tag,
+          `\`${RUNTIME} ${args.join(" ")}\` ${note}`,
+          output.length === BUILD_OUTPUT_TAIL_BYTES
+            ? `[output truncated to the last ${BUILD_OUTPUT_TAIL_BYTES} bytes]\n${output}`
+            : output,
+        ),
+      );
+    });
     if (image.stdinContext && child.stdin) {
       const src = createReadStream(
         containerfilePath(image, opts.root),
@@ -289,7 +356,11 @@ export async function ensureImages(
         console.log(
           `Building ${image.tag} in ${RUNTIME} (one-time setup; cached afterwards)...`,
         );
-        await buildImage(image, { root: contextRoot, capture: false });
+        await buildImage(image, {
+          root: contextRoot,
+          capture: false,
+          timeoutMs: image.buildTimeoutMs,
+        });
       }
       continue;
     }
@@ -305,6 +376,7 @@ export async function ensureImages(
       root: contextRoot,
       fingerprint,
       capture: false,
+      timeoutMs: image.buildTimeoutMs,
     });
   }
   return baseFingerprints;
@@ -339,14 +411,23 @@ export type BranchImagesOptions = {
   // Injectable for tests, which must be able to exercise the decision (reuse
   // the base image / build a variant / reuse a variant) without podman.
   readonly build?: (image: BuiltImage, opts: BuildOptions) => Promise<unknown>;
-  readonly exists?: (tag: string) => Promise<boolean>;
+  readonly inputsLabel?: (tag: string) => Promise<string | null>;
   readonly log?: (line: string) => void;
+  // Declared tags behind a worktree-mounting container, and the host uid they
+  // must run as. A freshly-built variant is re-probed against the D3 rule
+  // before it is handed to a container (see `checkVariantUid`); an empty set
+  // skips it entirely.
+  readonly worktreeMountingTags?: ReadonlySet<string>;
+  readonly hostUid?: number;
+  readonly probeUid?: UidProbe;
 };
 
 export function createBranchImages(opts: BranchImagesOptions): BranchImages {
   const build = opts.build ?? buildImage;
-  const exists = opts.exists ?? imageExists;
+  const inputsLabel = opts.inputsLabel ?? readInputsLabel;
   const log = opts.log ?? ((line: string) => console.log(line));
+  const worktreeMountingTags = opts.worktreeMountingTags ?? new Set<string>();
+  const probeUid = opts.probeUid ?? effectiveUid;
   const participating = opts.images.filter((i) =>
     opts.baseFingerprints.has(i.tag),
   );
@@ -373,16 +454,39 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
       map.set(image.tag, tag);
       let pending = builds.get(tag);
       if (pending === undefined) {
-        pending = (async () => {
-          if (!(await exists(tag))) {
+        const attempt = (async () => {
+          // The LABEL, not merely `image exists`. The variant tag carries only
+          // the first 8 hex of the fingerprint, so the name alone is a 32-bit
+          // cache key, and a leftover tag from a crashed run in this scope is
+          // accepted on it. Reading back the full fingerprint the build
+          // recorded costs the same one podman call and makes the check the
+          // same one the base path already makes — "unknown provenance means
+          // rebuild" is this module's own rule.
+          if ((await inputsLabel(tag)) !== fingerprint) {
             log(
               `Rebuilding ${image.tag} as ${tag}: ${worktreePath} changed a ` +
                 "declared input of it (#37).",
             );
             await build(
               { ...image, tag },
-              { root: worktreePath, fingerprint, capture: true },
+              {
+                root: worktreePath,
+                fingerprint,
+                capture: true,
+                timeoutMs: image.buildTimeoutMs,
+              },
             );
+            // D3, re-asked for an image the BRANCH authored. The Containerfile's
+            // own bytes are part of the fingerprint, so a branch is explicitly
+            // free to change the recipe — including its `USER` — and the
+            // startup check (which runs once, over the declared images) would
+            // never see it. Skipping it here is a silent mid-gate EACCES, the
+            // one failure D3 exists to convert into a refusal. Asked only for a
+            // tag that will actually be mounted onto, and only when it was just
+            // built: a reused one was probed when it was.
+            if (worktreeMountingTags.has(image.tag)) {
+              await checkVariantUid(tag, image.tag, opts.hostUid ?? 0, probeUid);
+            }
           }
           // Recorded only once the tag EXISTS, whether this run built it or
           // found it. A tag recorded before the build would send cleanup after
@@ -390,13 +494,31 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
           // about the missing tag would be reported as a leak.
           order.push(tag);
         })();
+        // A REJECTION is evicted; a success is not. The deduplication exists to
+        // stop two parallel issues racing one multi-minute build, and that
+        // argument is about work in flight — it is not an argument for caching
+        // a failure for the rest of the run.
+        //
+        // Cached, one transient failure (a registry 5xx on the `FROM` pull,
+        // ENOSPC) would be a dead end rather than a bad verdict: the
+        // fingerprint stays put as long as the agent does not touch the
+        // lockfile again, so every remaining attempt re-throws the SAME stale
+        // error, no build is ever retried, and the issue lands on `agent-stuck`
+        // with a trace telling its author their dependencies do not install.
+        // The merger's gate-2 on a merge result with the same lockfile bytes
+        // would inherit it too. Evicting costs a repeated failing build per
+        // attempt for a genuinely broken lockfile, bounded by `maxImplAttempts`.
+        pending = attempt.catch((err: unknown) => {
+          builds.delete(tag);
+          throw err;
+        });
         builds.set(tag, pending);
       }
       // Awaited even when another worktree started it: the container about to
-      // run this tag needs the image to exist, not merely to be on its way.
-      // A rejection is re-thrown to every waiter, which is correct — the tag is
-      // content-addressed, so a build that failed for one worktree fails for
-      // every worktree that asked for the same bytes.
+      // run this tag needs the image to exist, not merely to be on its way. A
+      // rejection reaches every waiter that was already queued — correct, since
+      // the tag is content-addressed and they asked for the same bytes — while
+      // a caller arriving afterwards gets a fresh attempt.
       await pending;
     }
     return map;
@@ -405,11 +527,46 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
   return { resolve, builtTags: () => [...order] };
 }
 
+// The D3 uid rule applied to a per-branch variant, as an `ImageBuildError` so
+// it lands as a gate RED rather than a HARD-ERROR. The blame is the branch's:
+// it changed the recipe that changed the uid, and the alternative — two
+// fresh-stack retries reproducing an image sandbar itself just built — is the
+// misattribution D5 spends a page on.
+async function checkVariantUid(
+  tag: string,
+  declaredTag: string,
+  hostUid: number,
+  probe: UidProbe,
+): Promise<void> {
+  let uid: number;
+  try {
+    uid = await probe(tag);
+  } catch (err) {
+    throw new ImageBuildError(
+      tag,
+      `the per-branch image '${tag}' built from this worktree could not be ` +
+        `run at all: ${err instanceof Error ? err.message : String(err)}`,
+      "",
+    );
+  }
+  if (uid === 0 || uid === hostUid) return;
+  throw new ImageBuildError(
+    tag,
+    `the per-branch image '${tag}' (built from this branch's version of ` +
+      `'${declaredTag}') runs as uid ${uid}, which is neither root (0) nor ` +
+      `the host uid (${hostUid}). It mounts the worktree, and inside the ` +
+      `pod's userns uid ${uid} maps to a subuid rather than to the invoking ` +
+      "user, so everything it writes into the tree would fail with EACCES " +
+      "mid-gate. This branch changed the image's recipe — drop the `USER` " +
+      "directive, or align it to the uid via the entry's `buildArgs`.",
+    "",
+  );
+}
+
 // Best-effort removal of the per-branch tags a run built, returning what could
 // not be removed. Teardown, so a failure is reported rather than thrown: it
-// leaks an image, which costs disk and nothing else — the tag is
-// content-addressed and scoped, so a leftover is reused rather than mistaken
-// for something current.
+// leaks an image, which costs disk and nothing else — and `sweepBranchImages`
+// reclaims it at the next run of this workdir.
 export async function removeBranchImages(
   tags: readonly string[],
 ): Promise<readonly string[]> {
@@ -430,6 +587,56 @@ export async function removeBranchImages(
   return failures;
 }
 
+// Per-branch images left behind in THIS scope, swept at startup — the image
+// half of `cleanupOrphanContainers`, with the same licence and the same
+// asymmetry.
+//
+// The licence: one lock ⇔ one scope, so a variant tag carrying our scope is
+// ours or a dead predecessor's on this workdir, and we hold the lock, so
+// nothing in it can be live. Another scope's variants are another workdir's to
+// reap and are not touched. Without this the scope segment in the tag would be
+// a claim nothing implements: the run-end removal does not run on SIGKILL, a
+// hard crash, or a `podman build` that outlived its parent, and these are
+// ~6GB-class images that no other code path names.
+//
+// The asymmetry: a failed LIST throws (a blind sweep would be asserting "no
+// debris" on no evidence), a failed REMOVE is collected and reported (it knows
+// exactly what leaked, the tag is content-addressed so a leftover is reused
+// rather than mistaken for something current, and throwing would let one wedged
+// image block every future run).
+export async function sweepBranchImages(
+  scope: RunScope,
+  run: RuntimeExec = (args) => exec(RUNTIME, [...args], {
+    timeout: IMAGE_QUERY_TIMEOUT_MS,
+  }),
+): Promise<SweepResult> {
+  const { stdout } = await run([
+    "images",
+    "--format",
+    "{{.Repository}}:{{.Tag}}",
+  ]);
+  const tags = stdout
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((t) => isVariantImageTagIn(scope, t));
+  const removed: string[] = [];
+  const failures: string[] = [];
+  for (const tag of tags) {
+    const args = ["rmi", "-f", tag];
+    try {
+      await run(args);
+      removed.push(tag);
+    } catch (err) {
+      failures.push(
+        `  ${RUNTIME} ${args.join(" ")}\n    ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+  return { removed, failures };
+}
+
 // `--entrypoint id` rather than `run <image> id -u`: with a plain command the
 // image's own ENTRYPOINT receives `id -u` as ARGUMENTS, and an entrypoint that
 // ignores them (or interprets them) answers a different question than the one
@@ -448,7 +655,12 @@ export type UidProbe = (image: string) => Promise<number>;
 async function effectiveUid(image: string): Promise<number> {
   let stdout: string;
   try {
-    ({ stdout } = await exec(RUNTIME, effectiveUidArgv(image)));
+    // Bounded like every other podman call this module makes. It runs during
+    // preflight with the lock held, so a wedged runtime here is a start that
+    // never finishes and never releases.
+    ({ stdout } = await exec(RUNTIME, effectiveUidArgv(image), {
+      timeout: IMAGE_QUERY_TIMEOUT_MS,
+    }));
   } catch (err) {
     throw new SandbarError(
       `could not determine the user image '${image}' runs as: ` +

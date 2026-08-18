@@ -898,6 +898,61 @@ describe.runIf(available)(
       300_000,
     );
 
+    // The regression the whole feature can die on, and the one bringup that
+    // neither precedes nor follows a `running.map` update: `reapKilledStep`
+    // recreates a timed-out `issue` container, and recreating it from the
+    // DECLARED image silently puts the stack back on the base image while the
+    // map still says it is on the branch's variant. Nothing ever sees it as
+    // stale again, so every remaining attempt gates against the source
+    // branch's dependencies — #37 verbatim, green included.
+    it(
+      "a reaped issue container comes back on the image the branch put it on, not the declared one",
+      async () => {
+        const ALIAS = `localhost/sandbar-reap-image-test:${STACK_ID}`;
+        await exec(RUNTIME, ["tag", IMAGE, ALIAS]);
+        stack = await startStack({
+          stackId: STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          images: async () => new Map([[IMAGE, ALIAS]]),
+          spec: resolveGateStack({
+            containers: [
+              { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            steps: [
+              { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
+              { name: "hangs-in-held", in: "held", command: ["sleep", "613"], timeoutMs: 2_000 },
+            ],
+          }),
+        });
+
+        const imageNameOf = async (name: string): Promise<string> =>
+          (
+            await exec(RUNTIME, [
+              "inspect",
+              "--format",
+              "{{.ImageName}}",
+              cName(name),
+            ])
+          ).stdout.trim();
+
+        expect((await stack.runGate()).failedStep).toBe("hangs-in-held");
+        // Recreated by the reap — and on the variant. `ok`-only, or an
+        // id-only, assertion passes with the bug present.
+        expect(await imageNameOf("held")).toBe(ALIAS);
+
+        // …and the next gate run does not see it as stale (the map is
+        // unchanged), which is exactly why getting the reap wrong would never
+        // self-correct.
+        expect((await stack.runGate()).failedStep).toBe("hangs-in-held");
+        expect(await imageNameOf("held")).toBe(ALIAS);
+
+        await exec(RUNTIME, ["rmi", ALIAS]).catch(() => {});
+      },
+      300_000,
+    );
+
     // The ordering trap the recreate introduces. `bringUp` removes before it
     // creates, so a recreate that fails leaves the issue container GONE — and
     // `assertIssueContainersAlive` would then read sandbar's own removal as
