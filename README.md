@@ -212,7 +212,7 @@ image the stack references must already be pulled — preflight refuses with the
 exact `podman pull` command rather than pulling it, so no run does silent
 network work at startup.
 
-### Two constraints the gate stack imposes on your images and steps
+### Three constraints the gate stack imposes on your images and steps
 
 **A worktree-mounting image must run as root, or as your uid.** Stack containers
 run inside a pod, and podman refuses `--userns=keep-id` alongside `--pod`; inside
@@ -222,6 +222,36 @@ to the invoking user, so files still land owned by you. Sandbar checks this
 before the run by running each such image (`podman run --rm --entrypoint id <img> -u`)
 and refuses with both remedies named: drop the `USER` directive, or align the
 image to your uid at build time via `buildArgs`.
+
+**The steps have to be able to see the code under test.** A gate whose steps all
+run in containers that never mount the worktree returns the same verdict for
+every commit — green included — which is the one failure the gate exists to
+prevent. Sandbar therefore requires that **at least one container mounting the
+worktree is stepped into**. Ordinary stacks (a runner that mounts the tree and
+holds, with every step `in` it) satisfy this for free.
+
+The exception is a stack that serves the branch's code over loopback: an app
+container that mounts the worktree and runs it, with every step in a playwright
+container that needs no mount of its own. That shape is correct and fails the
+check, and no rule can tell it apart from the broken one — a stale mount left on
+a database by a refactor produces byte-identical config, and a realistic database
+declares `readiness` too. So it says so:
+
+```ts
+{ name: "app", image: "…", mountWorktree: "/app", servesWorktree: true }
+```
+
+`servesWorktree` is needed **only** by a stack with no stepped-into mount at all,
+and is rejected on a container that mounts nothing (it has nothing to serve) or
+that sets `hold` (`sleep infinity` runs nothing, so it serves nobody).
+
+> **Note.** A container that mounts the worktree may not be `lifecycle: "issue"`.
+> An `issue` container is reused across attempts precisely because it depends
+> only on its image and its env, which is why a failure to start it is treated as
+> infrastructure and retried on a fresh stack. Mounting the branch's code breaks
+> that: a branch that breaks its startup gets blamed on the environment and burns
+> two retries reproducing the same failure. Use `mounts` when an `issue`
+> container only needs fixture files from the worktree.
 
 **A gate step must write only into gitignored paths.** The gate is a verdict
 about a *commit*, so sandbar refuses to run it against a worktree with

@@ -240,16 +240,19 @@ describe.runIf(available)(
             spec: resolveGateStack({
               containers: [
                 {
-                  name: "runner",
+                  // `issue` lifecycle, so bringup happens in startStack and its
+                  // failure throws. It mounts nothing: a worktree mount would
+                  // make it branch-dependent, which is what `attempt` is for.
+                  name: "svc",
                   image: IMAGE,
                   lifecycle: "issue",
-                  mountWorktree: "/work",
                   hold: true,
                   // Published on the pod, so `connect` SUCCEEDS at the host —
                   // and nothing in the pod is listening on it.
                   readiness: { kind: "tcp", port: 9999 },
                   readinessTimeoutMs: 4_000,
                 },
+                { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
               ],
               steps: [{ name: "ok", in: "runner", command: ["true"] }],
             }),

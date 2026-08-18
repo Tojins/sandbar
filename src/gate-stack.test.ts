@@ -352,6 +352,96 @@ describe("resolveGateStack validation", () => {
     ).toThrow(/mountWorktree/);
   });
 
+  // #29: the check above asks only whether SOMETHING mounts the worktree, and
+  // this stack satisfies it while every step runs in a container that cannot
+  // see the branch. Same verdict for every commit, green included — verbatim
+  // the failure that check's own message claims to prevent. Reachable by
+  // moving the mount to the wrong container during a refactor, after which
+  // every run passes.
+  it("refuses a stack where the worktree mount is on a container no step enters", () => {
+    expect(() =>
+      resolveGateStack({
+        containers: [
+          { name: "db", image: "mariadb", mountWorktree: "/w" },
+          { name: "runner", image: "node", hold: true },
+        ],
+        steps: [{ name: "test", in: "runner", command: ["npm", "test"] }],
+      }),
+    ).toThrow(/servesWorktree/);
+  });
+
+  // The shape the obvious tightening ("every step's container must mount the
+  // worktree") would have over-rejected: an app serving the branch's code over
+  // 127.0.0.1 to a playwright container that needs no mount of its own. It is
+  // byte-identical to the stack above except in intent, so intent is what the
+  // consumer states.
+  it("accepts the serve-over-loopback shape when the server declares it", () => {
+    expect(() =>
+      resolveGateStack({
+        containers: [
+          { name: "app", image: "app", mountWorktree: "/app", servesWorktree: true },
+          { name: "playwright", image: "pw", hold: true },
+        ],
+        steps: [{ name: "e2e", in: "playwright", command: ["npx", "playwright", "test"] }],
+      }),
+    ).not.toThrow();
+  });
+
+  // A false answer to the one question the rule asks is worse than no answer.
+  it("refuses servesWorktree on a container that mounts nothing", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          { name: "app", image: "app", mountWorktree: "/app", hold: true },
+          { name: "liar", image: "x", servesWorktree: true },
+        ],
+      }),
+    ).toThrow(/servesWorktree/);
+  });
+
+  // `hold` is `sleep infinity`: the container runs nothing, so this is the one
+  // form of the declaration that is decidably false.
+  it("refuses servesWorktree + hold", () => {
+    expect(() =>
+      resolveGateStack({
+        containers: [
+          {
+            name: "app",
+            image: "app",
+            mountWorktree: "/app",
+            hold: true,
+            servesWorktree: true,
+          },
+          { name: "pw", image: "pw", hold: true },
+        ],
+        steps: [{ name: "e2e", in: "pw", command: ["true"] }],
+      }),
+    ).toThrow(/hold/);
+  });
+
+  // D5 defines `issue` as depending only on image + env, which is why its
+  // bringup failure is infra and costs two HARD-ERROR retries. A worktree mount
+  // makes it depend on branch code, so a branch that breaks its startup is
+  // blamed on the environment. `mounts` is what an issue container uses when it
+  // only needs fixture files from the worktree.
+  it("refuses lifecycle 'issue' on a container that mounts the worktree", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "db",
+            image: "mariadb",
+            lifecycle: "issue",
+            mountWorktree: "/w",
+          },
+          { name: "app", image: "app", mountWorktree: "/app", hold: true },
+        ],
+      }),
+    ).toThrow(/lifecycle 'issue'/);
+  });
+
   // podman's -v spec is colon-delimited with no escape. `mounts` was checked
   // for this from the start; mountWorktree — the one every valid stack has, and
   // therefore the most-travelled spec sandbar builds — was not.

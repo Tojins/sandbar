@@ -121,6 +121,17 @@ export type StackContainer = {
   // writes to the worktree fail with EACCES. Checked empirically at startup
   // (see ensure-images.ts) rather than left to fail mid-gate.
   readonly mountWorktree?: string;
+  // "The steps consume the worktree THROUGH me" — this container mounts the
+  // branch's code and serves it to steps that run somewhere else (an app the
+  // playwright container drives over 127.0.0.1). It exists because the property
+  // the gate actually needs — the steps can see the code under test — is not
+  // structurally decidable (#29): a container that mounts the worktree and is
+  // never stepped into is either that app, or a stale mount left on a database
+  // by a refactor, and the config says exactly the same thing in both cases.
+  // The sound half of the rule is checked for free (some stepped-into container
+  // mounts the worktree); this is how the other shape says so out loud, and is
+  // needed ONLY by a stack that has no stepped-into mount at all.
+  readonly servesWorktree?: boolean;
   // The image has no long-running process of its own: hold it open with
   // `sleep infinity` so steps can `podman exec` into it. This is what makes a
   // one-shot task runner an ordinary container rather than a special case.
@@ -175,6 +186,7 @@ export type ResolvedStackContainer = {
   readonly args: readonly string[];
   readonly mounts: readonly StackMount[];
   readonly mountWorktree: string | null;
+  readonly servesWorktree: boolean;
   readonly hold: boolean;
   readonly readiness: Readiness | null;
   readonly readinessTimeoutMs: number;
@@ -613,6 +625,38 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
     }
   }
 
+  // The check above only asks whether SOMETHING mounts the worktree, which a
+  // stack can satisfy while every step runs somewhere that cannot see the
+  // branch (#29) — the same verdict for every commit, green included, which is
+  // verbatim what that check claims to prevent.
+  //
+  // The property actually wanted is "the steps can see the code under test",
+  // and it is not structurally decidable: a worktree-mounting container that no
+  // step enters is either an app serving the branch to a playwright container
+  // over 127.0.0.1, or a stale mount a refactor left on a database, and the
+  // config is byte-identical in both cases. Readiness doesn't separate them
+  // either — a realistic database declares `readiness` too. So the SOUND half
+  // is checked (some stepped-into container mounts it, which every ordinary
+  // stack satisfies for free) and the other shape has to say so out loud.
+  //
+  // A throw rather than a warning because the failure mode is silent and
+  // GREEN: a warning scrolls past at startup and the gate merges broken code
+  // for as long as nobody re-reads it.
+  const steppedInto = new Set(stack.steps.map((step) => step.in));
+  const mounting = containers.filter((c) => c.mountWorktree !== null);
+  if (!mounting.some((c) => steppedInto.has(c.name) || c.servesWorktree)) {
+    const names = mounting.map((c) => `'${c.name}'`).join(", ");
+    throw new SandbarError(
+      `config.gateStack: ${names} mount the worktree but no step runs in ` +
+        `${mounting.length === 1 ? "it" : "any of them"}, and none declares ` +
+        "`servesWorktree`. Every step runs in a container that cannot see the " +
+        "code under test, so the gate would return the same verdict for every " +
+        "commit. Either run a step in a container that mounts the worktree, " +
+        "or — if one of these serves the branch's code to the steps over " +
+        "127.0.0.1 — mark it `servesWorktree: true`.",
+    );
+  }
+
   return { containers, steps: stack.steps };
 }
 
@@ -676,6 +720,46 @@ function resolveStackContainer(
           "which would shadow the image's entire filesystem.",
       );
     }
+    // D5 defines `issue` as "depends only on its image and its env, never on
+    // the branch's code" — that is the whole reason its bringup failure is
+    // classed infra and spends two HARD-ERROR retries on a fresh stack. A
+    // container that mounts the worktree depends on branch code by
+    // construction, so the pair is a contradiction, and it is the expensive
+    // direction of the D5 mistake: a branch that breaks this container's
+    // startup gets blamed on the environment. An `issue` container that needs
+    // FILES from the worktree already has `mounts`, whose hostPath is resolved
+    // against it read-only.
+    if ((c.lifecycle ?? "attempt") === "issue") {
+      throw new SandbarError(
+        `config.gateStack: container '${c.name}' is lifecycle 'issue' and ` +
+          "mounts the worktree. An `issue` container is reused across attempts " +
+          "because it depends only on its image and its env — so a failure to " +
+          "start is infra, not the branch. Mounting the branch's code breaks " +
+          "that: use lifecycle 'attempt', or `mounts` if this container only " +
+          "needs fixture files from the worktree.",
+      );
+    }
+  } else if (c.servesWorktree === true) {
+    // Nothing to serve. Left unchecked it would be a false answer to the one
+    // question the #29 rule asks, which is worse than no answer.
+    throw new SandbarError(
+      `config.gateStack: container '${c.name}' sets 'servesWorktree' but does ` +
+        "not set 'mountWorktree', so it cannot see the code under test and " +
+        "has nothing to serve to the steps.",
+    );
+  }
+  // `hold` replaces the entrypoint with `sleep infinity`: the container runs
+  // NOTHING. It is the strongest available evidence that a container serves
+  // nobody, so a held container claiming to serve the steps is the one form of
+  // the declaration that is decidably false.
+  if (c.servesWorktree === true && hold) {
+    throw new SandbarError(
+      `config.gateStack: container '${c.name}' sets both 'servesWorktree' and ` +
+        "'hold'. 'hold' overrides the entrypoint with `sleep infinity`, so the " +
+        "container runs nothing and can serve nothing — a step that needs its " +
+        "code must run in it, and then it is stepped into and needs no " +
+        "declaration at all.",
+    );
   }
   for (const m of c.mounts ?? []) {
     // podman's `-v` spec is colon-delimited with no escape mechanism, so a
@@ -772,6 +856,7 @@ function resolveStackContainer(
     args: c.args ?? [],
     mounts: c.mounts ?? [],
     mountWorktree: c.mountWorktree ?? null,
+    servesWorktree: c.servesWorktree ?? false,
     hold,
     readiness,
     readinessTimeoutMs,
