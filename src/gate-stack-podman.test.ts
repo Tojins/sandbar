@@ -24,6 +24,23 @@ import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
 
+// Exit code + trimmed stdout of a podman call, for the tests that assert what
+// PODMAN answers rather than what sandbar does with the answer.
+const runExit = async (
+  args: readonly string[],
+): Promise<{ code: number; stdout: string }> => {
+  try {
+    const { stdout } = await exec(RUNTIME, [...args]);
+    return { code: 0, stdout: stdout.trim() };
+  } catch (err) {
+    const e = err as { code?: unknown; stdout?: string };
+    return {
+      code: typeof e.code === "number" ? e.code : -1,
+      stdout: (e.stdout ?? "").trim(),
+    };
+  }
+};
+
 // Behaviour PODMAN defines, asserted by running podman — the same argument as
 // forge-verify-git.test.ts makes for git. The pure argv builders in
 // gate-stack.test.ts prove sandbar emits the flags it means to; they cannot
@@ -35,7 +52,10 @@ const exec = promisify(execFile);
 //      the backend after — so a connect-only readiness probe is a green-on-red;
 //   2. a container running as root inside a pod writes files owned by the
 //      INVOKING user, which is the only reason dropping `--userns=keep-id`
-//      (impossible alongside `--pod`) is survivable.
+//      (impossible alongside `--pod`) is survivable;
+//   3. `podman inspect` reports a REMOVED container with the same exit 125 it
+//      gives a podman that is merely unwell, so telling "gone" from "could not
+//      answer" needs `container exists` — 0 in any state, 1 for gone (#36).
 //
 // Any local image with a shell will do. mariadb is chosen because it also
 // serves a real TCP listener for the positive half of (1), and because
@@ -492,6 +512,84 @@ describe.runIf(available)(
         await exec(RUNTIME, ["stop", "-t", "0", cName("svc")]);
 
         await expect(stack.runGate()).rejects.toThrow(/no longer running/);
+      },
+      180_000,
+    );
+
+    // #36. The same mapping for the other way a container stops existing, which
+    // `inspect` alone cannot see: it exits 125 both for a container that is
+    // GONE and for a podman that is merely unwell, so the removed case was read
+    // as "could not answer" and waved through — and the gate then reddened
+    // AGAINST THE BRANCH on the first step to exec into it.
+    it(
+      "an issue container that is REMOVED between gate runs throws instead of reddening",
+      async () => {
+        stack = await startStack({
+          stackId: STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              { name: "svc", image: IMAGE, lifecycle: "issue", hold: true },
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            // The step does not touch `svc` at all: the assert is a property of
+            // the stack, checked before any step runs, not a step failure that
+            // happens to mention it.
+            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+          }),
+        });
+        expect((await stack.runGate()).ok).toBe(true);
+
+        await exec(RUNTIME, ["rm", "-f", "-t", "0", cName("svc")]);
+
+        // Not `.ok === false`: reddening is precisely the bug. And the prose
+        // has to say REMOVED — "no longer running" sends the operator to
+        // `podman logs` for a container that answers "no such object".
+        await expect(stack.runGate()).rejects.toThrow(/no longer exists/);
+      },
+      180_000,
+    );
+
+    // The empirical claim the fix above rests on, pinned rather than trusted:
+    // `container exists` answers 0 for a container in ANY state and 1 for one
+    // that is not there, which is the distinction `inspect` refuses to draw.
+    // Podman's wording for the two 125s differs per subcommand (`no such
+    // object` from inspect, `no container with name or ID ... found` from
+    // exec), so matching on stderr instead would be fragile in a way this is
+    // not.
+    it(
+      "`container exists` separates gone from flaked where `inspect` cannot",
+      async () => {
+        const name = cName("svc");
+        stack = await startStack({
+          stackId: STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              { name: "svc", image: IMAGE, lifecycle: "issue", hold: true },
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+          }),
+        });
+
+        const inspect = ["inspect", "--format", "{{.State.Running}}", name];
+        const exists = ["container", "exists", name];
+
+        expect(await runExit(inspect)).toEqual({ code: 0, stdout: "true" });
+        expect((await runExit(exists)).code).toBe(0);
+
+        await exec(RUNTIME, ["stop", "-t", "0", name]);
+        // Stopped: inspect answers cleanly, so `exists` is never consulted.
+        expect(await runExit(inspect)).toEqual({ code: 0, stdout: "false" });
+        expect((await runExit(exists)).code).toBe(0);
+
+        await exec(RUNTIME, ["rm", "-f", "-t", "0", name]);
+        // Removed: inspect's 125 is the exit code a broken podman also gives.
+        expect((await runExit(inspect)).code).toBe(125);
+        expect((await runExit(exists)).code).toBe(1);
       },
       180_000,
     );
