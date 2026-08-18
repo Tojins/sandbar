@@ -241,17 +241,29 @@ declares `readiness` too. So it says so:
 { name: "app", image: "…", mountWorktree: "/app", servesWorktree: true }
 ```
 
-`servesWorktree` is needed **only** by a stack with no stepped-into mount at all,
-and is rejected on a container that mounts nothing (it has nothing to serve) or
-that sets `hold` (`sleep infinity` runs nothing, so it serves nobody).
+`servesWorktree` is needed **only** by a stack with no stepped-into mount at all.
+It is rejected where it is decidably false: on a container that mounts nothing
+(it has nothing to serve), and on one that sets `hold` with no
+`postReadyCommands` (`sleep infinity` plus nothing exec'd after it means the
+container never runs anything). A held container *with* a `postReadyCommands`
+entry that backgrounds a daemon is accepted — that is the only route for an
+image whose `ENTRYPOINT` is not a shell.
 
-> **Note.** A container that mounts the worktree may not be `lifecycle: "issue"`.
-> An `issue` container is reused across attempts precisely because it depends
-> only on its image and its env, which is why a failure to start it is treated as
-> infrastructure and retried on a fresh stack. Mounting the branch's code breaks
-> that: a branch that breaks its startup gets blamed on the environment and burns
-> two retries reproducing the same failure. Use `mounts` when an `issue`
-> container only needs fixture files from the worktree.
+> **Note.** A container that mounts the worktree and boots its own entrypoint
+> may not be `lifecycle: "issue"`. An `issue` container is reused across attempts
+> precisely because it depends only on its image and its env, which is why a
+> failure to start it is treated as infrastructure: two HARD-ERROR retries on a
+> fresh stack, then `NEEDS-HUMAN` with an "environment" trace. Booting the
+> branch's code breaks that — a branch that breaks its own startup gets blamed on
+> the environment. Use `mounts` when such a container only needs fixture files
+> from the worktree.
+>
+> `hold` is the exception, and is allowed: the entrypoint becomes `sleep
+> infinity`, so nothing of the branch's runs at bringup. It is also the only home
+> for per-issue setup, since `postReadyCommands` run once per *container* and an
+> `attempt` container is recreated on every gate run. Such a container's own
+> `postReadyCommands` do re-open the misblame window if they build branch code;
+> that is your argv and your call, not something sandbar can decide for you.
 
 **A gate step must write only into gitignored paths.** The gate is a verdict
 about a *commit*, so sandbar refuses to run it against a worktree with

@@ -35,6 +35,7 @@ const container = (
   args: [],
   mounts: [],
   mountWorktree: null,
+  servesWorktree: false,
   hold: false,
   readiness: null,
   readinessTimeoutMs: 60_000,
@@ -400,9 +401,10 @@ describe("resolveGateStack validation", () => {
     ).toThrow(/servesWorktree/);
   });
 
-  // `hold` is `sleep infinity`: the container runs nothing, so this is the one
-  // form of the declaration that is decidably false.
-  it("refuses servesWorktree + hold", () => {
+  // `hold` is `sleep infinity` and nothing is exec'd after readiness, so this
+  // container provably runs nothing at all — the one form of the declaration
+  // that is decidably false rather than merely unlikely.
+  it("refuses servesWorktree + hold with no postReadyCommands", () => {
     expect(() =>
       resolveGateStack({
         containers: [
@@ -417,7 +419,29 @@ describe("resolveGateStack validation", () => {
         ],
         steps: [{ name: "e2e", in: "pw", command: ["true"] }],
       }),
-    ).toThrow(/hold/);
+    ).toThrow(/postReadyCommands/);
+  });
+
+  // …but a held container CAN serve, because postReadyCommands are exec'd into
+  // it after readiness and one that backgrounds a daemon leaves it serving.
+  // That is the only route for an image whose ENTRYPOINT is not a shell.
+  it("accepts servesWorktree + hold when a postReadyCommand starts the server", () => {
+    expect(() =>
+      resolveGateStack({
+        containers: [
+          {
+            name: "app",
+            image: "app",
+            mountWorktree: "/app",
+            hold: true,
+            servesWorktree: true,
+            postReadyCommands: [["sh", "-c", "cd /app && nohup npm start &"]],
+          },
+          { name: "pw", image: "pw", hold: true },
+        ],
+        steps: [{ name: "e2e", in: "pw", command: ["true"] }],
+      }),
+    ).not.toThrow();
   });
 
   // D5 defines `issue` as depending only on image + env, which is why its
@@ -425,7 +449,7 @@ describe("resolveGateStack validation", () => {
   // makes it depend on branch code, so a branch that breaks its startup is
   // blamed on the environment. `mounts` is what an issue container uses when it
   // only needs fixture files from the worktree.
-  it("refuses lifecycle 'issue' on a container that mounts the worktree", () => {
+  it("refuses lifecycle 'issue' on a container that boots its own entrypoint over the worktree", () => {
     expect(() =>
       resolveGateStack({
         ...ok,
@@ -440,6 +464,45 @@ describe("resolveGateStack validation", () => {
         ],
       }),
     ).toThrow(/lifecycle 'issue'/);
+  });
+
+  // The rule reaches exactly as far as its argument does. Under `hold` the
+  // entrypoint is `sleep infinity`, so nothing of the branch's runs at bringup
+  // and `issue` is honest — and it is the only home for per-issue setup, since
+  // postReadyCommands run once per container and an `attempt` container is
+  // recreated on every gate run.
+  it("accepts lifecycle 'issue' on a held container that mounts the worktree", () => {
+    expect(() =>
+      resolveGateStack({
+        containers: [
+          {
+            name: "runner",
+            image: "app",
+            lifecycle: "issue",
+            mountWorktree: "/w",
+            hold: true,
+            postReadyCommands: [["composer", "install", "--no-interaction"]],
+          },
+        ],
+        steps: [{ name: "test", in: "runner", command: ["vendor/bin/phpunit"] }],
+      }),
+    ).not.toThrow();
+  });
+
+  // Issue #29's reproducer verbatim. It trips the lifecycle rule too, so this
+  // pins WHICH error it gets: the reachability one, the only one that names the
+  // reported symptom. Fixing the lifecycle first would just hand the consumer a
+  // config that throws the other error on the next run.
+  it("reports the reachability failure, not the lifecycle one, for #29's config", () => {
+    expect(() =>
+      resolveGateStack({
+        containers: [
+          { name: "db", image: "mariadb", mountWorktree: "/w", lifecycle: "issue" },
+          { name: "runner", image: "node", hold: true },
+        ],
+        steps: [{ name: "test", in: "runner", command: ["npm", "test"] }],
+      }),
+    ).toThrow(/servesWorktree/);
   });
 
   // podman's -v spec is colon-delimited with no escape. `mounts` was checked

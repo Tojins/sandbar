@@ -657,6 +657,40 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
     );
   }
 
+  // Checked AFTER the reachability rule above, and deliberately: #29's own
+  // reproducer trips both, and the reachability error is the one that explains
+  // the reported symptom. Fixing the lifecycle first would only hand the
+  // consumer a config that throws the other error on the next run.
+  //
+  // D5 defines `issue` as "depends only on its image and its env, never on the
+  // branch's code" — that is the whole reason its bringup failure is classed
+  // infra and spends two HARD-ERROR retries on a fresh stack. A container that
+  // runs its image's own entrypoint over a mounted worktree runs branch code at
+  // bringup by construction, so a branch that breaks its startup is blamed on
+  // the environment and lands NEEDS-HUMAN with an "environment" trace.
+  //
+  // Scoped to un-held containers, because that is exactly as far as the
+  // argument reaches: under `hold` the entrypoint is `sleep infinity` and
+  // NOTHING of the branch's executes at bringup, so `issue` is honest there —
+  // and it is the one place a per-issue setup can live, since
+  // `postReadyCommands` run once per container and an `attempt` container is
+  // recreated every gate run. That shape does re-open the misblame window
+  // through its own `postReadyCommands`, which is the consumer's argv and the
+  // consumer's call; it is not something a validator can decide.
+  for (const c of containers) {
+    if (c.mountWorktree === null || c.lifecycle !== "issue" || c.hold) continue;
+    throw new SandbarError(
+      `config.gateStack: container '${c.name}' is lifecycle 'issue', mounts ` +
+        "the worktree and runs its own entrypoint. An `issue` container is " +
+        "reused across attempts because it depends only on its image and its " +
+        "env — so a failure to start it is infra, and costs two HARD-ERROR " +
+        "retries on a fresh stack before the issue lands on NEEDS-HUMAN with " +
+        "an 'environment' trace. Booting the branch's code breaks that: use " +
+        "lifecycle 'attempt', `mounts` if this container only needs fixture " +
+        "files from the worktree, or `hold` if it has no process of its own.",
+    );
+  }
+
   return { containers, steps: stack.steps };
 }
 
@@ -720,25 +754,6 @@ function resolveStackContainer(
           "which would shadow the image's entire filesystem.",
       );
     }
-    // D5 defines `issue` as "depends only on its image and its env, never on
-    // the branch's code" — that is the whole reason its bringup failure is
-    // classed infra and spends two HARD-ERROR retries on a fresh stack. A
-    // container that mounts the worktree depends on branch code by
-    // construction, so the pair is a contradiction, and it is the expensive
-    // direction of the D5 mistake: a branch that breaks this container's
-    // startup gets blamed on the environment. An `issue` container that needs
-    // FILES from the worktree already has `mounts`, whose hostPath is resolved
-    // against it read-only.
-    if ((c.lifecycle ?? "attempt") === "issue") {
-      throw new SandbarError(
-        `config.gateStack: container '${c.name}' is lifecycle 'issue' and ` +
-          "mounts the worktree. An `issue` container is reused across attempts " +
-          "because it depends only on its image and its env — so a failure to " +
-          "start is infra, not the branch. Mounting the branch's code breaks " +
-          "that: use lifecycle 'attempt', or `mounts` if this container only " +
-          "needs fixture files from the worktree.",
-      );
-    }
   } else if (c.servesWorktree === true) {
     // Nothing to serve. Left unchecked it would be a false answer to the one
     // question the #29 rule asks, which is worse than no answer.
@@ -748,17 +763,25 @@ function resolveStackContainer(
         "has nothing to serve to the steps.",
     );
   }
-  // `hold` replaces the entrypoint with `sleep infinity`: the container runs
-  // NOTHING. It is the strongest available evidence that a container serves
-  // nobody, so a held container claiming to serve the steps is the one form of
-  // the declaration that is decidably false.
-  if (c.servesWorktree === true && hold) {
+  // `hold` replaces the entrypoint with `sleep infinity`, so the container runs
+  // nothing OF ITS OWN — but sandbar execs `postReadyCommands` into it after
+  // readiness, and one that backgrounds a daemon leaves a held container
+  // genuinely serving. That is the only route for an image whose ENTRYPOINT is
+  // not a shell, so the rule is the narrow, decidable one: held AND nothing
+  // exec'd after readiness is a container that provably runs nothing, and its
+  // claim to serve the steps is false rather than merely unlikely.
+  if (
+    c.servesWorktree === true &&
+    hold &&
+    (c.postReadyCommands?.length ?? 0) === 0
+  ) {
     throw new SandbarError(
-      `config.gateStack: container '${c.name}' sets both 'servesWorktree' and ` +
-        "'hold'. 'hold' overrides the entrypoint with `sleep infinity`, so the " +
-        "container runs nothing and can serve nothing — a step that needs its " +
-        "code must run in it, and then it is stepped into and needs no " +
-        "declaration at all.",
+      `config.gateStack: container '${c.name}' sets 'servesWorktree' with ` +
+        "'hold' and no 'postReadyCommands'. 'hold' overrides the entrypoint " +
+        "with `sleep infinity`, so nothing in this container ever runs and it " +
+        "can serve nothing. Either run a step in it (then it is stepped into " +
+        "and needs no declaration at all), or start the server from a " +
+        "'postReadyCommands' entry.",
     );
   }
   for (const m of c.mounts ?? []) {

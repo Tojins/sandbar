@@ -240,24 +240,24 @@ describe.runIf(available)(
             spec: resolveGateStack({
               containers: [
                 {
-                  // `issue` lifecycle, so bringup happens in startStack and its
-                  // failure throws. It mounts nothing: a worktree mount would
-                  // make it branch-dependent, which is what `attempt` is for.
-                  name: "svc",
+                  name: "runner",
                   image: IMAGE,
                   lifecycle: "issue",
+                  mountWorktree: "/work",
                   hold: true,
                   // Published on the pod, so `connect` SUCCEEDS at the host —
                   // and nothing in the pod is listening on it.
                   readiness: { kind: "tcp", port: 9999 },
                   readinessTimeoutMs: 4_000,
                 },
-                { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
               ],
               steps: [{ name: "ok", in: "runner", command: ["true"] }],
             }),
           }),
-        ).rejects.toThrow(/did not become ready/);
+          // Pinned to the container AND the probe: "did not become ready" alone
+          // would also be satisfied by some other container failing bringup for
+          // some other reason, which is not what this test is about.
+        ).rejects.toThrow(/'runner'[\s\S]*did not become ready[\s\S]*tcp port 9999/);
       },
       180_000,
     );
