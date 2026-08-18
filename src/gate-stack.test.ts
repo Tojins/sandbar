@@ -664,9 +664,10 @@ describe("resolveGateStack validation", () => {
     ]);
   });
 
-  // Both reach the runner as "no bound": node reads `timeout: 0` as unbounded,
-  // and NaN — a misparsed `process.env.STEP_TIMEOUT` — compares false against
-  // every deadline. The one value a bound must never silently become.
+  // The bound is a `setTimeout` sandbar owns, so 0, a negative and NaN all fire
+  // on the next tick: every step killed before it runs, a red gate every
+  // attempt until the budget dies. Infinity is the mirror — a bound that never
+  // fires. NaN is the one that actually happens, from a misparsed env var.
   it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
     "refuses a step timeoutMs of %s",
     (timeoutMs) => {

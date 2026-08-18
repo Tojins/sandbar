@@ -656,17 +656,20 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
         `config.gateStack: step '${step.name}' has an empty command.`,
       );
     }
-    // Same shape as readinessTimeoutMs, and rejected for the same reason: NaN
-    // and 0 both mean "no bound" once they reach the runner (node reads
-    // `timeout: 0` as unbounded), which is the one value a bound must never
-    // silently become.
+    // The bound is a `setTimeout` sandbar owns (gate-stack.ts, `boundedPodman`),
+    // so 0, a negative, and NaN all fire on the next tick rather than meaning
+    // "no bound" — every step would be killed instantly and the gate would red
+    // on a suite that never got to run a test, every attempt, until the budget
+    // died. Infinity is the mirror: a bound that can never fire. NaN is the one
+    // that actually reaches here, from a misparsed env var.
     const timeoutMs = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       throw new SandbarError(
         `config.gateStack: step '${step.name}' has a non-positive or ` +
-          `non-finite timeoutMs (${String(timeoutMs)}). NaN — from a ` +
-          "misparsed env var — reads as 'no bound', and an unbounded step " +
-          "hangs the run holding the single-instance lock.",
+          `non-finite timeoutMs (${String(timeoutMs)}). A non-positive or NaN ` +
+          "bound fires immediately, killing every step before it can run; an " +
+          "infinite one never fires, and an unbounded step hangs the run " +
+          "holding the single-instance lock.",
       );
     }
     steps.push({

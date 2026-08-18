@@ -74,15 +74,18 @@
 // ---------------------------------------------------------------------------
 // This module holds the run's single-instance lock while it works, and node's
 // execFile has NO default timeout, so an unbounded exec is not a slow gate —
-// it is a run that never ends and never tears down. Every such call goes
-// through `boundedPodman`, which does its OWN timing rather than passing node's
-// `timeout:` option — see that function, and note that the option it replaces
-// did not merely fail to bound a `podman exec`, it reported the hung call as a
-// SUCCESS. Steps are bounded by `step.timeoutMs` (#26, per step because a lint
-// step and a browser suite do not want the same ceiling); readiness probes and
-// postReadyCommands by the container's own readiness budget; sandbar's own
-// `logs`/`inspect` calls by LOG_READ_TIMEOUT_MS; and the tcp probe carries a
-// socket timeout because a dropped SYN produces neither `connect` nor `error`.
+// it is a run that never ends and never tears down. EVERY podman call in this
+// module goes through `boundedPodman`, which does its OWN timing rather than
+// passing node's `timeout:` option — see that function, and note that the
+// option it replaces did not merely fail to bound a `podman exec`, it reported
+// the hung call as a SUCCESS. Steps are bounded by `step.timeoutMs` (#26, per
+// step because a lint step and a browser suite do not want the same ceiling);
+// readiness probes and postReadyCommands by the container's own readiness
+// budget; `logs`/`inspect` by LOG_READ_TIMEOUT_MS; everything that creates or
+// destroys a pod, network or container by CONTROL_TIMEOUT_MS; and the tcp probe
+// carries a socket timeout because a dropped SYN produces neither `connect` nor
+// `error`. The one thing a gate run still shells out to unbounded is not
+// podman: `dirtyWorktreePaths`' `git status` (git-ops.ts).
 // Note that `readinessTimeoutMs` alone does not do this: the poll loop only
 // tests its deadline BETWEEN probes, so one probe that never returns hangs
 // forever inside a perfectly valid budget.
@@ -106,11 +109,15 @@
 // so a timed-out step leaves its work running, burning CPU beside the next
 // attempt and skewing whatever the next gate run measures. The only handle
 // podman offers that is total, and that needs no tools in an image sandbar does
-// not control, is the container itself: `reapTimedOutStep` removes it. For an
+// not control, is the container itself: `reapKilledStep` removes it. For an
 // `attempt` container that is free — the next gate run recreates it anyway —
-// and for an `issue` one it is recreated on the spot, so the "it came up once
-// and every attempt depends on it" contract still holds when the next gate run
-// asserts it.
+// and an `issue` one is recreated on the spot, since nothing else would: read
+// that function for why `assertIssueContainersAlive` does NOT cover the hole,
+// and for what the recreate costs. The same reap runs on a maxBuffer kill,
+// which strands a process for exactly the same reason.
+//
+// A recreate that fails is the one case where a killed step does not produce a
+// gate red: the bringup error wins and the run takes a HARD-ERROR instead.
 //
 // The `log` follower (#31) is the one thing here with no deadline at all, and
 // its bound is a kill rather than a timeout: `podman logs -f` is unbounded BY
@@ -252,6 +259,11 @@ function boundedPodman(
 ): Promise<BoundedResult> {
   return new Promise((resolve) => {
     let killedByTimer = false;
+    // Hoisted, not declared after `execFile`. `clearTimeout(timer)` below is
+    // safe only because execFile never invokes its callback synchronously, and
+    // a TDZ ReferenceError raised inside that callback would surface as an
+    // uncaught throw rather than a rejected promise.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const child = execFile(
       RUNTIME,
       [...args],
@@ -264,18 +276,21 @@ function boundedPodman(
         resolve({
           stdout,
           stderr,
-            exitCode:
-            e === null ? 0 : typeof e.code === "number" ? e.code : null,
-          // `err !== null` closes the boundary race: a step that exits 0 in the
-          // same tick the timer fires was not killed, and reporting it as a
-          // timeout would be a false red costing an implementation attempt.
+          exitCode: e === null ? 0 : typeof e.code === "number" ? e.code : null,
+          // `e !== null` keeps a call that exited 0 in the same tick the timer
+          // fired from being read as a timeout — a false red costing an
+          // implementation attempt. It does NOT cover the mirror case: a call
+          // that exits NON-ZERO inside that same window is reported as a
+          // timeout. Against a 15-minute default the window is microseconds,
+          // and both readings are red, so the asymmetry is priced in rather
+          // than closed.
           timedOut: killedByTimer && e !== null,
           maxBufferExceeded: e?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
           errorMessage: e?.message ?? "",
         });
       },
     );
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       killedByTimer = true;
       child.kill("SIGKILL");
     }, timeoutMs);
@@ -285,6 +300,27 @@ function boundedPodman(
 // Did the call exit 0 on its own?
 function boundedOk(r: BoundedResult): boolean {
   return r.exitCode === 0 && !r.timedOut && !r.maxBufferExceeded;
+}
+
+// A control-plane call whose failure means the stack cannot exist. Throws a
+// plain Error, NOT a SandbarError: SandbarError means "operator-actionable,
+// do not retry" and the inner loop rethrows it past HARD-ERROR, which would
+// drop the issue for the cycle with no terminal and no finalize. Podman
+// failing to create a network is infrastructure — the fresh-stack retry is
+// exactly what it wants.
+async function mustSucceed(
+  args: readonly string[],
+  what: string,
+): Promise<BoundedResult> {
+  const r = await boundedPodman(args, CONTROL_TIMEOUT_MS);
+  if (boundedOk(r)) return r;
+  throw new Error(
+    `gate stack: could not ${what}: ${
+      r.timedOut
+        ? `${RUNTIME} ${args[0]} did not return within ${CONTROL_TIMEOUT_MS}ms`
+        : r.errorMessage
+    }`,
+  );
 }
 
 export const READY_POLL_INTERVAL_MS = 500;
@@ -308,6 +344,19 @@ export const CONTAINER_LOG_TAIL = 40;
 // broken; the point is only that none of them can hang the run. Consumer-facing
 // execs are bounded by the readiness budget instead.
 export const LOG_READ_TIMEOUT_MS = 15_000;
+
+// Bound for the podman calls that CREATE and DESTROY things — `pod create`,
+// `network create`, `run`, `rm`, `pod rm`. Separate from LOG_READ_TIMEOUT_MS
+// and much larger, because these do real work (unpacking layers, setting up
+// overlay mounts, tearing down namespaces) and a host running three stacks in
+// parallel can legitimately take tens of seconds. 15s here would be a spurious
+// bringup failure, which is a false verdict about a branch.
+//
+// They are bounded at all because the alternative is #26's hang reached through
+// #26's own fix: `reapTimedOutStep` tolerates a failed remove on the grounds
+// that the next gate run force-removes the container before recreating it, so
+// an unbounded remove THERE would hang the run forever holding the lock.
+export const CONTROL_TIMEOUT_MS = 120_000;
 
 // The one env key sandbar owns in the stack. Everything else a step needs —
 // DB_HOST, credentials, ports — is now literal config the consumer writes,
@@ -508,17 +557,23 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // the process. `-f` on the network too, matching the create path: at this
     // point the pod is meant to be gone and a lingering endpoint is exactly
     // what needs forcing.
+    //
+    // Bounded through `boundedPodman`, not node's `timeout:` — this is the
+    // same green-on-red as everywhere else in this module and it lands
+    // precisely on the claim above: node SIGTERMs, podman exits 0, the failure
+    // list stays empty, and sandbar reports a clean teardown of a pod that is
+    // still running.
     const failures: string[] = [];
     const attempt = async (args: string[]): Promise<void> => {
-      try {
-        await exec(RUNTIME, args, { timeout: LOG_READ_TIMEOUT_MS });
-      } catch (err) {
-        failures.push(
-          `  ${RUNTIME} ${args.join(" ")}\n    ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
+      const r = await boundedPodman(args, CONTROL_TIMEOUT_MS);
+      if (boundedOk(r)) return;
+      failures.push(
+        `  ${RUNTIME} ${args.join(" ")}\n    ${
+          r.timedOut
+            ? `timed out after ${CONTROL_TIMEOUT_MS}ms`
+            : r.errorMessage
+        }`,
+      );
     };
     await attempt(POD_RM_ARGS(podName));
     await attempt(["network", "rm", "-f", networkName]);
@@ -546,16 +601,22 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // Unscoped, the only namesake a second run against a different repo could
     // find for issue 42 was the FIRST run's live pod, and this line tore it
     // down — the victim just watched its containers disappear mid-gate.
-    await exec(RUNTIME, POD_RM_ARGS(podName)).catch(() => {});
-    await exec(RUNTIME, ["network", "rm", "-f", networkName]).catch(() => {});
-    await exec(RUNTIME, ["network", "create", "--disable-dns", networkName]);
-    await exec(
-      RUNTIME,
+    await boundedPodman(POD_RM_ARGS(podName), CONTROL_TIMEOUT_MS);
+    await boundedPodman(
+      ["network", "rm", "-f", networkName],
+      CONTROL_TIMEOUT_MS,
+    );
+    await mustSucceed(
+      ["network", "create", "--disable-dns", networkName],
+      `create network ${networkName}`,
+    );
+    await mustSucceed(
       podCreateArgs({
         podName,
         networkName,
         publishPorts: tcpProbePorts(opts.spec),
       }),
+      `create pod ${podName}`,
     );
 
     const hostPorts = await readPortBindings(podName);
@@ -612,11 +673,20 @@ async function readPortBindings(podName: string): Promise<Map<number, number>> {
     ],
     LOG_READ_TIMEOUT_MS,
   );
+  // A plain Error, deliberately. `SandbarError` is the "operator-actionable,
+  // this run cannot proceed" class, and `inner-loop.ts` rethrows it PAST
+  // HARD-ERROR — so raising one here for a flaked `pod inspect` would drop that
+  // issue for the whole cycle with no terminal, no comment, no label flip and
+  // no retry, while leaving it queued to burn another budget next run. Podman
+  // failing to answer is infrastructure; HARD-ERROR's fresh stack is the right
+  // response. (`parsePortBindings` still raises SandbarError for a shape it
+  // cannot parse — that one really is sandbar's bug.)
   if (!boundedOk(r)) {
-    throw new SandbarError(
+    throw new Error(
       `gate stack: could not read the port bindings of pod ${podName}` +
         (r.timedOut
-          ? ` (${RUNTIME} pod inspect timed out)`
+          ? ` (${RUNTIME} pod inspect did not return within ` +
+            `${LOG_READ_TIMEOUT_MS}ms)`
           : `: ${r.errorMessage}`),
     );
   }
@@ -645,22 +715,30 @@ async function bringUp(
     const containerName = ctx.nameOf(c);
     // A container of this name may survive a crashed run; the sweep covers the
     // usual case but the pod was just recreated, so any leftover is stale.
-    await exec(RUNTIME, ["rm", "-f", "-t", "0", containerName]).catch(() => {});
-    try {
-      await exec(
-        RUNTIME,
-        containerRunArgs({
-          containerName,
-          podName: ctx.podName,
-          container: c,
-          worktreePath: ctx.worktreePath,
-        }),
-      );
-    } catch (err) {
+    //
+    // Bounded, and that bound is load-bearing rather than tidy: this remove is
+    // the fallback `reapTimedOutStep` leans on when its own remove fails, so an
+    // unbounded one here would turn a red gate into a run that hangs forever.
+    await boundedPodman(
+      ["rm", "-f", "-t", "0", containerName],
+      CONTROL_TIMEOUT_MS,
+    );
+    const started = await boundedPodman(
+      containerRunArgs({
+        containerName,
+        podName: ctx.podName,
+        container: c,
+        worktreePath: ctx.worktreePath,
+      }),
+      CONTROL_TIMEOUT_MS,
+    );
+    if (!boundedOk(started)) {
       throw new ContainerBringupError(
         containerName,
         `gate stack: container '${c.name}' (${c.image}) failed to start: ${
-          err instanceof Error ? err.message : String(err)
+          started.timedOut
+            ? `${RUNTIME} run did not return within ${CONTROL_TIMEOUT_MS}ms`
+            : started.errorMessage
         }`,
         await logTail(containerName),
       );
@@ -695,17 +773,23 @@ async function bringUp(
           (r.timedOut
             ? `did not finish within the container's ${c.readinessTimeoutMs}ms ` +
               `readiness budget and was killed, in container '${c.name}'. ` +
-              "Raise `readinessTimeoutMs` if the setup is genuinely this slow."
-            : `failed in container '${c.name}': ${r.errorMessage}`) +
-          (r.stderr.trim() ? `\n${stripAnsi(r.stderr).trim()}` : ""),
+              "Raise `readinessTimeoutMs` if the setup is genuinely this slow." +
+              // Only on this branch: node's own message already ends with the
+              // command's stderr, so appending it to the non-timeout branch
+              // would print the failure twice.
+              (r.stderr.trim() ? `\n${stripAnsi(r.stderr).trim()}` : "")
+            : `failed in container '${c.name}': ${r.errorMessage}`),
         await logTail(containerName),
       );
     }
   }
 }
 
-// Milliseconds left before `deadline`, floored at 1 — node reads `timeout: 0`
-// as "no timeout", which is the one value that must never reach an exec here.
+// Milliseconds left before `deadline`, floored at 1. The floor mattered more
+// when this fed node's `timeout:` option, which reads 0 as "no timeout"; it now
+// feeds `boundedPodman`'s own `setTimeout`, where 0 and 1 are both "next tick".
+// Kept because a probe budget is meaningfully expressed as at-least-one-tick
+// and a 0 would invite the old reading back.
 function remainingMs(deadline: number): number {
   return Math.max(1, deadline - Date.now());
 }
@@ -1298,7 +1382,13 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
       },
       ctx,
     );
-    if (r.timedOut) await reapTimedOutStep(container, containerName, ctx);
+    // Both kills leave the work running inside the container — node SIGTERMs
+    // the client for a maxBuffer overflow exactly as the timer does, and podman
+    // exits 0 either way — so both reap. An ordinary non-zero exit does not:
+    // the process is already gone.
+    if (r.timedOut || r.maxBufferExceeded) {
+      await reapKilledStep(container, containerName, ctx, red.failedStep ?? "");
+    }
     return red;
   }
   return {
@@ -1311,12 +1401,13 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   };
 }
 
-// Kill the work a timed-out step left running inside its container (#26).
+// Kill the work a killed step left running inside its container (#26).
 //
 // The `podman exec` client is dead by the time this runs, and that is all the
 // kill accomplished: the process it started keeps running in the container
-// (pinned in gate-stack-podman.test.ts). Leaving it there means a wedged suite
-// burning CPU beside the next attempt's gate and, for anything stateful,
+// (pinned in gate-stack-podman.test.ts, for both the timer's SIGKILL and the
+// SIGTERM node sends on a maxBuffer overflow). Leaving it there means a wedged
+// suite burning CPU beside the next attempt's gate and, for anything stateful,
 // skewing what that gate measures — the failure the timeout was supposed to
 // END, made quieter rather than fixed.
 //
@@ -1325,10 +1416,11 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
 // matching argv against `podman top` output and walking its PPID column — both
 // of which fail exactly where a hang is most likely, on a test runner that has
 // spawned children of its own.
-async function reapTimedOutStep(
+async function reapKilledStep(
   container: ResolvedStackContainer,
   containerName: string,
   ctx: RunGateCtx,
+  stepName: string,
 ): Promise<void> {
   const removed = await boundedPodman(
     ["rm", "-f", "-t", "0", containerName],
@@ -1336,9 +1428,13 @@ async function reapTimedOutStep(
   );
   if (!boundedOk(removed)) {
     // Not fatal, and not silent. The verdict is already decided, and the next
-    // gate run force-removes this container by name before recreating it — so
-    // throwing here would trade a red gate for a HARD-ERROR over a leftover
+    // gate run force-removes this container by name before recreating it — a
+    // remove that is itself bounded, so this tolerance cannot become a hang —
+    // so throwing here would trade a red gate for a HARD-ERROR over a leftover
     // that clears itself. But a survivor burns CPU until then, so say so.
+    // For an `issue` container it does not even reach the next run: the
+    // recreate below runs `podman run` with the same name and fails loudly on
+    // the conflict.
     const why = removed.timedOut
       ? `\`${RUNTIME} rm\` timed out`
       : removed.stderr.trim() || removed.errorMessage;
@@ -1349,10 +1445,23 @@ async function reapTimedOutStep(
     );
   }
   // An `attempt` container is recreated by the next gate run anyway. An
-  // `issue` one is not — and `assertIssueContainersAlive` would then find it
-  // missing and report an infrastructure failure that this reap, not the
-  // environment, caused. Put it back, at the cost of re-running its
-  // postReadyCommands.
+  // `issue` one is not, so it is put back here.
+  //
+  // Be precise about what that prevents, because the obvious answer is wrong:
+  // `assertIssueContainersAlive` would NOT catch the hole. It asks `isRunning`,
+  // which returns `null` — not `false` — when inspect fails, and inspecting a
+  // container that no longer exists exits 125. A removed issue container sails
+  // straight through it. What would actually happen is that every later step
+  // targeting it exits 125 and reds the gate AGAINST THE BRANCH, which is D5's
+  // blame mapping running backwards for a container sandbar itself removed.
+  //
+  // The cost is more than the re-run of `postReadyCommands`: everything the
+  // container accumulated beyond its declared setup goes with it — a schema an
+  // earlier gate step migrated, rows an earlier attempt wrote, fixtures
+  // uploaded into it. A held `issue` container is the only home for per-issue
+  // setup, so consumers are invited to keep exactly that state there. Losing it
+  // is still better than the alternatives: leaving a runaway inside it for the
+  // rest of the issue, or reporting a red the branch cannot act on.
   if (container.lifecycle !== "issue") return;
   try {
     await bringUp([container], {
@@ -1365,11 +1474,15 @@ async function reapTimedOutStep(
     // Deliberately not swallowed, even though it costs the red gate we were
     // about to return: a stack whose issue container will not come back up IS
     // an infrastructure failure, and HARD-ERROR retries it on a fresh stack.
-    // The context is printed because the throw alone reads as a spontaneous
-    // bringup failure with no mention of the timeout that caused it.
+    //
+    // This is the one exception to "a step timeout is always a gate red", and
+    // it is stated rather than hidden: on this path the step name, the bound
+    // and the D9 container logs are all discarded in favour of the bringup
+    // error, so the line below is what connects the two for whoever reads the
+    // run's output.
     console.error(
-      `gate stack: step timed out in issue-lifecycle container ` +
-        `'${container.name}', and recreating it failed. The gate's timeout ` +
+      `gate stack: step '${stepName}' was killed in issue-lifecycle container ` +
+        `'${container.name}', and recreating that container failed. The gate's ` +
         "verdict is being discarded in favour of the bringup failure below.",
     );
     throw err;

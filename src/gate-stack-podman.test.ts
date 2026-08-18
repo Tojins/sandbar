@@ -623,7 +623,7 @@ describe.runIf(available)(
     // a reap the timed-out work keeps running — burning CPU beside the next
     // attempt and skewing whatever the next gate run measures.
     it(
-      "the timed-out work is reaped: an attempt container is removed, an issue one recreated",
+      "the timed-out work is reaped: an issue container is recreated, only the step's container touched",
       async () => {
         stack = await startStack({
           stackId: STACK_ID,
@@ -670,11 +670,50 @@ describe.runIf(available)(
         expect(heldAfter).not.toBe(heldBefore);
         const { stdout } = await exec(RUNTIME, ["exec", cName("held"), "ps", "-eo", "args"]);
         expect(stdout).not.toContain("sleep 601");
+        // Only the step's own container is touched: the reap is not a stack
+        // teardown, so the bystander is still there. (Its id is NOT compared —
+        // every gate run recreates attempt containers anyway, so a change
+        // proves nothing either way.)
+        expect(await idOf("runner")).not.toBeNull();
 
         // …and the stack still works, which is the point of recreating rather
         // than leaving a hole where the container was.
         const after = await stack.runGate();
         expect(after.failedStep).toBe("hangs-in-held");
+      },
+      240_000,
+    );
+    // The other half of the reap, and the common one: a hung suite lives in the
+    // `attempt` container. Nothing asserted this — the test above times out in
+    // the `issue` container — so the removal was unverified by any test.
+    it(
+      "a timeout in an attempt container removes it, so the runaway cannot outlive the attempt",
+      async () => {
+        stack = await startStack({
+          stackId: STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            steps: [
+              { name: "hangs", in: "runner", command: ["sleep", "607"], timeoutMs: 2_000 },
+            ],
+          }),
+        });
+
+        expect((await stack.runGate()).failedStep).toBe("hangs");
+
+        // Gone, taking `sleep 607` with it. Left alive, that process would burn
+        // CPU beside the next attempt's agent run and every gate it triggers.
+        await expect(
+          exec(RUNTIME, ["inspect", "--format", "{{.Id}}", cName("runner")]),
+        ).rejects.toThrow();
+
+        // …and the stack still gates: the next run recreates it, which is why
+        // an `attempt` container needs no recreate here.
+        expect((await stack.runGate()).failedStep).toBe("hangs");
       },
       240_000,
     );
