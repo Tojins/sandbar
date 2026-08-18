@@ -7,10 +7,12 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import {
+  type LogWatcher,
   logFollowArgs,
   scanChunk,
   type Stack,
   startStack,
+  watchLog,
 } from "./gate-stack.js";
 import {
   networkNameFor,
@@ -569,6 +571,117 @@ describe.runIf(available)(
   },
 );
 
+// The follower itself (#31), against real podman. The end-to-end log-readiness
+// tests above are coverage, not regression tests: on this host the log driver
+// is whatever podman is configured with — journald buffers per line, so nothing
+// ever splits — and their logs are three orders of magnitude under MAX_BUFFER.
+// Mutation-tested: both of them pass with the carry removed AND with the
+// pre-#31 full re-read restored. These do not. The driver is pinned explicitly
+// because the split is the entire point.
+describe.runIf(available)("watchLog", () => {
+  // Scoped like every other resource in this file. A bare `sandbar-` name would
+  // be unattributable debris (#28): an interrupted run leaves a container that
+  // `findUnattributableResources` reports at every future sandbar startup and
+  // that the sweep deliberately refuses to remove.
+  const NAME = cName("logsplit");
+  let watcher: LogWatcher | null = null;
+
+  const runSplitter = async (script: string): Promise<void> => {
+    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
+    await exec(RUNTIME, [
+      "run", "-d",
+      // journald buffers per line and would never split, so the fact under
+      // test would silently not be exercised on this host.
+      "--log-driver", "k8s-file",
+      "--name", NAME,
+      IMAGE, "sh", "-c", script,
+    ]);
+  };
+
+  // Poll the way waitForReady does, so what is asserted is the loop that runs
+  // in production rather than a bespoke one.
+  const pollUntil = async (
+    w: LogWatcher,
+    budgetMs: number,
+  ): Promise<{ ready: boolean; detail: string }> => {
+    const deadline = Date.now() + budgetMs;
+    let last = { ready: false, detail: "" };
+    while (Date.now() < deadline) {
+      last = w.poll();
+      if (last.ready) return last;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return last;
+  };
+
+  afterEach(async () => {
+    watcher?.stop();
+    watcher = null;
+    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
+  }, 60_000);
+
+  // Fails without the carry: neither chunk contains the pattern.
+  it(
+    "goes ready on a pattern split across two chunks",
+    async () => {
+      await runSplitter('printf "boot: PAR"; sleep 2; printf "TIAL-READY\\n"; sleep 60');
+      watcher = watchLog(NAME, "PARTIAL-READY");
+      expect((await pollUntil(watcher, 20_000)).ready).toBe(true);
+    },
+    60_000,
+  );
+
+  // Fails without the StringDecoder: the split falls INSIDE the three bytes of
+  // U+2713, and decoding each chunk on its own replaces both halves with U+FFFD
+  // before the carry can help. `✓ Ready in` is what Next.js prints, which is
+  // exactly the container a `log` readiness is for.
+  it(
+    "goes ready on a pattern split inside a multi-byte character",
+    async () => {
+      await runSplitter(
+        'printf "boot \\342\\234"; sleep 2; printf "\\223 Ready in 1s\\n"; sleep 60',
+      );
+      watcher = watchLog(NAME, "✓ Ready in");
+      expect((await pollUntil(watcher, 20_000)).ready).toBe(true);
+    },
+    60_000,
+  );
+
+  // The other half of #31: a genuine podman failure must say what podman said.
+  // The old probe flattened this to "logs unavailable", which reads as "the
+  // pattern never appeared".
+  it(
+    "reports podman's own words when the container does not exist",
+    async () => {
+      watcher = watchLog(cName("never-created"), "READY");
+      const r = await pollUntil(watcher, 5_000);
+      expect(r.ready).toBe(false);
+      // Restarted rather than latched, and each death is counted and quoted.
+      expect(watcher.deathNote()).toMatch(/log follower died \d+x/);
+      expect(watcher.deathNote()).toContain("no such container");
+    },
+    60_000,
+  );
+
+  // The bound on an unbounded stream is this kill, so it is asserted rather
+  // than assumed: an orphaned follower outlives the run.
+  it(
+    "stop() leaves no follower behind",
+    async () => {
+      await runSplitter("echo quiet; sleep 60");
+      const w = watchLog(NAME, "NEVER");
+      await pollUntil(w, 1_500);
+      w.stop();
+      await new Promise((r) => setTimeout(r, 500));
+      const { stdout } = await exec("ps", ["-eo", "args"]).catch(() => ({
+        stdout: "",
+      }));
+      expect(stdout).not.toContain(`logs -f ${NAME}`);
+    },
+    60_000,
+  );
+});
+
 // The reason scanChunk carries bytes between chunks, asserted against podman
 // rather than argued from a man page: a followed log delivers an unterminated
 // partial line as its own chunk, so the two halves of a readiness pattern can
@@ -577,7 +690,11 @@ describe.runIf(available)(
 // here. Without the carry the container never goes ready and the operator is
 // told the pattern never appeared.
 describe.runIf(available)("podman logs -f chunking", () => {
-  const NAME = "sandbar-logsplit-test";
+  // Scoped like every other resource in this file. A bare `sandbar-` name is
+  // unattributable debris (#28): an interrupted run leaves a container that
+  // findUnattributableResources reports at every future sandbar startup and
+  // that the sweep deliberately refuses to remove.
+  const NAME = cName("chunking");
 
   afterEach(async () => {
     await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
@@ -597,7 +714,10 @@ describe.runIf(available)("podman logs -f chunking", () => {
         IMAGE,
         "sh",
         "-c",
-        'printf PAR; sleep 3; printf "TIAL-READY\n"; sleep 30',
+        // 6s, not 3: if the follower attaches after the second write both
+        // halves arrive in one chunk and the assertion below fails for a
+        // scheduling reason rather than a real one.
+        'printf PAR; sleep 6; printf "TIAL-READY\n"; sleep 60',
       ]);
 
       const chunks = await new Promise<string[]>((resolveChunks, rejectChunks) => {
@@ -606,7 +726,7 @@ describe.runIf(available)("podman logs -f chunking", () => {
         const done = setTimeout(() => {
           ch.kill("SIGKILL");
           resolveChunks(seen);
-        }, 8_000);
+        }, 11_000);
         ch.stdout.on("data", (b: Buffer) => seen.push(b.toString("utf8")));
         ch.on("error", (err) => {
           clearTimeout(done);

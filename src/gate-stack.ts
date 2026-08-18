@@ -89,9 +89,17 @@
 // it safe is that `waitForReady` owns it in a `finally` and kills it on every
 // path out — ready, timeout, or throw. It is deliberately not registered with
 // `onCleanup`: that registry never forgets an action, so one entry per
-// container per bringup would grow without limit, and a signal is already
-// covered transitively — the pod teardown removes the container, and a follower
-// whose container is gone exits on its own.
+// container per bringup would grow without limit.
+//
+// What covers a SIGNAL is weaker, and worth stating exactly rather than
+// waving at. On SIGINT/SIGTERM the trapped cleanup tears the pod down, and a
+// follower whose container has been removed exits ~1s later on its own —
+// verified. That chain does NOT cover SIGKILL, SIGHUP (untrapped), or a
+// teardown that throws before `pod rm`: an orphaned follower on a QUIET
+// container blocks in read, never notices the broken pipe, and survives its
+// parent indefinitely. It holds no lock and no podman resource, so it is a
+// stray process rather than a leak that blocks the next run — which is why
+// this is documented rather than defended against with a pidfile.
 //
 // ---------------------------------------------------------------------------
 // Readiness
@@ -116,6 +124,19 @@
 // cursor, must re-read an overlap window to avoid losing lines, and re-delivery
 // makes `carry + chunk` manufacture matches that were never in the log.
 //
+// The chunk boundary is a BYTE boundary, so the stream is decoded through a
+// StringDecoder rather than per-chunk `toString`; decoding independently
+// destroys a multi-byte character split across two chunks, and the patterns
+// most likely to be given to a frontend dev server are not ASCII.
+//
+// One behaviour change worth knowing: a container that prints its pattern and
+// EXITS within the first poll now fails bringup instead of going ready. The
+// old full read could answer from a dead container's log; a follower has ~200ms
+// of startup latency, so the first poll finds nothing and `throwIfDead` fires.
+// A readiness container that exits is not a service — every step that execs
+// into it would fail anyway — so failing loudly at bringup is the better
+// answer, but it IS an answer the old probe did not give.
+//
 // `tcp` is the interesting one: the port is probed from the HOST, through a
 // loopback-only publish with a podman-assigned ephemeral host port. Probing
 // from inside the namespace would need a shell and
@@ -134,6 +155,7 @@
 // forever — such a service should use `exec` readiness instead.
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { connect } from "node:net";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
@@ -634,7 +656,7 @@ async function pollUntilReady(
     containerName,
     `gate stack: container '${c.name}' (${c.image}) did not become ready ` +
       `within ${c.readinessTimeoutMs}ms (${describeReadiness(readiness)}; ` +
-      `last probe: ${lastErr})`,
+      `last probe: ${lastErr}${watcher?.deathNote() ?? ""})`,
     await logTail(containerName),
   );
 }
@@ -720,9 +742,12 @@ export function logFollowArgs(containerName: string): string[] {
 // pattern written as `PAR` then `TIAL`, and reports a timeout against a
 // container that printed exactly what was asked for.
 //
-// `pattern.length - 1` is exactly the right amount to keep and no more: a match
-// straddling the boundary can overlap the previous chunk by at most that, and
-// keeping more is the unbounded retention this whole change exists to remove.
+// `pattern.length - 1` code units is exactly the right amount to keep and no
+// more: a match straddling the boundary can overlap the previous chunk by at
+// most that, and keeping more is the unbounded retention this whole change
+// exists to remove. Code units, not bytes — the caller decodes before it gets
+// here, which it must (see watchLog), so a chunk boundary in the middle of a
+// multi-byte character is not this function's problem to solve.
 export function scanChunk(
   carry: string,
   chunk: string,
@@ -730,66 +755,123 @@ export function scanChunk(
 ): { found: boolean; carry: string } {
   const text = carry + chunk;
   if (text.includes(pattern)) return { found: true, carry: "" };
+  // `<= 0`, not `=== 0`: an empty pattern makes this -1, and `slice(1)` would
+  // grow the carry without bound forever. config.ts rejects an empty pattern
+  // and `includes("")` returns above, so this is unreachable through sandbar —
+  // but an exported pure function defends itself rather than relying on that.
   const keep = Math.min(pattern.length - 1, text.length);
-  return { found: false, carry: keep === 0 ? "" : text.slice(-keep) };
+  return { found: false, carry: keep <= 0 ? "" : text.slice(-keep) };
 }
+
+// How much of a follower's stderr is kept to explain its death. `podman logs`
+// writes podman's OWN diagnostics and the container's stderr to one fd, so this
+// is a tail of whichever spoke last — on a non-zero exit that is overwhelmingly
+// podman, which is the case worth explaining.
+const FOLLOWER_ERR_TAIL = 500;
 
 // A running `podman logs -f`, scanning for the readiness pattern as the log
 // arrives. Owned by waitForReady, which kills it on every path out.
-type LogWatcher = {
+export type LogWatcher = {
   readonly poll: () => { ready: boolean; detail: string };
+  // What has gone wrong with the follower itself, for the timeout message.
+  // Separate from `poll`'s detail because a death is overwritten within one
+  // poll: the restart succeeds, the next poll says "pattern not in log yet",
+  // and an intermittently-dying follower would otherwise leave no trace at all
+  // in the error the operator reads.
+  readonly deathNote: () => string;
   readonly stop: () => void;
 };
 
-function watchLog(containerName: string, pattern: string): LogWatcher {
+export function watchLog(containerName: string, pattern: string): LogWatcher {
   let found = false;
   let child: ChildProcess | null = null;
   let lastDeath = "";
+  let deaths = 0;
   let stopped = false;
 
   const start = (): void => {
-    // Carries are per-START, not per-watcher: a restart re-reads the log from
-    // the beginning, so anything they held is about to arrive again.
+    // Decoders and carries are per-START, not per-watcher: a restart re-reads
+    // the log from the beginning, so anything they held is about to arrive
+    // again.
+    //
+    // StringDecoder, not `chunk.toString("utf8")`: a chunk boundary can fall
+    // INSIDE a multi-byte character, and decoding each chunk independently
+    // replaces both halves with U+FFFD before scanChunk ever sees them — so the
+    // carry preserves corrupted text and the pattern is missed. That is not
+    // exotic for the container this feature is aimed at: Next.js prints
+    // "✓ Ready in" and Vite prints "➜  Local:", and either is a natural
+    // readiness pattern. The failure would be silent and reported as "pattern
+    // not in log yet", which is the exact misdirection #31 exists to remove.
+    const decoders = { out: new StringDecoder("utf8"), err: new StringDecoder("utf8") };
     let outCarry = "";
     let errCarry = "";
-    const ch = spawn(RUNTIME, logFollowArgs(containerName));
+    let errTail = "";
+    // stdin is never written to, so don't allocate a pipe for it.
+    const ch = spawn(RUNTIME, logFollowArgs(containerName), {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     child = ch;
     // Scanned per stream rather than on a concatenation of the two. `podman
     // logs` keeps the container's stdout and stderr separate (verified), so
     // joining them manufactures a seam that no reader of the log would ever
     // see and that a pattern could straddle.
     ch.stdout?.on("data", (b: Buffer) => {
-      const r = scanChunk(outCarry, b.toString("utf8"), pattern);
+      const r = scanChunk(outCarry, decoders.out.write(b), pattern);
       outCarry = r.carry;
       if (r.found) found = true;
     });
     ch.stderr?.on("data", (b: Buffer) => {
-      const r = scanChunk(errCarry, b.toString("utf8"), pattern);
+      const text = decoders.err.write(b);
+      errTail = (errTail + text).slice(-FOLLOWER_ERR_TAIL);
+      const r = scanChunk(errCarry, text, pattern);
       errCarry = r.carry;
       if (r.found) found = true;
     });
     ch.on("error", (err: Error) => {
-      if (child === ch) child = null;
+      // Node emits this when the process could not be spawned OR could not be
+      // killed, so the process may still be alive. Dropping the handle would
+      // leak a follower `stop` can no longer reach, so kill first and only then
+      // let go of it.
+      if (child === ch) {
+        ch.kill("SIGKILL");
+        child = null;
+      }
+      deaths += 1;
       lastDeath = `could not run ${RUNTIME} logs (${err.message})`;
     });
     // An 'error' on a child's stdio stream is an UNHANDLED event otherwise, and
     // an unhandled event takes the whole run down — a readiness follower must
-    // never be able to do that. Recorded rather than swallowed: it is what the
-    // timeout will report, and `close` follows it, so the next poll restarts.
+    // never be able to do that. The handle is dropped here as well: a stream
+    // that has errored delivers nothing more, and if the process happens to
+    // survive it, leaving `child` set would leave the watcher permanently blind
+    // AND permanently silent, reporting "pattern not in log yet" for the rest
+    // of the budget. That is the failure #31 is about, so it must not be
+    // reachable through the fix for it. Never swallowed: it is counted and
+    // reported through deathNote.
     for (const stream of [ch.stdout, ch.stderr]) {
       stream?.on("error", (err: Error) => {
+        if (child === ch) {
+          ch.kill("SIGKILL");
+          child = null;
+        }
+        deaths += 1;
         lastDeath = `${RUNTIME} logs stream failed (${err.message})`;
       });
     }
-    // `close`, not `exit`: `exit` fires while stdout may still have undelivered
-    // data, so a container that prints the pattern and immediately exits would
-    // be declared dead before the chunk carrying it was scanned.
+    // `close`, not `exit`: `exit` fires when the process ends, which can be
+    // before its stdout has delivered everything it read. `close` waits for the
+    // stdio streams too, so a container that prints the pattern and exits in
+    // the same breath still has that chunk scanned before the follower counts
+    // as gone — and before the poll that would restart it.
     ch.on("close", (code: number | null) => {
       if (child === ch) child = null;
+      if (stopped) return;
+      deaths += 1;
       lastDeath =
         code === 0
           ? "log stream ended"
-          : `${RUNTIME} logs exited ${String(code)}`;
+          : `${RUNTIME} logs exited ${String(code)}` +
+            (errTail.trim() ? `: ${errTail.trim()}` : "");
     });
   };
 
@@ -803,15 +885,26 @@ function watchLog(containerName: string, pattern: string): LogWatcher {
         // CONTAINER ends, and it can also die of a podman hiccup — under the
         // old re-read both became a permanent "logs unavailable" (#31). Re-
         // reading from the start is idempotent for a substring test, so the
-        // only cost is the reread; the poll interval rate-limits it for free,
-        // and a container that is actually dead throws from throwIfDead in
-        // this same iteration rather than restarting forever.
+        // only cost is the reread, and the poll interval rate-limits it.
+        //
+        // It can restart for the whole budget: `throwIfDead` ends the wait for
+        // a container that EXITED, but `isRunning` answers `null` when inspect
+        // itself fails and null is deliberately not evidence of death, so a
+        // container that was REMOVED restarts a doomed follower every poll
+        // until the deadline. That is the right trade — the alternative is
+        // treating a flaked inspect as a corpse — and deathNote is what stops
+        // it being mysterious: the timeout says podman kept answering "no such
+        // container" rather than blaming the consumer's pattern.
         const detail = lastDeath;
         start();
         return { ready: false, detail };
       }
       return { ready: false, detail: "pattern not in log yet" };
     },
+    deathNote: () =>
+      deaths === 0
+        ? ""
+        : `; log follower died ${deaths}x, last: ${lastDeath}`,
     stop: () => {
       stopped = true;
       // SIGKILL: there is nothing to flush, and a follower that ignored SIGTERM

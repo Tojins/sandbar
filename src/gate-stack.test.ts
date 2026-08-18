@@ -923,10 +923,12 @@ describe("scanChunk", () => {
   // A chunk boundary must not manufacture a match either: the carry is a
   // suffix of what really arrived, never a re-delivery of it.
   it("does not match text that never appeared in the stream", () => {
-    expect(feed(["abc", "def"], "cD").found).toBe(false);
-    // "bab" appears only if the carry were RE-delivered ("ab" + "abcd"), which
-    // is why this design follows the stream instead of re-reading a window.
+    // Boundary properties, not case checks. Each pattern appears only if the
+    // carry were RE-delivered at the head of the next chunk ("ab" + "abcd",
+    // "xy" + "xyz") — which is why this design follows the stream once instead
+    // of re-reading a window.
     expect(feed(["ab", "cd"], "bab").found).toBe(false);
+    expect(feed(["xy", "z"], "yxy").found).toBe(false);
   });
 
   it("keeps at most pattern.length - 1 bytes between chunks", () => {
