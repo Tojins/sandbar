@@ -262,8 +262,10 @@ The acceptance criteria allowed either:
   `.sandbar/worktrees/` layout).
 
 **(B) was taken.** The prefixes are now centralized in `src/naming.ts`
-(`BRANCH_PREFIX`, `RESOURCE_PREFIX`), and `containers.ts`, `merger.ts:435`,
-`plan-resolver.ts:74`, `preflight.ts` globs, and `finalize.ts:worktreePathFor`
-were updated together. During the transition window the cleanup paths still
-recognize the legacy `sandcastle-*` / `sandcastle/*` prefixes so artifacts left
-on existing repos get swept rather than orphaned.
+(`BRANCH_PREFIX`, `RESOURCE_PREFIX`), and `containers.ts`, `plan-resolver.ts:74`,
+`preflight.ts` globs, and `finalize.ts:worktreePathFor` were updated together.
+During the transition window the cleanup paths still recognize the legacy
+`sandcastle-*` / `sandcastle/*` prefixes — but since #28 legacy *branches* are
+deleted automatically while legacy *podman resources* are only reported for
+manual removal, because an unscoped name cannot be told apart from a
+concurrently-running old sandbar's live stack.

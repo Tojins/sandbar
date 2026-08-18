@@ -13,11 +13,13 @@ no podman SDK. This is the most directly portable piece.
 
 ## Options (`podman.d.ts`) and sandbar's resolved values
 
-Sandbar calls `podman()` with **no arguments**, so:
+Sandbar calls `podman()` with two explicit options and takes the defaults for
+everything else:
 
 | Option | Default | Sandbar value |
 | --- | --- | --- |
-| `imageName` | `defaultImageName(hostRepoPath)` = `sandbar:<dir>` | derived |
+| `imageName` | `defaultImageName(hostRepoPath)` = `sandbar:<dir>` | **`config.sandboxImage`** (explicit since #24 D7 — the default coupled the image to the host's directory name and broke on a rename) |
+| `namePrefix` | `RESOURCE_PREFIX` = `sandbar-` | **`sandbar-<scope>-`** (explicit since #28 — the container must be inside the run's scope or a sibling run's orphan sweeper force-removes it) |
 | `selinuxLabel` | `"z"` | `"z"` |
 | `userns` | `"keep-id"` | `"keep-id"` |
 | `containerUid` | `1000` | `1000` |
@@ -53,7 +55,8 @@ the worktree→`/home/agent/workspace` mount plus the git mounts.
 Sequence (`podman.ts`, `create`):
 
 1. `containerName = "sandbar-" + randomUUID()`. **Prefix is load-bearing**
-   (orphan sweeper).
+   (orphan sweeper). The port parameterised it as `PodmanOptions.namePrefix`
+   (#28); see the reimplementation notes below.
 2. Sandbox-side worktree path = the `sandboxPath` of the mount whose `hostPath`
    equals `createOptions.worktreePath`, else `/home/agent/workspace`.
 3. Build volume mounts: `[...createOptions.mounts, ...userMounts].map(m =>
@@ -170,7 +173,7 @@ N)` on non-zero). The in-house module can fold equivalents inline.
   indirection and return the handle directly.
 - Keep the container-name prefix caller-supplied (`PodmanOptions.namePrefix`,
   defaulting to `RESOURCE_PREFIX` in `src/naming.ts`), or update it and
-  `merger.ts:435` together. Sandbar passes its per-run scope's prefix
+  `containers.ts` together. Sandbar passes its per-run scope's prefix
   (`sandbar-<scope>-`, #28) so the orphan sweeper — which force-removes by
   prefix — can never reach a concurrent run's sandbox container.
 - Keep the shutdown-registry cleanup — it's what prevents leaked containers on

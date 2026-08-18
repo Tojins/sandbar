@@ -32,6 +32,7 @@ import { join } from "node:path";
 
 import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
 import {
+  type SweepResult,
   cleanupOrphanContainers,
   findUnattributableResources,
 } from "./containers.js";
@@ -125,6 +126,19 @@ function finalizeKindForSkip(
   }
 }
 
+// A leaked resource is recoverable — the next cycle's `startStack` force-removes
+// a namesake before creating one — so a failed sweep is not fatal. It is also
+// not silent: it leaks a pod, its invisible infra container and its network, and
+// the operator is the only one who can tell whether that matters.
+function reportSweepFailures(result: SweepResult): void {
+  if (result.failures.length === 0) return;
+  console.warn(
+    `Could not remove ${result.failures.length} orphaned sandbar resource(s). ` +
+      "They will be retried next cycle; clear them by hand if they persist:\n" +
+      result.failures.join("\n"),
+  );
+}
+
 export async function run(rawConfig: RunConfig): Promise<void> {
   const config = resolveConfig(rawConfig);
   const env = makeEnvReader(config.envFilePath);
@@ -200,11 +214,12 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   const scope = runScope(realpathSync(lockPaths.workDir));
 
   const orphans = await cleanupOrphanContainers(scope);
-  if (orphans.length > 0) {
+  if (orphans.removed.length > 0) {
     console.log(
-      `Removed ${orphans.length} orphaned sandbar resource(s) from prior runs.`,
+      `Removed ${orphans.removed.length} orphaned sandbar resource(s) from prior runs.`,
     );
   }
+  reportSweepFailures(orphans);
 
   // Debris no run's scope claims: from a build predating #28, or the sandcastle
   // era. Reported rather than removed, because a bare-prefix match cannot tell
@@ -302,11 +317,12 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // -----------------------------------------------------------------------
       if (iteration > 1) {
         const cycleOrphans = await cleanupOrphanContainers(scope);
-        if (cycleOrphans.length > 0) {
+        if (cycleOrphans.removed.length > 0) {
           await runLogger.appendOrchestrator(
-            `swept ${cycleOrphans.length} orphan(s) between cycles: ${cycleOrphans.join(", ")}`,
+            `swept ${cycleOrphans.removed.length} orphan(s) between cycles: ${cycleOrphans.removed.join(", ")}`,
           );
         }
+        reportSweepFailures(cycleOrphans);
       }
   
       const budget = remainingBudget(runState);

@@ -83,7 +83,8 @@ describe("cleanupOrphanContainers", () => {
       containers: [stackContainerNameFor(A, "42", "db"), `sandbar-${A}-someuuid`],
       networks: [networkNameFor(A, "42")],
     });
-    const removed = await cleanupOrphanContainers(A, run);
+    const { removed, failures } = await cleanupOrphanContainers(A, run);
+    expect(failures).toEqual([]);
     expect(removed).toContain(podNameFor(A, "42"));
     expect(removed).toContain(networkNameFor(A, "42"));
     expect(removed).toContain(`sandbar-${A}-someuuid`);
@@ -97,7 +98,7 @@ describe("cleanupOrphanContainers", () => {
       containers: [stackContainerNameFor(B, "42", "db"), `sandbar-${B}-someuuid`],
       networks: [networkNameFor(B, "42")],
     });
-    const removed = await cleanupOrphanContainers(A, run);
+    const { removed } = await cleanupOrphanContainers(A, run);
     expect(removed).toEqual([]);
     expect(state.pods.size).toBe(1);
     expect(state.containers.size).toBe(2);
@@ -112,7 +113,7 @@ describe("cleanupOrphanContainers", () => {
       containers: ["sandbar-42-db", "sandbar-1a2b3c4d-5e6f-7081-9234-56789abc"],
       networks: ["sandbar-net-42"],
     });
-    expect(await cleanupOrphanContainers(A, run)).toEqual([]);
+    expect((await cleanupOrphanContainers(A, run)).removed).toEqual([]);
     expect(state.pods.size).toBe(2);
     expect(state.containers.size).toBe(2);
     expect(state.networks.size).toBe(1);
@@ -142,7 +143,7 @@ describe("cleanupOrphanContainers", () => {
       seen.push(args[args.length - 1] as string);
       return { stdout: "" };
     };
-    const removed = await cleanupOrphanContainers(A, leaky);
+    const { removed } = await cleanupOrphanContainers(A, leaky);
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.every((n) => n.startsWith(`sandbar-${A}-`))).toBe(true);
     expect(removed).not.toContain(podNameFor(B, "42"));
@@ -174,6 +175,23 @@ describe("cleanupOrphanContainers", () => {
     await expect(cleanupOrphanContainers(A, broken)).rejects.toThrow(
       /database is locked/,
     );
+  });
+
+  it("reports a removal it could not perform instead of dropping it", async () => {
+    // Recoverable (the next startStack force-removes a namesake), so not fatal
+    // — but it leaks a pod, its invisible infra container and its network, and
+    // returning a bare "removed nothing" told the operator none of that.
+    const stubborn: RuntimeExec = async (args) => {
+      if (args.includes("--filter")) {
+        return { stdout: args[0] === "pod" ? podNameFor(A, "42") : "" };
+      }
+      throw new Error("cannot remove pod: container is in an unknown state");
+    };
+    const { removed, failures } = await cleanupOrphanContainers(A, stubborn);
+    expect(removed).toEqual([]);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain(`pod rm -f -t 0 ${podNameFor(A, "42")}`);
+    expect(failures[0]).toContain("unknown state");
   });
 
   // The production shape, which no single-population test exercises: our own

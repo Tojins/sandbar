@@ -117,15 +117,15 @@ const KINDS: readonly ResourceKind[] = [
 // containing regex metacharacters would match more than intended, and the
 // filter has historically been substring-matched on some versions.
 //
-// A failure here THROWS. It used to be swallowed as "runtime not installed",
-// which preflight has already made unreachable — it hard-fails on a missing
-// container runtime before the lock is taken, so anything reaching this catch
-// is a real podman fault (storage-lock contention, a broken `podman system`,
-// EPERM). Swallowing those was silent in the worst way: the sweep reported
-// having removed nothing, debris accumulated, and the first visible symptom was
-// an unrelated-looking `startStack` collision. Worse for the debris report,
-// which returned an empty result and thereby claimed there was nothing to see
-// while discarding names it had already collected.
+// A failure here PROPAGATES. It used to be caught and reported as "runtime not
+// installed", which preflight has already made unreachable — it hard-fails on a
+// missing container runtime before the lock is taken, so anything that fails
+// here is a real podman fault (storage-lock contention, a broken
+// `podman system`, EPERM). Swallowing those was silent in the worst way: the
+// sweep claimed to have removed nothing, debris accumulated, and the first
+// visible symptom was an unrelated-looking `startStack` collision. Worse for the
+// debris report, which returned an empty result — thereby claiming there was
+// nothing to see — while discarding names it had already collected.
 async function listByPrefix(
   kind: ResourceKind,
   prefix: string,
@@ -138,25 +138,30 @@ async function listByPrefix(
     .filter((n) => n.startsWith(prefix));
 }
 
-async function remove(
-  kind: ResourceKind,
-  name: string,
-  run: RuntimeExec,
-): Promise<boolean> {
-  try {
-    await run(kind.rmArgs(name));
-    return true;
-  } catch {
-    return false;
-  }
-}
+export type SweepResult = {
+  readonly removed: readonly string[];
+  // Resources that were found and could not be removed, preformatted with the
+  // command and podman's reason.
+  //
+  // Reported rather than thrown, and that asymmetry with `listByPrefix` above is
+  // deliberate. A failed LIST is a blind sweep: it cannot know what it missed,
+  // so continuing means asserting "no debris" on no evidence. A failed REMOVE
+  // knows exactly what leaked, and it is self-healing — `startStack` force-
+  // removes a namesake before creating one, so the next cycle clears what this
+  // one could not. Throwing would let one wedged leftover from an unrelated
+  // crash block every future run of the repo, replacing a recoverable leak with
+  // a hard stop. But it is not silent: the operator is told what leaked and how
+  // to clear it.
+  readonly failures: readonly string[];
+};
 
-// Sweep this run's scope. Returns the names actually removed.
+// Sweep this run's scope.
 export async function cleanupOrphanContainers(
   scope: RunScope,
   run: RuntimeExec = defaultExec,
-): Promise<readonly string[]> {
+): Promise<SweepResult> {
   const removed: string[] = [];
+  const failures: string[] = [];
   for (const kind of KINDS) {
     const names = await listByPrefix(
       kind,
@@ -164,18 +169,31 @@ export async function cleanupOrphanContainers(
       run,
     );
     for (const name of names) {
-      if (await remove(kind, name, run)) removed.push(name);
+      const args = kind.rmArgs(name);
+      try {
+        await run(args);
+        removed.push(name);
+      } catch (err) {
+        failures.push(
+          `  ${RUNTIME} ${args.join(" ")}\n    ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
   }
-  return removed;
+  return { removed, failures };
 }
 
 export type UnattributableResources = {
   readonly names: readonly string[];
   // Copy-pasteable, in the order that actually works (pods before networks).
   // A pod's members are listed separately even though `pod rm` already took
-  // them; podman's `rm -f` exits 0 on a name that is already gone, so the list
-  // stays paste-and-forget rather than needing membership resolved first.
+  // them; `podman rm -f` exits 0 on a container that is already gone (verified),
+  // so the list stays paste-and-forget rather than needing pod membership
+  // resolved first. Networks never cascade, so a listed one always still
+  // exists — which matters because `network rm` does NOT tolerate a missing
+  // name.
   readonly removalCommands: readonly string[];
 };
 

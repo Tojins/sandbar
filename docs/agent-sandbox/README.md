@@ -135,9 +135,11 @@ live stack, and guessing is the bug #28 fixed:
   — `src/finalize.ts:283` (`worktreePathFor`) mirrors `WorktreeManager.create`.
 - Container name prefix `sandbar-<scope>-` and network prefix
   `sandbar-<scope>-net-` — `src/naming.ts` (`RESOURCE_PREFIX`,
-  `scopedResourcePrefix`), matched in `containers.ts`, `merger.ts:435`. The
-  `<scope>` segment is per-run (#28); the sweeper keys on the full scoped
-  prefix and must never fall back to the bare one.
+  `scopedResourcePrefix`), matched in `containers.ts`. The `<scope>` segment is
+  per-run (#28); the sweeper keys on the full scoped prefix and must never fall
+  back to the bare one. (`merger.ts` names nothing prefixed — its one container
+  is `--rm` and unnamed, so podman assigns it a random name and the sweeper
+  never sees it.)
 - Branch prefix `sandbar/issue-<n>-<slug>` — `plan-resolver.ts:74`,
   `preflight.ts`, orphan sweeper.
 - Sandbox mount point `/home/agent/workspace` (`SANDBOX_REPO_DIR`) and home
