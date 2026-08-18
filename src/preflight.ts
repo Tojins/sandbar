@@ -6,8 +6,10 @@
 // to run before the lock was taken, which made the one destructive step in
 // startup the one step the lock did not cover — two launches on the same
 // workdir both reached it, and the loser was not turned away until afterwards.
-// The reads want the lock too: a concurrent run's in-flight issue branches
-// would classify `unmerged` and refuse a start with nothing wrong with it.
+// (Note the branch CLASSIFICATION below is not part of that argument: a
+// concurrent run's in-flight branches map to issues that are still open and
+// still `ready-for-agent` — the label flips happen in Phase 4 — so they read as
+// `resumable`, not as a spurious `unmerged` refusal.)
 //
 // Two layers:
 //   - checkInvariants(state)  — pure function over a captured RepoState.

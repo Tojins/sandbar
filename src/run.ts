@@ -149,9 +149,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   // mutates the repo, and it was the one operation the single-instance lock did
   // not cover — two launches racing on the same workdir, precisely what the
   // lock exists to stop, both reached it and the loser was only turned away
-  // afterwards. Preflight's *reads* need the lock just as much: a concurrent
-  // run's in-flight issue branches would otherwise be classified `unmerged` and
-  // refuse a start that has nothing wrong with it.
+  // afterwards.
   //
   // Ordering it this way costs nothing. `acquireLock` is `retries: 0`, so a
   // held lock fails immediately — there is no "lock wait" for a config error to
@@ -175,10 +173,16 @@ export async function run(rawConfig: RunConfig): Promise<void> {
 
   // Still ahead of the sweep and every container operation below, which is the
   // dependency that matters: those assume a working container runtime because
-  // this is what hard-fails when there isn't one. `runCleanup` before the exit
-  // releases the lock we now hold — `process.exit` runs no cleanup handler, and
-  // while lock.ts's stale-PID takeover would eventually reclaim it, leaving a
-  // lock behind over a typo'd config is not a thing to rely on that for.
+  // this is what hard-fails when there isn't one.
+  //
+  // `runCleanup` before the exit, because the lock is held by here and
+  // `process.exit` runs no cleanup handler. What that actually recovers is the
+  // `run.pid` SIDECAR, not the lock directory: proper-lockfile registers its
+  // own exit handler and rmdirs every lock it holds even on a bare
+  // `process.exit(1)`. So the leak this prevents is a small one — a sidecar
+  // naming a pid that will be dead, which the next launch's takeover reads as a
+  // crashed run and clears. Cheap, and it keeps every exit path in this file
+  // uniform rather than one of them relying on a dependency's exit hook.
   try {
     await runPreflight({
       cwd: config.cwd,
