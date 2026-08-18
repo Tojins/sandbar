@@ -30,7 +30,10 @@
 import { join } from "node:path";
 
 import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
-import { cleanupOrphanContainers } from "./containers.js";
+import {
+  cleanupOrphanContainers,
+  findUnattributableResources,
+} from "./containers.js";
 import { installCleanupTraps, onCleanup, runCleanup } from "./cleanup.js";
 import { checkWorktreeImageUids, ensureImages } from "./ensure-images.js";
 import { makeEnvReader } from "./env.js";
@@ -55,6 +58,7 @@ import {
 import { startKeepawake, stopKeepawake } from "./keepawake.js";
 import { runInnerLoop, type Terminal } from "./inner-loop.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
+import { runScope } from "./naming.js";
 import { startRunLogger } from "./logs.js";
 import {
   MergerError,
@@ -175,10 +179,33 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     if (release) await release();
   });
 
-  const orphans = await cleanupOrphanContainers();
+  // Derived from the string the lock was just taken on, so lock and scope
+  // agree by construction: one lock ⇔ one namespace of podman names (#28).
+  // Everything this run creates lives under it, and the sweep below reaches
+  // nothing else — a concurrent run against another workdir is invisible to us
+  // and we to it.
+  const scope = runScope(lockPaths.workDir);
+
+  const orphans = await cleanupOrphanContainers(scope);
   if (orphans.length > 0) {
     console.log(
       `Removed ${orphans.length} orphaned sandbar resource(s) from prior runs.`,
+    );
+  }
+
+  // Debris no run's scope claims: from a build predating #28, or the sandcastle
+  // era. Reported rather than removed, because a bare-prefix match cannot tell
+  // it from a concurrently-running old sandbar's LIVE resources — which is the
+  // failure #28 exists to end. One-time, and the commands are copy-pasteable.
+  const unattributable = await findUnattributableResources();
+  if (unattributable.names.length > 0) {
+    console.warn(
+      `\n${unattributable.names.length} podman resource(s) carry a sandbar name from ` +
+        "before this version's per-run scoping and cannot be attributed to any " +
+        "run, so sandbar will not remove them. If no other sandbar is running, " +
+        "clear them with:\n" +
+        unattributable.removalCommands.map((c) => `  ${c}`).join("\n") +
+        "\n",
     );
   }
 
@@ -231,6 +258,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     maxImplAttempts: config.maxImplAttempts,
     maxReviewRounds: config.maxReviewRounds,
     sandboxImage: config.sandboxImage,
+    scope,
     gateStack: config.gateStack,
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
@@ -253,7 +281,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // then collide with the next cycle's create. Cheap insurance.
       // -----------------------------------------------------------------------
       if (iteration > 1) {
-        const cycleOrphans = await cleanupOrphanContainers();
+        const cycleOrphans = await cleanupOrphanContainers(scope);
         if (cycleOrphans.length > 0) {
           await runLogger.appendOrchestrator(
             `swept ${cycleOrphans.length} orphan(s) between cycles: ${cycleOrphans.join(", ")}`,
@@ -377,6 +405,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           });
           mergerStack = await startStack({
             stackId: MERGER_STACK_ID,
+            scope,
             spec: config.gateStack,
             worktreePath: mergerWorktree.path,
           });

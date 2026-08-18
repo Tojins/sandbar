@@ -1,13 +1,27 @@
 // Orphan resource cleanup.
 //
 // All sandbar containers, pods and networks live in podman: the agent sandbox
-// (created by the in-house provider as `sandbar-<uuid>`), the gate stack's
-// containers (`sandbar-<stackId>-<name>`; `sandbar-db-*` / `sandbar-pg-*` on
-// pre-#24 builds — all match the bare prefix below), the per-stack pod
-// (`sandbar-pod-*`) and the per-stack network (`sandbar-net-*`). We identify
-// orphans by name prefix; switching to label-based filtering (`sandbar=true`,
-// already applied by the merger and by every stack container) is a one-line
-// change.
+// (`sandbar-<scope>-<uuid>`), the gate stack's containers
+// (`sandbar-<scope>-<stackId>-<name>`), the per-stack pod
+// (`sandbar-<scope>-pod-<stackId>`) and its network
+// (`sandbar-<scope>-net-<stackId>`). We identify orphans by name prefix.
+//
+// THE SWEEP ONLY EVER TOUCHES ITS OWN RUN'S SCOPE (#28). It force-removes, so
+// its licence to act is that it can prove the resource is not someone else's:
+// one lock ⇔ one scope (see naming.ts), so a `sandbar-<ourScope>-*` resource is
+// either ours or a dead predecessor's on the same workdir. A bare `sandbar-*`
+// match could prove nothing — the lock is per-workdir but podman names are
+// host-global, so a second run against a different repo was legitimately live
+// and got its pods destroyed mid-gate by its sibling's between-cycle sweep.
+//
+// What the sweep can no longer reach it REPORTS instead of removing:
+// `findUnattributableResources` names pre-scope (`sandbar-*` with no scope
+// segment) and legacy (`sandcastle-*`) debris and hands the operator the
+// removal command. Deliberately not "remove it anyway, it's probably old" — an
+// old sandbar running concurrently is exactly the case this issue is about, and
+// a wrong guess there is silent and destructive. Resources in ANOTHER run's
+// scope are not reported at all: they may be live, and they are that run's to
+// reap.
 //
 // PODS MUST BE SWEPT SEPARATELY, and not as a tidiness measure (#24). A pod's
 // infra container is named `<pod-id-prefix>-infra` — a podman-assigned hash,
@@ -16,150 +30,170 @@
 // alive, and its network un-removable, so every aborted run would leak a pod
 // the name-prefix sweep is structurally unable to see. `pod rm -f` takes the
 // members and the infra container with it.
-//
-// During the sandcastle→sandbar transition the sweep also matches the legacy
-// `sandcastle-*` prefixes so pre-existing resources on already-running repos
-// are reaped rather than orphaned (see ./naming.ts).
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import {
   ALL_RESOURCE_PREFIXES,
-  LEGACY_RESOURCE_PREFIXES,
-  RESOURCE_PREFIX,
+  isScopedResourceName,
+  scopedResourcePrefix,
 } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
 
-// Networks are named `<prefix>net-*`, pods `<prefix>pod-*`; containers carry
-// the bare prefix.
-const NETWORK_PREFIXES: readonly string[] = [
-  RESOURCE_PREFIX,
-  ...LEGACY_RESOURCE_PREFIXES,
-].map((p) => `${p}net-`);
+// The seam. A fake satisfies any contract no matter what argv the real one
+// builds, and here the argv IS the safety property: a filter that lost its
+// scope segment would silently go back to force-removing a sibling run's live
+// pods. Table-tested in containers.test.ts.
+export type RuntimeExec = (
+  args: readonly string[],
+) => Promise<{ stdout: string }>;
 
-const POD_PREFIXES: readonly string[] = [
-  RESOURCE_PREFIX,
-  ...LEGACY_RESOURCE_PREFIXES,
-].map((p) => `${p}pod-`);
+const defaultExec: RuntimeExec = (args) => exec(RUNTIME, [...args]);
 
-async function listContainerOrphans(): Promise<string[]> {
-  const found = new Set<string>();
-  for (const prefix of ALL_RESOURCE_PREFIXES) {
-    try {
-      const { stdout } = await exec(RUNTIME, [
-        "ps",
-        "-a",
-        "--filter",
-        `name=^${prefix}`,
-        "--format",
-        "{{.Names}}",
-      ]);
-      for (const n of stdout.split("\n").map((s) => s.trim())) {
-        if (n.startsWith(prefix)) found.add(n);
-      }
-    } catch {
-      // runtime not installed — nothing to clean
-      return [];
-    }
-  }
-  return [...found];
-}
+// The three resource kinds differ only in the argv that lists and removes
+// them, so they are a table rather than three near-identical function pairs.
+//
+// `-t 0` on the removals for the same reason gate-stack.ts uses it on teardown:
+// without it podman waits out its 10-second graceful stop PER CONTAINER, and a
+// leaked pod with four members costs ~40s of dead time at the top of a cycle.
+// Nothing being swept here has state worth flushing — it is by definition
+// debris.
+type ResourceKind = {
+  readonly listArgs: (filter: string) => string[];
+  readonly rmArgs: (name: string) => string[];
+  // Suffix between the scoped prefix and the id, for the kinds that carry one.
+  readonly infix: string;
+};
 
-async function listNetworkOrphans(): Promise<string[]> {
-  const found = new Set<string>();
-  for (const prefix of NETWORK_PREFIXES) {
-    try {
-      const { stdout } = await exec(RUNTIME, [
-        "network",
-        "ls",
-        "--filter",
-        `name=^${prefix}`,
-        "--format",
-        "{{.Name}}",
-      ]);
-      for (const n of stdout.split("\n").map((s) => s.trim())) {
-        if (n.startsWith(prefix)) found.add(n);
-      }
-    } catch {
-      return [];
-    }
-  }
-  return [...found];
-}
+// Pods first: `pod rm -f` takes its member containers AND its unreachably-named
+// infra container with it, so this is the only step that can free the pod's
+// network. Then loose containers — a network can't be removed while a container
+// is still attached — then the networks.
+const KINDS: readonly ResourceKind[] = [
+  {
+    listArgs: (f) => [
+      "pod",
+      "ls",
+      "--filter",
+      `name=^${f}`,
+      "--format",
+      "{{.Name}}",
+    ],
+    rmArgs: (n) => ["pod", "rm", "-f", "-t", "0", n],
+    infix: "pod-",
+  },
+  {
+    listArgs: (f) => [
+      "ps",
+      "-a",
+      "--filter",
+      `name=^${f}`,
+      "--format",
+      "{{.Names}}",
+    ],
+    rmArgs: (n) => ["rm", "-f", "-t", "0", n],
+    infix: "",
+  },
+  {
+    listArgs: (f) => [
+      "network",
+      "ls",
+      "--filter",
+      `name=^${f}`,
+      "--format",
+      "{{.Name}}",
+    ],
+    rmArgs: (n) => ["network", "rm", n],
+    infix: "net-",
+  },
+];
 
-async function listPodOrphans(): Promise<string[]> {
-  const found = new Set<string>();
-  for (const prefix of POD_PREFIXES) {
-    try {
-      const { stdout } = await exec(RUNTIME, [
-        "pod",
-        "ls",
-        "--filter",
-        `name=^${prefix}`,
-        "--format",
-        "{{.Name}}",
-      ]);
-      for (const n of stdout.split("\n").map((s) => s.trim())) {
-        if (n.startsWith(prefix)) found.add(n);
-      }
-    } catch {
-      return [];
-    }
-  }
-  return [...found];
-}
-
-// `-t 0` for the same reason gate-stack.ts uses it on teardown: without it
-// podman waits out its 10-second graceful stop PER CONTAINER, and a leaked pod
-// with four members costs ~40s of dead time at the top of a cycle. Nothing
-// being swept here has state worth flushing — it is by definition debris.
-async function removePod(name: string): Promise<boolean> {
+// The `--filter name=^<prefix>` is podman-side and anchored, but the local
+// `startsWith` re-check stays: podman's name filter is a regex, so a prefix
+// containing regex metacharacters would match more than intended, and the
+// filter has historically been substring-matched on some versions.
+async function listByPrefix(
+  kind: ResourceKind,
+  prefix: string,
+  run: RuntimeExec,
+): Promise<string[] | null> {
   try {
-    await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", name]);
+    const { stdout } = await run(kind.listArgs(prefix));
+    return stdout
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((n) => n.startsWith(prefix));
+  } catch {
+    // runtime not installed — nothing to list, and nothing to clean
+    return null;
+  }
+}
+
+async function remove(
+  kind: ResourceKind,
+  name: string,
+  run: RuntimeExec,
+): Promise<boolean> {
+  try {
+    await run(kind.rmArgs(name));
     return true;
   } catch {
     return false;
   }
 }
 
-async function removeContainer(name: string): Promise<boolean> {
-  try {
-    await exec(RUNTIME, ["rm", "-f", "-t", "0", name]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function removeNetwork(name: string): Promise<boolean> {
-  try {
-    await exec(RUNTIME, ["network", "rm", name]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function cleanupOrphanContainers(): Promise<readonly string[]> {
+// Sweep this run's scope. Returns the names actually removed.
+export async function cleanupOrphanContainers(
+  scope: string,
+  run: RuntimeExec = defaultExec,
+): Promise<readonly string[]> {
   const removed: string[] = [];
-  // Pods first: `pod rm -f` takes its member containers AND its unreachably-
-  // named infra container with it, so this is the only step that can free the
-  // pod's network. Doing it after the container sweep would work too, but doing
-  // it first means the container sweep has less to find.
-  for (const name of await listPodOrphans()) {
-    if (await removePod(name)) removed.push(name);
-  }
-  // Then loose containers; a network can't be removed while a container is
-  // still attached. After force-removing all sandbar-prefixed containers, the
-  // network removal is unblocked.
-  for (const name of await listContainerOrphans()) {
-    if (await removeContainer(name)) removed.push(name);
-  }
-  for (const name of await listNetworkOrphans()) {
-    if (await removeNetwork(name)) removed.push(name);
+  for (const kind of KINDS) {
+    const names = await listByPrefix(
+      kind,
+      `${scopedResourcePrefix(scope)}${kind.infix}`,
+      run,
+    );
+    if (names === null) return removed;
+    for (const name of names) {
+      if (await remove(kind, name, run)) removed.push(name);
+    }
   }
   return removed;
+}
+
+export type UnattributableResources = {
+  readonly names: readonly string[];
+  // Copy-pasteable, in the order that actually works (pods before networks).
+  readonly removalCommands: readonly string[];
+};
+
+// Podman resources carrying a sandbar-ish name that no run's scope claims:
+// debris from a build predating #28, or from the sandcastle era. Reported, not
+// removed — see the module header.
+export async function findUnattributableResources(
+  run: RuntimeExec = defaultExec,
+): Promise<UnattributableResources> {
+  const names: string[] = [];
+  const removalCommands: string[] = [];
+  for (const kind of KINDS) {
+    const found = new Set<string>();
+    for (const prefix of ALL_RESOURCE_PREFIXES) {
+      // Note the prefix is the BARE one — an unscoped pod is `sandbar-pod-42`,
+      // with the infix straight after the prefix, exactly as it was before #28.
+      const listed = await listByPrefix(kind, `${prefix}${kind.infix}`, run);
+      if (listed === null) return { names: [], removalCommands: [] };
+      for (const n of listed) {
+        if (!isScopedResourceName(n)) found.add(n);
+      }
+    }
+    for (const name of found) {
+      names.push(name);
+      removalCommands.push(`${RUNTIME} ${kind.rmArgs(name).join(" ")}`);
+    }
+  }
+  return { names, removalCommands };
 }

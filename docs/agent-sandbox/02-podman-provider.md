@@ -168,8 +168,11 @@ N)` on non-zero). The in-house module can fold equivalents inline.
 
 - This file is ~90% portable as-is: strip the `createBindMountSandboxProvider`
   indirection and return the handle directly.
-- Keep the `sandbar-` container-name prefix (`RESOURCE_PREFIX` in
-  `src/naming.ts`), or update it and `merger.ts:435` together.
+- Keep the container-name prefix caller-supplied (`PodmanOptions.namePrefix`,
+  defaulting to `RESOURCE_PREFIX` in `src/naming.ts`), or update it and
+  `merger.ts:435` together. Sandbar passes its per-run scope's prefix
+  (`sandbar-<scope>-`, #28) so the orphan sweeper — which force-removes by
+  prefix — can never reach a concurrent run's sandbox container.
 - Keep the shutdown-registry cleanup — it's what prevents leaked containers on
   crash. Note sandbar *already* has its own orphan sweeper (`containers.ts`) as a
   backstop, but the in-process handlers are the fast path. Port the registry

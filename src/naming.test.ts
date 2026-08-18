@@ -7,8 +7,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isScopedResourceName,
   networkNameFor,
   podNameFor,
+  runScope,
+  scopedResourcePrefix,
   stackContainerNameFor,
   ALL_BRANCH_PREFIXES,
   ALL_RESOURCE_PREFIXES,
@@ -77,22 +80,85 @@ describe("issueNumberFromBranch", () => {
 // (`<pod-id-prefix>-infra`, a podman-assigned hash) — which is why the sweep
 // removes pods, not just containers, and why the pod name is what has to match.
 describe("gate-stack resource names (#24)", () => {
+  const S = runScope("/some/workdir");
+
   it("prefixes every name so the orphan sweep can find it", () => {
-    expect(networkNameFor("42").startsWith(RESOURCE_PREFIX)).toBe(true);
-    expect(podNameFor("42").startsWith(RESOURCE_PREFIX)).toBe(true);
-    expect(stackContainerNameFor("42", "db").startsWith(RESOURCE_PREFIX)).toBe(true);
+    expect(networkNameFor(S, "42").startsWith(RESOURCE_PREFIX)).toBe(true);
+    expect(podNameFor(S, "42").startsWith(RESOURCE_PREFIX)).toBe(true);
+    expect(stackContainerNameFor(S, "42", "db").startsWith(RESOURCE_PREFIX)).toBe(
+      true,
+    );
   });
 
-  it("gives networks and pods their own sub-prefixes", () => {
-    expect(networkNameFor("42")).toBe("sandbar-net-42");
-    expect(podNameFor("42")).toBe("sandbar-pod-42");
-    expect(stackContainerNameFor("42", "db")).toBe("sandbar-42-db");
+  it("gives networks and pods their own sub-prefixes, under the scope", () => {
+    expect(networkNameFor(S, "42")).toBe(`sandbar-${S}-net-42`);
+    expect(podNameFor(S, "42")).toBe(`sandbar-${S}-pod-42`);
+    expect(stackContainerNameFor(S, "42", "db")).toBe(`sandbar-${S}-42-db`);
   });
 
   it("keeps the merger's stack disjoint from every issue's", () => {
     // Issue ids are numeric, so "merger" can never collide — the two stacks run
     // in the same process and would otherwise tear each other's pods down.
-    expect(podNameFor("merger")).not.toBe(podNameFor("42"));
-    expect(stackContainerNameFor("merger", "db")).toBe("sandbar-merger-db");
+    expect(podNameFor(S, "merger")).not.toBe(podNameFor(S, "42"));
+    expect(stackContainerNameFor(S, "merger", "db")).toBe(
+      `sandbar-${S}-merger-db`,
+    );
+  });
+});
+
+// #28: podman names are host-global, the lock is per-workdir. Without a scope
+// segment, two runs against different repos both legitimately hold their own
+// lock and then destroy each other's pods — by namesake collision on create,
+// and by the bare-prefix orphan sweep between cycles.
+describe("run scope (#28)", () => {
+  it("is stable for a workdir and distinct between workdirs", () => {
+    expect(runScope("/a/.sandbar")).toBe(runScope("/a/.sandbar"));
+    expect(runScope("/a/.sandbar")).not.toBe(runScope("/b/.sandbar"));
+  });
+
+  it("is a legal podman name segment", () => {
+    expect(runScope("/a/.sandbar")).toMatch(/^w[0-9a-f]{8}$/);
+  });
+
+  it("makes two workdirs' stacks disjoint at every resource kind", () => {
+    const a = runScope("/a/.sandbar");
+    const b = runScope("/b/.sandbar");
+    expect(podNameFor(a, "42")).not.toBe(podNameFor(b, "42"));
+    expect(networkNameFor(a, "42")).not.toBe(networkNameFor(b, "42"));
+    expect(stackContainerNameFor(a, "42", "db")).not.toBe(
+      stackContainerNameFor(b, "42", "db"),
+    );
+  });
+
+  it("keeps one run's sweep prefix from reaching another run's names", () => {
+    const a = runScope("/a/.sandbar");
+    const b = runScope("/b/.sandbar");
+    for (const name of [
+      podNameFor(b, "42"),
+      networkNameFor(b, "42"),
+      stackContainerNameFor(b, "42", "db"),
+    ]) {
+      expect(name.startsWith(scopedResourcePrefix(a))).toBe(false);
+    }
+  });
+
+  it("recognizes scoped names and only scoped names", () => {
+    const S = runScope("/a/.sandbar");
+    expect(isScopedResourceName(podNameFor(S, "42"))).toBe(true);
+    expect(isScopedResourceName(stackContainerNameFor(S, "42", "db"))).toBe(true);
+    // Pre-#28 names, which the debris report must still see.
+    expect(isScopedResourceName("sandbar-pod-42")).toBe(false);
+    expect(isScopedResourceName("sandbar-net-42")).toBe(false);
+    expect(isScopedResourceName("sandbar-42-db")).toBe(false);
+    expect(isScopedResourceName("sandcastle-pod-42")).toBe(false);
+  });
+
+  it("does not mistake a pre-#28 agent-sandbox uuid name for a scope", () => {
+    // The leading `w` carries this: a uuid's first segment is also 8 chars, but
+    // hex can never start with `w`, so `sandbar-<uuid>` stays unscoped and gets
+    // reported as debris rather than silently claimed by some run's sweep.
+    expect(isScopedResourceName("sandbar-1a2b3c4d-5e6f-7081-9234-56789abcdef0")).toBe(
+      false,
+    );
   });
 });

@@ -7,6 +7,12 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import { type Stack, startStack } from "./gate-stack.js";
+import {
+  networkNameFor,
+  podNameFor,
+  runScope,
+  stackContainerNameFor,
+} from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -47,6 +53,10 @@ const available = ((): boolean => {
 })();
 
 const STACK_ID = "podmantest";
+// Any stable string: the scope only has to be disjoint from a real run's.
+const SCOPE = runScope("/gate-stack-podman.test");
+const cName = (name: string): string =>
+  stackContainerNameFor(SCOPE, STACK_ID, name);
 
 describe.runIf(available)(
   "gate stack against real podman",
@@ -76,10 +86,10 @@ describe.runIf(available)(
     afterAll(async () => {
       // Belt and braces: a test that threw before assigning `stack` would leak
       // the pod, and the pod's infra container is invisible to a name sweep.
-      await exec(RUNTIME, ["pod", "rm", "-f", `sandbar-pod-${STACK_ID}`]).catch(
+      await exec(RUNTIME, ["pod", "rm", "-f", podNameFor(SCOPE, STACK_ID)]).catch(
         () => {},
       );
-      await exec(RUNTIME, ["network", "rm", `sandbar-net-${STACK_ID}`]).catch(
+      await exec(RUNTIME, ["network", "rm", networkNameFor(SCOPE, STACK_ID)]).catch(
         () => {},
       );
     }, 60_000);
@@ -89,6 +99,7 @@ describe.runIf(available)(
       async () => {
         stack = await startStack({
           stackId: STACK_ID,
+          scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
             containers: [
@@ -122,6 +133,7 @@ describe.runIf(available)(
       async () => {
         stack = await startStack({
           stackId: STACK_ID,
+          scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
             containers: [
@@ -157,6 +169,7 @@ describe.runIf(available)(
       async () => {
         stack = await startStack({
           stackId: STACK_ID,
+          scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
             containers: [
@@ -196,6 +209,7 @@ describe.runIf(available)(
         // gate step writes lands owned by a subuid the operator cannot delete.
         stack = await startStack({
           stackId: STACK_ID,
+          scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
             containers: [
@@ -221,6 +235,7 @@ describe.runIf(available)(
         await expect(
           startStack({
             stackId: STACK_ID,
+            scope: SCOPE,
             worktreePath: repo,
             spec: resolveGateStack({
               containers: [
@@ -249,6 +264,7 @@ describe.runIf(available)(
       async () => {
         stack = await startStack({
           stackId: STACK_ID,
+          scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
             containers: [
@@ -288,7 +304,7 @@ describe.runIf(available)(
               "inspect",
               "--format",
               "{{.Id}}",
-              `sandbar-${STACK_ID}-${name}`,
+              cName(name),
             ])
           ).stdout.trim();
 
@@ -299,7 +315,7 @@ describe.runIf(available)(
         // run. A recreated database would answer the SELECT with an error.
         await exec(RUNTIME, [
           "exec",
-          `sandbar-${STACK_ID}-runner`,
+          cName("runner"),
           "mariadb",
           "-h",
           "127.0.0.1",
@@ -318,7 +334,7 @@ describe.runIf(available)(
 
         const { stdout } = await exec(RUNTIME, [
           "exec",
-          `sandbar-${STACK_ID}-runner`,
+          cName("runner"),
           "mariadb",
           "-h",
           "127.0.0.1",
@@ -342,6 +358,7 @@ describe.runIf(available)(
       async () => {
         stack = await startStack({
           stackId: STACK_ID,
+          scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
             containers: [
@@ -362,7 +379,7 @@ describe.runIf(available)(
 
         const red = await stack.runGate();
         expect(red.ok).toBe(false);
-        expect(red.failedStep).toBe(`container:sandbar-${STACK_ID}-broken`);
+        expect(red.failedStep).toBe(`container:${cName("broken")}`);
         // The container's own log is the trace — without it the agent is told
         // only that something failed to start.
         expect(red.containerLogs).toContain("bootstrap-failed");
@@ -377,6 +394,7 @@ describe.runIf(available)(
       async () => {
         stack = await startStack({
           stackId: STACK_ID,
+          scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
             containers: [
@@ -420,6 +438,7 @@ describe.runIf(available)(
         await expect(
           startStack({
             stackId: STACK_ID,
+            scope: SCOPE,
             worktreePath: repo,
             spec: resolveGateStack({
               containers: [
@@ -448,6 +467,7 @@ describe.runIf(available)(
       async () => {
         stack = await startStack({
           stackId: STACK_ID,
+          scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
             containers: [
@@ -459,7 +479,7 @@ describe.runIf(available)(
         });
         expect((await stack.runGate()).ok).toBe(true);
 
-        await exec(RUNTIME, ["stop", "-t", "0", `sandbar-${STACK_ID}-svc`]);
+        await exec(RUNTIME, ["stop", "-t", "0", cName("svc")]);
 
         await expect(stack.runGate()).rejects.toThrow(/no longer running/);
       },

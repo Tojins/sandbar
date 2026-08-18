@@ -169,6 +169,11 @@ const POD_RM_ARGS = (podName: string): string[] => [
 export type StackOptions = {
   // Issue id in the inner loop, "merger" for gate-2.
   readonly stackId: string;
+  // This run's resource scope (#28). Every name below is built under it, so a
+  // concurrent run against a different workdir cannot be a namesake — the
+  // `pod rm -f` that recycles a stale pod below would otherwise be reaching
+  // into a live sibling's stack.
+  readonly scope: string;
   readonly spec: ResolvedGateStack;
   // The worktree the gate is a verdict about. Must exist, with its files, before
   // this call — bind-mount sources are read at container start.
@@ -320,10 +325,10 @@ export function parsePortBindings(json: string): Map<number, number> {
 // ---------------------------------------------------------------------------
 
 export async function startStack(opts: StackOptions): Promise<Stack> {
-  const networkName = networkNameFor(opts.stackId);
-  const podName = podNameFor(opts.stackId);
+  const networkName = networkNameFor(opts.scope, opts.stackId);
+  const podName = podNameFor(opts.scope, opts.stackId);
   const nameOf = (c: ResolvedStackContainer): string =>
-    stackContainerNameFor(opts.stackId, c.name);
+    stackContainerNameFor(opts.scope, opts.stackId, c.name);
 
   let stopped = false;
   const stop = async (): Promise<void> => {
@@ -374,6 +379,11 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // A namesake surviving an older run may be DNS-enabled or otherwise stale
     // and must never be reused. `rm -f` no-ops when absent, so this is the
     // recreate-once migration and the first-time create in one step.
+    //
+    // "an older run" is only true because the name carries `opts.scope` (#28).
+    // Unscoped, the only namesake a second run against a different repo could
+    // find for issue 42 was the FIRST run's live pod, and this line tore it
+    // down — the victim just watched its containers disappear mid-gate.
     await exec(RUNTIME, POD_RM_ARGS(podName)).catch(() => {});
     await exec(RUNTIME, ["network", "rm", "-f", networkName]).catch(() => {});
     await exec(RUNTIME, ["network", "create", "--disable-dns", networkName]);
@@ -394,7 +404,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     await bringUp(issueContainers, {
       podName,
       worktreePath: opts.worktreePath,
-      stackId: opts.stackId,
+      nameOf,
       hostPorts,
     });
 
@@ -412,7 +422,6 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
           attemptContainers,
           issueContainers,
           podName,
-          stackId: opts.stackId,
           worktreePath: opts.worktreePath,
           hostPorts,
           nameOf,
@@ -444,7 +453,9 @@ async function readPortBindings(podName: string): Promise<Map<number, number>> {
 type BringUpCtx = {
   readonly podName: string;
   readonly worktreePath: string;
-  readonly stackId: string;
+  // Passed as a closure rather than rebuilt from (scope, stackId) here: the
+  // name is the stack's identity, and one place composes it.
+  readonly nameOf: (c: ResolvedStackContainer) => string;
   readonly hostPorts: ReadonlyMap<number, number>;
 };
 
@@ -458,7 +469,7 @@ async function bringUp(
   ctx: BringUpCtx,
 ): Promise<void> {
   for (const c of containers) {
-    const containerName = stackContainerNameFor(ctx.stackId, c.name);
+    const containerName = ctx.nameOf(c);
     // A container of this name may survive a crashed run; the sweep covers the
     // usual case but the pod was just recreated, so any leftover is stale.
     await exec(RUNTIME, ["rm", "-f", "-t", "0", containerName]).catch(() => {});
@@ -484,11 +495,11 @@ async function bringUp(
   }
 
   for (const c of containers) {
-    await waitForReady(stackContainerNameFor(ctx.stackId, c.name), c, ctx);
+    await waitForReady(ctx.nameOf(c), c, ctx);
   }
 
   for (const c of containers) {
-    const containerName = stackContainerNameFor(ctx.stackId, c.name);
+    const containerName = ctx.nameOf(c);
     for (const command of c.postReadyCommands) {
       try {
         // Bounded by the container's readiness budget: post-ready setup is
@@ -736,7 +747,6 @@ type RunGateCtx = {
   readonly attemptContainers: readonly ResolvedStackContainer[];
   readonly issueContainers: readonly ResolvedStackContainer[];
   readonly podName: string;
-  readonly stackId: string;
   readonly worktreePath: string;
   readonly hostPorts: ReadonlyMap<number, number>;
   readonly nameOf: (c: ResolvedStackContainer) => string;
@@ -799,7 +809,7 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     await bringUp(ctx.attemptContainers, {
       podName: ctx.podName,
       worktreePath: ctx.worktreePath,
-      stackId: ctx.stackId,
+      nameOf: ctx.nameOf,
       hostPorts: ctx.hostPorts,
     });
   } catch (err) {

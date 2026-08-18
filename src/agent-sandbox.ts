@@ -146,6 +146,11 @@ export type SandboxProvider = {
 
 export type PodmanOptions = {
   imageName?: string;
+  // Prefix for the container name (`<namePrefix><uuid>`). Sandbar passes its
+  // run scope's prefix so the orphan sweeper, which force-removes by prefix,
+  // can never see a concurrent run's sandbox (#28). Defaults to the bare
+  // RESOURCE_PREFIX for standalone use.
+  namePrefix?: string;
   selinuxLabel?: string | false;
   userns?: string | false;
   containerUid?: number;
@@ -848,6 +853,7 @@ const checkImageExists = (imageName: string): Promise<void> =>
 
 export const podman = (options?: PodmanOptions): SandboxProvider => {
   const configuredImageName = options?.imageName;
+  const namePrefix = options?.namePrefix ?? CONTAINER_NAME_PREFIX;
   const selinuxLabel = options?.selinuxLabel ?? "z";
   const userns = options?.userns ?? "keep-id";
   const containerUid = options?.containerUid ?? 1000;
@@ -860,7 +866,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
     env: options?.env ?? {},
     sandboxHomedir: SANDBOX_HOMEDIR,
     create: async (createOptions) => {
-      const containerName = `${CONTAINER_NAME_PREFIX}${randomUUID()}`;
+      const containerName = `${namePrefix}${randomUUID()}`;
       const sandboxWorktreePath =
         createOptions.mounts.find((m) => m.hostPath === createOptions.worktreePath)
           ?.sandboxPath ?? SANDBOX_REPO_DIR;

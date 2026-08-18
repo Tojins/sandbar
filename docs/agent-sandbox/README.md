@@ -46,7 +46,11 @@ Of the `Sandbox` handle, sandbar uses only `run()`, `worktreePath`, and
 - **Always bind-mount + podman.** `podman()` is called with an explicit
   `imageName: config.sandboxImage` (since #24 D7 — the implicit
   `defaultImageName(repoDir)` coupled the image to the host's *directory name*
-  and broke silently on a rename), plus the defaults `--userns=keep-id`,
+  and broke silently on a rename) and an explicit
+  `namePrefix: scopedResourcePrefix(config.scope)` (since #28 — the container
+  name must fall inside the run's scope, or the orphan sweeper of a *second*
+  sandbar run on the same host force-removes this run's live sandbox), plus the
+  defaults `--userns=keep-id`,
   uid/gid 1000, SELinux label `z`, **no `--network`**. The agent container
   therefore cannot reach the per-issue gate stack — the stack's containers all
   join a pod on `sandbar-net-<id>` (`src/gate-stack.ts`), and the agent sandbox
@@ -126,8 +130,11 @@ repos get swept rather than orphaned:
 
 - Worktree dir layout: `<repoDir>/.sandbar/worktrees/<branch-with-slashes-as-dashes>`
   — `src/finalize.ts:283` (`worktreePathFor`) mirrors `WorktreeManager.create`.
-- Container name prefix `sandbar-` and network prefix `sandbar-net-` —
-  `src/naming.ts` (`RESOURCE_PREFIX`), matched in `containers.ts`, `merger.ts:435`.
+- Container name prefix `sandbar-<scope>-` and network prefix
+  `sandbar-<scope>-net-` — `src/naming.ts` (`RESOURCE_PREFIX`,
+  `scopedResourcePrefix`), matched in `containers.ts`, `merger.ts:435`. The
+  `<scope>` segment is per-run (#28); the sweeper keys on the full scoped
+  prefix and must never fall back to the bare one.
 - Branch prefix `sandbar/issue-<n>-<slug>` — `plan-resolver.ts:74`,
   `preflight.ts`, orphan sweeper.
 - Sandbox mount point `/home/agent/workspace` (`SANDBOX_REPO_DIR`) and home

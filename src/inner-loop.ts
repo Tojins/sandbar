@@ -38,6 +38,7 @@ import {
   step,
 } from "./inner-loop-machine.js";
 import type { AttemptLogger } from "./logs.js";
+import { scopedResourcePrefix } from "./naming.js";
 import { parsePromise } from "./promise-parser.js";
 import { buildPrompt, buildReviewerPrompt } from "./prompt.js";
 import { parseVerdict } from "./verdict-parser.js";
@@ -87,6 +88,9 @@ export type InnerLoopConfig = {
   readonly maxImplAttempts: number;
   readonly maxReviewRounds: number;
   readonly sandboxImage: string;
+  // This run's podman resource scope (#28) — see naming.ts. Both the agent
+  // sandbox container and the gate stack are named under it.
+  readonly scope: string;
   readonly gateStack: ResolvedGateStack;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
@@ -189,7 +193,10 @@ async function runSandboxCycle(
         // Named explicitly rather than left to defaultImageName(repoDir): the
         // implicit coupling between the sandbox image and the host's repo
         // DIRECTORY NAME broke silently on a rename (#24 D7).
-        sandbox: podman({ imageName: config.sandboxImage }),
+        sandbox: podman({
+          imageName: config.sandboxImage,
+          namePrefix: scopedResourcePrefix(config.scope),
+        }),
         hooks: opts.hooks,
         envFilePath: config.envFilePath,
         workDir: config.workDir,
@@ -197,6 +204,7 @@ async function runSandboxCycle(
       }),
       startStack({
         stackId: issue.id,
+        scope: config.scope,
         spec: config.gateStack,
         worktreePath,
       }),
