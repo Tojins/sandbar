@@ -61,14 +61,28 @@ export default {
   // own; default `lifecycle: "attempt"` because it mounts the worktree and runs
   // the branch's code, so it is recreated every gate run.
   //
-  // Known blind spot, and the reason for `verified` below: the podman-backed
-  // tests (`gate-stack-podman.test.ts`, `ensure-images-podman.test.ts`) resolve
-  // their `describe.runIf` at collection time against `podman image exists`,
-  // and there is no podman inside this container. They SKIP — green either way
-  // — and they are exactly the tests that pin what podman defines. Do not
-  // close that gap by mounting the podman socket in here: both files hardcode
-  // a fixed scope and stack id, so two issues gating concurrently (default plan
-  // size 3) would build identically-named pods and force-remove each other's.
+  // KNOWN BLIND SPOT, accepted deliberately. The podman-backed tests
+  // (`gate-stack-podman.test.ts`, `ensure-images-podman.test.ts`) resolve their
+  // `describe.runIf` at collection time against `podman image exists`, and
+  // there is no podman inside this container. ~35 tests SKIP — green either
+  // way — and they are exactly the ones pinning what podman defines: the tcp
+  // settle window's green-on-red, root-in-pod file ownership, `inspect` 125 vs
+  // `container exists` (#36), SIGKILL reaping, `logs -f` chunk splitting.
+  //
+  // They run on the HOST instead, where `npm test` is 877/877 with podman
+  // present. That is a human step, not a gate: a green gate here does NOT mean
+  // that layer was exercised. Run the full suite on the host before trusting a
+  // cycle that touched `gate-stack.ts`, `ensure-images.ts` or `containers.ts`.
+  //
+  // Neither of the two mechanical ways to close it is available. Mounting the
+  // podman socket into this container does not work: both files hardcode a
+  // fixed `SCOPE` and `STACK_ID`, so two issues gating concurrently (default
+  // plan size 3) build identically-named pods and `startStack` force-removes a
+  // namesake before creating — each issue's gate would destroy the other's
+  // stack mid-run. That route needs a prerequisite issue deriving the test
+  // scope per-process. `mergeMode: "verified"` was the other, and is out by
+  // choice: this is a personal project, the tests belong on host machines, and
+  // a cycle should not wait on a hosted runner.
   gateStack: {
     containers: [
       {
@@ -107,18 +121,9 @@ export default {
 
   env: readEnvFile(new URL("sandbar.env", import.meta.url)),
 
-  // The forge gets the last word, and that is this repo's whole answer to the
-  // blind spot above — verified mode's stated purpose verbatim: buying an
-  // independent verdict the local gate cannot. `.github/workflows/test.yml`
-  // runs the SAME suite on a runner that has podman, so the 35 tests skipped
-  // locally actually run before anything lands on main.
-  //
-  // `requiredChecks` is the job name AS THE FORGE REPORTS IT. The workflow and
-  // this line are one unit: a name that never appears is `missing-required`,
-  // which is fatal every cycle by design. Adding a matrix to that job renames
-  // the checks (`test (20.x)`) and must change this line in the same commit.
-  mergeMode: {
-    kind: "verified",
-    requiredChecks: ["test"],
-  },
+  // No `mergeMode`: the default `{ kind: "direct" }` is what this repo wants,
+  // and restating a default is noise (see RunConfig's deviations-only rule).
+  // Nothing downstream of `main` here trusts it blindly — `auto-tag.yml` reads
+  // package.json and creates a tag, which is bookkeeping, not a deploy — so the
+  // one thing `verified` protects against does not apply.
 };
