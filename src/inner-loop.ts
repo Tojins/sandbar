@@ -46,6 +46,7 @@ import {
 import type { AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { parsePromise } from "./promise-parser.js";
+import type { RepoLayout } from "./repo-cache.js";
 import {
   type ProjectAnchorOptions,
   buildPrompt,
@@ -104,15 +105,17 @@ export type Terminal =
     };
 
 export type InnerLoopConfig = {
-  // The host repo. Everything rooted here — the issue branch this loop seeds,
-  // the managed worktree it prepares, the anchor layers' `git log`/`gh issue
-  // view` — must agree with the `config.cwd` finalize, preflight and the merger
-  // use, and inheriting `process.cwd()` made that agreement a coincidence of
-  // how the host was launched (#34).
-  readonly cwd: string;
+  // Every directory this loop touches, as one object (#38). The issue branch it
+  // seeds, the managed worktree it prepares and the anchor layers' `git log` /
+  // `gh issue view` all name `layout.repoDir` — the bare cache — and must agree
+  // with what finalize, preflight and the merger use. Inheriting `process.cwd()`
+  // made that agreement a coincidence of how the host was launched (#34);
+  // splitting `cwd` into a repo and a set of paths is what stops it becoming a
+  // coincidence of which of two directories a call site happened to mean.
+  readonly layout: RepoLayout;
   readonly sourceBranch: string;
-  readonly workDir: string;
-  readonly envFilePath: string;
+  // The declared credential record (`config.env`), forwarded to each sandbox.
+  readonly env: Record<string, string>;
   readonly implementerModelId: string;
   readonly reviewerModelId: string;
   readonly maxImplAttempts: number;
@@ -216,27 +219,27 @@ async function runSandboxCycle(
   try {
     // Seed the issue branch off origin/<sourceBranch> (not the host's local)
     // so the sandbox never inherits cwd's in-progress state. Idempotent.
-    await ensureIssueBranch(config.cwd, issue.branch, config.sourceBranch);
+    await ensureIssueBranch(config.layout.repoDir, issue.branch, config.sourceBranch);
 
     // Worktree first (fast git ops), then container bringups in parallel: the
     // stack's mounts resolve against this worktree and must see its files on
     // disk at container start (#20).
     const worktreePath = await agentSandbox.prepareWorktree({
       branch: issue.branch,
-      // Explicit, not `process.cwd()` (#34). The path this returns has to be
-      // the one `worktreePathFor(config.cwd, ...)` computes for finalize and
-      // preflight — they are the same directory only if both are rooted the
-      // same way.
-      cwd: config.cwd,
+      // Explicit, not `process.cwd()` (#34), and one object rather than two
+      // paths that could disagree (#38). What this returns has to be exactly
+      // what `worktreePathFor(layout.worktreesDir, …)` computes for finalize and
+      // preflight, in a worktree registered in exactly the repo they run their
+      // git in.
+      layout: config.layout,
       hooks: opts.hooks,
       copyToWorktree: [...opts.copyToWorktree],
-      workDir: config.workDir,
     });
 
     const [sandboxResult, stackResult] = await Promise.allSettled([
       agentSandbox.createSandbox({
         branch: issue.branch,
-        cwd: config.cwd,
+        layout: config.layout,
         // Named explicitly rather than left to defaultImageName(repoDir): the
         // implicit coupling between the sandbox image and the host's repo
         // DIRECTORY NAME broke silently on a rename (#24 D7).
@@ -245,8 +248,7 @@ async function runSandboxCycle(
           namePrefix: scopedResourcePrefix(config.scope),
         }),
         hooks: opts.hooks,
-        envFilePath: config.envFilePath,
-        workDir: config.workDir,
+        env: config.env,
         preparedWorktreePath: worktreePath,
       }),
       startStack({
@@ -272,7 +274,8 @@ async function runSandboxCycle(
     const gateStack: Stack = stack;
 
     const anchorOpts = {
-      cwd: config.cwd,
+      repoDir: config.layout.repoDir,
+      sourceWorktree: config.layout.sourceWorktree,
       claudeMdPath: config.claudeMdPath,
       contextMdPath: config.contextMdPath,
       adrDir: config.adrDir,
@@ -470,7 +473,8 @@ async function runReviewer(
 
   const reviewerPrompt = await buildReviewerPrompt({
     issue,
-    cwd: config.cwd,
+    repoDir: config.layout.repoDir,
+    sourceWorktree: config.layout.sourceWorktree,
     worktreePath: sandbox.worktreePath,
     sourceBranch: config.sourceBranch,
     codingStandardsPath: config.codingStandardsPath,

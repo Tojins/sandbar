@@ -34,7 +34,6 @@
 // defensive ceiling — the conditions above terminate first.
 
 import { realpathSync } from "node:fs";
-import { join } from "node:path";
 
 import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
 import {
@@ -93,6 +92,11 @@ import { type Stack, startStack } from "./gate-stack.js";
 import { buildPlan } from "./plan-resolver.js";
 import { PreflightError, runPreflight } from "./preflight.js";
 import { buildProjectAnchor } from "./prompt.js";
+import {
+  ensureRepoCache,
+  ensureSourceWorktree,
+  repoLayout,
+} from "./repo-cache.js";
 
 // Defensive ceiling on cycles. The real terminators are in exit-conditions.ts
 // (success / stuck / budget) — MAX_ITERATIONS just guarantees the loop is
@@ -128,7 +132,11 @@ function reportSweepFailures(result: SweepResult): void {
 
 export async function run(rawConfig: RunConfig): Promise<void> {
   const config = resolveConfig(rawConfig);
-  const env = makeEnvReader(config.envFilePath);
+  const env = makeEnvReader(config.env);
+  // Every directory the run uses, derived once (#38). `config.cwd` is the
+  // operator's checkout and is READ, never operated on; everything sandbar
+  // owns hangs off `<cwd>/<workDir>` and is disposable.
+  const layout = repoLayout(config.cwd, config.workDir);
 
   // -------------------------------------------------------------------------
   // Pre-flight: required env vars
@@ -142,8 +150,8 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     console.error(
       `Pre-flight failed: GH_TOKEN is not set.\n` +
         `Sandboxes need a fine-grained PAT to talk to the issue tracker.\n` +
-        `See the .env.example for the required token type and scopes,\n` +
-        `then set GH_TOKEN in ${config.envFilePath}.`,
+        "Declare it in your sandbar config's `env` — either with the value, or " +
+        'as `GH_TOKEN: ""` to inherit it from this process\'s environment.',
     );
     process.exit(1);
   }
@@ -163,7 +171,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   // avoid by running first. All it changes is which of two true complaints a
   // second launch hears first, and "another sandbar is running" is the
   // actionable one.
-  const lockPaths = lockPathsFor(join(config.cwd, config.workDir));
+  const lockPaths = lockPathsFor(layout.stateDir);
   let release: (() => Promise<void>) | null = null;
   try {
     release = await acquireLock(lockPaths);
@@ -191,15 +199,27 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   // crashed run and clears. Cheap, and it keeps every exit path in this file
   // uniform rather than one of them relying on a dependency's exit hook.
   try {
+    // The object cache, before anything reads a ref (#38). Created from
+    // `config.cwd` when absent — a local clone, so hardlinked and offline —
+    // and its `origin` retargeted to whatever URL that checkout carries. Under
+    // the lock, because it writes into the state directory; before preflight,
+    // because preflight fetches into it.
+    //
+    // Inside preflight's catch, and `SandbarError` alongside `PreflightError`,
+    // because its failures are the same KIND of failure: `cwd` is not a repo,
+    // it has no `origin`, the clone did not work. Every one is a startup
+    // complaint an operator acts on, so it prints as its message alone and
+    // exits — and, unlike letting it escape to the bin, it runs cleanup first,
+    // which is what recovers the `run.pid` sidecar.
+    await ensureRepoCache(layout);
     await runPreflight({
-      cwd: config.cwd,
-      workDir: config.workDir,
-      envFilePath: config.envFilePath,
+      layout,
+      env,
       sourceBranch: config.sourceBranch,
       pulledImages: pulledImagesOf(config),
     });
   } catch (err) {
-    if (err instanceof PreflightError) {
+    if (err instanceof PreflightError || err instanceof SandbarError) {
       console.error(err.message);
       await runCleanup();
       process.exit(1);
@@ -277,7 +297,17 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   // sharing a `sandboxImage` tag on one host will race the build and then
   // silently share whichever image won. On a shared host, give each workdir its
   // own tag.
-  const baseFingerprints = await ensureImages(config.images, config.cwd);
+  //
+  // The build context is a COMMIT, not a directory someone was standing in
+  // (#38 item 4). `ensureImages` runs before any issue worktree exists, so its
+  // context used to be `config.cwd` — whatever the operator had checked out,
+  // uncommitted edits included. `worktrees/source` is detached at
+  // `origin/<sourceBranch>` and reset to it here, after preflight's fetch, so
+  // the fingerprint recorded on each image is a true claim about a named tree.
+  // #37's validation moves with it: `rebuildOn`'s must-exist check and
+  // `checkWorktreeImageUids` both resolve against this root.
+  const sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
+  const baseFingerprints = await ensureImages(config.images, sourceWorktree);
 
   // Per-branch gate images (#37). One instance for the whole run — every issue
   // and the merger share it, because the per-branch tag is content-addressed
@@ -337,7 +367,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   // closing run-end marker — no in-memory state to flush.
   // -------------------------------------------------------------------------
   const runLogger = await startRunLogger({
-    baseDir: join(config.cwd, config.workDir, "logs"),
+    baseDir: layout.logsDir,
   });
   console.log(`Run log tree: ${runLogger.runDir}`);
   let cleanupReason = "normal-exit";
@@ -360,8 +390,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   ): Promise<void> => {
     if (inputs.length === 0) return;
     const finalizeAdapter = realFinalizeAdapter({
-      cwd: config.cwd,
-      workDir: config.workDir,
+      layout,
       sourceBranch: config.sourceBranch,
     });
     const finalizeResults = await finalizeAll(
@@ -399,10 +428,9 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   const repo = { owner: config.ghOwner, name: config.ghRepo };
 
   const innerLoopCfg = {
-    cwd: config.cwd,
+    layout,
     sourceBranch: config.sourceBranch,
-    workDir: config.workDir,
-    envFilePath: config.envFilePath,
+    env: config.env,
     implementerModelId: config.implementerModelId,
     reviewerModelId: config.reviewerModelId,
     maxImplAttempts: config.maxImplAttempts,
@@ -458,7 +486,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // Phase 1: Plan
       // ---------------------------------------------------------------------
       const issues: { id: string; title: string; branch: string }[] = [
-        ...(await buildPlan(repo, config.cwd, mergedThisRun)),
+        ...(await buildPlan(repo, layout.repoDir, mergedThisRun)),
       ].slice(0, budget);
       const fingerprint = planFingerprint(issues.map((i) => i.id));
       await cycleLogger.writePlan(issues);
@@ -569,10 +597,12 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       let halt = false;
       if (completedIssues.length > 0) {
         // The merger runs in a dedicated worktree detached at
-        // origin/<sourceBranch>, NOT config.cwd — so the operator's uncommitted
-        // edits in their primary checkout can never be swept into a merge
-        // commit (issue #10). Worktree BEFORE stack: the stack's mounts
-        // bind-mount fixture files from it (#20). createMergerWorktree and
+        // origin/<sourceBranch>, NOT a checkout anyone stands in — so the
+        // operator's uncommitted edits can never be swept into a merge commit
+        // (issue #10; since #38 the worktree hangs off the bare cache, which
+        // makes the same guarantee structural rather than procedural).
+        // Worktree BEFORE stack: the stack's mounts bind-mount fixture files
+        // from it (#20). createMergerWorktree and
         // startStack each register their own teardown with onCleanup; we
         // also tear both down in the finally below. One stack serves gate-2 for
         // every branch in the cycle — its issue-lifecycle containers start once.
@@ -580,8 +610,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         let mergerStack: Stack | null = null;
         try {
           mergerWorktree = await createMergerWorktree({
-            cwd: config.cwd,
-            workDir: config.workDir,
+            layout,
             sourceBranch: config.sourceBranch,
           });
           const mergerWorktreePath = mergerWorktree.path;
@@ -610,7 +639,8 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           });
 
           const projectAnchor = await buildProjectAnchor({
-            cwd: config.cwd,
+            repoDir: layout.repoDir,
+            sourceWorktree: layout.sourceWorktree,
             claudeMdPath: config.claudeMdPath,
             contextMdPath: config.contextMdPath,
             adrDir: config.adrDir,

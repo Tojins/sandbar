@@ -1,4 +1,4 @@
-// #34 — the two anchor layers shell out, and both were doing it in
+// #34, #38 — the two anchor layers shell out, and both were doing it in
 // `process.cwd()`.
 //
 // This is the layer where a wrong repo is hardest to notice: the project anchor
@@ -9,6 +9,13 @@
 // Both are asserted through their real shell-out — a real git repo for the
 // history, a `gh` shim on PATH that echoes its own working directory for the
 // tracker — with `process.cwd()` pointed at a different repo throughout.
+//
+// #38 split the one `cwd` in two, because the anchor asks two different
+// questions of two different places: `repoDir` (the bare cache) answers the
+// `git log` and the `gh issue view`, and `sourceWorktree` (a tree at
+// `origin/<sourceBranch>`) answers "does this doc exist" — a bare repo has no
+// files to probe, and the operator's checkout has their uncommitted edits in
+// it. The last case here pins that they really are separate.
 import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -28,6 +35,9 @@ const exec = promisify(execFile);
 const git = (repo: string, ...args: string[]) =>
   exec("git", args, { cwd: repo });
 
+// A self-remote, so `origin/main` resolves without a network — the anchor asks
+// for `origin/<sourceBranch>` since #38, because the cache deliberately keeps
+// no local copy of the source branch.
 async function seedRepo(prefix: string, subject: string): Promise<string> {
   const repo = await mkdtemp(join(tmpdir(), prefix));
   await git(repo, "init", "-q", "-b", "main");
@@ -36,10 +46,12 @@ async function seedRepo(prefix: string, subject: string): Promise<string> {
   await writeFile(join(repo, "a.txt"), "a\n");
   await git(repo, "add", "-A");
   await git(repo, "commit", "-qm", subject);
+  await git(repo, "remote", "add", "origin", repo);
+  await git(repo, "fetch", "-q", "origin");
   return repo;
 }
 
-describe("prompt anchors are built from the configured repo (#34)", () => {
+describe("prompt anchors are built from the configured repo (#34, #38)", () => {
   let launchedFrom: string;
   let target: string;
   let shimBin: string;
@@ -73,7 +85,8 @@ describe("prompt anchors are built from the configured repo (#34)", () => {
 
   it("quotes the configured repo's recent history", async () => {
     const anchor = await buildProjectAnchor({
-      cwd: target,
+      repoDir: target,
+      sourceWorktree: target,
       claudeMdPath: "CLAUDE.md",
       sourceBranch: "main",
     });
@@ -93,7 +106,8 @@ describe("prompt anchors are built from the configured repo (#34)", () => {
         sourceBranch: "main",
       },
       {
-        cwd: target,
+        repoDir: target,
+        sourceWorktree: target,
         claudeMdPath: "CLAUDE.md",
         sourceBranch: "main",
       },
@@ -110,7 +124,8 @@ describe("prompt anchors are built from the configured repo (#34)", () => {
     await writeFile(join(target, "CONTEXT.md"), "# ctx\n");
 
     const anchor = await buildProjectAnchor({
-      cwd: target,
+      repoDir: target,
+      sourceWorktree: target,
       claudeMdPath: "CLAUDE.md",
       contextMdPath: "CONTEXT.md",
       sourceBranch: "main",
@@ -123,7 +138,8 @@ describe("prompt anchors are built from the configured repo (#34)", () => {
     await writeFile(join(launchedFrom, "CONTEXT.md"), "# ctx\n");
 
     const anchor = await buildProjectAnchor({
-      cwd: target,
+      repoDir: target,
+      sourceWorktree: target,
       claudeMdPath: "CLAUDE.md",
       contextMdPath: "CONTEXT.md",
       sourceBranch: "main",
@@ -139,7 +155,8 @@ describe("prompt anchors are built from the configured repo (#34)", () => {
     await writeFile(join(launchedFrom, "docs", "adr", "0002-launch.md"), "x\n");
 
     const anchor = await buildProjectAnchor({
-      cwd: target,
+      repoDir: target,
+      sourceWorktree: target,
       claudeMdPath: "CLAUDE.md",
       adrDir: "docs/adr",
       sourceBranch: "main",
@@ -154,7 +171,8 @@ describe("prompt anchors are built from the configured repo (#34)", () => {
 
     const prompt = await buildReviewerPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
-      cwd: target,
+      repoDir: target,
+      sourceWorktree: target,
       worktreePath: target,
       sourceBranch: "main",
       claudeMdPath: "CLAUDE.md",
@@ -164,14 +182,16 @@ describe("prompt anchors are built from the configured repo (#34)", () => {
     expect(prompt).toContain("@CODING_STANDARDS.md");
   });
 
-  // The reviewer's anchors come from `cwd`, NOT from `worktreePath`. The two
-  // are the same repo and would answer identically, but the worktree is the
-  // reviewer's subject: sourcing the project anchor from it would make the
-  // standard the branch is judged against a function of the branch.
-  it("builds the reviewer's anchors from cwd, not from the worktree under review", async () => {
+  // The reviewer's anchors come from the configured repo, NOT from
+  // `worktreePath`. The two are the same repo and would answer identically, but
+  // the worktree is the reviewer's subject: sourcing the project anchor from it
+  // would make the standard the branch is judged against a function of the
+  // branch.
+  it("builds the reviewer's anchors from the repo, not from the worktree under review", async () => {
     const prompt = await buildReviewerPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
-      cwd: target,
+      repoDir: target,
+      sourceWorktree: target,
       worktreePath: launchedFrom,
       sourceBranch: "main",
       claudeMdPath: "CLAUDE.md",
@@ -180,5 +200,28 @@ describe("prompt anchors are built from the configured repo (#34)", () => {
     expect(prompt).toContain("commit-from-target-repo");
     expect(prompt).not.toContain("commit-from-launch-dir");
     expect(prompt).toContain(realpathSync(target));
+  });
+
+  // #38: the two are genuinely separate inputs, not one value spelled twice.
+  // Pointed at a bare repo the probe would find nothing and every optional doc
+  // would silently vanish from the prompt; pointed at a tree with no refs the
+  // history would silently become "(unavailable)". Each half is checked against
+  // the OTHER directory failing to supply it.
+  it("probes docs in the source worktree while reading history from the repo", async () => {
+    await writeFile(join(launchedFrom, "CONTEXT.md"), "# ctx\n");
+
+    const anchor = await buildProjectAnchor({
+      repoDir: target,
+      sourceWorktree: launchedFrom,
+      claudeMdPath: "CLAUDE.md",
+      contextMdPath: "CONTEXT.md",
+      sourceBranch: "main",
+    });
+
+    // The doc came from the source worktree...
+    expect(anchor).toContain("Context: @CONTEXT.md");
+    // ...and the history from the repo, which does not have that doc.
+    expect(anchor).toContain("commit-from-target-repo");
+    expect(anchor).not.toContain("commit-from-launch-dir");
   });
 });

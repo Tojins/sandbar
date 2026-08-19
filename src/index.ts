@@ -1,5 +1,9 @@
 export { run } from "./run.js";
 export { SandbarError } from "./errors.js";
+// Opt-in, not contract (#38). `config.env` is a plain record; this is the
+// convenience for hosts that keep their credentials in a dotenv-style file
+// whose name and location THEY choose.
+export { readEnvFile } from "./env-file.js";
 export type {
   RunConfig,
   LabelConfig,

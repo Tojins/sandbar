@@ -57,13 +57,20 @@ function section(body: string): string {
 }
 
 export type ProjectAnchorOptions = {
-  // The host repo the `git log` below runs in (#34). Explicit rather than
-  // inherited from `process.cwd()`: on a host that sets `config.cwd` the anchor
-  // was quoting the recent history of whichever repo the process was launched
-  // from, which is the one layer of the prompt the agent has no way to sanity
-  // check — it reads as this repo's history and is wrong in a way that looks
-  // exactly like a stale checkout.
-  readonly cwd: string;
+  // Where the anchor is read FROM. Explicit rather than inherited from
+  // `process.cwd()` (#34): the anchor is the one layer of the prompt the agent
+  // has no way to sanity check — it reads as this repo's history and is wrong
+  // in a way that looks exactly like a stale checkout.
+  //
+  // Two directories, because they answer two different questions (#38).
+  // `repoDir` is the bare cache, where the `git log` runs. `sourceWorktree` is
+  // the persistent worktree detached at `origin/<sourceBranch>` — the only
+  // place the host-side "does this doc exist" probes can be asked, since a bare
+  // repo has no files and the operator's checkout has their uncommitted edits
+  // in it. It is also the closest tree to what the agent will actually see:
+  // issue worktrees seed from the same commit.
+  readonly repoDir: string;
+  readonly sourceWorktree: string;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
@@ -83,12 +90,13 @@ export type PromptInputs = {
 
 export type ReviewerPromptInputs = {
   readonly issue: { readonly id: string; readonly title: string; readonly branch: string };
-  // The host repo, for the anchor layers' `git log` and `gh issue view` (#34).
-  // NOT `worktreePath`: that is a linked worktree of the same repo and would
-  // answer both questions identically, but it is the reviewer's SUBJECT, and
-  // sourcing the project anchor from it would make the anchor a function of the
-  // branch under review.
-  readonly cwd: string;
+  // The anchor layers' sources, for the `git log`/`gh issue view` and the
+  // doc-existence probes respectively (#34, #38). NOT `worktreePath`: that is a
+  // linked worktree of the same repo and would answer the same questions, but
+  // it is the reviewer's SUBJECT, and sourcing the project anchor from it would
+  // make the anchor a function of the branch under review.
+  readonly repoDir: string;
+  readonly sourceWorktree: string;
   readonly worktreePath: string;
   readonly sourceBranch: string;
   // Optional project standards file that *extends* the built-in coding
@@ -104,7 +112,7 @@ export async function buildPrompt(
 ): Promise<string> {
   const layers = [
     await buildProjectAnchor(anchor),
-    await buildIssueAnchor(inputs.issue.id, anchor.cwd),
+    await buildIssueAnchor(inputs.issue.id, anchor.repoDir),
     await buildAttemptSlot(inputs),
   ];
   return layers.join("\n\n---\n\n");
@@ -115,12 +123,13 @@ export async function buildReviewerPrompt(
 ): Promise<string> {
   const layers = [
     await buildProjectAnchor({
-      cwd: inputs.cwd,
+      repoDir: inputs.repoDir,
+      sourceWorktree: inputs.sourceWorktree,
       claudeMdPath: inputs.claudeMdPath,
       contextMdPath: inputs.contextMdPath,
       sourceBranch: inputs.sourceBranch,
     }),
-    await buildIssueAnchor(inputs.issue.id, inputs.cwd),
+    await buildIssueAnchor(inputs.issue.id, inputs.repoDir),
     await buildReviewerSlot(inputs),
   ];
   return layers.join("\n\n---\n\n");
@@ -131,17 +140,24 @@ export async function buildProjectAnchor(
 ): Promise<string> {
   // The @refs stay exactly as the host wrote them — the agent resolves them
   // from the repo root inside its sandbox, so they must not be re-rooted. Only
-  // the host-side "does this exist" probe is resolved against `opts.cwd`
-  // (#34); left relative it asked the launch directory, and the answer is
-  // silent either way: a real CONTEXT.md dropped from the prompt, or a dead
-  // @ref handed to the agent.
+  // the host-side "does this exist" probe is resolved, and it is resolved
+  // against the SOURCE WORKTREE (#38): a tree at `origin/<sourceBranch>`, which
+  // is what the issue worktrees seed from. The answer is silent either way — a
+  // real CONTEXT.md dropped from the prompt, or a dead @ref handed to the agent
+  // — so it has to be asked of a tree that resembles the one the agent gets.
+  // (The known residual is narrowed but not closed: a doc the BRANCH adds is
+  // still absent here, so the commit that introduces a CODING_STANDARDS.md is
+  // reviewed without an @ref to it.)
   const lines = ["# Project anchor", "", `Conventions: @${opts.claudeMdPath}`];
-  if (opts.contextMdPath && existsSync(resolve(opts.cwd, opts.contextMdPath))) {
+  if (
+    opts.contextMdPath &&
+    existsSync(resolve(opts.sourceWorktree, opts.contextMdPath))
+  ) {
     lines.push(`Context: @${opts.contextMdPath}`);
   }
   const adrDir = opts.adrDir;
   if (adrDir) {
-    const adrDirPath = resolve(opts.cwd, adrDir);
+    const adrDirPath = resolve(opts.sourceWorktree, adrDir);
     const adrs = existsSync(adrDirPath)
       ? readdirSync(adrDirPath).filter((f) => f.endsWith(".md")).sort()
       : [];
@@ -152,10 +168,14 @@ export async function buildProjectAnchor(
   }
   lines.push("", `Last 10 commits on \`${opts.sourceBranch}\`:`, "```");
   try {
+    // `origin/<sourceBranch>`, not the bare name (#38). The cache deliberately
+    // holds no local copy of the source branch — `origin/<sourceBranch>` is
+    // what every worktree seeds from and what the merger lands on, so it is
+    // also the history the agent should be shown.
     const { stdout } = await exec(
       "git",
-      ["log", opts.sourceBranch, "-n", "10", "--format=%h %s"],
-      { cwd: opts.cwd },
+      ["log", `origin/${opts.sourceBranch}`, "-n", "10", "--format=%h %s"],
+      { cwd: opts.repoDir },
     );
     lines.push(stdout.trim());
   } catch {
@@ -282,7 +302,7 @@ async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> 
   // configured-but-absent path doesn't send the reviewer chasing a dead @ref.
   const codingStandardsPath =
     inputs.codingStandardsPath &&
-    existsSync(resolve(inputs.cwd, inputs.codingStandardsPath))
+    existsSync(resolve(inputs.sourceWorktree, inputs.codingStandardsPath))
       ? inputs.codingStandardsPath
       : undefined;
 

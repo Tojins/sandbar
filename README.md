@@ -16,12 +16,35 @@ If a version ever lands untagged anyway (e.g. hand-edited inside a feature commi
 
 ## Usage
 
+Sandbar ships a `sandbar` bin. Put one `sandbar.config.mjs` at the root of the
+repo you want worked on, gitignore `.sandbar/`, and run it:
+
+```sh
+npm i -D @offergeist/sandbar
+npx sandbar                     # or: sandbar --config path/to/sandbar.config.mjs
+```
+
+The config file is an ES module whose **default export** is the `RunConfig`
+object — a program, not data, so a computed image tag or a gate stack read from
+JSON is fine. Sandbar imports `./sandbar.config.mjs` from the current directory
+unless `--config` says otherwise, and **never searches parent directories**.
+`--config` is the only flag that carries configuration; everything else lives in
+the file.
+
+`cwd` defaults to the directory holding the resolved config file, not to the
+directory you launched from. That is the whole point of the bin: there is
+nowhere to run it from that operates on the wrong repo.
+
+`run(config)` remains the API — the bin is thin, and a host that wants to embed
+sandbar can still `import { run } from "@offergeist/sandbar"` and call it.
+
 `RunConfig` is **deviations-only**. Supply the repo-specific facts sandbar can't guess (required) plus only the knobs you want different from the defaults. Everything else falls through — don't restate a default.
 
-```ts
-import { run } from "@offergeist/sandbar";
+```js
+// sandbar.config.mjs
+import { readEnvFile } from "@offergeist/sandbar";
 
-await run({
+export default {
   // Required — no sensible default exists:
   ghOwner: "your-org",
   ghRepo: "your-repo",
@@ -75,10 +98,42 @@ await run({
     ],
   },
 
+  // Credentials: a VALUE, not a path. Only the keys declared here cross into a
+  // sandbox container, each falling back to `process.env[key]` when the value
+  // is empty — so `GH_TOKEN: ""` means "inherit it", and CI needs no file.
+  // `readEnvFile` is a convenience; where the file lives (and whether there is
+  // one) is entirely yours.
+  env: readEnvFile(new URL("sandbar.env", import.meta.url)),
+
   // Everything else is OPTIONAL — see the tables below for the defaults.
   // Omit any line you're happy with.
-});
+};
 ```
+
+### What sandbar puts in your repo
+
+```
+your-repo/
+  sandbar.config.mjs   <- committed; the whole host-side surface
+  sandbar.env          <- gitignored, if you use a file at all
+  .sandbar/            <- gitignored; node_modules-shaped, `rm -rf` at will
+    repo.git/            bare object cache; re-created if you delete it
+    worktrees/           source/ (image build context), issue-<n>-<slug>/, merger/
+    run.lock  run.pid  logs/
+```
+
+Nothing in `.sandbar/` is authoritative: the tracker is GitHub Issues, branches
+are pushed at finalise, merged work is on `origin/<sourceBranch>`. Deleting it
+costs agent time, never correctness. **Do not clean it while a run is in
+flight** — the single-instance lock lives there, and removing it lets a second
+run collide with the first.
+
+Sandbar never writes to your checkout. Every git and `gh` call — including
+`git branch -D` and the worktree removals — runs in `.sandbar/repo.git`, which
+holds only sandbar's own refs. What it *reads* from your checkout is your git
+identity, your `copyToWorktree` sources, and the URL of your `origin` (which is
+why no config names the remote: it cannot drift from the repo the config file
+sits in).
 
 ### Required fields
 
@@ -94,7 +149,7 @@ await run({
 
 | Field | Default |
 | --- | --- |
-| `cwd` | `process.cwd()` |
+| `cwd` | the config file's directory (bin), or `process.cwd()` (API) |
 | `workDir` | `.sandbar` |
 | `sourceBranch` | `main` |
 | `images` | `[{ tag: sandboxImage, containerfile: "Containerfile" }]` — see below |
@@ -105,7 +160,7 @@ await run({
 | `claudeMdPath` | `CLAUDE.md` |
 | `contextMdPath` | `CONTEXT.md` (referenced only if the file exists) |
 | `adrDir` | `docs/adr` (referenced only if the dir exists) |
-| `envFilePath` | `.env` |
+| `env` | `{}` |
 | `copyToWorktree` | `[]` |
 | `maxImplAttempts` | `8` |
 | `maxReviewRounds` | `5` |
@@ -114,18 +169,21 @@ await run({
 | `mergeMode` | `{ kind: "direct" }` — see below |
 | `codingStandardsPath` | *(unset)* — no conventional path; see below |
 
-`cwd` is resolved to an absolute path, and the paths above are interpreted
-relative to it rather than to the directory the host process happens to be
-launched from — but they are not all interpreted in the same place, so:
+`cwd` is resolved to an absolute path, and it must be a checkout of the repo,
+with an `origin` remote. The paths above are not all interpreted in the same
+place, so:
 
-- `envFilePath` is resolved against `cwd` up front. Only sandbar reads it, on
-  the host.
 - `claudeMdPath`, `contextMdPath`, `adrDir` and `codingStandardsPath` stay
   relative in the prompt, because the agent resolves them from the repo root
   inside its own sandbox — i.e. against the **issue worktree**, which is seeded
   from `origin/<sourceBranch>`. Sandbar's host-side "does this file exist" check
-  is rooted at `cwd`, so a file that is in your working tree but not yet pushed
-  can be referenced and then not found by the agent.
+  is rooted at `.sandbar/worktrees/source`, a tree at `origin/<sourceBranch>` —
+  so it matches what the agent sees, except for a doc the branch itself adds.
+- `copyToWorktree` entries resolve against `cwd`, your own checkout, because
+  the cache is bare and has nothing to copy. That is the feature's intent
+  (host-only files that are not in git), but it does make issue-worktree
+  content a function of your uncommitted state; point at absolute paths outside
+  the checkout if you want it stable.
 - `gateStack` mount `hostPath`s resolve against the issue worktree, not `cwd`.
 
 ### `mergeMode` — who gets to say the merge result is good
@@ -378,7 +436,7 @@ rather than spending the rest of its budget on it.
 The host project also supplies on disk:
 - A `Containerfile` for the sandbox image (or whatever `images` names)
 - Optionally, a `CODING_STANDARDS.md` (`codingStandardsPath`) — the reviewer ships with built-in default coding standards (`prompts/coding-standards.md`); this file *extends* them and is not required
-- `.env` (at `envFilePath`) with `GH_TOKEN` and either `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`
+- `GH_TOKEN` and either `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, reachable through `config.env` — as literal values, as keys declared empty so they inherit from the launching environment, or read from a file of your choosing with `readEnvFile`
 
 `verified` mode additionally uses the host's own `gh` auth (not the container's
 `GH_TOKEN`) for `gh api .../check-runs`, `gh api .../commits/<sha>/status`,

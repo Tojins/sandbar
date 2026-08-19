@@ -16,9 +16,9 @@ import {
   finalizeAll,
   finalizeOne,
   issueNumberOf,
-  worktreePathFor,
 } from "./finalize.js";
 import type { IssueRef } from "./merger.js";
+import { repoLayout, worktreePathFor } from "./repo-cache.js";
 
 const LABELS: LabelConfig = DEFAULT_LABELS;
 const { needsInfo: NEEDS_INFO, agentStuck: AGENT_STUCK } = DEFAULT_LABELS;
@@ -126,16 +126,19 @@ describe("issueNumberOf", () => {
 });
 
 describe("worktreePathFor", () => {
-  it("composes from repoDir + workDir + branch (slashes replaced)", () => {
-    expect(worktreePathFor("/repo", ".sandbar", "sandbar/issue-45-foo")).toBe(
-      "/repo/.sandbar/worktrees/sandbar-issue-45-foo",
-    );
+  it("composes from the worktrees dir + branch (slashes replaced)", () => {
+    expect(
+      worktreePathFor("/repo/.sandbar/worktrees", "sandbar/issue-45-foo"),
+    ).toBe("/repo/.sandbar/worktrees/sandbar-issue-45-foo");
   });
 
   it("works with a different workDir", () => {
-    expect(worktreePathFor("/repo", ".custom-wd", "sandbar/issue-45-foo")).toBe(
-      "/repo/.custom-wd/worktrees/sandbar-issue-45-foo",
-    );
+    expect(
+      worktreePathFor(
+        repoLayout("/repo", ".custom-wd").worktreesDir,
+        "sandbar/issue-45-foo",
+      ),
+    ).toBe("/repo/.custom-wd/worktrees/sandbar-issue-45-foo");
   });
 });
 

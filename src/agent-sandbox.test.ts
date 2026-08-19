@@ -18,7 +18,12 @@ import { promisify } from "node:util";
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import { worktreePathFor } from "./finalize.js";
+import {
+  type RepoLayout,
+  ensureRepoCache,
+  repoLayout,
+  worktreePathFor,
+} from "./repo-cache.js";
 import {
   BoundedTail,
   MAX_TAIL_CHARS,
@@ -26,6 +31,7 @@ import {
   type Mount,
   type ProviderCreateOptions,
   type SandboxProvider,
+  SANDBOX_REPO_DIR,
   claudeCode,
   createSandbox,
   defaultImageName,
@@ -227,11 +233,11 @@ describe("registerShutdown", () => {
 // ---------------------------------------------------------------------------
 
 describe("worktree path layout", () => {
-  it("matches finalize.ts:worktreePathFor for a slashed branch", () => {
-    const repo = "/repo";
+  it("matches repo-cache.ts:worktreePathFor for a slashed branch", () => {
+    const layout = repoLayout("/repo", ".sandbar");
     const branch = "sandbar/issue-5-add-foo";
-    expect(worktreePathFor(repo, ".sandbar", branch)).toBe(
-      join(repo, ".sandbar", "worktrees", "sandbar-issue-5-add-foo"),
+    expect(worktreePathFor(layout.worktreesDir, branch)).toBe(
+      join("/repo", ".sandbar", "worktrees", "sandbar-issue-5-add-foo"),
     );
   });
 });
@@ -245,14 +251,19 @@ describe("worktree path layout", () => {
 // onLine readline join and captures the env it was handed.
 function makeLocalProvider(): SandboxProvider & {
   capturedEnv?: Record<string, string>;
+  capturedMounts?: readonly Mount[];
 } {
-  const provider: SandboxProvider & { capturedEnv?: Record<string, string> } = {
+  const provider: SandboxProvider & {
+    capturedEnv?: Record<string, string>;
+    capturedMounts?: readonly Mount[];
+  } = {
     tag: "bind-mount",
     name: "podman",
     env: {},
     sandboxHomedir: "/home/agent",
     create: async (opts: ProviderCreateOptions) => {
       provider.capturedEnv = opts.env;
+      provider.capturedMounts = opts.mounts;
       // sandboxRepoDir resolves to this handle.worktreePath; point it at the
       // real host worktree so local git runs in the right place.
       const worktreePath = opts.worktreePath;
@@ -333,6 +344,20 @@ function scriptedAgent(shellScript: string): AgentProvider {
 const git = (args: string[], cwd: string) =>
   execFileP("git", args, { cwd, env: { ...process.env, LC_ALL: "C" } });
 
+// These fixtures are a plain (non-bare) repo standing in for BOTH roles: the
+// operator's checkout and sandbar's cache. That is deliberate — it keeps the
+// non-bare branch of `--git-common-dir` under test, and none of what these
+// cases assert (worktree placement, commit capture, env, hook ordering) is a
+// statement about bareness. `repo-cache-git.test.ts` covers the real split.
+const layoutFor = (dir: string): RepoLayout => ({
+  hostCwd: dir,
+  stateDir: join(dir, ".sandbar"),
+  repoDir: dir,
+  worktreesDir: join(dir, ".sandbar", "worktrees"),
+  sourceWorktree: join(dir, ".sandbar", "worktrees", "source"),
+  logsDir: join(dir, ".sandbar", "logs"),
+});
+
 describe("createSandbox integration (local provider)", () => {
   let dir: string;
   const cleanups: string[] = [];
@@ -356,9 +381,10 @@ describe("createSandbox integration (local provider)", () => {
   it("creates a managed worktree under .sandbar/worktrees and captures a commit", async () => {
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
+      env: {},
       branch: "sandbar/issue-1-demo",
       sandbox: provider,
-      cwd: dir,
+      layout: layoutFor(dir),
     });
     try {
       expect(sandbox.worktreePath).toBe(
@@ -387,16 +413,19 @@ describe("createSandbox integration (local provider)", () => {
     await git(["branch", "sandbar/issue-7-workdir"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
+      env: {},
       branch: "sandbar/issue-7-workdir",
       sandbox: provider,
-      cwd: dir,
-      workDir: ".sandbar",
+      layout: layoutFor(dir),
     });
     try {
       // The sandbox must place the worktree where finalize.ts:worktreePathFor
       // expects it — otherwise finalize's worktree-remove misses and the
       // branch-delete is blocked by the still-registered worktree.
-      const expected = worktreePathFor(dir, ".sandbar", "sandbar/issue-7-workdir");
+      const expected = worktreePathFor(
+        layoutFor(dir).worktreesDir,
+        "sandbar/issue-7-workdir",
+      );
       expect(sandbox.worktreePath).toBe(expected);
       expect(sandbox.worktreePath).toContain(join(".sandbar", "worktrees"));
     } finally {
@@ -418,9 +447,10 @@ describe("createSandbox integration (local provider)", () => {
     await git(["branch", "sandbar/issue-9-rescue"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
+      env: {},
       branch: "sandbar/issue-9-rescue",
       sandbox: provider,
-      cwd: dir,
+      layout: layoutFor(dir),
     });
     try {
       // Attempt 1: the agent detaches and commits there. Nothing reaches the
@@ -462,9 +492,10 @@ describe("createSandbox integration (local provider)", () => {
     await git(["branch", "sandbar/issue-2-noop"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
+      env: {},
       branch: "sandbar/issue-2-noop",
       sandbox: provider,
-      cwd: dir,
+      layout: layoutFor(dir),
     });
     try {
       // No result line, no commit — just raw text on stdout.
@@ -481,9 +512,10 @@ describe("createSandbox integration (local provider)", () => {
     await git(["branch", "sandbar/issue-3-id"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
+      env: {},
       branch: "sandbar/issue-3-id",
       sandbox: provider,
-      cwd: dir,
+      layout: layoutFor(dir),
     });
     try {
       const agent = scriptedAgent(`printf '%s\\n' 'ok'`);
@@ -507,9 +539,10 @@ describe("createSandbox integration (local provider)", () => {
     await git(["branch", "sandbar/issue-4-grace"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
+      env: {},
       branch: "sandbar/issue-4-grace",
       sandbox: provider,
-      cwd: dir,
+      layout: layoutFor(dir),
     });
     try {
       // Emit the completion signal, commit, then hold the pipe open (sleep) so
@@ -536,9 +569,11 @@ describe("createSandbox integration (local provider)", () => {
     }
   }, 15_000);
 
-  it("only forwards env keys declared in .sandbar/.env (no host leakage)", async () => {
-    await mkdir(join(dir, ".sandbar"), { recursive: true });
-    await writeFile(join(dir, ".sandbar", ".env"), "DECLARED=\nLITERAL=fixed\n");
+  // The allowlist is the whole security property of `config.env`, and #38
+  // changed only where the record comes from — a value in the config instead of
+  // a file sandbar named. Declared-and-empty still means "inherit this one key";
+  // undeclared still means nothing crosses.
+  it("only forwards env keys declared in config.env (no host leakage)", async () => {
     await git(["branch", "sandbar/issue-5-env"], dir);
 
     process.env.DECLARED = "from-host";
@@ -546,13 +581,14 @@ describe("createSandbox integration (local provider)", () => {
     try {
       const provider = makeLocalProvider();
       const sandbox = await createSandbox({
+        env: { DECLARED: "", LITERAL: "fixed" },
         branch: "sandbar/issue-5-env",
         sandbox: provider,
-        cwd: dir,
+        layout: layoutFor(dir),
       });
       await sandbox.close();
       const env = provider.capturedEnv ?? {};
-      expect(env.DECLARED).toBe("from-host"); // empty in file → process.env fallback
+      expect(env.DECLARED).toBe("from-host"); // empty in config → process.env fallback
       expect(env.LITERAL).toBe("fixed");
       expect(env.UNDECLARED).toBeUndefined(); // host env does not leak
       expect("PATH" in env).toBe(false);
@@ -562,10 +598,11 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
-  it("loads env from config.envFilePath, not the fixed .sandbar/.env (issue #5)", async () => {
-    // A populated custom file must be honoured even when the fixed default
-    // location (`.sandbar/.env`) holds a stale value.
-    await writeFile(join(dir, "custom.env"), "GH_TOKEN=from-custom\n");
+  // #5 became structural in #38: there is no path to get wrong and no fixed
+  // `.sandbar/.env` to fall through to, so a stale file at the old location is
+  // just a file. What is still worth pinning is that the record the caller
+  // passes is the ONLY source.
+  it("takes the declared record, with no fixed .sandbar/.env fallback (issue #5, #38)", async () => {
     await mkdir(join(dir, ".sandbar"), { recursive: true });
     await writeFile(join(dir, ".sandbar", ".env"), "GH_TOKEN=stale-default\n");
     await git(["branch", "sandbar/issue-5-path"], dir);
@@ -574,13 +611,13 @@ describe("createSandbox integration (local provider)", () => {
     const sandbox = await createSandbox({
       branch: "sandbar/issue-5-path",
       sandbox: provider,
-      cwd: dir,
-      envFilePath: join(dir, "custom.env"),
+      layout: layoutFor(dir),
+      env: { GH_TOKEN: "from-config" },
     });
     await sandbox.close();
     const env = provider.capturedEnv ?? {};
-    expect(env.GH_TOKEN).toBe("from-custom"); // honoured the override
-    expect(env.GH_TOKEN).not.toBe("stale-default"); // ignored the fixed path
+    expect(env.GH_TOKEN).toBe("from-config");
+    expect(env.GH_TOKEN).not.toBe("stale-default");
   });
 });
 
@@ -616,7 +653,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
 
     const worktreePath = await prepareWorktree({
       branch: "sandbar/issue-20-prep",
-      cwd: dir,
+      layout: layoutFor(dir),
       copyToWorktree: ["fixture.txt"],
       hooks,
     });
@@ -627,9 +664,10 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
 
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
+      env: {},
       branch: "sandbar/issue-20-prep",
       sandbox: provider,
-      cwd: dir,
+      layout: layoutFor(dir),
       hooks,
       preparedWorktreePath: worktreePath,
     });
@@ -647,7 +685,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     await git(["branch", "sandbar/issue-20-keep"], dir);
     const worktreePath = await prepareWorktree({
       branch: "sandbar/issue-20-keep",
-      cwd: dir,
+      layout: layoutFor(dir),
     });
 
     const failingProvider: SandboxProvider = {
@@ -661,9 +699,10 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     };
     await expect(
       createSandbox({
+        env: {},
         branch: "sandbar/issue-20-keep",
         sandbox: failingProvider,
-        cwd: dir,
+        layout: layoutFor(dir),
         preparedWorktreePath: worktreePath,
       }),
     ).rejects.toThrow("bringup boom");
@@ -678,14 +717,15 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     await git(["branch", "sandbar/issue-20-guard"], dir);
     const worktreePath = await prepareWorktree({
       branch: "sandbar/issue-20-guard",
-      cwd: dir,
+      layout: layoutFor(dir),
     });
     try {
       await expect(
         createSandbox({
+          env: {},
           branch: "sandbar/issue-20-guard",
           sandbox: makeLocalProvider(),
-          cwd: dir,
+          layout: layoutFor(dir),
           copyToWorktree: ["fixture.txt"],
           preparedWorktreePath: worktreePath,
         }),
@@ -700,12 +740,98 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     await expect(
       prepareWorktree({
         branch: "sandbar/issue-20-f4",
-        cwd: dir,
+        layout: layoutFor(dir),
         hooks: { host: { onWorktreeReady: [{ command: "exit 1" }] } },
       }),
     ).rejects.toThrow();
     expect(
       existsSync(join(dir, ".sandbar", "worktrees", "sandbar-issue-20-f4")),
     ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Git mount discovery (#38 item 6)
+// ---------------------------------------------------------------------------
+//
+// A linked worktree's `.git` is a file holding an absolute gitlink into the
+// repo's common directory; in-container git can only follow it if that
+// directory is mounted at its own absolute host path. The old discovery was
+// structural — `<repo>/.git`, or the gitlink's target up two levels — which
+// hardcoded the non-bare layout. Asked of git instead, the same question has
+// one answer for a plain repo and for a bare cache, and BOTH are asserted
+// because a fix that only handles the new shape breaks every embedding host
+// that still hands sandbar an ordinary checkout.
+describe("git mounts follow --git-common-dir, bare or not (#38)", () => {
+  const cleanups: string[] = [];
+  afterAll(async () => {
+    for (const d of cleanups) await rm(d, { recursive: true, force: true });
+  });
+
+  const mountsFor = async (
+    layout: RepoLayout,
+    branch: string,
+  ): Promise<readonly Mount[]> => {
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      branch,
+      sandbox: provider,
+      layout,
+      env: {},
+    });
+    await sandbox.close();
+    return provider.capturedMounts ?? [];
+  };
+
+  it("mounts the plain repo's .git directory", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "asb-mounts-plain-"));
+    cleanups.push(dir);
+    await git(["init", "-b", "main"], dir);
+    await git(["config", "user.name", "T"], dir);
+    await git(["config", "user.email", "t@t"], dir);
+    await writeFile(join(dir, "README.md"), "seed\n");
+    await git(["add", "."], dir);
+    await git(["commit", "-m", "seed"], dir);
+    await git(["branch", "sandbar/issue-1-plain"], dir);
+
+    const mounts = await mountsFor(layoutFor(dir), "sandbar/issue-1-plain");
+
+    const extra = mounts.filter((m) => m.sandboxPath !== SANDBOX_REPO_DIR);
+    expect(extra).toHaveLength(1);
+    expect(extra[0]!.hostPath).toBe(join(dir, ".git"));
+    // Identity: the gitlink inside the worktree names an absolute host path,
+    // so the mount has to appear at that same path inside the container.
+    expect(extra[0]!.sandboxPath).toBe(extra[0]!.hostPath);
+  });
+
+  it("mounts the bare cache itself for a worktree of it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-mounts-bare-"));
+    cleanups.push(root);
+    const origin = join(root, "origin.git");
+    const checkout = join(root, "checkout");
+    await execFileP("git", ["init", "--bare", "-q", "-b", "main", origin]);
+    await execFileP("git", ["clone", "-q", origin, checkout], { cwd: root });
+    await git(["config", "user.name", "T"], checkout);
+    await git(["config", "user.email", "t@t"], checkout);
+    await writeFile(join(checkout, "README.md"), "seed\n");
+    await git(["add", "."], checkout);
+    await git(["commit", "-m", "seed"], checkout);
+    await git(["push", "-q", "origin", "main"], checkout);
+
+    const layout = repoLayout(checkout, ".sandbar");
+    await ensureRepoCache(layout);
+    await git(
+      ["branch", "--no-track", "sandbar/issue-1-bare", "refs/remotes/origin/main"],
+      layout.repoDir,
+    );
+
+    const mounts = await mountsFor(layout, "sandbar/issue-1-bare");
+
+    const extra = mounts.filter((m) => m.sandboxPath !== SANDBOX_REPO_DIR);
+    expect(extra).toHaveLength(1);
+    // The cache directory itself — there is no `.git` inside it, which is
+    // exactly what the structural discovery got wrong.
+    expect(extra[0]!.hostPath).toBe(layout.repoDir);
+    expect(extra[0]!.sandboxPath).toBe(layout.repoDir);
   });
 });

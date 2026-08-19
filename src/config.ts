@@ -368,8 +368,22 @@ export type RunConfig = {
   readonly sandboxHooks: SandboxHooks;
 
   // ---- Optional: tunable, with a documented default ------------------------
-  // Where the host repo lives / where sandbar keeps its state. Defaults:
-  // cwd = process.cwd(), workDir = ".sandbar".
+  // The operator's own checkout, and the directory inside it that sandbar
+  // owns. Sandbar does not OPERATE on `cwd` (#38): it clones a bare cache at
+  // `<cwd>/<workDir>/repo.git` and every git and gh call runs there, so the
+  // branch deletes, worktree removals and force-pushes cannot reach the
+  // operator's repo. What sandbar still reads from `cwd` is the git identity,
+  // the `copyToWorktree` sources, and the URL of its own `origin` — which is
+  // why `cwd` must be a real checkout of the repo, with an `origin` remote.
+  //
+  // `<workDir>` is `node_modules`-shaped: gitignore it, and `rm -rf` it
+  // whenever you like — nothing in it is authoritative. Do not clean it while
+  // a run is in flight; the single-instance lock lives there.
+  //
+  // Defaults: workDir = ".sandbar"; cwd = process.cwd() for a programmatic
+  // caller, or the directory holding the config file when launched through the
+  // `sandbar` bin, which is what makes "you must launch from the repo"
+  // unreachable rather than merely fixed.
   readonly cwd?: string;
   readonly workDir?: string;
 
@@ -410,11 +424,20 @@ export type RunConfig = {
   // hosts are not required to supply one, and there's no conventional path.
   readonly codingStandardsPath?: string;
 
-  // Authoritative env-file path for BOTH the host-side preflight credential
-  // check and the values injected into each sandbox container (its declared
-  // keys, with per-key process.env fallback). One knob — no hidden
-  // `.sandbar/.env` second source. Default: ".env".
-  readonly envFilePath?: string;
+  // The credentials, as a VALUE rather than a path (#38). Sandbar names no
+  // file: where a host keeps its secrets is a property of that host's
+  // environment, and `.env` at a repo root is already spoken for by compose,
+  // Vite, Next and Laravel. `readEnvFile` (exported from the package root) is
+  // the one-liner for hosts that do want a file:
+  //
+  //   env: readEnvFile(new URL("sandbar.env", import.meta.url)),
+  //
+  // Allowlist semantics, unchanged from the file this replaced: only keys
+  // declared HERE cross into a sandbox container, each falling back to
+  // `process.env[key]` when the value is empty — so `{ GH_TOKEN: "" }` means
+  // "inherit it", and CI needs no file at all. The host's environment never
+  // leaks wholesale. Default: {}.
+  readonly env?: Record<string, string>;
 
   readonly maxImplAttempts?: number;
   readonly maxReviewRounds?: number;
@@ -424,7 +447,13 @@ export type RunConfig = {
   // to DEFAULT_LABELS.
   readonly labels?: Partial<LabelConfig>;
 
-  // Extra host paths copied into each issue worktree. Default: [].
+  // Extra host paths copied into each issue worktree. Relative entries resolve
+  // against `cwd` — the OPERATOR'S checkout, since #38 (the cache is bare and
+  // has no files to copy from). State it rather than discover it: the feature
+  // exists for host-only files that are not in git, which is arguably the
+  // intent, but it makes issue-worktree content a function of the operator's
+  // uncommitted state — the class of bug #10 was. A consumer who wants it
+  // stable points at absolute paths outside the checkout. Default: [].
   readonly copyToWorktree?: readonly string[];
 
   // How the merge result lands on the source branch. Default: {kind:"direct"}.
@@ -461,7 +490,6 @@ export const DEFAULT_MERGER_MODEL_ID = "opus";
 export const DEFAULT_CLAUDE_MD_PATH = "CLAUDE.md";
 export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
 export const DEFAULT_ADR_DIR = "docs/adr";
-export const DEFAULT_ENV_FILE_PATH = ".env";
 export const DEFAULT_MAX_IMPL_ATTEMPTS = 8;
 // 5, not 3: dogfooding surfaced a review-budget exhaustion on an issue making
 // monotonic progress (three rounds, three distinct real findings, each fixed;
@@ -1187,14 +1215,12 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     claudeMdPath: config.claudeMdPath ?? DEFAULT_CLAUDE_MD_PATH,
     contextMdPath: config.contextMdPath ?? DEFAULT_CONTEXT_MD_PATH,
     adrDir: config.adrDir ?? DEFAULT_ADR_DIR,
-    // Rooted at `cwd`, not left relative (#34). Unlike the anchor doc paths
-    // this one is never handed to the agent as an @ref — every consumer
-    // (run.ts's GH_TOKEN check, preflight, the sandbox's env resolver) just
-    // READS it on the host — so resolving it here is the whole fix, and a
-    // credential file read from whichever directory the process was launched
-    // from is the least obvious wrong answer of the lot. `resolve` rather than
-    // `join` so a host that configures an absolute path keeps it.
-    envFilePath: resolve(cwd, config.envFilePath ?? DEFAULT_ENV_FILE_PATH),
+    // No resolution to do since #38: this is the record itself, not a path
+    // that had to be rooted somewhere (`resolve(cwd, …)`, #34). The empty
+    // default is a real configuration — a host that supplies every credential
+    // through the process environment still has to DECLARE the keys, because
+    // the fallback is per declared key and never a wholesale leak.
+    env: config.env ?? {},
     maxImplAttempts: config.maxImplAttempts ?? DEFAULT_MAX_IMPL_ATTEMPTS,
     maxReviewRounds: config.maxReviewRounds ?? DEFAULT_MAX_REVIEW_ROUNDS,
     maxTotalIssues: config.maxTotalIssues ?? DEFAULT_MAX_TOTAL_ISSUES,

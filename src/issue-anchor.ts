@@ -57,7 +57,9 @@ export function renderIssueText(issueId: string, issue: IssueJson): string {
 // remotes of the directory it runs in, so an optional one is a silent way to
 // quote a different tracker: it was optional, and the prompt-layer call site was
 // the one that omitted it, which made the implementer's and reviewer's issue
-// anchor a function of where the host process happened to be launched.
+// anchor a function of where the host process happened to be launched. Callers
+// pass `layout.repoDir` (the bare cache) or, in the merger, its own worktree —
+// both carry the same `origin`, so both resolve the same tracker.
 export async function fetchIssueText(
   issueId: string,
   cwd: string,

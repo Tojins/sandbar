@@ -31,11 +31,12 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readdir, readFile, realpath, rm, stat } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { readdir, realpath, rm, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { parseEnvFile } from "./env-file.js";
+import { resolveSandboxEnv } from "./env.js";
 import { RESOURCE_PREFIX } from "./naming.js";
+import type { RepoLayout } from "./repo-cache.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -44,9 +45,6 @@ import { RESOURCE_PREFIX } from "./naming.js";
 export const SANDBOX_REPO_DIR = "/home/agent/workspace";
 const SANDBOX_HOMEDIR = "/home/agent";
 const CONTAINER_NAME_PREFIX = RESOURCE_PREFIX;
-// Default worktree-root dir when CreateSandboxOptions.workDir is omitted —
-// `<repo>/.sandbar/worktrees/`.
-export const DEFAULT_WORK_DIR = ".sandbar";
 
 export const MAX_TAIL_CHARS = 64 * 1024;
 export const DEFAULT_COMPLETION_SIGNAL = "<promise>COMPLETE</promise>";
@@ -191,20 +189,21 @@ export type CreateSandboxOptions = {
   branch: string;
   baseBranch?: string;
   sandbox: SandboxProvider;
-  cwd?: string;
+  // Every path this module needs, as one object (#38). `repoDir` is the bare
+  // cache every git call runs in; `worktreesDir` is where the managed worktree
+  // goes, which is BESIDE the cache and not inside it; `hostCwd` is the
+  // operator's checkout, read for the git identity and for `copyToWorktree`
+  // sources and written to never. Required rather than defaulted for the
+  // reason #34 made every other cwd required: an omitted path is invisible at
+  // the call site and wrong only on the hosts that configure one.
+  layout: RepoLayout;
   hooks?: SandboxHooks;
   copyToWorktree?: string[];
-  // Host path to the env file whose declared keys are injected into the
-  // sandbox. Defaults to `<cwd>/.sandbar/.env` when omitted; sandbar forwards
-  // `config.envFilePath` so one knob governs
-  // both preflight and the container.
-  envFilePath?: string;
-  // Directory (relative to `cwd`) under which managed worktrees live, at
-  // `<cwd>/<workDir>/worktrees/`. Defaults to `.sandbar`. sandbar forwards
-  // `config.workDir` so the sandbox and
-  // finalize.ts:worktreePathFor agree on where worktrees actually are — a
-  // mismatch leaks the worktree+branch on successful merges (#7).
-  workDir?: string;
+  // The declared credential record (`config.env`). Its keys are the allowlist
+  // that crosses into the container, each falling back to `process.env[key]`
+  // when empty — see env.ts. A VALUE since #38: sandbar names no env file, and
+  // there is no hidden `<cwd>/.sandbar/.env` second source to fall through to.
+  env: Record<string, string>;
   // Worktree already created by prepareWorktree(). When set, createSandbox
   // skips prune/create/copyToWorktree/onWorktreeReady (all done by
   // prepareWorktree) and only brings up the container. Lets the caller learn
@@ -221,8 +220,7 @@ export type CreateSandboxOptions = {
 export type PrepareWorktreeOptions = {
   branch: string;
   baseBranch?: string;
-  cwd?: string;
-  workDir?: string;
+  layout: RepoLayout;
   copyToWorktree?: string[];
   // Only host.onWorktreeReady runs here; sandbox-side hooks need the
   // container and stay in createSandbox.
@@ -438,56 +436,39 @@ const formatVolumeMount = (
 };
 
 // ---------------------------------------------------------------------------
-// Git mount resolution (worktree → two identity mounts) — SandboxFactory.ts
-// ---------------------------------------------------------------------------
-
-const resolveGitMounts = async (gitPath: string): Promise<Mount[]> => {
-  let isDir: boolean;
-  try {
-    isDir = (await stat(gitPath)).isDirectory();
-  } catch {
-    return [{ hostPath: gitPath, sandboxPath: gitPath }];
-  }
-  if (isDir) {
-    return [{ hostPath: gitPath, sandboxPath: gitPath }];
-  }
-  const content = (await readFile(gitPath, "utf-8")).trim();
-  const match = content.match(/^gitdir:\s*(.+)$/);
-  if (!match || match[1] === undefined) {
-    return [{ hostPath: gitPath, sandboxPath: gitPath }];
-  }
-  const parentGitDir = resolve(match[1], "..", "..");
-  return [
-    { hostPath: gitPath, sandboxPath: gitPath },
-    { hostPath: parentGitDir, sandboxPath: parentGitDir },
-  ];
-};
-
-// ---------------------------------------------------------------------------
-// Env resolution
+// Git mount resolution
 // ---------------------------------------------------------------------------
 //
-// `envFilePath` is supplied by the caller (sandbar forwards `config.envFilePath`
-// — the SAME path preflight checks; see env.ts) rather than being hardcoded to
-// `<repo>/.sandbar/.env` as upstream did. Allowlist semantics are preserved:
-// only keys *declared* in the file cross into the container, with each value
-// falling back to process.env — host env never leaks wholesale. Parsing is the
-// shared `parseEnvFile`. A missing file yields an empty map, but because
-// preflight reads this same path it fails loudly first.
-
-const resolveEnv = async (envFilePath: string): Promise<Record<string, string>> => {
-  let declared: Record<string, string>;
-  try {
-    declared = parseEnvFile(await readFile(envFilePath, "utf-8"));
-  } catch {
-    declared = {};
+// A linked worktree's `.git` is a FILE holding an absolute gitlink into the
+// repo's common directory, so in-container git can only follow it if that
+// directory is mounted at its own absolute host path. The worktree itself is
+// already mounted (at SANDBOX_REPO_DIR), so the common dir is the only extra.
+//
+// ASK GIT (#38 item 6). This used to derive the path structurally — `<repo>/
+// .git`, or the gitlink's target up two levels — which hardcoded the non-bare
+// layout and stopped being true the moment the repo became `repo.git`. There is
+// a command whose entire job is this question, it answers it for a bare repo, a
+// normal repo and a linked worktree of either, and the mount SHAPE (identity,
+// at the same absolute path) was already right. Only the discovery was wrong.
+//
+// `--git-common-dir` may answer relatively (a plain `.git` in a normal
+// checkout), so it is resolved against the worktree before being used as a
+// mount source — an unresolved relative path would be a podman error, not a
+// wrong mount, but the failure would name the worktree rather than the repo.
+const resolveGitMounts = async (worktreePath: string): Promise<Mount[]> => {
+  const commonDir = (
+    await execGit(["rev-parse", "--git-common-dir"], worktreePath)
+  ).trim();
+  // Unreachable against a working git, and deliberately not softened to `[]`:
+  // an empty answer means the container gets no repo mount, which is the same
+  // silent "not a git repository" the swallow at the call site used to produce.
+  if (!commonDir) {
+    throw new WorktreeError(
+      `git rev-parse --git-common-dir returned nothing for ${worktreePath}`,
+    );
   }
-  const result: Record<string, string> = {};
-  for (const key of Object.keys(declared)) {
-    const value = declared[key] || process.env[key];
-    if (value) result[key] = value;
-  }
-  return result;
+  const abs = resolve(worktreePath, commonDir);
+  return [{ hostPath: abs, sandboxPath: abs }];
 };
 
 // ---------------------------------------------------------------------------
@@ -640,12 +621,11 @@ const fastForwardFromOrigin = async (
 const worktreeCreate = (
   repoDir: string,
   branch: string,
-  workDir: string,
+  worktreesDir: string,
   baseBranch?: string,
 ): Promise<{ path: string; branch: string }> =>
   withTimeout(
     (async () => {
-      const worktreesDir = join(repoDir, workDir, "worktrees");
       const worktreeName = branch.replace(/\//g, "-");
       const worktreePath = join(worktreesDir, worktreeName);
 
@@ -703,22 +683,30 @@ const worktreeCreate = (
       ),
   );
 
-const worktreeRemove = (worktreePath: string): Promise<void> => {
-  // Up exactly three levels: <repo>/<workDir>/worktrees/<name>.
-  const repoDir = join(worktreePath, "..", "..", "..");
-  return execGit(["worktree", "remove", "--force", worktreePath], repoDir).then(
+// The repo is NAMED, not derived from the path (#38). It used to walk three
+// levels up from the worktree — `<repo>/<workDir>/worktrees/<name>` — which was
+// sound only while the repo was the worktrees' grandparent AND `workDir` was a
+// single path segment, neither of which survives the split: three levels up
+// from `<hostCwd>/.sandbar/worktrees/<name>` is now the OPERATOR'S checkout, a
+// repo the worktree is not registered in. Every caller swallows this failure,
+// so the whole class of bug would have been a silent worktree leak.
+const worktreeRemove = (
+  repoDir: string,
+  worktreePath: string,
+): Promise<void> =>
+  execGit(["worktree", "remove", "--force", worktreePath], repoDir).then(
     () => undefined,
   );
-};
 
 // Best-effort hygiene run at createSandbox start: prune metadata, then sweep
-// orphaned dirs under <workDir>/worktrees/. realPath-canonicalises the dir so
-// a symlinked workDir does not make active worktrees look orphaned (#470).
-const pruneStale = (repoDir: string, workDir: string): Promise<void> =>
+// orphaned dirs under the worktrees directory. realPath-canonicalises the dir
+// so a symlinked workDir does not make active worktrees look orphaned (#470).
+// Takes the directory rather than composing it from `repoDir` + `workDir`,
+// which stopped being the same place in #38.
+const pruneStale = (repoDir: string, worktreesDir: string): Promise<void> =>
   withTimeout(
     (async () => {
       await execGit(["worktree", "prune"], repoDir);
-      const worktreesDir = join(repoDir, workDir, "worktrees");
       let entries: string[];
       try {
         entries = await readdir(worktreesDir);
@@ -1192,29 +1180,33 @@ const invokeAgent = (
 export const prepareWorktree = async (
   options: PrepareWorktreeOptions,
 ): Promise<string> => {
-  const hostRepoDir = resolve(options.cwd ?? process.cwd());
-  const workDir = options.workDir ?? DEFAULT_WORK_DIR;
+  const { repoDir, worktreesDir, hostCwd } = options.layout;
 
-  await pruneStale(hostRepoDir, workDir).catch(() => {
+  await pruneStale(repoDir, worktreesDir).catch(() => {
     // best-effort
   });
 
   const { path: worktreePath } = await worktreeCreate(
-    hostRepoDir,
+    repoDir,
     options.branch,
-    workDir,
+    worktreesDir,
     options.baseBranch,
   );
 
   try {
     if (options.copyToWorktree && options.copyToWorktree.length > 0) {
-      await copyToWorktree(options.copyToWorktree, hostRepoDir, worktreePath);
+      // Resolved against the OPERATOR'S checkout, not the cache — the cache is
+      // bare and has no files to copy. `copyToWorktree` exists for host-only
+      // paths that are not in git, so this is the intent; the consequence,
+      // stated in config.ts, is that issue-worktree content becomes a function
+      // of the operator's uncommitted state (#38 item 11).
+      await copyToWorktree(options.copyToWorktree, hostCwd, worktreePath);
     }
     if (options.hooks?.host?.onWorktreeReady?.length) {
       await runHostHooks(options.hooks.host.onWorktreeReady, worktreePath);
     }
   } catch (e) {
-    await worktreeRemove(worktreePath).catch(() => {});
+    await worktreeRemove(repoDir, worktreePath).catch(() => {});
     throw e;
   }
   return worktreePath;
@@ -1224,8 +1216,7 @@ export const createSandbox = async (
   options: CreateSandboxOptions,
 ): Promise<Sandbox> => {
   const { branch } = options;
-  const hostRepoDir = resolve(options.cwd ?? process.cwd());
-  const workDir = options.workDir ?? DEFAULT_WORK_DIR;
+  const { repoDir, hostCwd } = options.layout;
 
   const prepared = options.preparedWorktreePath !== undefined;
   if (prepared && options.copyToWorktree && options.copyToWorktree.length > 0) {
@@ -1238,8 +1229,7 @@ export const createSandbox = async (
     (await prepareWorktree({
       branch,
       baseBranch: options.baseBranch,
-      cwd: hostRepoDir,
-      workDir,
+      layout: options.layout,
       copyToWorktree: options.copyToWorktree,
       hooks: options.hooks,
     }));
@@ -1247,16 +1237,19 @@ export const createSandbox = async (
   let providerHandle: SandboxHandle;
   let sandboxRepoDir: string;
   try {
-    const resolvedEnv = await resolveEnv(
-      options.envFilePath ?? join(hostRepoDir, ".sandbar", ".env"),
-    );
+    const resolvedEnv = resolveSandboxEnv(options.env);
     // mergeProviderEnv: agent env is {} on sandbar's path; provider env layers
     // over resolved (overlap between agent⨯sandbox would throw, but agent={}).
     const env = { ...resolvedEnv, ...options.sandbox.env };
 
-    const gitMounts = await resolveGitMounts(join(hostRepoDir, ".git")).catch(
-      () => [] as Mount[],
-    );
+    // NOT swallowed to `[]` (#38). It used to be, back when the mount was
+    // often redundant — a plain checkout's `.git` sits inside the worktree the
+    // container already mounts. Against the bare cache it is essential: without
+    // it in-container git cannot follow the worktree's gitlink, so every agent
+    // command fails with "not a git repository" and the attempt produces
+    // nothing, silently, for the whole budget. A genuine failure here is infra,
+    // so it belongs on the HARD-ERROR path with the rest of bringup.
+    const gitMounts = await resolveGitMounts(worktreePath);
     const mounts: Mount[] = [
       { hostPath: worktreePath, sandboxPath: SANDBOX_REPO_DIR },
       ...gitMounts,
@@ -1264,7 +1257,7 @@ export const createSandbox = async (
 
     providerHandle = await options.sandbox.create({
       worktreePath,
-      hostRepoPath: hostRepoDir,
+      hostRepoPath: hostCwd,
       mounts,
       env,
     });
@@ -1301,7 +1294,7 @@ export const createSandbox = async (
     // caller, who may be concurrently bind-mounting from it (the gate stack's
     // mounts); deleting it here would corrupt that bringup's error into a
     // bogus missing-mount-source failure (#20).
-    if (!prepared) await worktreeRemove(worktreePath).catch(() => {});
+    if (!prepared) await worktreeRemove(repoDir, worktreePath).catch(() => {});
     throw e;
   }
 
@@ -1324,9 +1317,13 @@ export const createSandbox = async (
     // Read host git identity, then propagate into the sandbox. safe.directory
     // is set per-run (load-bearing: bind mount is owned by a different UID and
     // sandbar's common case has no onSandboxReady hooks).
+    // From the OPERATOR'S checkout (#38): a repo-local `user.email` is
+    // configured there, and the bare cache — cloned, not configured — carries
+    // none of it. Reading the cache would silently substitute the global
+    // identity for a repo-local one.
     const [hostGitName, hostGitEmail] = await Promise.all([
-      gitOrEmpty(["config", "user.name"], hostRepoDir),
-      gitOrEmpty(["config", "user.email"], hostRepoDir),
+      gitOrEmpty(["config", "user.name"], hostCwd),
+      gitOrEmpty(["config", "user.email"], hostCwd),
     ]);
 
     await sandboxGitSetup(
@@ -1366,7 +1363,7 @@ export const createSandbox = async (
     // Falls back to the worktree HEAD if the ref is unreadable; ensureIssueBranch
     // has created it by now, so this is belt-and-braces rather than a real path.
     const baseHead = (
-      await execGit(["rev-parse", "--verify", `refs/heads/${branch}`], hostRepoDir)
+      await execGit(["rev-parse", "--verify", `refs/heads/${branch}`], repoDir)
         .catch(() => execGit(["rev-parse", "HEAD"], worktreePath))
     ).trim();
 
@@ -1380,12 +1377,12 @@ export const createSandbox = async (
       completionSignals,
     );
 
-    // Explicit-branch commit capture: fully-qualified ref, host repo dir,
+    // Explicit-branch commit capture: fully-qualified ref, the cache repo,
     // --reverse (oldest-first). Missing branch / zero commits → []. Never throw.
     const commits = await withTimeout(
       execGit(
         ["rev-list", `${baseHead}..refs/heads/${branch}`, "--reverse"],
-        hostRepoDir,
+        repoDir,
       )
         .then((out) => {
           const trimmed = out.trim();
@@ -1454,7 +1451,7 @@ export const createSandbox = async (
       if (dirty) {
         return { preservedWorktreePath: worktreePath };
       }
-      await worktreeRemove(worktreePath).catch(() => {});
+      await worktreeRemove(repoDir, worktreePath).catch(() => {});
       return { preservedWorktreePath: undefined };
     },
   };

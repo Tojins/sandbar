@@ -1,30 +1,48 @@
-// Host-side reader for the orchestrator's env file (`config.envFilePath`).
+// The two readers of `config.env`, and the one place its semantics live.
 //
-// This is the SAME file the sandbox env resolver reads (see
-// `agent-sandbox.ts:resolveEnv`) — `config.envFilePath` is authoritative for
-// both. Preflight uses this reader to verify credentials (GH_TOKEN, the agent
-// key) up front; because it inspects the identical path the container will
-// load, a wrong/missing file fails preflight loudly instead of surfacing later
-// as an in-container "Not logged in".
+// `config.env` is a `Record<string, string>` — a VALUE in the config, not a
+// path to a file (#38). Sandbar used to name `.env` at the host repo root and
+// parse it twice, once here for preflight's credential check and once in
+// `agent-sandbox.ts` for the container. Two problems, both closed by the
+// change: sandbar had an opinion about the most contested filename in a repo
+// root (compose auto-reads `./.env` for interpolation, as do Vite, Next and
+// Laravel), and "both readers see the same file" was an invariant two module
+// headers had to keep restating. One record is structurally one answer, and a
+// host with no file at all — CI, passing `{ GH_TOKEN: "" }` — needs no parser.
 //
-// Per-key semantics: prefer the file's value, fall back to process.env for the
-// requested key (preflight only needs to know the credential exists *somewhere*
-// the host can see). Parsing is delegated to the shared `parseEnvFile`.
-
-import { readFileSync } from "node:fs";
-import { parseEnvFile } from "./env-file.js";
+// The SEMANTICS are unchanged, and they are an allowlist. Only keys the config
+// DECLARES cross into a container; the host's environment never leaks
+// wholesale. A declared key with an empty value means "inherit this one from
+// the host", which is exactly what a bare `GH_TOKEN=` line in a dotenv file
+// meant. `readEnvFile` (env-file.ts) turns such a file into this record for
+// hosts that want to keep one.
 
 export type EnvReader = (key: string) => string | undefined;
 
-export function makeEnvReader(envFilePath: string): EnvReader {
-  let parsed: Record<string, string> | null;
-  try {
-    parsed = parseEnvFile(readFileSync(envFilePath, "utf8"));
-  } catch {
-    parsed = null;
-  }
+// Host-side lookup, used by preflight and by run.ts's GH_TOKEN check. Prefers
+// the configured value and falls back to the host's environment for that key
+// alone — preflight only needs to know the credential exists SOMEWHERE the
+// host can see, because `resolveSandboxEnv` applies the identical fallback
+// when it builds what the container gets.
+export function makeEnvReader(env: Record<string, string>): EnvReader {
   return (key: string): string | undefined => {
-    const v = parsed?.[key];
+    const v = env[key];
     return v !== undefined && v !== "" ? v : process.env[key];
   };
+}
+
+// What a sandbox container actually receives: every declared key whose value
+// resolves to something non-empty, taking the host's environment when the
+// config left it blank. A key that resolves to nothing is omitted rather than
+// exported empty — an empty `ANTHROPIC_API_KEY` in the container is worse than
+// an absent one, since it defeats the agent's own "is it set" checks.
+export function resolveSandboxEnv(
+  env: Record<string, string>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const key of Object.keys(env)) {
+    const value = env[key] || process.env[key];
+    if (value) result[key] = value;
+  }
+  return result;
 }

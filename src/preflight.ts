@@ -11,8 +11,28 @@
 // still `ready-for-agent` — the label flips happen in Phase 4 — so they read as
 // `resumable`, not as a spurious `unmerged` refusal.)
 //
-// Every shell-out here names the repo explicitly (#34). See `runOk` below for
-// why the `cwd` parameter is required rather than optional.
+// Since #38 every command here runs in `layout.repoDir`, the bare cache — not
+// in the operator's checkout. That is the sharpest edge of the whole change and
+// it runs the opposite way to how it looks. While `config.cwd` WAS a dedicated
+// operating clone, pointing the branch delete at it was harmless. Now `cwd` is
+// the human's real repo, so threading it here would run `git branch -D` in it.
+// The cache holds nothing of theirs, which is what makes the delete safe by
+// construction rather than by care.
+//
+// TWO checks were deleted rather than retargeted (#38 item 7). "Not on
+// <sourceBranch>" and "an in-progress merge/rebase/cherry-pick was detected"
+// existed only because a human might be standing in the directory sandbar was
+// about to operate on. Against a bare cache they are vacuous — it has no
+// working tree and an unborn HEAD — and pointed at `config.cwd` they would be
+// worse than vacuous: they would refuse to start because the OPERATOR is
+// mid-rebase in their own repo, on work that has nothing to do with the run.
+//
+// ONE check deliberately still reads the operator's checkout: the soft warning
+// that local `<sourceBranch>` is ahead of `origin/<sourceBranch>`. It was
+// nearly useless while `cwd` was a machine-managed clone that is never ahead.
+// Against the human's repo it is exactly what it was written for — per-issue
+// worktrees seed from origin, so unpushed local work is invisible to every
+// agent, and that is both likely and silent.
 //
 // Two layers:
 //   - checkInvariants(state)  — pure function over a captured RepoState.
@@ -32,22 +52,22 @@
 //                 issue no longer queued. Stays a hard error as before.
 
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { makeEnvReader } from "./env.js";
-import { worktreePathFor } from "./finalize.js";
+import type { EnvReader } from "./env.js";
 import { ALL_BRANCH_PREFIXES, issueNumberFromBranch } from "./naming.js";
+import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import { RUNTIME } from "./runtime.js";
 import { fetchCandidates } from "./plan-resolver.js";
 
 const exec = promisify(execFile);
 
 export type PreflightConfig = {
-  readonly cwd: string;
-  readonly workDir: string;
-  readonly envFilePath: string;
+  readonly layout: RepoLayout;
+  // The resolved `config.env`, already merged with the host environment per
+  // declared key (#38). Preflight no longer knows where the values came from,
+  // which is the point: sandbar names no file.
+  readonly env: EnvReader;
   readonly sourceBranch: string;
   // Every image the gate stack references that sandbar does NOT build itself
   // (#24 D7). Preflight verifies each is already pulled and REFUSES rather than
@@ -71,11 +91,8 @@ export type RepoState = {
   readonly ghAuthOk: boolean;
   readonly sandboxGhTokenOk: boolean;
   readonly hasAgentCredential: boolean;
-  readonly inProgressMarkers: readonly string[];
-  readonly currentBranch: string | null;
-  readonly expectedBranch: string;
+  readonly sourceBranch: string;
   readonly hasOriginBranch: boolean;
-  readonly envFilePath: string;
   readonly unmergedIssueBranches: readonly string[];
   readonly discardedIssueBranches: readonly string[];
   // Stranded branches that map to a still-open `ready-for-agent` issue — not a
@@ -121,42 +138,30 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
     out.push({
       ok: false,
       message:
-        `GH_TOKEN in ${s.envFilePath} is missing, empty, or rejected by GitHub. ` +
-        "The agent's sandbox uses this token (no hosts.yml is mounted), so it must be a valid " +
-        `fine-grained PAT with the scopes documented in the .env.example. ` +
-        `Regenerate at https://github.com/settings/personal-access-tokens and update ${s.envFilePath}.`,
+        "GH_TOKEN is missing, empty, or rejected by GitHub. Sandbar reads it " +
+        "from `config.env` (falling back to the host environment for a key " +
+        "declared with an empty value). The agent's sandbox uses this token — " +
+        "no hosts.yml is mounted — so it must be a valid fine-grained PAT. " +
+        "Regenerate at https://github.com/settings/personal-access-tokens and " +
+        "update whatever `config.env` is built from.",
     });
   }
   if (!s.hasAgentCredential) {
     out.push({
       ok: false,
       message:
-        `No agent credential in ${s.envFilePath}. Set one of:\n` +
+        "No agent credential in `config.env`. Declare one of:\n" +
         "  - CLAUDE_CODE_OAUTH_TOKEN  (Pro/Max/Team/Enterprise subscription; generate with `claude setup-token`)\n" +
         "  - ANTHROPIC_API_KEY        (pay-as-you-go API; takes precedence if both are set)",
-    });
-  }
-  if (s.inProgressMarkers.length > 0) {
-    out.push({
-      ok: false,
-      message: `In-progress git operation detected: ${s.inProgressMarkers.join(
-        ", ",
-      )}. Resolve before launching sandbar.`,
-    });
-  }
-  if (s.currentBranch !== s.expectedBranch) {
-    out.push({
-      ok: false,
-      message: `Not on \`${s.expectedBranch}\` (current branch: ${
-        s.currentBranch ?? "unknown"
-      }). Switch to ${s.expectedBranch} with \`git switch ${s.expectedBranch}\`.`,
     });
   }
   if (!s.hasOriginBranch) {
     out.push({
       ok: false,
       message:
-        `\`origin/${s.expectedBranch}\` does not exist after fetch. Configure the \`origin\` remote.`,
+        `\`origin/${s.sourceBranch}\` does not exist in sandbar's object cache ` +
+        "after fetch. Check that the branch exists on the `origin` your " +
+        "checkout points at.",
     });
   }
   if (s.unmergedIssueBranches.length > 0) {
@@ -196,19 +201,16 @@ function which(cmd: string): boolean {
 // `cwd` is REQUIRED and first, not an optional trailing option (#34). Every
 // command this module runs — the fetch, the `git branch -D`, the worktree
 // removals, the classification's for-each-ref/merge-base — is a statement
-// about, or a mutation of, the repo the run is about. Left to inherit
+// about, or a mutation of, a specific repo, and left to inherit
 // `process.cwd()` they described whichever directory the host process happened
-// to be launched from, which coincides with `config.cwd` only because
-// `DEFAULT_CWD()` is `process.cwd()`. A host that sets `config.cwd` — which the
-// config explicitly supports — got a preflight that inspected and DELETED
-// branches in one repo while the run's lock, worktrees, scope and merges
-// belonged to another. That also quietly qualified #32: the destructive delete
-// was under *a* lock, just not the one covering the repo it deleted from.
+// to be launched from. An omitted `{ cwd }` is invisible at the call site and
+// fails only on the hosts that configure one, i.e. never in the author's own
+// checkout; a missing positional argument is a type error.
 //
-// Making the parameter required rather than optional is the whole point. An
-// omitted `{ cwd }` is invisible at the call site and fails only on the hosts
-// that configure a cwd, i.e. never in the author's own checkout; a missing
-// positional argument is a type error.
+// Since #38 the value every caller passes is `layout.repoDir` — the bare cache
+// — with the single, commented exception of the local-ahead warning. Keeping
+// the parameter required is what makes that exception legible: it is one call
+// site that names a different directory on purpose, not one that forgot.
 async function runOk(
   cwd: string,
   file: string,
@@ -235,19 +237,9 @@ async function captureOk(
   }
 }
 
-function inProgressMarkers(gitDir: string): readonly string[] {
-  const candidates = [
-    "MERGE_HEAD",
-    "CHERRY_PICK_HEAD",
-    "REVERT_HEAD",
-    "rebase-merge",
-    "rebase-apply",
-  ];
-  return candidates.filter((m) => existsSync(`${gitDir}/${m}`));
-}
-
 export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
-  const env = makeEnvReader(cfg.envFilePath);
+  const repoDir = cfg.layout.repoDir;
+  const env = cfg.env;
   const hasGit = which("git");
   const hasGh = which("gh");
   const hasContainerRuntime = which(RUNTIME);
@@ -255,44 +247,29 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
   const missingImages: string[] = [];
   if (hasContainerRuntime) {
     for (const image of cfg.pulledImages) {
-      if (!(await runOk(cfg.cwd, RUNTIME, ["image", "exists", image]))) {
+      if (!(await runOk(repoDir, RUNTIME, ["image", "exists", image]))) {
         missingImages.push(image);
       }
     }
   }
 
-  const ghAuthOk = hasGh ? await runOk(cfg.cwd, "gh", ["auth", "status"]) : false;
+  const ghAuthOk = hasGh ? await runOk(repoDir, "gh", ["auth", "status"]) : false;
   const sandboxGhTokenOk = hasGh
-    ? await checkSandboxGhToken(cfg.cwd, env)
+    ? await checkSandboxGhToken(repoDir, env)
     : false;
   const hasAgentCredential =
     !!env("CLAUDE_CODE_OAUTH_TOKEN") || !!env("ANTHROPIC_API_KEY");
 
-  // `--git-dir` prints a path relative to the command's cwd for the ordinary
-  // case (`.git`), so the marker probe has to resolve it against that same cwd
-  // — reading `.git/MERGE_HEAD` from `process.cwd()` is the very confusion this
-  // parameter exists to end.
-  const gitDir = (
-    await captureOk(cfg.cwd, "git", ["rev-parse", "--git-dir"])
-  ).stdout.trim();
-
-  const branchRes = await captureOk(cfg.cwd, "git", [
-    "rev-parse",
-    "--abbrev-ref",
-    "HEAD",
-  ]);
-  const currentBranch = branchRes.ok ? branchRes.stdout.trim() : null;
-
-  const hasOriginBranch = await runOk(cfg.cwd, "git", [
+  const hasOriginBranch = await runOk(repoDir, "git", [
     "show-ref",
     "--verify",
     "--quiet",
     `refs/remotes/origin/${cfg.sourceBranch}`,
   ]);
 
-  const openReadyIssues = await fetchOpenReadyIssueNumbers(cfg.cwd);
+  const openReadyIssues = await fetchOpenReadyIssueNumbers(repoDir);
   const { unmerged, discarded, resumable } = await classifyIssueBranches(
-    cfg.cwd,
+    repoDir,
     openReadyIssues,
   );
 
@@ -304,11 +281,8 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     ghAuthOk,
     sandboxGhTokenOk,
     hasAgentCredential,
-    inProgressMarkers: gitDir ? inProgressMarkers(resolve(cfg.cwd, gitDir)) : [],
-    currentBranch,
-    expectedBranch: cfg.sourceBranch,
+    sourceBranch: cfg.sourceBranch,
     hasOriginBranch,
-    envFilePath: cfg.envFilePath,
     unmergedIssueBranches: unmerged,
     discardedIssueBranches: discarded,
     resumableIssueBranches: resumable,
@@ -334,7 +308,7 @@ async function fetchOpenReadyIssueNumbers(
 
 async function checkSandboxGhToken(
   cwd: string,
-  env: (key: string) => string | undefined,
+  env: EnvReader,
 ): Promise<boolean> {
   const token = env("GH_TOKEN");
   if (!token) return false;
@@ -445,27 +419,33 @@ async function classifyIssueBranches(
   return { unmerged, discarded, resumable };
 }
 
+// The destructive step, and the reason every other call site in this module
+// had to be retargeted first (#38 item 3): it runs `git branch -D` in
+// `layout.repoDir`. Against the operator's own checkout that would be a
+// sandbar bug that destroys a human's branches; against a bare cache holding
+// only sandbar's own refs it cannot be.
 export async function deleteMergedIssueBranches(
-  cfg: { cwd: string; workDir: string; sourceBranch: string },
+  cfg: { layout: RepoLayout; sourceBranch: string },
 ): Promise<readonly string[]> {
-  const all = await listIssueBranches(cfg.cwd);
+  const repoDir = cfg.layout.repoDir;
+  const all = await listIssueBranches(repoDir);
   const deleted: string[] = [];
   for (const branch of all) {
-    if (!(await isBranchMerged(cfg.cwd, branch, cfg.sourceBranch))) continue;
+    if (!(await isBranchMerged(repoDir, branch, cfg.sourceBranch))) continue;
     // A leftover worktree (from a crash or a non-merged terminal whose
     // finalize ran before the corresponding fix landed) holds the branch and
     // makes `git branch -D` fail. Remove it best-effort first.
-    await runOk(cfg.cwd, "git", [
+    await runOk(repoDir, "git", [
       "worktree",
       "remove",
       "--force",
-      worktreePathFor(cfg.cwd, cfg.workDir, branch),
+      worktreePathFor(cfg.layout.worktreesDir, branch),
     ]);
-    await runOk(cfg.cwd, "git", ["worktree", "prune"]);
+    await runOk(repoDir, "git", ["worktree", "prune"]);
     // Use -D rather than -d: when the branch is merged only into
     // origin/sourceBranch (not local), git's safety check refuses -d even
     // though the commits are demonstrably preserved on a remote ref.
-    const ok = await runOk(cfg.cwd, "git", ["branch", "-D", branch]);
+    const ok = await runOk(repoDir, "git", ["branch", "-D", branch]);
     if (ok) deleted.push(branch);
   }
   return deleted;
@@ -482,12 +462,18 @@ export class PreflightError extends Error {
 
 export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   // Fetch before the cleanup pass so that merged-on-origin branches can be
-  // reaped even when the user hasn't pulled local sourceBranch recently.
-  await runOk(cfg.cwd, "git", ["fetch", "origin", cfg.sourceBranch, "--quiet"]);
+  // reaped even when the cache has not seen origin recently. Into the CACHE:
+  // sandbar never fetches into the operator's checkout, so a run can neither
+  // move their refs nor be blamed for doing so.
+  await runOk(cfg.layout.repoDir, "git", [
+    "fetch",
+    "origin",
+    cfg.sourceBranch,
+    "--quiet",
+  ]);
 
   const deleted = await deleteMergedIssueBranches({
-    cwd: cfg.cwd,
-    workDir: cfg.workDir,
+    layout: cfg.layout,
     sourceBranch: cfg.sourceBranch,
   });
   if (deleted.length > 0) {
@@ -507,17 +493,21 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   const failures = results.flatMap((r) => (r.ok ? [] : [r.message]));
   if (failures.length > 0) throw new PreflightError(failures);
 
-  // Soft warning: per-issue worktrees seed off origin/sourceBranch. If local
-  // is ahead of origin, those issues won't see that work — the merge into
-  // local carries it forward but issues that depend on it can fail.
+  // The one check that reads the OPERATOR'S checkout, on purpose (#38 item 10).
+  // Per-issue worktrees seed off origin/<sourceBranch>, so commits sitting
+  // unpushed in the human's repo are invisible to every agent in the run. While
+  // `cwd` was a machine-managed operating clone this could essentially never
+  // fire; against a real working checkout it is both likely and silent, which
+  // is what a soft warning is for. Fails quiet in both directions — a checkout
+  // with no local `<sourceBranch>` at all just reports 0.
   const ahead = await countCommitsAhead(
-    cfg.cwd,
+    cfg.layout.hostCwd,
     cfg.sourceBranch,
     `origin/${cfg.sourceBranch}`,
   );
   if (ahead > 0) {
     console.warn(
-      `WARNING: local ${cfg.sourceBranch} is ${ahead} commit(s) ahead of origin/${cfg.sourceBranch}. ` +
+      `WARNING: ${cfg.layout.hostCwd} has local ${cfg.sourceBranch} ${ahead} commit(s) ahead of origin/${cfg.sourceBranch}. ` +
         "Per-issue worktrees seed from origin, so issues that depend on " +
         "unpushed work will fail or merge oddly. Push or rebase first if " +
         "those commits matter for the work sandbar is about to do.",

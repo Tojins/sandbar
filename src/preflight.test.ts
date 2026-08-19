@@ -9,11 +9,8 @@ const cleanState: RepoState = {
   ghAuthOk: true,
   sandboxGhTokenOk: true,
   hasAgentCredential: true,
-  inProgressMarkers: [],
-  currentBranch: "main",
-  expectedBranch: "main",
+  sourceBranch: "main",
   hasOriginBranch: true,
-  envFilePath: ".sandbar/.env",
   unmergedIssueBranches: [],
   discardedIssueBranches: [],
   resumableIssueBranches: [],
@@ -67,13 +64,16 @@ describe("checkInvariants", () => {
     expect(f.some((m) => m.includes("gh auth status"))).toBe(true);
   });
 
-  it("flags an invalid sandbox GH_TOKEN (mentions env file path)", () => {
+  // Names `config.env` rather than a file path (#38): sandbar no longer knows
+  // where the value came from, so pointing at a path it invented would send the
+  // operator to a file they may not have.
+  it("flags an invalid sandbox GH_TOKEN (points at config.env)", () => {
     const f = failures({ ...cleanState, sandboxGhTokenOk: false });
     expect(
       f.some(
         (m) =>
           m.includes("GH_TOKEN") &&
-          m.includes(cleanState.envFilePath) &&
+          m.includes("config.env") &&
           m.includes("rejected by GitHub"),
       ),
     ).toBe(true);
@@ -90,48 +90,21 @@ describe("checkInvariants", () => {
     ).toBe(true);
   });
 
-  it("flags MERGE_HEAD marker", () => {
-    const f = failures({ ...cleanState, inProgressMarkers: ["MERGE_HEAD"] });
-    expect(f.some((m) => m.includes("MERGE_HEAD"))).toBe(true);
+  // The operator-state invariants ("not on <sourceBranch>", "an in-progress
+  // merge/rebase was detected") are GONE, not moved (#38 item 7). They existed
+  // only because a human might be standing in the directory sandbar operated
+  // on. Against the bare cache they are vacuous; pointed at `config.cwd` they
+  // would fail runs because the operator is mid-rebase in their own repo.
+  it("says nothing about the operator's branch or in-progress operations", () => {
+    const f = failures(cleanState);
+    expect(f).toEqual([]);
+    const all = checkInvariants({ ...cleanState, hasOriginBranch: false })
+      .flatMap((r) => (r.ok ? [] : [r.message]))
+      .join("\n");
+    expect(all).not.toMatch(/MERGE_HEAD|rebase|Not on/);
   });
 
-  it("flags rebase-merge marker", () => {
-    const f = failures({
-      ...cleanState,
-      inProgressMarkers: ["rebase-merge"],
-    });
-    expect(f.some((m) => m.includes("rebase-merge"))).toBe(true);
-  });
-
-  it("flags multiple in-progress markers in one message", () => {
-    const f = failures({
-      ...cleanState,
-      inProgressMarkers: ["MERGE_HEAD", "CHERRY_PICK_HEAD"],
-    });
-    expect(f.length).toBe(1);
-    expect(f[0]).toContain("MERGE_HEAD");
-    expect(f[0]).toContain("CHERRY_PICK_HEAD");
-  });
-
-  it("flags being on a feature branch (names the expected branch)", () => {
-    const f = failures({ ...cleanState, currentBranch: "feature/foo" });
-    expect(
-      f.some((m) => m.includes("Not on `main`") && m.includes("feature/foo")),
-    ).toBe(true);
-  });
-
-  it("flags a different expected branch (e.g., trunk)", () => {
-    const f = failures({
-      ...cleanState,
-      expectedBranch: "trunk",
-      currentBranch: "main",
-    });
-    expect(f.some((m) => m.includes("Not on `trunk`") && m.includes("main"))).toBe(
-      true,
-    );
-  });
-
-  it("flags missing origin/<expectedBranch>", () => {
+  it("flags missing origin/<sourceBranch>", () => {
     const f = failures({ ...cleanState, hasOriginBranch: false });
     expect(f.some((m) => m.includes("origin/main"))).toBe(true);
   });
@@ -193,7 +166,7 @@ describe("checkInvariants", () => {
     const f = failures({
       ...cleanState,
       hasGh: false,
-      currentBranch: "feature/x",
+      hasOriginBranch: false,
       hasAgentCredential: false,
     });
     expect(f.length).toBe(3);
@@ -208,8 +181,6 @@ describe("checkInvariants", () => {
       ghAuthOk: false,
       sandboxGhTokenOk: false,
       hasAgentCredential: false,
-      inProgressMarkers: ["MERGE_HEAD"],
-      currentBranch: "feature/x",
       hasOriginBranch: false,
       unmergedIssueBranches: ["sandbar/issue-1-x"],
     };

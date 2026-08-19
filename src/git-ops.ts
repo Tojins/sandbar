@@ -20,7 +20,8 @@ const exec = promisify(execFile);
 // launched. On a host that sets `config.cwd`, that created the issue branch in
 // a different repo from the one the worktree, the gate and the merger all
 // operate on, so `prepareWorktree` then failed to find a branch that had just
-// been created successfully.
+// been created successfully. Since #38 it is `layout.repoDir`, the bare cache —
+// which is also why writing this ref cannot reach the operator's own branches.
 export async function ensureIssueBranch(
   repoDir: string,
   branch: string,

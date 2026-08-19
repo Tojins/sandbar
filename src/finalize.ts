@@ -51,13 +51,13 @@
 // failure while the handoff arms turn it into a loud stop.
 
 import { execFile } from "node:child_process";
-import { join } from "node:path";
 import { promisify } from "node:util";
 
 import type { LabelConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { IssueRef } from "./merger.js";
+import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 
 // Where an implementer's commits ended up when it worked off the issue branch
 // (#27). Structural alias of git-ops' HeadMismatch — finalize only ever reads
@@ -716,33 +716,22 @@ export async function finalizeAll(
 }
 
 // ---------------------------------------------------------------------------
-// Worktree paths
-// ---------------------------------------------------------------------------
-
-export function worktreePathFor(
-  repoDir: string,
-  workDir: string,
-  branch: string,
-): string {
-  // Mirror the sandbox WorktreeManager.create: <repoDir>/<workDir>/worktrees/
-  // <branch with '/' replaced by '-'>.
-  return join(repoDir, workDir, "worktrees", branch.replace(/\//g, "-"));
-}
-
-// ---------------------------------------------------------------------------
 // Real adapter — shells out to git and gh.
 // ---------------------------------------------------------------------------
 
 export type RealFinalizeAdapterDeps = {
-  readonly cwd: string;
-  readonly workDir: string;
+  // Every git and gh call below runs in `layout.repoDir`, the bare cache (#38)
+  // — including the `git branch -d`/`-D` pair, which is the reason that
+  // matters. The worktree path it removes still comes from
+  // `layout.worktreesDir`, which is BESIDE the cache rather than inside it.
+  readonly layout: RepoLayout;
   // Needed by branchIsContainedInOrigin: issue branches are seeded from
   // origin/<sourceBranch>, so that ref is what "already preserved" means here.
   readonly sourceBranch: string;
 };
 
 export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
-  const cwd = deps.cwd;
+  const cwd = deps.layout.repoDir;
   return {
     async pushBranch(branch) {
       // Required: the whole point of the non-merged terminals is to hand the
@@ -801,7 +790,7 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       }
     },
     async removeWorktreeFor(branch) {
-      const path = worktreePathFor(cwd, deps.workDir, branch);
+      const path = worktreePathFor(deps.layout.worktreesDir, branch);
       try {
         await exec("git", ["worktree", "remove", "--force", path], { cwd });
       } catch {

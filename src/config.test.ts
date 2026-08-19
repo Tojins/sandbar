@@ -12,7 +12,6 @@ import {
   DEFAULT_CLAUDE_MD_PATH,
   DEFAULT_CONTAINERFILE_PATH,
   DEFAULT_CONTEXT_MD_PATH,
-  DEFAULT_ENV_FILE_PATH,
   DEFAULT_MAX_IMPL_ATTEMPTS,
   DEFAULT_MAX_REVIEW_ROUNDS,
   DEFAULT_MAX_TOTAL_ISSUES,
@@ -112,10 +111,10 @@ describe("resolveConfig", () => {
     expect(r.claudeMdPath).toBe(DEFAULT_CLAUDE_MD_PATH);
     expect(r.contextMdPath).toBe(DEFAULT_CONTEXT_MD_PATH);
     expect(r.adrDir).toBe(DEFAULT_ADR_DIR);
-    // Rooted at `cwd` (#34) — every consumer reads it on the host, so leaving
-    // it relative meant reading the credential file of whichever directory the
-    // process was launched from.
-    expect(r.envFilePath).toBe(join(process.cwd(), DEFAULT_ENV_FILE_PATH));
+    // A record, not a path (#38): the empty default is a real configuration —
+    // a host whose credentials all come from the process environment still has
+    // to DECLARE the keys, because the fallback is per declared key.
+    expect(r.env).toEqual({});
     expect(r.maxImplAttempts).toBe(DEFAULT_MAX_IMPL_ATTEMPTS);
     expect(r.maxReviewRounds).toBe(DEFAULT_MAX_REVIEW_ROUNDS);
     expect(r.maxTotalIssues).toBe(DEFAULT_MAX_TOTAL_ISSUES);
@@ -368,10 +367,6 @@ describe("resolveMergeMode (#22)", () => {
 });
 
 // #34 — every host-side path config has to name the repo the run is about.
-// `envFilePath` is the one that can be resolved once, here, because unlike the
-// anchor doc paths it is never handed to the agent as an @ref: run.ts's
-// GH_TOKEN check, preflight's credential invariants and the sandbox's env
-// resolver all just read it on the host.
 describe("resolveConfig — cwd is absolute (#34)", () => {
   it("resolves a relative cwd against the launch directory", () => {
     const r = resolveConfig({ ...minimal, cwd: "sub/repo" });
@@ -395,18 +390,22 @@ describe("resolveConfig — cwd is absolute (#34)", () => {
   });
 });
 
-describe("resolveConfig — envFilePath is rooted at cwd (#34)", () => {
-  it("resolves a relative env file against a configured cwd", () => {
-    const r = resolveConfig({ ...minimal, cwd: "/repos/other", envFilePath: ".env" });
-    expect(r.envFilePath).toBe("/repos/other/.env");
+// #38 — the credentials are a VALUE, so there is no path to root anywhere and
+// no second reader that could disagree about which file it meant.
+describe("resolveConfig — env is a record, passed through", () => {
+  it("keeps the declared record verbatim", () => {
+    const env = { GH_TOKEN: "ghp_x", CLAUDE_CODE_OAUTH_TOKEN: "" };
+    const r = resolveConfig({ ...minimal, env });
+    expect(r.env).toEqual(env);
   });
 
-  it("leaves an absolute env file alone", () => {
-    const r = resolveConfig({
+  it("does not vary with cwd", () => {
+    const here = resolveConfig({ ...minimal, env: { GH_TOKEN: "t" } });
+    const elsewhere = resolveConfig({
       ...minimal,
       cwd: "/repos/other",
-      envFilePath: "/etc/sandbar/.env",
+      env: { GH_TOKEN: "t" },
     });
-    expect(r.envFilePath).toBe("/etc/sandbar/.env");
+    expect(here.env).toEqual(elsewhere.env);
   });
 });

@@ -11,8 +11,9 @@
 // absorb them — in the clean path or the conflict path.
 //
 // The worktree lives beside the per-issue worktrees (<cwd>/<workDir>/worktrees/
-// merger) so the existing `git worktree prune` + orphan sweep at the next
-// cycle's sandbox bring-up reclaims any leftover after a crash. We still remove
+// merger), registered in the bare cache since #38, so the existing
+// `git worktree prune` + orphan sweep at the next cycle's sandbox bring-up
+// reclaims any leftover after a crash. We still remove
 // it explicitly in run.ts's finally, and register removal with onCleanup before
 // creating it so a signal mid-bringup tears it down.
 //
@@ -28,6 +29,7 @@ import { promisify } from "node:util";
 
 import { onCleanup } from "./cleanup.js";
 import { SandbarError } from "./errors.js";
+import type { RepoLayout } from "./repo-cache.js";
 
 const exec = promisify(execFile);
 
@@ -43,16 +45,22 @@ const NO_CONFIG_LOCK_FLAGS = [
 export const MERGER_WORKTREE_NAME = "merger";
 
 // Where the merger worktree lives. Pure — beside the per-issue worktrees so the
-// existing prune/orphan-sweep reclaims it.
-export function mergerWorktreePathFor(cwd: string, workDir: string): string {
-  return join(cwd, workDir, "worktrees", MERGER_WORKTREE_NAME);
+// existing prune/orphan-sweep reclaims it. Takes the worktrees directory since
+// #38: the repo is `<stateDir>/repo.git` and the worktrees sit beside it, so
+// composing this from the repo directory would put the merge inside the cache.
+export function mergerWorktreePathFor(worktreesDir: string): string {
+  return join(worktreesDir, MERGER_WORKTREE_NAME);
 }
 
 // Given the contents of a worktree's `.git` gitlink file ("gitdir: <abs>"),
-// return the repo's common git dir (the parent repo's `.git`), or null when the
-// content isn't a gitlink. The container running the resolve agent must mount
-// this path at its own absolute location so in-container git can follow the
-// gitlink. Pure — mirrors resolveGitMounts in agent-sandbox.ts.
+// return the repo's common git dir, or null when the content isn't a gitlink.
+// Since #38 that is sandbar's bare cache rather than a `.git` inside a
+// checkout — "up two levels from the gitdir" lands correctly on either. The
+// container running the resolve agent must mount this path at its own absolute
+// location so in-container git can follow the gitlink. Pure; `resolveGitMounts`
+// in agent-sandbox.ts answers the same question by asking
+// `git rev-parse --git-common-dir`, which it can because it has a worktree to
+// ask from and this one is handed only the file's bytes.
 export function gitlinkCommonDir(gitFileContent: string): string | null {
   const match = gitFileContent.trim().match(/^gitdir:\s*(.+)$/);
   if (!match || match[1] === undefined) return null;
@@ -98,12 +106,15 @@ export type MergerWorktree = {
 // checked out in another worktree" error when the operator's checkout is on
 // sourceBranch.
 export async function createMergerWorktree(opts: {
-  readonly cwd: string;
-  readonly workDir: string;
+  readonly layout: RepoLayout;
   readonly sourceBranch: string;
 }): Promise<MergerWorktree> {
-  const { cwd, workDir, sourceBranch } = opts;
-  const path = mergerWorktreePathFor(cwd, workDir);
+  const { layout, sourceBranch } = opts;
+  // The bare cache (#38). The operator's checkout is not merely avoided here,
+  // it is unreachable: the worktree is registered in a repo that holds none of
+  // their refs and no working tree of their own.
+  const cwd = layout.repoDir;
+  const path = mergerWorktreePathFor(layout.worktreesDir);
 
   let removed = false;
   const remove = async (): Promise<void> => {

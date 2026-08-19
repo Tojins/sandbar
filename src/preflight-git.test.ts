@@ -1,11 +1,11 @@
-// #34 — preflight's verdict, and its one destructive step, are about the repo
-// the RUN is configured against, not about wherever the host process happened
-// to be launched.
+// #34 + #38 — preflight's verdict, and its one destructive step, are about a
+// NAMED repo, and since #38 that repo is sandbar's bare cache rather than
+// anything a human stands in.
 //
 // Asserted against two real repos with `process.cwd()` pointed at the WRONG
 // one. That arrangement is the whole test: `DEFAULT_CWD()` is `process.cwd()`,
 // so on every host that does not set `config.cwd` the two coincide and a test
-// that lets them coincide passes just as happily with the `cwd` option deleted
+// that lets them coincide passes just as happily with the threading deleted
 // again. Real git, not a fake exec, because the assertions are about refs that
 // did or did not move.
 import { execFile } from "node:child_process";
@@ -15,7 +15,9 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { makeEnvReader } from "./env.js";
 import { deleteMergedIssueBranches, gatherState } from "./preflight.js";
+import { type RepoLayout, ensureRepoCache, repoLayout } from "./repo-cache.js";
 
 const exec = promisify(execFile);
 
@@ -45,7 +47,7 @@ async function seedRepo(prefix: string): Promise<string> {
   return repo;
 }
 
-describe("preflight operates on config.cwd, not process.cwd() (#34)", () => {
+describe("preflight operates on the named repo, not process.cwd() (#34, #38)", () => {
   let launchedFrom: string;
   let target: string;
   let originalCwd: string;
@@ -78,10 +80,18 @@ describe("preflight operates on config.cwd, not process.cwd() (#34)", () => {
     await rm(shimBin, { recursive: true, force: true });
   });
 
-  const cfg = (cwd: string) => ({
-    cwd,
-    workDir: ".sandbar",
-    envFilePath: join(cwd, "does-not-exist.env"),
+  // A layout that names `repoDir` directly, so these cases can point preflight
+  // at an ordinary repo and read its refs afterwards. The cache-shaped case is
+  // the separate describe below, where the point is that the two directories
+  // are DIFFERENT rather than that either is bare.
+  const layoutAt = (repoDir: string, hostCwd = repoDir): RepoLayout => ({
+    ...repoLayout(hostCwd, ".sandbar"),
+    repoDir,
+  });
+
+  const cfg = (layout: RepoLayout) => ({
+    layout,
+    env: makeEnvReader({}),
     sourceBranch: "main",
     pulledImages: [] as readonly string[],
   });
@@ -97,15 +107,15 @@ describe("preflight operates on config.cwd, not process.cwd() (#34)", () => {
       }
     });
 
-    it("deletes the merged branch in config.cwd", async () => {
-      const deleted = await deleteMergedIssueBranches(cfg(target));
+    it("deletes the merged branch in the named repo", async () => {
+      const deleted = await deleteMergedIssueBranches(cfg(layoutAt(target)));
 
       expect(deleted).toEqual(["sandbar/issue-1-merged"]);
       expect(await hasBranch(target, "sandbar/issue-1-merged")).toBe(false);
     });
 
     it("does not touch the identically-named branch in the launch directory", async () => {
-      await deleteMergedIssueBranches(cfg(target));
+      await deleteMergedIssueBranches(cfg(layoutAt(target)));
 
       expect(await hasBranch(launchedFrom, "sandbar/issue-1-merged")).toBe(true);
     });
@@ -119,7 +129,7 @@ describe("preflight operates on config.cwd, not process.cwd() (#34)", () => {
     it("deletes in whichever repo it is pointed at", async () => {
       process.chdir(target);
 
-      await deleteMergedIssueBranches(cfg(launchedFrom));
+      await deleteMergedIssueBranches(cfg(layoutAt(launchedFrom)));
 
       expect(await hasBranch(launchedFrom, "sandbar/issue-1-merged")).toBe(false);
       expect(await hasBranch(target, "sandbar/issue-1-merged")).toBe(true);
@@ -132,26 +142,66 @@ describe("preflight operates on config.cwd, not process.cwd() (#34)", () => {
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const deleted = await deleteMergedIssueBranches(cfg(target));
+      const deleted = await deleteMergedIssueBranches(cfg(layoutAt(target)));
 
       expect(deleted).toEqual(["sandbar/issue-1-merged"]);
       expect(await hasBranch(target, "sandbar/issue-2-unmerged")).toBe(true);
     });
   });
 
-  // The other consequence in #34: a clean launch directory would let preflight
-  // pass while the actual target repo is mid-merge, on the wrong branch, or
-  // carrying unmerged issue branches.
-  describe("gatherState", () => {
-    it("reports the target's current branch, not the launch directory's", async () => {
-      await git(launchedFrom, "checkout", "-q", "-b", "some-other-branch");
-      await git(target, "checkout", "-q", "-b", "release");
+  // #38 item 3, stated as the thing it protects rather than as a path. `cwd`
+  // stopped being a dedicated operating clone and became the human's own
+  // checkout, so a `git branch -D` that followed `cwd` would now destroy THEIR
+  // branches. The pin is not "the argument says repoDir" — it is that a real
+  // preflight against a real cache leaves the operator's refs where they were.
+  describe("with a real bare cache, the operator's checkout is never written", () => {
+    it("deletes only in the cache, and only sandbar's own refs exist there", async () => {
+      // The operator's checkout carries a branch of their own AND an
+      // identically-named sandbar branch — the case a prefix-glob delete would
+      // reach if it followed `cwd`.
+      await git(target, "branch", "my-wip");
+      await git(target, "branch", "sandbar/issue-1-merged");
 
-      const state = await gatherState(cfg(target));
+      const layout = repoLayout(target, ".sandbar");
+      await ensureRepoCache(layout);
 
-      expect(state.currentBranch).toBe("release");
+      // The clone imports the operator's branches; the cache clears them, so
+      // preflight's `refs/heads/sandbar/issue-*` glob cannot refuse a run over
+      // a branch sandbar itself imported from the human's repo.
+      const headsInCache = await git(
+        layout.repoDir,
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/heads/",
+      );
+      expect(headsInCache.stdout.trim()).toBe("");
+
+      // Now sandbar's own branch, created the way the inner loop creates it.
+      await git(
+        layout.repoDir,
+        "branch",
+        "--no-track",
+        "sandbar/issue-1-merged",
+        "refs/remotes/origin/main",
+      );
+
+      const deleted = await deleteMergedIssueBranches({
+        layout,
+        sourceBranch: "main",
+      });
+
+      expect(deleted).toEqual(["sandbar/issue-1-merged"]);
+      expect(await hasBranch(layout.repoDir, "sandbar/issue-1-merged")).toBe(false);
+      // The operator's repo is untouched — both their own branch and their
+      // same-named one survive.
+      expect(await hasBranch(target, "my-wip")).toBe(true);
+      expect(await hasBranch(target, "sandbar/issue-1-merged")).toBe(true);
     });
+  });
 
+  // The other consequence in #34: a clean launch directory would let preflight
+  // pass while the actual target repo carries unmerged issue branches.
+  describe("gatherState", () => {
     it("classifies the target's issue branches, not the launch directory's", async () => {
       await git(launchedFrom, "checkout", "-q", "-b", "sandbar/issue-9-launch");
       await git(launchedFrom, "commit", "-q", "--allow-empty", "-m", "work");
@@ -159,28 +209,22 @@ describe("preflight operates on config.cwd, not process.cwd() (#34)", () => {
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(target));
+      const state = await gatherState(cfg(layoutAt(target)));
 
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
     });
 
-    // `git rev-parse --git-dir` prints a path relative to the command's cwd
-    // (`.git`), so this stays broken if the command is fixed and the marker
-    // probe is not — the run would then start on top of a half-finished merge.
-    it("sees an in-progress merge in the target", async () => {
-      await writeFile(join(target, ".git", "MERGE_HEAD"), "deadbeef\n");
+    it("reads origin/<sourceBranch> from the named repo", async () => {
+      const state = await gatherState(cfg(layoutAt(target)));
+      expect(state.hasOriginBranch).toBe(true);
 
-      const state = await gatherState(cfg(target));
-
-      expect(state.inProgressMarkers).toEqual(["MERGE_HEAD"]);
-    });
-
-    it("does not report an in-progress merge that belongs to the launch directory", async () => {
-      await writeFile(join(launchedFrom, ".git", "MERGE_HEAD"), "deadbeef\n");
-
-      const state = await gatherState(cfg(target));
-
-      expect(state.inProgressMarkers).toEqual([]);
+      // A repo with no `origin/main` at all — the invariant must be about the
+      // repo it was pointed at, not about the one the process stands in.
+      const bare = await mkdtemp(join(tmpdir(), "sandbar-empty-"));
+      await git(bare, "init", "-q", "-b", "main");
+      const empty = await gatherState(cfg(layoutAt(bare, target)));
+      expect(empty.hasOriginBranch).toBe(false);
+      await rm(bare, { recursive: true, force: true });
     });
   });
 });

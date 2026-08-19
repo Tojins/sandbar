@@ -19,12 +19,21 @@
 // `fetchCandidates` takes an explicit `cwd` (#34). `gh issue list` resolves the
 // repo from the git remotes of the directory it runs in, so inheriting
 // `process.cwd()` made the planner's queue a property of where the host process
-// was launched rather than of `config.cwd`. It is required, not optional, for
-// the reason spelled out in preflight.ts: an omitted option is invisible and
-// wrong only on the hosts that configure a cwd. `fetchIssueStates` needs no
-// such thing — it already names the repo in the GraphQL variables — and the two
-// must keep agreeing, since preflight's resume classification calls
-// `fetchCandidates` to predict exactly what the next cycle will pick up.
+// was launched. It is required, not optional, for the reason spelled out in
+// preflight.ts: an omitted option is invisible and wrong only on the hosts that
+// configure a cwd. `fetchIssueStates` needs no such thing — it already names
+// the repo in the GraphQL variables — and the two must keep agreeing, since
+// preflight's resume classification calls `fetchCandidates` to predict exactly
+// what the next cycle will pick up.
+//
+// Since #38 what every caller passes is `layout.repoDir`, the bare cache. `gh`
+// resolves a bare repo's remotes exactly as it does a checkout's, so this is
+// one directory for every git and gh call sandbar makes rather than two that
+// could disagree (#38 item 9). The standing gap is unchanged and worth
+// restating: these calls name a DIRECTORY, never `--repo <owner>/<name>` the
+// way forge-verify.ts does, so a cache whose `origin` disagrees with the
+// configured `ghOwner`/`ghRepo` still splits sandbar's tracker access in two,
+// and nothing validates the agreement.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
