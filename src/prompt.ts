@@ -24,6 +24,17 @@
 //                              reviewer pass is stateless — no prior-round
 //                              transcript is included.
 //
+// Every range a slot renders is anchored at `origin/<sourceBranch>`, never the
+// bare branch name (#40). The agents work out of a worktree of the bare object
+// cache, whose local head namespace is sandbar's alone and holds exactly one
+// ref — the issue branch (repo-cache.ts deletes the imported `refs/heads/*`).
+// `main` therefore does not resolve there and never can: every range built on
+// the bare name exited 128, and a `catch` rendered the result as if the branch
+// held nothing. The implementer was told its own committed work did not exist,
+// and the reviewer — whose commit list AND diff both came from that ref — was
+// handed an empty changeset and asked for a verdict on it. Failures now throw
+// (see `readGit`), and a reviewer over an empty changeset is refused outright.
+//
 // All prose lives in prompts/*.md and is loaded via prompts.ts; this module
 // only formats data into the templates' placeholders.
 
@@ -32,6 +43,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { SandbarError } from "./errors.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
@@ -50,6 +62,73 @@ const IMPLEMENTER_ESCALATION_TPL = loadTemplate("implementer-escalation");
 
 // Attempt at which the implementer prompt starts surfacing the escalation block.
 const ESCALATION_ATTEMPT = 6;
+
+// Ceiling on a single git read below. Generous because the thing it bounds is a
+// whole branch's `log -p`; it is a limit, not an allocation, so the two-line
+// commit list is given the same one rather than a second knob.
+const GIT_READ_MAX_BUFFER = 50 * 1024 * 1024;
+
+// What a truncated read renders instead of stopping mid-hunk. Deliberately not
+// diff-shaped, so no agent reads it as content.
+function truncationNote(limit: number): string {
+  return `[sandbar] output truncated: exceeded the ${limit}-byte read limit for this slot.`;
+}
+
+// The base of every range this module builds: `origin/<sourceBranch>`, never the
+// bare name (#40). See the module header for why the bare name cannot resolve.
+function baseRef(sourceBranch: string): string {
+  return `origin/${sourceBranch}`;
+}
+
+// Every git read behind a prompt slot goes through here, and the two ways it can
+// fail are deliberately NOT the same answer (#40).
+//
+// git BLOWING UP is a fault. The ranges below are built on a ref preflight has
+// already verified exists in the cache, read in a worktree sandbar created
+// itself, so there is no working configuration in which they fail. Mapping that
+// onto the empty string — which is what all three call sites did — makes it
+// indistinguishable from "there is genuinely nothing here yet", which is the
+// legitimate reading on attempt 1. That is the whole reason #40 stayed
+// invisible for a run: git exited 128 on every call, and the prompt said "No
+// commits yet on this branch." So it throws instead, and it throws SandbarError
+// because the failure is permanent — a fresh sandbox reproduces it exactly.
+//
+// A maxBuffer overflow is the exception, and it is not a fault at all: the
+// output is real, there is just more of it than the buffer holds. Node rejects
+// with the truncated prefix on `err.stdout`, so that prefix is returned with a
+// marker rather than thrown — a partial diff the agent can read beats both a
+// halted issue and, once again, an empty string that reads as "no work yet".
+//
+// Exported, with the bound as a parameter, for one reason: the truncation path
+// is the half nobody can fake. That node hands back the prefix on `err.stdout`
+// rather than losing it is behaviour node defines, so it is asserted by running
+// it — against real git, at a bound a test can reach, instead of a 50MB fixture.
+export async function readGit(
+  args: readonly string[],
+  cwd: string,
+  what: string,
+  maxBuffer: number = GIT_READ_MAX_BUFFER,
+): Promise<string> {
+  try {
+    const { stdout } = await exec("git", [...args], { cwd, maxBuffer });
+    return stdout;
+  } catch (err) {
+    if (
+      (err as { code?: unknown }).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+    ) {
+      const partial = (err as { stdout?: unknown }).stdout;
+      return `${typeof partial === "string" ? partial : ""}\n${truncationNote(maxBuffer)}\n`;
+    }
+    throw new SandbarError(
+      `could not read ${what}: \`git ${args.join(" ")}\` failed in ${cwd}. ` +
+        `Prompt ranges are based on \`origin/<sourceBranch>\`, which preflight verifies ` +
+        `exists in sandbar's object cache; had this been swallowed the slot would have ` +
+        `rendered as if the branch held no work at all (#40). ` +
+        (err instanceof Error ? err.message : String(err)),
+      { cause: err },
+    );
+  }
+}
 
 // Append a trailing blank-line separator to a non-empty section so the skeleton
 // templates can place optional sections back-to-back without managing spacing.
@@ -216,6 +295,11 @@ export async function buildProjectAnchor(
     );
     lines.push(stdout.trim());
   } catch {
+    // The one read in this module that degrades rather than throwing (#40), and
+    // the difference is that this failure is not silent: history is background
+    // colour, and "(unavailable)" says outright that it is missing. The slots
+    // below have no such marker available — their empty rendering is a claim
+    // about the branch, and a false one.
     lines.push("(unavailable)");
   }
   lines.push("```");
@@ -232,20 +316,14 @@ async function buildIssueAnchor(
 async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
   const { worktreePath, sourceBranch } = inputs;
 
-  let diff = "";
-  try {
-    const { stdout } = await exec(
-      "git",
-      ["log", "-p", "--reverse", `${sourceBranch}..HEAD`],
-      {
-        cwd: worktreePath,
-        maxBuffer: 50 * 1024 * 1024,
-      },
-    );
-    diff = stdout;
-  } catch {
-    diff = "";
-  }
+  // Empty is a legitimate answer HERE and only here: attempt 1 has no commits.
+  // Which is exactly why the read must not be able to fail quietly — the one
+  // slot whose emptiness is unremarkable is the one that hid #40.
+  const diff = await readGit(
+    ["log", "-p", "--reverse", `${baseRef(sourceBranch)}..HEAD`],
+    worktreePath,
+    `the work done so far on ${inputs.issue.branch}`,
+  );
 
   return renderAttemptSlot({ ...inputs, diff });
 }
@@ -306,30 +384,42 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
 
 async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> {
   const { worktreePath, sourceBranch } = inputs;
+  const base = baseRef(sourceBranch);
 
-  let commits = "";
-  try {
-    const { stdout } = await exec(
-      "git",
-      ["log", `${sourceBranch}..HEAD`, "--oneline"],
-      { cwd: worktreePath },
+  const commits = (
+    await readGit(
+      ["log", `${base}..HEAD`, "--oneline"],
+      worktreePath,
+      `the commit list for ${inputs.issue.branch}`,
+    )
+  ).trim();
+
+  // An empty changeset is never a legitimate reviewer prompt (#40). A reviewer
+  // is reached only through a COMPLETE that `parsePromise` did not downgrade —
+  // which requires accumulated commits — followed by a green gate-1 over a
+  // clean tree whose HEAD is still `refs/heads/<branch>`. So an empty list is
+  // not "nothing to review"; it is this module and the inner loop disagreeing
+  // about what the branch holds, and the only thing a reviewer can do with it
+  // is return a verdict uninformed by any code. Refusing is what catches the
+  // next wrong base ref even if it is wrong for a reason `origin/` does not
+  // cover — the check that would have caught #40 on cycle 1 rather than after
+  // 25 minutes of agent time spent reviewing nothing.
+  if (commits === "") {
+    throw new SandbarError(
+      `refusing to launch a reviewer for issue #${inputs.issue.id}: ` +
+        `\`${base}..HEAD\` is empty in ${worktreePath}, but a reviewer only runs on ` +
+        `committed work that has already passed gate-1. The branch's commits and the ` +
+        `range used to render them disagree.`,
     );
-    commits = stdout.trim();
-  } catch {
-    commits = "";
   }
 
-  let diff = "";
-  try {
-    const { stdout } = await exec(
-      "git",
-      ["diff", `${sourceBranch}...HEAD`],
-      { cwd: worktreePath, maxBuffer: 50 * 1024 * 1024 },
-    );
-    diff = stdout.trim();
-  } catch {
-    diff = "";
-  }
+  const diff = (
+    await readGit(
+      ["diff", `${base}...HEAD`],
+      worktreePath,
+      `the branch diff for ${inputs.issue.branch}`,
+    )
+  ).trim();
 
   // Only point at the project standards file when it actually exists, so a
   // configured-but-absent path doesn't send the reviewer chasing a dead @ref.

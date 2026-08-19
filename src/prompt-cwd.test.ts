@@ -78,6 +78,14 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     originalCwd = process.cwd();
     launchedFrom = await seedRepo("sandbar-launch-", "commit-from-launch-dir");
     target = await seedRepo("sandbar-target-", "commit-from-target-repo");
+    // `launchedFrom` doubles as the tree under review below, and a reviewer
+    // prompt over an empty `origin/main..HEAD` is refused outright (#40) — the
+    // loop only ever reaches a reviewer on committed work. So put a commit on
+    // it. The subject is deliberately not either seed's, so the "whose history
+    // is this" assertions keep testing what they were written to test.
+    await writeFile(join(launchedFrom, "work.txt"), "branch work\n");
+    await git(launchedFrom, "add", "-A");
+    await git(launchedFrom, "commit", "-qm", "commit-under-review");
     process.chdir(launchedFrom);
 
     shimBin = await mkdtemp(join(tmpdir(), "sandbar-shim-"));

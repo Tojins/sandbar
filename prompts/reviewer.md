@@ -1,6 +1,10 @@
 # Review
 
-Review the implementation on branch `{{branch}}` against `{{sourceBranch}}`.
+Review the implementation on branch `{{branch}}` against `origin/{{sourceBranch}}`.
+(That is the ref to use for any git command of your own: this worktree comes from
+a bare object cache that holds no local `{{sourceBranch}}`, so the bare name does
+not resolve.)
+
 Issue #{{issueId}}: {{issueTitle}}
 
 {{commits}}{{diff}}{{codingStandards}}
