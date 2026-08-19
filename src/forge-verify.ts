@@ -86,6 +86,24 @@
 //     satisfied; this module does not, because a skipped test job is precisely
 //     the state it exists to catch.
 //
+// THE POLL'S PACING AND ITS DEADLINE COME FROM ONE CLOCK (#25). `waitForChecks`
+// is a `for (;;)` whose every exit is computed from a `now()` reading, while its
+// only yield is a `sleep()`. When those were two independently-optional deps a
+// caller could fake the sleep and leave the deadline on the real clock — the
+// natural half-mistake for a test — and the loop then polled at zero wall-clock
+// against a deadline nothing it controlled could reach: not a hang but a spin,
+// one full core for the whole of `timeoutMs`, which at the suite's usual
+// `600_000` is ten minutes. Vitest's fork pool made it worse than a slow test:
+// the spinner is a separate PROCESS, so anything that kills the parent PID
+// alone — `kill -9` on it, `timeout --foreground`, a Python harness's
+// `subprocess.run(..., timeout=N)` — reparents it to init, where it keeps
+// burning with nothing left on screen to say it exists. Whatever bounds a run
+// has to kill the process GROUP; CLAUDE.md's Commands section says which
+// wrappers already do. The type-level fix is `Clock`, one object, so a
+// half-injected clock cannot be written; the belt-and-braces one is
+// `maxPollsFor`, a poll ceiling that fails loud on a clock which does not
+// advance, however it was faked.
+//
 // Attribution: the landing is always a fast-forward push of commits sandbar
 // authored locally, never a server-side merge. `openPullRequest` adds a PR as
 // an audit/review handle *around* that push (the forge marks it merged once its
@@ -360,10 +378,26 @@ export type ChecksOutcome =
 // that a mis-triggered workflow doesn't burn the full check timeout.
 export const NO_CHECKS_GRACE_MS = 120_000;
 
+// The poll's pacing and its deadline, as ONE value (#25) — see the header for
+// what the two independently-optional `sleep?`/`now?` deps this replaces cost.
+// The shape was the bug rather than a way of writing it: faking one reading and
+// leaving the other real is a full-core spin, and it is the natural
+// half-mistake, since the first instinct when testing a poller is "don't wait on
+// real timers". One object makes that unrepresentable — a caller supplies both
+// readings or neither — which closes the whole class, not the one instance.
+export type Clock = {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+};
+
+export const realClock: Clock = {
+  now: () => Date.now(),
+  sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+};
+
 export type WaitForChecksDeps = {
   listCheckRuns(sha: string): Promise<CheckRunListing>;
-  readonly sleep?: (ms: number) => Promise<void>;
-  readonly now?: () => number;
+  readonly clock?: Clock;
   readonly log?: ResolveLogger;
 };
 
@@ -375,8 +409,32 @@ export type WaitForChecksOptions = {
   readonly greenSettlePolls?: number;
 };
 
-const defaultSleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+// Slack over the number of polls the deadline itself allows, before the loop
+// declares its clock broken. Generous on purpose: this is a backstop against a
+// clock that does not advance at all, never a second deadline. Anything pacing
+// honestly exits on `elapsed >= timeoutMs` a long way under it.
+export const POLL_CEILING_SLACK = 100;
+
+/**
+ * The most polls `waitForChecks` may make before it concludes its clock is not
+ * advancing — the same idea as `MAX_ITERATIONS` in run.ts, and here for the same
+ * reason: a loop whose every exit is computed from an injected reading must
+ * still terminate when that reading lies.
+ *
+ * Every iteration sleeps exactly `pollIntervalMs` (the error-retry path and the
+ * bottom of the loop alike), so a clock that advances at all reaches the
+ * deadline within `timeoutMs / pollIntervalMs` polls; past that plus slack the
+ * clock is not moving, which is a bug and fails loud rather than converting
+ * into an infinite spin. Non-positive and non-finite inputs are floored rather
+ * than trusted — the job here is to produce a bound, and a NaN bound is the
+ * exact state this exists to catch.
+ */
+export function maxPollsFor(timeoutMs: number, pollIntervalMs: number): number {
+  const interval =
+    Number.isFinite(pollIntervalMs) && pollIntervalMs > 0 ? pollIntervalMs : 1;
+  const timeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 0;
+  return Math.ceil(timeout / interval) + POLL_CEILING_SLACK;
+}
 
 /**
  * Identity of a run set, for the settle comparison. Two polls "agree" only if
@@ -395,12 +453,15 @@ export async function waitForChecks(
   opts: WaitForChecksOptions,
   deps: WaitForChecksDeps,
 ): Promise<ChecksOutcome> {
-  const sleep = deps.sleep ?? defaultSleep;
-  const now = deps.now ?? (() => Date.now());
+  const clock = deps.clock ?? realClock;
+  const sleep = (ms: number) => clock.sleep(ms);
+  const now = () => clock.now();
   const log = deps.log ?? (() => undefined);
   const grace = opts.noChecksGraceMs ?? NO_CHECKS_GRACE_MS;
   const settleTarget = opts.greenSettlePolls ?? GREEN_SETTLE_POLLS;
   const started = now();
+  const maxPolls = maxPollsFor(opts.timeoutMs, opts.pollIntervalMs);
+  let polls = 0;
 
   // Consecutive polls that have reported the same green run set.
   let greenStreak = 0;
@@ -415,6 +476,17 @@ export async function waitForChecks(
   let missingStableSince: number | null = null;
 
   for (;;) {
+    // Fail loud on a clock that is not advancing. Reaching this means every
+    // exit below is unreachable — `elapsed` never grows — so the alternative is
+    // not a slow poll but a loop that never returns, at full CPU.
+    if (++polls > maxPolls) {
+      throw new Error(
+        `waitForChecks polled ${polls} times for ${sha} without reaching its ` +
+          `${opts.timeoutMs}ms deadline (ceiling ${maxPolls} at a ` +
+          `${opts.pollIntervalMs}ms interval). The clock backing this poll is ` +
+          `not advancing — every exit from the wait is computed from it.`,
+      );
+    }
     let listing: CheckRunListing;
     try {
       listing = await deps.listCheckRuns(sha);
@@ -620,8 +692,10 @@ export type VerifiedLandingDeps = {
   // The merger adapter — satisfies ResolveAdapter, which is all the resolve
   // loop needs. `getHeadSha` also comes from here.
   readonly resolve: ResolveAdapter;
-  readonly sleep?: (ms: number) => Promise<void>;
-  readonly now?: () => number;
+  // One clock, forwarded whole into waitForChecks — see `Clock`. Splitting it
+  // back into a sleep and a now would re-open #25 at this layer, where the
+  // forward is the only thing the pair is ever used for.
+  readonly clock?: Clock;
   readonly log?: ResolveLogger;
 };
 
@@ -793,8 +867,7 @@ export async function runVerifiedLanding(
       },
       {
         listCheckRuns: (s) => deps.verify.listCheckRuns(s),
-        ...(deps.sleep ? { sleep: deps.sleep } : {}),
-        ...(deps.now ? { now: deps.now } : {}),
+        ...(deps.clock ? { clock: deps.clock } : {}),
         log,
       },
     );
