@@ -61,6 +61,16 @@ describe("realVerifyAdapter git primitives (real repos)", () => {
 
     await exec("git", ["init", "--bare", "-b", "main", origin], { env: GIT_ENV });
     await exec("git", ["clone", origin, work], { env: GIT_ENV });
+    // GIT_ENV covers the calls THIS file makes; it does not reach the calls the
+    // adapter makes. `syncWithSource` runs `git merge` with the ambient
+    // environment (unlike merger.ts, which passes GIT_AUTHOR_*/GIT_COMMITTER_*
+    // from botName), so it commits with whatever identity the repo can find —
+    // which on a bare container or a CI runner is none, and the merge fails
+    // with "Committer identity unknown" instead of the conflict/success the
+    // test is about. Repo-local, so the file keeps its promise not to depend on
+    // the developer's git config.
+    await git(work, "config", "user.name", "T");
+    await git(work, "config", "user.email", "t@e");
     await commit(work, "a.txt", "one\n");
     await git(work, "push", "origin", "HEAD:refs/heads/main");
     // The merger worktree is DETACHED — no branch, no upstream, which is why

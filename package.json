@@ -26,6 +26,7 @@
     "build": "rm -rf dist && tsc",
     "check": "tsc --noEmit",
     "test": "vitest run",
+    "sandbar": "npm run build && node dist/cli.js",
     "prepare": "npm run build",
     "preversion": "npm run check && npm test",
     "postversion": "git push --follow-tags"
