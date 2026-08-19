@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Read @AGENTS.md first. It holds the working rules that apply to every commit made
+here (starting with: bump the version in the same commit), and it is shared with
+the sandbar agents — `sandbar.config.mjs` names it as an anchor doc, so they get
+an `@ref` to it directly rather than through this import. The rest of this file is
+architecture.
+
 ## Commands
 
 - `npm run build` — compile `src/` → `dist/` via `tsc` (also runs on `prepare`).

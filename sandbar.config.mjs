@@ -27,6 +27,15 @@ export default {
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
 
+  // The working rules every agent committing here follows (bump the version in
+  // the same commit, and whatever joins it). Named outright so the prompt
+  // builders emit `Context: @AGENTS.md` in the project anchor, rather than
+  // leaving the agent to follow the import out of CLAUDE.md — two routes to one
+  // file, neither load-bearing alone. The default is `CONTEXT.md`, which this
+  // repo does not have and which is silently dropped, so this line costs
+  // nothing it was not already spending.
+  contextMdPath: "AGENTS.md",
+
   sandboxHooks: {
     host: {
       // `node_modules` is installed on the HOST, into the gated worktree, and
