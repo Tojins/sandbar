@@ -552,15 +552,29 @@ describe("createSandbox integration (local provider)", () => {
     try {
       const agent = scriptedAgent(`printf '%s\\n' 'ok'`);
       await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
-      // The run() lifecycle wrote these into GIT_CONFIG_GLOBAL.
-      const name = await execFileP("git", ["config", "--global", "user.name"]);
+      // The run() lifecycle wrote these into GIT_CONFIG_GLOBAL. Both reads
+      // NAME the directory they run in, and that is not tidiness (#25): even
+      // `git config --global` discovers a repository from its working
+      // directory, and a BROKEN gitlink there is a fatal 128 rather than a
+      // shrug. The gate runner mounts the worktree at /workspace and nothing
+      // else, so /workspace/.git points at a `.sandbar/repo.git/worktrees/...`
+      // path no container can see — an ambient-cwd git call therefore passes on
+      // a developer's host and fatals in the gate, which is the same trap as
+      // the ambient git-identity one CLAUDE.md already records, one directory
+      // over. `gitConfigDir` is a plain temp dir, so these answers can only
+      // have come from the global file this suite points at.
+      const at = { cwd: gitConfigDir };
+      const name = await execFileP(
+        "git",
+        ["config", "--global", "user.name"],
+        at,
+      );
       expect(name.stdout.trim()).toBe("Test Host");
-      const safe = await execFileP("git", [
-        "config",
-        "--global",
-        "--get-all",
-        "safe.directory",
-      ]);
+      const safe = await execFileP(
+        "git",
+        ["config", "--global", "--get-all", "safe.directory"],
+        at,
+      );
       expect(safe.stdout).toContain(sandbox.worktreePath);
     } finally {
       await sandbox.close();
