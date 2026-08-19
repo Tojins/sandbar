@@ -8,8 +8,7 @@
 // safe.directory, commit capture, the result||stdout fallback, env isolation,
 // and the two-phase completion timer (F5).
 
-import { execFile } from "node:child_process";
-import { spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -249,6 +248,20 @@ describe("worktree path layout", () => {
 // A fake provider whose handle runs commands locally (`sh -c`) against the host
 // worktree path — the model the upstream test suite used. It replicates the
 // onLine readline join and captures the env it was handed.
+//
+// Its `close()` KILLS whatever it still has running (#25). The real provider's
+// close removes a container, which takes every process inside it; this one had
+// no equivalent and simply resolved, so a test whose command outlives the
+// `run()` that started it handed the child to init. That is not hypothetical
+// here: the F5 grace test resolves on a 0.2s completion timer while its command
+// is deliberately still in `sleep 30`, so every `npm test` leaked two processes
+// (the `sh` and its `sleep`) for 30s on a clean run.
+//
+// `detached: true` is the load-bearing half. Killing the `sh` pid alone leaves
+// its `sleep` child reparented to init — the leak, minus one process. Detached,
+// `sh` is a process-group leader, and `process.kill(-pid)` reaches the whole
+// group. Same reason a `timeout`-wrapped vitest run has to kill the group: the
+// pid is never the whole of what was started.
 function makeLocalProvider(): SandboxProvider & {
   capturedEnv?: Record<string, string>;
   capturedMounts?: readonly Mount[];
@@ -267,6 +280,7 @@ function makeLocalProvider(): SandboxProvider & {
       // sandboxRepoDir resolves to this handle.worktreePath; point it at the
       // real host worktree so local git runs in the right place.
       const worktreePath = opts.worktreePath;
+      const live = new Set<ChildProcess>();
       return {
         worktreePath,
         exec: (command, execOpts) =>
@@ -274,12 +288,16 @@ function makeLocalProvider(): SandboxProvider & {
             const proc = spawn("sh", ["-c", command], {
               cwd: execOpts?.cwd ?? worktreePath,
               env: { ...process.env },
+              detached: true,
               stdio: [
                 execOpts?.stdin !== undefined ? "pipe" : "ignore",
                 "pipe",
                 "pipe",
               ],
             });
+            live.add(proc);
+            proc.on("close", () => live.delete(proc));
+            proc.on("error", () => live.delete(proc));
             if (execOpts?.stdin !== undefined && proc.stdin) {
               // Same guard the real provider needs: `sh -c` can exit before
               // reading stdin, and an unlistened EPIPE surfaces as an uncaught
@@ -321,7 +339,21 @@ function makeLocalProvider(): SandboxProvider & {
               );
             }
           }),
-        close: async () => {},
+        close: async () => {
+          for (const proc of live) {
+            // Negative pid = the process group, which `detached: true` above is
+            // what makes exist. Swallowing is right: the group is already gone
+            // whenever the child exited between the `close` handler and here.
+            if (proc.pid !== undefined) {
+              try {
+                process.kill(-proc.pid, "SIGKILL");
+              } catch {
+                /* already reaped */
+              }
+            }
+          }
+          live.clear();
+        },
       };
     },
   };

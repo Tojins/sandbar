@@ -4,6 +4,7 @@ import { SandbarError } from "./errors.js";
 import {
   type CheckRunListing,
   type ChecksOutcome,
+  type Clock,
   type ExecFn,
   type ForgeCheckRun,
   type PullRequestRef,
@@ -14,7 +15,9 @@ import {
   aggregateCheckRuns,
   buildForgeRedTrace,
   jobIdFromDetailsUrl,
+  POLL_CEILING_SLACK,
   latestPerCheck,
+  maxPollsFor,
   realVerifyAdapter,
   runVerifiedLanding,
   verifiedLandingOptionsFrom,
@@ -284,7 +287,10 @@ describe("verifiedLandingOptionsFrom", () => {
 // waitForChecks — fake clock, no real timers.
 // ---------------------------------------------------------------------------
 
-function fakeClock(stepMs: number) {
+// A `Clock` (#25), which is what makes this the only fake time available here:
+// `waitForChecks` takes the pacing and the deadline as one object, so a test
+// cannot hand it a no-op sleep and leave the deadline on Date.now().
+function fakeClock(stepMs: number): Clock & { advance(ms: number): void } {
   let t = 0;
   return {
     now: () => t,
@@ -311,8 +317,7 @@ describe("waitForChecks", () => {
     let calls = 0;
     const out = await waitForChecks("sha1", opts, {
       listCheckRuns: async () => listing(pages[calls++] ?? []),
-      sleep: clock.sleep,
-      now: clock.now,
+      clock,
     });
     expect(out).toEqual({ kind: "green", names: ["tests"] });
     // 3 to reach green + 1 to confirm nothing new appeared.
@@ -331,8 +336,7 @@ describe("waitForChecks", () => {
     let calls = 0;
     const out = await waitForChecks("sha1", opts, {
       listCheckRuns: async () => listing(pages[Math.min(calls++, 1)] ?? []),
-      sleep: clock.sleep,
-      now: clock.now,
+      clock,
     });
     expect(out.kind).toBe("red");
   });
@@ -349,8 +353,7 @@ describe("waitForChecks", () => {
           runs: [run({ name: "tests" })],
           complete: false,
         }),
-        sleep: clock.sleep,
-        now: clock.now,
+        clock,
       },
     );
     expect(out.kind).toBe("timeout");
@@ -361,8 +364,7 @@ describe("waitForChecks", () => {
     const failing = run({ name: "tests", conclusion: "failure" });
     const out = await waitForChecks("sha1", opts, {
       listCheckRuns: async () => listing([failing]),
-      sleep: clock.sleep,
-      now: clock.now,
+      clock,
     });
     expect(out).toEqual({ kind: "red", failed: [failing] });
   });
@@ -372,8 +374,7 @@ describe("waitForChecks", () => {
     const out = await waitForChecks("sha1", { ...opts, timeoutMs: 5_000 }, {
       listCheckRuns: async () =>
         listing([run({ name: "browser", status: "in_progress", conclusion: null })]),
-      sleep: clock.sleep,
-      now: clock.now,
+      clock,
     });
     expect(out).toEqual({ kind: "timeout", waitingOn: ["browser"] });
   });
@@ -385,8 +386,7 @@ describe("waitForChecks", () => {
       { ...opts, timeoutMs: 600_000, pollIntervalMs: 1_000 },
       {
         listCheckRuns: async () => listing([]),
-        sleep: clock.sleep,
-        now: clock.now,
+        clock,
       },
     );
     expect(out.kind).toBe("no-checks");
@@ -403,8 +403,7 @@ describe("waitForChecks", () => {
         if (calls <= 2) throw new Error("HTTP 502");
         return listing([run({ name: "tests" })]);
       },
-      sleep: clock.sleep,
-      now: clock.now,
+      clock,
     });
     expect(out.kind).toBe("green");
   });
@@ -416,10 +415,79 @@ describe("waitForChecks", () => {
         listCheckRuns: async () => {
           throw new Error("HTTP 502");
         },
-        sleep: clock.sleep,
-        now: clock.now,
+        clock,
       }),
     ).rejects.toThrow("502");
+  });
+
+  // #25. The type now makes the half-injected clock unwritable, but the ceiling
+  // has to hold for any future caller that fakes time some other way (a stubbed
+  // Date.now, a clock whose sleep silently stops advancing after N calls). A
+  // frozen clock makes every exit from the loop unreachable — `elapsed` is
+  // always 0 — so without the ceiling this call does not fail, it spins one core
+  // for as long as the process lives, in a fork worker that outlives the
+  // vitest parent that was supposed to bound it.
+  it("throws instead of spinning when its clock never advances", async () => {
+    const frozen: Clock = { now: () => 5_000, sleep: async () => {} };
+    let calls = 0;
+    await expect(
+      waitForChecks(
+        "sha1",
+        { timeoutMs: 600_000, pollIntervalMs: 1_000 },
+        {
+          listCheckRuns: async () => {
+            calls++;
+            return listing([
+              run({ name: "tests", status: "in_progress", conclusion: null }),
+            ]);
+          },
+          clock: frozen,
+        },
+      ),
+    ).rejects.toThrow(/not advancing/);
+    // And it gave up AT the ceiling rather than somewhere unbounded — the
+    // check is at the top of the loop, so the poll that trips it is not made.
+    expect(calls).toBe(maxPollsFor(600_000, 1_000));
+  });
+
+  it("does not trip the ceiling on a clock that does advance", async () => {
+    // The bound is a backstop, never a second deadline: an honest poll reaches
+    // `elapsed >= timeoutMs` with the ceiling's slack untouched.
+    const clock = fakeClock(1_000);
+    let calls = 0;
+    const out = await waitForChecks(
+      "sha1",
+      { timeoutMs: 600_000, pollIntervalMs: 1_000 },
+      {
+        listCheckRuns: async () => {
+          calls++;
+          return listing([
+            run({ name: "tests", status: "in_progress", conclusion: null }),
+          ]);
+        },
+        clock,
+      },
+    );
+    expect(out.kind).toBe("timeout");
+    expect(calls).toBeLessThan(maxPollsFor(600_000, 1_000));
+  });
+});
+
+describe("maxPollsFor", () => {
+  it("allows every poll the deadline itself does, plus slack", () => {
+    expect(maxPollsFor(60_000, 1_000)).toBe(60 + POLL_CEILING_SLACK);
+  });
+
+  it("floors a non-positive or non-finite interval rather than trusting it", () => {
+    // `waitForChecks` is exported and callable with options no config produced.
+    // A NaN interval must yield a usable bound — a NaN one compares false
+    // against every count, which is the unbounded loop this exists to catch.
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const n = maxPollsFor(1_000, bad);
+      expect(Number.isFinite(n)).toBe(true);
+      expect(n).toBeGreaterThan(0);
+    }
+    expect(maxPollsFor(Number.NaN, 1_000)).toBe(POLL_CEILING_SLACK);
   });
 });
 
@@ -591,7 +659,7 @@ async function land(
   const clock = fakeClock(1_000);
   const result = await runVerifiedLanding(
     { ...baseOptions, ...over },
-    { verify, resolve, sleep: clock.sleep, now: clock.now },
+    { verify, resolve, clock },
   );
   return { result, calls };
 }
@@ -1261,7 +1329,7 @@ describe("realVerifyAdapter.listCheckRuns — completeness", () => {
       await waitForChecks(
         "sha1",
         { timeoutMs: 10, pollIntervalMs: 5 },
-        { listCheckRuns: async () => out, now: clock.now, sleep: clock.sleep },
+        { listCheckRuns: async () => out, clock },
       ),
     ).toMatchObject({ kind: "timeout" });
   });
@@ -1362,8 +1430,7 @@ describe("waitForChecks — settle semantics", () => {
     let calls = 0;
     const out = await waitForChecks("sha1", opts, {
       listCheckRuns: async () => listing(pages[calls++] ?? []),
-      sleep: clock.sleep,
-      now: clock.now,
+      clock,
     });
     expect(out).toMatchObject({ kind: "green" });
     // 3, not 2: the changed run set restarted the streak rather than
@@ -1382,8 +1449,7 @@ describe("waitForChecks — settle semantics", () => {
     let calls = 0;
     const out = await waitForChecks("sha1", opts, {
       listCheckRuns: async () => listing(pages[calls++] ?? []),
-      sleep: clock.sleep,
-      now: clock.now,
+      clock,
     });
     expect(out).toMatchObject({ kind: "green" });
     // The green at poll 1 does not combine with the green at poll 3.
@@ -1409,8 +1475,7 @@ describe("waitForChecks — settle semantics", () => {
         if (s === "boom" || s === undefined) throw new Error("502");
         return listing(s);
       },
-      sleep: clock.sleep,
-      now: clock.now,
+      clock,
     });
     expect(out).toMatchObject({ kind: "green" });
   });
@@ -1428,8 +1493,7 @@ describe("waitForChecks — settle semantics", () => {
         listCheckRuns: async () => {
           throw new Error("network down");
         },
-        sleep: clock.sleep,
-        now: clock.now,
+        clock,
       },
     );
     expect(out.kind).toBe("timeout");
@@ -1444,8 +1508,7 @@ describe("waitForChecks — settle semantics", () => {
       { timeoutMs: 5_000, pollIntervalMs: 1_000, noChecksGraceMs: 1_000 },
       {
         listCheckRuns: async () => ({ runs: [], complete: false }),
-        sleep: clock.sleep,
-        now: clock.now,
+        clock,
       },
     );
     expect(out.kind).toBe("timeout");
@@ -1465,8 +1528,7 @@ describe("waitForChecks — a required check that never appears", () => {
       { ...base, requiredChecks: ["test"] },
       {
         listCheckRuns: async () => listing([run({ name: "test (20.x)" })]),
-        sleep: clock.sleep,
-        now: clock.now,
+        clock,
       },
     );
     expect(out).toEqual({ kind: "missing-required", names: ["test"] });
@@ -1490,8 +1552,7 @@ describe("waitForChecks — a required check that never appears", () => {
               : [run({ name: "build" }), run({ name: "deploy", id: 2 })],
           );
         },
-        sleep: clock.sleep,
-        now: clock.now,
+        clock,
       },
     );
     expect(out).toMatchObject({ kind: "green" });
@@ -1514,8 +1575,7 @@ describe("waitForChecks — a required check that never appears", () => {
               : [run({ name: "build" }), run({ name: "deploy", id: 2 })],
           );
         },
-        sleep: clock.sleep,
-        now: clock.now,
+        clock,
       },
     );
     expect(out).toMatchObject({ kind: "green" });

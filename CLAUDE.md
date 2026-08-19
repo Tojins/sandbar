@@ -15,6 +15,8 @@ architecture.
 - `npm test` — run the Vitest suite (`vitest run`, non-watch).
 - `npx vitest run src/plan-resolver.test.ts` — run a single test file. Add `-t "<name>"` to filter by test name.
 
+**Whatever bounds a test run has to kill the process GROUP, not the pid (#25).** Vitest's fork pool runs each file in a separate *process*, so a worker that gets stuck — a spin, not a hang — outlives anything that kills only the top of the tree: it reparents to init, keeps burning a full core, and leaves nothing on screen to say it exists. Bare `timeout 90 npx vitest run <file>` is fine and was checked (GNU `timeout` puts the command in its own process group and signals the group), but two things reach for the pid alone and are what actually leaked: `timeout --foreground`, which is documented to signal only the child, and a Python harness's `subprocess.run(..., timeout=N)`, whose timeout path calls `Popen.kill()` on the direct child and abandons its descendants. From Python use `start_new_session=True` + `os.killpg`. After any run you interrupted, `ps -ef | grep [f]orks.js` is the check — a leftover there is measured in cores, not megabytes. The production-side half of this is in `forge-verify.ts`'s header: a poll's pacing and its deadline must come from the same clock, or a faked one turns the wait into exactly that spin.
+
 Node ≥ 20 is required. The package is ESM (`"type": "module"`); imports inside `src/` use the `.js` extension even when the on-disk file is `.ts` (NodeNext resolution).
 
 ## What this package is

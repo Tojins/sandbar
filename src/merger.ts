@@ -101,6 +101,7 @@ import { type EnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
 import { dirtyWorktreePaths } from "./git-ops.js";
 import {
+  type Clock,
   type VerifiedFailureReason,
   type VerifiedLandingOptions,
   type VerifyAdapter,
@@ -373,9 +374,11 @@ export type RunMergerOptions = {
       VerifiedLandingOptions,
       "mergedIssues" | "cycleIssues" | "projectAnchor"
     >;
-    // Test seams for the check-poll clock.
-    readonly sleep?: (ms: number) => Promise<void>;
-    readonly now?: () => number;
+    // Test seam for the check-poll clock. ONE object, not a sleep and a now:
+    // the poll's pacing and its deadline both read from it, and a caller able
+    // to fake one while leaving the other real turns the wait into a full-core
+    // spin (#25). See `Clock` in forge-verify.ts.
+    readonly clock?: Clock;
   };
 };
 
@@ -628,8 +631,7 @@ export async function runMergerWithAdapter(
         verify: verified.adapter,
         resolve: adapter,
         log: resolveLog,
-        ...(verified.sleep ? { sleep: verified.sleep } : {}),
-        ...(verified.now ? { now: verified.now } : {}),
+        ...(verified.clock ? { clock: verified.clock } : {}),
       },
     ).catch(haltVerified);
 
