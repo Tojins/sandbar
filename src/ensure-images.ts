@@ -336,12 +336,15 @@ export async function buildImage(
 // fingerprint each participating tag is now built from — the baseline the
 // per-branch resolver compares each gated worktree against.
 //
-// `contextRoot` is the host checkout (`config.cwd`). Passing it explicitly
-// rather than leaning on the process's cwd is not cosmetic: the fingerprint is
-// a claim about the tree the image was built from, so the build and the hash
-// have to be rooted at the same place, and a consumer that sets `config.cwd`
-// away from the process cwd previously built from one and would have hashed the
-// other.
+// `contextRoot` is `<workDir>/worktrees/source`, detached at
+// `origin/<sourceBranch>` (#38) — NOT the operator's checkout, which is what it
+// was until the state directory stopped being a checkout at all. The
+// fingerprint is a claim about the tree the image was built from, so that tree
+// has to be a commit: rooted at `config.cwd` the claim was about whatever the
+// operator happened to have in their working tree, uncommitted edits included.
+// Passing it explicitly rather than leaning on the process's cwd is the same
+// argument one level down — the build and the hash have to be rooted at the
+// same place.
 export async function ensureImages(
   images: readonly BuiltImage[],
   contextRoot: string,

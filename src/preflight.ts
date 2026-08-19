@@ -160,8 +160,12 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
       ok: false,
       message:
         `\`origin/${s.sourceBranch}\` does not exist in sandbar's object cache ` +
-        "after fetch. Check that the branch exists on the `origin` your " +
-        "checkout points at.",
+        "after fetch. Either the branch does not exist on the `origin` your " +
+        "checkout points at, or the fetch itself failed — sandbar's cache is " +
+        "a fresh clone and carries none of your checkout's repo-local git " +
+        "config, so a deploy key or credential helper set with plain " +
+        "`git config` (rather than `--global`) does not reach it. `git -C " +
+        "<workDir>/repo.git fetch origin` will say which.",
     });
   }
   if (s.unmergedIssueBranches.length > 0) {

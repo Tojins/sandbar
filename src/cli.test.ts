@@ -4,9 +4,13 @@
 // cases that matter are the refusals: a mistyped flag that parsed as "no
 // arguments" would silently run the DEFAULT config, which on a machine with
 // several repos is a run against the wrong one.
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 
-import { parseArgs } from "./cli.js";
+import { loadConfig, parseArgs, withDefaultCwd } from "./cli.js";
+import type { RunConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
 
 describe("parseArgs", () => {
@@ -58,5 +62,117 @@ describe("parseArgs", () => {
       /--config needs a path/,
     );
     expect(() => parseArgs(["--config="])).toThrow(/--config needs a path/);
+  });
+});
+
+// The bin's headline behaviour. A test that runs from the directory it points
+// at cannot see this — `process.cwd()` and `dirname(configPath)` coincide and
+// it passes with the default deleted — so every case here names a config path
+// somewhere the process is NOT standing.
+describe("withDefaultCwd", () => {
+  const cfg = (over: Partial<RunConfig> = {}) =>
+    ({ sourceBranch: "main", ...over }) as RunConfig;
+
+  it("defaults cwd to the directory holding the config file", () => {
+    expect(withDefaultCwd(cfg(), "/repos/widgets/sandbar.config.mjs").cwd).toBe(
+      "/repos/widgets",
+    );
+    expect(withDefaultCwd(cfg(), "/repos/widgets/sandbar.config.mjs").cwd).not.toBe(
+      process.cwd(),
+    );
+  });
+
+  it("leaves an explicit cwd alone", () => {
+    expect(
+      withDefaultCwd(cfg({ cwd: "/elsewhere" }), "/repos/widgets/sandbar.config.mjs")
+        .cwd,
+    ).toBe("/elsewhere");
+  });
+
+  // A spread with the default first would let this key overwrite it and fall
+  // through to `process.cwd()` — the behaviour the default exists to make
+  // unreachable, restored by the shape of the merge.
+  it("treats an explicitly-undefined cwd as absent, not as an override", () => {
+    expect(
+      withDefaultCwd(cfg({ cwd: undefined }), "/repos/widgets/sandbar.config.mjs")
+        .cwd,
+    ).toBe("/repos/widgets");
+  });
+
+  it("does not otherwise touch the config", () => {
+    const c = cfg({ sourceBranch: "trunk", workDir: ".state" });
+    expect(withDefaultCwd(c, "/r/sandbar.config.mjs")).toMatchObject({
+      sourceBranch: "trunk",
+      workDir: ".state",
+    });
+  });
+});
+
+// Each branch is an operator-facing message on the very first thing the bin
+// does, so each is reached with a real file rather than a mock.
+describe("loadConfig", () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
+  });
+
+  const write = async (body: string, name = "sandbar.config.mjs") => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbar-cli-"));
+    dirs.push(dir);
+    const path = join(dir, name);
+    await writeFile(path, body);
+    return path;
+  };
+
+  it("returns the default export", async () => {
+    const path = await write('export default { sourceBranch: "main" };\n');
+    await expect(loadConfig(path)).resolves.toEqual({ sourceBranch: "main" });
+  });
+
+  it("survives top-level await, because the config is a program", async () => {
+    const path = await write(
+      'const b = await Promise.resolve("trunk");\nexport default { sourceBranch: b };\n',
+    );
+    await expect(loadConfig(path)).resolves.toEqual({ sourceBranch: "trunk" });
+  });
+
+  it("says so when there is no config, and does not search upward", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbar-cli-"));
+    dirs.push(dir);
+    await expect(loadConfig(join(dir, "sandbar.config.mjs"))).rejects.toThrow(
+      /does not search parent directories/,
+    );
+  });
+
+  it("reports a config that throws on import as a load failure", async () => {
+    const path = await write('throw new Error("boom");\n');
+    await expect(loadConfig(path)).rejects.toThrow(/Failed to load the sandbar config/);
+  });
+
+  it("refuses a config with no default export", async () => {
+    const path = await write('export const config = { sourceBranch: "main" };\n');
+    await expect(loadConfig(path)).rejects.toThrow(/has no default export/);
+  });
+
+  // The factory shape is the plausible wrong guess, and it has to be named
+  // rather than falling into the generic "not an object" message: config files
+  // may use top-level await, so a factory buys nothing.
+  it("refuses a default-exported function", async () => {
+    const path = await write('export default () => ({ sourceBranch: "main" });\n');
+    await expect(loadConfig(path)).rejects.toThrow(/default-exports a function/);
+  });
+
+  it.each([
+    ["a string", 'export default "main";\n'],
+    ["an array", "export default [];\n"],
+    ["null", "export default null;\n"],
+  ])("refuses %s as the config", async (_name, body) => {
+    const path = await write(body);
+    await expect(loadConfig(path)).rejects.toThrow(/default-exports a/);
+  });
+
+  it("throws SandbarError, so the bin prints a message rather than a stack", async () => {
+    const path = await write("export default 1;\n");
+    await expect(loadConfig(path)).rejects.toBeInstanceOf(SandbarError);
   });
 });

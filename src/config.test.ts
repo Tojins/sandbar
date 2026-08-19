@@ -408,4 +408,34 @@ describe("resolveConfig — env is a record, passed through", () => {
     });
     expect(here.env).toEqual(elsewhere.env);
   });
+
+  it("defaults to an empty record", () => {
+    expect(resolveConfig({ ...minimal }).env).toEqual({});
+  });
+
+  // The config is a program, so nothing type-checks it at the host, and #38
+  // removed the dotenv parser that used to guarantee the shape. A string here
+  // reaches `Object.keys` and exports a dozen single-character variables into
+  // every container while the credential check reports GH_TOKEN missing.
+  it.each([
+    ["a string", "GH_TOKEN=x"],
+    ["an array", ["GH_TOKEN=x"]],
+    ["null", null],
+  ])("refuses %s in place of the record", (_name, value) => {
+    expect(() =>
+      resolveConfig({ ...minimal, env: value as never }),
+    ).toThrow(/config\.env must be an object/);
+  });
+
+  it("refuses a non-string value", () => {
+    expect(() =>
+      resolveConfig({ ...minimal, env: { GH_TOKEN: 42 as never } }),
+    ).toThrow(/config\.env\['GH_TOKEN'\] must be a string/);
+  });
+
+  it("refuses a key that is not a usable variable name", () => {
+    expect(() =>
+      resolveConfig({ ...minimal, env: { "GH-TOKEN": "x" } }),
+    ).toThrow(/not a usable environment variable name/);
+  });
 });

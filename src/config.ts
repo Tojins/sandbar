@@ -519,6 +519,49 @@ function requirePositiveMs(label: string, value: number): number {
   return value;
 }
 
+// `config.env` is the one field #38 turned from a path into a value, so it is
+// also the one field that stopped being validated by a parser. `readEnvFile`
+// guaranteed a `Record<string, string>`; a config file writing
+// `env: "GH_TOKEN=x"` now type-checks nowhere (the config is a program, not a
+// schema) and reaches `Object.keys`, which yields "0", "1", "2"… — a dozen
+// single-character variables exported into every sandbox while the credential
+// check reports GH_TOKEN missing. Rejected at resolve time, before the lock,
+// like every other shape mistake in this file.
+export function resolveEnv(
+  env: Record<string, string> | undefined,
+): Record<string, string> {
+  if (env === undefined) return {};
+  if (typeof env !== "object" || env === null || Array.isArray(env)) {
+    throw new SandbarError(
+      "config.env must be an object mapping variable names to values " +
+        `(got ${Array.isArray(env) ? "an array" : typeof env}). It is the ` +
+        "record itself, not a path to a file — use `readEnvFile(<path>)` to " +
+        "build one from a dotenv file.",
+    );
+  }
+  const out: Record<string, string> = {};
+  for (const key of Object.keys(env)) {
+    const value = env[key];
+    if (typeof value !== "string") {
+      throw new SandbarError(
+        `config.env['${key}'] must be a string (got ${value === null ? "null" : typeof value}). ` +
+          'Use "" to inherit the value from this process\'s environment.',
+      );
+    }
+    // The allowlist is exported into a container as environment variables, so
+    // a key that is not a valid variable name cannot be set and would be
+    // dropped silently by the runtime rather than by sandbar.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new SandbarError(
+        `config.env has the key '${key}', which is not a usable environment ` +
+          "variable name (letters, digits and underscore, not starting with a digit).",
+      );
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
 export function resolveMergeMode(
   mode: MergeModeConfig | undefined,
   sourceBranch: string,
@@ -1022,7 +1065,7 @@ function resolveRebuildOn(img: BuiltImage): readonly string[] {
   }
   // The per-branch rebuild re-roots the build at the gated worktree
   // (`<worktree>/<containerfile>`), which an absolute path cannot express: it
-  // would rebuild from the host checkout and answer the same wrong question
+  // would rebuild from the source worktree and answer the same wrong question
   // the whole feature exists to stop answering.
   if (img.containerfile.startsWith("/")) {
     throw new SandbarError(
@@ -1048,8 +1091,8 @@ function resolveRebuildOn(img: BuiltImage): readonly string[] {
       throw new SandbarError(
         `config.images: entry '${img.tag}' has an absolute \`rebuildOn\` path ` +
           `('${path}'). These are repo-relative — they are resolved against ` +
-          "the host checkout and against each gated worktree in turn, and an " +
-          "absolute path would name the same file both times.",
+          "the source worktree and against each gated worktree in turn, and " +
+          "an absolute path would name the same file both times.",
       );
     }
     const segments = path.split("/");
@@ -1220,7 +1263,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     // default is a real configuration — a host that supplies every credential
     // through the process environment still has to DECLARE the keys, because
     // the fallback is per declared key and never a wholesale leak.
-    env: config.env ?? {},
+    env: resolveEnv(config.env),
     maxImplAttempts: config.maxImplAttempts ?? DEFAULT_MAX_IMPL_ATTEMPTS,
     maxReviewRounds: config.maxReviewRounds ?? DEFAULT_MAX_REVIEW_ROUNDS,
     maxTotalIssues: config.maxTotalIssues ?? DEFAULT_MAX_TOTAL_ISSUES,

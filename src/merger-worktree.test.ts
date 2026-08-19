@@ -164,4 +164,24 @@ describe("createMergerWorktree (real git)", () => {
 
     await wt.remove();
   });
-});
+
+
+  // Not `[]`. Since #38 the merger worktree is always a linked worktree of the
+  // bare cache, so the mount is always required — an empty list means
+  // in-container git cannot follow the gitlink and every command the resolve
+  // agent runs fails with "not a git repository", which the loop then reads as
+  // the agent's own doing. Swallowing it is the same silence #38 removed from
+  // `resolveGitMounts` one file over.
+  it("gitMountsForWorktree throws rather than returning [] when it cannot answer", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbar-nogit-"));
+    dirs.push(dir);
+
+    // No `.git` at all.
+    await expect(gitMountsForWorktree(dir)).rejects.toThrow(/No `\.git`/);
+
+    // A gitlink that names nothing.
+    await writeFile(join(dir, ".git"), "not a gitlink\n");
+    await expect(gitMountsForWorktree(dir)).rejects.toThrow(
+      /does not name a git directory/,
+    );
+  });});

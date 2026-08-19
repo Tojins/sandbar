@@ -9,7 +9,7 @@
 // silently turns their branch into a preflight refusal.
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -264,5 +264,119 @@ describe("ensureSourceWorktree (real git)", () => {
 
     const path = await ensureSourceWorktree(layout, "main");
     expect(existsSync(join(path, "a.txt"))).toBe(true);
+  });
+});
+
+// The state `rm -rf .sandbar` leaves when it is interrupted, and the one this
+// whole design has to survive: a directory that exists inside the operator's
+// checkout and is not a repository. `git rev-parse --git-dir` answers 0 there
+// — with the operator's own `.git` — so a probe that lets git DISCOVER the
+// repo reports the cache as present and points every later call, `branch -D`
+// and `reset --hard` included, at the human's repository.
+//
+// These cases build the degenerate states directly. A fixture that builds a
+// valid cache cannot see the bug: every assertion above passes with the
+// discovering probe restored.
+describe("a directory is not a repository just because git finds one above it", () => {
+  it("does not mistake a non-repo `repo.git` inside the checkout for the cache", async () => {
+    const { checkout } = await setup();
+    await git(checkout, "branch", "my-wip");
+    await git(checkout, "branch", "sandbar/issue-1-x");
+    const layout = repoLayout(checkout, ".sandbar");
+    // What an interrupted `rm -rf` leaves: the directory shell, no repository.
+    await mkdir(layout.repoDir, { recursive: true });
+
+    await ensureRepoCache(layout);
+
+    // A real cache was built, rather than the operator's repo being adopted
+    // as one. Both halves matter: bare, and holding none of their branches.
+    expect(
+      (await git(layout.repoDir, "rev-parse", "--is-bare-repository")).stdout.trim(),
+    ).toBe("true");
+    expect(await refs(layout.repoDir, "refs/heads/")).toEqual([]);
+    expect(await refs(layout.repoDir, "refs/remotes/origin/")).toContain(
+      "refs/remotes/origin/main",
+    );
+    // And the operator still has everything they had.
+    expect(await refs(checkout, "refs/heads/")).toEqual([
+      "refs/heads/main",
+      "refs/heads/my-wip",
+      "refs/heads/sandbar/issue-1-x",
+    ]);
+  });
+
+  // The same trap on the other probe, where the recovery path is `reset --hard`
+  // — so a mis-answer does not merely adopt the operator's repo, it moves their
+  // branch and orphans unpushed commits.
+  it("does not mistake a plain directory inside the checkout for the source worktree", async () => {
+    const { checkout } = await setup();
+    const layout = repoLayout(checkout, ".sandbar");
+    await ensureRepoCache(layout);
+    await ensureSourceWorktree(layout, "main");
+
+    // A partially-removed state directory: the path is there, the worktree is
+    // not. (`rm` empties depth-first, so a directory shell is what an
+    // interrupted `rm -rf .sandbar` leaves behind.)
+    await rm(layout.sourceWorktree, { recursive: true, force: true });
+    await rm(join(layout.repoDir, "worktrees"), { recursive: true, force: true });
+    await mkdir(layout.sourceWorktree, { recursive: true });
+    // The operator has work that only exists locally.
+    await writeFile(join(checkout, "b.txt"), "unpushed\n");
+    await git(checkout, "add", "-A");
+    await git(checkout, "commit", "-qm", "unpushed work");
+    const before = (await git(checkout, "rev-parse", "HEAD")).stdout.trim();
+
+    await ensureSourceWorktree(layout, "main");
+
+    // Their commit is still their branch's tip...
+    expect((await git(checkout, "rev-parse", "HEAD")).stdout.trim()).toBe(before);
+    // Tracked paths only: the state directory itself is legitimately untracked
+    // here (this fixture has no gitignore for it).
+    expect(
+      (await git(checkout, "status", "--porcelain", "-uno")).stdout.trim(),
+    ).toBe("");
+    // ...and the source worktree is a real worktree of the cache again.
+    expect(
+      (await git(layout.sourceWorktree, "rev-parse", "--git-common-dir")).stdout.trim(),
+    ).toBe(layout.repoDir);
+  });
+});
+
+// #38's head-deletion and initial fetch used to run only on the creation path,
+// so a run killed between the clone and the deletion left a structurally valid
+// bare repo carrying the operator's branches — and no later run ever looked
+// again. Creation is atomic now: `repo.git` exists only once it is finished.
+describe("cache creation is all-or-nothing", () => {
+  it("leaves no half-prepared cache to be adopted after an interrupted create", async () => {
+    const { checkout } = await setup();
+    await git(checkout, "branch", "sandbar/issue-42-stale");
+    const layout = repoLayout(checkout, ".sandbar");
+
+    // Exactly what dying between the clone and the preparation produces.
+    await mkdir(layout.stateDir, { recursive: true });
+    await exec("git", ["clone", "--bare", "--quiet", checkout, layout.repoDir]);
+    expect(await refs(layout.repoDir, "refs/heads/")).toContain(
+      "refs/heads/sandbar/issue-42-stale",
+    );
+
+    await ensureRepoCache(layout);
+
+    // Not adopted: the imported branches are gone and the remote refs exist,
+    // which together mean every skipped step ran.
+    expect(await refs(layout.repoDir, "refs/heads/")).toEqual([]);
+    expect(await refs(layout.repoDir, "refs/remotes/origin/")).toContain(
+      "refs/remotes/origin/main",
+    );
+  });
+
+  it("does not publish the cache before it is prepared", async () => {
+    const { checkout } = await setup();
+    await git(checkout, "branch", "sandbar/issue-7-x");
+    const layout = repoLayout(checkout, ".sandbar");
+    await ensureRepoCache(layout);
+
+    // The scratch name is not left behind on the happy path.
+    expect(existsSync(`${layout.repoDir}.incoming`)).toBe(false);
+    expect(await refs(layout.repoDir, "refs/heads/")).toEqual([]);
   });
 });

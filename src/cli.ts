@@ -103,7 +103,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   return { kind: "run", configPath: configPath ?? DEFAULT_CONFIG_FILE };
 }
 
-async function loadConfig(configPath: string): Promise<RunConfig> {
+// Exported for cli.test.ts: every branch below is an operator-facing message
+// on a path that only ever fires against a real file on disk.
+export async function loadConfig(configPath: string): Promise<RunConfig> {
   if (!existsSync(configPath)) {
     throw new SandbarError(
       `No sandbar config at ${configPath}.\n` +
@@ -170,13 +172,26 @@ async function main(): Promise<void> {
   // reasonably mean by a relative path — and the last place process.cwd() is
   // allowed to decide anything. From here on `cwd` is the config's directory.
   const configPath = resolve(process.cwd(), parsed.configPath);
-  const config = await loadConfig(configPath);
-  // Not a spread with the default first: a config that names `cwd: undefined`
-  // explicitly would overwrite it and fall through to `process.cwd()`, which is
-  // the exact behaviour this default exists to make unreachable.
-  await run(
-    config.cwd === undefined ? { ...config, cwd: dirname(configPath) } : config,
-  );
+  await run(withDefaultCwd(await loadConfig(configPath), configPath));
+}
+
+// The bin's whole prize, and the reason it is a function rather than three
+// lines inside `main`: `cwd` defaults to the directory the CONFIG FILE sits
+// in, not to wherever the operator's shell happened to be. That is what makes
+// "you must launch sandbar from the repo" unreachable instead of merely
+// documented — and it is invisible to any test that runs from the same
+// directory it configures, which is why it is pinned separately.
+//
+// Not a spread with the default first: a config that names `cwd: undefined`
+// explicitly would overwrite it and fall through to `process.cwd()`, which is
+// the exact behaviour this default exists to make unreachable.
+export function withDefaultCwd(
+  config: RunConfig,
+  configPath: string,
+): RunConfig {
+  return config.cwd === undefined
+    ? { ...config, cwd: dirname(configPath) }
+    : config;
 }
 
 // Only when this file IS the program. Without the guard, importing the module

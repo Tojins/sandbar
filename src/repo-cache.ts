@@ -71,10 +71,31 @@
 // the only answer. The resulting unborn HEAD is fine for every operation
 // sandbar performs (pinned in repo-cache-git.test.ts: `worktree add` names its
 // commit-ish explicitly in every case).
+//
+// Creation is ATOMIC — prepared under `repo.git.incoming`, stamped, and only
+// then renamed into place — so "the cache is there" and "the cache went
+// through every preparation step" cannot come apart. The stamp is what makes
+// the second fact checkable: a half-built cache is a perfectly valid bare
+// repository, so being one is not evidence of having been prepared. See
+// `ensureRepoCache` and `isPreparedCache`.
+//
+// ---------------------------------------------------------------------------
+// Never ask git WHICH repository this is; tell it
+// ---------------------------------------------------------------------------
+// Every path in the layout lives inside the operator's checkout, so `git
+// rev-parse --git-dir` — which discovers by walking UP — answers `0` and
+// `<hostCwd>/.git` for any of them that exists but is not a repository. Used
+// as an existence probe it reports the cache as present and hands the
+// operator's own repo to `branch -D`, `worktree remove --force`, `reset
+// --hard` and the force-pushed integration ref: the entire safety argument for
+// a bare cache, inverted, in the one state (`rm -rf .sandbar` interrupted) the
+// documentation invites. So the probes NAME what they are asking about —
+// `--git-dir=<path>` for the cache, `--git-common-dir` compared against it for
+// a worktree — and never let discovery pick the answer.
 
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { existsSync, realpathSync } from "node:fs";
+import { mkdir, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -151,6 +172,87 @@ async function gitOk(cwd: string, args: readonly string[]): Promise<boolean> {
   }
 }
 
+// Two paths naming the same directory. `--absolute-git-dir` and
+// `--git-common-dir` are git's own answers and may or may not have gone
+// through a symlink, so a string compare alone is not enough on a host whose
+// state directory is reached through one.
+function samePath(a: string, b: string): boolean {
+  if (resolve(a) === resolve(b)) return true;
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
+// Is `repoDir` a prepared cache?
+//
+// The obvious probe — `git -C <repoDir> rev-parse --git-dir` — is WRONG here,
+// and destructively so. Git discovers a repository by walking UP, and every
+// path in the layout sits inside the operator's own checkout, so for a
+// `repo.git` that exists but is not a repository (an interrupted
+// `rm -rf .sandbar`, a restore that skipped it, a disk-full mid-clone) it
+// answers with `<hostCwd>/.git` and exits 0. The cache then reads as present,
+// and every call that takes `layout.repoDir` as its cwd — `branch -D`,
+// `worktree remove --force`, `fetch`, `push`, the force-pushed integration ref
+// — resolves to the operator's repository. The whole safety argument for
+// making the cache bare is that those commands run somewhere holding none of
+// the operator's refs; a discovering probe hands them the one repo that holds
+// all of them.
+//
+// `--git-dir=<path>` names the directory instead of discovering it: git exits
+// 128 rather than climbing. So the question asked is the one meant — "is THIS
+// directory a bare repository" — and there is no path comparison to get wrong.
+//
+// Bare is necessary and not sufficient. A half-built cache is a perfectly
+// valid bare repository — that is the whole hazard — so the last thing
+// creation does before the rename is stamp `CACHE_MARKER` into the repo's own
+// config, and this asks for the stamp. Anything else at that path is treated
+// as debris and rebuilt, which costs a local hardlinked clone and discards
+// only in-flight issue branches (agent time, never correctness: nothing in the
+// state directory is authoritative).
+const CACHE_MARKER = "sandbar.cache";
+
+async function isPreparedCache(repoDir: string): Promise<boolean> {
+  if (!existsSync(repoDir)) return false;
+  try {
+    const bare = await exec(
+      "git",
+      ["--git-dir", repoDir, "rev-parse", "--is-bare-repository"],
+      { cwd: repoDir, maxBuffer: 1024 * 1024 },
+    );
+    if (bare.stdout.trim() !== "true") return false;
+    const marked = await exec(
+      "git",
+      ["--git-dir", repoDir, "config", "--get", CACHE_MARKER],
+      { cwd: repoDir, maxBuffer: 1024 * 1024 },
+    );
+    return marked.stdout.trim() === "1";
+  } catch {
+    return false;
+  }
+}
+
+// Is `dir` a registered linked worktree OF the cache? Same trap, same stakes:
+// an unregistered leftover directory discovers upward to the operator's
+// checkout, and the caller's recovery path is `reset --hard` + `clean -ffdx`.
+// `--git-common-dir` is the worktree's answer to "which repository am I in",
+// and it is compared against the cache rather than merely required to exist.
+async function isWorktreeOfCache(
+  dir: string,
+  repoDir: string,
+): Promise<boolean> {
+  if (!existsSync(dir)) return false;
+  try {
+    const { stdout } = await git(dir, ["rev-parse", "--git-common-dir"]);
+    const common = stdout.trim();
+    // Relative, and relative to the worktree — `git rev-parse` says so.
+    return common !== "" && samePath(resolve(dir, common), repoDir);
+  } catch {
+    return false;
+  }
+}
+
 function detail(err: unknown): string {
   if (err && typeof err === "object" && "stderr" in err) {
     const s = String((err as { stderr?: unknown }).stderr ?? "").trim();
@@ -205,17 +307,35 @@ export async function ensureRepoCache(layout: RepoLayout): Promise<void> {
   const { hostCwd, repoDir, stateDir } = layout;
   const url = await hostOriginUrl(hostCwd);
 
-  const exists =
-    existsSync(repoDir) && (await gitOk(repoDir, ["rev-parse", "--git-dir"]));
-
-  if (!exists) {
+  if (!(await isPreparedCache(repoDir))) {
     await mkdir(stateDir, { recursive: true });
     console.log(
       `Creating sandbar's object cache at ${repoDir} (one-time; cloned from ` +
         `${hostCwd}, so it is local and hardlinked)...`,
     );
+    // Built under a scratch name and moved into place only once it is FULLY
+    // prepared, so that "the directory is there" and "the directory has been
+    // through every preparation step" are the same fact.
+    //
+    // Preparing in place made them different facts, and the gap was permanent
+    // rather than transient: a run killed between the clone and the
+    // head-deletion below leaves a structurally valid bare repo carrying the
+    // operator's branches, and every later run sees a cache and never revisits
+    // the steps that were skipped. An imported `sandbar/issue-42-*` is then a
+    // hard preflight refusal, on every run, naming a branch in a repo the
+    // operator does not know exists — which is verbatim the failure deleting
+    // the heads exists to prevent. SIGTERM is the likely path and not an
+    // exotic one: sandbar's cleanup traps exit the process without killing the
+    // child, so the clone runs to completion while nothing after it does.
+    //
+    // A fixed scratch name is safe because the single-instance lock is already
+    // held (run.ts acquires it before preflight), and it is preferable to a
+    // unique one: a crash leaves at most one to overwrite rather than one per
+    // crash.
+    const incoming = `${repoDir}.incoming`;
+    await rm(incoming, { recursive: true, force: true });
     try {
-      await git(hostCwd, ["clone", "--bare", "--quiet", hostCwd, repoDir]);
+      await git(hostCwd, ["clone", "--bare", "--quiet", hostCwd, incoming]);
     } catch (err) {
       throw new SandbarError(
         `Failed to clone sandbar's object cache from ${hostCwd} into ` +
@@ -228,17 +348,60 @@ export async function ensureRepoCache(layout: RepoLayout): Promise<void> {
     // would make preflight refuse to start over a branch sandbar created here
     // itself out of the operator's checkout.
     try {
-      const { stdout } = await git(repoDir, [
+      const { stdout } = await git(incoming, [
         "for-each-ref",
         "--format=%(refname)",
         "refs/heads/",
       ]);
       for (const ref of stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
-        await git(repoDir, ["update-ref", "-d", ref]);
+        await git(incoming, ["update-ref", "-d", ref]);
       }
     } catch (err) {
       throw new SandbarError(
         `Failed to clear the imported local branches from ${repoDir}: ${detail(err)}`,
+        { cause: err },
+      );
+    }
+    try {
+      await setRemote(incoming, url);
+    } catch (err) {
+      throw new SandbarError(
+        `Failed to point sandbar's object cache at ${url}: ${detail(err)}`,
+        { cause: err },
+      );
+    }
+    // Populate refs/remotes/origin/* once. The objects are already here from
+    // the local clone, so this is a ref negotiation rather than a download —
+    // but it is what turns `origin/<sourceBranch>` into a real ref, which
+    // everything downstream reads.
+    try {
+      await git(incoming, ["fetch", "origin", "--prune", "--quiet"]);
+    } catch (err) {
+      throw new SandbarError(
+        `Failed the initial fetch of ${url} into sandbar's object cache: ${detail(err)}`,
+        { cause: err },
+      );
+    }
+    // The stamp `isPreparedCache` looks for. Written last, so it can only be
+    // read on a cache that made it through every step above.
+    try {
+      await git(incoming, ["config", CACHE_MARKER, "1"]);
+    } catch (err) {
+      throw new SandbarError(
+        `Failed to mark sandbar's object cache as prepared: ${detail(err)}`,
+        { cause: err },
+      );
+    }
+    // Only now is there anything worth keeping. Removing whatever was at
+    // `repoDir` is safe by construction: reaching here means it was not a
+    // prepared cache, and it is inside the disposable state directory.
+    try {
+      await rm(repoDir, { recursive: true, force: true });
+      await rename(incoming, repoDir);
+    } catch (err) {
+      throw new SandbarError(
+        `Failed to move sandbar's prepared object cache into place at ` +
+          `${repoDir}: ${detail(err)}`,
         { cause: err },
       );
     }
@@ -248,33 +411,24 @@ export async function ensureRepoCache(layout: RepoLayout): Promise<void> {
   // `origin` must not end up with a cache still pushing at the old one, and a
   // cache created by an older sandbar may carry no refspec at all.
   try {
-    await git(repoDir, ["remote", "set-url", "origin", url]);
-    await git(repoDir, [
-      "config",
-      "remote.origin.fetch",
-      "+refs/heads/*:refs/remotes/origin/*",
-    ]);
+    await setRemote(repoDir, url);
   } catch (err) {
     throw new SandbarError(
       `Failed to point sandbar's object cache at ${url}: ${detail(err)}`,
       { cause: err },
     );
   }
+}
 
-  if (!exists) {
-    // Populate refs/remotes/origin/* once. The objects are already here from
-    // the local clone, so this is a ref negotiation rather than a download —
-    // but it is what turns `origin/<sourceBranch>` into a real ref, which
-    // everything downstream reads.
-    try {
-      await git(repoDir, ["fetch", "origin", "--prune", "--quiet"]);
-    } catch (err) {
-      throw new SandbarError(
-        `Failed the initial fetch of ${url} into sandbar's object cache: ${detail(err)}`,
-        { cause: err },
-      );
-    }
-  }
+// `git clone --bare` sets no fetch refspec at all, so it is set explicitly —
+// see the module header for why `--mirror` is not the answer.
+async function setRemote(repoDir: string, url: string): Promise<void> {
+  await git(repoDir, ["remote", "set-url", "origin", url]);
+  await git(repoDir, [
+    "config",
+    "remote.origin.fetch",
+    "+refs/heads/*:refs/remotes/origin/*",
+  ]);
 }
 
 // The persistent worktree the declared images are built from (#38 item 4).
@@ -296,15 +450,18 @@ export async function ensureSourceWorktree(
   const { repoDir, sourceWorktree } = layout;
   const target = `origin/${sourceBranch}`;
 
-  const registered =
-    existsSync(sourceWorktree) &&
-    (await gitOk(sourceWorktree, ["rev-parse", "--git-dir"]));
+  const registered = await isWorktreeOfCache(sourceWorktree, repoDir);
 
   if (!registered) {
     // A leftover directory with no worktree registration (a killed run, a
-    // partially-removed state dir) blocks `worktree add`. Clear both sides.
+    // partially-removed state dir) blocks `worktree add`. Clear both sides,
+    // then the directory itself: `worktree remove` declines to touch a path it
+    // has no registration for, and `worktree add` refuses a non-empty one. It
+    // is inside the disposable state directory and, by the probe above, holds
+    // no repository of its own.
     await gitOk(repoDir, ["worktree", "remove", "--force", sourceWorktree]);
     await gitOk(repoDir, ["worktree", "prune"]);
+    await rm(sourceWorktree, { recursive: true, force: true });
     try {
       await git(repoDir, [
         "worktree",

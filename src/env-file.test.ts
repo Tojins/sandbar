@@ -1,8 +1,15 @@
-// Unit tests for the shared dotenv parser consumed by both the preflight
-// reader (env.ts) and the sandbox env resolver (agent-sandbox.ts).
+// Unit tests for the dotenv parser, and for the `readEnvFile` wrapper a host
+// calls from its own config file (#38).
+//
+// The parser stopped being contract when `envFilePath` became `env`; the
+// wrapper is what a consumer now writes in `sandbar.config.mjs`, which makes
+// its FAILURE mode the interesting part — see the last case.
 
-import { describe, expect, it } from "vitest";
-import { parseEnvFile } from "./env-file.js";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { parseEnvFile, readEnvFile } from "./env-file.js";
 
 describe("parseEnvFile", () => {
   it("parses plain KEY=value pairs", () => {
@@ -37,5 +44,38 @@ describe("parseEnvFile", () => {
 
   it("preserves an explicitly empty value", () => {
     expect(parseEnvFile("A=")).toEqual({ A: "" });
+  });
+});
+
+describe("readEnvFile", () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
+  });
+
+  it("reads a file into the record `config.env` takes", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbar-envfile-"));
+    dirs.push(dir);
+    const path = join(dir, "sandbar.env");
+    await writeFile(path, "GH_TOKEN=ghp_x\nCLAUDE_CODE_OAUTH_TOKEN=\n");
+
+    expect(readEnvFile(path)).toEqual({
+      GH_TOKEN: "ghp_x",
+      CLAUDE_CODE_OAUTH_TOKEN: "",
+    });
+    expect(readEnvFile(new URL(`file://${path}`))).toEqual(readEnvFile(path));
+  });
+
+  // The whole reason it throws rather than returning {}. An empty record is a
+  // legitimate configuration, so a silent fallback turns a typo'd path into
+  // "GH_TOKEN is missing" and sends the operator to look at their token
+  // instead of at the line naming the file.
+  it("throws on an unreadable file rather than returning an empty record", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbar-envfile-"));
+    dirs.push(dir);
+
+    expect(() => readEnvFile(join(dir, "does-not-exist.env"))).toThrow(
+      /readEnvFile/,
+    );
   });
 });

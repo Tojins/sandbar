@@ -69,9 +69,18 @@ export function gitlinkCommonDir(gitFileContent: string): string | null {
 }
 
 // Resolve the extra identity bind-mount the resolve-agent container needs so
-// in-container git works against a worktree. Returns [] when `worktreeCwd` is a
-// normal repo (its `.git` is a directory, already covered by mounting the
-// workspace) or has no readable gitlink.
+// in-container git works against a worktree. Returns [] only for the one case
+// that legitimately needs no extra mount: a normal repo, whose `.git` is a
+// directory already covered by mounting the workspace.
+//
+// Every other outcome THROWS rather than returning []. Since #38 the merger
+// worktree is always a linked worktree of the bare cache, so its `.git` is
+// always a gitlink and the mount is always required — an empty list means
+// in-container git cannot follow it, and every command the resolve agent runs
+// fails with "not a git repository" while the loop reads the result as the
+// agent's own doing. That is the same swallow #38 removed from
+// `resolveGitMounts` one file over, and it belongs removed here for the same
+// reason.
 export async function gitMountsForWorktree(
   worktreeCwd: string,
 ): Promise<readonly string[]> {
@@ -79,18 +88,32 @@ export async function gitMountsForWorktree(
   let isDir: boolean;
   try {
     isDir = (await stat(gitPath)).isDirectory();
-  } catch {
-    return [];
+  } catch (err) {
+    throw new SandbarError(
+      `No \`.git\` at ${gitPath}: the merger worktree must be a git worktree ` +
+        "for the resolve agent's container to see the repository.",
+      { cause: err },
+    );
   }
   if (isDir) return [];
   let content: string;
   try {
     content = await readFile(gitPath, "utf-8");
-  } catch {
-    return [];
+  } catch (err) {
+    throw new SandbarError(
+      `Cannot read the gitlink at ${gitPath}, so the resolve agent's ` +
+        "container cannot be given the repository it points at.",
+      { cause: err },
+    );
   }
   const commonDir = gitlinkCommonDir(content);
-  return commonDir ? [commonDir] : [];
+  if (commonDir === null) {
+    throw new SandbarError(
+      `The gitlink at ${gitPath} does not name a git directory ` +
+        `(expected a \`gitdir: <path>\` line, got ${JSON.stringify(content.trim().slice(0, 120))}).`,
+    );
+  }
+  return [commonDir];
 }
 
 export type MergerWorktree = {

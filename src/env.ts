@@ -19,13 +19,23 @@
 
 export type EnvReader = (key: string) => string | undefined;
 
-// Host-side lookup, used by preflight and by run.ts's GH_TOKEN check. Prefers
-// the configured value and falls back to the host's environment for that key
-// alone — preflight only needs to know the credential exists SOMEWHERE the
-// host can see, because `resolveSandboxEnv` applies the identical fallback
-// when it builds what the container gets.
+// Host-side lookup, used by preflight and by run.ts's GH_TOKEN check. For a
+// DECLARED key it prefers the configured value and falls back to the host's
+// environment for that key alone — preflight only needs to know the credential
+// exists somewhere the host can see, because `resolveSandboxEnv` applies the
+// identical fallback when it builds what the container gets. An undeclared key
+// resolves to nothing in both, which is what keeps them from disagreeing.
 export function makeEnvReader(env: Record<string, string>): EnvReader {
   return (key: string): string | undefined => {
+    // An UNDECLARED key resolves to nothing, whatever the host environment
+    // holds. Falling back for it would make the two readers disagree in the
+    // one direction that is silent and unrecoverable: preflight would find
+    // `GH_TOKEN` in its own environment and pass, `resolveSandboxEnv` iterates
+    // only declared keys and would export nothing, and every agent would run
+    // unauthenticated for its whole attempt budget — the exact failure the
+    // credential check exists to prevent, reached through the check. Which is
+    // also why the reader is not merely `env[key] ?? process.env[key]`.
+    if (!Object.prototype.hasOwnProperty.call(env, key)) return undefined;
     const v = env[key];
     return v !== undefined && v !== "" ? v : process.env[key];
   };
