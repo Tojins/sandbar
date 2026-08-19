@@ -370,9 +370,10 @@ export type RunConfig = {
   // ---- Optional: tunable, with a documented default ------------------------
   // The operator's own checkout, and the directory inside it that sandbar
   // owns. Sandbar does not OPERATE on `cwd` (#38): it clones a bare cache at
-  // `<cwd>/<workDir>/repo.git` and every git and gh call runs there, so the
-  // branch deletes, worktree removals and force-pushes cannot reach the
-  // operator's repo. What sandbar still reads from `cwd` is the git identity,
+  // `<cwd>/<workDir>/repo.git` and every GIT call runs there, so the branch
+  // deletes, worktree removals and force-pushes cannot reach the operator's
+  // repo. (`gh` calls run in no particular directory since #34 — they name the
+  // repository with `--repo` instead of letting a directory's remotes decide.) What sandbar still reads from `cwd` is the git identity,
   // the `copyToWorktree` sources, and the URL of its own `origin` — which is
   // why `cwd` must be a real checkout of the repo, with an `origin` remote.
   //
@@ -1212,13 +1213,45 @@ export function defaultCoauthorTrailer(botName: string, botEmail: string): strin
   return `Co-authored-by: ${botName} <${botEmail}>`;
 }
 
+// One half of an `owner/name`, trimmed and checked against what GitHub itself
+// allows in a name. Rejects rather than repairs: a `ghOwner` carrying a slash
+// is a config the operator has to look at, not one to guess the intent of.
+function requireRepoPart(field: string, raw: unknown): string {
+  if (typeof raw !== "string") {
+    throw new SandbarError(`config.${field} is required and must be a string.`);
+  }
+  const value = raw.trim();
+  if (value === "") {
+    throw new SandbarError(`config.${field} must not be empty.`);
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(value)) {
+    throw new SandbarError(
+      `config.${field} must be a single GitHub name (letters, digits, ".", "_", "-"), ` +
+        `got ${JSON.stringify(raw)}. It is one half of the \`--repo <owner>/<name>\` ` +
+        "every tracker call passes, so a slash or a space in it addresses a different repository.",
+    );
+  }
+  return value;
+}
+
 export function resolveConfig(config: RunConfig): ResolvedConfig {
   // Trimmed HERE, not just where it is compared. `resolveMergeMode` tests
   // `integrationBranch === sourceBranch.trim()`, so trimming only in the guard
   // made the guard describe a value that never existed: `" main "` would pass
-  // the must-differ check against `"main"` and then reach every git and gh call
-  // with the spaces still on it.
+  // the must-differ check against `"main"` and then reach every git call with
+  // the spaces still on it.
   const sourceBranch = (config.sourceBranch ?? DEFAULT_SOURCE_BRANCH).trim();
+  // Validated since #34, and trimmed for the same reason `sourceBranch` is.
+  // These two used to reach only `fetchIssueStates`'s GraphQL variables and
+  // `forge-verify`'s `--repo`; they now compose the `--repo` on EVERY tracker
+  // call and one side of preflight's origin-agreement check. So a value with a
+  // stray space produces `--repo "acme /app"` on every call, and a mismatch
+  // message that reads identically to a correctly-spelled wrong repo. A slash
+  // is the other likely slip — `ghOwner: "acme/app"` builds a three-part
+  // `--repo` that gh reads as `HOST/OWNER/REPO` and sends somewhere else
+  // entirely.
+  const ghOwner = requireRepoPart("ghOwner", config.ghOwner);
+  const ghRepo = requireRepoPart("ghRepo", config.ghRepo);
   const gateStack = resolveGateStack(config.gateStack);
   const images = resolveImages(config.images, config.sandboxImage);
   checkRebuildOnIsUsed(images, gateStack);
@@ -1245,6 +1278,8 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   const cwd = resolve(config.cwd ?? DEFAULT_CWD());
   return {
     ...config,
+    ghOwner,
+    ghRepo,
     cwd,
     workDir: config.workDir ?? DEFAULT_WORK_DIR,
     sourceBranch,

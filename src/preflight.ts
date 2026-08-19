@@ -124,6 +124,14 @@ export type RepoState = {
   readonly configuredRepo: RepoRef;
   readonly originUrl: string | null;
   readonly originRepo: RepoRef | null;
+  // The host in that URL, and the host `gh` will actually talk to. `--repo` is
+  // `[HOST/]OWNER/REPO` and sandbar passes the two-part form, so every tracker
+  // call goes to gh's DEFAULT host — `GH_HOST` when set, github.com otherwise.
+  // `originHost` is null when the URL's pre-path half is not confidently a
+  // hostname (an `insteadOf` alias), which is the only case this is not
+  // compared.
+  readonly originHost: string | null;
+  readonly ghHost: string;
 };
 
 export type Invariant = { ok: true } | { ok: false; message: string };
@@ -205,6 +213,30 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
   // the configured repo's issues for commits that landed in the other, and
   // `mergeMode: "verified"` polls checks for a sha the configured repo has
   // never seen — which reports as `sha-never-built`, i.e. as a CI problem.
+  // The host half of the same question, and it is a separate check because a
+  // matching `owner/name` on a DIFFERENT host is the worse failure: it passes
+  // the comparison below while pointing every tracker call at an unrelated
+  // repository that happens to share a name. `gh`'s flag is
+  // `[HOST/]OWNER/REPO`; `repoSlug` emits the two-part form, so the host is
+  // gh's default and `ghOwner`/`ghRepo` have nowhere to carry one. Refusing is
+  // the honest answer — the alternative was already silently broken before
+  // #34's fix (`gh issue list` followed the remote's host while
+  // `gh api graphql` went to the default one, which is this issue's own bug),
+  // and it names `GH_HOST`, which is how gh itself is pointed at an enterprise
+  // instance.
+  if (s.originHost !== null && s.originHost !== s.ghHost) {
+    out.push({
+      ok: false,
+      message:
+        `this repository's \`origin\` is on ${s.originHost} (${s.originUrl}) ` +
+        `but \`gh\` will talk to ${s.ghHost}. Sandbar passes ` +
+        "`--repo <owner>/<name>`, which uses gh's default host, and there is " +
+        "no host field in the config to carry another. Set `GH_HOST=" +
+        `${s.originHost}\` in sandbar's environment if that is the instance ` +
+        "you mean, or point `config.cwd` at a checkout whose `origin` is on " +
+        `${s.ghHost}.`,
+    });
+  }
   if (s.originRepo && !sameRepo(s.originRepo, s.configuredRepo)) {
     out.push({
       ok: false,
@@ -321,6 +353,7 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
   ]);
 
   const originUrl = await readOriginUrl(repoDir);
+  const parsedOrigin = originUrl === null ? null : parseRepoFromRemoteUrl(originUrl);
   const openReadyIssues = await fetchOpenReadyIssueNumbers(cfg.repo);
   const { unmerged, discarded, resumable } = await classifyIssueBranches(
     repoDir,
@@ -342,7 +375,12 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     resumableIssueBranches: resumable,
     configuredRepo: cfg.repo,
     originUrl,
-    originRepo: originUrl === null ? null : parseRepoFromRemoteUrl(originUrl),
+    originRepo: parsedOrigin?.repo ?? null,
+    originHost: parsedOrigin?.host ?? null,
+    // What `gh` resolves an unqualified `--repo owner/name` against. gh reads
+    // `GH_HOST` from its own environment, which is this process's — the
+    // sandbox's env record is a different thing and does not apply here.
+    ghHost: (process.env["GH_HOST"] ?? "").trim().toLowerCase() || "github.com",
   };
 }
 
@@ -561,11 +599,14 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
         "continues from each branch's existing commits.",
     );
   }
-  const results = checkInvariants(state);
-  const failures = results.flatMap((r) => (r.ok ? [] : [r.message]));
-  if (failures.length > 0) throw new PreflightError(failures);
-
-  // The other half of the #34 agreement check. `parseRepoFromRemoteUrl`
+  // The other half of the #34 agreement check, and it is emitted BEFORE the
+  // throw on purpose: the run most likely to be failing preflight for other
+  // reasons is a first run, where the operator is debugging exactly the remote
+  // and credential setup this line is about. Suppressing it there — which is
+  // what putting it after the throw did — hides the one message that says
+  // sandbar could not read their origin.
+  //
+  // The rest of the #34 agreement check. `parseRepoFromRemoteUrl`
   // returns null rather than guessing at a URL it cannot read as
   // `<owner>/<repo>` — a filesystem-path remote, most likely a local mirror —
   // because a wrong parse here REFUSES a working configuration, which is worse
@@ -581,6 +622,10 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
         "issues for work that landed somewhere else.",
     );
   }
+
+  const results = checkInvariants(state);
+  const failures = results.flatMap((r) => (r.ok ? [] : [r.message]));
+  if (failures.length > 0) throw new PreflightError(failures);
 
   // The one check that reads the OPERATOR'S checkout, on purpose (#38 item 10).
   // Per-issue worktrees seed off origin/<sourceBranch>, so commits sitting

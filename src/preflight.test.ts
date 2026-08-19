@@ -17,6 +17,8 @@ const cleanState: RepoState = {
   configuredRepo: { owner: "acme", name: "app" },
   originUrl: "https://github.com/acme/app.git",
   originRepo: { owner: "acme", name: "app" },
+  originHost: "github.com",
+  ghHost: "github.com",
 };
 
 function failures(s: RepoState): string[] {
@@ -77,7 +79,64 @@ describe("checkInvariants — the tracker and the git remote name one repo (#34)
 
   it("stays silent when there is no origin URL at all", () => {
     expect(
-      failures({ ...cleanState, originUrl: null, originRepo: null }),
+      failures({
+        ...cleanState,
+        originUrl: null,
+        originRepo: null,
+        originHost: null,
+      }),
+    ).toEqual([]);
+  });
+});
+
+// The HOST half, and it is a separate invariant because a matching owner/name
+// on a different host is the WORSE failure: it passes the owner/name comparison
+// while every tracker call goes to an unrelated repository that happens to
+// share a name. `gh`'s flag is `[HOST/]OWNER/REPO` and `repoSlug` emits the
+// two-part form, so the host is always gh's default.
+describe("checkInvariants — the tracker host (#34)", () => {
+  it("passes when origin is on the host gh will talk to", () => {
+    expect(failures(cleanState)).toEqual([]);
+  });
+
+  it("refuses a GHE origin while gh would go to github.com", () => {
+    const f = failures({
+      ...cleanState,
+      originUrl: "https://github.acme-corp.com/acme/app.git",
+      originHost: "github.acme-corp.com",
+      // Deliberately AGREEING on owner/name: without this check the run
+      // proceeds, and every issue read and write lands on
+      // github.com/acme/app, an unrelated repository that happens to match.
+      originRepo: { owner: "acme", name: "app" },
+    });
+    const msg = f.find((m) => m.includes("github.acme-corp.com"));
+    expect(msg).toBeDefined();
+    expect(msg).toContain("github.com");
+    // The message has to name gh's own mechanism, since the config has no
+    // host field to fix instead.
+    expect(msg).toContain("GH_HOST");
+  });
+
+  it("accepts a GHE origin when gh is pointed at that instance", () => {
+    expect(
+      failures({
+        ...cleanState,
+        originUrl: "https://github.acme-corp.com/acme/app.git",
+        originHost: "github.acme-corp.com",
+        ghHost: "github.acme-corp.com",
+      }),
+    ).toEqual([]);
+  });
+
+  // An `insteadOf` alias has no readable host. Refusing over one sandbar
+  // invented is the same false-refusal failure the parser exists to avoid.
+  it("stays silent when the host could not be read", () => {
+    expect(
+      failures({
+        ...cleanState,
+        originUrl: "ghalias:acme/app",
+        originHost: null,
+      }),
     ).toEqual([]);
   });
 });

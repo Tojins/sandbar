@@ -239,6 +239,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
 
       expect(state.originUrl).toBe("https://github.com/acme/app-fork.git");
       expect(state.originRepo).toEqual({ owner: "acme", name: "app-fork" });
+      expect(state.originHost).toBe("github.com");
       expect(state.configuredRepo).toEqual({ owner: "acme", name: "app" });
     });
 
@@ -250,6 +251,27 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
 
       expect(state.originUrl).toBe(target);
       expect(state.originRepo).toBeNull();
+      expect(state.originHost).toBeNull();
+    });
+
+    // The regression the parser rewrite exists for, exercised through real git
+    // rather than the parser's own table: an ssh-reached filesystem path is a
+    // perfectly ordinary mirror remote, and reading `git/app` out of it made
+    // preflight refuse a working configuration for good.
+    it("does not invent a repo out of an ssh-reached filesystem path", async () => {
+      await git(
+        target,
+        "remote",
+        "set-url",
+        "origin",
+        "git@gitserver.internal:/srv/git/app.git",
+      );
+
+      const state = await gatherState(cfg(layoutAt(target)));
+
+      expect(state.originUrl).toBe("git@gitserver.internal:/srv/git/app.git");
+      expect(state.originRepo).toBeNull();
+      expect(state.originHost).toBeNull();
     });
 
     it("reads origin/<sourceBranch> from the named repo", async () => {

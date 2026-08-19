@@ -21,7 +21,8 @@
 //   <hostCwd>/                     the operator's own checkout. Sandbar reads
 //     sandbar.config.mjs           it (git identity, `copyToWorktree`) and
 //     .sandbar/                    clones it once. It never writes to it.
-//       repo.git/                  <- every git and gh call runs HERE
+//       repo.git/                  <- every git call runs HERE (gh names its
+//                                     own repo with --repo, #34)
 //       worktrees/source/          <- image build context, at origin/<branch>
 //       worktrees/issue-<n>-<slug>/
 //       worktrees/merger/
@@ -126,8 +127,9 @@ export type RepoLayout = {
   readonly hostCwd: string;
   // <hostCwd>/<workDir>. Holds everything below, plus the lock and the logs.
   readonly stateDir: string;
-  // The bare cache. The `cwd` of every git and gh call sandbar makes, with the
-  // documented exception above.
+  // The bare cache. The `cwd` of every git call sandbar makes, with the
+  // documented exception above. NOT of the `gh` calls: since #34 those name
+  // `ghOwner`/`ghRepo` with `--repo` and run in no named directory.
   readonly repoDir: string;
   readonly worktreesDir: string;
   readonly sourceWorktree: string;

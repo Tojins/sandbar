@@ -279,12 +279,14 @@ async function runSandboxCycle(
     // any podman resource, so no re-registration is needed here.
     const gateStack: Stack = stack;
 
+    // No probe tree here on purpose (#34): `buildPrompt` derives it from
+    // `inputs.worktreePath`, so this site cannot hand the anchor the wrong
+    // tree. It used to, and nothing could see it — every candidate is a
+    // string, so the mistake type-checks and the prompt-layer tests, which
+    // pass their own tree, stay green.
     const anchorOpts = {
       repo: config.repo,
       repoDir: config.layout.repoDir,
-      // The tree the agent will resolve the emitted @refs in is its own issue
-      // worktree, so that is the tree the probes ask (#34).
-      probeWorktree: worktreePath,
       claudeMdPath: config.claudeMdPath,
       contextMdPath: config.contextMdPath,
       adrDir: config.adrDir,

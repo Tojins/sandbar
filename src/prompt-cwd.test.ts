@@ -81,17 +81,41 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     process.chdir(launchedFrom);
 
     shimBin = await mkdtemp(join(tmpdir(), "sandbar-shim-"));
-    // Echoes the repository gh was TOLD to use as the issue title, or
-    // `(inferred)` when it was told nothing — which is what gh itself would
-    // then resolve from the working directory's remotes.
+    // Echoes the repository this invocation resolved as the issue title: the
+    // `--repo` value when given one, otherwise the working directory's
+    // `origin` — modelling what real gh does, so the different-origin repos
+    // below are load-bearing rather than decoration.
     await writeFile(
       join(shimBin, "gh"),
       [
         "#!/bin/sh",
-        'seen="(inferred)"',
+        'seen=""',
         "while [ $# -gt 0 ]; do",
         '  case "$1" in --repo) seen="$2"; shift 2 ;; *) shift ;; esac',
         "done",
+        "# No --repo: resolve the repository the way gh itself does, from the",
+        "# remotes of the working directory. That is what makes the",
+        "# different-origin repo below load-bearing rather than decoration —",
+        "# delete the flag and the assertion sees `other/wrong`, not a sentinel",
+        "# this file made up.",
+        "#",
+        "# Parameter expansion rather than sed: the obvious `sed \"s#\\.git$##\"`",
+        "# has a `$#` in it, which the shell expands to the argument count",
+        "# INSIDE double quotes, so the whole expression silently matched",
+        "# nothing and the fallback resolved to an empty string — a shim that",
+        "# reports no repository is exactly the vacuous sentinel this replaced.",
+        'if [ -z "$seen" ]; then',
+        "  url=$(git config --get remote.origin.url 2>/dev/null)",
+        '  if [ -z "$url" ]; then',
+        '    seen="(no-remote)"',
+        "  else",
+        "    url=${url%.git}",
+        "    repo=${url##*[:/]}",
+        "    rest=${url%/*}",
+        "    owner=${rest##*[:/]}",
+        '    seen="$owner/$repo"',
+        "  fi",
+        "fi",
         'printf \'{"title":"%s","body":"body","comments":[]}\' "$seen"',
       ].join("\n") + "\n",
       { mode: 0o755 },
@@ -110,13 +134,15 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   });
 
   it("quotes the named repo's recent history", async () => {
-    const anchor = await buildProjectAnchor({
-      repo: CONFIGURED,
-      repoDir: target,
-      probeWorktree: target,
-      claudeMdPath: "CLAUDE.md",
-      sourceBranch: "main",
-    });
+    const anchor = await buildProjectAnchor(
+      {
+        repo: CONFIGURED,
+        repoDir: target,
+        claudeMdPath: "CLAUDE.md",
+        sourceBranch: "main",
+      },
+      target,
+    );
 
     expect(anchor).toContain("commit-from-target-repo");
     expect(anchor).not.toContain("commit-from-launch-dir");
@@ -142,7 +168,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     );
 
     expect(prompt).toContain("Issue #1: acme/app");
-    expect(prompt).not.toContain("(inferred)");
+    // What the shim resolves on its own. Drop `--repo` and this is the anchor.
     expect(prompt).not.toContain("other/wrong");
   });
 
@@ -152,14 +178,16 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("probes the anchor docs in the tree the agent will read", async () => {
     await writeFile(join(target, "CONTEXT.md"), "# ctx\n");
 
-    const anchor = await buildProjectAnchor({
-      repo: CONFIGURED,
-      repoDir: target,
-      probeWorktree: target,
-      claudeMdPath: "CLAUDE.md",
-      contextMdPath: "CONTEXT.md",
-      sourceBranch: "main",
-    });
+    const anchor = await buildProjectAnchor(
+      {
+        repo: CONFIGURED,
+        repoDir: target,
+        claudeMdPath: "CLAUDE.md",
+        contextMdPath: "CONTEXT.md",
+        sourceBranch: "main",
+      },
+      target,
+    );
 
     expect(anchor).toContain("Context: @CONTEXT.md");
   });
@@ -167,14 +195,16 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("does not hand the agent a dead @ref for a doc that only exists elsewhere", async () => {
     await writeFile(join(launchedFrom, "CONTEXT.md"), "# ctx\n");
 
-    const anchor = await buildProjectAnchor({
-      repo: CONFIGURED,
-      repoDir: target,
-      probeWorktree: target,
-      claudeMdPath: "CLAUDE.md",
-      contextMdPath: "CONTEXT.md",
-      sourceBranch: "main",
-    });
+    const anchor = await buildProjectAnchor(
+      {
+        repo: CONFIGURED,
+        repoDir: target,
+        claudeMdPath: "CLAUDE.md",
+        contextMdPath: "CONTEXT.md",
+        sourceBranch: "main",
+      },
+      target,
+    );
 
     expect(anchor).not.toContain("Context: @CONTEXT.md");
   });
@@ -185,14 +215,16 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     await mkdir(join(launchedFrom, "docs", "adr"), { recursive: true });
     await writeFile(join(launchedFrom, "docs", "adr", "0002-launch.md"), "x\n");
 
-    const anchor = await buildProjectAnchor({
-      repo: CONFIGURED,
-      repoDir: target,
-      probeWorktree: target,
-      claudeMdPath: "CLAUDE.md",
-      adrDir: "docs/adr",
-      sourceBranch: "main",
-    });
+    const anchor = await buildProjectAnchor(
+      {
+        repo: CONFIGURED,
+        repoDir: target,
+        claudeMdPath: "CLAUDE.md",
+        adrDir: "docs/adr",
+        sourceBranch: "main",
+      },
+      target,
+    );
 
     expect(anchor).toContain("0001-target.md");
     expect(anchor).not.toContain("0002-launch.md");
@@ -260,14 +292,16 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("probes the given tree while reading history from the given repo", async () => {
     await writeFile(join(launchedFrom, "CONTEXT.md"), "# ctx\n");
 
-    const anchor = await buildProjectAnchor({
-      repo: CONFIGURED,
-      repoDir: target,
-      probeWorktree: launchedFrom,
-      claudeMdPath: "CLAUDE.md",
-      contextMdPath: "CONTEXT.md",
-      sourceBranch: "main",
-    });
+    const anchor = await buildProjectAnchor(
+      {
+        repo: CONFIGURED,
+        repoDir: target,
+        claudeMdPath: "CLAUDE.md",
+        contextMdPath: "CONTEXT.md",
+        sourceBranch: "main",
+      },
+      launchedFrom,
+    );
 
     // The doc came from the probed tree...
     expect(anchor).toContain("Context: @CONTEXT.md");

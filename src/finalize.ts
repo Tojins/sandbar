@@ -721,10 +721,12 @@ export async function finalizeAll(
 // ---------------------------------------------------------------------------
 
 export type RealFinalizeAdapterDeps = {
-  // Every git and gh call below runs in `layout.repoDir`, the bare cache (#38)
-  // — including the `git branch -d`/`-D` pair, which is the reason that
-  // matters. The worktree path it removes still comes from
-  // `layout.worktreesDir`, which is BESIDE the cache rather than inside it.
+  // Every GIT call below runs in `layout.repoDir`, the bare cache (#38) —
+  // including the `git branch -d`/`-D` pair, which is the reason that matters.
+  // The worktree path it removes still comes from `layout.worktreesDir`, which
+  // is BESIDE the cache rather than inside it. The `gh` calls pass no cwd at
+  // all since #34: they name the repository with `--repo`, so no directory is
+  // consulted and none can be wrong.
   readonly layout: RepoLayout;
   // The tracker the comment/label/state calls address. NAMED, never inferred
   // from the cache's git remotes (#34): these are the writes that hand an issue

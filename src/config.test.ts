@@ -367,6 +367,46 @@ describe("resolveMergeMode (#22)", () => {
 });
 
 // #34 — every host-side path config has to name the repo the run is about.
+// #34 — these two used to reach only `fetchIssueStates`'s GraphQL variables and
+// `forge-verify`'s `--repo`. They now compose the `--repo` on EVERY tracker
+// call and one side of preflight's origin-agreement check, so a malformed one
+// addresses a different repository on every call rather than one.
+describe("resolveConfig — ghOwner/ghRepo are validated (#34)", () => {
+  it("trims, the way sourceBranch is trimmed and for the same reason", () => {
+    const r = resolveConfig({ ...minimal, ghOwner: " acme ", ghRepo: "widgets\n" });
+    expect(r.ghOwner).toBe("acme");
+    expect(r.ghRepo).toBe("widgets");
+  });
+
+  // The likeliest slip: gh reads a three-part --repo as HOST/OWNER/REPO, so
+  // `ghOwner: "acme/widgets"` sends every call to a host called `acme`.
+  it("rejects a slash, which gh would read as a host", () => {
+    expect(() => resolveConfig({ ...minimal, ghOwner: "acme/widgets" })).toThrow(
+      /ghOwner/,
+    );
+  });
+
+  it("rejects an interior space", () => {
+    expect(() => resolveConfig({ ...minimal, ghRepo: "my widgets" })).toThrow(
+      /ghRepo/,
+    );
+  });
+
+  it("rejects empty and whitespace-only", () => {
+    expect(() => resolveConfig({ ...minimal, ghOwner: "" })).toThrow(/ghOwner/);
+    expect(() => resolveConfig({ ...minimal, ghRepo: "   " })).toThrow(/ghRepo/);
+  });
+
+  it("accepts the punctuation GitHub actually allows", () => {
+    const r = resolveConfig({
+      ...minimal,
+      ghOwner: "acme-corp",
+      ghRepo: "my.app_v2-beta",
+    });
+    expect(r.ghRepo).toBe("my.app_v2-beta");
+  });
+});
+
 describe("resolveConfig — cwd is absolute (#34)", () => {
   it("resolves a relative cwd against the launch directory", () => {
     const r = resolveConfig({ ...minimal, cwd: "sub/repo" });

@@ -139,7 +139,7 @@ sits in).
 
 | Field | Why it can't default |
 | --- | --- |
-| `ghOwner`, `ghRepo` | Repo identity. Every `gh` call names this repository, so it — not `cwd`'s `origin` — decides which tracker sandbar reads and writes. Preflight refuses to start if the two disagree. |
+| `ghOwner`, `ghRepo` | Repo identity. Every `gh` call names this repository, so it — not `cwd`'s `origin` — decides which tracker sandbar reads and writes. Each must be a single GitHub name (no slashes). Preflight refuses to start if it disagrees with `origin`. |
 | `sandboxImage` | The image the agent (and the merger's resolve agent) runs in. |
 | `botName`, `botEmail` | Commit/author identity. |
 | `sandboxHooks` | Host-specific build/setup. |
@@ -173,7 +173,12 @@ sits in).
 `ghOwner`/`ghRepo`, with an `origin` remote — sandbar pushes branches and merges
 to that `origin` while reading and writing issues in the configured repo, so
 preflight compares the two and refuses the run when they name different
-repositories. The paths above are not all interpreted in the same
+repositories. It also compares the **host**: `gh` is given `--repo
+<owner>/<name>`, which uses gh's default host, so an `origin` on a GitHub
+Enterprise instance needs `GH_HOST` set in sandbar's environment and is refused
+without it. A remote sandbar cannot read an `<owner>/<repo>` out of — a local
+mirror path, say — is reported as a warning rather than refused, since guessing
+at it would reject working setups. The paths above are not all interpreted in the same
 place, so:
 
 - `claudeMdPath`, `contextMdPath`, `adrDir` and `codingStandardsPath` stay

@@ -70,21 +70,12 @@ export type ProjectAnchorOptions = {
   //
   // `repoDir` is the bare cache, where the `git log` runs (#38).
   //
-  // `probeWorktree` is the tree the emitted `@refs` will be RESOLVED against —
-  // the working tree the agent gets: its issue worktree in the inner loop, the
-  // merger worktree in the merge phase. The probe and the resolver have to be
-  // asked of the same tree or the answer is silent in both directions, and it
-  // has been asked of three different wrong ones: `process.cwd()` before #34,
-  // the operator's checkout (uncommitted edits, so a real `CONTEXT.md` the
-  // agent cannot open) after it, and `worktrees/source` after #38 — a clean
-  // tree at `origin/<sourceBranch>`, which is what an issue worktree SEEDS
-  // from and stops being the moment the branch adds a doc. That last one is
-  // the case worth naming: when the issue IS "add CODING_STANDARDS.md", the
-  // branch has it and the source tree does not, so the reviewer was handed no
-  // `@ref` to the very standards the commit under review had just authored.
+  // The tree the emitted `@refs` will be RESOLVED against is deliberately NOT
+  // a field here — it is `buildProjectAnchor`'s second argument, so that the
+  // two prompt builders can DERIVE it from the worktree they are already
+  // given rather than a caller having to remember to supply it. See there.
   readonly repo: RepoRef;
   readonly repoDir: string;
-  readonly probeWorktree: string;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
@@ -110,11 +101,11 @@ export type ReviewerPromptInputs = {
   // project HISTORY from it would make the anchor a function of the branch
   // under review.
   //
-  // The doc-existence probes are the opposite case and take `worktreePath`
-  // (see `ProjectAnchorOptions.probeWorktree`): they decide whether to emit an
-  // `@ref` the reviewer will resolve inside its sandbox, against exactly that
-  // worktree. Being a function of the branch is the POINT there — a branch
-  // that adds `CODING_STANDARDS.md` must be reviewed against it.
+  // The doc-existence probes are the opposite case and are derived from
+  // `worktreePath`: they decide whether to emit an `@ref` the reviewer will
+  // resolve inside its sandbox, against exactly that worktree. Being a function
+  // of the branch is the POINT there — a branch that adds
+  // `CODING_STANDARDS.md` must be reviewed against it.
   readonly repo: RepoRef;
   readonly repoDir: string;
   readonly worktreePath: string;
@@ -131,7 +122,14 @@ export async function buildPrompt(
   anchor: ProjectAnchorOptions,
 ): Promise<string> {
   const layers = [
-    await buildProjectAnchor(anchor),
+    // The probe tree is DERIVED from the worktree this prompt is about, not
+    // taken from `anchor` (#34). The caller cannot get it wrong because the
+    // caller does not supply it — which matters because "which tree" is
+    // type-invisible: every candidate is a string, so a call site handed the
+    // source worktree instead type-checks, passes every test that exercises
+    // this module directly, and silently drops the `@ref` for any doc the
+    // branch itself adds.
+    await buildProjectAnchor(anchor, inputs.worktreePath),
     await buildIssueAnchor(inputs.issue.id, anchor.repo),
     await buildAttemptSlot(inputs),
   ];
@@ -142,22 +140,43 @@ export async function buildReviewerPrompt(
   inputs: ReviewerPromptInputs,
 ): Promise<string> {
   const layers = [
-    await buildProjectAnchor({
-      repo: inputs.repo,
-      repoDir: inputs.repoDir,
-      probeWorktree: inputs.worktreePath,
-      claudeMdPath: inputs.claudeMdPath,
-      contextMdPath: inputs.contextMdPath,
-      sourceBranch: inputs.sourceBranch,
-    }),
+    await buildProjectAnchor(
+      {
+        repo: inputs.repo,
+        repoDir: inputs.repoDir,
+        claudeMdPath: inputs.claudeMdPath,
+        contextMdPath: inputs.contextMdPath,
+        sourceBranch: inputs.sourceBranch,
+      },
+      inputs.worktreePath,
+    ),
     await buildIssueAnchor(inputs.issue.id, inputs.repo),
     await buildReviewerSlot(inputs),
   ];
   return layers.join("\n\n---\n\n");
 }
 
+// `probeWorktree` is the tree the emitted `@refs` will be resolved in — the
+// working tree the agent gets. It is a POSITIONAL argument rather than a field
+// on `opts` because the two prompt builders derive it from the worktree they
+// are already about, and only the merge phase supplies one by hand; a field
+// would have made it one more string among six that a call site has to get
+// right, with nothing but a name to distinguish it from `repoDir` and no test
+// able to see the difference (see `buildPrompt`).
+//
+// The probe and the resolver have to be asked of the same tree or the answer is
+// silent in both directions, and it has been asked of three different wrong
+// ones: `process.cwd()` before #34, the operator's checkout (uncommitted edits,
+// so a real `CONTEXT.md` the agent cannot open) after it, and `worktrees/source`
+// after #38 — a clean tree at `origin/<sourceBranch>`, which is what an issue
+// worktree SEEDS from and stops being the moment the branch adds a doc. That
+// last one is the case worth naming: when the issue IS "add
+// CODING_STANDARDS.md", the branch has it and the source tree does not, so the
+// reviewer was handed no `@ref` to the very standards the commit under review
+// had just authored.
 export async function buildProjectAnchor(
   opts: ProjectAnchorOptions,
+  probeWorktree: string,
 ): Promise<string> {
   // The @refs stay exactly as the host wrote them — the agent resolves them
   // from the repo root inside its sandbox, so they must not be re-rooted. Only
@@ -169,13 +188,13 @@ export async function buildProjectAnchor(
   const lines = ["# Project anchor", "", `Conventions: @${opts.claudeMdPath}`];
   if (
     opts.contextMdPath &&
-    existsSync(resolve(opts.probeWorktree, opts.contextMdPath))
+    existsSync(resolve(probeWorktree, opts.contextMdPath))
   ) {
     lines.push(`Context: @${opts.contextMdPath}`);
   }
   const adrDir = opts.adrDir;
   if (adrDir) {
-    const adrDirPath = resolve(opts.probeWorktree, adrDir);
+    const adrDirPath = resolve(probeWorktree, adrDir);
     const adrs = existsSync(adrDirPath)
       ? readdirSync(adrDirPath).filter((f) => f.endsWith(".md")).sort()
       : [];

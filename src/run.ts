@@ -649,17 +649,27 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             runStackGate: () => stackForGate2.runGate(),
           });
 
-          const projectAnchor = await buildProjectAnchor({
-            repo,
-            repoDir: layout.repoDir,
-            // The resolve agent reads the merger worktree, so that is the tree
-            // whose files the emitted @refs have to exist in (#34).
-            probeWorktree: mergerWorktree.path,
-            claudeMdPath: config.claudeMdPath,
-            contextMdPath: config.contextMdPath,
-            adrDir: config.adrDir,
-            sourceBranch: config.sourceBranch,
-          });
+          // The only site that supplies the probe tree by hand — the two
+          // prompt builders derive theirs (#34). The resolve agent reads this
+          // worktree, so it is the right tree; be precise about WHEN, though,
+          // because the anchor is one string built once for the whole cycle
+          // and this runs before any merge. At probe time the worktree is
+          // detached at `origin/<sourceBranch>`, so a doc added by a branch in
+          // THIS cycle is still not visible to it. What this buys over the
+          // run-start source worktree is only that it moves with origin
+          // between cycles; the within-cycle case is a known residual, and
+          // closing it would mean rebuilding the anchor per resolve attempt.
+          const projectAnchor = await buildProjectAnchor(
+            {
+              repo,
+              repoDir: layout.repoDir,
+              claudeMdPath: config.claudeMdPath,
+              contextMdPath: config.contextMdPath,
+              adrDir: config.adrDir,
+              sourceBranch: config.sourceBranch,
+            },
+            mergerWorktree.path,
+          );
           // Verified merge mode (#22): the forge gates the landing. Wired here
           // rather than inside the merger so the merger stays adapter-driven —
           // its type demands the verify adapter exactly when the mode is on.

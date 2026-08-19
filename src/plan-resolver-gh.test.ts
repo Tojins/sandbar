@@ -11,8 +11,11 @@
 // The trap this file exists to avoid: a test that runs from a directory with no
 // remotes passes just as happily with `--repo` deleted, because there is
 // nothing for gh to infer from. So the process stands in a REAL git repo whose
-// `origin` names a DIFFERENT repository, and the shim reports what it was
-// actually told. Delete the flag and the assertion sees `other/wrong`.
+// `origin` names a DIFFERENT repository, and the shim MODELS gh's fallback —
+// it reads `remote.origin.url` when it is given no `--repo`. Delete the flag
+// and the assertion sees `other/wrong`. A shim that printed a made-up sentinel
+// instead would make the repo setup and every `not.toBe("other/wrong")` here
+// dead weight that can never fail.
 //
 // `fetchIssueStates` is deliberately not covered: it has always named the repo,
 // in its GraphQL variables. That the two now read the same `RepoRef` is the
@@ -38,18 +41,44 @@ describe("fetchCandidates names the configured repo (#34)", () => {
   beforeEach(async () => {
     originalCwd = process.cwd();
     shimBin = await mkdtemp(join(tmpdir(), "sandbar-shim-"));
-    // Reports the value gh was given for --repo, in the shape
-    // `gh issue list --json number,title,body,labels` returns. Reports
-    // `(inferred)` when the flag is absent — which is what gh itself would then
-    // do, from the working directory's remotes.
+    // Reports the repository this invocation resolved, in the shape
+    // `gh issue list --json number,title,body,labels` returns: the `--repo`
+    // value when given one, and otherwise the `owner/name` of the working
+    // directory's `origin` — which is what real gh does when the flag is
+    // absent. Modelling the fallback rather than printing a sentinel is what
+    // lets the assertions below be about the WRONG repo instead of about the
+    // absence of a right one.
     await writeFile(
       join(shimBin, "gh"),
       [
         "#!/bin/sh",
-        'seen="(inferred)"',
+        'seen=""',
         "while [ $# -gt 0 ]; do",
         '  case "$1" in --repo) seen="$2"; shift 2 ;; *) shift ;; esac',
         "done",
+        "# No --repo: resolve the repository the way gh itself does, from the",
+        "# remotes of the working directory. That is what makes the",
+        "# different-origin repo below load-bearing rather than decoration —",
+        "# delete the flag and the assertion sees `other/wrong`, not a sentinel",
+        "# this file made up.",
+        "#",
+        "# Parameter expansion rather than sed: the obvious `sed \"s#\\.git$##\"`",
+        "# has a `$#` in it, which the shell expands to the argument count",
+        "# INSIDE double quotes, so the whole expression silently matched",
+        "# nothing and the fallback resolved to an empty string — a shim that",
+        "# reports no repository is exactly the vacuous sentinel this replaced.",
+        'if [ -z "$seen" ]; then',
+        "  url=$(git config --get remote.origin.url 2>/dev/null)",
+        '  if [ -z "$url" ]; then',
+        '    seen="(no-remote)"',
+        "  else",
+        "    url=${url%.git}",
+        "    repo=${url##*[:/]}",
+        "    rest=${url%/*}",
+        "    owner=${rest##*[:/]}",
+        '    seen="$owner/$repo"',
+        "  fi",
+        "fi",
         'printf \'[{"number":1,"title":"%s","body":"","labels":[]}]\' "$seen"',
       ].join("\n") + "\n",
       { mode: 0o755 },
@@ -85,7 +114,9 @@ describe("fetchCandidates names the configured repo (#34)", () => {
   it("is unaffected by the remotes of the directory it runs in", async () => {
     const candidates = await fetchCandidates(CONFIGURED);
 
-    expect(candidates[0]?.title).not.toBe("(inferred)");
+    // The value the shim would have resolved on its own. Drop `--repo` from
+    // `fetchCandidates` and this is what comes back.
     expect(candidates[0]?.title).not.toBe("other/wrong");
+    expect(candidates[0]?.title).not.toBe("(no-remote)");
   });
 });
