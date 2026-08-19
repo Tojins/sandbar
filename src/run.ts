@@ -214,15 +214,18 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   //
   // `realpathSync`, not the raw string, and not `resolve` either. The two have
   // to partition the host IDENTICALLY, and proper-lockfile resolves symlinks on
-  // the path it locks (`realpath: true` is its default). Hash the raw string
-  // and the agreement is a coincidence of how the host spelled `config.cwd`,
-  // which `resolveConfig` passes through untouched:
-  //   - Two repos both configured `cwd: "."` hash the same `.sandbar` and share
-  //     one scope while correctly holding two locks — #28, verbatim, with this
-  //     module's own comments asserting it cannot happen.
-  //   - One workdir reached through a symlink is one lock but two scopes, so a
-  //     crashed run's debris lands in a scope no later run computes and no
-  //     report names (it IS scoped, just not ours) — invisible and unreapable.
+  // the path it locks (`realpath: true` is its default). `resolveConfig` now
+  // makes `config.cwd` absolute (#34), which retires the first of the two ways
+  // this went wrong and leaves the second exactly where it was:
+  //   - Two repos both configured `cwd: "."` used to hash the same `.sandbar`
+  //     and share one scope while correctly holding two locks — #28, verbatim,
+  //     with this module's own comments asserting it cannot happen. `resolve`
+  //     closes that, and it closes it in config.ts rather than here, because a
+  //     relative cwd is wrong for reasons that have nothing to do with scoping.
+  //   - One workdir reached through a symlink is STILL one lock but two scopes
+  //     under `resolve` alone, so a crashed run's debris lands in a scope no
+  //     later run computes and no report names (it IS scoped, just not ours) —
+  //     invisible and unreapable. Only `realpathSync` closes that one.
   // acquireLock has already mkdirSync'd the directory, so this cannot ENOENT.
   const scope = runScope(realpathSync(lockPaths.workDir));
 
@@ -396,6 +399,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   const repo = { owner: config.ghOwner, name: config.ghRepo };
 
   const innerLoopCfg = {
+    cwd: config.cwd,
     sourceBranch: config.sourceBranch,
     workDir: config.workDir,
     envFilePath: config.envFilePath,
@@ -454,7 +458,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // Phase 1: Plan
       // ---------------------------------------------------------------------
       const issues: { id: string; title: string; branch: string }[] = [
-        ...(await buildPlan(repo, mergedThisRun)),
+        ...(await buildPlan(repo, config.cwd, mergedThisRun)),
       ].slice(0, budget);
       const fingerprint = planFingerprint(issues.map((i) => i.id));
       await cycleLogger.writePlan(issues);
@@ -606,6 +610,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           });
 
           const projectAnchor = await buildProjectAnchor({
+            cwd: config.cwd,
             claudeMdPath: config.claudeMdPath,
             contextMdPath: config.contextMdPath,
             adrDir: config.adrDir,

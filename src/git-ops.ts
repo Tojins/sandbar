@@ -13,19 +13,36 @@ const exec = promisify(execFile);
 // worktree never inherits in-progress state from the host's working tree —
 // sandbar can run while the user is mid-edit on cwd. Existing branches keep
 // their accumulated commits (resumed runs); we only pre-create when missing.
+//
+// `repoDir` is explicit for the same reason preflight's is (#34): every other
+// function in this module is handed a worktree path, and this one — the only
+// one that WRITES a ref — was the one running wherever the host process was
+// launched. On a host that sets `config.cwd`, that created the issue branch in
+// a different repo from the one the worktree, the gate and the merger all
+// operate on, so `prepareWorktree` then failed to find a branch that had just
+// been created successfully.
 export async function ensureIssueBranch(
+  repoDir: string,
   branch: string,
   sourceBranch: string,
 ): Promise<void> {
   try {
-    await exec("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+    await exec(
+      "git",
+      ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+      { cwd: repoDir },
+    );
     return; // exists
   } catch {
     // fall through
   }
   // --no-track: don't write upstream config (a) we never `git pull` these
   // branches and (b) parallel `git branch` calls race on `.git/config`.
-  await exec("git", ["branch", "--no-track", branch, `origin/${sourceBranch}`]);
+  await exec(
+    "git",
+    ["branch", "--no-track", branch, `origin/${sourceBranch}`],
+    { cwd: repoDir },
+  );
 }
 
 // The paths `git status --porcelain` reports in a worktree — tracked

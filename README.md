@@ -114,6 +114,20 @@ await run({
 | `mergeMode` | `{ kind: "direct" }` — see below |
 | `codingStandardsPath` | *(unset)* — no conventional path; see below |
 
+`cwd` is resolved to an absolute path, and the paths above are interpreted
+relative to it rather than to the directory the host process happens to be
+launched from — but they are not all interpreted in the same place, so:
+
+- `envFilePath` is resolved against `cwd` up front. Only sandbar reads it, on
+  the host.
+- `claudeMdPath`, `contextMdPath`, `adrDir` and `codingStandardsPath` stay
+  relative in the prompt, because the agent resolves them from the repo root
+  inside its own sandbox — i.e. against the **issue worktree**, which is seeded
+  from `origin/<sourceBranch>`. Sandbar's host-side "does this file exist" check
+  is rooted at `cwd`, so a file that is in your working tree but not yet pushed
+  can be referenced and then not found by the agent.
+- `gateStack` mount `hostPath`s resolve against the issue worktree, not `cwd`.
+
 ### `mergeMode` — who gets to say the merge result is good
 
 `direct` (the default) is what sandbar has always done: merge locally, run the

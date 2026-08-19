@@ -53,16 +53,21 @@ export function renderIssueText(issueId: string, issue: IssueJson): string {
   return lines.join("\n");
 }
 
+// `cwd` is required (#34). `gh issue view` resolves the repo from the git
+// remotes of the directory it runs in, so an optional one is a silent way to
+// quote a different tracker: it was optional, and the prompt-layer call site was
+// the one that omitted it, which made the implementer's and reviewer's issue
+// anchor a function of where the host process happened to be launched.
 export async function fetchIssueText(
   issueId: string,
-  cwd?: string,
+  cwd: string,
 ): Promise<string> {
   let stdout: string;
   try {
     ({ stdout } = await exec(
       "gh",
       ["issue", "view", issueId, "--json", "title,body,comments"],
-      cwd ? { cwd } : {},
+      { cwd },
     ));
   } catch (err) {
     throw new SandbarError(

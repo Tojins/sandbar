@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 import { SandbarError } from "./errors.js";
 import {
@@ -110,7 +112,10 @@ describe("resolveConfig", () => {
     expect(r.claudeMdPath).toBe(DEFAULT_CLAUDE_MD_PATH);
     expect(r.contextMdPath).toBe(DEFAULT_CONTEXT_MD_PATH);
     expect(r.adrDir).toBe(DEFAULT_ADR_DIR);
-    expect(r.envFilePath).toBe(DEFAULT_ENV_FILE_PATH);
+    // Rooted at `cwd` (#34) — every consumer reads it on the host, so leaving
+    // it relative meant reading the credential file of whichever directory the
+    // process was launched from.
+    expect(r.envFilePath).toBe(join(process.cwd(), DEFAULT_ENV_FILE_PATH));
     expect(r.maxImplAttempts).toBe(DEFAULT_MAX_IMPL_ATTEMPTS);
     expect(r.maxReviewRounds).toBe(DEFAULT_MAX_REVIEW_ROUNDS);
     expect(r.maxTotalIssues).toBe(DEFAULT_MAX_TOTAL_ISSUES);
@@ -359,5 +364,49 @@ describe("resolveMergeMode (#22)", () => {
         },
       }),
     ).toThrow(/must start with 'sandbar\//);
+  });
+});
+
+// #34 — every host-side path config has to name the repo the run is about.
+// `envFilePath` is the one that can be resolved once, here, because unlike the
+// anchor doc paths it is never handed to the agent as an @ref: run.ts's
+// GH_TOKEN check, preflight's credential invariants and the sandbox's env
+// resolver all just read it on the host.
+describe("resolveConfig — cwd is absolute (#34)", () => {
+  it("resolves a relative cwd against the launch directory", () => {
+    const r = resolveConfig({ ...minimal, cwd: "sub/repo" });
+    expect(r.cwd).toBe(join(process.cwd(), "sub", "repo"));
+  });
+
+  it("leaves an absolute cwd alone", () => {
+    const r = resolveConfig({ ...minimal, cwd: "/repos/app" });
+    expect(r.cwd).toBe("/repos/app");
+  });
+
+  // The reason it has to happen here rather than at each call site: every path
+  // sandbar derives from `cwd` is passed to a child as an ARGUMENT while `cwd`
+  // itself is that child's working directory, so a relative one is applied
+  // twice.
+  it("makes a derived worktree path absolute too", () => {
+    const r = resolveConfig({ ...minimal, cwd: "sub/repo", workDir: ".sandbar" });
+    expect(join(r.cwd, r.workDir)).toBe(
+      join(process.cwd(), "sub", "repo", ".sandbar"),
+    );
+  });
+});
+
+describe("resolveConfig — envFilePath is rooted at cwd (#34)", () => {
+  it("resolves a relative env file against a configured cwd", () => {
+    const r = resolveConfig({ ...minimal, cwd: "/repos/other", envFilePath: ".env" });
+    expect(r.envFilePath).toBe("/repos/other/.env");
+  });
+
+  it("leaves an absolute env file alone", () => {
+    const r = resolveConfig({
+      ...minimal,
+      cwd: "/repos/other",
+      envFilePath: "/etc/sandbar/.env",
+    });
+    expect(r.envFilePath).toBe("/etc/sandbar/.env");
   });
 });

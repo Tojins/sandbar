@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { dirtyWorktreePaths, headMismatch } from "./git-ops.js";
+import { dirtyWorktreePaths, ensureIssueBranch, headMismatch } from "./git-ops.js";
 
 const exec = promisify(execFile);
 
@@ -253,5 +253,96 @@ describe("headMismatch (#27)", () => {
       else process.env["GIT_CEILING_DIRECTORIES"] = prev;
       await rm(notARepo, { recursive: true, force: true });
     }
+  });
+});
+
+// #34 — the branch has to be created in the repo the RUN is about.
+//
+// Every other function in git-ops takes a worktree path, so this was the one
+// that ran wherever the host process was launched. It is asserted against two
+// real repos with the process cwd pointed at the WRONG one, because that is the
+// only arrangement in which the bug is visible at all: with `config.cwd`
+// defaulting to `process.cwd()` the two coincide, and a test that lets them
+// coincide passes just as happily with the `cwd` option deleted again.
+describe("ensureIssueBranch — operates on repoDir, not process.cwd() (#34)", () => {
+  let launchedFrom: string;
+  let target: string;
+  let originalCwd: string;
+
+  const seed = async (repo: string) => {
+    const git = (...args: string[]) => exec("git", args, { cwd: repo });
+    await git("init", "-q", "-b", "main");
+    await git("config", "user.email", "t@t");
+    await git("config", "user.name", "t");
+    await writeFile(join(repo, "a.txt"), "a\n");
+    await git("add", "-A");
+    await git("commit", "-qm", "init");
+    // ensureIssueBranch seeds from origin/<sourceBranch>, so the ref has to
+    // exist. A self-remote is enough and needs no network.
+    await git("remote", "add", "origin", repo);
+    await git("fetch", "-q", "origin");
+  };
+
+  beforeEach(async () => {
+    originalCwd = process.cwd();
+    launchedFrom = await mkdtemp(join(tmpdir(), "sandbar-launch-"));
+    target = await mkdtemp(join(tmpdir(), "sandbar-target-"));
+    await seed(launchedFrom);
+    await seed(target);
+    process.chdir(launchedFrom);
+  });
+
+  afterEach(async () => {
+    process.chdir(originalCwd);
+    await rm(launchedFrom, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
+  });
+
+  const hasBranch = async (repo: string, branch: string): Promise<boolean> =>
+    exec("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], {
+      cwd: repo,
+    }).then(
+      () => true,
+      () => false,
+    );
+
+  it("creates the branch in repoDir and leaves the launch directory alone", async () => {
+    await ensureIssueBranch(target, "sandbar/issue-1-thing", "main");
+
+    expect(await hasBranch(target, "sandbar/issue-1-thing")).toBe(true);
+    expect(await hasBranch(launchedFrom, "sandbar/issue-1-thing")).toBe(false);
+  });
+
+  // The "already exists" short-circuit has to ask the same repo the create
+  // would write to. Asking the launch directory instead is the silent half of
+  // the bug: a branch present there suppresses a create the target still needs.
+  it("does not treat a same-named branch in the launch directory as existing", async () => {
+    await exec("git", ["branch", "sandbar/issue-2-thing"], { cwd: launchedFrom });
+
+    await ensureIssueBranch(target, "sandbar/issue-2-thing", "main");
+
+    expect(await hasBranch(target, "sandbar/issue-2-thing")).toBe(true);
+  });
+
+  // Resumed runs depend on this: an existing branch keeps its commits.
+  it("leaves an existing branch in repoDir untouched", async () => {
+    await exec("git", ["branch", "sandbar/issue-3-thing"], { cwd: target });
+    await exec("git", ["commit", "-q", "--allow-empty", "-m", "more"], {
+      cwd: target,
+    });
+    const { stdout: before } = await exec(
+      "git",
+      ["rev-parse", "sandbar/issue-3-thing"],
+      { cwd: target },
+    );
+
+    await ensureIssueBranch(target, "sandbar/issue-3-thing", "main");
+
+    const { stdout: after } = await exec(
+      "git",
+      ["rev-parse", "sandbar/issue-3-thing"],
+      { cwd: target },
+    );
+    expect(after.trim()).toBe(before.trim());
   });
 });

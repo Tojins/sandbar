@@ -29,7 +29,7 @@
 
 import { execFile } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { fetchIssueText } from "./issue-anchor.js";
@@ -57,6 +57,13 @@ function section(body: string): string {
 }
 
 export type ProjectAnchorOptions = {
+  // The host repo the `git log` below runs in (#34). Explicit rather than
+  // inherited from `process.cwd()`: on a host that sets `config.cwd` the anchor
+  // was quoting the recent history of whichever repo the process was launched
+  // from, which is the one layer of the prompt the agent has no way to sanity
+  // check — it reads as this repo's history and is wrong in a way that looks
+  // exactly like a stale checkout.
+  readonly cwd: string;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
@@ -76,6 +83,12 @@ export type PromptInputs = {
 
 export type ReviewerPromptInputs = {
   readonly issue: { readonly id: string; readonly title: string; readonly branch: string };
+  // The host repo, for the anchor layers' `git log` and `gh issue view` (#34).
+  // NOT `worktreePath`: that is a linked worktree of the same repo and would
+  // answer both questions identically, but it is the reviewer's SUBJECT, and
+  // sourcing the project anchor from it would make the anchor a function of the
+  // branch under review.
+  readonly cwd: string;
   readonly worktreePath: string;
   readonly sourceBranch: string;
   // Optional project standards file that *extends* the built-in coding
@@ -91,7 +104,7 @@ export async function buildPrompt(
 ): Promise<string> {
   const layers = [
     await buildProjectAnchor(anchor),
-    await buildIssueAnchor(inputs.issue.id),
+    await buildIssueAnchor(inputs.issue.id, anchor.cwd),
     await buildAttemptSlot(inputs),
   ];
   return layers.join("\n\n---\n\n");
@@ -102,11 +115,12 @@ export async function buildReviewerPrompt(
 ): Promise<string> {
   const layers = [
     await buildProjectAnchor({
+      cwd: inputs.cwd,
       claudeMdPath: inputs.claudeMdPath,
       contextMdPath: inputs.contextMdPath,
       sourceBranch: inputs.sourceBranch,
     }),
-    await buildIssueAnchor(inputs.issue.id),
+    await buildIssueAnchor(inputs.issue.id, inputs.cwd),
     await buildReviewerSlot(inputs),
   ];
   return layers.join("\n\n---\n\n");
@@ -115,26 +129,34 @@ export async function buildReviewerPrompt(
 export async function buildProjectAnchor(
   opts: ProjectAnchorOptions,
 ): Promise<string> {
+  // The @refs stay exactly as the host wrote them — the agent resolves them
+  // from the repo root inside its sandbox, so they must not be re-rooted. Only
+  // the host-side "does this exist" probe is resolved against `opts.cwd`
+  // (#34); left relative it asked the launch directory, and the answer is
+  // silent either way: a real CONTEXT.md dropped from the prompt, or a dead
+  // @ref handed to the agent.
   const lines = ["# Project anchor", "", `Conventions: @${opts.claudeMdPath}`];
-  if (opts.contextMdPath && existsSync(opts.contextMdPath)) {
+  if (opts.contextMdPath && existsSync(resolve(opts.cwd, opts.contextMdPath))) {
     lines.push(`Context: @${opts.contextMdPath}`);
   }
-  if (opts.adrDir && existsSync(opts.adrDir)) {
-    const adrs = readdirSync(opts.adrDir).filter((f) => f.endsWith(".md")).sort();
+  const adrDir = opts.adrDir;
+  if (adrDir) {
+    const adrDirPath = resolve(opts.cwd, adrDir);
+    const adrs = existsSync(adrDirPath)
+      ? readdirSync(adrDirPath).filter((f) => f.endsWith(".md")).sort()
+      : [];
     if (adrs.length > 0) {
       lines.push("", "ADRs:");
-      for (const a of adrs) lines.push(`- @${join(opts.adrDir, a)}`);
+      for (const a of adrs) lines.push(`- @${join(adrDir, a)}`);
     }
   }
   lines.push("", `Last 10 commits on \`${opts.sourceBranch}\`:`, "```");
   try {
-    const { stdout } = await exec("git", [
-      "log",
-      opts.sourceBranch,
-      "-n",
-      "10",
-      "--format=%h %s",
-    ]);
+    const { stdout } = await exec(
+      "git",
+      ["log", opts.sourceBranch, "-n", "10", "--format=%h %s"],
+      { cwd: opts.cwd },
+    );
     lines.push(stdout.trim());
   } catch {
     lines.push("(unavailable)");
@@ -143,8 +165,15 @@ export async function buildProjectAnchor(
   return lines.join("\n");
 }
 
-async function buildIssueAnchor(issueId: string): Promise<string> {
-  return `# Issue anchor\n\n${await fetchIssueText(issueId)}`;
+// `gh issue view` resolves the repo from the git remotes of the directory it
+// runs in, so the cwd decides which tracker the anchor quotes (#34).
+// `fetchIssueText` has always accepted one — merger.ts passes its worktree —
+// and this call site was simply not passing it.
+async function buildIssueAnchor(
+  issueId: string,
+  cwd: string,
+): Promise<string> {
+  return `# Issue anchor\n\n${await fetchIssueText(issueId, cwd)}`;
 }
 
 async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
@@ -252,7 +281,8 @@ async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> 
   // Only point at the project standards file when it actually exists, so a
   // configured-but-absent path doesn't send the reviewer chasing a dead @ref.
   const codingStandardsPath =
-    inputs.codingStandardsPath && existsSync(inputs.codingStandardsPath)
+    inputs.codingStandardsPath &&
+    existsSync(resolve(inputs.cwd, inputs.codingStandardsPath))
       ? inputs.codingStandardsPath
       : undefined;
 

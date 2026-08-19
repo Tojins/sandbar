@@ -15,6 +15,16 @@
 // All ranking logic lives in pure functions (parseBlockedBy, kebabSlug,
 // resolvePlan) so it can be table-driven tested. The I/O wrappers
 // (fetchCandidates, fetchIssueStates) are thin adapters over `gh`.
+//
+// `fetchCandidates` takes an explicit `cwd` (#34). `gh issue list` resolves the
+// repo from the git remotes of the directory it runs in, so inheriting
+// `process.cwd()` made the planner's queue a property of where the host process
+// was launched rather than of `config.cwd`. It is required, not optional, for
+// the reason spelled out in preflight.ts: an omitted option is invisible and
+// wrong only on the hosts that configure a cwd. `fetchIssueStates` needs no
+// such thing — it already names the repo in the GraphQL variables — and the two
+// must keep agreeing, since preflight's resume classification calls
+// `fetchCandidates` to predict exactly what the next cycle will pick up.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -96,19 +106,25 @@ export function resolvePlan(
 // I/O
 // ---------------------------------------------------------------------------
 
-export async function fetchCandidates(): Promise<readonly IssueSummary[]> {
-  const { stdout } = await exec("gh", [
-    "issue",
-    "list",
-    "--label",
-    READY_LABEL,
-    "--state",
-    "open",
-    "--json",
-    "number,title,body,labels",
-    "--limit",
-    "200",
-  ]);
+export async function fetchCandidates(
+  cwd: string,
+): Promise<readonly IssueSummary[]> {
+  const { stdout } = await exec(
+    "gh",
+    [
+      "issue",
+      "list",
+      "--label",
+      READY_LABEL,
+      "--state",
+      "open",
+      "--json",
+      "number,title,body,labels",
+      "--limit",
+      "200",
+    ],
+    { cwd },
+  );
   const raw = JSON.parse(stdout) as ReadonlyArray<{
     number: number;
     title: string;
@@ -161,10 +177,11 @@ export async function fetchIssueStates(
 
 export async function buildPlan(
   repo: RepoRef,
+  cwd: string,
   excluded: ReadonlySet<number> = new Set(),
   k: number = DEFAULT_K,
 ): Promise<Plan> {
-  const candidates = await fetchCandidates();
+  const candidates = await fetchCandidates(cwd);
   // One GraphQL batch covers both the authoritative state of every candidate
   // (the #16 stale-search CLOSED guard) and of every blocker they reference.
   const wanted = new Set<number>();

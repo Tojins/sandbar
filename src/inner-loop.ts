@@ -46,7 +46,11 @@ import {
 import type { AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { parsePromise } from "./promise-parser.js";
-import { buildPrompt, buildReviewerPrompt } from "./prompt.js";
+import {
+  type ProjectAnchorOptions,
+  buildPrompt,
+  buildReviewerPrompt,
+} from "./prompt.js";
 import { parseVerdict } from "./verdict-parser.js";
 
 export const FAILURE_TAIL_LINES = 200;
@@ -100,6 +104,12 @@ export type Terminal =
     };
 
 export type InnerLoopConfig = {
+  // The host repo. Everything rooted here — the issue branch this loop seeds,
+  // the managed worktree it prepares, the anchor layers' `git log`/`gh issue
+  // view` — must agree with the `config.cwd` finalize, preflight and the merger
+  // use, and inheriting `process.cwd()` made that agreement a coincidence of
+  // how the host was launched (#34).
+  readonly cwd: string;
   readonly sourceBranch: string;
   readonly workDir: string;
   readonly envFilePath: string;
@@ -206,13 +216,18 @@ async function runSandboxCycle(
   try {
     // Seed the issue branch off origin/<sourceBranch> (not the host's local)
     // so the sandbox never inherits cwd's in-progress state. Idempotent.
-    await ensureIssueBranch(issue.branch, config.sourceBranch);
+    await ensureIssueBranch(config.cwd, issue.branch, config.sourceBranch);
 
     // Worktree first (fast git ops), then container bringups in parallel: the
     // stack's mounts resolve against this worktree and must see its files on
     // disk at container start (#20).
     const worktreePath = await agentSandbox.prepareWorktree({
       branch: issue.branch,
+      // Explicit, not `process.cwd()` (#34). The path this returns has to be
+      // the one `worktreePathFor(config.cwd, ...)` computes for finalize and
+      // preflight — they are the same directory only if both are rooted the
+      // same way.
+      cwd: config.cwd,
       hooks: opts.hooks,
       copyToWorktree: [...opts.copyToWorktree],
       workDir: config.workDir,
@@ -221,6 +236,7 @@ async function runSandboxCycle(
     const [sandboxResult, stackResult] = await Promise.allSettled([
       agentSandbox.createSandbox({
         branch: issue.branch,
+        cwd: config.cwd,
         // Named explicitly rather than left to defaultImageName(repoDir): the
         // implicit coupling between the sandbox image and the host's repo
         // DIRECTORY NAME broke silently on a rename (#24 D7).
@@ -256,6 +272,7 @@ async function runSandboxCycle(
     const gateStack: Stack = stack;
 
     const anchorOpts = {
+      cwd: config.cwd,
       claudeMdPath: config.claudeMdPath,
       contextMdPath: config.contextMdPath,
       adrDir: config.adrDir,
@@ -345,12 +362,7 @@ type ExecuteActionCtx = {
   readonly sandbox: Sandbox;
   readonly opts: InnerLoopOptions;
   readonly config: InnerLoopConfig;
-  readonly anchorOpts: {
-    readonly claudeMdPath: string;
-    readonly contextMdPath?: string;
-    readonly adrDir?: string;
-    readonly sourceBranch: string;
-  };
+  readonly anchorOpts: ProjectAnchorOptions;
   readonly gateStack: Stack;
   // The issue worktree. Same tree the sandbox edits, the stack mounts and the
   // clean-assert reads — one tree, which is the whole point of D1.
@@ -458,6 +470,7 @@ async function runReviewer(
 
   const reviewerPrompt = await buildReviewerPrompt({
     issue,
+    cwd: config.cwd,
     worktreePath: sandbox.worktreePath,
     sourceBranch: config.sourceBranch,
     codingStandardsPath: config.codingStandardsPath,

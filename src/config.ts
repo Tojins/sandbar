@@ -1,3 +1,5 @@
+import { resolve } from "node:path";
+
 import type { SandboxHooks } from "./agent-sandbox.js";
 import { SandbarError } from "./errors.js";
 import { BRANCH_PREFIX } from "./naming.js";
@@ -1149,9 +1151,30 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   const gateStack = resolveGateStack(config.gateStack);
   const images = resolveImages(config.images, config.sandboxImage);
   checkRebuildOnIsUsed(images, gateStack);
+  // Resolved to absolute HERE, not left as the host wrote it (#34). Since every
+  // git call now runs with `cwd` as its process cwd, a RELATIVE `cwd` is
+  // double-rooted the moment a path derived from it is passed as an argument:
+  // `worktreePathFor("sub/repo", …)` yields `sub/repo/.sandbar/…`, which the
+  // child then resolves against `<launch>/sub/repo`. Reproduced against real
+  // git: `worktree add` cheerfully creates
+  // `sub/repo/sub/repo/.sandbar/worktrees/merger` and lists it as such.
+  // Preflight's own `worktree remove` happens to survive the same doubling —
+  // git falls back to a suffix match against the worktree list — which is
+  // exactly why this is fixed at the source rather than per call site:
+  // `merger-worktree.ts`'s `worktree add` has no such fallback, and podman
+  // rejects a relative `-v` source outright ("names must match …"), so
+  // `merger.ts`'s `-v ${cwd}:/workspace` would fail every resolve-loop attempt.
+  // The assertion below is only that the string comes out absolute; the git and
+  // podman behaviour it protects against is theirs to define, not ours to fake.
+  //
+  // NOT `realpathSync`: this only has to make the string absolute and
+  // self-consistent. run.ts still canonicalises separately for the podman scope,
+  // because THAT has to partition the host identically to proper-lockfile, which
+  // resolves symlinks — two different jobs.
+  const cwd = resolve(config.cwd ?? DEFAULT_CWD());
   return {
     ...config,
-    cwd: config.cwd ?? DEFAULT_CWD(),
+    cwd,
     workDir: config.workDir ?? DEFAULT_WORK_DIR,
     sourceBranch,
     images,
@@ -1164,7 +1187,14 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     claudeMdPath: config.claudeMdPath ?? DEFAULT_CLAUDE_MD_PATH,
     contextMdPath: config.contextMdPath ?? DEFAULT_CONTEXT_MD_PATH,
     adrDir: config.adrDir ?? DEFAULT_ADR_DIR,
-    envFilePath: config.envFilePath ?? DEFAULT_ENV_FILE_PATH,
+    // Rooted at `cwd`, not left relative (#34). Unlike the anchor doc paths
+    // this one is never handed to the agent as an @ref — every consumer
+    // (run.ts's GH_TOKEN check, preflight, the sandbox's env resolver) just
+    // READS it on the host — so resolving it here is the whole fix, and a
+    // credential file read from whichever directory the process was launched
+    // from is the least obvious wrong answer of the lot. `resolve` rather than
+    // `join` so a host that configures an absolute path keeps it.
+    envFilePath: resolve(cwd, config.envFilePath ?? DEFAULT_ENV_FILE_PATH),
     maxImplAttempts: config.maxImplAttempts ?? DEFAULT_MAX_IMPL_ATTEMPTS,
     maxReviewRounds: config.maxReviewRounds ?? DEFAULT_MAX_REVIEW_ROUNDS,
     maxTotalIssues: config.maxTotalIssues ?? DEFAULT_MAX_TOTAL_ISSUES,

@@ -11,6 +11,9 @@
 // still `ready-for-agent` — the label flips happen in Phase 4 — so they read as
 // `resumable`, not as a spurious `unmerged` refusal.)
 //
+// Every shell-out here names the repo explicitly (#34). See `runOk` below for
+// why the `cwd` parameter is required rather than optional.
+//
 // Two layers:
 //   - checkInvariants(state)  — pure function over a captured RepoState.
 //                               Unit-tested with hand-built fixtures.
@@ -30,6 +33,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { makeEnvReader } from "./env.js";
@@ -189,9 +193,29 @@ function which(cmd: string): boolean {
   }
 }
 
-async function runOk(file: string, args: readonly string[]): Promise<boolean> {
+// `cwd` is REQUIRED and first, not an optional trailing option (#34). Every
+// command this module runs — the fetch, the `git branch -D`, the worktree
+// removals, the classification's for-each-ref/merge-base — is a statement
+// about, or a mutation of, the repo the run is about. Left to inherit
+// `process.cwd()` they described whichever directory the host process happened
+// to be launched from, which coincides with `config.cwd` only because
+// `DEFAULT_CWD()` is `process.cwd()`. A host that sets `config.cwd` — which the
+// config explicitly supports — got a preflight that inspected and DELETED
+// branches in one repo while the run's lock, worktrees, scope and merges
+// belonged to another. That also quietly qualified #32: the destructive delete
+// was under *a* lock, just not the one covering the repo it deleted from.
+//
+// Making the parameter required rather than optional is the whole point. An
+// omitted `{ cwd }` is invisible at the call site and fails only on the hosts
+// that configure a cwd, i.e. never in the author's own checkout; a missing
+// positional argument is a type error.
+async function runOk(
+  cwd: string,
+  file: string,
+  args: readonly string[],
+): Promise<boolean> {
   try {
-    await exec(file, [...args]);
+    await exec(file, [...args], { cwd });
     return true;
   } catch {
     return false;
@@ -199,11 +223,12 @@ async function runOk(file: string, args: readonly string[]): Promise<boolean> {
 }
 
 async function captureOk(
+  cwd: string,
   file: string,
   args: readonly string[],
 ): Promise<{ ok: boolean; stdout: string }> {
   try {
-    const { stdout } = await exec(file, [...args]);
+    const { stdout } = await exec(file, [...args], { cwd });
     return { ok: true, stdout };
   } catch {
     return { ok: false, stdout: "" };
@@ -230,38 +255,46 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
   const missingImages: string[] = [];
   if (hasContainerRuntime) {
     for (const image of cfg.pulledImages) {
-      if (!(await runOk(RUNTIME, ["image", "exists", image]))) {
+      if (!(await runOk(cfg.cwd, RUNTIME, ["image", "exists", image]))) {
         missingImages.push(image);
       }
     }
   }
 
-  const ghAuthOk = hasGh ? await runOk("gh", ["auth", "status"]) : false;
-  const sandboxGhTokenOk = hasGh ? await checkSandboxGhToken(env) : false;
+  const ghAuthOk = hasGh ? await runOk(cfg.cwd, "gh", ["auth", "status"]) : false;
+  const sandboxGhTokenOk = hasGh
+    ? await checkSandboxGhToken(cfg.cwd, env)
+    : false;
   const hasAgentCredential =
     !!env("CLAUDE_CODE_OAUTH_TOKEN") || !!env("ANTHROPIC_API_KEY");
 
+  // `--git-dir` prints a path relative to the command's cwd for the ordinary
+  // case (`.git`), so the marker probe has to resolve it against that same cwd
+  // — reading `.git/MERGE_HEAD` from `process.cwd()` is the very confusion this
+  // parameter exists to end.
   const gitDir = (
-    await captureOk("git", ["rev-parse", "--git-dir"])
+    await captureOk(cfg.cwd, "git", ["rev-parse", "--git-dir"])
   ).stdout.trim();
 
-  const branchRes = await captureOk("git", [
+  const branchRes = await captureOk(cfg.cwd, "git", [
     "rev-parse",
     "--abbrev-ref",
     "HEAD",
   ]);
   const currentBranch = branchRes.ok ? branchRes.stdout.trim() : null;
 
-  const hasOriginBranch = await runOk("git", [
+  const hasOriginBranch = await runOk(cfg.cwd, "git", [
     "show-ref",
     "--verify",
     "--quiet",
     `refs/remotes/origin/${cfg.sourceBranch}`,
   ]);
 
-  const openReadyIssues = await fetchOpenReadyIssueNumbers();
-  const { unmerged, discarded, resumable } =
-    await classifyIssueBranches(openReadyIssues);
+  const openReadyIssues = await fetchOpenReadyIssueNumbers(cfg.cwd);
+  const { unmerged, discarded, resumable } = await classifyIssueBranches(
+    cfg.cwd,
+    openReadyIssues,
+  );
 
   return {
     hasGit,
@@ -271,7 +304,7 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     ghAuthOk,
     sandboxGhTokenOk,
     hasAgentCredential,
-    inProgressMarkers: gitDir ? inProgressMarkers(gitDir) : [],
+    inProgressMarkers: gitDir ? inProgressMarkers(resolve(cfg.cwd, gitDir)) : [],
     currentBranch,
     expectedBranch: cfg.sourceBranch,
     hasOriginBranch,
@@ -288,9 +321,11 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
 // Fail-closed to an empty set: a gh hiccup just means no branch is treated as
 // resumable (they fall back to the existing hard error), and the ghAuthOk /
 // sandboxGhTokenOk invariants report the real problem.
-async function fetchOpenReadyIssueNumbers(): Promise<ReadonlySet<number>> {
+async function fetchOpenReadyIssueNumbers(
+  cwd: string,
+): Promise<ReadonlySet<number>> {
   try {
-    const candidates = await fetchCandidates();
+    const candidates = await fetchCandidates(cwd);
     return new Set(candidates.map((c) => c.number));
   } catch {
     return new Set();
@@ -298,12 +333,14 @@ async function fetchOpenReadyIssueNumbers(): Promise<ReadonlySet<number>> {
 }
 
 async function checkSandboxGhToken(
+  cwd: string,
   env: (key: string) => string | undefined,
 ): Promise<boolean> {
   const token = env("GH_TOKEN");
   if (!token) return false;
   try {
     await exec("gh", ["api", "user", "--silent"], {
+      cwd,
       env: { ...process.env, GH_TOKEN: token, GH_HOST: "github.com" },
     });
     return true;
@@ -317,8 +354,8 @@ const ISSUE_BRANCH_REFGLOBS = ALL_BRANCH_PREFIXES.map(
   (p) => `refs/heads/${p}issue-*`,
 );
 
-async function listIssueBranches(): Promise<readonly string[]> {
-  const { ok, stdout } = await captureOk("git", [
+async function listIssueBranches(cwd: string): Promise<readonly string[]> {
+  const { ok, stdout } = await captureOk(cwd, "git", [
     "for-each-ref",
     "--format=%(refname:short)",
     ...ISSUE_BRANCH_REFGLOBS,
@@ -328,20 +365,21 @@ async function listIssueBranches(): Promise<readonly string[]> {
 }
 
 async function isBranchMerged(
+  cwd: string,
   branch: string,
   sourceBranch: string,
 ): Promise<boolean> {
   // A branch counts as merged if its tip is reachable from local sourceBranch
   // OR origin/sourceBranch. The origin check covers PRs that landed upstream
   // while local is behind.
-  const onLocal = await runOk("git", [
+  const onLocal = await runOk(cwd, "git", [
     "merge-base",
     "--is-ancestor",
     branch,
     sourceBranch,
   ]);
   if (onLocal) return true;
-  return runOk("git", [
+  return runOk(cwd, "git", [
     "merge-base",
     "--is-ancestor",
     branch,
@@ -349,8 +387,10 @@ async function isBranchMerged(
   ]);
 }
 
-async function branchUpstreamTracks(): Promise<ReadonlyMap<string, string>> {
-  const { ok, stdout } = await captureOk("git", [
+async function branchUpstreamTracks(
+  cwd: string,
+): Promise<ReadonlyMap<string, string>> {
+  const { ok, stdout } = await captureOk(cwd, "git", [
     "for-each-ref",
     "--format=%(refname:short)\t%(upstream:track)",
     ...ISSUE_BRANCH_REFGLOBS,
@@ -368,14 +408,15 @@ async function branchUpstreamTracks(): Promise<ReadonlyMap<string, string>> {
 }
 
 async function classifyIssueBranches(
+  cwd: string,
   openReadyIssues: ReadonlySet<number>,
 ): Promise<{
   unmerged: readonly string[];
   discarded: readonly string[];
   resumable: readonly string[];
 }> {
-  const all = await listIssueBranches();
-  const tracks = await branchUpstreamTracks();
+  const all = await listIssueBranches(cwd);
+  const tracks = await branchUpstreamTracks(cwd);
   const unmerged: string[] = [];
   const discarded: string[] = [];
   const resumable: string[] = [];
@@ -407,24 +448,24 @@ async function classifyIssueBranches(
 export async function deleteMergedIssueBranches(
   cfg: { cwd: string; workDir: string; sourceBranch: string },
 ): Promise<readonly string[]> {
-  const all = await listIssueBranches();
+  const all = await listIssueBranches(cfg.cwd);
   const deleted: string[] = [];
   for (const branch of all) {
-    if (!(await isBranchMerged(branch, cfg.sourceBranch))) continue;
+    if (!(await isBranchMerged(cfg.cwd, branch, cfg.sourceBranch))) continue;
     // A leftover worktree (from a crash or a non-merged terminal whose
     // finalize ran before the corresponding fix landed) holds the branch and
     // makes `git branch -D` fail. Remove it best-effort first.
-    await runOk("git", [
+    await runOk(cfg.cwd, "git", [
       "worktree",
       "remove",
       "--force",
       worktreePathFor(cfg.cwd, cfg.workDir, branch),
     ]);
-    await runOk("git", ["worktree", "prune"]);
+    await runOk(cfg.cwd, "git", ["worktree", "prune"]);
     // Use -D rather than -d: when the branch is merged only into
     // origin/sourceBranch (not local), git's safety check refuses -d even
     // though the commits are demonstrably preserved on a remote ref.
-    const ok = await runOk("git", ["branch", "-D", branch]);
+    const ok = await runOk(cfg.cwd, "git", ["branch", "-D", branch]);
     if (ok) deleted.push(branch);
   }
   return deleted;
@@ -442,7 +483,7 @@ export class PreflightError extends Error {
 export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   // Fetch before the cleanup pass so that merged-on-origin branches can be
   // reaped even when the user hasn't pulled local sourceBranch recently.
-  await runOk("git", ["fetch", "origin", cfg.sourceBranch, "--quiet"]);
+  await runOk(cfg.cwd, "git", ["fetch", "origin", cfg.sourceBranch, "--quiet"]);
 
   const deleted = await deleteMergedIssueBranches({
     cwd: cfg.cwd,
@@ -470,6 +511,7 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   // is ahead of origin, those issues won't see that work — the merge into
   // local carries it forward but issues that depend on it can fail.
   const ahead = await countCommitsAhead(
+    cfg.cwd,
     cfg.sourceBranch,
     `origin/${cfg.sourceBranch}`,
   );
@@ -483,8 +525,12 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   }
 }
 
-async function countCommitsAhead(local: string, remote: string): Promise<number> {
-  const { ok, stdout } = await captureOk("git", [
+async function countCommitsAhead(
+  cwd: string,
+  local: string,
+  remote: string,
+): Promise<number> {
+  const { ok, stdout } = await captureOk(cwd, "git", [
     "rev-list",
     "--count",
     `${remote}..${local}`,
