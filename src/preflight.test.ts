@@ -14,11 +14,73 @@ const cleanState: RepoState = {
   unmergedIssueBranches: [],
   discardedIssueBranches: [],
   resumableIssueBranches: [],
+  configuredRepo: { owner: "acme", name: "app" },
+  originUrl: "https://github.com/acme/app.git",
+  originRepo: { owner: "acme", name: "app" },
 };
 
 function failures(s: RepoState): string[] {
   return checkInvariants(s).flatMap((r) => (r.ok ? [] : [r.message]));
 }
+
+// #34 — `gh` now names `ghOwner`/`ghRepo` on every call while `git push` still
+// goes to the cache's `origin`, which is copied from the operator's checkout
+// and declared by nobody. Naming the tracker cannot make the two AGREE, so
+// preflight compares them; every symptom of a mismatch is silent and lands
+// somewhere real (issues closed in one repo for commits pushed to another).
+describe("checkInvariants — the tracker and the git remote name one repo (#34)", () => {
+  it("passes when origin and ghOwner/ghRepo are the same repo", () => {
+    expect(failures(cleanState)).toEqual([]);
+  });
+
+  it("refuses when origin points at a different repo, naming both", () => {
+    const f = failures({
+      ...cleanState,
+      originUrl: "https://github.com/acme/app-fork.git",
+      originRepo: { owner: "acme", name: "app-fork" },
+    });
+    const msg = f.find((m) => m.includes("ghOwner/ghRepo"));
+    expect(msg).toBeDefined();
+    expect(msg).toContain("acme/app");
+    expect(msg).toContain("acme/app-fork");
+    // The URL itself, because "origin is acme/app-fork" is not actionable
+    // without knowing which remote said so.
+    expect(msg).toContain("https://github.com/acme/app-fork.git");
+  });
+
+  // GitHub owner and repo names are case-insensitive and `gh` follows a
+  // case-differing --repo without complaint, so refusing here would be
+  // refusing a working configuration.
+  it("accepts a case difference", () => {
+    expect(
+      failures({
+        ...cleanState,
+        originUrl: "git@github.com:ACME/App.git",
+        originRepo: { owner: "ACME", name: "App" },
+      }),
+    ).toEqual([]);
+  });
+
+  // A URL `parseRepoFromRemoteUrl` will not commit to (a local mirror, most
+  // likely) is reported by runPreflight as a warning, not turned into a guess
+  // here: a wrong parse REFUSES a working configuration, which is worse than
+  // the split it is trying to catch.
+  it("stays silent when origin could not be read as a repo", () => {
+    expect(
+      failures({
+        ...cleanState,
+        originUrl: "/srv/git/app.git",
+        originRepo: null,
+      }),
+    ).toEqual([]);
+  });
+
+  it("stays silent when there is no origin URL at all", () => {
+    expect(
+      failures({ ...cleanState, originUrl: null, originRepo: null }),
+    ).toEqual([]);
+  });
+});
 
 describe("checkInvariants", () => {
   it("passes on a fully clean state", () => {

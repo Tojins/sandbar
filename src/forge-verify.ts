@@ -104,6 +104,7 @@ import {
   type ResolveLogger,
   runResolveLoop,
 } from "./resolve-loop.js";
+import type { RepoRef } from "./repo-ref.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -996,7 +997,7 @@ export type RealVerifyAdapterDeps = {
   // The merger worktree (detached at origin/<sourceBranch>).
   readonly cwd: string;
   readonly sourceBranch: string;
-  readonly repo: { readonly owner: string; readonly name: string };
+  readonly repo: RepoRef;
   readonly exec?: ExecFn;
 };
 

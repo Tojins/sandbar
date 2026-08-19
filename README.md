@@ -139,7 +139,7 @@ sits in).
 
 | Field | Why it can't default |
 | --- | --- |
-| `ghOwner`, `ghRepo` | Repo identity. |
+| `ghOwner`, `ghRepo` | Repo identity. Every `gh` call names this repository, so it — not `cwd`'s `origin` — decides which tracker sandbar reads and writes. Preflight refuses to start if the two disagree. |
 | `sandboxImage` | The image the agent (and the merger's resolve agent) runs in. |
 | `botName`, `botEmail` | Commit/author identity. |
 | `sandboxHooks` | Host-specific build/setup. |
@@ -169,16 +169,20 @@ sits in).
 | `mergeMode` | `{ kind: "direct" }` — see below |
 | `codingStandardsPath` | *(unset)* — no conventional path; see below |
 
-`cwd` is resolved to an absolute path, and it must be a checkout of the repo,
-with an `origin` remote. The paths above are not all interpreted in the same
+`cwd` is resolved to an absolute path, and it must be a checkout of
+`ghOwner`/`ghRepo`, with an `origin` remote — sandbar pushes branches and merges
+to that `origin` while reading and writing issues in the configured repo, so
+preflight compares the two and refuses the run when they name different
+repositories. The paths above are not all interpreted in the same
 place, so:
 
 - `claudeMdPath`, `contextMdPath`, `adrDir` and `codingStandardsPath` stay
   relative in the prompt, because the agent resolves them from the repo root
-  inside its own sandbox — i.e. against the **issue worktree**, which is seeded
-  from `origin/<sourceBranch>`. Sandbar's host-side "does this file exist" check
-  is rooted at `.sandbar/worktrees/source`, a tree at `origin/<sourceBranch>` —
-  so it matches what the agent sees, except for a doc the branch itself adds.
+  inside its own sandbox — i.e. against the **issue worktree**. Sandbar's
+  host-side "does this file exist" check is rooted at that same worktree, so a
+  doc the branch itself adds is referenced from the attempt that adds it, and
+  the reviewer of a commit that introduces a `CODING_STANDARDS.md` is pointed
+  at it.
 - `copyToWorktree` entries resolve against `cwd`, your own checkout, because
   the cache is bare and has nothing to copy. That is the feature's intent
   (host-only files that are not in git), but it does make issue-worktree

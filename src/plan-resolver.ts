@@ -16,29 +16,31 @@
 // resolvePlan) so it can be table-driven tested. The I/O wrappers
 // (fetchCandidates, fetchIssueStates) are thin adapters over `gh`.
 //
-// `fetchCandidates` takes an explicit `cwd` (#34). `gh issue list` resolves the
-// repo from the git remotes of the directory it runs in, so inheriting
-// `process.cwd()` made the planner's queue a property of where the host process
-// was launched. It is required, not optional, for the reason spelled out in
-// preflight.ts: an omitted option is invisible and wrong only on the hosts that
-// configure a cwd. `fetchIssueStates` needs no such thing — it already names
-// the repo in the GraphQL variables — and the two must keep agreeing, since
-// preflight's resume classification calls `fetchCandidates` to predict exactly
-// what the next cycle will pick up.
+// `fetchCandidates` NAMES the repository (#34). It used to identify it the way
+// `gh` does by default — from the git remotes of the directory the command runs
+// in — which made the planner's queue a property of a directory: first of
+// wherever the host process was launched, then (once #34 threaded a `cwd`) of
+// wherever the cache's `origin` happened to point. `fetchIssueStates` has
+// always named the repo, in its GraphQL variables, and the two MUST agree:
+// `buildPlan` lists candidates through the first and resolves their
+// authoritative state through the second, so a disagreement resolves one
+// repository's issue numbers in another — silently dropping or mis-stating
+// every candidate rather than failing. Preflight's resume classification calls
+// `fetchCandidates` for the same never-desync reason, so the same argument
+// covers it.
 //
-// Since #38 what every caller passes is `layout.repoDir`, the bare cache. `gh`
-// resolves a bare repo's remotes exactly as it does a checkout's, so this is
-// one directory for every git and gh call sandbar makes rather than two that
-// could disagree (#38 item 9). The standing gap is unchanged and worth
-// restating: these calls name a DIRECTORY, never `--repo <owner>/<name>` the
-// way forge-verify.ts does, so a cache whose `origin` disagrees with the
-// configured `ghOwner`/`ghRepo` still splits sandbar's tracker access in two,
-// and nothing validates the agreement.
+// Passing `RepoRef` rather than a directory is what makes that agreement
+// structural: both functions now read `config.ghOwner`/`config.ghRepo`, which
+// are required fields, so there is exactly one answer and no directory can
+// supply a second. Note neither function takes a `cwd` at all any more — with
+// `--repo` given, `gh` never looks at git remotes, so there is no directory
+// left for one to be wrong.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { BRANCH_PREFIX } from "./naming.js";
+import { type RepoRef, repoSlug } from "./repo-ref.js";
 
 const exec = promisify(execFile);
 
@@ -62,11 +64,6 @@ export type PlannedIssue = {
 };
 
 export type Plan = readonly PlannedIssue[];
-
-export type RepoRef = {
-  readonly owner: string;
-  readonly name: string;
-};
 
 export function parseBlockedBy(body: string): readonly number[] {
   // Match `## Blocked by` (case-insensitive) and capture everything up to the
@@ -116,24 +113,22 @@ export function resolvePlan(
 // ---------------------------------------------------------------------------
 
 export async function fetchCandidates(
-  cwd: string,
+  repo: RepoRef,
 ): Promise<readonly IssueSummary[]> {
-  const { stdout } = await exec(
-    "gh",
-    [
-      "issue",
-      "list",
-      "--label",
-      READY_LABEL,
-      "--state",
-      "open",
-      "--json",
-      "number,title,body,labels",
-      "--limit",
-      "200",
-    ],
-    { cwd },
-  );
+  const { stdout } = await exec("gh", [
+    "issue",
+    "list",
+    "--repo",
+    repoSlug(repo),
+    "--label",
+    READY_LABEL,
+    "--state",
+    "open",
+    "--json",
+    "number,title,body,labels",
+    "--limit",
+    "200",
+  ]);
   const raw = JSON.parse(stdout) as ReadonlyArray<{
     number: number;
     title: string;
@@ -186,11 +181,10 @@ export async function fetchIssueStates(
 
 export async function buildPlan(
   repo: RepoRef,
-  cwd: string,
   excluded: ReadonlySet<number> = new Set(),
   k: number = DEFAULT_K,
 ): Promise<Plan> {
-  const candidates = await fetchCandidates(cwd);
+  const candidates = await fetchCandidates(repo);
   // One GraphQL batch covers both the authoritative state of every candidate
   // (the #16 stale-search CLOSED guard) and of every blocker they reference.
   const wanted = new Set<number>();

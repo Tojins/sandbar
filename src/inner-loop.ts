@@ -47,6 +47,7 @@ import type { AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { parsePromise } from "./promise-parser.js";
 import type { RepoLayout } from "./repo-cache.js";
+import type { RepoRef } from "./repo-ref.js";
 import {
   type ProjectAnchorOptions,
   buildPrompt,
@@ -113,6 +114,11 @@ export type InnerLoopConfig = {
   // splitting `cwd` into a repo and a set of paths is what stops it becoming a
   // coincidence of which of two directories a call site happened to mean.
   readonly layout: RepoLayout;
+  // The tracker the issue anchor quotes, named rather than inferred from a
+  // directory's git remotes (#34). Distinct from `layout` on purpose: the
+  // cache's `origin` is copied from the operator's checkout and is not the
+  // configured repository until preflight has confirmed it is.
+  readonly repo: RepoRef;
   readonly sourceBranch: string;
   // The declared credential record (`config.env`), forwarded to each sandbox.
   readonly env: Record<string, string>;
@@ -274,8 +280,11 @@ async function runSandboxCycle(
     const gateStack: Stack = stack;
 
     const anchorOpts = {
+      repo: config.repo,
       repoDir: config.layout.repoDir,
-      sourceWorktree: config.layout.sourceWorktree,
+      // The tree the agent will resolve the emitted @refs in is its own issue
+      // worktree, so that is the tree the probes ask (#34).
+      probeWorktree: worktreePath,
       claudeMdPath: config.claudeMdPath,
       contextMdPath: config.contextMdPath,
       adrDir: config.adrDir,
@@ -473,8 +482,8 @@ async function runReviewer(
 
   const reviewerPrompt = await buildReviewerPrompt({
     issue,
+    repo: config.repo,
     repoDir: config.layout.repoDir,
-    sourceWorktree: config.layout.sourceWorktree,
     worktreePath: sandbox.worktreePath,
     sourceBranch: config.sourceBranch,
     codingStandardsPath: config.codingStandardsPath,

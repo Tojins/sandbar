@@ -34,6 +34,7 @@ import { promisify } from "node:util";
 
 import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
+import type { RepoRef } from "./repo-ref.js";
 
 const exec = promisify(execFile);
 
@@ -62,15 +63,28 @@ export type ProjectAnchorOptions = {
   // has no way to sanity check — it reads as this repo's history and is wrong
   // in a way that looks exactly like a stale checkout.
   //
-  // Two directories, because they answer two different questions (#38).
-  // `repoDir` is the bare cache, where the `git log` runs. `sourceWorktree` is
-  // the persistent worktree detached at `origin/<sourceBranch>` — the only
-  // place the host-side "does this doc exist" probes can be asked, since a bare
-  // repo has no files and the operator's checkout has their uncommitted edits
-  // in it. It is also the closest tree to what the agent will actually see:
-  // issue worktrees seed from the same commit.
+  // Three sources, because they answer three different questions.
+  //
+  // `repo` is the tracker (#34). It names the repository outright rather than
+  // letting `gh` infer it from a directory's remotes — see issue-anchor.ts.
+  //
+  // `repoDir` is the bare cache, where the `git log` runs (#38).
+  //
+  // `probeWorktree` is the tree the emitted `@refs` will be RESOLVED against —
+  // the working tree the agent gets: its issue worktree in the inner loop, the
+  // merger worktree in the merge phase. The probe and the resolver have to be
+  // asked of the same tree or the answer is silent in both directions, and it
+  // has been asked of three different wrong ones: `process.cwd()` before #34,
+  // the operator's checkout (uncommitted edits, so a real `CONTEXT.md` the
+  // agent cannot open) after it, and `worktrees/source` after #38 — a clean
+  // tree at `origin/<sourceBranch>`, which is what an issue worktree SEEDS
+  // from and stops being the moment the branch adds a doc. That last one is
+  // the case worth naming: when the issue IS "add CODING_STANDARDS.md", the
+  // branch has it and the source tree does not, so the reviewer was handed no
+  // `@ref` to the very standards the commit under review had just authored.
+  readonly repo: RepoRef;
   readonly repoDir: string;
-  readonly sourceWorktree: string;
+  readonly probeWorktree: string;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
@@ -90,13 +104,19 @@ export type PromptInputs = {
 
 export type ReviewerPromptInputs = {
   readonly issue: { readonly id: string; readonly title: string; readonly branch: string };
-  // The anchor layers' sources, for the `git log`/`gh issue view` and the
-  // doc-existence probes respectively (#34, #38). NOT `worktreePath`: that is a
-  // linked worktree of the same repo and would answer the same questions, but
-  // it is the reviewer's SUBJECT, and sourcing the project anchor from it would
-  // make the anchor a function of the branch under review.
+  // The anchor layers' sources (#34, #38). `repo` names the tracker; `repoDir`
+  // is where the `git log` runs, and it stays the bare cache rather than
+  // `worktreePath` — that worktree is the reviewer's SUBJECT, and sourcing the
+  // project HISTORY from it would make the anchor a function of the branch
+  // under review.
+  //
+  // The doc-existence probes are the opposite case and take `worktreePath`
+  // (see `ProjectAnchorOptions.probeWorktree`): they decide whether to emit an
+  // `@ref` the reviewer will resolve inside its sandbox, against exactly that
+  // worktree. Being a function of the branch is the POINT there — a branch
+  // that adds `CODING_STANDARDS.md` must be reviewed against it.
+  readonly repo: RepoRef;
   readonly repoDir: string;
-  readonly sourceWorktree: string;
   readonly worktreePath: string;
   readonly sourceBranch: string;
   // Optional project standards file that *extends* the built-in coding
@@ -112,7 +132,7 @@ export async function buildPrompt(
 ): Promise<string> {
   const layers = [
     await buildProjectAnchor(anchor),
-    await buildIssueAnchor(inputs.issue.id, anchor.repoDir),
+    await buildIssueAnchor(inputs.issue.id, anchor.repo),
     await buildAttemptSlot(inputs),
   ];
   return layers.join("\n\n---\n\n");
@@ -123,13 +143,14 @@ export async function buildReviewerPrompt(
 ): Promise<string> {
   const layers = [
     await buildProjectAnchor({
+      repo: inputs.repo,
       repoDir: inputs.repoDir,
-      sourceWorktree: inputs.sourceWorktree,
+      probeWorktree: inputs.worktreePath,
       claudeMdPath: inputs.claudeMdPath,
       contextMdPath: inputs.contextMdPath,
       sourceBranch: inputs.sourceBranch,
     }),
-    await buildIssueAnchor(inputs.issue.id, inputs.repoDir),
+    await buildIssueAnchor(inputs.issue.id, inputs.repo),
     await buildReviewerSlot(inputs),
   ];
   return layers.join("\n\n---\n\n");
@@ -141,23 +162,20 @@ export async function buildProjectAnchor(
   // The @refs stay exactly as the host wrote them — the agent resolves them
   // from the repo root inside its sandbox, so they must not be re-rooted. Only
   // the host-side "does this exist" probe is resolved, and it is resolved
-  // against the SOURCE WORKTREE (#38): a tree at `origin/<sourceBranch>`, which
-  // is what the issue worktrees seed from. The answer is silent either way — a
-  // real CONTEXT.md dropped from the prompt, or a dead @ref handed to the agent
-  // — so it has to be asked of a tree that resembles the one the agent gets.
-  // (The known residual is narrowed but not closed: a doc the BRANCH adds is
-  // still absent here, so the commit that introduces a CODING_STANDARDS.md is
-  // reviewed without an @ref to it.)
+  // against `probeWorktree`: the very tree the agent will resolve the @ref in.
+  // The answer is silent either way — a real CONTEXT.md dropped from the
+  // prompt, or a dead @ref handed to the agent — which is why the probe and the
+  // resolver must be the same tree rather than merely similar ones (#34).
   const lines = ["# Project anchor", "", `Conventions: @${opts.claudeMdPath}`];
   if (
     opts.contextMdPath &&
-    existsSync(resolve(opts.sourceWorktree, opts.contextMdPath))
+    existsSync(resolve(opts.probeWorktree, opts.contextMdPath))
   ) {
     lines.push(`Context: @${opts.contextMdPath}`);
   }
   const adrDir = opts.adrDir;
   if (adrDir) {
-    const adrDirPath = resolve(opts.sourceWorktree, adrDir);
+    const adrDirPath = resolve(opts.probeWorktree, adrDir);
     const adrs = existsSync(adrDirPath)
       ? readdirSync(adrDirPath).filter((f) => f.endsWith(".md")).sort()
       : [];
@@ -185,15 +203,11 @@ export async function buildProjectAnchor(
   return lines.join("\n");
 }
 
-// `gh issue view` resolves the repo from the git remotes of the directory it
-// runs in, so the cwd decides which tracker the anchor quotes (#34).
-// `fetchIssueText` has always accepted one — merger.ts passes its worktree —
-// and this call site was simply not passing it.
 async function buildIssueAnchor(
   issueId: string,
-  cwd: string,
+  repo: RepoRef,
 ): Promise<string> {
-  return `# Issue anchor\n\n${await fetchIssueText(issueId, cwd)}`;
+  return `# Issue anchor\n\n${await fetchIssueText(issueId, repo)}`;
 }
 
 async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
@@ -300,9 +314,12 @@ async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> 
 
   // Only point at the project standards file when it actually exists, so a
   // configured-but-absent path doesn't send the reviewer chasing a dead @ref.
+  // Probed in the worktree UNDER REVIEW, which is where the reviewer will
+  // resolve the @ref — so the commit that adds the standards is reviewed
+  // against them (#34).
   const codingStandardsPath =
     inputs.codingStandardsPath &&
-    existsSync(resolve(inputs.sourceWorktree, inputs.codingStandardsPath))
+    existsSync(resolve(worktreePath, inputs.codingStandardsPath))
       ? inputs.codingStandardsPath
       : undefined;
 

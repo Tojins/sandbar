@@ -109,6 +109,7 @@ import {
 import type { GateResult } from "./gate.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { gitMountsForWorktree } from "./merger-worktree.js";
+import { type RepoRef, repoSlug } from "./repo-ref.js";
 import { RUNTIME } from "./runtime.js";
 import {
   RESOLVE_MAX_ATTEMPTS,
@@ -810,6 +811,11 @@ async function closeMergedIssues(
 
 export type RealAdapterDeps = {
   readonly cwd: string;
+  // The tracker the comment / label / close calls address, NAMED rather than
+  // inferred from the merger worktree's git remotes (#34). This is the phase
+  // that closes issues, so a repository resolved from a directory is a repository
+  // whose issues get closed for work that landed somewhere else.
+  readonly repo: RepoRef;
   readonly sourceBranch: string;
   readonly botName: string;
   readonly botEmail: string;
@@ -1010,7 +1016,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // Throws (SandbarError) on fetch failure: a resolve agent reasoning
       // about cross-branch intent without the issue specs is worse than a
       // halted merge phase.
-      return fetchIssueText(issueId, cwd);
+      return fetchIssueText(issueId, deps.repo);
     },
     async getHeadSha() {
       const { stdout } = await exec("git", ["rev-parse", "HEAD"], { cwd });
@@ -1096,9 +1102,15 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // Required: this comment is the merger's explanation of an abandon/revert.
       // Swallowing it would strand the human without the reason — fail loud.
       try {
-        await exec("gh", ["issue", "comment", String(n), "--body", msg], {
-          cwd,
-        });
+        await exec("gh", [
+          "issue",
+          "comment",
+          String(n),
+          "--repo",
+          repoSlug(deps.repo),
+          "--body",
+          msg,
+        ]);
       } catch (err) {
         throw new SandbarError(
           `merger: failed to comment on issue #${n}: ${
@@ -1112,11 +1124,15 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // Required: this is the twin of the #8 bug — silently failing to drop
       // `ready-for-agent` leaves the issue on the queue to be re-picked forever.
       try {
-        await exec(
-          "gh",
-          ["issue", "edit", String(n), "--remove-label", label],
-          { cwd },
-        );
+        await exec("gh", [
+          "issue",
+          "edit",
+          String(n),
+          "--repo",
+          repoSlug(deps.repo),
+          "--remove-label",
+          label,
+        ]);
       } catch (err) {
         throw new SandbarError(
           `merger: failed to remove label '${label}' from issue #${n}: ${
@@ -1133,11 +1149,15 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // is dropped by Phase 4 regardless, so a persistently-un-closable issue is
       // left OPEN but de-queued (never re-picked), and the operator is told.
       try {
-        await exec(
-          "gh",
-          ["issue", "close", String(n), "--comment", comment],
-          { cwd },
-        );
+        await exec("gh", [
+          "issue",
+          "close",
+          String(n),
+          "--repo",
+          repoSlug(deps.repo),
+          "--comment",
+          comment,
+        ]);
       } catch (err) {
         throw new SandbarError(
           `merger: failed to close issue #${n} after merging it: ${

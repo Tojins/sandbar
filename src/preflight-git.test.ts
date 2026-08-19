@@ -91,6 +91,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
 
   const cfg = (layout: RepoLayout) => ({
     layout,
+    repo: { owner: "acme", name: "app" },
     env: makeEnvReader({}),
     sourceBranch: "main",
     pulledImages: [] as readonly string[],
@@ -212,6 +213,43 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const state = await gatherState(cfg(layoutAt(target)));
 
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
+    });
+
+    // #34 — the tracker is `ghOwner`/`ghRepo` and the push target is the
+    // cache's `origin`, and nothing declares the second. Read from the repo
+    // preflight was pointed at, through real git, so the assertion covers
+    // `git remote get-url` rather than a string this test also wrote.
+    it("reads the origin URL of the named repo and parses it", async () => {
+      await git(
+        target,
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/acme/app-fork.git",
+      );
+      await git(
+        launchedFrom,
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/acme/app.git",
+      );
+
+      const state = await gatherState(cfg(layoutAt(target)));
+
+      expect(state.originUrl).toBe("https://github.com/acme/app-fork.git");
+      expect(state.originRepo).toEqual({ owner: "acme", name: "app-fork" });
+      expect(state.configuredRepo).toEqual({ owner: "acme", name: "app" });
+    });
+
+    // A local-path remote is the shape the parser refuses to guess at, and a
+    // fixture repo built with a self-remote is exactly that shape — so this is
+    // also the default state of every other test in this file.
+    it("reports a remote it cannot read as a repo without guessing", async () => {
+      const state = await gatherState(cfg(layoutAt(target)));
+
+      expect(state.originUrl).toBe(target);
+      expect(state.originRepo).toBeNull();
     });
 
     it("reads origin/<sourceBranch> from the named repo", async () => {

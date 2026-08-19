@@ -16,6 +16,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { SandbarError } from "./errors.js";
+import { type RepoRef, repoSlug } from "./repo-ref.js";
 
 const exec = promisify(execFile);
 
@@ -53,27 +54,33 @@ export function renderIssueText(issueId: string, issue: IssueJson): string {
   return lines.join("\n");
 }
 
-// `cwd` is required (#34). `gh issue view` resolves the repo from the git
-// remotes of the directory it runs in, so an optional one is a silent way to
-// quote a different tracker: it was optional, and the prompt-layer call site was
-// the one that omitted it, which made the implementer's and reviewer's issue
-// anchor a function of where the host process happened to be launched. Callers
-// pass `layout.repoDir` (the bare cache) or, in the merger, its own worktree —
-// both carry the same `origin`, so both resolve the same tracker.
+// The repository is NAMED, not inferred (#34). `gh issue view` otherwise
+// resolves it from the git remotes of the directory it runs in, and this call
+// is the one that decides which tracker the implementer's and reviewer's issue
+// anchor QUOTES — the one layer of the prompt an agent has no way to sanity
+// check, since a different repository's issue #42 reads exactly like this
+// repository's would. It was a directory twice over: first `process.cwd()`
+// (the prompt-layer call site omitted the optional `cwd` #34 added), then the
+// cache's `origin`. `config.ghOwner`/`config.ghRepo` are required fields, so
+// naming them is one answer that no directory can contradict.
 export async function fetchIssueText(
   issueId: string,
-  cwd: string,
+  repo: RepoRef,
 ): Promise<string> {
   let stdout: string;
   try {
-    ({ stdout } = await exec(
-      "gh",
-      ["issue", "view", issueId, "--json", "title,body,comments"],
-      { cwd },
-    ));
+    ({ stdout } = await exec("gh", [
+      "issue",
+      "view",
+      issueId,
+      "--repo",
+      repoSlug(repo),
+      "--json",
+      "title,body,comments",
+    ]));
   } catch (err) {
     throw new SandbarError(
-      `Failed to fetch issue #${issueId} via gh: ${
+      `Failed to fetch issue #${issueId} from ${repoSlug(repo)} via gh: ${
         err instanceof Error ? err.message : String(err)
       }`,
       { cause: err },
@@ -84,7 +91,7 @@ export async function fetchIssueText(
     parsed = JSON.parse(stdout) as IssueJson;
   } catch {
     throw new SandbarError(
-      `gh returned non-JSON for issue #${issueId}: ${stdout.slice(0, 200)}`,
+      `gh returned non-JSON for issue #${issueId} in ${repoSlug(repo)}: ${stdout.slice(0, 200)}`,
     );
   }
   return renderIssueText(issueId, parsed);

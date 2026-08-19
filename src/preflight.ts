@@ -27,6 +27,14 @@
 // worse than vacuous: they would refuse to start because the OPERATOR is
 // mid-rebase in their own repo, on work that has nothing to do with the run.
 //
+// TWO repositories are compared here, and that is the point of the check #34
+// added last: every `gh` call now NAMES `config.ghOwner`/`config.ghRepo`
+// instead of letting gh infer one from a directory's git remotes, while every
+// `git push` still goes to the cache's `origin` — copied from the operator's
+// checkout, declared by nobody. Naming the tracker removed the "which directory
+// answers this" question; it could not make the two answers agree, so
+// `checkInvariants` refuses a run where they don't.
+//
 // ONE check deliberately still reads the operator's checkout: the soft warning
 // that local `<sourceBranch>` is ahead of `origin/<sourceBranch>`. It was
 // nearly useless while `cwd` was a machine-managed clone that is never ahead.
@@ -59,11 +67,21 @@ import { ALL_BRANCH_PREFIXES, issueNumberFromBranch } from "./naming.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import { RUNTIME } from "./runtime.js";
 import { fetchCandidates } from "./plan-resolver.js";
+import {
+  parseRepoFromRemoteUrl,
+  type RepoRef,
+  repoSlug,
+  sameRepo,
+} from "./repo-ref.js";
 
 const exec = promisify(execFile);
 
 export type PreflightConfig = {
   readonly layout: RepoLayout;
+  // `config.ghOwner`/`config.ghRepo`. Every `gh` call sandbar makes names this
+  // repository outright (#34) — including `fetchCandidates` below, which is why
+  // preflight needs it. It is also one half of the agreement checked here.
+  readonly repo: RepoRef;
   // The resolved `config.env`, already merged with the host environment per
   // declared key (#38). Preflight no longer knows where the values came from,
   // which is the point: sandbar names no file.
@@ -99,6 +117,13 @@ export type RepoState = {
   // failure (resumed, not refused). Carried on the state purely so runPreflight
   // can announce them; checkInvariants emits no Invariant for them.
   readonly resumableIssueBranches: readonly string[];
+  // The configured tracker, and what the cache's `origin` actually points at
+  // (#34). `originRepo` is null when there is no readable origin URL or when it
+  // is not a shape `parseRepoFromRemoteUrl` will commit to — see below, and see
+  // repo-ref.ts for why refusing to guess is the whole point.
+  readonly configuredRepo: RepoRef;
+  readonly originUrl: string | null;
+  readonly originRepo: RepoRef | null;
 };
 
 export type Invariant = { ok: true } | { ok: false; message: string };
@@ -166,6 +191,30 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
         "config, so a deploy key or credential helper set with plain " +
         "`git config` (rather than `--global`) does not reach it. `git -C " +
         "<workDir>/repo.git fetch origin` will say which.",
+    });
+  }
+  // Every `gh` call names `config.ghOwner`/`config.ghRepo`; every `git push`
+  // goes to the cache's `origin`, which is copied from the operator's checkout
+  // and which nothing declares. Naming the repo (#34) made the tracker half a
+  // function of the config file instead of a directory, but it cannot make the
+  // two halves AGREE — so they are compared, once, here.
+  //
+  // A mismatch is fatal rather than a warning because every one of its symptoms
+  // is silent and lands somewhere real: the planner queues issues from the
+  // configured repo, the agents' work is pushed to origin's, the merger closes
+  // the configured repo's issues for commits that landed in the other, and
+  // `mergeMode: "verified"` polls checks for a sha the configured repo has
+  // never seen — which reports as `sha-never-built`, i.e. as a CI problem.
+  if (s.originRepo && !sameRepo(s.originRepo, s.configuredRepo)) {
+    out.push({
+      ok: false,
+      message:
+        `config names ${repoSlug(s.configuredRepo)} (ghOwner/ghRepo) but this ` +
+        `repository's \`origin\` is ${repoSlug(s.originRepo)} ` +
+        `(${s.originUrl}). Sandbar reads and writes issues in the configured ` +
+        "repo and pushes branches and merges to `origin`, so these must be " +
+        "the same repository. Fix whichever is wrong: change ghOwner/ghRepo, " +
+        "or point `config.cwd` at a checkout of that repo.",
     });
   }
   if (s.unmergedIssueBranches.length > 0) {
@@ -271,7 +320,8 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     `refs/remotes/origin/${cfg.sourceBranch}`,
   ]);
 
-  const openReadyIssues = await fetchOpenReadyIssueNumbers(repoDir);
+  const originUrl = await readOriginUrl(repoDir);
+  const openReadyIssues = await fetchOpenReadyIssueNumbers(cfg.repo);
   const { unmerged, discarded, resumable } = await classifyIssueBranches(
     repoDir,
     openReadyIssues,
@@ -290,7 +340,25 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     unmergedIssueBranches: unmerged,
     discardedIssueBranches: discarded,
     resumableIssueBranches: resumable,
+    configuredRepo: cfg.repo,
+    originUrl,
+    originRepo: originUrl === null ? null : parseRepoFromRemoteUrl(originUrl),
   };
+}
+
+// The cache's `origin` URL, or null when there isn't one to read. Null is not
+// an error here: a cache with no usable origin already fails the
+// `origin/<sourceBranch>` invariant, with a message that says considerably more
+// about why.
+async function readOriginUrl(cwd: string): Promise<string | null> {
+  const { ok, stdout } = await captureOk(cwd, "git", [
+    "remote",
+    "get-url",
+    "origin",
+  ]);
+  if (!ok) return null;
+  const url = stdout.trim();
+  return url === "" ? null : url;
 }
 
 // The set of issue numbers currently in the planner queue (open +
@@ -300,10 +368,10 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
 // resumable (they fall back to the existing hard error), and the ghAuthOk /
 // sandboxGhTokenOk invariants report the real problem.
 async function fetchOpenReadyIssueNumbers(
-  cwd: string,
+  repo: RepoRef,
 ): Promise<ReadonlySet<number>> {
   try {
-    const candidates = await fetchCandidates(cwd);
+    const candidates = await fetchCandidates(repo);
     return new Set(candidates.map((c) => c.number));
   } catch {
     return new Set();
@@ -496,6 +564,23 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   const results = checkInvariants(state);
   const failures = results.flatMap((r) => (r.ok ? [] : [r.message]));
   if (failures.length > 0) throw new PreflightError(failures);
+
+  // The other half of the #34 agreement check. `parseRepoFromRemoteUrl`
+  // returns null rather than guessing at a URL it cannot read as
+  // `<owner>/<repo>` — a filesystem-path remote, most likely a local mirror —
+  // because a wrong parse here REFUSES a working configuration, which is worse
+  // than the silent split the check exists to catch. Saying so is the honest
+  // remainder: the two halves may well disagree and sandbar cannot tell.
+  if (state.originUrl !== null && state.originRepo === null) {
+    console.warn(
+      `WARNING: could not read an <owner>/<repo> out of this repository's ` +
+        `\`origin\` (${state.originUrl}), so it cannot be checked against the ` +
+        `configured ${repoSlug(state.configuredRepo)}. Issues are read and ` +
+        "written in the configured repo; branches and merges are pushed to " +
+        "`origin`. If those are not the same repository, sandbar will close " +
+        "issues for work that landed somewhere else.",
+    );
+  }
 
   // The one check that reads the OPERATOR'S checkout, on purpose (#38 item 10).
   // Per-issue worktrees seed off origin/<sourceBranch>, so commits sitting

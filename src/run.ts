@@ -198,6 +198,15 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   // naming a pid that will be dead, which the next launch's takeover reads as a
   // crashed run and clears. Cheap, and it keeps every exit path in this file
   // uniform rather than one of them relying on a dependency's exit hook.
+
+  // One `repo` for the whole run (#34). Every `gh` call sandbar makes — the
+  // planner's queue, the issue anchor, the finalise writes, the merger's closes
+  // and the forge-verify polls — names this rather than letting gh infer a
+  // repository from whatever directory the command ran in. Preflight is where
+  // it is checked against the cache's `origin`, which is the one repository
+  // identity sandbar does NOT get from config.
+  const repo = { owner: config.ghOwner, name: config.ghRepo };
+
   try {
     // The object cache, before anything reads a ref (#38). Created from
     // `config.cwd` when absent — a local clone, so hardlinked and offline —
@@ -216,6 +225,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       layout,
       env,
       sourceBranch: config.sourceBranch,
+      repo,
       pulledImages: pulledImagesOf(config),
     });
   } catch (err) {
@@ -391,6 +401,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     if (inputs.length === 0) return;
     const finalizeAdapter = realFinalizeAdapter({
       layout,
+      repo,
       sourceBranch: config.sourceBranch,
     });
     const finalizeResults = await finalizeAll(
@@ -425,10 +436,9 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   // buildPlan as a hard exclusion alongside its live-state CLOSED check.
   const mergedThisRun = new Set<number>();
 
-  const repo = { owner: config.ghOwner, name: config.ghRepo };
-
   const innerLoopCfg = {
     layout,
+    repo,
     sourceBranch: config.sourceBranch,
     env: config.env,
     implementerModelId: config.implementerModelId,
@@ -486,7 +496,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // Phase 1: Plan
       // ---------------------------------------------------------------------
       const issues: { id: string; title: string; branch: string }[] = [
-        ...(await buildPlan(repo, layout.repoDir, mergedThisRun)),
+        ...(await buildPlan(repo, mergedThisRun)),
       ].slice(0, budget);
       const fingerprint = planFingerprint(issues.map((i) => i.id));
       await cycleLogger.writePlan(issues);
@@ -628,6 +638,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           const stackForGate2 = mergerStack;
           const adapter = realAdapter({
             cwd: mergerWorktree.path,
+            repo,
             sourceBranch: config.sourceBranch,
             botName: config.botName,
             botEmail: config.botEmail,
@@ -639,8 +650,11 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           });
 
           const projectAnchor = await buildProjectAnchor({
+            repo,
             repoDir: layout.repoDir,
-            sourceWorktree: layout.sourceWorktree,
+            // The resolve agent reads the merger worktree, so that is the tree
+            // whose files the emitted @refs have to exist in (#34).
+            probeWorktree: mergerWorktree.path,
             claudeMdPath: config.claudeMdPath,
             contextMdPath: config.contextMdPath,
             adrDir: config.adrDir,
@@ -655,7 +669,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
                   adapter: realVerifyAdapter({
                     cwd: mergerWorktree.path,
                     sourceBranch: config.sourceBranch,
-                    repo: { owner: config.ghOwner, name: config.ghRepo },
+                    repo,
                   }),
                   options: verifiedLandingOptionsFrom(
                     config.mergeMode,

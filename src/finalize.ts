@@ -58,6 +58,7 @@ import { SandbarError } from "./errors.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { IssueRef } from "./merger.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
+import { type RepoRef, repoSlug } from "./repo-ref.js";
 
 // Where an implementer's commits ended up when it worked off the issue branch
 // (#27). Structural alias of git-ops' HeadMismatch — finalize only ever reads
@@ -725,6 +726,11 @@ export type RealFinalizeAdapterDeps = {
   // matters. The worktree path it removes still comes from
   // `layout.worktreesDir`, which is BESIDE the cache rather than inside it.
   readonly layout: RepoLayout;
+  // The tracker the comment/label/state calls address. NAMED, never inferred
+  // from the cache's git remotes (#34): these are the writes that hand an issue
+  // to a human, and a `gh` that resolved the repository from a directory would
+  // post them wherever that directory's `origin` pointed.
+  readonly repo: RepoRef;
   // Needed by branchIsContainedInOrigin: issue branches are seeded from
   // origin/<sourceBranch>, so that ref is what "already preserved" means here.
   readonly sourceBranch: string;
@@ -807,11 +813,15 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       // trace, reviewer prose). A silently-dropped comment strands the human
       // without the context they need — fail loud.
       try {
-        await exec(
-          "gh",
-          ["issue", "comment", String(issueNum), "--body", body],
-          { cwd },
-        );
+        await exec("gh", [
+          "issue",
+          "comment",
+          String(issueNum),
+          "--repo",
+          repoSlug(deps.repo),
+          "--body",
+          body,
+        ]);
       } catch (err) {
         throw new SandbarError(
           `Failed to post comment on issue #${issueNum}: ${
@@ -829,10 +839,16 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       // lands even when the handoff label is missing/misconfigured (#8).
       const ghEdit = async (flag: "--remove-label" | "--add-label", labelsToApply: readonly string[]): Promise<string | undefined> => {
         if (labelsToApply.length === 0) return undefined;
-        const args = ["issue", "edit", String(issueNum)];
+        const args = [
+          "issue",
+          "edit",
+          String(issueNum),
+          "--repo",
+          repoSlug(deps.repo),
+        ];
         for (const l of labelsToApply) args.push(flag, l);
         try {
-          await exec("gh", args, { cwd });
+          await exec("gh", args);
           return undefined;
         } catch (err) {
           return err instanceof Error ? err.message : String(err);
@@ -858,11 +874,15 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       // closed issue or skipping a live handoff. `gh issue view` works on
       // closed issues too.
       try {
-        const { stdout } = await exec(
-          "gh",
-          ["issue", "view", String(issueNum), "--json", "state"],
-          { cwd },
-        );
+        const { stdout } = await exec("gh", [
+          "issue",
+          "view",
+          String(issueNum),
+          "--repo",
+          repoSlug(deps.repo),
+          "--json",
+          "state",
+        ]);
         const parsed = JSON.parse(stdout) as { state?: string };
         return parsed.state === "CLOSED" ? "CLOSED" : "OPEN";
       } catch (err) {
