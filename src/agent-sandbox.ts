@@ -17,8 +17,11 @@
 //        long runs and tears down the whole cycle.
 //   F2 — git-setup execs retry on exit 126/137 only (transient container-exec
 //        races under parallelism); genuine failures fail fast.
-//   F3 — ONE process-wide shutdown listener set fans out to a Set of teardowns;
+//   F3 — ONE process-wide shutdown registration fans out to a Set of teardowns;
 //        not a listener per sandbox (MaxListenersExceededWarning past ~5).
+//        Since #35 that registration is an `onCleanup` entry rather than this
+//        module's own SIGINT/SIGTERM handlers, which exited the process out
+//        from under the shared async cleanup — see the shutdown registry.
 //   F4 — a failure after worktree create removes the worktree before rethrowing.
 //   F5 — two-phase agent timeout: once the completion signal is seen, a short
 //        grace timer resolves the run SUCCESSFULLY with the collected commits
@@ -34,6 +37,7 @@ import { existsSync } from "node:fs";
 import { readdir, realpath, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { onCleanup } from "./cleanup.js";
 import { resolveSandboxEnv } from "./env.js";
 import { RESOURCE_PREFIX } from "./naming.js";
 import type { RepoLayout } from "./repo-cache.js";
@@ -367,14 +371,52 @@ export const claudeCode = (
 });
 
 // ---------------------------------------------------------------------------
-// Shutdown registry (F3) — ONE listener set process-wide, verbatim semantics
+// Shutdown registry (F3) — ONE registration process-wide, into the SHARED
+// cleanup registry
 // ---------------------------------------------------------------------------
+//
+// F3 itself is unchanged: one process-wide registration fans out to a Set of
+// teardowns, never one listener per sandbox (MaxListenersExceededWarning past
+// ~5). What moved is WHERE that registration goes (#35).
+//
+// This module used to install its own SIGINT/SIGTERM handlers whose last act
+// was a synchronous `process.exit(1)`. cleanup.ts installs sandbar's handlers
+// first — `installCleanupTraps()` runs in `run()` before any sandbox exists —
+// and node runs listeners in registration order, so on Ctrl-C the shared
+// handler went first, started the ASYNC `runCleanup()` and returned at its
+// first await; this handler then ran and exited the process out from under it.
+// Everything the shared registry holds was skipped: the per-issue pods,
+// networks and containers, the merger worktree, the run log's terminal write,
+// the lock release. And the failure was quiet precisely because the competing
+// handler did its own job first — the one resource class it could see was the
+// one class that survived.
+//
+// So there is no signal handler here. The teardowns go into `onCleanup`, whose
+// handler owns the exit and its code. Registered ONCE, lazily: that registry
+// never forgets an action, so an entry per sandbox would grow without limit —
+// ensure-images.ts's build reaper is the same shape for the same reason.
+//
+// `process.on("exit")` stays. It is synchronous and last-resort by nature, and
+// it is what covers a bare `process.exit` from elsewhere in the run, which
+// runs no cleanup action at all. Teardowns are therefore DRAINED rather than
+// iterated: a signal now reaches them twice — once through `runCleanup`, then
+// again through the `exit` event that `runCleanup`'s own `process.exit` fires
+// — and running them twice would `podman rm -f` a container that is already
+// gone and print the worktree-preserved notice to the operator twice.
+//
+// The dependency this creates is on `installCleanupTraps()` having run, which
+// `run()` does before the first sandbox. Deliberately NOT called from here:
+// those traps also catch uncaughtException/unhandledRejection and exit the
+// process, which is entry-point policy, and this module is imported by tests.
 
 const teardownCallbacks = new Set<() => void>();
-let listenersInstalled = false;
+let exitHookInstalled = false;
+let cleanupRegistered = false;
 
 const runTeardowns = (): void => {
-  for (const teardown of teardownCallbacks) {
+  // Drained, not iterated — see the note above on arriving twice.
+  for (const teardown of [...teardownCallbacks]) {
+    teardownCallbacks.delete(teardown);
     try {
       teardown();
     } catch {
@@ -383,34 +425,31 @@ const runTeardowns = (): void => {
   }
 };
 const handleExit = (): void => runTeardowns();
-const handleSignal = (): void => {
-  detachListeners();
-  runTeardowns();
-  process.exit(1);
-};
-const attachListeners = (): void => {
-  if (listenersInstalled) return;
-  listenersInstalled = true;
+const installHooks = (): void => {
+  if (!cleanupRegistered) {
+    cleanupRegistered = true;
+    onCleanup(runTeardowns);
+  }
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
   process.on("exit", handleExit);
-  process.on("SIGINT", handleSignal);
-  process.on("SIGTERM", handleSignal);
 };
-function detachListeners(): void {
-  if (!listenersInstalled) return;
-  listenersInstalled = false;
+function removeExitHook(): void {
+  if (!exitHookInstalled) return;
+  exitHookInstalled = false;
   process.removeListener("exit", handleExit);
-  process.removeListener("SIGINT", handleSignal);
-  process.removeListener("SIGTERM", handleSignal);
 }
 export const registerShutdown = (teardown: () => void): (() => void) => {
   teardownCallbacks.add(teardown);
-  attachListeners();
+  installHooks();
   let active = true;
   return () => {
     if (!active) return;
     active = false;
     teardownCallbacks.delete(teardown);
-    if (teardownCallbacks.size === 0) detachListeners();
+    // The `onCleanup` entry cannot be withdrawn and is not withdrawn: it fans
+    // out over a set that is empty by then, which costs nothing.
+    if (teardownCallbacks.size === 0) removeExitHook();
   };
 };
 
