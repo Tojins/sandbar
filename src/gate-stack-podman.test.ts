@@ -16,12 +16,8 @@ import {
   startStack,
   watchLog,
 } from "./gate-stack.js";
-import {
-  networkNameFor,
-  podNameFor,
-  runScope,
-  stackContainerNameFor,
-} from "./naming.js";
+import { stackContainerNameFor } from "./naming.js";
+import { podmanTestScope } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -81,11 +77,28 @@ const available = ((): boolean => {
   }
 })();
 
+// Per PROCESS, not per file (#47). Two copies of this file running at once
+// would otherwise compute identical pod, network and container names, and
+// `startStack` force-removes a namesake before creating one — so each would
+// tear down the other's live stack mid-test.
+//
+// `STACK_ID` stays a literal on purpose: the scope already separates the two
+// processes, and a readable stack id is what makes leftover debris
+// identifiable. What the scope does NOT reach are the fixture image tags the
+// image-swap and reap tests write by hand, so those go through `testImageTag`.
+const { scope: SCOPE, testImageTag, cleanup } = podmanTestScope("gate-stack");
 const STACK_ID = "podmantest";
-// Any stable string: the scope only has to be disjoint from a real run's.
-const SCOPE = runScope("/gate-stack-podman.test");
 const cName = (name: string): string =>
   stackContainerNameFor(SCOPE, STACK_ID, name);
+
+// One file-level sweep, covering every `describe` below rather than only the
+// first. Guarded because it shells out to podman and there is none in the gate
+// runner — where `available` is false nothing was created, so there is nothing
+// to remove. Nothing reaps this scope if the process is SIGKILLed; the
+// recovery command is in `podman-test-scope.test-util.ts`.
+afterAll(async () => {
+  if (available) await cleanup();
+}, 120_000);
 
 describe.runIf(available)(
   "gate stack against real podman",
@@ -110,17 +123,6 @@ describe.runIf(available)(
       if (stack) await stack.stop();
       stack = null;
       await rm(repo, { recursive: true, force: true });
-    }, 60_000);
-
-    afterAll(async () => {
-      // Belt and braces: a test that threw before assigning `stack` would leak
-      // the pod, and the pod's infra container is invisible to a name sweep.
-      await exec(RUNTIME, ["pod", "rm", "-f", podNameFor(SCOPE, STACK_ID)]).catch(
-        () => {},
-      );
-      await exec(RUNTIME, ["network", "rm", networkNameFor(SCOPE, STACK_ID)]).catch(
-        () => {},
-      );
     }, 60_000);
 
     it(
@@ -842,7 +844,7 @@ describe.runIf(available)(
         // `podman tag` rather than a build: the assertion is about which image
         // the container was created from, and an alias answers it without
         // making the test pay for a build.
-        const ALIAS = `localhost/sandbar-image-swap-test:${STACK_ID}`;
+        const ALIAS = testImageTag("image-swap");
         await exec(RUNTIME, ["tag", IMAGE, ALIAS]);
         let swap = new Map<string, string>();
         stack = await startStack({
@@ -892,8 +894,6 @@ describe.runIf(available)(
         // restarting the stack on every attempt.
         expect((await stack.runGate()).ok).toBe(true);
         expect(await inspectOf("held", "{{.Id}}")).toBe(idAfter);
-
-        await exec(RUNTIME, ["rmi", ALIAS]).catch(() => {});
       },
       300_000,
     );
@@ -908,7 +908,7 @@ describe.runIf(available)(
     it(
       "a reaped issue container comes back on the image the branch put it on, not the declared one",
       async () => {
-        const ALIAS = `localhost/sandbar-reap-image-test:${STACK_ID}`;
+        const ALIAS = testImageTag("reap-image");
         await exec(RUNTIME, ["tag", IMAGE, ALIAS]);
         stack = await startStack({
           stackId: STACK_ID,
@@ -947,8 +947,6 @@ describe.runIf(available)(
         // self-correct.
         expect((await stack.runGate()).failedStep).toBe("hangs-in-held");
         expect(await imageNameOf("held")).toBe(ALIAS);
-
-        await exec(RUNTIME, ["rmi", ALIAS]).catch(() => {});
       },
       300_000,
     );
