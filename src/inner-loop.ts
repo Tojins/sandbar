@@ -16,9 +16,18 @@
 // Reviewer is strictly advisory and never commits — there is no gate-2 and
 // no revert-after-reviewer logic. All branching decisions live in the state
 // machine. This file only does I/O.
+//
+// Which includes the one judgment this file used to make silently: what a
+// FAILED reviewer run means (#41). It caught the error, wrote the message into
+// `reviewerStdout`, and let the verdict parser turn it into CHANGES-REQUESTED —
+// so a harness fault arrived at the state machine wearing a verdict's clothes
+// and was charged a review round. The policy now lives in reviewer-run.ts and
+// its outcome is two distinct events; this file's remaining job is to adapt
+// `sandbox.run`'s throw into the shape that policy classifies, which is why the
+// try/catch below returns a value instead of substituting prose.
 
 import * as agentSandbox from "./agent-sandbox.js";
-import { podman } from "./agent-sandbox.js";
+import { agentPartialOutput, podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
 import type { ResolvedGateStack } from "./config.js";
@@ -46,6 +55,10 @@ import {
 import type { AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { parsePromise } from "./promise-parser.js";
+import {
+  REVIEWER_MAX_INVOCATIONS,
+  runReviewerInvocations,
+} from "./reviewer-run.js";
 import type { RepoLayout } from "./repo-cache.js";
 import type { RepoRef } from "./repo-ref.js";
 import {
@@ -89,7 +102,8 @@ export type Terminal =
         | "gate-red"
         | "reviewer-blocked"
         | "uncommittable-worktree"
-        | "off-branch-head";
+        | "off-branch-head"
+        | "reviewer-harness-failed";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
       readonly strandedHead: HeadMismatch | null;
@@ -493,35 +507,70 @@ async function runReviewer(
     contextMdPath: config.contextMdPath,
   });
 
-  let reviewerStdout = "";
-  try {
-    const reviewerRun = await sandbox.run({
-      name: `reviewer-${issue.id}-round-${action.reviewRound}`,
-      maxIterations: 1,
-      agent: agentSandbox.claudeCode(config.reviewerModelId),
-      prompt: reviewerPrompt,
-    });
-    reviewerStdout = reviewerRun.stdout;
-  } catch (err) {
-    // A reviewer that crashes mid-run defaults to CHANGES-REQUESTED via the
-    // verdict parser (empty stdout = no verdict token). Surface the error
-    // text as prose so the next implementer attempt sees something useful.
-    reviewerStdout =
-      `reviewer run errored: ${err instanceof Error ? err.message : String(err)}\n`;
-    console.error(
-      `  ${issue.id}: reviewer run errored — defaulting to CHANGES-REQUESTED. (${err instanceof Error ? err.message : String(err)})`,
-    );
-  }
+  const outcome = await runReviewerInvocations(
+    async (invocation) => {
+      // The retry is a fresh agent run in the SAME sandbox. The sandbox is not
+      // what failed — in the observed case the implementer was working in it
+      // concurrently — and rebuilding it would restart the whole issue from
+      // attempt 1 through the HARD-ERROR path, discarding a green gate to
+      // re-run a reviewer.
+      try {
+        const reviewerRun = await sandbox.run({
+          name:
+            `reviewer-${issue.id}-round-${action.reviewRound}` +
+            (invocation > 1 ? `-invocation-${invocation}` : ""),
+          maxIterations: 1,
+          agent: agentSandbox.claudeCode(config.reviewerModelId),
+          prompt: reviewerPrompt,
+        });
+        return { output: reviewerRun.stdout, error: null };
+      } catch (err) {
+        // The bytes the agent had emitted before it failed ride out on the
+        // error (#41, agent-sandbox F9). Without them a reviewer that emitted
+        // a verdict and then died is indistinguishable from one that emitted
+        // nothing, and only the second is a harness fault.
+        return {
+          output: agentPartialOutput(err),
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+    {
+      onRetry: async (invocation, detail) => {
+        const line =
+          `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
+          `invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} no-review — retrying (${detail.split("\n")[0]})`;
+        console.error(`  ${line}`);
+        if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
+      },
+    },
+  );
 
+  // Every invocation's output, not just the reviewing one: the observed failure
+  // left a 73-byte log for a 15-minute run, and this file is the only offline
+  // artefact of what the reviewer did or did not say.
   if (opts.attemptLogger) {
     await opts.attemptLogger.writeAttemptReviewer(
       issue.id,
       action.attempt,
-      reviewerStdout,
+      outcome.transcript,
     );
   }
 
-  const { verdict, prose } = parseVerdict(reviewerStdout);
+  if (outcome.kind === "harness-failed") {
+    // Logged as its own thing, never as `verdict=CHANGES-REQUESTED` — the run
+    // log was the only place the two were distinguishable and it did not
+    // distinguish them either. The round number repeats on the next attempt
+    // because the round is not consumed, so the line says so.
+    const line =
+      `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
+      `harness-failed invocations=${outcome.invocations} (round not consumed)`;
+    console.error(`  ${line}`);
+    if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
+    return { kind: "reviewer-harness-failed", detail: outcome.detail };
+  }
+
+  const { verdict, prose } = parseVerdict(outcome.stdout);
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(
       `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} verdict=${verdict}`,

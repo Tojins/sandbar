@@ -578,6 +578,42 @@ describe("finalizeOne", () => {
     ]);
   });
 
+  it("needs-human reviewer-harness-failed: says the code was never reviewed, and never quotes a verdict nobody gave (#41)", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "needs-human",
+        issue: i,
+        cause: "reviewer-harness-failed",
+        failureTrace:
+          "invocation 1/2: the run failed and emitted no output at all: Agent idle for 600 seconds — no output received.",
+        // An earlier round's genuine report. It must not be presented as the
+        // reason the issue stopped — the reviewer that stopped it said nothing.
+        latestReviewerProse: "## Extract the duplicated lifecycle dispatch",
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    // The branch is green and pushed: the reader may well be able to merge it.
+    expect(calls.pushes).toEqual([i.branch]);
+    const body = calls.comments[0]!.body;
+    expect(body).toContain("Agent idle for 600 seconds");
+    expect(body).toContain("no review at all");
+    expect(body).toContain("harness or environment failure");
+    // The two claims the reviewer-blocked comment would have made, both false
+    // here: that the reviewer asked for changes, and that its report is below.
+    expect(body).not.toContain("the code reviewer's `CHANGES-REQUESTED` is the blocker");
+    expect(body).not.toContain("Extract the duplicated lifecycle dispatch");
+    // Nor is it a gate failure — the gate is what went green.
+    expect(body).not.toContain("without a green gate");
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+    ]);
+  });
+
   it("needs-human off-branch-head: names the branch, the stranded sha, and how to rescue it (#27)", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
