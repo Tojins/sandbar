@@ -58,16 +58,32 @@
 // `runScope`, so `isScopedResourceName` is true of the debris and
 // `findUnattributableResources` deliberately stays silent about it (another
 // run's scope may be live and is that run's to reap). With no sandbar and no
-// test run in flight:
+// test run in flight, all four classes clear with the following — in
+// `cleanupOrphanContainers`'s own order, because a network cannot be removed
+// while a container is still attached to it:
 //
 //   podman pod rm -f $(podman pod ls --filter name=^sandbar- -q)
+//   podman rm -f $(podman ps -aq --filter name=^sandbar-)
+//   podman network rm $(podman network ls --filter name=^sandbar- -q)
 //   podman rmi -f $(podman images --format '{{.Repository}}:{{.Tag}}' \
 //     | grep '^localhost/sandbar-test-')
 //
-// The first is the coarse command `naming.ts` already documents, and it is
-// coarse because a test scope is indistinguishable by name from a real run's.
-// The second is targeted, which is why `testImageTag` puts `sandbar-test-` in
-// the repository component rather than only the token in the tag.
+// All four lines are load-bearing, and the middle two are the ones easily
+// dropped as redundant. `pod rm -f` takes its member containers and the pod's
+// unreachably-named infra container, but it reaches neither the fixture
+// containers these files start with a bare `podman run -d --name`
+// (`killprobe`, `logsplit`, `chunking` — and `killprobe` is a `sleep infinity`,
+// i.e. a container left RUNNING forever) nor the network sandbar created for
+// the pod, which outlives it. Under the old fixed scope both classes reaped
+// themselves, because the next run recomputed the same names and the fixtures'
+// own `rm -f` / `startStack` reclaimed them; per-process, nothing ever
+// recomputes the scope, so this list is the whole of it.
+//
+// The first three are the coarse `sandbar-` sweep `naming.ts` documents one
+// line of, and coarse is the best available: a test scope is indistinguishable
+// by name from a real run's. The last is targeted, which is why
+// `testImageTag` puts `sandbar-test-` in the repository component rather than
+// only the token in the tag.
 //
 // A SEPARATE PODMAN STORAGE GRAPH was considered and rejected on cost, not
 // principle. Giving each process its own store (`CONTAINERS_STORAGE_CONF`, or
