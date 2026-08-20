@@ -25,16 +25,22 @@ import {
   readInputsLabel,
   sweepBranchImages,
 } from "./ensure-images.js";
-import { runScope, variantImageTag } from "./naming.js";
+import { variantImageTag } from "./naming.js";
+import { podmanTestScope } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
 
 const BASE = "docker.io/library/mariadb:10.11";
-const TAG = "localhost/sandbar-ensure-images-test:probe";
-const SCOPE = runScope("/ensure-images.test");
-// Any other workdir's scope. The sweep must be blind to it.
-const OTHER_SCOPE = runScope("/ensure-images.test.sibling");
+
+// Per PROCESS, not per file (#47). The pod collision the issue names is not
+// even the worst half here: `beforeEach` does `rmi -f TAG` and the tests
+// rebuild it, so with a hardcoded tag two concurrent processes destroy and
+// rebuild each other's fixture image mid-assertion, with no pod involved. A
+// scope fix alone would leave that exactly as broken as it was.
+const { scope: SCOPE, otherScope: OTHER_SCOPE, testImageTag, cleanup } =
+  podmanTestScope("ensure-images");
+const TAG = testImageTag("probe");
 
 // Collection time, not beforeAll: vitest evaluates `runIf` while building the
 // suite, so a flag set in a hook arrives too late and silently skips
@@ -76,16 +82,11 @@ describe.runIf(available)("ensureImages against real podman", () => {
     await rm(root, { recursive: true, force: true });
   }, 60_000);
 
-  afterAll(async () => {
-    for (const scope of [SCOPE, OTHER_SCOPE]) {
-      await exec(RUNTIME, [
-        "rmi",
-        "-f",
-        variantImageTag(TAG, scope, "deadbeefcafe"),
-      ]).catch(() => {});
-    }
-    await exec(RUNTIME, ["rmi", "-f", TAG]).catch(() => {});
-  }, 120_000);
+  // `cleanup` is the two production sweepers plus the tags they cannot see —
+  // which covers both `ours` and `theirs` below, since OTHER_SCOPE is this
+  // process's too. Nothing reaps it if the process is SIGKILLed; the recovery
+  // command is in `podman-test-scope.test-util.ts`.
+  afterAll(cleanup, 120_000);
 
   const idOf = async (): Promise<string> =>
     (
@@ -175,6 +176,10 @@ describe.runIf(available)("ensureImages against real podman", () => {
       // SIGKILL or a hard crash — and these are the largest things sandbar
       // creates. This sweep is what makes the scope segment in the tag mean
       // something, and it must not reach a concurrent run's live images.
+      //
+      // OTHER_SCOPE stands in for that other run and is derived from this
+      // process's own token (#47), so it is a scope the sweep must be blind to
+      // without ever being a scope somebody else is really using.
       const ours = variantImageTag(TAG, SCOPE, "deadbeefcafe");
       const theirs = variantImageTag(TAG, OTHER_SCOPE, "deadbeefcafe");
       await ensureImages([image], root);
@@ -194,8 +199,6 @@ describe.runIf(available)("ensureImages against real podman", () => {
       // The BASE tag is untouched — `podman rmi -f` on a multi-tagged image
       // untags rather than deleting, and the base is what `ensureImages` built.
       expect(listed).toContain(TAG);
-
-      await exec(RUNTIME, ["rmi", "-f", theirs]).catch(() => {});
     },
     600_000,
   );
