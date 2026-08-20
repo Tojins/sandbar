@@ -31,9 +31,11 @@ import {
   type ProviderCreateOptions,
   type SandboxProvider,
   SANDBOX_REPO_DIR,
+  agentPartialOutput,
   claudeCode,
   createSandbox,
   defaultImageName,
+  killOnAbort,
   parseStreamJsonLine,
   prepareWorktree,
   registerShutdown,
@@ -217,6 +219,55 @@ describe("defaultImageName", () => {
 // Shutdown registry (F3, obligation 16)
 // ---------------------------------------------------------------------------
 
+describe("killOnAbort (#41)", () => {
+  const fakeChild = () => {
+    const killed: string[] = [];
+    let onClose: (() => void) | null = null;
+    return {
+      killed,
+      close: () => onClose?.(),
+      child: {
+        kill: (sig: NodeJS.Signals) => killed.push(sig),
+        on: (_e: "close", listener: () => void) => {
+          onClose = listener;
+        },
+      },
+    };
+  };
+
+  it("kills the child with SIGKILL when the signal aborts", () => {
+    const f = fakeChild();
+    const ac = new AbortController();
+    killOnAbort(f.child, ac.signal);
+    expect(f.killed).toEqual([]);
+    ac.abort();
+    expect(f.killed).toEqual(["SIGKILL"]);
+  });
+
+  it("kills immediately when handed an already-aborted signal", () => {
+    const f = fakeChild();
+    const ac = new AbortController();
+    ac.abort();
+    killOnAbort(f.child, ac.signal);
+    expect(f.killed).toEqual(["SIGKILL"]);
+  });
+
+  it("drops the listener on close, so a later abort cannot kill a reused pid", () => {
+    const f = fakeChild();
+    const ac = new AbortController();
+    killOnAbort(f.child, ac.signal);
+    f.close();
+    ac.abort();
+    expect(f.killed).toEqual([]);
+  });
+
+  it("is a no-op without a signal — every exec but the agent's passes none", () => {
+    const f = fakeChild();
+    expect(() => killOnAbort(f.child, undefined)).not.toThrow();
+    expect(f.killed).toEqual([]);
+  });
+});
+
 describe("registerShutdown", () => {
   it("installs a bounded, constant number of process listeners regardless of count", () => {
     const before = process.listenerCount("exit");
@@ -278,7 +329,10 @@ describe("worktree path layout", () => {
 // `sh` is a process-group leader, and `process.kill(-pid)` reaches the whole
 // group. Same reason a `timeout`-wrapped vitest run has to kill the group: the
 // pid is never the whole of what was started.
-function makeLocalProvider(): SandboxProvider & {
+// `live` is a parameter so a caller can watch the children this provider
+// spawned: #41's idle timeout is supposed to kill the exec it stops waiting
+// for, and "the run rejected" is true whether or not it did.
+function makeLocalProvider(live: Set<ChildProcess> = new Set()): SandboxProvider & {
   capturedEnv?: Record<string, string>;
   capturedMounts?: readonly Mount[];
 } {
@@ -296,7 +350,6 @@ function makeLocalProvider(): SandboxProvider & {
       // sandboxRepoDir resolves to this handle.worktreePath; point it at the
       // real host worktree so local git runs in the right place.
       const worktreePath = opts.worktreePath;
-      const live = new Set<ChildProcess>();
       return {
         worktreePath,
         exec: (command, execOpts) =>
@@ -312,6 +365,8 @@ function makeLocalProvider(): SandboxProvider & {
               ],
             });
             live.add(proc);
+            // The same wiring the podman provider uses, for the same reason.
+            killOnAbort(proc, execOpts?.signal);
             proc.on("close", () => live.delete(proc));
             proc.on("error", () => live.delete(proc));
             if (execOpts?.stdin !== undefined && proc.stdin) {
@@ -626,6 +681,93 @@ describe("createSandbox integration (local provider)", () => {
       expect(run.stdout).toContain("<promise>COMPLETE</promise>");
       expect(run.commits).toHaveLength(1);
       expect(elapsed).toBeLessThan(5000); // resolved on the grace timer, not the 30s idle
+    } finally {
+      await sandbox.close();
+    }
+  }, 15_000);
+
+  it("the idle timeout carries out what the agent emitted, and kills the exec (#41)", async () => {
+    await git(["branch", "sandbar/issue-41-idle"], dir);
+    const live = new Set<ChildProcess>();
+    const provider = makeLocalProvider(live);
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-41-idle",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      // A reviewer that says something and then goes quiet. The observed #41
+      // run emitted nothing at all, but the interesting assertion is the
+      // opposite case: those bytes are the ONLY thing that tells a caller
+      // "the agent produced no review" apart from "the agent produced a
+      // review and the run died", and the two are handled differently.
+      const agent = scriptedAgent(
+        `printf '%s\\n' '${JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "partial review findings" }] },
+        })}' && sleep 30`,
+      );
+      const err = await sandbox
+        .run({ agent, prompt: "go", maxIterations: 1, idleTimeoutSeconds: 0.4 })
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain("idle");
+      expect(agentPartialOutput(err)).toContain("partial review findings");
+
+      // And the half the message never covered: the run stopped waiting for the
+      // exec, so the exec is stopped. Before this, `sleep 30` (in production, a
+      // `podman exec` client and a live agent session) outlived the rejection
+      // with nothing left to collect it — the sandbox is per-issue, so nothing
+      // would have until the issue ended.
+      const killed = await Promise.race([
+        new Promise<boolean>((r) => {
+          const t = setInterval(() => {
+            // `signalCode`, not an empty `live`: node fires 'close' only once
+            // the child's STDIO has closed, and the `sleep` this command
+            // orphans holds that pipe for its full 30s. Which is the local
+            // shape of the production point — killing a client does not reap
+            // what it started, and the provider's group kill at `close()` is
+            // what finally takes the orphan (see makeLocalProvider's header).
+            if ([...live].some((c) => c.signalCode === "SIGKILL")) {
+              clearInterval(t);
+              r(true);
+            }
+          }, 20);
+        }),
+        new Promise<boolean>((r) => setTimeout(() => r(false), 5000)),
+      ]);
+      expect(killed).toBe(true);
+    } finally {
+      await sandbox.close();
+    }
+  }, 15_000);
+
+  it("a run that emits NOTHING before the idle timeout carries out nothing (#41)", async () => {
+    await git(["branch", "sandbar/issue-41-silent"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-41-silent",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      // The observed shape: not one byte, not even the stream's init event.
+      const agent = scriptedAgent("sleep 30");
+      const err = await sandbox
+        .run({ agent, prompt: "go", maxIterations: 1, idleTimeoutSeconds: 0.4 })
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      // "" and not the error's own message: reviewer-run.ts reads this as
+      // evidence, and a harness message counted as evidence is the whole bug.
+      expect(agentPartialOutput(err)).toBe("");
     } finally {
       await sandbox.close();
     }

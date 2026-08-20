@@ -20,9 +20,27 @@ export type ParsedVerdict = {
   readonly prose: string;
 };
 
+// Non-global, so it is safe to share across calls: a `g` regex object carries
+// `lastIndex` and answers differently on alternate `test`s of the same input.
+// `matchAll` requires a global one, so parseVerdict uses the derived copy.
+const VERDICT_TOKEN = /<verdict>([\s\S]*?)<\/verdict>/;
+const VERDICT_TOKEN_ALL = new RegExp(VERDICT_TOKEN, "g");
+
+// Whether the reviewer got as far as emitting a token at all — NOT what it
+// said. Used by the reviewer-run policy (#41) to decide whether a run that
+// FAILED still reached a decision: a run killed after it emitted a verdict has
+// judged the code, so it is a verdict and not a harness fault, while a run that
+// died before emitting one has said nothing about the branch whatever prose it
+// left behind. Deliberately not a check on the token's VALUE — a malformed
+// token is still a decision the reviewer reached, and parseVerdict's
+// default-to-CHANGES-REQUESTED is the right handling for it.
+export function containsVerdictToken(stdout: string): boolean {
+  return VERDICT_TOKEN.test(stdout);
+}
+
 export function parseVerdict(stdout: string): ParsedVerdict {
   const prose = stdout;
-  const matches = [...stdout.matchAll(/<verdict>([\s\S]*?)<\/verdict>/g)];
+  const matches = [...stdout.matchAll(VERDICT_TOKEN_ALL)];
   if (matches.length === 0) {
     return { verdict: "CHANGES-REQUESTED", prose };
   }

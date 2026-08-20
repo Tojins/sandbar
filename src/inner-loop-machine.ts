@@ -47,6 +47,27 @@
 // enough for the reviewer to issue a deterministic verdict, not from
 // commit-and-revert round-trips.
 //
+// A reviewer that produced NO review is not a verdict and is not charged like
+// one (#41). Whether an invocation reviewed anything is reviewer-run.ts's
+// judgment; what arrives here is `reviewer-harness-failed`, and it differs from
+// CHANGES-REQUESTED on every axis that costs the issue something: no review
+// round is consumed (the budget bounds how many times the reviewer may reject
+// this branch, and it rejected nothing), `latestReviewerProse` is left exactly
+// as it was (a harness message quoted back as review prose is the fabrication
+// the issue is named for, and that string is what finalize shows a human), and
+// exhaustion names `reviewer-harness-failed` rather than `reviewer-blocked`,
+// which would send its reader to look for a report nobody wrote — #17's
+// mistake, one terminal along. The next implementer attempt is dispatched
+// anyway, because gate-1 is green and unreviewed work must not read as DONE —
+// but it gets an orchestrator note saying the harness failed, not a finding.
+//
+// A SECOND consecutive harness failure terminates instead. The argument is
+// `uncommittable-worktree`'s: an implementer attempt sits between the two, so
+// the branch is not what changed, and "the reviewer emits nothing" is not a
+// claim about code that another attempt could answer. Left to run, a wedged
+// reviewer costs the full attempt budget — each attempt an implementer run, a
+// gate, and two idle timeouts — to arrive at the same report it could give now.
+//
 // Sandbox lifecycle (setup, HARD-ERROR retry-with-fresh-sandbox) sits one
 // layer above this machine: decideAfterTerminal answers "retry or surface?"
 // for the runner's outer loop. HARD-ERROR is not a verdict the SM ever emits
@@ -86,6 +107,12 @@ export type LoopState = {
   // branch (#27). One re-prompt is offered; a second consecutive off-branch
   // attempt terminates — see onImplementerResult.
   readonly lastOffBranch: boolean;
+  // Whether the review round on the PREVIOUS attempt yielded no review at all
+  // (#41). Cleared by any other route out of an attempt, so it means "the
+  // attempt immediately before this one ended that way" — a harness failure two
+  // attempts apart, with a real gate red or a real verdict between them, is two
+  // incidents and not a wedged reviewer.
+  readonly lastReviewerHarnessFailed: boolean;
   readonly phase: LoopPhase;
 };
 
@@ -140,12 +167,19 @@ export type Verdict =
       //     second consecutive attempt was still off it (#27). `failureTrace`
       //     carries where HEAD actually is, which is the only handle anyone has
       //     on the stranded commits once the worktree is removed.
+      //   reviewer-harness-failed — gate-1 was green and the reviewer produced no
+      //     review at all, twice running (#41). `failureTrace` carries why each
+      //     invocation yielded nothing. Distinct from reviewer-blocked because the
+      //     code was never judged: there is no CHANGES-REQUESTED to act on, and the
+      //     thing to fix is the harness. `latestReviewerProse` is whatever an
+      //     EARLIER round said, if any — never the harness error.
       readonly type: "NEEDS-HUMAN";
       readonly cause:
         | "gate-red"
         | "reviewer-blocked"
         | "uncommittable-worktree"
-        | "off-branch-head";
+        | "off-branch-head"
+        | "reviewer-harness-failed";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
       // Set only by `off-branch-head`, so finalize can render the rescue note
@@ -196,6 +230,14 @@ export type LoopEvent =
       readonly kind: "reviewer-result";
       readonly verdict: "APPROVED" | "CHANGES-REQUESTED";
       readonly prose: string;
+    }
+  | {
+      // The reviewer was invoked its full invocation budget and none of the runs
+      // produced a review (#41). NOT a verdict — see the module header for what
+      // that changes. `detail` says why each invocation yielded nothing; it is
+      // diagnostics, never prose attributed to the reviewer.
+      readonly kind: "reviewer-harness-failed";
+      readonly detail: string;
     };
 
 export type StepResult = {
@@ -229,6 +271,7 @@ export function initialState(opts: InitialStateOptions): LoopState {
     latestReviewerProse: null,
     lastDirtyPaths: null,
     lastOffBranch: false,
+    lastReviewerHarnessFailed: false,
     phase: "needs-implementer",
   };
 }
@@ -277,6 +320,14 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
         );
       }
       return onReviewerResult(state, event.verdict, event.prose);
+
+    case "reviewer-harness-failed":
+      if (state.phase !== "needs-reviewer") {
+        throw new Error(
+          `reviewer-harness-failed event in phase ${state.phase}; expected needs-reviewer`,
+        );
+      }
+      return onReviewerHarnessFailed(state, event.detail);
   }
 }
 
@@ -342,6 +393,51 @@ export function offBranchHeadReprompt(m: HeadMismatch): string {
     "",
     "Verify with `git rev-parse --symbolic-full-name HEAD` before you report",
     "again. Do not report COMPLETE until that prints `refs/heads/" + m.branch + "`.",
+  ].join("\n");
+}
+
+// The orchestrator note for an attempt whose review round produced no review
+// (#41). Exported so the wording is asserted where the routing is.
+//
+// It goes in the ORCHESTRATOR NOTE slot, not the reviewer-feedback slot, and
+// that is the whole point of the terminal: the previous behaviour handed the
+// implementer `reviewer run errored: Agent idle for 600 seconds` under a
+// "Previous reviewer feedback (CHANGES-REQUESTED)" heading, so an agent whose
+// work had just passed a green gate was told it had been reviewed and rejected,
+// by a reviewer that never read a line of it. This note therefore says three
+// things and no more: what happened, that nothing was said about the code THIS
+// ROUND, and that the green gate still stands.
+//
+// Every claim it makes is scoped to this round, and that scoping is the whole
+// of its correctness. `latestReviewerProse` is carried forward untouched, so
+// `renderAttemptSlot` may well render an EARLIER round's real report directly
+// above this note, under an "Address the reviewer's concerns" imperative. A
+// note saying there is no reviewer feedback above would then be false — and
+// handing an implementer a false statement about what the reviewer said is the
+// thing this issue exists to stop, moved one slot over. So the note names the
+// two cases explicitly rather than asserting either.
+//
+// It deliberately quotes NONE of the harness detail. The detail names an idle
+// timeout in seconds and a podman exec — an implementer cannot act on any of it
+// from inside its sandbox, and an agent handed a failure it cannot fix will
+// try anyway. That text goes to the run log and, if this recurs, to the human
+// handoff, which are the two places someone can do something with it.
+export function reviewerHarnessFailedReprompt(): string {
+  return [
+    "The code reviewer could not be run this round: every invocation returned",
+    "no review at all. That is a fault in the orchestrator's harness, not a",
+    "finding about your work — nothing was said about your code this round, and",
+    "no review round was charged for it.",
+    "",
+    "Gate-1 passed on your last commit, and that verdict stands. Do not rework",
+    "or revert anything on the strength of this note. There is no NEW reviewer",
+    "feedback: if a \"Previous reviewer feedback\" section appears above, it is an",
+    "earlier round's, it still stands, and it is still what to address. If none",
+    "appears, no reviewer has said anything about this branch at all.",
+    "",
+    "Use this attempt for whatever you already knew was outstanding. If the work",
+    "is genuinely finished, confirm the worktree is clean and every commit is on",
+    "the issue branch, then report COMPLETE again so the reviewer can be retried.",
   ].join("\n");
 }
 
@@ -564,6 +660,43 @@ function onReviewerResult(
   );
 }
 
+// The reviewer produced no review at all (#41). Gate-1 was green to get here,
+// so this attempt's work is not in question and nothing about it is being
+// charged: the review round is NOT consumed and `latestReviewerProse` keeps
+// whatever an earlier round actually said.
+//
+// Note the impl attempt IS consumed, and that is the residual this terminal
+// accepts rather than hides. The alternative — re-dispatching the reviewer from
+// here — is an unbounded loop against a component that has just failed twice,
+// bounded by nothing the SM can see; one more implementer attempt at least does
+// real work and re-reaches the reviewer through a fresh gate. The
+// second-consecutive rule below is what keeps the price at two attempts.
+function onReviewerHarnessFailed(state: LoopState, detail: string): StepResult {
+  const exhausted: Verdict = {
+    type: "NEEDS-HUMAN",
+    cause: "reviewer-harness-failed",
+    failureTrace: detail,
+    // An earlier round's real report, if there was one. Never `detail` — the
+    // handoff renders this as the reviewer speaking.
+    latestReviewerProse: state.latestReviewerProse,
+    strandedHead: null,
+  };
+  if (state.lastReviewerHarnessFailed) return terminate(state, exhausted);
+  return advanceAttempt(
+    // Gate-1 was green this attempt, so there is no gate trace to carry: an
+    // older red would be re-shown to the implementer as if it were this
+    // attempt's, the same way onReviewerResult clears it.
+    { ...state, lastFailureTrace: "" },
+    {
+      failureTrace: "",
+      extraReprompt: reviewerHarnessFailedReprompt(),
+      latestReviewerProse: state.latestReviewerProse,
+      reviewerHarnessFailed: true,
+    },
+    exhausted,
+  );
+}
+
 // The gate-red flavour of impl-budget exhaustion: surface the last recorded
 // gate trace, or the sentinel when no gate ever ran (NO-SIGNAL only).
 function gateRedExhaustion(state: LoopState): Verdict {
@@ -590,6 +723,9 @@ function advanceAttempt(
     // attempt was told to get back on the branch" stays a statement about the
     // attempt immediately before this one.
     readonly offBranch?: boolean;
+    // And for #41: only the harness-failure route sets it, so two failures with
+    // a real verdict or a gate red between them do not read as consecutive.
+    readonly reviewerHarnessFailed?: boolean;
   },
   // The verdict to emit if this attempt was the last. Caller-supplied because
   // only the caller knows the terminal cause: a gate-red trace vs. a green-gate
@@ -608,6 +744,7 @@ function advanceAttempt(
     latestReviewerProse: next.latestReviewerProse,
     lastDirtyPaths: next.dirtyPaths ?? null,
     lastOffBranch: next.offBranch ?? false,
+    lastReviewerHarnessFailed: next.reviewerHarnessFailed ?? false,
   };
   return {
     state: ns,

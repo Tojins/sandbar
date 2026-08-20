@@ -12,6 +12,7 @@ import {
   initialAction,
   initialState,
   offBranchHeadReprompt,
+  reviewerHarnessFailedReprompt,
   step,
 } from "./inner-loop-machine.js";
 import type { HeadMismatch } from "./git-ops.js";
@@ -70,6 +71,11 @@ const changes = (prose: string): LoopEvent => ({
   kind: "reviewer-result",
   verdict: "CHANGES-REQUESTED",
   prose,
+});
+// The reviewer was invoked its full budget and reviewed nothing (#41).
+const harnessFailed = (detail = "invocation 1/2: …"): LoopEvent => ({
+  kind: "reviewer-harness-failed",
+  detail,
 });
 // Clean tree and HEAD on the issue branch unless a case says otherwise — the
 // dirty routing (#24 D1) and the off-branch routing (#27) each have their own
@@ -322,6 +328,201 @@ describe("inner-loop-machine — reviewer CHANGES-REQUESTED loop", () => {
   });
 });
 
+describe("inner-loop-machine — reviewer harness failure (#41)", () => {
+  const asImpl = (a: LoopAction) =>
+    a as Extract<LoopAction, { kind: "run-implementer" }>;
+  const asReviewer = (a: LoopAction) =>
+    a as Extract<LoopAction, { kind: "run-reviewer" }>;
+
+  it("spends NO review round: the next reviewer pass is still round 1", () => {
+    const { actions } = drive(defaultOpts, [
+      impl(complete),
+      gate1Ok,
+      harnessFailed(),
+      impl(complete),
+      gate1Ok,
+      approved(),
+    ]);
+    expect(asReviewer(actions[2]!).reviewRound).toBe(1);
+    expect(asReviewer(actions[5]!).reviewRound).toBe(1);
+  });
+
+  it("cannot exhaust the review budget — a maxReviewRounds of 1 survives it", () => {
+    // The charge #41 objects to, at its sharpest: with one round to spend, a
+    // reviewer that emitted nothing used to end the issue as
+    // NEEDS-HUMAN-REVIEW quoting its own error message as the reviewer's
+    // report. The real CHANGES-REQUESTED that follows is what spends the round.
+    const { verdict } = drive(
+      { maxAttempts: 8, maxReviewRounds: 1 },
+      [
+        impl(complete),
+        gate1Ok,
+        harnessFailed(),
+        impl(complete),
+        gate1Ok,
+        changes("a real report"),
+      ],
+    );
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN-REVIEW",
+      latestReviewerProse: "a real report",
+    });
+  });
+
+  it("re-prompts as an ORCHESTRATOR note and quotes none of the harness detail", () => {
+    const { actions } = drive(defaultOpts, [
+      impl(complete),
+      gate1Ok,
+      harnessFailed("invocation 1/2: podman exec died\ninvocation 2/2: idle 600s"),
+      impl(complete),
+      gate1Ok,
+      approved(),
+    ]);
+    const next = asImpl(actions[3]!);
+    expect(next.attempt).toBe(2);
+    expect(next.extraReprompt).toBe(reviewerHarnessFailedReprompt());
+    // The whole of #41: the harness's error text is not reviewer feedback, and
+    // an implementer must not be handed one as the other.
+    expect(next.latestReviewerProse).toBeNull();
+    expect(next.extraReprompt).not.toContain("podman");
+    expect(next.extraReprompt).not.toContain("idle 600s");
+  });
+
+  it("leaves an earlier round's real prose exactly as it was", () => {
+    const { actions } = drive(defaultOpts, [
+      impl(complete),
+      gate1Ok,
+      changes("round 1: rename the thing"),
+      impl(complete),
+      gate1Ok,
+      harnessFailed("the reviewer emitted nothing"),
+      impl(complete),
+      gate1Ok,
+      approved(),
+    ]);
+    const next = asImpl(actions[6]!);
+    expect(next.latestReviewerProse).toBe("round 1: rename the thing");
+    expect(next.latestReviewerProse).not.toContain("emitted nothing");
+
+    // And the note rendered beside it must not contradict it. `prompt.ts`
+    // renders that prose under "## Previous reviewer feedback
+    // (CHANGES-REQUESTED)" with "Address the reviewer's concerns" beneath it,
+    // so a note claiming there is no reviewer feedback above would be false in
+    // exactly the case this issue is about — an implementer told something
+    // untrue about what the reviewer said.
+    expect(next.extraReprompt).toBe(reviewerHarnessFailedReprompt());
+    expect(next.extraReprompt).not.toContain("there is none");
+    expect(next.extraReprompt).toContain("Previous reviewer feedback");
+    expect(next.extraReprompt).toContain("earlier round's");
+  });
+
+  it("carries no gate trace forward — gate-1 was green to reach the reviewer", () => {
+    const { actions } = drive(defaultOpts, [
+      impl(complete),
+      gate1Red("an OLD red from attempt 1"),
+      impl(complete),
+      gate1Ok,
+      harnessFailed(),
+      impl(complete),
+      gate1Ok,
+      approved(),
+    ]);
+    expect(asImpl(actions[5]!).failureTrace).toBe("");
+  });
+
+  it("a SECOND consecutive harness failure terminates instead of grinding the budget", () => {
+    const { actions, verdict } = drive(defaultOpts, [
+      impl(complete),
+      gate1Ok,
+      harnessFailed("first"),
+      impl(complete),
+      gate1Ok,
+      harnessFailed("second"),
+    ]);
+    expect(actions[actions.length - 1]?.kind).toBe("terminate");
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "reviewer-harness-failed",
+      failureTrace: "second",
+      latestReviewerProse: null,
+      strandedHead: null,
+    });
+  });
+
+  it("a real verdict between two failures makes them non-consecutive", () => {
+    const { actions, verdict } = drive(defaultOpts, [
+      impl(complete),
+      gate1Ok,
+      harnessFailed("first"),
+      impl(complete),
+      gate1Ok,
+      changes("a real report"),
+      impl(complete),
+      gate1Ok,
+      harnessFailed("second"),
+      impl(complete),
+      gate1Ok,
+      approved(),
+    ]);
+    // Not terminated at the second failure: an attempt with a genuine review in
+    // it separates them, so the reviewer is not wedged.
+    expect(asImpl(actions[9]!).attempt).toBe(4);
+    expect(verdict).toEqual({ type: "DONE" });
+  });
+
+  it("a gate red between two failures makes them non-consecutive too", () => {
+    const { actions } = drive(defaultOpts, [
+      impl(complete),
+      gate1Ok,
+      harnessFailed("first"),
+      impl(complete),
+      gate1Red("red"),
+      impl(complete),
+      gate1Ok,
+      harnessFailed("second"),
+      impl(complete),
+      gate1Ok,
+      approved(),
+    ]);
+    expect(asImpl(actions[8]!).attempt).toBe(4);
+  });
+
+  it("on the LAST impl attempt it exhausts as reviewer-harness-failed, not reviewer-blocked", () => {
+    const { verdict } = drive({ maxAttempts: 1, maxReviewRounds: 3 }, [
+      impl(complete),
+      gate1Ok,
+      harnessFailed("nothing came back, twice"),
+    ]);
+    // #17's rule, one terminal along: reviewer-blocked would tell the human to
+    // go and resolve a CHANGES-REQUESTED that nobody wrote.
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "reviewer-harness-failed",
+      failureTrace: "nothing came back, twice",
+      latestReviewerProse: null,
+      strandedHead: null,
+    });
+  });
+
+  it("exhausting on a harness failure keeps an earlier round's prose for the handoff", () => {
+    const { verdict } = drive({ maxAttempts: 2, maxReviewRounds: 5 }, [
+      impl(complete),
+      gate1Ok,
+      changes("round 1 prose"),
+      impl(complete),
+      gate1Ok,
+      harnessFailed("nothing came back"),
+    ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "reviewer-harness-failed",
+      failureTrace: "nothing came back",
+      latestReviewerProse: "round 1 prose",
+      strandedHead: null,
+    });
+  });
+});
+
 describe("inner-loop-machine — review-round budget exhaustion", () => {
   it("3 CHANGES-REQUESTED rounds → NEEDS-HUMAN-REVIEW with latest prose", () => {
     const { verdict } = drive(defaultOpts, [
@@ -519,6 +720,13 @@ describe("inner-loop-machine — phase invariants", () => {
     const state = initialState(defaultOpts);
     expect(() => step(state, approved())).toThrow(
       /reviewer-result.*expected needs-reviewer/,
+    );
+  });
+
+  it("reviewer-harness-failed before reviewer phase throws", () => {
+    const state = initialState(defaultOpts);
+    expect(() => step(state, harnessFailed())).toThrow(
+      /reviewer-harness-failed.*expected needs-reviewer/,
     );
   });
 

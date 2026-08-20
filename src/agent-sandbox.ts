@@ -30,6 +30,10 @@
 //   F8 — the container runs with `--init`. The entrypoint is `sleep infinity`,
 //        which reaps nothing, so without it every process an agent orphans
 //        zombies for the lifetime of the issue (#42). See `sandboxRunArgs`.
+//   F9 — a run that FAILS still carries out whatever the agent had emitted
+//        (`agentPartialOutput`), and both timeout paths kill the exec they stop
+//        waiting for (#41). See the two blocks at invokeAgent for why each half
+//        of that is load-bearing.
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
@@ -124,6 +128,17 @@ type ExecOptions = {
   cwd?: string;
   sudo?: boolean;
   onLine?: (line: string) => void;
+  // Kills the exec CLIENT when aborted (#41). Be precise about what that
+  // reaps: the host-side `podman exec` process, its pipes and the readline
+  // interface reading them — nothing more. The process INSIDE the container is
+  // podman's, and gate-stack.ts's `reapKilledStep` records the same finding
+  // from the other side: killing the client reaps nothing in the container, and
+  // the only total handle podman offers is the container itself. Here that
+  // handle belongs to the issue, not to one agent run, so the in-container
+  // process outlives an abort and dies with the sandbox at `close()`. What the
+  // abort buys is that sandbar stops holding a process, three fds and a growing
+  // output buffer for a run whose result it has already discarded.
+  signal?: AbortSignal;
 };
 
 type ExecResult = { stdout: string; stderr: string; exitCode: number };
@@ -247,6 +262,36 @@ export class AgentIdleTimeoutError extends Error {
     this.timeoutMs = timeoutMs;
   }
 }
+
+// What the agent had emitted when a run failed (#41).
+//
+// Every rejection out of `invokeAgent` discards `accumulatedOutput`, so from a
+// caller's side EVERY failure looks identical to a run that emitted nothing —
+// which is exactly the distinction #41 needs to make: a reviewer that produced
+// no bytes at all is a harness fault, while one that produced a review and then
+// failed to exit cleanly has already said something about the code. Told apart
+// only by the bytes, so the bytes have to survive the throw.
+//
+// A WeakMap rather than a field, because the generic `.catch` in invokeAgent
+// forwards errors this module did not construct (a podman exec failure, an
+// EPIPE on stdin) and those must carry the output too. Nothing is mutated and
+// no property name can collide with one the thrown error already has.
+const AGENT_PARTIAL_OUTPUT = new WeakMap<object, string>();
+
+const withPartialOutput = (err: unknown, partial: string): unknown => {
+  if (partial !== "" && typeof err === "object" && err !== null) {
+    AGENT_PARTIAL_OUTPUT.set(err, partial);
+  }
+  return err;
+};
+
+// "" when the run emitted nothing, or when the error came from somewhere other
+// than an agent run. Callers read it as evidence, so an absent record and an
+// empty one mean the same thing on purpose.
+export const agentPartialOutput = (err: unknown): string => {
+  if (typeof err !== "object" || err === null) return "";
+  return AGENT_PARTIAL_OUTPUT.get(err) ?? "";
+};
 
 class WorktreeError extends Error {}
 
@@ -1047,6 +1092,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
             proc.on("error", (error) => {
               rejectExec(new Error(`podman exec failed: ${error.message}`));
             });
+            killOnAbort(proc, opts?.signal);
             // stdout/stderr are always piped above, so they are non-null here.
             const stdout = proc.stdout as NonNullable<typeof proc.stdout>;
             const stderr = proc.stderr as NonNullable<typeof proc.stderr>;
@@ -1097,6 +1143,41 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
       return handle;
     },
   };
+};
+
+// Wiring for ExecOptions.signal, extracted from the podman provider so it can
+// be asserted at all: that provider needs a real podman and a real image, so
+// anything left inline in it is covered by nothing — the same argument that put
+// `sandboxRunArgs` out here (#42).
+//
+// SIGKILL, not SIGTERM: the client is a relay with nothing to flush, and the
+// caller has already stopped reading it. The listener comes off on close, so an
+// AbortSignal that outlives one exec — invokeAgent's per-run controller does
+// not, but a future caller's might — cannot accumulate one listener per exec.
+//
+// Note the exec promise still RESOLVES afterwards, reporting `code ?? 0` for a
+// signalled death. That is not a claim that the exec succeeded and nothing reads
+// it as one: the only caller that aborts settles its own promise first, so the
+// resolution is discarded by construction rather than by inspection.
+export type KillableChild = {
+  kill(signal: NodeJS.Signals): unknown;
+  on(event: "close", listener: () => void): unknown;
+};
+
+export const killOnAbort = (
+  child: KillableChild,
+  signal: AbortSignal | undefined,
+): void => {
+  if (!signal) return;
+  const onAbort = (): void => {
+    child.kill("SIGKILL");
+  };
+  if (signal.aborted) {
+    onAbort();
+    return;
+  }
+  signal.addEventListener("abort", onAbort, { once: true });
+  child.on("close", () => signal.removeEventListener("abort", onAbort));
 };
 
 // ---------------------------------------------------------------------------
@@ -1162,6 +1243,10 @@ const invokeAgent = (
     let completionDetected = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
+    // Both timers stop waiting for the exec; this is how they also stop it
+    // (#41). One controller per agent run, so the listener it installs on the
+    // exec cannot outlive the run that made it.
+    const abort = new AbortController();
 
     const clearTimer = (): void => {
       if (timer !== null) {
@@ -1179,17 +1264,35 @@ const invokeAgent = (
       if (settled) return;
       settled = true;
       clearTimer();
-      rejectRun(err);
+      // F9 — the collected output rides out with the failure. Without it a
+      // caller cannot tell "the agent never produced a byte" from "the agent
+      // produced a full review and then died", and #41 turns on that
+      // distinction. Read back with `agentPartialOutput`.
+      rejectRun(withPartialOutput(err, resultText || accumulatedOutput));
     };
 
     // Two-phase: pre-signal → idle kill timer; post-signal → completion-grace
     // timer that resolves SUCCESSFULLY with the collected output (the agent has
     // signalled but a child may be holding the stdout pipe open past EOF).
     const resetTimer = (): void => {
+      // Nothing is waiting any more, so nothing should be armed: `onLine` still
+      // fires after a settle (readline flushes its trailing partial line as the
+      // killed exec's stdout closes), and re-arming there would leave one
+      // `idleTimeoutMs` timer pending with no path left to clear it — up to ten
+      // minutes of an event loop held open on the exit-0 path, which returns
+      // rather than calling process.exit. The same "stop what you stopped
+      // waiting for" thought as the abort below.
+      if (settled) return;
       clearTimer();
       if (completionDetected) {
         timer = setTimeout(() => {
+          // Settle FIRST, then abort: the abort makes the exec resolve, and
+          // settling first is what makes that resolution a no-op instead of a
+          // race with this one. The agent has already emitted its completion
+          // signal and whatever is still holding the pipe open is producing
+          // output nobody will read, so there is nothing here worth waiting on.
           settleResolve({ result: resultText || accumulatedOutput });
+          abort.abort();
         }, completionTimeoutMs);
       } else {
         timer = setTimeout(() => {
@@ -1199,6 +1302,12 @@ const invokeAgent = (
               idleTimeoutMs,
             ),
           );
+          // The "idle kill timer" (#41): it used to reject and nothing else,
+          // leaving a `podman exec` client, its pipes and this closure's
+          // growing output buffer alive for the rest of the ISSUE — the sandbox
+          // is per-issue, so nothing else was going to collect them. See
+          // ExecOptions.signal for what this does and does not reap.
+          abort.abort();
         }, idleTimeoutMs);
       }
     };
@@ -1214,6 +1323,7 @@ const invokeAgent = (
       .exec(printCmd.command, {
         cwd: sandboxRepoDir,
         stdin: printCmd.stdin,
+        signal: abort.signal,
         onLine: (line) => {
           for (const parsed of agent.parseStreamLine(line)) {
             if (parsed.type === "text") {
