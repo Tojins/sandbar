@@ -37,6 +37,14 @@ afterAll(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+// The existence probe comes BEFORE the delegation, not after it: node's own
+// resolver finalizes a relative specifier by checking the file is there, so a
+// missing `.ts` sibling leaves `nextResolve` as an ERR_MODULE_NOT_FOUND rather
+// than as a URL to be probed. Probing the answer would therefore make the
+// fallback unreachable, and the whole file would fail as `child never started`
+// naming a `.ts` path nobody wrote — the exact miss the fallback is for. It is
+// not hypothetical for long: this hook sees CJS `require` as well as `import`,
+// so one dependency doing `require("./polyfills.js")` reaches it.
 const RESOLVE_HOOK = `
 import { registerHooks } from "node:module";
 import { existsSync } from "node:fs";
@@ -44,8 +52,10 @@ import { fileURLToPath } from "node:url";
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier.startsWith(".") && specifier.endsWith(".js")) {
-      const asTs = nextResolve(specifier.slice(0, -3) + ".ts", context);
-      if (existsSync(fileURLToPath(asTs.url))) return asTs;
+      const asTs = specifier.slice(0, -3) + ".ts";
+      if (existsSync(fileURLToPath(new URL(asTs, context.parentURL)))) {
+        return nextResolve(asTs, context);
+      }
     }
     return nextResolve(specifier, context);
   },
@@ -57,6 +67,10 @@ registerHooks({
 // installs, and is the arrangement the bug needed.
 const childSource = (markerPath: string) => `
 import { appendFileSync } from "node:fs";
+// Exercises the hook's fallback, which nothing in the module graph reaches
+// today (every relative import under src/ has a .ts sibling) and which would
+// otherwise sit here unrun until the day a dependency needed it.
+import "./no-ts-sibling.js";
 import { installCleanupTraps, onCleanup } from ${JSON.stringify(join(SRC_DIR, "cleanup.ts"))};
 import { registerShutdown } from ${JSON.stringify(join(SRC_DIR, "agent-sandbox.ts"))};
 
@@ -82,9 +96,10 @@ type ChildRun = { code: number | null; signal: string | null; lines: string[] };
 async function sigintChild(): Promise<ChildRun> {
   const marker = join(dir, "marker.txt");
   const hook = join(dir, "resolve-hook.mjs");
-  const script = join(dir, "child.mts");
+  const script = join(dir, "child.mjs");
   await writeFile(marker, "");
   await writeFile(hook, RESOLVE_HOOK);
+  await writeFile(join(dir, "no-ts-sibling.js"), "module.exports = {};\n");
   await writeFile(script, childSource(marker));
 
   const child = spawn(process.execPath, ["--import", hook, script], {
@@ -96,9 +111,17 @@ async function sigintChild(): Promise<ChildRun> {
     (resolve, reject) => {
       let out = "";
       let err = "";
+      let sent = false;
       child.stdout.on("data", (c: Buffer) => {
         out += c.toString();
-        if (out.includes("ready")) child.kill("SIGINT");
+        // Once only. cleanup.ts's trap is a `process.once`, so a second SIGINT
+        // arriving while the first is still awaiting the registry would find
+        // no listener and default-terminate the child — failing the exit-code
+        // assertion below as a flake rather than as the regression.
+        if (!sent && out.includes("ready")) {
+          sent = true;
+          child.kill("SIGINT");
+        }
       });
       child.stderr.on("data", (c: Buffer) => (err += c.toString()));
       child.on("error", reject);
@@ -134,9 +157,10 @@ describe("SIGINT during a run", () => {
 
   it("still tears the sandbox down, through the shared registry", () => {
     expect(run.lines).toContain("sandbox-teardown");
-    // LIFO, so the sandbox teardown (registered last) leads. Asserting the
-    // order is what shows it ran as a registry action rather than from a
-    // handler of its own racing alongside one.
+    // LIFO, so the sandbox teardown (registered last) leads. The ordering is
+    // a property of the registry, not the thing under test — under the bug it
+    // held too, and what fails below is the comparison against a -1, the async
+    // action never having got to write its line.
     expect(run.lines.indexOf("sandbox-teardown")).toBeLessThan(
       run.lines.indexOf("registry-action-finished"),
     );
