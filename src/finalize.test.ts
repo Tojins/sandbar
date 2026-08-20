@@ -578,7 +578,7 @@ describe("finalizeOne", () => {
     ]);
   });
 
-  it("needs-human reviewer-harness-failed: says the code was never reviewed, and never quotes a verdict nobody gave (#41)", async () => {
+  it("needs-human reviewer-harness-failed, nothing ever reviewed: says so in the strongest form (#41)", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
@@ -588,9 +588,8 @@ describe("finalizeOne", () => {
         cause: "reviewer-harness-failed",
         failureTrace:
           "invocation 1/2: the run failed and emitted no output at all: Agent idle for 600 seconds — no output received.",
-        // An earlier round's genuine report. It must not be presented as the
-        // reason the issue stopped — the reviewer that stopped it said nothing.
-        latestReviewerProse: "## Extract the duplicated lifecycle dispatch",
+        // No round ever produced a report, so the global claim is the true one.
+        latestReviewerProse: null,
       },
       adapter,
       LABELS,
@@ -603,12 +602,52 @@ describe("finalizeOne", () => {
     expect(body).toContain("Agent idle for 600 seconds");
     expect(body).toContain("no review at all");
     expect(body).toContain("harness or environment failure");
-    // The two claims the reviewer-blocked comment would have made, both false
-    // here: that the reviewer asked for changes, and that its report is below.
+    expect(body).toContain("No reviewer has said anything about this branch at all");
+    // The claim the reviewer-blocked comment would have made, and it is false
+    // here: that a standards complaint is what the human has to resolve.
     expect(body).not.toContain("the code reviewer's `CHANGES-REQUESTED` is the blocker");
-    expect(body).not.toContain("Extract the duplicated lifecycle dispatch");
     // Nor is it a gate failure — the gate is what went green.
     expect(body).not.toContain("without a green gate");
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+    ]);
+  });
+
+  it("needs-human reviewer-harness-failed with an earlier round's report: renders it, scoped to that round (#41)", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    // The reachable shape: round 1 reviewed and asked for changes, and the
+    // reviewer that ended the issue produced nothing. Every global claim ("no
+    // verdict was ever reached", "the reviewer did not ask for changes") is
+    // false here, and the earlier report is the only review this branch ever
+    // got — dropped, it survives nowhere a human will look, precisely as the
+    // comment tells them to review the branch themselves.
+    const earlier = "## Extract the duplicated lifecycle dispatch";
+    const action = await finalizeOne(
+      {
+        kind: "needs-human",
+        issue: i,
+        cause: "reviewer-harness-failed",
+        failureTrace:
+          "invocation 1/2: the run failed and emitted no output at all: Agent idle for 600 seconds — no output received.",
+        latestReviewerProse: earlier,
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    const body = calls.comments[0]!.body;
+    expect(body).toContain("Agent idle for 600 seconds");
+    expect(body).toContain(earlier);
+    expect(body).toContain("earlier round");
+    expect(body).toContain("whether it was addressed is unverified");
+    // Scoped, not global — the two sentences that would be untrue.
+    expect(body).toContain("the last code-reviewer round produced no review at all");
+    expect(body).not.toContain("No reviewer has said anything about this branch at all");
+    // And still not presented as the blocker: this is not a CHANGES-REQUESTED
+    // terminal, and the harness trace is not the reviewer speaking.
+    expect(body).not.toContain("the code reviewer's `CHANGES-REQUESTED` is the blocker");
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);

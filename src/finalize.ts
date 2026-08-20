@@ -253,26 +253,52 @@ export const NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE = (
 // under a "latest reviewer pass" heading, sending the author to resolve a
 // standards complaint nobody made.
 //
-// So this one says the opposite in as many words: the code was never reviewed.
-// The trace is the harness's, and the fix is in the harness or the environment
-// — the branch is green and may well be mergeable as it stands, which is the
-// one thing the reader most needs to know before they start reading their own
-// diff for a defect.
+// So this one says the opposite in as many words: this round's reviewer never
+// reviewed the code. The trace is the harness's, and the fix is in the harness
+// or the environment — the branch is green and may well be mergeable as it
+// stands, which is the one thing the reader most needs to know before they start
+// reading their own diff for a defect.
+//
+// **Every claim it makes is scoped to the round that failed**, for the same
+// reason the implementer's note is (see `reviewerHarnessFailedReprompt`): this
+// terminal is reachable with an EARLIER round's genuine `CHANGES-REQUESTED`
+// behind it — round 1 reviews and rejects, attempt 2's reviewer wedges — and the
+// verdict carries that prose. A comment saying no verdict was ever reached and
+// nothing was ever asked for would then be false in the direction that costs
+// most: the author is told to review the branch themselves while the one real
+// report anyone produced about it is dropped on the floor. Nothing else surfaces
+// it — the attempt logs are offline and this arm is not `review-budget-exhausted`
+// — so it is rendered here, under its own heading, and described as an earlier
+// round's and possibly unaddressed rather than as the blocker.
+//
+// With no prose the stronger sentence is the true one and is kept: no reviewer
+// has said anything about this branch at all.
 export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
   failureTrace: string,
+  latestReviewerProse: string | null,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} stopped: the gate is GREEN and the code reviewer ` +
-  `produced no review at all — every invocation returned nothing, so no verdict ` +
-  `was ever reached and nothing below is a finding about this branch. This is a ` +
-  `harness or environment failure, not a \`CHANGES-REQUESTED\`: the reviewer did ` +
-  `not ask for changes, because it did not run.\n\n` +
+  `${BOT_COMMENT_PREFIX} stopped: the gate is GREEN and the last code-reviewer ` +
+  `round produced no review at all — every invocation returned nothing, so no ` +
+  `verdict was reached about the current commits. This is a harness or ` +
+  `environment failure, not a \`CHANGES-REQUESTED\`: the reviewer did not ask for ` +
+  `changes this round, because it did not run, and the trace below is the ` +
+  `harness's rather than a finding about this branch.\n\n` +
+  (latestReviewerProse === null
+    ? `No reviewer has said anything about this branch at all. `
+    : `An earlier round did review this branch, and its report is reproduced at ` +
+      `the bottom. Treat it as still standing: work went on after it, but nothing ` +
+      `reviewed the result, so whether it was addressed is unverified. `) +
   `The branch is pushed and its commits pass the gate. Review it yourself, or ` +
   `fix what stopped the reviewer and re-run — then drop \`${stuckLabel}\` and ` +
   `re-apply \`${readyLabel}\`.\n\n` +
   `<details><summary>Why each reviewer invocation produced nothing</summary>\n\n` +
-  `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
+  `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>` +
+  (latestReviewerProse === null
+    ? ""
+    : `\n\n---\n\nThe last review this branch actually received, from an ` +
+      `earlier round:\n\n${latestReviewerProse}`);
 
 export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
   latestReviewerProse: string,
@@ -335,9 +361,10 @@ export type FinalizeInput =
       // gate-red comment would describe a failure that did not happen);
       // off-branch-head surfaces where HEAD went (#27) — likewise no gate ran,
       // and the comment is the only place the stranded commit's sha survives;
-      // reviewer-harness-failed says the gate is green and NOTHING reviewed it
-      // (#41), which is the one arm where `latestReviewerProse` may be a real
-      // report from an earlier round and still must not be presented as the
+      // reviewer-harness-failed says the gate is green and nothing reviewed the
+      // current commits (#41), which is the one arm where `latestReviewerProse`
+      // may be a real report from an EARLIER round: it is rendered, because
+      // nothing else surfaces it, but as that earlier round's and never as the
       // reason the issue stopped.
       readonly kind: "needs-human";
       readonly issue: IssueRef;
@@ -643,6 +670,11 @@ export async function finalizeOne(
           case "reviewer-harness-failed":
             return NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE(
               input.failureTrace,
+              // An earlier round's real report, when there was one (#41). It is
+              // rendered as an earlier round's, never as the blocker — but
+              // dropping it would lose the only review this branch ever got,
+              // exactly as the reader is told to review it themselves.
+              input.latestReviewerProse,
               labels.agentStuck,
               READY_FOR_AGENT_LABEL,
             );
