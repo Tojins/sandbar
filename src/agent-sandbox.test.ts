@@ -37,6 +37,7 @@ import {
   parseStreamJsonLine,
   prepareWorktree,
   registerShutdown,
+  sandboxRunArgs,
 } from "./agent-sandbox.js";
 import { existsSync } from "node:fs";
 
@@ -894,5 +895,117 @@ describe("git mounts follow --git-common-dir, bare or not (#38)", () => {
     // exactly what the structural discovery got wrong.
     expect(extra[0]!.hostPath).toBe(layout.repoDir);
     expect(extra[0]!.sandboxPath).toBe(layout.repoDir);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sandboxRunArgs (#42)
+// ---------------------------------------------------------------------------
+
+// The provider's own `podman run` needs a real podman and a real image, so the
+// integration tests above drive a fake provider — which left this argv asserted
+// by nothing. What podman *does* with `--init` is pinned separately, against
+// real podman, in agent-sandbox-podman.test.ts.
+describe("sandboxRunArgs (#42)", () => {
+  const base = {
+    containerName: "sandbar-w0011223-abc",
+    imageName: "localhost/sandbar:latest",
+    workdir: SANDBOX_REPO_DIR,
+    env: {},
+    volumeMounts: [],
+    userns: "keep-id" as const,
+    containerUid: 1000,
+    containerGid: 1000,
+    networks: [],
+    groups: [],
+    devices: [],
+    cpus: undefined,
+  };
+
+  it("runs the sandbox under --init, so pid 1 reaps what the agent orphans", () => {
+    expect(sandboxRunArgs(base)).toContain("--init");
+  });
+
+  it("keeps --init an option of run, not an argument of the entrypoint", () => {
+    // `podman run ... --entrypoint sleep <image> infinity`: everything after the
+    // image name belongs to `sleep`, so an --init appended there would be a
+    // silent no-op that `toContain` alone would still accept.
+    const args = sandboxRunArgs(base);
+    expect(args.indexOf("--init")).toBeLessThan(args.indexOf(base.imageName));
+  });
+
+  it("still ends at the sleep entrypoint", () => {
+    expect(sandboxRunArgs(base).slice(-4)).toEqual([
+      "--entrypoint",
+      "sleep",
+      base.imageName,
+      "infinity",
+    ]);
+  });
+
+  it("carries the identity, workdir, env and mounts it was given", () => {
+    const args = sandboxRunArgs({
+      ...base,
+      env: { HOME: "/home/agent", GH_TOKEN: "t" },
+      volumeMounts: ["/host/wt:/home/agent/workspace:rw,z"],
+      networks: ["sandbar-w0011223-net-1"],
+      groups: [44, "video"],
+      devices: ["/dev/fuse"],
+      cpus: 2,
+    });
+    expect(args.slice(0, 4)).toEqual(["run", "-d", "--name", base.containerName]);
+    expect(args).toEqual(
+      expect.arrayContaining([
+        "--user",
+        "1000:1000",
+        "--userns=keep-id:uid=1000,gid=1000",
+        "--network",
+        "sandbar-w0011223-net-1",
+        "--group-add",
+        "44",
+        "--group-add",
+        "video",
+        "--device",
+        "/dev/fuse",
+        "--cpus",
+        "2",
+        "-w",
+        SANDBOX_REPO_DIR,
+        "-e",
+        "HOME=/home/agent",
+        "-e",
+        "GH_TOKEN=t",
+        "-v",
+        "/host/wt:/home/agent/workspace:rw,z",
+      ]),
+    );
+  });
+
+  it("omits --userns when the provider was configured without one", () => {
+    const args = sandboxRunArgs({ ...base, userns: false });
+    expect(args.some((a) => a.startsWith("--userns"))).toBe(false);
+    // The uid mapping is a separate flag and must survive.
+    expect(args).toContain("--user");
+    // ...and the reaper is not conditional on any of it.
+    expect(args).toContain("--init");
+  });
+
+  it("emits no empty optional flags", () => {
+    expect(sandboxRunArgs(base)).toEqual([
+      "run",
+      "-d",
+      "--name",
+      base.containerName,
+      "--init",
+      "--user",
+      "1000:1000",
+      "--userns=keep-id:uid=1000,gid=1000",
+      "-w",
+      SANDBOX_REPO_DIR,
+      "--entrypoint",
+      "sleep",
+      base.imageName,
+      "infinity",
+    ]);
   });
 });

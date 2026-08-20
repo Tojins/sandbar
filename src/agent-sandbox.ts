@@ -27,6 +27,9 @@
 //        grace timer resolves the run SUCCESSFULLY with the collected commits
 //        instead of a 600 s idle error that discards them.
 //   F7 — every host git invocation runs under LC_ALL=C (locale-stable stderr).
+//   F8 — the container runs with `--init`. The entrypoint is `sleep infinity`,
+//        which reaps nothing, so without it every process an agent orphans
+//        zombies for the lifetime of the issue (#42). See `sandboxRunArgs`.
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
@@ -878,6 +881,71 @@ const checkImageExists = (imageName: string): Promise<void> =>
     });
   });
 
+// ---------------------------------------------------------------------------
+// The sandbox container's `podman run` argv
+// ---------------------------------------------------------------------------
+
+// Pure and exported so the flags are table-testable. The provider itself needs
+// a real podman and a real image, so the suite drives a fake provider instead —
+// which meant every flag below was, until #42, asserted by nothing at all.
+//
+// `--init` is why that gap mattered. The entrypoint is `sleep infinity`, so
+// pid 1 is `sleep`, which never calls wait(): anything an agent orphans inside
+// the sandbox — a test runner's browser, a build's worker, any child whose
+// parent exits first — is reparented to pid 1 and stays `Z` for the lifetime of
+// the issue. Nothing reaps them, so the count only grows, and each one holds a
+// pid slot against the container's pids limit (2048 by default); ahead of that
+// ceiling, `ps` is the tool an agent reaches for to diagnose its own sandbox
+// and it is full of corpses that mean nothing. `--init` puts podman's catatonit
+// at pid 1 and moves `sleep` to pid 2, which reaps them.
+//
+// Unconditional, with no config surface: no sandbox wants to leak zombies, and
+// a consumer cannot fix this from its own image, because pid 1 is sandbar's
+// choice and a container's pid 1 cannot be delegated after the fact. The
+// alternative — an entrypoint shell that traps and reaps — reimplements
+// catatonit in bash and would have to be baked into every consumer image. A
+// host whose podman ships no catatonit fails the `podman run` outright, naming
+// the missing binary, which is loud at sandbox creation rather than silent.
+export function sandboxRunArgs(opts: {
+  readonly containerName: string;
+  readonly imageName: string;
+  readonly workdir: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly volumeMounts: readonly string[];
+  readonly userns: string | false;
+  readonly containerUid: number;
+  readonly containerGid: number;
+  readonly networks: readonly string[];
+  readonly groups: ReadonlyArray<string | number>;
+  readonly devices: readonly string[];
+  readonly cpus: number | undefined;
+}): string[] {
+  return [
+    "run",
+    "-d",
+    "--name",
+    opts.containerName,
+    "--init",
+    "--user",
+    `${opts.containerUid}:${opts.containerGid}`,
+    ...(opts.userns
+      ? [`--userns=keep-id:uid=${opts.containerUid},gid=${opts.containerGid}`]
+      : []),
+    ...opts.networks.flatMap((n) => ["--network", n]),
+    ...opts.groups.flatMap((g) => ["--group-add", String(g)]),
+    ...opts.devices.flatMap((d) => ["--device", d]),
+    ...(opts.cpus !== undefined ? ["--cpus", String(opts.cpus)] : []),
+    "-w",
+    opts.workdir,
+    ...Object.entries(opts.env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+    ...opts.volumeMounts.flatMap((v) => ["-v", v]),
+    "--entrypoint",
+    "sleep",
+    opts.imageName,
+    "infinity",
+  ];
+}
+
 export const podman = (options?: PodmanOptions): SandboxProvider => {
   const configuredImageName = options?.imageName;
   const namePrefix = options?.namePrefix ?? CONTAINER_NAME_PREFIX;
@@ -906,48 +974,29 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
       await checkImageExists(imageName);
 
       const env = { ...createOptions.env, HOME: SANDBOX_HOMEDIR };
-      const envArgs = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
-      const volumeArgs = volumeMounts.flatMap((v) => ["-v", v]);
-      const usernsArgs = userns
-        ? [`--userns=keep-id:uid=${containerUid},gid=${containerGid}`]
-        : [];
-      const userArgs = ["--user", `${containerUid}:${containerGid}`];
       const networks = options?.network
         ? Array.isArray(options.network)
           ? options.network
           : [options.network]
         : [];
-      const networkArgs = networks.flatMap((n) => ["--network", n]);
-      const groupArgs = (options?.groups ?? []).flatMap((g) => [
-        "--group-add",
-        String(g),
-      ]);
-      const deviceArgs = (options?.devices ?? []).flatMap((d) => ["--device", d]);
-      const cpusArgs = options?.cpus !== undefined ? ["--cpus", String(options.cpus)] : [];
 
       await new Promise<void>((resolveRun, rejectRun) => {
         execFile(
           "podman",
-          [
-            "run",
-            "-d",
-            "--name",
+          sandboxRunArgs({
             containerName,
-            ...userArgs,
-            ...usernsArgs,
-            ...networkArgs,
-            ...groupArgs,
-            ...deviceArgs,
-            ...cpusArgs,
-            "-w",
-            sandboxWorktreePath,
-            ...envArgs,
-            ...volumeArgs,
-            "--entrypoint",
-            "sleep",
             imageName,
-            "infinity",
-          ],
+            workdir: sandboxWorktreePath,
+            env,
+            volumeMounts,
+            userns,
+            containerUid,
+            containerGid,
+            networks,
+            groups: options?.groups ?? [],
+            devices: options?.devices ?? [],
+            cpus: options?.cpus,
+          }),
           (error) => {
             if (error) rejectRun(new Error(`podman run failed: ${error.message}`));
             else resolveRun();
