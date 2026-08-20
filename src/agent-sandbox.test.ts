@@ -218,12 +218,27 @@ describe("defaultImageName", () => {
 
 describe("registerShutdown", () => {
   it("installs a bounded, constant number of process listeners regardless of count", () => {
-    const before = process.listenerCount("SIGINT");
+    const before = process.listenerCount("exit");
     const unregs = Array.from({ length: 8 }, () => registerShutdown(() => {}));
-    expect(process.listenerCount("SIGINT")).toBe(before + 1);
+    expect(process.listenerCount("exit")).toBe(before + 1);
     for (const u of unregs) u();
     // Last unregister detaches the shared listener again.
-    expect(process.listenerCount("SIGINT")).toBe(before);
+    expect(process.listenerCount("exit")).toBe(before);
+  });
+
+  // #35: this module's own SIGINT/SIGTERM handlers ended in a synchronous
+  // `process.exit(1)`, which ran AFTER cleanup.ts's handler had started the
+  // async `runCleanup()` and killed it mid-await. The teardowns belong in the
+  // shared registry; the trap that owns the exit is cleanup.ts's alone.
+  it("installs no signal listener of its own", () => {
+    const before = {
+      SIGINT: process.listenerCount("SIGINT"),
+      SIGTERM: process.listenerCount("SIGTERM"),
+    };
+    const unreg = registerShutdown(() => {});
+    expect(process.listenerCount("SIGINT")).toBe(before.SIGINT);
+    expect(process.listenerCount("SIGTERM")).toBe(before.SIGTERM);
+    unreg();
   });
 });
 
