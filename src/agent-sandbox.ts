@@ -1275,6 +1275,14 @@ const invokeAgent = (
     // timer that resolves SUCCESSFULLY with the collected output (the agent has
     // signalled but a child may be holding the stdout pipe open past EOF).
     const resetTimer = (): void => {
+      // Nothing is waiting any more, so nothing should be armed: `onLine` still
+      // fires after a settle (readline flushes its trailing partial line as the
+      // killed exec's stdout closes), and re-arming there would leave one
+      // `idleTimeoutMs` timer pending with no path left to clear it — up to ten
+      // minutes of an event loop held open on the exit-0 path, which returns
+      // rather than calling process.exit. The same "stop what you stopped
+      // waiting for" thought as the abort below.
+      if (settled) return;
       clearTimer();
       if (completionDetected) {
         timer = setTimeout(() => {

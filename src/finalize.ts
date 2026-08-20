@@ -635,40 +635,47 @@ export async function finalizeOne(
       // CHANGES-REQUESTED prose; uncommittable-worktree → the dirty paths, and
       // say that no gate ran; off-branch-head → where HEAD went and how to
       // rescue the commits (#27); gate-red → the gate failure trace.
-      const body =
-        input.cause === "reviewer-harness-failed"
-          ? NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE(
+      // A switch rather than the ternary chain this used to be: one arm per
+      // cause, so a cause added to the union without a template here is a
+      // compile error instead of the generic gate-red comment silently.
+      const body = ((): string => {
+        switch (input.cause) {
+          case "reviewer-harness-failed":
+            return NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE(
               input.failureTrace,
               labels.agentStuck,
               READY_FOR_AGENT_LABEL,
-            )
-          : input.cause === "reviewer-blocked"
-          ? NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE(
+            );
+          case "reviewer-blocked":
+            return NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE(
               input.latestReviewerProse ?? "",
               labels.agentStuck,
               READY_FOR_AGENT_LABEL,
-            )
-          : input.cause === "uncommittable-worktree"
-            ? NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE(
+            );
+          case "uncommittable-worktree":
+            return NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE(
+              input.failureTrace,
+              labels.agentStuck,
+              READY_FOR_AGENT_LABEL,
+            );
+          case "off-branch-head":
+            return (
+              NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE(
+                input.issue.branch,
                 input.failureTrace,
                 labels.agentStuck,
                 READY_FOR_AGENT_LABEL,
-              )
-            : input.cause === "off-branch-head"
-              ? NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE(
-                  input.issue.branch,
-                  input.failureTrace,
-                  labels.agentStuck,
-                  READY_FOR_AGENT_LABEL,
-                ) +
-                (input.strandedHead
-                  ? STRANDED_COMMITS_NOTE(input.strandedHead)
-                  : "")
-              : NEEDS_HUMAN_COMMENT_TEMPLATE(
-                  input.failureTrace,
-                  labels.agentStuck,
-                  READY_FOR_AGENT_LABEL,
-                );
+              ) +
+              (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : "")
+            );
+          case "gate-red":
+            return NEEDS_HUMAN_COMMENT_TEMPLATE(
+              input.failureTrace,
+              labels.agentStuck,
+              READY_FOR_AGENT_LABEL,
+            );
+        }
+      })();
       await adapter.postComment(n, body);
       const r = await adapter.editLabels(
         n,

@@ -405,8 +405,17 @@ export function offBranchHeadReprompt(m: HeadMismatch): string {
 // "Previous reviewer feedback (CHANGES-REQUESTED)" heading, so an agent whose
 // work had just passed a green gate was told it had been reviewed and rejected,
 // by a reviewer that never read a line of it. This note therefore says three
-// things and no more: what happened, that nothing has been said about the code,
-// and that the green gate still stands.
+// things and no more: what happened, that nothing was said about the code THIS
+// ROUND, and that the green gate still stands.
+//
+// Every claim it makes is scoped to this round, and that scoping is the whole
+// of its correctness. `latestReviewerProse` is carried forward untouched, so
+// `renderAttemptSlot` may well render an EARLIER round's real report directly
+// above this note, under an "Address the reviewer's concerns" imperative. A
+// note saying there is no reviewer feedback above would then be false — and
+// handing an implementer a false statement about what the reviewer said is the
+// thing this issue exists to stop, moved one slot over. So the note names the
+// two cases explicitly rather than asserting either.
 //
 // It deliberately quotes NONE of the harness detail. The detail names an idle
 // timeout in seconds and a podman exec — an implementer cannot act on any of it
@@ -417,12 +426,14 @@ export function reviewerHarnessFailedReprompt(): string {
   return [
     "The code reviewer could not be run this round: every invocation returned",
     "no review at all. That is a fault in the orchestrator's harness, not a",
-    "finding about your work — nothing has been said about your code, and no",
-    "review round was charged for it.",
+    "finding about your work — nothing was said about your code this round, and",
+    "no review round was charged for it.",
     "",
     "Gate-1 passed on your last commit, and that verdict stands. Do not rework",
-    "or revert anything on the strength of this note, and do not go looking for",
-    "reviewer feedback above — there is none.",
+    "or revert anything on the strength of this note. There is no NEW reviewer",
+    "feedback: if a \"Previous reviewer feedback\" section appears above, it is an",
+    "earlier round's, it still stands, and it is still what to address. If none",
+    "appears, no reviewer has said anything about this branch at all.",
     "",
     "Use this attempt for whatever you already knew was outstanding. If the work",
     "is genuinely finished, confirm the worktree is clean and every commit is on",

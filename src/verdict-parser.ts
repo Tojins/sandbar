@@ -20,7 +20,11 @@ export type ParsedVerdict = {
   readonly prose: string;
 };
 
-const VERDICT_TOKEN = /<verdict>([\s\S]*?)<\/verdict>/g;
+// Non-global, so it is safe to share across calls: a `g` regex object carries
+// `lastIndex` and answers differently on alternate `test`s of the same input.
+// `matchAll` requires a global one, so parseVerdict uses the derived copy.
+const VERDICT_TOKEN = /<verdict>([\s\S]*?)<\/verdict>/;
+const VERDICT_TOKEN_ALL = new RegExp(VERDICT_TOKEN, "g");
 
 // Whether the reviewer got as far as emitting a token at all — NOT what it
 // said. Used by the reviewer-run policy (#41) to decide whether a run that
@@ -31,14 +35,12 @@ const VERDICT_TOKEN = /<verdict>([\s\S]*?)<\/verdict>/g;
 // token is still a decision the reviewer reached, and parseVerdict's
 // default-to-CHANGES-REQUESTED is the right handling for it.
 export function containsVerdictToken(stdout: string): boolean {
-  // A fresh lastIndex per call: the literal is `g`, so a shared regex object
-  // would answer differently on alternate calls with the same input.
-  return new RegExp(VERDICT_TOKEN.source).test(stdout);
+  return VERDICT_TOKEN.test(stdout);
 }
 
 export function parseVerdict(stdout: string): ParsedVerdict {
   const prose = stdout;
-  const matches = [...stdout.matchAll(VERDICT_TOKEN)];
+  const matches = [...stdout.matchAll(VERDICT_TOKEN_ALL)];
   if (matches.length === 0) {
     return { verdict: "CHANGES-REQUESTED", prose };
   }

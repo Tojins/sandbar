@@ -403,6 +403,17 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
     const next = asImpl(actions[6]!);
     expect(next.latestReviewerProse).toBe("round 1: rename the thing");
     expect(next.latestReviewerProse).not.toContain("emitted nothing");
+
+    // And the note rendered beside it must not contradict it. `prompt.ts`
+    // renders that prose under "## Previous reviewer feedback
+    // (CHANGES-REQUESTED)" with "Address the reviewer's concerns" beneath it,
+    // so a note claiming there is no reviewer feedback above would be false in
+    // exactly the case this issue is about — an implementer told something
+    // untrue about what the reviewer said.
+    expect(next.extraReprompt).toBe(reviewerHarnessFailedReprompt());
+    expect(next.extraReprompt).not.toContain("there is none");
+    expect(next.extraReprompt).toContain("Previous reviewer feedback");
+    expect(next.extraReprompt).toContain("earlier round's");
   });
 
   it("carries no gate trace forward — gate-1 was green to reach the reviewer", () => {
