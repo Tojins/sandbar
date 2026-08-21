@@ -21,6 +21,7 @@ import {
   containerState,
   formatHealthLog,
   healthCheckArgs,
+  lastProbeText,
   mountSpec,
   parseHealthLog,
   podCreateArgs,
@@ -388,6 +389,52 @@ describe("formatHealthLog", () => {
     // The caller only adds a "Container health log" heading for a non-empty
     // string, so this is what keeps a heading from standing over nothing.
     expect(formatHealthLog([])).toBe("");
+  });
+});
+
+// The `last probe:` slot of a readiness timeout. Three outcomes, and the third
+// is the one that needs the test: a probe sandbar KILLED at the deadline is
+// invisible to the health log, so the log's newest entry belongs to an earlier
+// failure and rendering it describes something that did not happen.
+describe("lastProbeText", () => {
+  const failed = { start: "T1", exitCode: 1, output: "connect failed\n" };
+
+  it("quotes the last recorded probe, not podman's `unhealthy`", () => {
+    expect(lastProbeText([failed], "unhealthy", false)).toBe(
+      "exit 1: connect failed",
+    );
+  });
+
+  // An entry with an empty Output still says more than the client does — the
+  // probe ran and returned a code.
+  it("names the exit code when the probe recorded no output", () => {
+    expect(
+      lastProbeText([{ start: "T1", exitCode: 1, output: "" }], "x", false),
+    ).toBe("exit 1, no output");
+  });
+
+  it("falls back to the client's detail when nothing was recorded", () => {
+    expect(lastProbeText([], "no such container", false)).toBe(
+      "no such container",
+    );
+    expect(lastProbeText([], "", false)).toBe("no probe was recorded");
+  });
+
+  // The blocking case. Polls 1..N fail fast and record entries; the service
+  // then starts accepting and never answers, so probe N+1 hangs and is
+  // SIGKILLed at the deadline, recording nothing. Reporting the stale entry
+  // sends the operator to debug a connection error against a probe that in
+  // fact stopped returning — the #31 misdirection rebuilt in its replacement.
+  it("leads with the kill when the final probe was killed at the deadline", () => {
+    const text = lastProbeText([failed], "probe did not return within 800ms and was killed", true);
+    expect(text).toMatch(/^probe did not return within 800ms and was killed/);
+    // The stale entry is context, and is labelled as previous rather than as
+    // the verdict — dropping it would lose the only thing any probe ever said.
+    expect(text).toContain("previous probe: exit 1: connect failed");
+  });
+
+  it("reports the kill even with no entries at all to fall back on", () => {
+    expect(lastProbeText([], "", true)).toBe("probe was killed at the deadline");
   });
 });
 

@@ -173,14 +173,22 @@
 //   - EXIT CODES ARE NORMALISED. A probe that exits 3 is recorded as
 //     `ExitCode: 1`; a podman-timeout is recorded as `-1`. The number in the
 //     log is not the number the probe returned.
-//   - `lastErr` MUST COME FROM THE HEALTH LOG, NOT FROM THE CLIENT.
-//     `podman healthcheck run`'s own stdout on failure is the single word
-//     `unhealthy`, so a "last probe: unhealthy" built from the client's output
-//     says less than the probe it replaced. The last entry's `Output` is the
-//     useful text, so the timeout reads it — once, at the deadline, where it
-//     also collects the five most recent entries for the trace. Podman keeps
-//     exactly five, so a poll loop that ran to its deadline leaves the right
-//     window and it costs one call.
+//   - `lastErr` MUST COME FROM THE HEALTH LOG, NOT FROM THE CLIENT — WITH ONE
+//     EXCEPTION THAT IS NOT OPTIONAL. `podman healthcheck run`'s own stdout on
+//     failure is the single word `unhealthy`, so a "last probe: unhealthy"
+//     built from the client's output says less than the probe it replaced. The
+//     last entry's `Output` is the useful text, so the timeout reads it — once,
+//     at the deadline, where it also collects the most recent entries for the
+//     trace, sliced to HEALTH_LOG_ENTRIES.
+//     The exception is a probe SANDBAR KILLED at the deadline: it records no
+//     entry at all, because the client died before podman could write one. The
+//     newest entry is then some earlier, faster failure, and rendering it
+//     reports "exit 1: connect failed" for a probe that in fact stopped
+//     returning — nothing else in the message, health block or log tail
+//     included, would mention the kill. So `probeOnce` carries `timedOut` out
+//     beside the detail and `lastProbeText` leads with it. Since our deadline is
+//     the only bound there is (`--health-timeout` does not kill, above), that
+//     kill is the single most useful thing the error can say.
 //
 // The health block is ADDED TO `ContainerBringupError`, not swapped for the
 // container log tail. The health log says what the probe saw; D9's argument
@@ -333,8 +341,10 @@ async function mustSucceed(
 export const READY_POLL_INTERVAL_MS = 500;
 
 // How many `.State.Health.Log` entries a bringup failure carries. Podman keeps
-// exactly five, so this is the whole window rather than a choice — named so the
-// error message can say what it is showing.
+// five by default, which is the number this matches, but retention is a host
+// setting (`--health-max-log-count`, containers.conf) — so this is SANDBAR's
+// cap and the trace is sliced to it, rather than a restatement of podman's that
+// a configured host would quietly falsify.
 export const HEALTH_LOG_ENTRIES = 5;
 
 // Public resolvers on the pod, so external name resolution survives the
@@ -422,9 +432,16 @@ export type Stack = {
 // `healthLog` is ADDED to the container log tail rather than replacing it
 // (#43). The health log says what the PROBE saw, which is what the tail cannot
 // tell you; D9's argument runs the other way as well, since why a probe failed
-// is usually in the service's own output. Only the readiness timeout has one —
-// every other bringup failure happens before or beside the probe, and an empty
-// health block there would be a heading over nothing.
+// is usually in the service's own output.
+//
+// Only the readiness TIMEOUT fills it in. Most bringup failures happen before
+// or beside the probe and have no entries to show, so a heading there would
+// stand over nothing — but one does not: `throwIfDead` reached from inside the
+// readiness poll is a container that failed probes and THEN exited, and its
+// entries exist. That omission is a deliberate small loss, not an oversight. A
+// container that dies during startup is diagnosed by its own log, which that
+// error already carries in full, and the alternative is an `inspect` on the
+// path where podman has just told us the container is stopped or gone.
 export class ContainerBringupError extends SandbarError {
   readonly containerName: string;
   readonly logTail: string;
@@ -437,13 +454,13 @@ export class ContainerBringupError extends SandbarError {
   ) {
     super(
       `${message}\n` +
-        // Phrased as a fact about the SOURCE, not a count of what follows:
-        // podman keeps five entries, and a container that failed fewer times
-        // than that has fewer. "last 5 probes" over three lines would be a
-        // small lie in exactly the place someone is counting.
+        // No count in the heading: a container that failed twice has two
+        // entries, so "last 5 probes" over two lines would be a small lie in
+        // exactly the place someone is counting — and the caller, not this
+        // heading, is what bounds the list to HEALTH_LOG_ENTRIES.
         (healthLog
-          ? `Container health log (podman keeps the last ` +
-            `${HEALTH_LOG_ENTRIES} probes):\n${healthLog}\n`
+          ? `Container health log (most recent probes, oldest first):\n` +
+            `${healthLog}\n`
           : "") +
         `Container log tail:\n${logTail}`,
     );
@@ -813,9 +830,10 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
 }
 
 // The container's recorded probe history, for a bringup error. Read ONCE, at
-// the readiness deadline, rather than on every failed poll: podman keeps five
-// entries, so the read at the deadline sees exactly the five most recent probes
-// and a per-poll read would buy nothing but a podman call every 500ms.
+// the readiness deadline, rather than on every failed poll: podman is already
+// keeping the recent entries for us (five by default), so the read at the
+// deadline sees the right window and a per-poll read would buy nothing but a
+// podman call every 500ms.
 //
 // Never throws, and returns "" for everything it cannot answer. This runs on a
 // path where a `ContainerBringupError` is already being raised — that error is
@@ -835,21 +853,39 @@ async function readHealthLog(
 
 // The text the readiness timeout puts in its `last probe:` slot.
 //
-// The health log, not the client's own output, and that is the difference
-// between a useful message and a worse one than this replaced:
+// Ordinarily the health log, not the client's own output, and that is the
+// difference between a useful message and a worse one than this replaced:
 // `podman healthcheck run` prints the single word `unhealthy` on failure, so a
-// detail built from its stdout says nothing about what the probe saw. The
-// client detail survives only as the fallback, which is the case where podman
-// never ran the probe at all (it would not answer, it was killed by our own
-// deadline) and there is therefore no new entry to read.
-function lastProbeText(
+// detail built from its stdout says nothing about what the probe saw.
+//
+// `clientTimedOut` overrides that, and it is the one thing the health log
+// CANNOT say. A probe killed at the deadline records no entry — the client died
+// before podman wrote one — so the newest entry belongs to some earlier, faster
+// failure. Rendering it would report "exit 1: connect failed" for a probe that
+// in fact stopped returning, which is the #31 misdirection ("pattern not in log
+// yet" over a buffer wall) rebuilt in the replacement for it: the operator is
+// sent to debug a connection error that is not what happened. Since sandbar's
+// own deadline is the ONLY bound on a probe — podman's `--health-timeout` does
+// not kill — the kill is exactly the fact worth reporting, so it is reported
+// first and the stale entry is offered after it as context rather than as the
+// verdict.
+export function lastProbeText(
   entries: readonly HealthLogEntry[],
   clientDetail: string,
+  clientTimedOut: boolean,
 ): string {
   const last = entries[entries.length - 1];
-  if (last === undefined) return clientDetail || "no probe was recorded";
-  const output = stripAnsi(last.output).trim();
-  const code = Number.isNaN(last.exitCode) ? "?" : String(last.exitCode);
+  const recorded = last === undefined ? "" : describeHealthEntry(last);
+  if (clientTimedOut) {
+    const detail = clientDetail || "probe was killed at the deadline";
+    return recorded ? `${detail} (previous probe: ${recorded})` : detail;
+  }
+  return recorded || clientDetail || "no probe was recorded";
+}
+
+function describeHealthEntry(e: HealthLogEntry): string {
+  const output = stripAnsi(e.output).trim();
+  const code = Number.isNaN(e.exitCode) ? "?" : String(e.exitCode);
   return output ? `exit ${code}: ${output}` : `exit ${code}, no output`;
 }
 
@@ -983,6 +1019,10 @@ async function pollUntilReady(
 ): Promise<void> {
   const deadline = Date.now() + c.readinessTimeoutMs;
   let lastErr = "";
+  // Tracked beside the string rather than sniffed out of it: a probe killed at
+  // the deadline is the one outcome the health log cannot record, so the error
+  // below has to be told, not left to guess (see `lastProbeText`).
+  let lastTimedOut = false;
   while (Date.now() < deadline) {
     // Bounded by what is LEFT of the readiness budget, not by the budget: the
     // loop's `Date.now() < deadline` is only tested between probes, so a single
@@ -997,6 +1037,7 @@ async function pollUntilReady(
     const probe = await probeOnce(containerName, remainingMs(deadline));
     if (probe.ready) return;
     lastErr = probe.detail;
+    lastTimedOut = probe.timedOut;
     // The recipe is untrusted consumer input and the branch's own code, so a
     // container whose entrypoint dies at startup is an EXPECTED failure. Report
     // it immediately with its log instead of polling a corpse for the full
@@ -1004,17 +1045,20 @@ async function pollUntilReady(
     await throwIfDead(containerName, c);
     await sleep(READY_POLL_INTERVAL_MS);
   }
-  // Read once, here, rather than on every failed poll: podman keeps five
-  // entries, so this sees exactly the five most recent probes and a per-poll
-  // read would be a podman call every 500ms for text nobody looks at until now.
+  // Read once, here, rather than on every failed poll: this sees the most
+  // recent probes podman still holds, and a per-poll read would be a podman
+  // call every 500ms for text nobody looks at until now.
   const entries = await readHealthLog(containerName);
   throw new ContainerBringupError(
     containerName,
     `gate stack: container '${c.name}' (${c.image}) did not become ready ` +
       `within ${c.readinessTimeoutMs}ms (${describeReadiness(readiness)}; ` +
-      `last probe: ${lastProbeText(entries, lastErr)})`,
+      `last probe: ${lastProbeText(entries, lastErr, lastTimedOut)})`,
     await logTail(containerName),
-    formatHealthLog(entries),
+    // Sliced here rather than trusted to be short: podman keeps five by
+    // default, but `--health-max-log-count` and containers.conf can raise it,
+    // and the heading is a claim about what follows.
+    formatHealthLog(entries.slice(-HEALTH_LOG_ENTRIES)),
   );
 }
 
@@ -1033,24 +1077,31 @@ function describeReadiness(
 // special handling here for the same reason: it is not-ready either way, and
 // the state question is asked by something that can answer it.
 //
-// The detail is the CLIENT's view and is only a fallback. `healthcheck run`
-// prints `unhealthy` and nothing else on a failed probe, so what the probe
-// actually said lives in the health log, which the timeout above reads.
+// The detail is the CLIENT's view, and for an ordinary failed probe it is only
+// a fallback: `healthcheck run` prints `unhealthy` and nothing else, so what the
+// probe actually said lives in the health log, which the timeout above reads.
+//
+// `timedOut` is the exception, and it is carried separately rather than left to
+// be inferred from the detail string: a probe sandbar KILLED at the deadline
+// records no health-log entry at all — the client died before podman could
+// write one — so the health log's newest entry is some earlier, faster failure
+// and nothing else in the error would ever say a probe stopped returning.
 async function probeOnce(
   containerName: string,
   timeoutMs: number,
-): Promise<{ ready: boolean; detail: string }> {
+): Promise<{ ready: boolean; detail: string; timedOut: boolean }> {
   const r = await boundedPodman(
     ["healthcheck", "run", containerName],
     timeoutMs,
   );
-  if (boundedOk(r)) return { ready: true, detail: "" };
+  if (boundedOk(r)) return { ready: true, detail: "", timedOut: false };
   // A probe that never returns is NOT ready, and saying so is the whole point
   // of doing the timing here rather than through node's `timeout:`, which
   // would have killed the client, seen it exit 0, and reported the container
   // ready.
   return {
     ready: false,
+    timedOut: r.timedOut,
     detail: r.timedOut
       ? `probe did not return within ${timeoutMs}ms and was killed`
       : r.errorMessage,

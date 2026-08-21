@@ -1304,7 +1304,12 @@ describe.runIf(available)("podman healthcheck run", () => {
               steps: [{ name: "ok", in: "runner", command: ["true"] }],
             }),
           }),
-        ).rejects.toThrow(/did not become ready/);
+          // And it SAYS the probe was killed. A probe sandbar kills records
+          // nothing in the health log — the client dies before podman writes an
+          // entry — so this is the one fact only the client knows, and without
+          // it the operator reads "did not become ready" over a health block
+          // that describes some earlier, faster failure or nothing at all.
+        ).rejects.toThrow(/did not become ready[\s\S]*was killed/);
         // Generous, because bringup also pulls/creates the pod — the claim is
         // that the wait ENDS, not that it ends to the millisecond. Without
         // sandbar's own kill it would not end at all.

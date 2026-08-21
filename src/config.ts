@@ -1094,7 +1094,7 @@ function resolveStackContainer(
   const readiness = c.readiness ?? null;
   if (readiness !== null) checkReadiness(c.name, readiness);
   for (const command of c.postReadyCommands ?? []) {
-    // Checked like `step.command` and `readiness.exec.argv`, which it sits
+    // Checked like `step.command` and `readiness.command`, which it sits
     // beside: an empty argv reaches podman as a bare `exec <container>` and
     // fails as a bringup error — two wasted HARD-ERROR retries for an
     // `issue` container, a branch-blamed gate red for an `attempt` one.
