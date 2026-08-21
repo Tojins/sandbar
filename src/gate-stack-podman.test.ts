@@ -43,21 +43,27 @@ const runExit = async (
 // Behaviour PODMAN defines, asserted by running podman — the same argument as
 // forge-verify-git.test.ts makes for git. The pure argv builders in
 // gate-stack.test.ts prove sandbar emits the flags it means to; they cannot
-// prove those flags produce a stack that works, and the two facts this file
-// pins were both discovered empirically rather than read out of a man page:
+// prove those flags produce a stack that works, and the facts this file pins
+// were all discovered empirically rather than read out of a man page:
 //
-//   1. a bare TCP connect to a pod's published port SUCCEEDS with nothing
-//      listening inside — the rootless port forwarder accepts first and asks
-//      the backend after — so a connect-only readiness probe is a green-on-red;
-//   2. a container running as root inside a pod writes files owned by the
+//   1. a container running as root inside a pod writes files owned by the
 //      INVOKING user, which is the only reason dropping `--userns=keep-id`
 //      (impossible alongside `--pod`) is survivable;
-//   3. `podman inspect` reports a REMOVED container with the same exit 125 it
+//   2. `podman inspect` reports a REMOVED container with the same exit 125 it
 //      gives a podman that is merely unwell, so telling "gone" from "could not
-//      answer" needs `container exists` — 0 in any state, 1 for gone (#36).
+//      answer" needs `container exists` — 0 in any state, 1 for gone (#36);
+//   3. an `issue` container keeps its id and its state across gate runs while
+//      the `attempt` container gets a new one, which no `ok`-only assertion
+//      can see.
 //
-// Any local image with a shell will do. mariadb is chosen because it also
-// serves a real TCP listener for the positive half of (1), and because
+// Since #48 this file runs IN THE GATE, against the host's podman over a
+// mounted socket, so every fact above is exercised per attempt rather than by a
+// human remembering to. The three that a remote client cannot pin — the tcp
+// probe's topology and the local client's signal semantics — moved to
+// gate-stack-hostpodman.test.ts, which states why.
+//
+// Any local image with a shell will do. mariadb is chosen because it serves a
+// real listener for the readiness and pod-namespace assertions, and because
 // `id -u` in it is 0.
 const IMAGE = "docker.io/library/mariadb:10.11";
 
@@ -255,42 +261,14 @@ describe.runIf(available)(
       180_000,
     );
 
-    // The green-on-red this design would have shipped with a naive probe.
+    // The tcp half of this test moved to gate-stack-hostpodman.test.ts (#48):
+    // the probe runs on the HOST, and a gate runner driving podman over a
+    // socket sits in a different network namespace from the pod's publish. The
+    // fact left here is the one the socket preserves perfectly and that an
+    // `ok`-only assertion cannot see, so readiness becomes `exec` — inside the
+    // namespace, no host-side connect — rather than the test leaving with it.
     it(
-      "tcp readiness does NOT go green on a published port with nothing listening",
-      async () => {
-        await expect(
-          startStack({
-            stackId: STACK_ID,
-            scope: SCOPE,
-            worktreePath: repo,
-            spec: resolveGateStack({
-              containers: [
-                {
-                  name: "runner",
-                  image: IMAGE,
-                  lifecycle: "issue",
-                  mountWorktree: "/work",
-                  hold: true,
-                  // Published on the pod, so `connect` SUCCEEDS at the host —
-                  // and nothing in the pod is listening on it.
-                  readiness: { kind: "tcp", port: 9999 },
-                  readinessTimeoutMs: 4_000,
-                },
-              ],
-              steps: [{ name: "ok", in: "runner", command: ["true"] }],
-            }),
-          }),
-          // Pinned to the container AND the probe: "did not become ready" alone
-          // would also be satisfied by some other container failing bringup for
-          // some other reason, which is not what this test is about.
-        ).rejects.toThrow(/'runner'[\s\S]*did not become ready[\s\S]*tcp port 9999/);
-      },
-      180_000,
-    );
-
-    it(
-      "tcp readiness goes green on a real listener, and issue containers survive gate runs",
+      "issue containers keep their id and their state across gate runs",
       async () => {
         stack = await startStack({
           stackId: STACK_ID,
@@ -303,7 +281,10 @@ describe.runIf(available)(
                 image: IMAGE,
                 lifecycle: "issue",
                 env: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "app" },
-                readiness: { kind: "tcp", port: 3306 },
+                readiness: {
+                  kind: "exec",
+                  argv: ["mariadb", "-h", "127.0.0.1", "-uroot", "-e", "SELECT 1"],
+                },
                 readinessTimeoutMs: 120_000,
               },
               { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
@@ -1066,10 +1047,14 @@ describe.runIf(available)(
   },
 );
 
-// Why `boundedPodman` does its own timing instead of passing node's `timeout:`
-// option (#26). Both facts below are about PODMAN, not about node, and both
-// were discovered by running it — which is the only reason the option looks
-// safe in a diff.
+// Killing the client reaps NOTHING (#26): the process keeps running inside the
+// container, which is why a timed-out step has to remove the container rather
+// than just report. Discovered by running it, not read out of a man page.
+//
+// The other half of that argument — that `podman exec` EXITS 0 when the client
+// is killed with SIGTERM, so node's `timeout:` option reports a hang as
+// SUCCESS — is a property of the LOCAL client and lives in
+// gate-stack-hostpodman.test.ts (#48). What is left here holds either way.
 describe.runIf(available)("podman exec under a killed client", () => {
   const NAME = cName("killprobe");
 
@@ -1082,26 +1067,8 @@ describe.runIf(available)("podman exec under a killed client", () => {
     await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
   }, 60_000);
 
-  // The green-on-red this whole mechanism exists to avoid. Node's `timeout:`
-  // kills the child with SIGTERM; `podman exec` EXITS 0 on SIGTERM; node
-  // reports an error only for a non-zero code or a non-null signal — so the
-  // call RESOLVES. A hung test suite would have been a GREEN gate, a hung
-  // `exec` readiness probe a container reported ready, a hung postReadyCommand
-  // a database reported seeded.
-  it(
-    "node's `timeout:` option reports a hung `podman exec` as SUCCESS",
-    async () => {
-      const r = await exec(RUNTIME, ["exec", NAME, "sleep", "600"], {
-        timeout: 1_500,
-      });
-      // Not a rejection. This is the assertion.
-      expect(r.stdout).toBe("");
-    },
-    60_000,
-  );
-
-  // …and the kill bought nothing either way, which is why a timeout has to
-  // reap the container rather than just report.
+  // The kill buys nothing, which is why a timeout has to reap the container
+  // rather than just report.
   it.each(["SIGTERM", "SIGKILL"] as const)(
     "the in-container process survives the client dying of %s",
     async (signal) => {
