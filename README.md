@@ -259,6 +259,7 @@ sits in).
 | `maxTotalIssues` | `50` |
 | `labels` | `{ needsInfo: "needs-info", agentStuck: "agent-stuck" }` (override any subset) |
 | `mergeMode` | `{ kind: "direct" }` — see below |
+| `relaunchAfterLanding` | `false` — see below |
 | `codingStandardsPath` | *(unset)* — no conventional path; see below |
 
 `cwd` is resolved to an absolute path, and it must be a checkout of
@@ -376,6 +377,51 @@ The point of `verified` is **independence, not coverage**: CI is a second,
 differently-authored implementation of "does this work", which is the one thing
 expanding the local gate can never buy. Coverage gaps should still be closed in
 `gateStack.steps` — that is cheaper and faster than a CI round-trip.
+
+### `relaunchAfterLanding` — self-hosted runs that stay current
+
+If the repo sandbar operates on is the repo sandbar's own driver is built from
+— sandbar itself is the motivating case, but any repo whose launcher runs a
+locally-built orchestrator qualifies — a run that keeps cycling goes stale
+mid-series: sandbar pushes merges to origin, but the process keeps driving with
+the `dist/`, the config (the gate stack that judges every branch!) and the
+Containerfile it loaded at launch. In a queued chain of orchestrator issues,
+slice N+1 is then built by a driver that predates slice N — judge and judged
+from different eras, the same genus of silent false verdict `rebuildOn` exists
+to prevent, arriving through the launcher.
+
+`relaunchAfterLanding: true` makes any cycle in which the merger landed merges
+finalise normally and then exit with `EXIT_CODE_RELAUNCH` (**75**, exported
+from the package root) instead of continuing: "landed work; relaunch me to
+continue". The launcher becomes a loop:
+
+```sh
+while :; do
+  git pull --ff-only && npm run build && node dist/cli.js
+  c=$?; [ "$c" -eq 75 ] || exit "$c"
+done
+```
+
+The pull at the top closes the at-launch staleness window, the relaunch the
+mid-series one. The contract is: pull, build, run; loop **only** on the
+relaunch code; propagate every other exit. The semantics hold because:
+
+- **No spin.** The relaunch code requires a landing, i.e. progress. A cycle
+  that lands nothing exits through the normal conditions, whose codes break
+  the loop. A landing that also exhausts `maxTotalIssues` relaunches rather
+  than stopping — budgets are per-run and reset across runs by design, so the
+  relaunched process starts fresh exactly as a human re-launch would.
+- **Fail loud.** A dirty or diverged checkout makes `git pull --ff-only` fail
+  and the loop exit with git's own message. No stash, no merge, no guessing.
+- **State is already per-run.** The relaunched process re-acquires the lock
+  (released on exit), same workdir, same podman scope.
+- Cost: one build per landing cycle, plus one extra launch at series end (the
+  relaunch that finds the plan empty and exits 0).
+
+It is **explicit config, not detection**, on purpose: deriving self-hostedness
+(is `dist/cli.js` inside the operated repo?) false-positives for every consumer
+running the package from `node_modules`, whose non-looping launcher would then
+stop after the first landing cycle. Leave it off unless your launcher loops.
 
 ### `images` — what sandbar builds
 

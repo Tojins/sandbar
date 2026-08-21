@@ -30,8 +30,11 @@
 //
 // Outer-loop termination is governed by exit-conditions.ts: plan-empty →
 // success, repeated-plan-with-zero-DONEs or two consecutive zero-DONE cycles
-// → stuck, issuesAttempted hits maxTotalIssues → budget. MAX_ITERATIONS is a
-// defensive ceiling — the conditions above terminate first.
+// → stuck, issuesAttempted hits maxTotalIssues → budget — and, with
+// config.relaunchAfterLanding, any cycle that landed merges → exit
+// EXIT_CODE_RELAUNCH so a looping launcher can pull, rebuild and relaunch
+// (#65). MAX_ITERATIONS is a defensive ceiling — the conditions above
+// terminate first.
 
 import { realpathSync } from "node:fs";
 
@@ -379,7 +382,10 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   let cleanupReason = "normal-exit";
   onCleanup(() => runLogger.finalize(cleanupReason));
 
-  const runState = newRunState({ maxTotalIssues: config.maxTotalIssues });
+  const runState = newRunState({
+    maxTotalIssues: config.maxTotalIssues,
+    relaunchAfterLanding: config.relaunchAfterLanding,
+  });
   let exitCode = 0;
 
   // One Phase-4 pass. Called twice per cycle (#30): once for the agent
@@ -809,6 +815,14 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         planFingerprint: fingerprint,
         planSize: issues.length,
         doneCount: completedIssues.length,
+        // The relaunch trigger (#65). Deliberately `mergerSummary`, never
+        // `haltPartial` — a halt broke out above, and a halt means nothing
+        // landed. A landed-but-unclosed cycle also broke out above (exit 1):
+        // relaunching past an operator-actionable tracker mess would bury it.
+        landedMerges:
+          mergerSummary && mergerSummary.pushed
+            ? mergerSummary.merged.length
+            : 0,
       });
       if (decision.kind === "exit") {
         console.log(`Exit (${decision.tag}): ${decision.reason}`);

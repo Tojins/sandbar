@@ -2,14 +2,22 @@
 //
 // This repo IS the package, so there is nothing to `npm i` and no `npx sandbar`
 // on PATH: the import below is the local build, and the launcher is
-// `npm run sandbar` (build, then `node dist/cli.js`). That coupling is the one
-// thing about self-hosting that differs from any other host repo, and it has a
-// consequence worth remembering before queueing work: the orchestrator driving
-// a cycle is whatever `dist/` held when the run STARTED, so a merged regression
-// in the outer loop breaks the NEXT run, not the one that merged it. Recovery
-// is a hand `git revert` — while preflight refuses to start on the leftover
-// branches. Keep issues that touch run.ts / inner-loop / merger off
-// `ready-for-agent` until a few cycles have landed cleanly.
+// `npm run sandbar` — a LOOP since #65: pull --ff-only, build, run, and go
+// again only when the run exits EXIT_CODE_RELAUNCH (75, hardcoded in the
+// script because a shell loop cannot import a constant). That code is what
+// `relaunchAfterLanding` below makes any landing cycle exit with, so an
+// unattended series is always driven by what it just landed — the launch tree
+// supplies `dist/`, THIS FILE and the Containerfile, while judged trees come
+// from origin/<sourceBranch>, and before #65 a queued chain of outer-loop
+// issues had slice N+1 built by a driver predating slice N (found 40 commits
+// behind once, across a `feat!`). The pull at the top of the loop closes the
+// at-launch half of the same gap; a dirty or diverged checkout makes it fail
+// loud with git's own message, no stash, no guessing.
+//
+// The residual is the one #39 already accepted: a subtle regression in slice N
+// now mis-drives slice N+1 UNATTENDED, one relaunch later rather than one
+// manual launch later. Recovery is a hand `git revert` — while preflight
+// refuses to start on the leftover branches.
 import { readEnvFile } from "./dist/index.js";
 
 // One image serves both roles — the agent sandbox (`--user 1000:1000
@@ -211,6 +219,14 @@ export default {
   ],
 
   env: readEnvFile(new URL("sandbar.env", import.meta.url)),
+
+  // Exit 75 after any cycle that lands merges, so the launcher loop above can
+  // pull, rebuild and relaunch (#65). Explicit rather than detected — see
+  // RunConfig — and set HERE because this is the one repo where the landed
+  // commits are the orchestrator itself. Budgets and stuck counters are
+  // per-run and reset across runs by design, so the relaunch resets them
+  // exactly as a human re-launch would.
+  relaunchAfterLanding: true,
 
   // No `mergeMode`: the default `{ kind: "direct" }` is what this repo wants,
   // and restating a default is noise (see RunConfig's deviations-only rule).

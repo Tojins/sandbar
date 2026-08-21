@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_MAX_TOTAL_ISSUES } from "./config.js";
 import {
   EXIT_CODE_BUDGET,
+  EXIT_CODE_RELAUNCH,
   EXIT_CODE_STUCK,
   applyCycle,
   newRunState,
@@ -64,6 +65,7 @@ describe("applyCycle", () => {
       planFingerprint: "10,42",
       planSize: 2,
       doneCount: 1,
+      landedMerges: 0,
     });
     expect(d.kind).toBe("continue");
     expect(s.issuesAttempted).toBe(2);
@@ -77,6 +79,7 @@ describe("applyCycle", () => {
       planFingerprint: "10",
       planSize: 1,
       doneCount: 0,
+      landedMerges: 0,
     });
     expect(d.kind).toBe("continue");
     expect(s.consecutiveZeroDoneCycles).toBe(1);
@@ -84,11 +87,12 @@ describe("applyCycle", () => {
 
   it("(b) stuck when the same plan repeats with zero DONEs the second time", () => {
     const s = newRunState();
-    applyCycle(s, { planFingerprint: "10,42", planSize: 2, doneCount: 0 });
+    applyCycle(s, { planFingerprint: "10,42", planSize: 2, doneCount: 0, landedMerges: 0 });
     const d = applyCycle(s, {
       planFingerprint: "10,42",
       planSize: 2,
       doneCount: 0,
+      landedMerges: 0,
     });
     expect(d.kind).toBe("exit");
     if (d.kind !== "exit") throw new Error("unreachable");
@@ -103,12 +107,14 @@ describe("applyCycle", () => {
       planFingerprint: "10,42",
       planSize: 2,
       doneCount: 0,
+      landedMerges: 0,
     });
     expect(d1.kind).toBe("continue");
     const d2 = applyCycle(s, {
       planFingerprint: "11,43",
       planSize: 2,
       doneCount: 0,
+      landedMerges: 0,
     });
     expect(d2.kind).toBe("exit");
     if (d2.kind !== "exit") throw new Error("unreachable");
@@ -119,13 +125,14 @@ describe("applyCycle", () => {
 
   it("zero-DONE streak resets when a cycle produces a DONE", () => {
     const s = newRunState();
-    applyCycle(s, { planFingerprint: "a", planSize: 1, doneCount: 0 });
-    applyCycle(s, { planFingerprint: "b", planSize: 1, doneCount: 1 });
+    applyCycle(s, { planFingerprint: "a", planSize: 1, doneCount: 0, landedMerges: 0 });
+    applyCycle(s, { planFingerprint: "b", planSize: 1, doneCount: 1, landedMerges: 0 });
     expect(s.consecutiveZeroDoneCycles).toBe(0);
     const d = applyCycle(s, {
       planFingerprint: "c",
       planSize: 1,
       doneCount: 0,
+      landedMerges: 0,
     });
     expect(d.kind).toBe("continue");
   });
@@ -137,6 +144,7 @@ describe("applyCycle", () => {
       planFingerprint: "x",
       planSize: 3,
       doneCount: 1,
+      landedMerges: 0,
     });
     expect(d.kind).toBe("exit");
     if (d.kind !== "exit") throw new Error("unreachable");
@@ -147,11 +155,12 @@ describe("applyCycle", () => {
 
   it("(b) takes priority over (c) when both would fire", () => {
     const s = newRunState();
-    applyCycle(s, { planFingerprint: "10,42", planSize: 2, doneCount: 0 });
+    applyCycle(s, { planFingerprint: "10,42", planSize: 2, doneCount: 0, landedMerges: 0 });
     const d = applyCycle(s, {
       planFingerprint: "10,42",
       planSize: 2,
       doneCount: 0,
+      landedMerges: 0,
     });
     expect(d.kind).toBe("exit");
     if (d.kind !== "exit") throw new Error("unreachable");
@@ -167,6 +176,7 @@ describe("applyCycle", () => {
       planFingerprint: "10,42",
       planSize: 2,
       doneCount: 0,
+      landedMerges: 0,
     });
     expect(d.kind).toBe("exit");
     if (d.kind !== "exit") throw new Error("unreachable");
@@ -175,8 +185,89 @@ describe("applyCycle", () => {
 
   it("each call advances issuesAttempted by planSize regardless of outcome", () => {
     const s = newRunState();
-    applyCycle(s, { planFingerprint: "a", planSize: 3, doneCount: 0 });
-    applyCycle(s, { planFingerprint: "b", planSize: 2, doneCount: 1 });
+    applyCycle(s, { planFingerprint: "a", planSize: 3, doneCount: 0, landedMerges: 0 });
+    applyCycle(s, { planFingerprint: "b", planSize: 2, doneCount: 1, landedMerges: 0 });
     expect(s.issuesAttempted).toBe(5);
+  });
+});
+
+// (e) relaunch-after-landing (#65). The launcher's loop continues on exactly
+// EXIT_CODE_RELAUNCH and propagates everything else, so what these pin is the
+// loop's no-spin argument: the code requires a landing (progress), and a cycle
+// that lands nothing falls through to the codes that break the loop.
+describe("applyCycle — relaunch after landing (#65)", () => {
+  it("exits EXIT_CODE_RELAUNCH when the cycle landed merges and the flag is set", () => {
+    const s = newRunState({ relaunchAfterLanding: true });
+    const d = applyCycle(s, {
+      planFingerprint: "10,42",
+      planSize: 2,
+      doneCount: 2,
+      landedMerges: 2,
+    });
+    expect(d.kind).toBe("exit");
+    if (d.kind !== "exit") throw new Error("unreachable");
+    expect(d.tag).toBe("relaunch");
+    expect(d.exitCode).toBe(EXIT_CODE_RELAUNCH);
+    expect(d.reason).toMatch(/landed 2 merge/);
+  });
+
+  it("is inert without the flag — a landing cycle continues as before", () => {
+    const s = newRunState();
+    const d = applyCycle(s, {
+      planFingerprint: "10,42",
+      planSize: 2,
+      doneCount: 2,
+      landedMerges: 2,
+    });
+    expect(d.kind).toBe("continue");
+  });
+
+  it("does not fire without a landing — a DONE the merger skipped is not progress the launcher can pull", () => {
+    const s = newRunState({ relaunchAfterLanding: true });
+    const d = applyCycle(s, {
+      planFingerprint: "10",
+      planSize: 1,
+      doneCount: 1,
+      landedMerges: 0,
+    });
+    expect(d.kind).toBe("continue");
+  });
+
+  it("(e) beats (d): a cycle that landed and exhausted the budget relaunches", () => {
+    // Budgets are per-run and reset across runs by design, so stopping here
+    // would end a series mid-progress that a fresh (re)launch would continue.
+    const s = newRunState({ maxTotalIssues: 3, relaunchAfterLanding: true });
+    const d = applyCycle(s, {
+      planFingerprint: "1,2,3",
+      planSize: 3,
+      doneCount: 3,
+      landedMerges: 3,
+    });
+    expect(d.kind).toBe("exit");
+    if (d.kind !== "exit") throw new Error("unreachable");
+    expect(d.tag).toBe("relaunch");
+  });
+
+  it("the flag does not weaken the loop-breaking exits: a landless repeat is still stuck", () => {
+    const s = newRunState({ relaunchAfterLanding: true });
+    applyCycle(s, { planFingerprint: "10,42", planSize: 2, doneCount: 0, landedMerges: 0 });
+    const d = applyCycle(s, {
+      planFingerprint: "10,42",
+      planSize: 2,
+      doneCount: 0,
+      landedMerges: 0,
+    });
+    expect(d.kind).toBe("exit");
+    if (d.kind !== "exit") throw new Error("unreachable");
+    expect(d.tag).toBe("stuck-same-plan");
+    expect(d.exitCode).toBe(EXIT_CODE_STUCK);
+  });
+
+  it("EXIT_CODE_RELAUNCH collides with none of the codes that must break the launcher's loop", () => {
+    // The launcher continues on exactly this number; 0/1/2/3 (success, halt,
+    // stuck, budget) must all propagate out of the loop.
+    expect([0, 1, EXIT_CODE_STUCK, EXIT_CODE_BUDGET]).not.toContain(
+      EXIT_CODE_RELAUNCH,
+    );
   });
 });

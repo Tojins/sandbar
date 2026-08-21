@@ -139,8 +139,16 @@ describe("resolveConfig", () => {
     expect(r.maxTotalIssues).toBe(DEFAULT_MAX_TOTAL_ISSUES);
     expect(r.copyToWorktree).toEqual([]);
     expect(r.labels).toEqual(DEFAULT_LABELS);
+    // Off by default (#65): only a host whose launcher loops on
+    // EXIT_CODE_RELAUNCH wants a landing cycle to end the process.
+    expect(r.relaunchAfterLanding).toBe(false);
     // No conventional value → stays undefined.
     expect(r.codingStandardsPath).toBeUndefined();
+  });
+
+  it("passes relaunchAfterLanding through when set (#65)", () => {
+    const r = resolveConfig({ ...minimal, relaunchAfterLanding: true });
+    expect(r.relaunchAfterLanding).toBe(true);
   });
 
   it("derives coauthorTrailer from bot identity when unset", () => {

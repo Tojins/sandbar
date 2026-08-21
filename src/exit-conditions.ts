@@ -7,13 +7,23 @@
 //   (b) stuck-same-plan  — same plan as previous cycle AND 0 DONEs this cycle.
 //   (c) stuck-zero-dones — two consecutive cycles produced 0 DONEs.
 //   (d) budget           — issuesAttempted hits state.maxTotalIssues.
+//   (e) relaunch         — the cycle LANDED merges and the config asks for
+//                          relaunch-after-landing (#65). Not a failure: the
+//                          dedicated exit code tells the launcher "pull,
+//                          rebuild, run me again".
 //
 // (a) is checked at the top of each cycle (after building the plan); the
-// orchestrator handles it directly with a clean break. (b)/(c)/(d) are pure
+// orchestrator handles it directly with a clean break. (b)/(c)/(d)/(e) are pure
 // decisions over the run state plus the just-completed cycle, evaluated by
-// applyCycle in that order. remainingBudget is the pre-cycle hook the
-// orchestrator uses to trim the plan so no cycle can push issuesAttempted
-// past the cap mid-run.
+// applyCycle — (e) first, then (b)/(c)/(d) in that order. (e) before (d) is the
+// one ordering that carries weight: a landing is progress, and the budgets are
+// per-run and documented as resetting across runs by design, so a cycle that
+// both landed and exhausted the budget relaunches rather than stopping — the
+// relaunched process starts a fresh budget exactly as a human re-launch would.
+// No spin hides in that: (e) requires a landing, and a cycle that lands nothing
+// falls through to (b)/(c)/(d), whose codes break the launcher's loop.
+// remainingBudget is the pre-cycle hook the orchestrator uses to trim the plan
+// so no cycle can push issuesAttempted past the cap mid-run.
 
 import { DEFAULT_MAX_TOTAL_ISSUES } from "./config.js";
 
@@ -28,8 +38,23 @@ export const SILENT_NOOP_RETRY_LIMIT = 2;
 export const EXIT_CODE_SUCCESS = 0;
 export const EXIT_CODE_STUCK = 2;
 export const EXIT_CODE_BUDGET = 3;
+// "Landed work; relaunch me to continue" (#65). A launcher that loops on
+// exactly this code — pull, rebuild, rerun — closes both staleness windows of a
+// self-hosted series: the checkout that fell behind origin between launches,
+// and the launch-time `dist/` (plus config and Containerfile) still driving
+// after a cycle landed orchestrator commits, where judge and judged come from
+// different eras. 75 is sysexits' EX_TEMPFAIL ("temporary failure; retry"),
+// which is the meaning, and it is clear of the run's own 0/1/2/3 and of the
+// shell's reserved 126+. The number is repeated by hand in the `sandbar`
+// script in package.json — a shell loop cannot import a constant — so a change
+// here must move that script (and the README's launcher example) with it.
+export const EXIT_CODE_RELAUNCH = 75;
 
-export type ExitTag = "stuck-same-plan" | "stuck-zero-dones" | "budget";
+export type ExitTag =
+  | "stuck-same-plan"
+  | "stuck-zero-dones"
+  | "budget"
+  | "relaunch";
 
 export type ExitDecision =
   | { readonly kind: "continue" }
@@ -50,21 +75,34 @@ export type RunState = {
   // a human re-running sandbar implicitly authorises a fresh budget.
   silentNoopAttemptsByIssue: Map<string, number>;
   readonly maxTotalIssues: number;
+  // Exit (e) after any cycle that lands merges, instead of continuing on the
+  // launch-time build (#65). Config rather than state, like maxTotalIssues —
+  // carried here so applyCycle stays the single owner of the exit ordering.
+  readonly relaunchAfterLanding: boolean;
 };
 
 export type CycleOutcome = {
   readonly planFingerprint: string;
   readonly planSize: number;
   readonly doneCount: number;
+  // Merges the merger pushed to origin this cycle; 0 when the merge phase did
+  // not run, did not push, or the cycle was reset (verified mode). REQUIRED
+  // rather than defaulted, because the one caller forgetting to thread it
+  // would disable relaunch silently — the run would just keep driving on the
+  // stale build, which is #65's own bug wearing the fix.
+  readonly landedMerges: number;
 };
 
-export function newRunState(opts: { maxTotalIssues?: number } = {}): RunState {
+export function newRunState(
+  opts: { maxTotalIssues?: number; relaunchAfterLanding?: boolean } = {},
+): RunState {
   return {
     issuesAttempted: 0,
     lastPlanFingerprint: null,
     consecutiveZeroDoneCycles: 0,
     silentNoopAttemptsByIssue: new Map(),
     maxTotalIssues: opts.maxTotalIssues ?? DEFAULT_MAX_TOTAL_ISSUES,
+    relaunchAfterLanding: opts.relaunchAfterLanding ?? false,
   };
 }
 
@@ -96,6 +134,22 @@ export function applyCycle(state: RunState, cycle: CycleOutcome): ExitDecision {
     state.consecutiveZeroDoneCycles = 0;
   }
   state.lastPlanFingerprint = cycle.planFingerprint;
+
+  // (e) relaunch — the cycle landed merges, so the source branch has moved and
+  // this process is now driving with a `dist/`, a config and a Containerfile
+  // from before the landing. Checked FIRST (see the header for why it beats
+  // the budget): a landing is the one outcome that guarantees progress, so
+  // exiting here can never spin the launcher's loop.
+  if (state.relaunchAfterLanding && cycle.landedMerges > 0) {
+    return {
+      kind: "exit",
+      tag: "relaunch",
+      reason:
+        `landed ${cycle.landedMerges} merge(s); relaunching so the driver ` +
+        "is what it just landed",
+      exitCode: EXIT_CODE_RELAUNCH,
+    };
+  }
 
   // (b) stuck — identical plan to the previous cycle and no progress this one.
   if (

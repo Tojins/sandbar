@@ -542,6 +542,22 @@ export type RunConfig = {
   // Turn on `verified` when anything downstream of the source branch trusts it
   // without re-checking (a deploy on push, a release job).
   readonly mergeMode?: MergeModeConfig;
+
+  // Exit with EXIT_CODE_RELAUNCH (75) after any cycle in which the merger
+  // landed merges, instead of continuing on the launch-time build (#65). For a
+  // repo whose launcher is a pull → build → run LOOP that continues on exactly
+  // that code — the shape a self-hosted repo needs, because there the landed
+  // commits ARE the orchestrator, its gate-stack config and its Containerfile,
+  // and a run that keeps cycling drives slice N+1 of a queued series with a
+  // driver from before slice N. Judge and judged from different eras is the
+  // #37 genus of silent false verdict, arriving through the launcher.
+  //
+  // EXPLICIT config, not detection, and that is a decision: deriving
+  // self-hostedness (is `dist/cli.js` inside the operated repo?) false-
+  // positives for every consumer running the package from `node_modules`,
+  // whose non-looping launcher would then stop after the first landing cycle.
+  // A flag the host sets is one line and cannot misfire. Default: false.
+  readonly relaunchAfterLanding?: boolean;
 };
 
 // After resolution every defaultable field is concrete. `codingStandardsPath`
@@ -1465,5 +1481,6 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     labels: { ...DEFAULT_LABELS, ...config.labels },
     gateStack,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
+    relaunchAfterLanding: config.relaunchAfterLanding ?? false,
   };
 }
