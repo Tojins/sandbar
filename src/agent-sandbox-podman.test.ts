@@ -17,12 +17,13 @@
 // gate cannot see podman" — run the suite on the host before trusting a cycle
 // that touched this module's run args.
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import { sandboxRunArgs } from "./agent-sandbox.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -32,22 +33,13 @@ const exec = promisify(execFile);
 // test files already require, so this file adds no new pull.
 const IMAGE = "docker.io/library/mariadb:10.11";
 
-// Resolved at COLLECTION time, not in beforeAll: vitest evaluates `runIf` while
-// building the suite, so a flag set in a hook arrives too late and silently
-// skips everything — a test file that always passes by never running.
-const available = ((): boolean => {
-  if (process.env["SANDBAR_SKIP_PODMAN_TESTS"] === "1") return false;
-  try {
-    execFileSync(RUNTIME, ["image", "exists", IMAGE], { stdio: "ignore" });
-    return true;
-  } catch {
-    console.warn(
-      `skipping agent-sandbox podman tests: ${RUNTIME} or ${IMAGE} unavailable ` +
-        `(\`${RUNTIME} pull ${IMAGE}\` to enable them)`,
-    );
-    return false;
-  }
-})();
+// Resolved at COLLECTION time, not in beforeAll: vitest evaluates `runIf`
+// while building the suite, so a flag set in a hook arrives too late and
+// silently skips everything — a test file that always passes by never running.
+const available = podmanTestsEnabled({
+  what: "agent-sandbox podman tests",
+  image: IMAGE,
+});
 
 const delay = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));

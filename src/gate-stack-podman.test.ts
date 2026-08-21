@@ -1,4 +1,4 @@
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,7 @@ import {
   watchLog,
 } from "./gate-stack.js";
 import { stackContainerNameFor } from "./naming.js";
+import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import { podmanTestScope } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -60,22 +61,17 @@ const runExit = async (
 // `id -u` in it is 0.
 const IMAGE = "docker.io/library/mariadb:10.11";
 
-// Resolved at COLLECTION time, not in beforeAll: vitest evaluates `runIf` while
-// building the suite, so a flag set in a hook arrives too late and silently
-// skips everything — a test file that always passes by never running.
-const available = ((): boolean => {
-  if (process.env["SANDBAR_SKIP_PODMAN_TESTS"] === "1") return false;
-  try {
-    execFileSync(RUNTIME, ["image", "exists", IMAGE], { stdio: "ignore" });
-    return true;
-  } catch {
-    console.warn(
-      `skipping gate-stack podman tests: ${RUNTIME} or ${IMAGE} unavailable ` +
-        `(\`${RUNTIME} pull ${IMAGE}\` to enable them)`,
-    );
-    return false;
-  }
-})();
+// Resolved at COLLECTION time, not in beforeAll: vitest evaluates `runIf`
+// while building the suite, so a flag set in a hook arrives too late and
+// silently skips everything — a test file that always passes by never running.
+//
+// Under `SANDBAR_REQUIRE_PODMAN_TESTS=1` (the gate runner's env, #48) an
+// unreachable podman registers a FAILING test instead: this file skipping
+// silently in the gate is the whole of the bug #48 closes.
+const available = podmanTestsEnabled({
+  what: "gate-stack podman tests",
+  image: IMAGE,
+});
 
 // Per PROCESS, not per file (#47). Two copies of this file running at once
 // would otherwise compute identical pod, network and container names, and
