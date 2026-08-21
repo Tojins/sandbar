@@ -38,6 +38,47 @@ nowhere to run it from that operates on the wrong repo.
 `run(config)` remains the API — the bin is thin, and a host that wants to embed
 sandbar can still `import { run } from "@offergeist/sandbar"` and call it.
 
+### `sandbar gate` — the gate stack on its own
+
+```sh
+npx sandbar gate                      # gate the current directory
+npx sandbar gate --worktree ../other  # …or some other tree
+npx sandbar gate --keep               # leave the stack up to poke at
+```
+
+Brings up `gateStack`, runs its steps in order, stops at the first red, and
+exits **0** green, **1** red, **2** if it could not reach a verdict at all (a
+config error, an image that would not build, a container that would not come
+up). No tracker, no agents, no worktrees, no lock — so it runs on a laptop, in
+CI, and beside a live `sandbar` run on the same machine. Your `scripts/gate.sh`
+becomes this line, and readiness, step timeouts, teardown and log capture stop
+having a second implementation that drifts.
+
+Three differences from the gate inside a run, all of them because the standalone
+one has no commit to be a verdict about and no orchestrator to report to:
+
+- **It gates the working tree, dirty or not**, and says so when it is dirty.
+  Inside a run the gate refuses an uncommitted tree, because a green there
+  would certify something the merger cannot land; here you are asking about the
+  tree in front of you.
+- **Steps stream as they run.** Inside a run they are captured for a trace
+  nobody is watching live.
+- **`--keep` leaves the stack up**, and the next `sandbar gate` over the same
+  worktree then **reuses its `lifecycle: "issue"` containers** — the database
+  keeps its schema and its rows, and its `postReadyCommands` are not re-run.
+  That reuse is checked, not assumed: change any of those containers' config
+  (image, env, args, mounts, readiness, `postReadyCommands`, name), the
+  worktree, or sandbar's version, and the stack is rebuilt instead. Remove a
+  kept stack with the `podman pod rm -f …` line the command prints.
+
+Two `sandbar gate` invocations over the **same** worktree collide — they share
+one set of podman names, which is what makes the reuse possible — so don't run
+two at once against one tree. Different worktrees, and a `sandbar` run on the
+same host, are disjoint by construction.
+
+`runGateCommand(config, { worktree, keep })` is the API, returning that exit
+code.
+
 `RunConfig` is **deviations-only**. Supply the repo-specific facts sandbar can't guess (required) plus only the knobs you want different from the defaults. Everything else falls through — don't restate a default.
 
 ```js
