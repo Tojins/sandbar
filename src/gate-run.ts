@@ -65,6 +65,25 @@
 //     (there is no lock, so a sweep could not tell debris from a live sibling
 //     invocation). Any token change or a `pod rm -f` clears it. It is the one
 //     class of debris no report ever names, and it costs a stopped container.
+//     Its IMAGES half is the same bullet: `--keep` skips `removeBranchImages`
+//     unconditionally, so a kept invocation's content-addressed variants
+//     outlive it and nothing sweeps this scope either. Bounded by the number of
+//     distinct input states rather than by invocations, and reused by the next
+//     gate over the same inputs, which is why it is accepted rather than
+//     closed — see the teardown for why the flag, and not "did a stack survive",
+//     is what it keys on.
+//   - `ensureImages` is handed the GATED WORKTREE as its context root, so
+//     `fingerprintImageInputs` runs with `mustExist: true` against a tree that
+//     is not necessarily the one the config sits in. That rule is documented
+//     one file over as being for the host checkout — a declared `rebuildOn`
+//     path missing there is a typo, while a branch is allowed to DELETE a
+//     lockfile — and the typo reading is the right one here: this command has
+//     exactly one tree, it is the tree the config is about in the default
+//     invocation, and an inert declaration silently gating every commit alike
+//     is the failure #37 exists to prevent. Under `--worktree <other>` the
+//     other reading applies and a deleted input is reported as a typo; the
+//     alternative is a gate that goes quietly inert on the tree the operator
+//     pointed it at, which is worse in the same direction.
 //
 // ---------------------------------------------------------------------------
 // Concurrency, stated rather than guarded
@@ -501,6 +520,12 @@ async function gate(
         "being gated, so this is a verdict about that tree and not an " +
         `infrastructure failure.\n${e.message}\n`,
     );
+    // Every other exit says what `--keep` did with the stack, and this one is
+    // the exit at which an operator most needs to be told there is none: they
+    // asked for containers to poke at and got a red, which is exactly the
+    // shape that otherwise reads as a teardown bug. No container was created,
+    // so `keepFaultNotice` renders that case and no new one is needed.
+    if (opts.keep) err(keepFaultNotice(progress));
     return GATE_EXIT_RED;
   }
   const hostUid = process.getuid?.() ?? 0;

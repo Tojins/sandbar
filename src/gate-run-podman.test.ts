@@ -376,9 +376,12 @@ describe.runIf(available)("sandbar gate against real podman", () => {
             ],
           },
         },
+        // `--keep`, so the notice is reached: a red is exactly when an
+        // operator wants the containers, and this red happens before any
+        // container exists.
         {
           worktree: repo,
-          keep: false,
+          keep: true,
           out: (t) => out.push(t),
           err: (t) => out.push(t),
         },
@@ -394,6 +397,11 @@ describe.runIf(available)("sandbar gate against real podman", () => {
       // Named the way the variant path names it, so a CI log reads the same
       // either way.
       expect(out.join("")).toContain(`image:${SANDBOX_ONLY_TAG}`);
+      // …and it says what `--keep` did, which every other exit does: a red
+      // with no stack behind it and nothing said about why reads as a teardown
+      // bug. This is the pre-container case, not the half-built one.
+      expect(out.join("")).toContain("before any container was created");
+      expect(out.join("")).not.toContain("never finished coming up");
       expect(await podExists()).toBe(false);
     },
     600_000,

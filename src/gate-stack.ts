@@ -1791,9 +1791,27 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   // than a HARD-ERROR, and that is a deliberate exception to D5: D5 maps
   // `issue` to infra because such a container depends only on image + env, and
   // an image the branch authored is precisely where that stops being true.
-  const staleIssueContainers = ctx.issueContainers.filter(
-    (c) => imageFor(c, images) !== imageFor(c, ctx.running.map),
-  );
+  //
+  // A difference in the STRING is not yet staleness, and settling it by image
+  // ID is the same guard `runningImages` applies one comparison earlier — it
+  // has to be applied here too, because the value it records for a reused
+  // container is podman's spelling of a reference while the value compared
+  // against it is the resolver's (#45). The two can differ on a normalising
+  // prefix alone (`localhost/app:gate-sb-…` against the unqualified tag the
+  // config wrote), and reading that as staleness recreates the very container
+  // `--keep` was asked to preserve, re-runs its `postReadyCommands`, and says
+  // nothing — reuse defeated silently, once per invocation, which is the
+  // outcome the earlier guard exists to prevent arriving one comparison later.
+  // The extra podman call is paid only where a recreate was already about to
+  // be.
+  const staleIssueContainers: ResolvedStackContainer[] = [];
+  for (const c of ctx.issueContainers) {
+    const wanted = imageFor(c, images);
+    const running = imageFor(c, ctx.running.map);
+    if (wanted === running) continue;
+    if (await sameImage(wanted, running)) continue;
+    staleIssueContainers.push(c);
+  }
   if (staleIssueContainers.length > 0) {
     try {
       await bringUpContainers(withImages(staleIssueContainers, images), {

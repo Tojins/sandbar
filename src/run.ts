@@ -53,7 +53,7 @@ import {
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
 import { makeEnvReader } from "./env.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, faultDetail } from "./errors.js";
 import {
   EXIT_CODE_BUDGET,
   applyCycle,
@@ -818,14 +818,11 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     // the LAST thing printed — no success banner after it to push it up the
     // scrollback — then run cleanup and exit non-zero. SandbarError is an
     // expected, operator-actionable fault so we print its message alone; any
-    // other error is an unexpected bug, so we include the stack.
+    // other error is an unexpected bug, so we include the stack — which is
+    // `faultDetail`'s rule, shared with the bin and with `runGateCommand`
+    // rather than restated here (#45).
     const banner = "═".repeat(72);
-    const detail =
-      err instanceof SandbarError
-        ? err.message
-        : err instanceof Error
-          ? (err.stack ?? err.message)
-          : String(err);
+    const detail = faultDetail(err);
     console.error(`\n${banner}\nSANDBAR HALTED — internal failure\n${banner}\n${detail}\n${banner}`);
     cleanupReason = "sandbar-internal-error";
     await runLogger.appendOrchestrator(`HALTED — internal failure: ${detail}`);

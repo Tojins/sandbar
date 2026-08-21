@@ -101,6 +101,37 @@ const STACK_ID = "podmantest";
 const cName = (name: string): string =>
   stackContainerNameFor(SCOPE, STACK_ID, name);
 
+// A genuinely DIFFERENT image from `IMAGE`, for the tests about a branch
+// changing which image the stack runs.
+//
+// It was a `podman tag` alias until #45, on the reasoning that the assertion
+// is about which image a container was created FROM and an alias answers that
+// without paying for a build. It no longer does: the staleness check now
+// settles a difference in the reference STRING by comparing image IDs before
+// believing it, so re-tagging the identical bytes correctly recreates nothing,
+// and an alias would make "a changed image recreates the issue container" a
+// test of nothing. One `RUN` layer on an image already on the host is what a
+// changed image actually looks like, and is a few seconds.
+const buildVariantImage = async (tag: string): Promise<void> => {
+  const dir = await mkdtemp(join(tmpdir(), "sandbar-variant-"));
+  try {
+    await writeFile(
+      join(dir, "Containerfile"),
+      `FROM ${IMAGE}\nRUN touch /variant-marker\n`,
+    );
+    await exec(RUNTIME, [
+      "build",
+      "-t",
+      tag,
+      "-f",
+      join(dir, "Containerfile"),
+      dir,
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+};
+
 // One file-level sweep, covering every `describe` below rather than only the
 // first. Guarded because it shells out to podman and there is none in the gate
 // runner — where `available` is false nothing was created, so there is nothing
@@ -936,11 +967,12 @@ describe.runIf(available)(
     it(
       "a changed image recreates the issue container, and an unchanged one leaves it alone",
       async () => {
-        // `podman tag` rather than a build: the assertion is about which image
-        // the container was created from, and an alias answers it without
-        // making the test pay for a build.
+        // A built image, not a `podman tag` alias — see `buildVariantImage`.
+        // Since #45 an alias is not a changed image: same ID, so the staleness
+        // check settles the string difference and recreates nothing, which is
+        // right and would leave this test asserting nothing.
         const ALIAS = testImageTag("image-swap");
-        await exec(RUNTIME, ["tag", IMAGE, ALIAS]);
+        await buildVariantImage(ALIAS);
         let swap = new Map<string, string>();
         // What the stack ASKS about, recorded: since #46 the resolver is shared
         // with the agent sandbox, and the stack — not its caller — names the
@@ -1015,7 +1047,7 @@ describe.runIf(available)(
       "a reaped issue container comes back on the image the branch put it on, not the declared one",
       async () => {
         const ALIAS = testImageTag("reap-image");
-        await exec(RUNTIME, ["tag", IMAGE, ALIAS]);
+        await buildVariantImage(ALIAS);
         stack = await startStack({
           stackId: STACK_ID,
           scope: SCOPE,
@@ -1805,6 +1837,71 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
         (await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])).stdout.trim(),
       ).not.toBe("");
       await fixed.stop();
+    },
+    600_000,
+  );
+  // The reuse path's own image bookkeeping, which is where a spelling
+  // difference can defeat the whole feature silently (#45).
+  //
+  // An adopted container's entry in `running.map` is read back off podman —
+  // podman's rendering of a reference — while the value it is compared against
+  // on the next gate run comes from the image resolver. Two authors, so the two
+  // strings can name one image and differ: a normalising `localhost/` prefix is
+  // enough. Believed as staleness, that recreates the very container `--keep`
+  // was asked to preserve, re-runs its `postReadyCommands`, and says nothing —
+  // once per invocation, forever.
+  //
+  // The difference is forced from the RESOLVER's side rather than by hoping
+  // podman normalises, because whether it does is a version detail this test
+  // must not depend on: two tags of one built image, one named by the
+  // invocation that created the container and the other by the invocation that
+  // adopts it. The property is the same either way — a difference in the string
+  // is not a difference in the image.
+  it(
+    "does not recreate an adopted container because the image it runs is spelled differently",
+    async () => {
+      const variantA = testImageTag("reuse-variant");
+      const variantB = testImageTag("reuse-variant-alias");
+      await buildVariantImage(variantA);
+      await exec(RUNTIME, ["tag", variantA, variantB]);
+
+      const start = async (variant: string): Promise<Stack> =>
+        await startStack({
+          stackId: GATE_STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: spec(),
+          images: async () => new Map([[IMAGE, variant]]),
+          reuseToken: "token-variant",
+          keepAlive: true,
+          allowDirtyWorktree: true,
+        });
+
+      // The first invocation puts `db` on the variant: `startStack` brings
+      // issue containers up on the DECLARED image and the first gate run
+      // recreates whatever the branch moved (#37), which is what leaves an
+      // adopted container running something its config does not name.
+      const first = await start(variantA);
+      expect((await first.runGate()).ok).toBe(true);
+      const dbId = await idOf("db");
+      const seeded = (
+        await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
+      ).stdout.trim();
+      expect(dbId).not.toBeNull();
+      await first.stop();
+
+      // …and the second adopts it and must leave it alone, though it names that
+      // image by its other tag.
+      const second = await start(variantB);
+      expect(second.reused).toEqual(["db"]);
+      expect((await second.runGate()).ok).toBe(true);
+      expect(await idOf("db")).toBe(dbId);
+      // The id alone would be satisfied by podman handing an identical one
+      // back; the seed is what says the container was never recreated.
+      expect(
+        (await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])).stdout.trim(),
+      ).toBe(seeded);
+      await second.stop();
     },
     600_000,
   );

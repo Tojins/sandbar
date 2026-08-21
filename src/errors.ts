@@ -28,8 +28,10 @@ export class SandbarError extends Error {
 // else prints a stack, because an unexpected bug that prints like a config
 // error is a bug nobody can locate.
 //
-// Here rather than in cli.ts because since #45 there are two callers and the
-// rule is one rule — the same argument `pulledImagesOf` moved on.
+// Here rather than in cli.ts because since #45 all three of those callers are
+// real and the rule is one rule — the same argument `pulledImagesOf` moved on.
+// run.ts's handler is the one that had the copy: naming it above while leaving
+// the ternary in place would make this comment false on the day it landed.
 export function faultDetail(err: unknown): string {
   return err instanceof SandbarError
     ? err.message
