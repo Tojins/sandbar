@@ -26,6 +26,8 @@ import {
   parseHealthLog,
   podCreateArgs,
   type PodmanProbe,
+  pollUntilHealthy,
+  READY_POLL_INTERVAL_MS,
   stepExecArgs,
 } from "./gate-stack.js";
 import { SandbarError } from "./errors.js";
@@ -1572,5 +1574,184 @@ describe("containerState", () => {
       expect(await containerState("c", probe)).toBe("unknown");
       expect(calls).toEqual(["inspect"]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pollUntilHealthy (#49)
+//
+// The CLASSIFICATION half, for the same reason containerState's lives here: a
+// real podman will not produce a timed-out `healthcheck run`, a SIGKILLed
+// client or an exit code with no meaning on demand, and those are precisely the
+// answers whose misreading is the HARD-ERROR storm this feature must not
+// introduce. What only a real podman can produce — a container that is running
+// and genuinely unhealthy — is pinned in gate-stack-podman.test.ts.
+// ---------------------------------------------------------------------------
+
+const probed = (over: Partial<ResolvedStackContainer> = {}) =>
+  container({
+    name: "db",
+    lifecycle: "issue",
+    readiness: { kind: "healthcheck", command: ["true"] },
+    readinessTimeoutMs: 600,
+    ...over,
+  });
+
+// Answers `healthcheck run` from a script (the last entry repeating forever)
+// and every other call — the `inspect` behind `throwIfDead` — with a running
+// container. A thunk entry may take real time, which is the only way to reach
+// the "the probe outlived the budget" branch.
+const healthProbeOf = (
+  script: ReadonlyArray<BoundedResult | (() => Promise<BoundedResult>)>,
+): { probe: PodmanProbe; calls: string[] } => {
+  const calls: string[] = [];
+  let i = 0;
+  const probe: PodmanProbe = async (args) => {
+    if (args[0] === "healthcheck") {
+      calls.push("healthcheck");
+      const answer = script[Math.min(i++, script.length - 1)];
+      return typeof answer === "function" ? await answer() : answer!;
+    }
+    calls.push(String(args[0]));
+    return podmanSaid({ stdout: "true\n" });
+  };
+  return { probe, calls };
+};
+
+const after = (ms: number, r: BoundedResult) => async (): Promise<BoundedResult> => {
+  await new Promise((res) => setTimeout(res, ms));
+  return r;
+};
+
+describe("pollUntilHealthy", () => {
+  // The ordinary case and the cost argument for the whole feature: one probe,
+  // no wait, no second call. A loop that slept first would be paying the poll
+  // interval at the top of every gate run for every probed issue container.
+  it("returns healthy on the first probe, without sleeping", async () => {
+    const { probe, calls } = healthProbeOf([podmanSaid({})]);
+    const started = Date.now();
+    expect(await pollUntilHealthy("c", probed(), probe)).toEqual({
+      verdict: "healthy",
+      detail: "",
+    });
+    expect(calls).toEqual(["healthcheck"]);
+    expect(Date.now() - started).toBeLessThan(READY_POLL_INTERVAL_MS);
+  });
+
+  // It POLLS rather than deciding on one shot: a database mid-GC or a service
+  // reloading config is transiently unhealthy, and one shot turns that into a
+  // HARD-ERROR and two fresh stacks. Recovering at any point inside the budget
+  // is a healthy verdict and nothing is recreated.
+  it("keeps probing an unhealthy container and returns healthy if it recovers", async () => {
+    const { probe, calls } = healthProbeOf([
+      podmanSaid({ exitCode: 1 }),
+      podmanSaid({ exitCode: 1 }),
+      podmanSaid({}),
+    ]);
+    // Three probes at the 500ms poll interval need a budget past 1000ms.
+    const c = probed({ readinessTimeoutMs: 1_200 });
+    expect((await pollUntilHealthy("c", c, probe)).verdict).toBe("healthy");
+    expect(calls.filter((k) => k === "healthcheck").length).toBe(3);
+    // `throwIfDead` between probes, exactly as bringup does it: a container
+    // that DIED while this waited must reach the caller as that error rather
+    // than as a wedge the recreate would try to fix.
+    expect(calls).toContain("inspect");
+  });
+
+  it("returns unhealthy once the budget is spent with the container still saying no", async () => {
+    const { probe, calls } = healthProbeOf([podmanSaid({ exitCode: 1 })]);
+    const { verdict } = await pollUntilHealthy("c", probed(), probe);
+    expect(verdict).toBe("unhealthy");
+    // More than one, or the poll is a one-shot wearing a loop's clothes.
+    expect(calls.filter((c) => c === "healthcheck").length).toBeGreaterThan(1);
+  });
+
+  // The rule that keeps this from being a storm: podman failing to ANSWER is
+  // never the service answering "no". Read as evidence, a flaked podman becomes
+  // a HARD-ERROR, a fresh stack, and eventually NEEDS-HUMAN with an
+  // "environment" trace — which is the failure the whole check exists to close,
+  // arriving through the check. Abandoning costs at most the misblame that
+  // exists today.
+  it.each([
+    ["podman's own 125", { exitCode: 125, errorMessage: "no healthcheck" }],
+    ["a timeout", { exitCode: null, timedOut: true }],
+    ["a kill", { exitCode: null }],
+    ["an undocumented exit code", { exitCode: 7 }],
+    ["a maxBuffer overflow", { exitCode: 1, maxBufferExceeded: true }],
+  ] as [string, Partial<BoundedResult>][])(
+    "abandons on %s, immediately and without polling",
+    async (_what, over) => {
+      const { probe, calls } = healthProbeOf([podmanSaid(over)]);
+      expect((await pollUntilHealthy("c", probed(), probe)).verdict).toBe(
+        "abandoned",
+      );
+      // One probe: an unanswerable podman is not going to become answerable by
+      // being asked for a full readiness budget, and waiting is budget spent on
+      // no evidence.
+      expect(calls).toEqual(["healthcheck"]);
+    },
+  );
+
+  // "At any point in the poll", not "on the first probe". An error after real
+  // unhealthy answers still abandons: the escalation is destructive and the
+  // last thing we know is that podman stopped answering.
+  it("abandons on an error that arrives after unhealthy answers", async () => {
+    const { probe } = healthProbeOf([
+      podmanSaid({ exitCode: 1 }),
+      podmanSaid({ exitCode: 125 }),
+    ]);
+    expect((await pollUntilHealthy("c", probed(), probe)).verdict).toBe(
+      "abandoned",
+    );
+  });
+
+  // Sandbar's OWN deadline expiring is not podman failing. Each probe is bounded
+  // by what is LEFT of the budget, so the poll's last probe is routinely the one
+  // that gets killed — classified as an error, whether a persistently unhealthy
+  // container escalated at all would depend on where a 500ms sleep happened to
+  // land relative to a 300ms probe. The verdict comes from what the poll
+  // observed instead.
+  it("treats a probe killed at the deadline as the budget ending, not as an error", async () => {
+    const { probe } = healthProbeOf([
+      podmanSaid({ exitCode: 1 }),
+      // Returns after the 600ms budget is gone: unhealthy at 0ms, asleep until
+      // 500ms, then a probe with 100ms left that takes 300ms.
+      after(300, podmanSaid({ exitCode: null, timedOut: true })),
+    ]);
+    expect((await pollUntilHealthy("c", probed(), probe)).verdict).toBe(
+      "unhealthy",
+    );
+  });
+
+  // The control for the pair above, and it carries the weight: the same timed-
+  // out answer with budget still left IS an error and abandons. Without this,
+  // the assertion above passes just as happily with the error rule deleted.
+  it("still abandons on a timeout that arrives with budget to spare", async () => {
+    const { probe } = healthProbeOf([
+      podmanSaid({ exitCode: 1 }),
+      podmanSaid({ exitCode: null, timedOut: true }),
+    ]);
+    expect(
+      (
+        await pollUntilHealthy(
+          "c",
+          probed({ readinessTimeoutMs: 60_000 }),
+          probe,
+        )
+      ).verdict,
+    ).toBe("abandoned");
+  });
+
+  // A poll in which no probe ever answered is no evidence, so it abandons even
+  // though the budget is what ended it. Escalating here would recreate a
+  // container on the strength of a probe that never once returned a verdict.
+  it("abandons when the budget ends and no probe ever answered", async () => {
+    const { probe } = healthProbeOf([
+      after(200, podmanSaid({ exitCode: null, timedOut: true })),
+    ]);
+    expect(
+      (await pollUntilHealthy("c", probed({ readinessTimeoutMs: 100 }), probe))
+        .verdict,
+    ).toBe("abandoned");
   });
 });
