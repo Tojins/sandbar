@@ -1327,9 +1327,10 @@ describe("containerState", () => {
     expect(calls).toEqual(["inspect", "exists"]);
   });
 
-  // The second producer of `unknown`, and the one the watchLog restart trade
-  // leans on: the container demonstrably EXISTS, we just cannot say whether it
-  // is running. Reading this as death would be the retry storm.
+  // The second producer of `unknown`, and the one the readiness poll leans on
+  // when it keeps probing rather than declaring a container dead: it
+  // demonstrably EXISTS, we just cannot say whether it is running. Reading this
+  // as death would be the retry storm.
   it("is `unknown` when inspect fails but `exists` says the container is there", async () => {
     const { probe } = probeOf({
       inspect: podmanSaid({ exitCode: 125 }),
