@@ -151,7 +151,14 @@ export default {
           "--",
           "src/gate-stack-podman.test.ts",
           "src/ensure-images-podman.test.ts",
+          "src/gate-run-podman.test.ts",
         ],
+        // `gate-run-podman.test.ts` (#45) joins the pair here rather than
+        // staying host-only: it drives `runGateCommand` end to end, and every
+        // podman call it makes goes through the same client as the two above.
+        // It declares no `needsLocalClient` because it needs none — nothing in
+        // it asks a question about the host's own session.
+        //
         // 30 minutes against 229s measured for the pair alone. The runtime
         // is dominated by mariadb bringup and by readiness timeouts the tests
         // ask for deliberately, and three gates run concurrently at the

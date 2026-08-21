@@ -51,7 +51,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
-import { installCleanupTraps, onCleanup, runCleanup } from "./cleanup.js";
+import { installCleanupTraps, onCleanup } from "./cleanup.js";
 import {
   type ResolvedConfig,
   type ResolvedGateStack,
@@ -202,16 +202,68 @@ export async function runGateCommand(
   const scope = gateScope(worktreePath);
 
   installCleanupTraps();
+  // The teardown is called DIRECTLY on the way out, and registered with
+  // `onCleanup` only so a signal still reaches it. `runCleanup()` would have
+  // been shorter and is wrong here: that registry is drained once per PROCESS
+  // (#35's own `running` latch never resets), which is right for `run()`, which
+  // exits immediately after — and a silent leak for a command that returns a
+  // number to a caller who may call it again. So the actions are idempotent and
+  // this owns the order; the registry is the signal path, not the normal one.
+  const teardown = teardownFor(opts, err);
+  onCleanup(teardown.run);
   try {
-    return await gate(config, opts, { worktreePath, scope, out, err });
+    return await gate(config, opts, { worktreePath, scope, out, err, teardown });
   } finally {
-    // Every teardown this command owns is an `onCleanup` action — the stack's
-    // `stop`, the built images' removal — so the success path, the throw path
-    // and the signal path run the identical actions in the identical order.
-    // `runCleanup` swallows an action's own failure, so this cannot displace
-    // the error it is unwinding.
-    await runCleanup();
+    await teardown.run();
   }
+}
+
+// The two things this command has to take down, in the order they have to come
+// down in: the stack first, then the images its containers were running.
+// Latched, so the `finally` and the signal trap cannot both do it — a second
+// `removeBranchImages` over the same tags reports every one of them as a
+// failure to remove something that is already gone.
+type Teardown = {
+  readonly run: () => Promise<void>;
+  // Filled in by `gate` as each becomes available. Registered before either
+  // exists, because a signal during the bringup has to reach whatever DOES.
+  stack: Stack | null;
+  builtTags: (() => readonly string[]) | null;
+};
+
+function teardownFor(
+  opts: GateCommandOptions,
+  err: (text: string) => void,
+): Teardown {
+  let done = false;
+  const t: Teardown = {
+    stack: null,
+    builtTags: null,
+    run: async () => {
+      if (done) return;
+      done = true;
+      // A teardown failure is reported, never thrown: this runs in a `finally`
+      // and from a signal handler, and replacing the verdict — or the error
+      // being unwound — with a `pod rm` complaint loses the thing the operator
+      // was waiting for. `stop` is idempotent and is a no-op under `--keep`.
+      await t.stack?.stop().catch((e: unknown) => {
+        err(`${e instanceof Error ? e.message : String(e)}\n`);
+      });
+      const tags = t.builtTags?.() ?? [];
+      // Not under `--keep`: the containers the operator asked to keep are
+      // running these, and podman's `rmi -f` takes a container using the image
+      // with it — which would delete the thing `--keep` exists to preserve.
+      if (opts.keep || tags.length === 0) return;
+      const failures = await removeBranchImages(tags);
+      if (failures.length > 0) {
+        err(
+          `Could not remove ${failures.length} per-branch image(s) built for ` +
+            `this gate run:\n${failures.join("\n")}\n`,
+        );
+      }
+    },
+  };
+  return t;
 }
 
 // The body, split out only so the `finally` above wraps every exit from it
@@ -224,9 +276,10 @@ async function gate(
     readonly scope: RunScope;
     readonly out: (text: string) => void;
     readonly err: (text: string) => void;
+    readonly teardown: Teardown;
   },
 ): Promise<number> {
-  const { worktreePath, scope, out, err } = ctx;
+  const { worktreePath, scope, out, err, teardown } = ctx;
 
   // First, because everything below is a podman call and the failure otherwise
   // arrives as a raw `spawn podman ENOENT` stack out of whichever call got
@@ -275,20 +328,7 @@ async function gate(
     ),
     hostUid,
   });
-  onCleanup(async () => {
-    const tags = branchImages.builtTags();
-    // Not under `--keep`: the containers the operator asked to keep are running
-    // these, and `podman rmi -f` on an image in use takes the container with
-    // it — which would delete the thing `--keep` exists to preserve.
-    if (opts.keep || tags.length === 0) return;
-    const failures = await removeBranchImages(tags);
-    if (failures.length > 0) {
-      err(
-        `Could not remove ${failures.length} per-branch image(s) built for ` +
-          `this gate run:\n${failures.join("\n")}\n`,
-      );
-    }
-  });
+  teardown.builtTags = branchImages.builtTags;
 
   await checkWorktreeImageUids(config.gateStack, hostUid);
 
@@ -325,6 +365,7 @@ async function gate(
     allowDirtyWorktree: true,
     onStepOutput: out,
   });
+  teardown.stack = stack;
 
   if (stack.reused.length > 0) {
     out(
