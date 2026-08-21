@@ -90,7 +90,11 @@ import {
 } from "./merger-worktree.js";
 import { type Stack, startStack } from "./gate-stack.js";
 import { buildPlan } from "./plan-resolver.js";
-import { PreflightError, runPreflight } from "./preflight.js";
+import {
+  absoluteMountSources,
+  PreflightError,
+  runPreflight,
+} from "./preflight.js";
 import { buildProjectAnchor } from "./prompt.js";
 import {
   ensureRepoCache,
@@ -227,6 +231,10 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       sourceBranch: config.sourceBranch,
       repo,
       pulledImages: pulledImagesOf(config),
+      // The gate stack is the whole of sandbar's consumer-supplied host-path
+      // surface (#51), and a source podman cannot resolve is host state that
+      // would otherwise redden the gate against the branch.
+      mountSources: absoluteMountSources(config.gateStack.containers),
     });
   } catch (err) {
     if (err instanceof PreflightError || err instanceof SandbarError) {

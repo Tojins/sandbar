@@ -22,9 +22,12 @@ const IMAGE = "localhost/sandbar-agent:latest";
 // The gate runner talks to the host's podman over this (#48). The config is a
 // program, so the uid is derived rather than written down — the path is
 // rootless podman's, and a hardcoded one would be wrong on any other account.
-// If `podman.socket` is not active the source does not exist and the runner's
-// bringup fails, which for an `attempt` container is a gate red: a host-state
-// problem reported as the branch's fault. Known, and not closed here.
+// If `podman.socket` is not active this source does not exist, and until #51
+// that meant a bringup failure on an `attempt` container, i.e. a gate RED
+// blaming the branch for host state. Preflight now stats every absolute
+// `mounts[].hostPath` and refuses the run naming this path and `runner`, so
+// the operator is sent to `systemctl --user enable --now podman.socket`
+// instead of three issues being parked as `agent-stuck`.
 const PODMAN_SOCKET = `/run/user/${process.getuid()}/podman/podman.sock`;
 
 export default {

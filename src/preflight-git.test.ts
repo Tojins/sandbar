@@ -9,14 +9,18 @@
 // again. Real git, not a fake exec, because the assertions are about refs that
 // did or did not move.
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { makeEnvReader } from "./env.js";
-import { deleteMergedIssueBranches, gatherState } from "./preflight.js";
+import {
+  type DeclaredMount,
+  deleteMergedIssueBranches,
+  gatherState,
+} from "./preflight.js";
 import { type RepoLayout, ensureRepoCache, repoLayout } from "./repo-cache.js";
 
 const exec = promisify(execFile);
@@ -95,6 +99,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     env: makeEnvReader({}),
     sourceBranch: "main",
     pulledImages: [] as readonly string[],
+    mountSources: [] as readonly DeclaredMount[],
   });
 
   // The highest-stakes half, and the one that qualified #32's fix: #32 put this
@@ -285,6 +290,56 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const empty = await gatherState(cfg(layoutAt(bare, target)));
       expect(empty.hasOriginBranch).toBe(false);
       await rm(bare, { recursive: true, force: true });
+    });
+
+    // #51 — host state, read with a real stat against real paths. The gate
+    // stack is the whole of sandbar's consumer-supplied host-path surface, and
+    // a source podman cannot resolve fails an `attempt` container at bringup,
+    // which #24 D5 reports as a gate red against the branch.
+    it("reports a declared mount source that does not exist, and not one that does", async () => {
+      const present = join(target, "a.txt");
+      const absent = join(target, "run", "podman.sock");
+
+      const state = await gatherState({
+        ...cfg(layoutAt(target)),
+        mountSources: [
+          { container: "gate", hostPath: present },
+          { container: "gate", hostPath: absent },
+        ],
+      });
+
+      expect(state.missingMountSources).toEqual([
+        {
+          container: "gate",
+          hostPath: absent,
+          detail: "no such file or directory",
+        },
+      ]);
+    });
+
+    // `stat`, not `lstat`: podman resolves the `-v` source through symlinks, so
+    // a link whose target is gone is a bringup failure and has to read as one.
+    it("follows a symlink and reports a dangling one as missing", async () => {
+      const dangling = join(target, "dangling");
+      await symlink(join(target, "nothing-here"), dangling);
+
+      const state = await gatherState({
+        ...cfg(layoutAt(target)),
+        mountSources: [{ container: "db", hostPath: dangling }],
+      });
+
+      expect(state.missingMountSources).toEqual([
+        {
+          container: "db",
+          hostPath: dangling,
+          detail: "no such file or directory",
+        },
+      ]);
+    });
+
+    it("reports nothing when the stack declares no absolute sources", async () => {
+      const state = await gatherState(cfg(layoutAt(target)));
+      expect(state.missingMountSources).toEqual([]);
     });
   });
 });

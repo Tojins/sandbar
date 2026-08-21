@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { checkInvariants, type RepoState } from "./preflight.js";
+import type { ResolvedStackContainer } from "./config.js";
+import {
+  absoluteMountSources,
+  checkInvariants,
+  type RepoState,
+} from "./preflight.js";
 
 const cleanState: RepoState = {
   hasGit: true,
   hasGh: true,
   hasContainerRuntime: true,
   missingImages: [],
+  missingMountSources: [],
   ghAuthOk: true,
   sandboxGhTokenOk: true,
   hasAgentCredential: true,
@@ -311,5 +317,108 @@ describe("checkInvariants", () => {
         /git|gh|origin|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|Resolve|Switch|Install|stash|Configure|build|pull/,
       );
     }
+  });
+});
+
+// #51 — a gate-stack `mounts[].hostPath` that does not exist on the host fails
+// `podman run` at bringup, and a gate container is `attempt`-lifecycle, so #24
+// D5 charges that to the BRANCH: a gate red about a statfs source no agent can
+// see or fix, repeated until the attempt budget parks the issue as
+// `agent-stuck` with an "environment" trace. Host state belongs in preflight,
+// beside `missingImages`, which is the identical class.
+describe("checkInvariants — gate-stack mount sources exist (#51)", () => {
+  it("passes when nothing is missing", () => {
+    expect(failures(cleanState)).toEqual([]);
+  });
+
+  // The path AND the container, because a stack with several containers
+  // otherwise leaves the operator grepping their config for the declaration.
+  it("names the path and the container that declares it", () => {
+    const f = failures({
+      ...cleanState,
+      missingMountSources: [
+        {
+          container: "gate",
+          hostPath: "/run/user/1000/podman/podman.sock",
+          detail: "no such file or directory",
+        },
+      ],
+    });
+
+    const msg = f.find((m) => m.includes("mount source"));
+    expect(msg).toBeDefined();
+    expect(msg).toContain("/run/user/1000/podman/podman.sock");
+    expect(msg).toContain("gate");
+    expect(msg).toContain("no such file or directory");
+    // The operator has to be told this is theirs to fix, not the branch's —
+    // that misattribution is the whole reason the check exists.
+    expect(msg).toContain("config.gateStack");
+  });
+
+  it("lists every missing source, not just the first", () => {
+    const f = failures({
+      ...cleanState,
+      missingMountSources: [
+        { container: "gate", hostPath: "/a", detail: "no such file or directory" },
+        { container: "db", hostPath: "/b", detail: "EACCES" },
+      ],
+    });
+
+    const msg = f.find((m) => m.includes("mount source"));
+    expect(msg).toContain("/a");
+    expect(msg).toContain("/b");
+    expect(msg).toContain("db");
+  });
+});
+
+const container = (
+  name: string,
+  mounts: ReadonlyArray<{ hostPath: string; containerPath: string }>,
+): ResolvedStackContainer => ({
+  name,
+  image: "img",
+  lifecycle: "attempt",
+  env: {},
+  args: [],
+  mounts: mounts.map((m) => ({ ...m, mode: "ro" as const })),
+  mountWorktree: "/workspace",
+  servesWorktree: false,
+  inSandbox: false,
+  hold: false,
+  readiness: null,
+  readinessTimeoutMs: 60_000,
+  postReadyCommands: [],
+});
+
+describe("absoluteMountSources (#51)", () => {
+  it("collects absolute hostPaths with the container that declares them", () => {
+    expect(
+      absoluteMountSources([
+        container("gate", [{ hostPath: "/srv/fixtures", containerPath: "/fx" }]),
+        container("db", [{ hostPath: "/var/lib/seed", containerPath: "/seed" }]),
+      ]),
+    ).toEqual([
+      { container: "gate", hostPath: "/srv/fixtures" },
+      { container: "db", hostPath: "/var/lib/seed" },
+    ]);
+  });
+
+  // The gap this check cannot close, pinned so nobody "fixes" it into a
+  // preflight that refuses on every relative mount: a relative hostPath
+  // resolves against the worktree being gated, which does not exist yet.
+  it("ignores relative hostPaths, which name a tree that does not exist yet", () => {
+    expect(
+      absoluteMountSources([
+        container("gate", [
+          { hostPath: "fixtures/db.sql", containerPath: "/fx/db.sql" },
+          { hostPath: "../shared", containerPath: "/shared" },
+          { hostPath: "/etc/ssl/certs", containerPath: "/certs" },
+        ]),
+      ]),
+    ).toEqual([{ container: "gate", hostPath: "/etc/ssl/certs" }]);
+  });
+
+  it("is empty for a stack that mounts nothing but the worktree", () => {
+    expect(absoluteMountSources([container("gate", [])])).toEqual([]);
   });
 });

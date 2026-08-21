@@ -202,6 +202,14 @@ place, so:
   content a function of your uncommitted state; point at absolute paths outside
   the checkout if you want it stable.
 - `gateStack` mount `hostPath`s resolve against the issue worktree, not `cwd`.
+  An **absolute** one is host state, so preflight stats it and refuses the run
+  naming the path and the container that declares it — left to the gate, a
+  source podman cannot resolve fails an `attempt` container at bringup, which
+  is reported as a gate red against the branch under test rather than as your
+  host's problem. Two things follow: an absolute source has to exist before the
+  run starts (a path an `onWorktreeReady` hook was creating is now too late),
+  and a **relative** one is never checked, because the worktree it resolves
+  against does not exist that early.
 
 ### `mergeMode` — who gets to say the merge result is good
 
