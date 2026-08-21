@@ -11,6 +11,7 @@ import {
   networkNameFor,
   podNameFor,
   runScope,
+  sandboxContainerNameFor,
   scopedResourcePrefix,
   stackContainerNameFor,
   ALL_BRANCH_PREFIXES,
@@ -94,6 +95,35 @@ describe("gate-stack resource names (#24)", () => {
     expect(networkNameFor(S, "42")).toBe(`sandbar-${S}-net-42`);
     expect(podNameFor(S, "42")).toBe(`sandbar-${S}-pod-42`);
     expect(stackContainerNameFor(S, "42", "db")).toBe(`sandbar-${S}-42-db`);
+  });
+
+  // #44. The sandbox siblings share a scope with the gate's containers and the
+  // gate force-removes its own by name before every gate run, so an alias is
+  // one stack reaping the other's live container mid-attempt. The `sbx-`
+  // segment is what makes that impossible, and it is only impossible because no
+  // stackId can produce it — ids are issue numbers or the literal "merger".
+  it("keeps a sandbox sibling out of every gate container's name", () => {
+    expect(sandboxContainerNameFor(S, "42", "db")).toBe(`sandbar-${S}-sbx-42-db`);
+    expect(sandboxContainerNameFor(S, "42", "db")).not.toBe(
+      stackContainerNameFor(S, "42", "db"),
+    );
+    // The alias would need a stack whose id is literally "sbx", and the one
+    // non-numeric id sandbar mints is "merger".
+    expect(sandboxContainerNameFor(S, "42", "db")).toBe(
+      stackContainerNameFor(S, "sbx", "42-db"),
+    );
+    expect(stackContainerNameFor(S, "merger", "db")).not.toBe(
+      sandboxContainerNameFor(S, "merger", "db"),
+    );
+  });
+
+  // No new pod and no new network under the anchor-chain topology, so the
+  // existing scoped sweep reaps these for free — which is only true while the
+  // name carries the scope.
+  it("scopes a sandbox sibling so the orphan sweep can reach it", () => {
+    expect(sandboxContainerNameFor(S, "42", "db")).toContain(
+      scopedResourcePrefix(S),
+    );
   });
 
   it("keeps the merger's stack disjoint from every issue's", () => {

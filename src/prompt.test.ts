@@ -5,7 +5,11 @@ import {
   NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE,
   NO_PROTOTYPE_NEEDED_PHRASE,
 } from "./finalize.js";
-import { renderAttemptSlot, renderReviewerSlot } from "./prompt.js";
+import {
+  renderAttemptSlot,
+  renderReviewerSlot,
+  renderSandboxStackSlot,
+} from "./prompt.js";
 import { parsePromise } from "./promise-parser.js";
 
 const baseInputs = {
@@ -255,5 +259,124 @@ describe("renderReviewerSlot", () => {
     expect(slot).toContain("Issue #42: do the thing");
     expect(slot).toContain("`sandbar/issue-42-do-the-thing`");
     expect(slot).toContain("`main`");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The sandbox-stack slot (#44 D8)
+// ---------------------------------------------------------------------------
+//
+// Sandbar is the only party that knows which siblings came up THIS attempt,
+// which did not, and where their logs are — a consumer's CLAUDE.md would go
+// stale the first time it was wrong. So the slot is data, and these pin what
+// the data has to say.
+
+describe("renderSandboxStackSlot (#44)", () => {
+  const up = {
+    name: "db",
+    image: "docker.io/library/mariadb:10.11",
+    lifecycle: "issue" as const,
+    address: "127.0.0.1:3306",
+    logPath: "/sandbar/logs/db.log",
+    up: true,
+    failure: null,
+  };
+  const down = {
+    name: "app",
+    image: "localhost/app:gate",
+    lifecycle: "attempt" as const,
+    address: null,
+    logPath: "/sandbar/logs/app.log",
+    up: false,
+    failure:
+      "gate stack: container 'app' did not become ready within 60000ms\n" +
+      "Container log tail:\nPHP Fatal error: syntax error, unexpected ';'",
+  };
+
+  // The empty case is the one every existing consumer gets, and it has to cost
+  // exactly nothing — an empty heading would be a section about a feature that
+  // is not switched on.
+  it("renders nothing at all for a stack with no sandbox containers", () => {
+    expect(renderSandboxStackSlot([])).toBe("");
+  });
+
+  it("names each sibling, its address and the log the agent can read", () => {
+    const slot = renderSandboxStackSlot([up]);
+    expect(slot).toContain("**db**");
+    expect(slot).toContain("127.0.0.1:3306");
+    expect(slot).toContain("/sandbar/logs/db.log");
+    expect(slot).toContain("docker.io/library/mariadb:10.11");
+  });
+
+  // The whole point of the slot: the agent is told to USE these, because a test
+  // it has never watched fail is not evidence.
+  it("tells the agent the gate is authoritative and that nothing restarts a sibling", () => {
+    const slot = renderSandboxStackSlot([up]);
+    expect(slot).toMatch(/gate is authoritative/i);
+    expect(slot).toMatch(/restarts a sibling/i);
+  });
+
+  // D3: an `attempt` sibling that will not start is the branch's own bootstrap
+  // breaking, and the agent is the one entity that can fix it. Omitting it
+  // would leave the agent to discover a missing service by watching a
+  // connection refuse — the guessing this feature exists to end.
+  it("lists a container that did not start, with its log tail", () => {
+    const slot = renderSandboxStackSlot([up, down]);
+    expect(slot).toContain("**app**");
+    expect(slot).toMatch(/DID NOT START/);
+    expect(slot).toContain("PHP Fatal error");
+  });
+
+  // A tail of a healthy service's log in every attempt's prompt is pure noise,
+  // and the path is already there for an agent that wants it.
+  it("does not paste a log tail for a container that is up", () => {
+    expect(renderSandboxStackSlot([up])).not.toContain("```");
+  });
+
+  // Sandbar knows a port only where a `tcp` readiness wrote one down. Inventing
+  // one would send the agent to a socket nothing is listening on and read as
+  // the service being broken.
+  it("omits the address when no readiness declared a port", () => {
+    const slot = renderSandboxStackSlot([{ ...up, address: null }]);
+    expect(slot).toContain("**db**");
+    expect(slot).not.toContain("127.0.0.1:");
+  });
+});
+
+// The slot has to reach the assembled prompt, not merely render. It is spliced
+// between the branch diff and the round's feedback, so a placeholder rename in
+// prompts/implementer.md would otherwise drop it silently — the same class of
+// failure as an unemittable escalation token above.
+describe("renderAttemptSlot — the sandbox slot reaches the prompt", () => {
+  const slotWith = (sandboxStack: Parameters<typeof renderSandboxStackSlot>[0]) =>
+    renderAttemptSlot({
+      issue: baseInputs.issue,
+      attempt: 1,
+      maxAttempts: 8,
+      worktreePath: "/tmp/wt",
+      lastFailureTrace: "",
+      sourceBranch: "main",
+      diff: "",
+      sandboxStack,
+    });
+
+  it("splices the rendered section in", () => {
+    expect(slotWith([
+      {
+        name: "db",
+        image: "mariadb",
+        lifecycle: "issue",
+        address: "127.0.0.1:3306",
+        logPath: "/sandbar/logs/db.log",
+        up: true,
+        failure: null,
+      },
+    ])).toContain("## Your sandbox stack");
+  });
+
+  it("leaves no trace of the placeholder when there is no sandbox stack", () => {
+    const slot = slotWith([]);
+    expect(slot).not.toContain("sandbox stack");
+    expect(slot).not.toContain("{{");
   });
 });

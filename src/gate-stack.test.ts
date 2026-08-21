@@ -749,6 +749,103 @@ describe("resolveGateStack validation", () => {
     ).toThrow(/duplicate step name/);
   });
 
+  // ---------------------------------------------------------------------
+  // inSandbox (#44 D2)
+  // ---------------------------------------------------------------------------
+
+  // Opt-in by construction: the flag's absence is what keeps every existing
+  // consumer's topology and cost exactly where they were.
+  it("defaults inSandbox to false, so no stack declares a sandbox by accident", () => {
+    expect(resolveGateStack(ok).containers.map((c) => c.inSandbox)).toEqual([
+      false,
+      false,
+    ]);
+  });
+
+  it("carries an explicit inSandbox onto the resolved container", () => {
+    const resolved = resolveGateStack({
+      ...ok,
+      containers: [
+        { name: "db", image: "mariadb", lifecycle: "issue", inSandbox: true },
+        { name: "app", image: "app", mountWorktree: "/app", hold: true },
+      ],
+    });
+    expect(resolved.containers.map((c) => c.inSandbox)).toEqual([true, false]);
+  });
+
+  // The one decidable emptiness: `hold` replaces the entrypoint with
+  // `sleep infinity`, so held with nothing exec'd after readiness is a
+  // container that provably runs nothing — and the sandbox slot would then hand
+  // the agent an address with no process behind it, which is worse than not
+  // offering one at all. (The gate's copy of that container is fine: steps
+  // `exec` into it. The sandbox's is not: nothing execs into a sibling.)
+  it("refuses inSandbox on a held container that runs nothing", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          { name: "db", image: "mariadb", lifecycle: "issue" },
+          {
+            name: "app",
+            image: "app",
+            mountWorktree: "/app",
+            hold: true,
+            inSandbox: true,
+          },
+        ],
+      }),
+    ).toThrow(/inSandbox/);
+  });
+
+  it("accepts inSandbox on a held container that starts something after readiness", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          { name: "db", image: "mariadb", lifecycle: "issue" },
+          {
+            name: "app",
+            image: "app",
+            mountWorktree: "/app",
+            hold: true,
+            inSandbox: true,
+            postReadyCommands: [["sh", "-c", "httpd &"]],
+          },
+        ],
+      }),
+    ).not.toThrow();
+  });
+
+  // The tcp-readiness-port rule is a rule over the WHOLE stack, so it already
+  // covers the sandbox subset — which matters because the sandbox publishes one
+  // host port per distinct container port too, and two siblings sharing one
+  // would report both ready as soon as either bound. Pinned here so a future
+  // narrowing of that rule to "gate containers only" fails loudly.
+  it("still refuses two sandbox containers sharing a tcp readiness port", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "db",
+            image: "mariadb",
+            lifecycle: "issue",
+            inSandbox: true,
+            readiness: { kind: "tcp", port: 3306 },
+          },
+          {
+            name: "db2",
+            image: "mariadb",
+            lifecycle: "issue",
+            inSandbox: true,
+            readiness: { kind: "tcp", port: 3306 },
+          },
+          { name: "app", image: "app", mountWorktree: "/app", hold: true },
+        ],
+      }),
+    ).toThrow(/tcp readiness on port 3306/);
+  });
+
   // #26. An unbounded step is not a slow gate, it is a run that never ends and
   // never releases the single-instance lock, so the resolved shape has no
   // "absent" case — a step that names no bound gets sandbar's.
