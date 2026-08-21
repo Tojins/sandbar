@@ -65,22 +65,47 @@ describe("mountSpec", () => {
       mountSpec("/wt", {
         hostPath: "tests/fixtures/schema.sql",
         containerPath: "/docker-entrypoint-initdb.d/01.sql",
+        mode: "ro",
       }),
     ).toBe("/wt/tests/fixtures/schema.sql:/docker-entrypoint-initdb.d/01.sql:ro,z");
   });
 
   it("passes an absolute hostPath through", () => {
     expect(
-      mountSpec("/wt", { hostPath: "/etc/hosts", containerPath: "/etc/hosts" }),
+      mountSpec("/wt", {
+        hostPath: "/etc/hosts",
+        containerPath: "/etc/hosts",
+        mode: "ro",
+      }),
     ).toBe("/etc/hosts:/etc/hosts:ro,z");
   });
 
   // Category C of sandcastle's permissions taxonomy, and a live bug in the code
   // #24 replaced: without `z` the mount is denied outright under SELinux, so
-  // sandbar's gate simply did not work on Fedora/RHEL/CentOS.
-  it("always carries the SELinux relabel and read-only flags", () => {
-    const spec = mountSpec("/wt", { hostPath: "a", containerPath: "/b" });
-    expect(spec.endsWith(":ro,z")).toBe(true);
+  // sandbar's gate simply did not work on Fedora/RHEL/CentOS. The relabel is
+  // the half `mode` may NOT touch, so it is asserted on both modes rather than
+  // on one. What an OMITTED mode means is not this function's question and is
+  // not asserted here — `resolveGateStack` decides it, and pins it.
+  it("always carries the SELinux relabel", () => {
+    for (const mode of ["ro", "rw"] as const) {
+      const spec = mountSpec("/wt", {
+        hostPath: "a",
+        containerPath: "/b",
+        mode,
+      });
+      expect(spec.endsWith(`:${mode},z`)).toBe(true);
+    }
+  });
+
+  // #48's motivating case: the gate runner identity-mounts the host's `/tmp`
+  // so a step can build fixtures at paths the host's podman also resolves,
+  // which is a mount written THROUGH rather than read. (The socket in the same
+  // config is not — it stays `ro`.) The mode reaches the `-v` spec and takes
+  // the relabel with it.
+  it("emits rw for a mount that asked for it", () => {
+    expect(
+      mountSpec("/wt", { hostPath: "/tmp", containerPath: "/tmp", mode: "rw" }),
+    ).toBe("/tmp:/tmp:rw,z");
   });
 });
 
@@ -789,6 +814,52 @@ describe("resolveGateStack validation", () => {
         ],
       }),
     ).toThrow(/colon-delimited/);
+  });
+
+  // An omitted mode is decided once, at resolve time — `mountSpec` reads the
+  // resolved value and has no default of its own to disagree with.
+  it("defaults a mount's mode to ro and carries an explicit rw through", () => {
+    const spec = resolveGateStack({
+      ...ok,
+      containers: [
+        {
+          name: "app",
+          image: "a",
+          mountWorktree: "/app",
+          mounts: [
+            { hostPath: "fixtures", containerPath: "/fixtures" },
+            { hostPath: "/tmp", containerPath: "/tmp", mode: "rw" },
+          ],
+        },
+      ],
+    });
+    expect(spec.containers[0]?.mounts).toEqual([
+      { hostPath: "fixtures", containerPath: "/fixtures", mode: "ro" },
+      { hostPath: "/tmp", containerPath: "/tmp", mode: "rw" },
+    ]);
+  });
+
+  // podman would reject the `-v` spec at container-create time, which on an
+  // `attempt` container arrives as a gate RED blamed on the branch — the same
+  // argument every other mount rule here is made from.
+  it("refuses an unknown mount mode", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "app",
+            image: "a",
+            mountWorktree: "/app",
+            mounts: [
+              // The shape a consumer reaches for by analogy with podman's own
+              // spelling of the same idea.
+              { hostPath: "a", containerPath: "/c", mode: "readonly" as "ro" },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/unknown mode/);
   });
 
   it("refuses an out-of-range tcp readiness port", () => {

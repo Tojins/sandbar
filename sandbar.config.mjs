@@ -19,6 +19,14 @@ import { readEnvFile } from "./dist/index.js";
 // and leaves its default USER as root.
 const IMAGE = "localhost/sandbar-agent:latest";
 
+// The gate runner talks to the host's podman over this (#48). The config is a
+// program, so the uid is derived rather than written down — the path is
+// rootless podman's, and a hardcoded one would be wrong on any other account.
+// If `podman.socket` is not active the source does not exist and the runner's
+// bringup fails, which for an `attempt` container is a gate red: a host-state
+// problem reported as the branch's fault. Known, and not closed here.
+const PODMAN_SOCKET = `/run/user/${process.getuid()}/podman/podman.sock`;
+
 export default {
   ghOwner: "Tojins",
   ghRepo: "sandbar",
@@ -56,33 +64,34 @@ export default {
     },
   },
 
-  // What it takes to produce a verdict about a commit here: one container, two
-  // steps. `hold: true` because the image has no long-running process of its
-  // own; default `lifecycle: "attempt"` because it mounts the worktree and runs
-  // the branch's code, so it is recreated every gate run.
+  // What it takes to produce a verdict about a commit here: one container,
+  // three steps. `hold: true` because the image has no long-running process of
+  // its own; default `lifecycle: "attempt"` because it mounts the worktree and
+  // runs the branch's code, so it is recreated every gate run.
   //
-  // KNOWN BLIND SPOT, accepted deliberately. The podman-backed tests
-  // (`gate-stack-podman.test.ts`, `ensure-images-podman.test.ts`) resolve their
-  // `describe.runIf` at collection time against `podman image exists`, and
-  // there is no podman inside this container. ~35 tests SKIP — green either
-  // way — and they are exactly the ones pinning what podman defines: the tcp
-  // settle window's green-on-red, root-in-pod file ownership, `inspect` 125 vs
-  // `container exists` (#36), SIGKILL reaping, `logs -f` chunk splitting.
+  // The runner drives the HOST's podman through the socket below (#48), which
+  // is what lets the podman-backed tests run here at all — they resolve their
+  // `describe.runIf` at collection time against `podman image exists`, so
+  // without one they used to skip ~35 tests and leave the gate green either
+  // way. `CONTAINER_HOST` alone puts the client in remote mode, so nothing in
+  // the suite or in `gate-stack.ts` had to learn a new spelling.
   //
-  // They run on the HOST instead, where `npm test` is 877/877 with podman
-  // present. That is a human step, not a gate: a green gate here does NOT mean
-  // that layer was exercised. Run the full suite on the host before trusting a
-  // cycle that touched `gate-stack.ts`, `ensure-images.ts` or `containers.ts`.
-  //
-  // Neither of the two mechanical ways to close it is available. Mounting the
-  // podman socket into this container does not work: both files hardcode a
-  // fixed `SCOPE` and `STACK_ID`, so two issues gating concurrently (default
-  // plan size 3) build identically-named pods and `startStack` force-removes a
-  // namesake before creating — each issue's gate would destroy the other's
-  // stack mid-run. That route needs a prerequisite issue deriving the test
-  // scope per-process. `mergeMode: "verified"` was the other, and is out by
-  // choice: this is a personal project, the tests belong on host machines, and
-  // a cycle should not wait on a hosted runner.
+  //   - the socket is read-only; the client needs no more than that, and the
+  //     mount source is a path only this host can produce, hence the uid;
+  //   - `/tmp` is an IDENTITY mount, rw, because bind sources are resolved by
+  //     the podman that creates the container — the HOST's. The fixtures those
+  //     tests build with `mkdtemp(tmpdir())` are otherwise paths the host
+  //     cannot see, and podman fails the run rather than mounting an empty
+  //     directory. Identity is what makes `os.tmpdir()` work untouched. A
+  //     dedicated `.sandbar/gate-tmp` was rejected: its mount source must
+  //     exist before bringup, and a bringup failure on an `attempt` container
+  //     is a gate RED, so a `git clean -xfd` would blame the branch for a
+  //     missing directory;
+  //   - `SANDBAR_REQUIRE_PODMAN_TESTS=1` turns an unreachable podman into a
+  //     FAILING test rather than a silent skip. Without it the day the socket
+  //     breaks — a podman upgrade, a uid change, a `podman.socket` nobody
+  //     re-enabled — is the day this gate quietly stops covering the layer it
+  //     was given a socket for.
   gateStack: {
     containers: [
       {
@@ -90,11 +99,62 @@ export default {
         image: IMAGE,
         mountWorktree: "/workspace",
         hold: true,
+        mounts: [
+          { hostPath: PODMAN_SOCKET, containerPath: "/run/podman.sock" },
+          { hostPath: "/tmp", containerPath: "/tmp", mode: "rw" },
+        ],
+        env: {
+          CONTAINER_HOST: "unix:///run/podman.sock",
+          SANDBAR_REQUIRE_PODMAN_TESTS: "1",
+        },
       },
     ],
+    // Split in three, and bounded explicitly rather than by the 15-minute
+    // default, which was sized for a suite that skipped 35 tests. Steps stop at
+    // the first red, so the cheap suite still fails fast — and the trace then
+    // NAMES which layer broke, which matters because a `podman-test` red has a
+    // second possible cause (the socket) that a `test` red does not.
+    //
+    // The exclude glob deliberately misses `gate-stack-hostpodman.test.ts`,
+    // which self-skips: it holds only for a LOCAL client, and this one is
+    // remote. `agent-sandbox-podman.test.ts` is excluded and not named below —
+    // its `--init` reaping assertions were never measured through a socket, so
+    // it stays a host-only file for now, exactly as it was before this change.
+    //
+    // NEITHER of those depends on this comment being right. Both files declare
+    // `needsLocalClient`, so they skip against a remote client on their own
+    // say-so — which matters because a glob and a by-hand file list are two
+    // lists that drift, and the drift is silent in the direction that hurts
+    // (a host-only file quietly added to `podman-test` would be a red nobody
+    // asked for; one quietly dropped from BOTH would be a layer nobody runs).
+    //
+    // `npm test` on the host still runs everything. The two files above are
+    // the whole of the manual step: run them on the host after a cycle that
+    // touched the podman layer or the sandbox run args.
     steps: [
       { name: "check", in: "runner", command: ["npm", "run", "check"] },
-      { name: "test", in: "runner", command: ["npm", "test"] },
+      {
+        name: "test",
+        in: "runner",
+        command: ["npm", "test", "--", "--exclude", "**/*-podman.test.ts"],
+        timeoutMs: 900_000,
+      },
+      {
+        name: "podman-test",
+        in: "runner",
+        command: [
+          "npm",
+          "test",
+          "--",
+          "src/gate-stack-podman.test.ts",
+          "src/ensure-images-podman.test.ts",
+        ],
+        // 30 minutes against 229s measured for the pair alone. The runtime
+        // is dominated by mariadb bringup and by readiness timeouts the tests
+        // ask for deliberately, and three gates run concurrently at the
+        // default plan size, contending for one podman.
+        timeoutMs: 1_800_000,
+      },
     ],
   },
 

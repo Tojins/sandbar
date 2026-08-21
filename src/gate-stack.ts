@@ -203,7 +203,7 @@ import { onCleanup } from "./cleanup.js";
 import type {
   ResolvedGateStack,
   ResolvedStackContainer,
-  StackMount,
+  ResolvedStackMount,
 } from "./config.js";
 import { type ImageMap, ImageBuildError } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
@@ -434,15 +434,20 @@ export class ContainerBringupError extends SandbarError {
 // ---------------------------------------------------------------------------
 
 // One `-v` spec. Relative hostPaths resolve against the gated worktree;
-// absolute pass through. Always read-only, always `z`-relabelled: without the
-// SELinux label the mount is denied outright on Fedora/RHEL/CentOS, which is
-// what `agent-sandbox.ts` has always done and what the pre-#24 gate and sidecar
-// mounts did not.
-export function mountSpec(worktreePath: string, mount: StackMount): string {
+// absolute pass through. Read-only unless the mount says `mode: "rw"`, always
+// `z`-relabelled: without the SELinux label the mount is denied outright on
+// Fedora/RHEL/CentOS, which is what `agent-sandbox.ts` has always done and what
+// the pre-#24 gate and sidecar mounts did not. The mode is read off the
+// RESOLVED mount rather than defaulted here, so "what does an omitted mode
+// mean" is answered in exactly one place (`resolveGateStack`).
+export function mountSpec(
+  worktreePath: string,
+  mount: ResolvedStackMount,
+): string {
   const hostPath = isAbsolute(mount.hostPath)
     ? mount.hostPath
     : resolvePath(worktreePath, mount.hostPath);
-  return `${hostPath}:${mount.containerPath}:ro,z`;
+  return `${hostPath}:${mount.containerPath}:${mount.mode},z`;
 }
 
 export function podCreateArgs(opts: {

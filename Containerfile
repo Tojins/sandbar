@@ -37,6 +37,35 @@ RUN groupmod -n agent node \
     && printf 'agent ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/agent \
     && chmod 0440 /etc/sudoers.d/agent
 
+# The podman REMOTE client (#48). The gate runner reaches the HOST's podman
+# through a socket mounted into it, and `CONTAINER_HOST` alone switches this
+# binary to remote mode — no `--remote`, no containers.conf — so `RUNTIME =
+# "podman"` stands and not one `execFile(RUNTIME, …)` in sandbar or in the
+# suite changes. That is what buys the ~35 podman tests that used to skip in the
+# gate, silently, green either way.
+#
+# The static release binary rather than Debian's package: bookworm ships no
+# `podman-remote` at all, and its `podman` is 4.3.1 dragging ~60 MB of runtime
+# dependencies (conmon, crun, netavark, the storage stack) that a remote client
+# never executes. This is one 21 MB file.
+#
+# PINNED, unlike claude-code below, and the difference is not taste: that is a
+# tool the agent uses, this is a protocol client talking to a server whose
+# version it does not choose. Skew bites only when the client is NEWER than the
+# server, so a pin drifts in the SAFE direction — it keeps working against a
+# host that upgrades. Deriving the host's version at config load and passing it
+# as a `buildArgs` entry is self-maintaining and was rejected: it puts the image
+# fingerprint (#37) downstream of the host's podman package, so a routine
+# `apt upgrade` triggers a rebuild mid-backlog, against a failure that needs a
+# major-version bump to appear.
+#
+# In the agent-sandbox role no socket is mounted and `CONTAINER_HOST` is unset,
+# so this binary reaches nothing. Inert, and cheaper than a second image.
+RUN curl -fsSL https://github.com/containers/podman/releases/download/v4.9.3/podman-remote-static-linux_amd64.tar.gz \
+      | tar xz -C /tmp \
+    && install -m0755 /tmp/bin/podman-remote-static-linux_amd64 /usr/bin/podman \
+    && rm -rf /tmp/bin
+
 # Unpinned on purpose: the image is rebuilt only when this file's bytes change
 # (it declares no `rebuildOn`, since it bakes no dependency of the repo), so a
 # pin here would be a version nobody revisits rather than a reproducible one.

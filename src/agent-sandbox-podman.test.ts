@@ -11,18 +11,34 @@
 // same argv runs twice, once with `--init` filtered back out, and the pair
 // pins the difference rather than the flag.
 //
-// Not merged into agent-sandbox.test.ts: that file is podman-free by design
-// (it drives a fake provider against a real temp git repo) and runs in the gate
-// runner, which has no podman. This one skips there. See CLAUDE.md's "the local
-// gate cannot see podman" — run the suite on the host before trusting a cycle
-// that touched this module's run args.
+// Not merged into agent-sandbox.test.ts: that file is podman-free by design (it
+// drives a fake provider against a real temp git repo), and this one needs a
+// real podman and a real image.
+//
+// It stays a HOST-ONLY file after #48, which gave the gate runner a podman over
+// the host's socket and moved gate-stack-podman.test.ts and
+// ensure-images-podman.test.ts into the gate with it. This file was never
+// measured through that socket — whether `--init` reaping observes the same way
+// through a remote client is exactly the sort of thing this file exists to
+// establish empirically rather than assume — so it declares
+// `needsLocalClient`, neither gate step names it, and it runs where it always
+// ran: on the host, before trusting a cycle that touched this module's run
+// args.
+//
+// SO IT IS HALF OF THE HUMAN'S STEP, not a footnote to it. #48 shrank that
+// step from "run the full suite on the host" to two files, and this is one of
+// them (gate-stack-hostpodman.test.ts is the other). Anything that describes
+// the manual step as one file leaves these assertions exercised by nobody,
+// with nothing saying so — which is #48's own failure mode moved into the
+// handoff text.
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import { sandboxRunArgs } from "./agent-sandbox.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -32,22 +48,21 @@ const exec = promisify(execFile);
 // test files already require, so this file adds no new pull.
 const IMAGE = "docker.io/library/mariadb:10.11";
 
-// Resolved at COLLECTION time, not in beforeAll: vitest evaluates `runIf` while
-// building the suite, so a flag set in a hook arrives too late and silently
-// skips everything — a test file that always passes by never running.
-const available = ((): boolean => {
-  if (process.env["SANDBAR_SKIP_PODMAN_TESTS"] === "1") return false;
-  try {
-    execFileSync(RUNTIME, ["image", "exists", IMAGE], { stdio: "ignore" });
-    return true;
-  } catch {
-    console.warn(
-      `skipping agent-sandbox podman tests: ${RUNTIME} or ${IMAGE} unavailable ` +
-        `(\`${RUNTIME} pull ${IMAGE}\` to enable them)`,
-    );
-    return false;
-  }
-})();
+// Resolved at COLLECTION time, not in beforeAll: vitest evaluates `runIf`
+// while building the suite, so a flag set in a hook arrives too late and
+// silently skips everything — a test file that always passes by never running.
+//
+// `needsLocalClient` is what makes "host-only" a property this FILE enforces
+// rather than one that lives in a gate step's file list the file cannot see.
+// Without it, host-only status is the accident of a glob in
+// `sandbar.config.mjs` excluding `**/*-podman.test.ts` and a second step
+// naming its two files by hand — two lists that can drift silently, which is
+// how this file came to be in neither.
+const available = podmanTestsEnabled({
+  what: "agent-sandbox podman tests",
+  image: IMAGE,
+  needsLocalClient: true,
+});
 
 const delay = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));

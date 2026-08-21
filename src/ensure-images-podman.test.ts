@@ -10,7 +10,7 @@
 // mirror: a fingerprint that came back stale-but-parseable would pin a gate to
 // an image the operator's own checkout no longer matches.
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +26,7 @@ import {
   sweepBranchImages,
 } from "./ensure-images.js";
 import { variantImageTag } from "./naming.js";
+import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import { podmanTestScope } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -44,20 +45,13 @@ const TAG = testImageTag("probe");
 
 // Collection time, not beforeAll: vitest evaluates `runIf` while building the
 // suite, so a flag set in a hook arrives too late and silently skips
-// everything — a test file that always passes by never running.
-const available = ((): boolean => {
-  if (process.env["SANDBAR_SKIP_PODMAN_TESTS"] === "1") return false;
-  try {
-    execFileSync(RUNTIME, ["image", "exists", BASE], { stdio: "ignore" });
-    return true;
-  } catch {
-    console.warn(
-      `skipping ensure-images podman tests: ${RUNTIME} or ${BASE} unavailable ` +
-        `(\`${RUNTIME} pull ${BASE}\` to enable them)`,
-    );
-    return false;
-  }
-})();
+// everything — a test file that always passes by never running. Under
+// `SANDBAR_REQUIRE_PODMAN_TESTS=1` (the gate runner's env, #48) an unreachable
+// podman is a FAILING test rather than a skip.
+const available = podmanTestsEnabled({
+  what: "ensure-images podman tests",
+  image: BASE,
+});
 
 describe.runIf(available)("ensureImages against real podman", () => {
   let root: string;

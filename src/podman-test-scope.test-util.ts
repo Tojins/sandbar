@@ -13,10 +13,10 @@
 // therefore tears down the other's live stack mid-test.
 //
 // That was invisible only because nothing ran them concurrently: vitest's fork
-// pool gives each FILE its own process, and no two files shared a scope. It
-// stops being true the moment the gate runner gets a podman socket (#48) —
-// three issues gate concurrently at the default plan size, each running the
-// full suite, three processes inside one file.
+// pool gives each FILE its own process, and no two files shared a scope. #48
+// ended that by mounting the host's podman socket into the gate runner — three
+// issues gate concurrently at the default plan size, each running these files,
+// three processes inside one file, against one podman.
 //
 // WHAT ACTUALLY COLLIDES. Once the scope is per-process every *scoped* name —
 // pod, network, containers, `variantImageTag` refs — is disjoint by
@@ -104,10 +104,12 @@
 // which is a rough corner rootless. Every build would also run cold, and the
 // tests would exercise a podman configuration nothing in production uses.
 //
-// VERIFYING THIS BY HAND, and which check is worth running. The gate has no
-// podman, and `cleanup` sits in an `afterAll` inside a `describe.runIf` that
-// skips without one, so nothing automated ever executes any of this. The check
-// is two concurrent runners of one file, both passing:
+// VERIFYING THIS BY HAND, and which check is worth running. Since #48 the gate
+// DOES run `cleanup` — the socket makes `available` true in the runner — but
+// what it exercises there is one process reaping its own scope, which is the
+// case that was never in doubt. Nothing automated runs two at once, and the
+// concurrency is the whole claim. The check is two concurrent runners of one
+// file, both passing:
 //
 //   npx vitest run src/gate-stack-podman.test.ts &
 //   npx vitest run src/gate-stack-podman.test.ts &
@@ -117,7 +119,8 @@
 // one does is the point of writing this down. Run that pair against the
 // pre-#47 tree and both processes fail 24-27 of their 30 tests, on every
 // attempt — `startStack` force-removing the namesake pod out from under the
-// sibling. Against this tree both pass 30/30.
+// sibling. Against this tree both pass, all of them (28 since #48 moved three
+// host-only facts to gate-stack-hostpodman.test.ts).
 //
 // The same pair over `ensure-images-podman.test.ts` proves nothing on its own
 // and must not be recorded as evidence: it passes pre-#47 too, 0 failures in 6

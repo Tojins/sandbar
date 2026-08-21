@@ -69,9 +69,10 @@ export default {
         env: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "app" },
         readiness: { kind: "tcp", port: 3306 },
         readinessTimeoutMs: 120_000,               // default 60_000
-        // Optional: args (image CMD args), mounts (fixture files mounted
-        // read-only, hostPath relative to the GATED WORKTREE),
-        // postReadyCommands (one-shot setup exec'd after readiness).
+        // Optional: args (image CMD args), mounts (fixture files, hostPath
+        // relative to the GATED WORKTREE, read-only unless the entry says
+        // `mode: "rw"`), postReadyCommands (one-shot setup exec'd after
+        // readiness).
       },
       {
         name: "runner",
