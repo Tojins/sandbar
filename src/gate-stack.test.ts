@@ -27,6 +27,7 @@ import {
   lastProbeText,
   mountSpec,
   parseHealthLog,
+  parsePodLabel,
   podCreateArgs,
   type PodmanProbe,
   pollUntilHealthy,
@@ -144,6 +145,61 @@ describe("podCreateArgs", () => {
     const args = podCreateArgs({ podName: "p", networkName: "n" });
     expect(args).not.toContain("-p");
     expect(args.some((a) => a.includes("127.0.0.1::"))).toBe(false);
+  });
+
+  // #45. The token rides on the POD because the pod outlives every member, so
+  // it is the only place that can say what config the members were created
+  // from. No token, no label: a stack inside a run has nothing to reuse and a
+  // label there would be a claim nobody reads.
+  it("records the reuse token as a pod label, and only when given one", () => {
+    expect(
+      podCreateArgs({ podName: "p", networkName: "n", reuseToken: "abc123" }),
+    ).toEqual(
+      expect.arrayContaining(["--label", "sandbar.stack=abc123"]),
+    );
+    expect(podCreateArgs({ podName: "p", networkName: "n" })).not.toContain(
+      "--label",
+    );
+    expect(
+      podCreateArgs({ podName: "p", networkName: "n", reuseToken: undefined }),
+    ).not.toContain("--label");
+  });
+});
+
+// #45. The answer decides whether a live database is adopted or destroyed, so
+// every shape it does not recognise has to come back null — recreate, which is
+// only ever slower — rather than throw or guess.
+describe("parsePodLabel", () => {
+  const labelled = (labels: unknown): string =>
+    JSON.stringify({ Name: "p", Labels: labels });
+
+  // Podman has returned a bare object (4.x) and a one-element array (5.x) for
+  // `pod inspect` across the versions sandbar runs on, so both are accepted
+  // rather than one being assumed.
+  it("reads the label out of an object and out of a one-element array", () => {
+    expect(parsePodLabel(labelled({ "sandbar.stack": "tok" }), "sandbar.stack")).toBe(
+      "tok",
+    );
+    expect(
+      parsePodLabel(`[${labelled({ "sandbar.stack": "tok" })}]`, "sandbar.stack"),
+    ).toBe("tok");
+  });
+
+  it("returns null for a pod that carries no such label", () => {
+    expect(parsePodLabel(labelled({ other: "x" }), "sandbar.stack")).toBeNull();
+    // A pod created before the label existed reports `Labels: null`.
+    expect(parsePodLabel(labelled(null), "sandbar.stack")).toBeNull();
+    expect(parsePodLabel(JSON.stringify({ Name: "p" }), "sandbar.stack")).toBeNull();
+  });
+
+  it("returns null rather than throwing for anything it cannot read", () => {
+    expect(parsePodLabel("", "sandbar.stack")).toBeNull();
+    expect(parsePodLabel("not json", "sandbar.stack")).toBeNull();
+    expect(parsePodLabel("[]", "sandbar.stack")).toBeNull();
+    expect(parsePodLabel("null", "sandbar.stack")).toBeNull();
+    // A non-string label value is not a token; reading it as one would compare
+    // unequal anyway, but only by accident.
+    expect(parsePodLabel(labelled({ "sandbar.stack": 7 }), "sandbar.stack")).toBeNull();
   });
 });
 

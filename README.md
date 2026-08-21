@@ -38,6 +38,90 @@ nowhere to run it from that operates on the wrong repo.
 `run(config)` remains the API — the bin is thin, and a host that wants to embed
 sandbar can still `import { run } from "@offergeist/sandbar"` and call it.
 
+### `sandbar gate` — the gate stack on its own
+
+```sh
+npx sandbar gate                      # gate the current directory
+npx sandbar gate --worktree ../other  # …or some other tree
+npx sandbar gate --keep               # leave the stack up to poke at
+```
+
+Brings up `gateStack`, runs its steps in order, stops at the first red, and
+exits **0** green, **1** red, **2** if it could not reach a verdict at all. No
+tracker, no agents, no worktrees, no lock — so it runs on a laptop, in CI, and
+beside a live `sandbar` run on the same machine.
+
+**2 is narrower than it sounds, and the difference matters if you branch on it
+in CI.** A build that fails or a container that will not start is usually your
+branch's doing and is a **red**: any image sandbar builds for this stack is
+built from the tree being gated, so a lockfile that won't install fails the gate
+as `image:<tag>` — whether the tag was missing entirely or `rebuildOn` sent it
+to a per-branch variant — and an `attempt`-lifecycle container that won't come
+up fails it as `container:<name>`. 2 is for the cases that are not about the code at all —
+a config error, an image sandbar doesn't build that you haven't pulled, a
+podman it can't talk to, an `issue`-lifecycle container (your database, your
+mail catcher) that never becomes ready. Your `scripts/gate.sh`
+becomes this line, and readiness, step timeouts, teardown and log capture stop
+having a second implementation that drifts.
+
+Three differences from the gate inside a run, all of them because the standalone
+one has no commit to be a verdict about and no orchestrator to report to:
+
+- **It gates the working tree, dirty or not**, and says so when it is dirty.
+  Inside a run the gate refuses an uncommitted tree, because a green there
+  would certify something the merger cannot land; here you are asking about the
+  tree in front of you.
+- **Steps stream as they run.** Inside a run they are captured for a trace
+  nobody is watching live.
+- **`--keep` leaves the stack up**, and the next `sandbar gate` over the same
+  worktree then **reuses its `lifecycle: "issue"` containers** — the database
+  keeps its schema and its rows, and its `postReadyCommands` are not re-run.
+  That reuse is checked, not assumed: change any of those containers' config
+  (image, env, args, mounts, readiness, `postReadyCommands`, name), the
+  worktree, or sandbar's version, and the stack is rebuilt instead. A stack
+  whose own bringup never finished is torn down despite the flag, and says so —
+  keeping it would let the next invocation adopt a database whose
+  `postReadyCommands` never ran and then decline to re-run them. A stack it
+  merely *adopted* is kept even when that fails: if the database it picked up
+  has wedged since, you get it, its log and its pod name rather than a fresh
+  one, which is the whole reason to type `--keep`. Note the flip side — a
+  container that is running but permanently unhealthy is adopted and re-probed
+  by every later invocation, so fix it in place or remove the pod. Remove a kept
+  stack with the `podman pod rm -f …` line the command prints.
+
+It builds only the `config.images` entries a `gateStack` container actually
+runs. Your agent sandbox image is never built here — this command creates no
+sandbox, so building it would cost a cold CI checkout the whole agent image
+before the first gate container started, and let its build failure decide a
+gate it has nothing to do with.
+
+It does **not** run `sandboxHooks`. `onWorktreeReady` (your `npm ci`, typically)
+fires when *sandbar* creates a worktree; here the tree is yours and already
+exists, and reinstalling dependencies in your checkout on every invocation would
+be a surprise. A CI job starting from a bare checkout runs its own install line
+before `npx sandbar gate`.
+
+Two `sandbar gate` invocations over the **same** worktree collide — they share
+one set of podman names, which is what makes the reuse possible — so don't run
+two at once against one tree. Different worktrees, and a `sandbar` run on the
+same host, are disjoint by construction.
+
+`runGateCommand(config, { worktree, keep })` is the API, and it **returns** that
+exit code rather than throwing — including the 2, which is the whole reason
+`GATE_EXIT_GREEN`/`GATE_EXIT_RED`/`GATE_EXIT_NO_VERDICT` are exported beside it.
+
+```js
+process.exitCode = await runGateCommand(config, { worktree: ".", keep: false });
+```
+
+That is the bin, near enough — and **set the code rather than calling
+`process.exit(code)`**, which is not a style preference: the steps stream
+through `process.stdout.write`, and to a pipe (a CI log, a `| tee`) those writes
+are asynchronous, so exiting on the spot truncates the failing step's output —
+the diagnosis the exit code is about, lost only on red. Setting the code and
+letting node drain cannot. Faults are rendered to stderr on the way out; pass
+`out` and `err` sinks to put them somewhere else.
+
 `RunConfig` is **deviations-only**. Supply the repo-specific facts sandbar can't guess (required) plus only the knobs you want different from the defaults. Everything else falls through — don't restate a default.
 
 ```js

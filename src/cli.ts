@@ -22,7 +22,13 @@
 //     duplicates a config field creates a second source of truth, which is the
 //     thing this issue removes. `--help` and `--version` duplicate nothing and
 //     answer questions the config cannot, so they are not exceptions to that
-//     rule — there is still only one way to configure a run.
+//     rule — there is still only one way to configure a run. Neither are
+//     `gate`'s `--worktree` and `--keep` (#45), and it is worth saying why,
+//     because a subcommand with flags is what that rule looks like breaking:
+//     a run derives the tree it gates from an issue branch and tears the stack
+//     down with the issue, so there is no `RunConfig` field for either to
+//     duplicate. They name what a stack-only invocation has to be told and the
+//     config has no opinion about.
 //   - NO config search up the directory tree. `./sandbar.config.mjs` or an
 //     explicit path. "Which config did it find" is not a question worth the
 //     ergonomics, and an ambiguous answer to it is a run against the wrong
@@ -45,17 +51,24 @@
 // for them and wrong here.
 
 import { existsSync, realpathSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { RunConfig } from "./config.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, faultDetail } from "./errors.js";
+import { GATE_EXIT_NO_VERDICT, runGateCommand } from "./gate-run.js";
 import { run } from "./run.js";
+import { sandbarVersion } from "./version.js";
 
 const DEFAULT_CONFIG_FILE = "sandbar.config.mjs";
 
+// The one subcommand (#45). A literal rather than a registry: sandbar has one
+// verb and one noun, and a dispatch table for two entries is scaffolding for a
+// third that does not exist.
+const GATE_SUBCOMMAND = "gate";
+
 const USAGE = `Usage: sandbar [--config <path>]
+       sandbar gate [--config <path>] [--worktree <path>] [--keep]
 
   --config <path>   Config file to load. Default: ./${DEFAULT_CONFIG_FILE}
                     (resolved against the current directory). The file is an
@@ -64,10 +77,26 @@ const USAGE = `Usage: sandbar [--config <path>]
   --version         Print sandbar's version.
   --help            Print this message.
 
+\`sandbar\` runs the full agent loop. \`sandbar gate\` runs config.gateStack
+against one worktree and nothing else — no tracker, no agents, no lock — and
+exits 0 green, 1 red, 2 if it could not reach a verdict. It is what a laptop and
+a CI job run, so the gate has one implementation.
+
+  --worktree <path> The tree to gate. Default: the current directory.
+  --keep            Leave the stack up afterwards, to inspect a red gate. The
+                    next \`sandbar gate\` over the same worktree then reuses its
+                    issue-lifecycle containers instead of recreating them.
+
 Everything else is configured in that file — see the RunConfig type.`;
 
 export type ParsedArgs =
   | { readonly kind: "run"; readonly configPath: string }
+  | {
+      readonly kind: "gate";
+      readonly configPath: string;
+      readonly worktree: string;
+      readonly keep: boolean;
+    }
   | { readonly kind: "help" }
   | { readonly kind: "version" };
 
@@ -76,13 +105,23 @@ export type ParsedArgs =
 // mistyped flag must not be silently ignored and then run the default config
 // against the wrong repo.
 export function parseArgs(argv: readonly string[]): ParsedArgs {
+  // A subcommand only in FIRST position, and only the exact word. `sandbar
+  // --config x gate` is rejected rather than accepted-and-ignored, for the same
+  // reason a mistyped flag is: the two spellings would do entirely different
+  // things and the wrong one is a full agent run against a repo the operator
+  // meant to spot-check.
+  const isGate = argv[0] === GATE_SUBCOMMAND;
+  const rest = isGate ? argv.slice(1) : argv;
+
   let configPath: string | null = null;
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!;
+  let worktree: string | null = null;
+  let keep = false;
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i]!;
     if (arg === "--help" || arg === "-h") return { kind: "help" };
     if (arg === "--version" || arg === "-v") return { kind: "version" };
     if (arg === "--config") {
-      const value = argv[i + 1];
+      const value = rest[i + 1];
       if (value === undefined || value.startsWith("-")) {
         throw new SandbarError(`--config needs a path.\n\n${USAGE}`);
       }
@@ -96,11 +135,48 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       configPath = value;
       continue;
     }
+    // Gate-only flags are rejected on the run path by NAME rather than falling
+    // through to "unrecognised": `sandbar --keep` is someone who meant
+    // `sandbar gate --keep`, and telling them so beats a usage dump.
+    if (arg === "--worktree" || arg.startsWith("--worktree=") || arg === "--keep") {
+      if (!isGate) {
+        throw new SandbarError(
+          `'${arg}' is a \`sandbar gate\` flag; a run has no stack of its own ` +
+            `to point at or keep. Did you mean \`sandbar ${GATE_SUBCOMMAND} ` +
+            `${arg}\`?\n\n${USAGE}`,
+        );
+      }
+      if (arg === "--keep") {
+        keep = true;
+        continue;
+      }
+      if (arg === "--worktree") {
+        const value = rest[i + 1];
+        if (value === undefined || value.startsWith("-")) {
+          throw new SandbarError(`--worktree needs a path.\n\n${USAGE}`);
+        }
+        worktree = value;
+        i++;
+        continue;
+      }
+      const value = arg.slice("--worktree=".length);
+      if (!value) throw new SandbarError(`--worktree needs a path.\n\n${USAGE}`);
+      worktree = value;
+      continue;
+    }
     throw new SandbarError(
       `Unrecognised argument '${arg}'.\n\n${USAGE}`,
     );
   }
-  return { kind: "run", configPath: configPath ?? DEFAULT_CONFIG_FILE };
+  const resolvedConfigPath = configPath ?? DEFAULT_CONFIG_FILE;
+  return isGate
+    ? {
+        kind: "gate",
+        configPath: resolvedConfigPath,
+        worktree: worktree ?? ".",
+        keep,
+      }
+    : { kind: "run", configPath: resolvedConfigPath };
 }
 
 // Exported for cli.test.ts: every branch below is an operator-facing message
@@ -148,31 +224,55 @@ export async function loadConfig(configPath: string): Promise<RunConfig> {
   return config as RunConfig;
 }
 
-function version(): string {
-  try {
-    const require = createRequire(import.meta.url);
-    const pkg = require("../package.json") as { version?: string };
-    return pkg.version ?? "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
-async function main(): Promise<void> {
+async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.kind === "help") {
     console.log(USAGE);
-    return;
+    return 0;
   }
   if (parsed.kind === "version") {
-    console.log(version());
-    return;
+    console.log(sandbarVersion());
+    return 0;
   }
   // Against the process cwd, which is the one thing a shell invocation can
   // reasonably mean by a relative path — and the last place process.cwd() is
   // allowed to decide anything. From here on `cwd` is the config's directory.
   const configPath = resolve(process.cwd(), parsed.configPath);
+  if (parsed.kind === "gate") {
+    // `runGateCommand` returns its own exit code for every outcome INCLUDING
+    // the faults — that is the point of it having a third code, and of that
+    // code being exported (#45) — so the only throw left on this path is
+    // loading the config file itself, which happens before the command exists
+    // to have an opinion. It lands on the same code: a `sandbar gate` that
+    // never reached a verdict must never report one of the two codes that IS a
+    // verdict, and to a CI job a config typo and a container that would not
+    // start are the same "we do not know".
+    //
+    // Argument faults are the exception and stay on the outer handler's 1:
+    // they are answered before any config is loaded, they are the operator's
+    // shell rather than their repo, and a usage error exiting like a gate
+    // outcome is its own confusion.
+    let config: RunConfig;
+    try {
+      config = withDefaultCwd(await loadConfig(configPath), configPath);
+    } catch (err) {
+      console.error(faultDetail(err));
+      return GATE_EXIT_NO_VERDICT;
+    }
+    // `--worktree` stays relative to the process cwd, NOT to the config's
+    // directory. `cwd`'s default is the config's directory because a run
+    // operates on the repo the config sits in and there is no other candidate;
+    // a worktree is a path the operator typed at a shell, and re-rooting it
+    // somewhere else is the class of surprise this file exists to remove.
+    return await runGateCommand(config, {
+      worktree: parsed.worktree,
+      keep: parsed.keep,
+    });
+  }
+  // `run()` owns its own exit codes and calls `process.exit` for anything
+  // non-zero, so there is no code to return here.
   await run(withDefaultCwd(await loadConfig(configPath), configPath));
+  return 0;
 }
 
 // The bin's whole prize, and the reason it is a function rather than three
@@ -210,19 +310,23 @@ function isEntrypoint(): boolean {
 }
 
 // `run()` handles its own faults and exits; this catches what escapes before
-// it installs that handler. Same rule as run.ts's: an operator-actionable
-// SandbarError prints as its message alone, anything else prints a stack,
-// because an unexpected bug that prints like a config error is a bug nobody
-// can locate.
+// it installs that handler — and, since #45, whatever `main` returns, because
+// `sandbar gate` reports its verdict as an exit code and has nobody else to
+// report it to.
 if (isEntrypoint()) {
-  main().catch((err: unknown) => {
-    const detail =
-      err instanceof SandbarError
-        ? err.message
-        : err instanceof Error
-          ? (err.stack ?? err.message)
-          : String(err);
-    console.error(detail);
-    process.exit(1);
-  });
+  main()
+    // `process.exitCode`, NOT `process.exit(code)`. `sandbar gate` streams a
+    // whole test suite through `process.stdout.write`, and to a pipe — a CI
+    // log, a `| tee` — those writes are asynchronous, so `process.exit` on the
+    // red path would truncate the output the exit code is about. Setting the
+    // code and letting node drain is the only spelling that cannot. Nothing
+    // here holds the loop open afterwards: the teardown is awaited, and node's
+    // signal handles are unref'd.
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((err: unknown) => {
+      console.error(faultDetail(err));
+      process.exit(1);
+    });
 }

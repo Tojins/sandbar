@@ -47,11 +47,13 @@ import {
   checkWorktreeImageUids,
   createBranchImages,
   ensureImages,
+  pulledImagesOf,
   removeBranchImages,
   sweepBranchImages,
+  worktreeMountingTagsOf,
 } from "./ensure-images.js";
 import { makeEnvReader } from "./env.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, faultDetail } from "./errors.js";
 import {
   EXIT_CODE_BUDGET,
   applyCycle,
@@ -110,16 +112,6 @@ const MAX_ITERATIONS = 100;
 // The merge phase's stack id. Distinct from every issue id (which are numeric),
 // so its pod, network and containers can never collide with an issue's.
 const MERGER_STACK_ID = "merger";
-
-// Images the gate stack references that sandbar does NOT build. Preflight
-// refuses when one is missing rather than pulling it (#24 D7) — a run must not
-// do silent network work at startup, and a `podman pull` behind the lock turns
-// a config error into a slow one.
-function pulledImagesOf(config: ResolvedConfig): readonly string[] {
-  const built = new Set(config.images.map((i) => i.tag));
-  const referenced = new Set(config.gateStack.containers.map((c) => c.image));
-  return [...referenced].filter((i) => !built.has(i));
-}
 
 // A leaked resource is recoverable — the next cycle's `startStack` force-removes
 // a namesake before creating one — so a failed sweep is not fatal. It is also
@@ -342,11 +334,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     // D3, re-asked for anything the branch rebuilds. The startup check below
     // covers the declared images once; a variant is built from a Containerfile
     // the branch may have edited, so its uid is not the one that was probed.
-    worktreeMountingTags: new Set(
-      config.gateStack.containers
-        .filter((c) => c.mountWorktree !== null)
-        .map((c) => c.image),
-    ),
+    worktreeMountingTags: worktreeMountingTagsOf(config.gateStack),
     hostUid: process.getuid?.() ?? 0,
   });
   onCleanup(async () => {
@@ -838,14 +826,11 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     // the LAST thing printed — no success banner after it to push it up the
     // scrollback — then run cleanup and exit non-zero. SandbarError is an
     // expected, operator-actionable fault so we print its message alone; any
-    // other error is an unexpected bug, so we include the stack.
+    // other error is an unexpected bug, so we include the stack — which is
+    // `faultDetail`'s rule, shared with the bin and with `runGateCommand`
+    // rather than restated here (#45).
     const banner = "═".repeat(72);
-    const detail =
-      err instanceof SandbarError
-        ? err.message
-        : err instanceof Error
-          ? (err.stack ?? err.message)
-          : String(err);
+    const detail = faultDetail(err);
     console.error(`\n${banner}\nSANDBAR HALTED — internal failure\n${banner}\n${detail}\n${banner}`);
     cleanupReason = "sandbar-internal-error";
     await runLogger.appendOrchestrator(`HALTED — internal failure: ${detail}`);

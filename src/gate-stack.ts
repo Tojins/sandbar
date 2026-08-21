@@ -395,9 +395,20 @@ export type BoundedResult = {
 // Exported since #44: sandbox-stack.ts drives podman for the sandbox siblings
 // and every claim this module makes about not hanging (and about `podman exec`
 // exiting 0 on SIGTERM) applies there verbatim.
+//
+// `onChunk` is a TEE, not a replacement for the buffering (#45). The standalone
+// `sandbar gate` has a human or a CI log in front of it, and a step that prints
+// nothing for fifteen minutes and then dumps everything at once is a worse
+// runner than the bash script it replaces. Every consumer of `BoundedResult`
+// still gets the complete captured output — the gate trace, the D9 log block
+// and `summarizeGateFailure` all read the buffer, so nothing downstream has to
+// know whether anyone was watching. `execFile` collects through its own
+// listeners on the same streams, and a second `data` listener sees the same
+// chunks, so this costs one extra listener and no behaviour.
 export function boundedPodman(
   args: readonly string[],
   timeoutMs: number,
+  onChunk?: (chunk: string) => void,
 ): Promise<BoundedResult> {
   return new Promise((resolve) => {
     let killedByTimer = false;
@@ -432,6 +443,19 @@ export function boundedPodman(
         });
       },
     );
+    if (onChunk !== undefined) {
+      // ANSI-stripped here rather than at the sink, so the live view and the
+      // trace read alike — a stream showing raw `^[[90m` where the trace shows
+      // clean text is two accounts of one step. Per CHUNK, so an escape or a
+      // multi-byte character straddling a chunk boundary survives into the live
+      // view; that is a cosmetic artefact of the tee alone and never reaches
+      // the buffer, which node decodes whole.
+      const tee = (buf: Buffer | string): void => {
+        onChunk(stripAnsi(buf.toString()));
+      };
+      child.stdout?.on("data", tee);
+      child.stderr?.on("data", tee);
+    }
     timer = setTimeout(() => {
       killedByTimer = true;
       child.kill("SIGKILL");
@@ -571,11 +595,82 @@ export type StackOptions = {
   // runs would pay for a build the gate cannot use and let that build's failure
   // red a gate it has nothing to do with.
   readonly images?: (only: ReadonlySet<string>) => Promise<ImageMap>;
+
+  // -------------------------------------------------------------------------
+  // The standalone `sandbar gate` (#45). Every field below is omitted by every
+  // caller inside a run, and each one is a deliberate exception to a rule this
+  // module states elsewhere — so they are named for what they suspend, not for
+  // what they enable.
+  // -------------------------------------------------------------------------
+
+  // Reuse an `issue`-lifecycle container that is still running from a previous
+  // invocation, instead of recreating it — the half of #45 that makes
+  // `sandbar gate` as fast as the bash script it replaces (its database survives
+  // between runs). Inside a run the question never arises: a stack is created
+  // and destroyed with its issue, so there is never a predecessor.
+  //
+  // The token is what makes the reuse SOUND rather than merely fast. It is
+  // recorded on the pod at creation and compared here, so a stack whose config
+  // has changed since — a new env var on the database, a different mount, a
+  // renamed step — is torn down and rebuilt rather than silently gating against
+  // the container the old config described. `gate-run.ts` derives it from the
+  // resolved spec; this module only carries it. A mismatch, an unreadable
+  // label, or a pod that predates the label all mean "recreate", which is only
+  // ever slower.
+  //
+  // What it does NOT cover is the image: a reused container may be running a
+  // tag the branch has since moved. That is `runGate`'s existing staleness
+  // check, which recreates it — `startStack` seeds `running.map` from what the
+  // reused containers are ACTUALLY running so that check has something true to
+  // compare against.
+  readonly reuseToken?: string | undefined;
+
+  // Leave the whole stack up when `stop()` is called, so an operator can poke
+  // at a red gate's containers (`GATE_KEEP=true` in the script #45 deletes).
+  // `stop` stays registered with `onCleanup` and stays idempotent; it simply
+  // removes nothing, which is what makes a Ctrl-C mid-gate keep the stack too —
+  // the state the operator asked to be able to inspect.
+  //
+  // It keeps a stack in which nothing is HALF-BUILT, and only that. A bringup
+  // of this call's own that threw — or a signal during one — tears down
+  // regardless, because the reuse above would otherwise adopt a half-built
+  // stack as one this config describes. A failure over containers this call
+  // only ADOPTED does not tear down: they were completed under the invocation
+  // that kept them, which kept them under this same condition. The argument is
+  // at `stop`'s own early return, since that is where the condition is
+  // enforced.
+  readonly keepAlive?: boolean;
+
+  // Skip D1's dirty-worktree refusal.
+  //
+  // D1 refuses to gate a tree that is not its HEAD because a verdict inside the
+  // loop is about a COMMIT: the merger only ever sees commits, so a green over
+  // uncommitted work certifies something no merge can contain. A standalone
+  // gate has no merger and no commit — the operator is asking about the tree in
+  // front of them, which on a laptop is the tree with their edits in it. Keep
+  // the refusal there and `sandbar gate` cannot replace `scripts/gate.sh` at
+  // all, since the first thing anyone runs it on is work in progress.
+  //
+  // The distinction is not dropped, only moved: `gate-run.ts` reports the dirty
+  // paths and says the verdict is about the working tree. Nothing inside a run
+  // may pass this.
+  readonly allowDirtyWorktree?: boolean;
+
+  // Tee each step's output as it arrives (see `boundedPodman`). Absent, output
+  // is captured only, which is what a run wants — its steps report through the
+  // attempt log and a gate trace, and nobody is watching a terminal.
+  readonly onStepOutput?: (chunk: string) => void;
 };
 
 export type Stack = {
   readonly podName: string;
   readonly networkName: string;
+  // Which containers this call adopted from a previous invocation rather than
+  // creating, by their configured names (#45). Always empty without
+  // `reuseToken`. Reported by the caller, because "your database is 40 minutes
+  // old" is exactly what an operator debugging a surprising verdict needs to be
+  // told without having to ask podman.
+  readonly reused: readonly string[];
   // Recreate the attempt-lifecycle containers and run every step in order.
   readonly runGate: () => Promise<GateResult>;
   readonly stop: () => Promise<void>;
@@ -607,11 +702,32 @@ export type Stack = {
 // recreated, still broken. Quoting `message` there would nest a second
 // "Container log tail:" heading inside the first; quoting `reason` and passing
 // the tail and health log on as fields keeps one of each.
+//
+// `keptStack` is the pod this error was raised over when `--keep` left it
+// standing (#45) — see the field.
 export class ContainerBringupError extends SandbarError {
   readonly containerName: string;
   readonly reason: string;
   readonly logTail: string;
   readonly healthLog: string;
+  // The stack a `--keep` invocation left up when this error was raised, or
+  // null — which is what it is for every throw inside a run, and for every
+  // standalone gate that kept nothing.
+  //
+  // Not a constructor argument, because no throw site can know it: the answer
+  // is "did `startStack`'s own `stop()` return early", and only that catch
+  // knows both halves — the pod identity, and what its own teardown did with
+  // it. So it is filled in there, in the statement that computes the fact.
+  //
+  // It exists because the caller cannot infer it, and got it wrong in exactly
+  // the case `--keep` is for. `gate-run.ts` had only the absent stack handle to
+  // reason from, so an ADOPTED stack whose re-probe failed — standing,
+  // complete, and the one thing its operator asked to be able to poke at — was
+  // announced as "it never finished coming up, and a half-built stack is one
+  // the next invocation would adopt as if its postReadyCommands had run". Both
+  // clauses false: it finished coming up under the invocation that kept it, and
+  // nothing in it is half-built.
+  keptStack: KeptStack | null = null;
   constructor(
     containerName: string,
     message: string,
@@ -637,6 +753,13 @@ export class ContainerBringupError extends SandbarError {
     this.healthLog = healthLog;
   }
 }
+
+// A stack that is still up, named the two ways it has to be named for anyone to
+// inspect it or get rid of it again.
+export type KeptStack = {
+  readonly podName: string;
+  readonly networkName: string;
+};
 
 // ---------------------------------------------------------------------------
 // Pure argv builders — the real adapters' blind spot is that a fake satisfies
@@ -667,6 +790,11 @@ export function mountSpec(
 export function podCreateArgs(opts: {
   readonly podName: string;
   readonly networkName: string;
+  // The reuse token (#45), recorded on the pod so a later invocation can ask
+  // whether the stack still up is the stack its config describes. Omitted for
+  // every stack inside a run, which is torn down with the issue and has nothing
+  // to reuse.
+  readonly reuseToken?: string | undefined;
 }): string[] {
   return [
     "pod",
@@ -676,7 +804,37 @@ export function podCreateArgs(opts: {
     "--network",
     opts.networkName,
     ...DNS_SERVERS.flatMap((s) => ["--dns", s]),
+    ...(opts.reuseToken === undefined
+      ? []
+      : ["--label", `${REUSE_TOKEN_LABEL}=${opts.reuseToken}`]),
   ];
+}
+
+// The pod label carrying the reuse token (#45).
+export const REUSE_TOKEN_LABEL = "sandbar.stack";
+
+// Read one label off an existing pod, from `podman pod inspect`'s JSON.
+//
+// A pure parser rather than an `--format` template, and both halves of that are
+// deliberate. Podman's `pod inspect` has returned a bare OBJECT (4.x) and an
+// ARRAY of one (5.x) across the versions sandbar is used on, so the shape is
+// something to accept rather than assume; and this answer decides whether a
+// live database is REUSED or torn down, so it degrades to null — recreate,
+// which is only ever slower — for anything it does not recognise, exactly as
+// `parseHealthLog` degrades to no health block.
+export function parsePodLabel(json: string, key: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json.trim());
+  } catch {
+    return null;
+  }
+  const one = Array.isArray(parsed) ? parsed[0] : parsed;
+  if (typeof one !== "object" || one === null) return null;
+  const labels = (one as { Labels?: unknown }).Labels;
+  if (typeof labels !== "object" || labels === null) return null;
+  const value = (labels as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : null;
 }
 
 // The `run` flags that register a readiness probe podman will evaluate on
@@ -902,9 +1060,83 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     stackContainerNameFor(opts.scope, opts.stackId, c.name);
 
   let stopped = false;
+  // Is the pod free of anything half-built? `--keep` is conditioned on it, and
+  // that condition is the whole of what makes adopting a kept stack sound
+  // (#45) — see the early return in `stop`. Set the moment the bringup THIS
+  // CALL performs is past, which on the adoption path is immediately: what it
+  // adopted was completed under the invocation that kept it.
+  let broughtUp = false;
+  // …and what `stop` then did with the pod, for the catch below to attach to
+  // the error. Read rather than recomputed, so it cannot come to disagree with
+  // the early return that produced it.
+  let podKept = false;
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    // `--keep` (#45). Registered and idempotent exactly as before, so nothing
+    // about the cleanup contract changes — this teardown simply has nothing to
+    // do. Placed after the `stopped` latch rather than before the registration
+    // so a signal still runs the action and still finds it already spent.
+    //
+    // But ONLY while nothing in the pod is HALF-BUILT, and that half is
+    // load-bearing rather than tidy. The reuse token is a pod LABEL written at
+    // pod-create time, and the adopt test is "podman says this container is
+    // running" — neither of which says the previous invocation's bringup
+    // finished. A half-built stack kept here is therefore fully adoptable by
+    // the next invocation of the same config, and `bringUpContainers` starts
+    // every container, then probes every one, then runs every
+    // `postReadyCommand`, so a failure anywhere in that sequence leaves earlier
+    // containers running, healthy, and missing the migration or the seed that
+    // was to follow. The next `sandbar gate` re-probes them (they pass — they
+    // were never unhealthy), deliberately does not re-run their
+    // `postReadyCommands`, and forms a verdict against a database whose
+    // declared setup never ran: a stack that does not match its config, reached
+    // through the mechanism whose whole soundness argument is that the token
+    // proves it does. So a stack carrying such wreckage is not a stack to keep.
+    // This covers the signal paths that RUN it, which is why the flag is read
+    // here rather than at the one throw site: a Ctrl-C mid-bringup would
+    // otherwise leave exactly the same adoptable wreckage.
+    //
+    // `broughtUp` is that fact and NOT the stronger "every container in this
+    // pod came up under this call", because the two differ on exactly one path
+    // and it is the path `--keep` exists to serve. On the adoption path this
+    // call creates nothing: it re-probes containers an earlier invocation
+    // built, and a probe that fails there — a database that has wedged since,
+    // a host that suspended — leaves a pod in which nothing is half-built.
+    // Destroying it would take the database and everything its
+    // `postReadyCommands` built, at the moment its log is the only diagnosis
+    // available, which is the entire reason someone typed the flag. The
+    // invariant survives inductively: invocation N keeps its pod only if its
+    // own `broughtUp` was true, so whatever this call adopted was completed
+    // under that invocation's own guarantee.
+    //
+    // The counter-argument, recorded because it is real: an adopted container
+    // that can never pass its probe wedges every LATER invocation too, since
+    // `containerState` reports wedged-but-running as `running`, where a stopped
+    // one would simply be recreated. What answers it is that the wedge is one
+    // documented command deep — the `pod rm -f` line the kept-stack notice
+    // prints — while what tearing it down destroys is unrecoverable. A
+    // debugging flag should hand back the broken thing, not a fresh one and not
+    // nothing.
+    //
+    // SIGKILL is the residual, and it is stated rather than closed. Killed
+    // between the `pod create` that writes the token label and the end of the
+    // bringup, nothing runs at all, so what is left is a pod carrying a
+    // matching token over an `issue` container that is up and healthy and
+    // whose `postReadyCommands` never ran — adoptable by the next invocation
+    // of the same config, which is the failure this paragraph exists to
+    // prevent, arriving by the one route no teardown can cover. Podman cannot
+    // relabel a pod after the fact, so the close is to write the label only
+    // once the bringup has finished, which is a second control-plane call on
+    // every ordinary path for a case whose cost is one `pod rm -f`. Same shape
+    // as the variant image a SIGKILLed gate leaks, and recorded beside it.
+    //
+    // A red gate STEP — which is what `--keep` is actually for — is untouched:
+    // that path never enters the catch and `broughtUp` is long since true.
+    if (opts.keepAlive === true && broughtUp) {
+      podKept = true;
+      return;
+    }
     // `pod rm -f` takes the member containers AND the infra container with it.
     // The infra container is named `<pod-id-prefix>-infra`, which matches no
     // sandbar prefix — removing containers by name would leave it, and the pod,
@@ -953,33 +1185,70 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   onCleanup(stop);
 
   try {
-    // A namesake surviving an older run may be DNS-enabled or otherwise stale
-    // and must never be reused. `rm -f` no-ops when absent, so this is the
-    // recreate-once migration and the first-time create in one step.
+    // Is there a stack up that this call may adopt (#45)? Only ever true for a
+    // standalone `sandbar gate`, which passes a token; every stack inside a run
+    // skips straight to the recreate below.
     //
-    // "an older run" is only true because the name carries `opts.scope` (#28).
-    // Unscoped, the only namesake a second run against a different repo could
-    // find for issue 42 was the FIRST run's live pod, and this line tore it
-    // down — the victim just watched its containers disappear mid-gate.
-    await boundedPodman(POD_RM_ARGS(podName), CONTROL_TIMEOUT_MS);
-    await boundedPodman(
-      ["network", "rm", "-f", networkName],
-      CONTROL_TIMEOUT_MS,
-    );
-    await mustSucceed(
-      ["network", "create", "--disable-dns", networkName],
-      `create network ${networkName}`,
-    );
-    await mustSucceed(
-      podCreateArgs({ podName, networkName }),
-      `create pod ${podName}`,
-    );
+    // The token has to be compared BEFORE the `pod rm -f`, because that line is
+    // what a reuse has to avoid, and it is asked of the POD rather than of the
+    // containers: the pod is the one resource that outlives every member, so it
+    // is the only honest place to record what config the members were created
+    // from.
+    const reusing =
+      opts.reuseToken !== undefined &&
+      (await podReuseToken(podName)) === opts.reuseToken;
+
+    if (!reusing) {
+      // A namesake surviving an older run may be DNS-enabled or otherwise stale
+      // and must never be reused. `rm -f` no-ops when absent, so this is the
+      // recreate-once migration and the first-time create in one step.
+      //
+      // "an older run" is only true because the name carries `opts.scope` (#28).
+      // Unscoped, the only namesake a second run against a different repo could
+      // find for issue 42 was the FIRST run's live pod, and this line tore it
+      // down — the victim just watched its containers disappear mid-gate.
+      await boundedPodman(POD_RM_ARGS(podName), CONTROL_TIMEOUT_MS);
+      await boundedPodman(
+        ["network", "rm", "-f", networkName],
+        CONTROL_TIMEOUT_MS,
+      );
+      await mustSucceed(
+        ["network", "create", "--disable-dns", networkName],
+        `create network ${networkName}`,
+      );
+      await mustSucceed(
+        podCreateArgs({ podName, networkName, reuseToken: opts.reuseToken }),
+        `create pod ${podName}`,
+      );
+    }
 
     const attach: ContainerAttachment = { kind: "pod", podName };
 
     const issueContainers = opts.spec.containers.filter(
       (c) => c.lifecycle === "issue",
     );
+    // Split only under reuse; otherwise the pod was just created and nothing
+    // can be running in it. `running` here means podman says so — a stopped or
+    // removed one is rebuilt, which is the answer
+    // `assertIssueContainersAlive` would give a moment later anyway, reached
+    // while it can still be acted on. `unknown` counts as NOT reusable, and
+    // that asymmetry with every other reader of that state (which treats it as
+    // no evidence and defers) is deliberate: there the cost of being wrong is a
+    // HARD-ERROR storm, here it is one container recreated.
+    //
+    // The SPLIT is for bringup alone. `runStackGate` keeps the whole list, so a
+    // reused container is liveness-checked and staleness-checked exactly like
+    // one this call started — the reuse is a claim about who created it, never
+    // an exemption from the checks.
+    const reused: ResolvedStackContainer[] = [];
+    const freshIssueContainers: ResolvedStackContainer[] = [];
+    for (const c of issueContainers) {
+      if (reusing && (await containerState(nameOf(c))) === "running") {
+        reused.push(c);
+      } else {
+        freshIssueContainers.push(c);
+      }
+    }
     // Brought up with the images config NAMES, deliberately, even when some of
     // them are `rebuildOn` images the branch may already have changed (#37).
     // Resolving here would put a per-branch build — which can fail because of
@@ -992,12 +1261,36 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // Nothing of the branch runs at this point in any case: `resolveGateStack`
     // refuses `lifecycle: "issue"` on an un-held container that mounts the
     // worktree, and a held one's entrypoint is `sleep infinity`.
-    await bringUpContainers(issueContainers, {
+    await bringUpContainers(freshIssueContainers, {
       attach,
       label: GATE_LABEL,
       worktreePath: opts.worktreePath,
       nameOf,
     });
+    // Past this statement nothing THIS CALL created is half-built, which is the
+    // fact `--keep` is conditioned on (see `stop`). Here rather than after the
+    // last statement that can throw, because everything below creates nothing:
+    // the re-probe asks an adopted container a question and `runningImages`
+    // reads. So on a fresh bringup the position makes no difference at all —
+    // `reused` is empty, neither of those can fail — and on the adoption path
+    // it is the whole difference between keeping a wedged database and
+    // destroying it.
+    broughtUp = true;
+
+    // A reused container is not re-created, but it IS re-probed (#45). Its
+    // `postReadyCommands` are deliberately not re-run — they are one-shot setup
+    // per container, and re-running the migration that made the reuse worth
+    // having is the whole cost the reuse exists to avoid — but "it was ready an
+    // hour ago" is not evidence that it is ready now: the host may have
+    // suspended, the service may have wedged. One `podman healthcheck run` is
+    // cheap and is the same question bringup asks.
+    //
+    // A probe that fails here raises `ContainerBringupError` from the shared
+    // poll, which for an `issue` container is D5's infra throw — correct, and
+    // it lands on the standalone gate's non-verdict exit rather than on a red.
+    for (const c of reused) {
+      await waitForReady(nameOf(c), c, GATE_LABEL);
+    }
 
     const attemptContainers = opts.spec.containers.filter(
       (c) => c.lifecycle === "attempt",
@@ -1007,7 +1300,15 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // in the same shape `opts.images` returns. Mutable and owned by the stack:
     // it is how `runGate` knows which issue containers a changed image leaves
     // stale, and the empty map above is the honest starting value.
-    const running = { map: new Map<string, string>() as ImageMap };
+    //
+    // Honest only for containers THIS call created. A reused one was created by
+    // an earlier invocation, possibly from a per-branch variant tag, so its
+    // entry is read back off podman (#45) — an empty map would claim it is on
+    // the declared tag, which either recreates a perfectly good container every
+    // invocation or, worse, agrees with a declared tag it is not running.
+    const running: { map: ImageMap } = {
+      map: await runningImages(reused, nameOf),
+    };
     const imageResolver = opts.images;
     // Computed here, from this stack's own spec, so no caller can hand the
     // shared resolver a superset (#46).
@@ -1016,6 +1317,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     return {
       podName,
       networkName,
+      reused: reused.map((c) => c.name),
       stop,
       runGate: () =>
         runStackGate({
@@ -1029,6 +1331,8 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
             ? () => imageResolver(imagesThisStackRuns)
             : async () => new Map(),
           running,
+          allowDirtyWorktree: opts.allowDirtyWorktree === true,
+          onStepOutput: opts.onStepOutput,
         }),
     };
   } catch (err) {
@@ -1039,6 +1343,21 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
         stopErr instanceof Error ? stopErr.message : String(stopErr),
       );
     });
+    // What that `stop` DID with the pod, carried out on the error rather than
+    // left for whoever catches it to infer (#45). This is the one place that
+    // knows both — the pod identity, and whether its own early return kept it
+    // — so the fact and the claim made about it are computed in one statement.
+    // A caller reasoning instead from the absence of a stack handle gets it
+    // wrong in exactly one case, and it is the case the flag exists for: an
+    // adopted stack whose re-probe failed is still standing, and telling its
+    // operator that it never finished coming up is false twice over.
+    //
+    // Only `ContainerBringupError` carries it, which costs nothing: reaching
+    // here with a kept pod means `broughtUp` was already true, and the only
+    // thing that throws past that point is the adopted containers' re-probe.
+    if (podKept && err instanceof ContainerBringupError) {
+      err.keptStack = { podName, networkName };
+    }
     throw err;
   }
 }
@@ -1064,6 +1383,76 @@ async function readHealthLog(
   );
   if (!boundedOk(r)) return [];
   return parseHealthLog(r.stdout);
+}
+
+// The reuse token recorded on an existing pod (#45), or null for a pod that is
+// absent, unreadable, or predates the label.
+//
+// Never throws and never distinguishes its failures, because every one of them
+// has the same consequence: the pod is force-removed and the stack rebuilt,
+// which is what would have happened without a token at all. A reuse that cannot
+// prove itself is not a reuse.
+async function podReuseToken(podName: string): Promise<string | null> {
+  const r = await boundedPodman(
+    ["pod", "inspect", podName],
+    LOG_READ_TIMEOUT_MS,
+  );
+  if (!boundedOk(r)) return null;
+  return parsePodLabel(r.stdout, REUSE_TOKEN_LABEL);
+}
+
+// What the reused containers are actually running, as the declared-tag ->
+// running-tag map `runGate`'s staleness check compares against (#45).
+//
+// An UNMAPPED container means "running what its config names", which is the
+// same convention `imageFor` uses everywhere else and the honest answer for
+// every reused container the tree has not moved under. A mapping is recorded
+// only when the container is on something else — a per-branch variant an
+// earlier invocation built — and that is exactly what makes the staleness check
+// recreate it.
+//
+// `.Config.Image` is the reference the container was CREATED from: the same
+// string `containerRunArgs` put on the command line, which is what the check
+// compares against. But podman is free to answer in a spelling the config did
+// not use, and an unqualified `mariadb:10.11` coming back
+// `docker.io/library/mariadb:10.11` would make every reused container look
+// stale and be recreated — reuse defeated, silently, by a string comparison.
+// So a difference in the STRING is settled by comparing image IDs before it is
+// believed. Anything unreadable contributes nothing and therefore recreates:
+// wrong only in the direction that costs time.
+async function runningImages(
+  reused: readonly ResolvedStackContainer[],
+  nameOf: (c: ResolvedStackContainer) => string,
+): Promise<ImageMap> {
+  const map = new Map<string, string>();
+  for (const c of reused) {
+    const r = await boundedPodman(
+      ["inspect", "--format", "{{.Config.Image}}", nameOf(c)],
+      LOG_READ_TIMEOUT_MS,
+    );
+    if (!boundedOk(r)) continue;
+    const image = r.stdout.trim();
+    if (!image || image === c.image) continue;
+    if (!(await sameImage(image, c.image))) map.set(c.image, image);
+  }
+  return map;
+}
+
+// Do two references name the same image right now? Used only to stop a
+// spelling difference from reading as staleness (#45). A reference podman
+// cannot resolve — a tag removed since the container was created — answers
+// false, which is both true and the safe direction.
+async function sameImage(a: string, b: string): Promise<boolean> {
+  const idOf = async (ref: string): Promise<string | null> => {
+    const r = await boundedPodman(
+      ["image", "inspect", "--format", "{{.Id}}", ref],
+      LOG_READ_TIMEOUT_MS,
+    );
+    if (!boundedOk(r)) return null;
+    return r.stdout.trim() || null;
+  };
+  const idA = await idOf(a);
+  return idA !== null && idA === (await idOf(b));
 }
 
 // The text the readiness timeout puts in its `last probe:` slot.
@@ -1656,6 +2045,9 @@ type RunGateCtx = {
   readonly images: () => Promise<ImageMap>;
   // Mutable, owned by `startStack`: what the issue containers are running now.
   readonly running: { map: ImageMap };
+  // #45; see `StackOptions`. Both false/absent for every gate inside a run.
+  readonly allowDirtyWorktree: boolean;
+  readonly onStepOutput?: ((chunk: string) => void) | undefined;
 };
 
 // The long-lived half of the stack, re-checked before every gate run.
@@ -1851,7 +2243,15 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   // also covers gate-2 in the merger worktree, where the resolve agent can
   // leave edits behind; the inner loop short-circuits earlier (the state
   // machine re-prompts the implementer to commit) and never reaches here dirty.
-  const dirty = await dirtyWorktreePaths(ctx.worktreePath);
+  //
+  // Suspended for the standalone `sandbar gate` alone (#45), where there is no
+  // merger and no commit and the operator means the tree in front of them. The
+  // read itself is skipped rather than merely ignored: a tree handed to
+  // `sandbar gate` need not be a git worktree at all, and `git status` throws
+  // rather than shrugging when it is not.
+  const dirty = ctx.allowDirtyWorktree
+    ? []
+    : await dirtyWorktreePaths(ctx.worktreePath);
   if (dirty.length > 0) {
     return {
       ok: false,
@@ -1909,9 +2309,27 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   // than a HARD-ERROR, and that is a deliberate exception to D5: D5 maps
   // `issue` to infra because such a container depends only on image + env, and
   // an image the branch authored is precisely where that stops being true.
-  const staleIssueContainers = ctx.issueContainers.filter(
-    (c) => imageFor(c, images) !== imageFor(c, ctx.running.map),
-  );
+  //
+  // A difference in the STRING is not yet staleness, and settling it by image
+  // ID is the same guard `runningImages` applies one comparison earlier — it
+  // has to be applied here too, because the value it records for a reused
+  // container is podman's spelling of a reference while the value compared
+  // against it is the resolver's (#45). The two can differ on a normalising
+  // prefix alone (`localhost/app:gate-sb-…` against the unqualified tag the
+  // config wrote), and reading that as staleness recreates the very container
+  // `--keep` was asked to preserve, re-runs its `postReadyCommands`, and says
+  // nothing — reuse defeated silently, once per invocation, which is the
+  // outcome the earlier guard exists to prevent arriving one comparison later.
+  // The extra podman call is paid only where a recreate was already about to
+  // be.
+  const staleIssueContainers: ResolvedStackContainer[] = [];
+  for (const c of ctx.issueContainers) {
+    const wanted = imageFor(c, images);
+    const running = imageFor(c, ctx.running.map);
+    if (wanted === running) continue;
+    if (await sameImage(wanted, running)) continue;
+    staleIssueContainers.push(c);
+  }
   if (staleIssueContainers.length > 0) {
     try {
       await bringUpContainers(withImages(staleIssueContainers, images), {
@@ -1996,9 +2414,14 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     }
     const containerName = ctx.nameOf(container);
     const banner = `\n== ${step.name} (${step.in})\n`;
+    // The banner goes to the live view too, and before the step rather than
+    // with its first byte: a step that produces nothing for minutes is exactly
+    // the one whose name a watcher needs (#45).
+    ctx.onStepOutput?.(banner);
     const r = await boundedPodman(
       stepExecArgs(containerName, step.command),
       step.timeoutMs,
+      ctx.onStepOutput,
     );
     if (boundedOk(r)) {
       stdout += banner + stripAnsi(r.stdout);

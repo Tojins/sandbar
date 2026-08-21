@@ -65,6 +65,67 @@ describe("parseArgs", () => {
   });
 });
 
+// #45 — the one subcommand.
+describe("parseArgs: the gate subcommand", () => {
+  it("defaults the worktree to the current directory and keeps nothing", () => {
+    expect(parseArgs(["gate"])).toEqual({
+      kind: "gate",
+      configPath: "sandbar.config.mjs",
+      worktree: ".",
+      keep: false,
+    });
+  });
+
+  it("takes --config, --worktree in both spellings, and --keep", () => {
+    expect(parseArgs(["gate", "--config", "o.mjs", "--worktree", "/w", "--keep"])).toEqual(
+      { kind: "gate", configPath: "o.mjs", worktree: "/w", keep: true },
+    );
+    expect(parseArgs(["gate", "--config=o.mjs", "--worktree=/w"])).toEqual({
+      kind: "gate",
+      configPath: "o.mjs",
+      worktree: "/w",
+      keep: false,
+    });
+  });
+
+  // The subcommand is first-position only. Accepted anywhere, `sandbar --config
+  // x gate` and `sandbar gate --config x` would look alike and do entirely
+  // different things — one runs the full agent loop.
+  it("only recognises `gate` in first position", () => {
+    expect(() => parseArgs(["--config", "x.mjs", "gate"])).toThrow(
+      /Unrecognised argument 'gate'/,
+    );
+  });
+
+  // The mirror of that: a gate flag on the run path is someone who dropped the
+  // subcommand, and the whole point of the refusal is that they are told so
+  // rather than shown a usage dump for an "unrecognised" flag that exists.
+  it("names the subcommand when a gate flag arrives without it", () => {
+    expect(() => parseArgs(["--keep"])).toThrow(/sandbar gate --keep/);
+    expect(() => parseArgs(["--worktree", "/w"])).toThrow(/is a `sandbar gate` flag/);
+    expect(() => parseArgs(["--worktree=/w"])).toThrow(/is a `sandbar gate` flag/);
+  });
+
+  it("refuses --worktree with no value, or with a flag as its value", () => {
+    expect(() => parseArgs(["gate", "--worktree"])).toThrow(
+      /--worktree needs a path/,
+    );
+    expect(() => parseArgs(["gate", "--worktree", "--keep"])).toThrow(
+      /--worktree needs a path/,
+    );
+    expect(() => parseArgs(["gate", "--worktree="])).toThrow(
+      /--worktree needs a path/,
+    );
+  });
+
+  it("still answers --help and --version, and still refuses a typo", () => {
+    expect(parseArgs(["gate", "--help"]).kind).toBe("help");
+    expect(parseArgs(["gate", "--version"]).kind).toBe("version");
+    expect(() => parseArgs(["gate", "--kepe"])).toThrow(/Unrecognised argument/);
+    expect(() => parseArgs(["gate", "extra"])).toThrow(/Unrecognised argument/);
+  });
+});
+
 // The bin's headline behaviour. A test that runs from the directory it points
 // at cannot see this — `process.cwd()` and `dirname(configPath)` coincide and
 // it passes with the default deleted — so every case here names a config path

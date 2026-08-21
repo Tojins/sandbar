@@ -117,6 +117,44 @@ const IMAGE_QUERY_TIMEOUT_MS = 30_000;
 // is which.
 export const DEFAULT_BUILD_TIMEOUT_MS = 45 * 60_000;
 
+// Images the gate stack references that sandbar does NOT build. Sandbar refuses
+// when one is missing rather than pulling it (#24 D7) — a startup must not do
+// silent network work, and a `podman pull` behind the run's lock turns a config
+// error into a slow one. Lives here rather than beside either caller because
+// since #45 there are two of them (`run.ts`'s preflight and `gate-run.ts`'s),
+// and "which images sandbar builds" is one rule.
+export function pulledImagesOf(config: {
+  readonly images: readonly BuiltImage[];
+  readonly gateStack: ResolvedGateStack;
+}): readonly string[] {
+  const built = new Set(config.images.map((i) => i.tag));
+  const referenced = new Set(config.gateStack.containers.map((c) => c.image));
+  return [...referenced].filter((i) => !built.has(i));
+}
+
+// The images D3's root-or-host-uid rule has to be re-asked about: those a
+// worktree-mounting container runs. `createBranchImages` probes a freshly-built
+// variant of one of these before any container gets it, because the branch may
+// have edited the Containerfile's `USER` and the startup check only ever saw
+// the declared images (#37). Beside `pulledImagesOf` and for the same reason:
+// two callers since #45, and which images the rule covers is one rule.
+export function worktreeMountingTagsOf(
+  gateStack: ResolvedGateStack,
+): ReadonlySet<string> {
+  return new Set(
+    gateStack.containers
+      .filter((c) => c.mountWorktree !== null)
+      .map((c) => c.image),
+  );
+}
+
+// The baseline recorded for a declared tag whose own provenance is unknown,
+// under `ensureImages`' `rebuildInPlace: false` (#45). Not hex, so no
+// `fingerprintImageInputs` output can ever equal it, which is the whole
+// requirement: it has to compare unequal to every tree so the per-branch
+// resolver builds a variant rather than trusting an image nothing vouches for.
+const UNKNOWN_PROVENANCE = "unrecorded";
+
 // Builds currently running, so a signal can reap them. ONE cleanup entry for
 // the whole process rather than one per build: `onCleanup` never forgets an
 // action, and gate-stack.ts declines to register its log followers there for
@@ -359,10 +397,32 @@ export async function buildImage(
 // Passing it explicitly rather than leaning on the process's cwd is the same
 // argument one level down — the build and the hash have to be rooted at the
 // same place.
+//
+// `rebuildInPlace: false` is the standalone `sandbar gate` (#45), and it is a
+// safety property rather than a speed one. Rewriting a DECLARED tag mutates the
+// one podman resource class no scope partitions, and the standalone gate holds
+// no lock — so on a host where a `sandbar` run is in flight it would rebuild
+// that run's base image from a different tree. That is not a leak but a wrong
+// verdict, and a silent one: the run captured its own `baseFingerprints` at
+// startup, so a gated worktree whose inputs match that baseline uses the base
+// TAG, which by then holds someone else's bytes. With the flag off, a stale
+// declared tag is left exactly as it is and the returned baseline is what the
+// image RECORDS rather than what the context hashes to — which is the input
+// `createBranchImages` needs to route the difference into a scoped, content-
+// addressed variant instead. An unlabelled tag (built before sandbar recorded
+// inputs, or by hand) contributes no baseline entry and therefore always takes
+// the variant path: unknown provenance means rebuild, which is this module's
+// rule everywhere else too.
+//
+// A MISSING tag is still built either way. There is nothing to clobber, and
+// refusing would mean `sandbar gate` could not run in CI from a fresh checkout,
+// which is most of the point of it existing.
 export async function ensureImages(
   images: readonly BuiltImage[],
   contextRoot: string,
+  opts?: { readonly rebuildInPlace?: boolean },
 ): Promise<ReadonlyMap<string, string>> {
+  const rebuildInPlace = opts?.rebuildInPlace ?? true;
   const baseFingerprints = new Map<string, string>();
   for (const image of images) {
     const fingerprint = await fingerprintImageInputs(contextRoot, image, {
@@ -381,8 +441,18 @@ export async function ensureImages(
       }
       continue;
     }
-    baseFingerprints.set(image.tag, fingerprint);
     const recorded = await readInputsLabel(image.tag);
+    if (!rebuildInPlace && (await imageExists(image.tag))) {
+      // The baseline is what the image on disk was built from, not what this
+      // context hashes to — see above. A null recording leaves the entry out,
+      // which drops the tag from `participating` in `createBranchImages`… and
+      // that is the one place this needs help, because "unknown provenance"
+      // would then mean "never rebuild" rather than "always". So it is recorded
+      // as a fingerprint no tree can produce.
+      baseFingerprints.set(image.tag, recorded ?? UNKNOWN_PROVENANCE);
+      continue;
+    }
+    baseFingerprints.set(image.tag, fingerprint);
     if (recorded === fingerprint) continue;
     console.log(
       recorded === null
@@ -816,10 +886,12 @@ export async function checkWorktreeImageUids(
 ): Promise<void> {
   // Only worktree-mounting containers. Widening this to every image would
   // refuse a perfectly good stack whose mariadb runs as uid 999 and never
-  // writes to the tree — a hard, wrong halt on every run.
-  const images = new Set(
-    stack.containers.filter((c) => c.mountWorktree !== null).map((c) => c.image),
-  );
+  // writes to the tree — a hard, wrong halt on every run. Through the shared
+  // `worktreeMountingTagsOf` rather than inline, because `createBranchImages`
+  // is handed the same set and the two are one rule: the startup check over
+  // the declared images and the per-branch check over what the branch built
+  // have to cover the same containers or the second is not the first re-asked.
+  const images = worktreeMountingTagsOf(stack);
   for (const image of images) {
     const uid = await probe(image);
     if (uid === 0 || uid === hostUid) continue;

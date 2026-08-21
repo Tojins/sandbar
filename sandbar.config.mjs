@@ -162,18 +162,28 @@ export default {
           "src/gate-stack-podman.test.ts",
           "src/ensure-images-podman.test.ts",
           "src/agent-sandbox-podman.test.ts",
+          "src/gate-run-podman.test.ts",
         ],
+        // `gate-run-podman.test.ts` (#45) is named here rather than staying
+        // host-only: it drives `runGateCommand` end to end, and every podman
+        // call it makes goes through the same client as the others. It declares
+        // no `needsLocalClient` because it needs none — nothing in it asks a
+        // question about the host's own session.
+        //
         // 30 minutes. The only wall-clock measurement anyone has taken here is
         // #48's 229s, and it is quoted as the historical figure it is: it timed
-        // the first two files when they held 33 tests between them, and #45,
-        // #49 and #50 have since taken them to 42 — several of the additions
-        // being readiness timeouts the tests ask for deliberately. #52 adds this
-        // step's third file, whose cost is two container starts and ~8s of
-        // waiting on orphans. The bound stays where it is because it was never
-        // sized against that figure: the runtime is dominated by mariadb
-        // bringup and by those deliberate timeouts, and three gates run
-        // concurrently at the default plan size, contending for one podman. Do
-        // not tighten it towards a number that has not been re-measured.
+        // two of these files when they held 33 tests between them, and #45,
+        // #49, #50 and #52 have since taken this step to 59, measured with
+        // `vitest list` on this tree — several of the additions being
+        // readiness timeouts the tests ask for deliberately, and #45's own
+        // being bringups it cannot avoid (reuse and keep-alive are only
+        // assertable by bringing a stack up more than once, and most of its
+        // `runGateCommand` invocations bring one up). The bound stays where it
+        // is because it was never sized against that figure: the runtime is
+        // dominated by mariadb bringup and by those deliberate timeouts, and
+        // three gates run concurrently at the default plan size, contending
+        // for one podman. Do not tighten it towards a number that has not
+        // been re-measured.
         timeoutMs: 1_800_000,
       },
     ],
