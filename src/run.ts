@@ -638,7 +638,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             // is a tree neither branch had, and two branches that each touched
             // the lockfile compose into a third lockfile. Resolved per gate
             // run, so each merge in the cycle is gated against its own.
-            images: () => branchImages.resolve(mergerWorktreePath),
+            images: (only) => branchImages.resolve(mergerWorktreePath, only),
           });
           const stackForGate2 = mergerStack;
           const adapter = realAdapter({

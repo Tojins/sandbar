@@ -63,10 +63,11 @@ const minimal: RunConfig = {
   },
 };
 
-// #37 — `rebuildOn` on an image nothing in the gate stack runs is inert, and
-// inertness is the failure itself: the operator wrote down what the image is a
-// function of and sandbar would silently never act on it.
-describe("resolveConfig: rebuildOn must reach a gate container", () => {
+// #37 — `rebuildOn` on an image nothing runs is inert, and inertness is the
+// failure itself: the operator wrote down what the image is a function of and
+// sandbar would silently never act on it. Since #46 the agent sandbox counts as
+// a use, because its image is resolved against the issue worktree.
+describe("resolveConfig: rebuildOn must reach something that runs the image", () => {
   it("accepts rebuildOn on an image the gate stack runs", () => {
     const r = resolveConfig({
       ...minimal,
@@ -81,21 +82,36 @@ describe("resolveConfig: rebuildOn must reach a gate container", () => {
     expect(r.images[0]?.rebuildOn).toEqual(["package-lock.json"]);
   });
 
-  it("refuses rebuildOn on an image only the agent sandbox uses", () => {
-    // The sandbox image is resolved once, when the sandbox is created — before
-    // the branch it would be a function of exists. Honouring `rebuildOn` there
-    // would be a promise sandbar cannot keep.
+  it("accepts rebuildOn on an image only the agent sandbox uses (#46)", () => {
+    // The issue worktree is prepared before the sandbox is created, so the
+    // branch's inputs are on disk in time to be hashed. Refusing this is what
+    // sent consumers to compare lockfiles in a boot script inside the sandbox.
+    const r = resolveConfig({
+      ...minimal,
+      sandboxImage: "localhost/sandbar:agent",
+      images: [
+        {
+          tag: "localhost/sandbar:agent",
+          containerfile: "Containerfile",
+          rebuildOn: ["package-lock.json"],
+        },
+        { tag: "localhost/sandbar:widgets", containerfile: "Containerfile.gate" },
+      ],
+    });
+    expect(r.images[0]?.rebuildOn).toEqual(["package-lock.json"]);
+  });
+
+  it("still refuses rebuildOn on an image neither the sandbox nor a gate container runs", () => {
     expect(() =>
       resolveConfig({
         ...minimal,
-        sandboxImage: "localhost/sandbar:agent",
         images: [
+          { tag: "localhost/sandbar:widgets", containerfile: "Containerfile" },
           {
-            tag: "localhost/sandbar:agent",
-            containerfile: "Containerfile",
+            tag: "localhost/sandbar:unused",
+            containerfile: "Containerfile.unused",
             rebuildOn: ["package-lock.json"],
           },
-          { tag: "localhost/sandbar:widgets", containerfile: "Containerfile.gate" },
         ],
       }),
     ).toThrow(SandbarError);

@@ -19,6 +19,7 @@ import {
   type BuildOptions,
   createBranchImages,
   parseInputsLabel,
+  resolveSandboxImage,
 } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { fingerprintImageInputs } from "./image-inputs.js";
@@ -57,6 +58,11 @@ const IMAGE: BuiltImage = {
 function fp(root: string, image: BuiltImage = IMAGE): Promise<string | null> {
   return fingerprintImageInputs(root, image, { mustExist: false });
 }
+
+// The declared tags a caller is about to run. Required at every call since #46,
+// because the gate and the agent sandbox share one resolver and ask about
+// different containers.
+const runs = (...tags: string[]): ReadonlySet<string> => new Set(tags);
 
 describe("fingerprintImageInputs", () => {
   it("is null for an image that declares no inputs — it does not participate", async () => {
@@ -276,7 +282,7 @@ describe("createBranchImages", () => {
     const root = await tree({ Containerfile: "FROM x", "package-lock.json": "{}" });
     const base = new Map([["app", (await fp(root))!]]);
     const { branchImages, built } = harness([IMAGE], base);
-    expect((await branchImages.resolve(root)).size).toBe(0);
+    expect((await branchImages.resolve(root, runs("app"))).size).toBe(0);
     expect(built).toEqual([]);
     expect(branchImages.builtTags()).toEqual([]);
   });
@@ -290,7 +296,7 @@ describe("createBranchImages", () => {
     const base = new Map([["app", (await fp(source))!]]);
     const { branchImages, built } = harness([IMAGE], base);
 
-    const map = await branchImages.resolve(branch);
+    const map = await branchImages.resolve(branch, runs("app"));
     const variant = variantImageTag("app", scope, (await fp(branch))!);
     expect(map.get("app")).toBe(variant);
     // Rooted at the branch's worktree — building it from the host checkout
@@ -308,8 +314,8 @@ describe("createBranchImages", () => {
     // Concurrently, as the issues in a cycle resolve: without in-flight
     // deduplication both would race the same multi-minute build onto one name.
     const [a, b] = await Promise.all([
-      branchImages.resolve(one),
-      branchImages.resolve(two),
+      branchImages.resolve(one, runs("app")),
+      branchImages.resolve(two, runs("app")),
     ]);
     expect(a.get("app")).toBe(b.get("app"));
     expect(built).toHaveLength(1);
@@ -323,9 +329,9 @@ describe("createBranchImages", () => {
     const base = new Map([["app", (await fp(source))!]]);
     const { branchImages, built } = harness([IMAGE], base);
 
-    expect((await branchImages.resolve(branch)).size).toBe(0);
+    expect((await branchImages.resolve(branch, runs("app"))).size).toBe(0);
     await writeFile(join(branch, "package-lock.json"), '{"added":"dep"}');
-    expect((await branchImages.resolve(branch)).get("app")).toBe(
+    expect((await branchImages.resolve(branch, runs("app"))).get("app")).toBe(
       variantImageTag("app", scope, (await fp(branch))!),
     );
     expect(built).toHaveLength(1);
@@ -339,7 +345,7 @@ describe("createBranchImages", () => {
     const fingerprint = (await fp(branch))!;
     present.set(variantImageTag("app", scope, fingerprint), fingerprint);
 
-    expect((await branchImages.resolve(branch)).size).toBe(1);
+    expect((await branchImages.resolve(branch, runs("app"))).size).toBe(1);
     expect(built).toEqual([]);
     // Still reported as this run's, so cleanup reaches it.
     expect(branchImages.builtTags()).toHaveLength(1);
@@ -360,7 +366,7 @@ describe("createBranchImages", () => {
         "a-different-fingerprint-entirely",
       );
 
-      expect((await branchImages.resolve(branch)).size).toBe(1);
+      expect((await branchImages.resolve(branch, runs("app"))).size).toBe(1);
       expect(built).toHaveLength(1);
     })();
   });
@@ -387,9 +393,9 @@ describe("createBranchImages", () => {
       log: () => {},
     });
 
-    await expect(branchImages.resolve(branch)).rejects.toThrow("registry 503");
+    await expect(branchImages.resolve(branch, runs("app"))).rejects.toThrow("registry 503");
     // The next gate run gets a real attempt, not the corpse of the last one.
-    await expect(branchImages.resolve(branch)).resolves.toEqual(
+    await expect(branchImages.resolve(branch, runs("app"))).resolves.toEqual(
       new Map([["app", variantImageTag("app", scope, (await fp(branch))!)]]),
     );
     expect(attempts).toBe(2);
@@ -416,11 +422,11 @@ describe("createBranchImages", () => {
         probeUid: async () => uid,
       });
 
-    await expect(make(1234).resolve(branch)).rejects.toThrow(/uid 1234/);
+    await expect(make(1234).resolve(branch, runs("app"))).rejects.toThrow(/uid 1234/);
     // Root and the host uid are both fine — rootless podman maps container root
     // to the invoking user.
-    await expect(make(0).resolve(branch)).resolves.toBeInstanceOf(Map);
-    await expect(make(1000).resolve(branch)).resolves.toBeInstanceOf(Map);
+    await expect(make(0).resolve(branch, runs("app"))).resolves.toBeInstanceOf(Map);
+    await expect(make(1000).resolve(branch, runs("app"))).resolves.toBeInstanceOf(Map);
   });
 
   it("does not probe the uid of an image no worktree-mounting container runs", async () => {
@@ -444,7 +450,7 @@ describe("createBranchImages", () => {
     });
     // Widening the check to every image would refuse a perfectly good stack
     // whose mariadb runs as uid 999 and never writes to the tree.
-    await expect(branchImages.resolve(branch)).resolves.toBeInstanceOf(Map);
+    await expect(branchImages.resolve(branch, runs("app"))).resolves.toBeInstanceOf(Map);
     expect(probed).toBe(0);
   });
 
@@ -452,7 +458,7 @@ describe("createBranchImages", () => {
     const root = await tree({ Containerfile: "FROM x", "package-lock.json": "{}" });
     const plain: BuiltImage = { tag: "sandbox", containerfile: "Containerfile" };
     const { branchImages, built } = harness([plain], new Map());
-    expect((await branchImages.resolve(root)).size).toBe(0);
+    expect((await branchImages.resolve(root, runs("sandbox"))).size).toBe(0);
     expect(built).toEqual([]);
   });
 
@@ -476,9 +482,175 @@ describe("createBranchImages", () => {
     // silently got an unbuilt image would gate against a container that cannot
     // start.
     const results = await Promise.allSettled([
-      branchImages.resolve(one),
-      branchImages.resolve(two),
+      branchImages.resolve(one, runs("app")),
+      branchImages.resolve(two, runs("app")),
     ]);
     expect(results.map((r) => r.status)).toEqual(["rejected", "rejected"]);
+  });
+
+  it("answers only about the tags the caller runs", async () => {
+    // The gate and the agent sandbox share one resolver. A gate run that also
+    // resolved the sandbox's entry would pay for a build no container in that
+    // stack runs — and, since a build can fail because of the branch, would let
+    // that failure red a gate the image has nothing to do with.
+    const source = await tree({
+      Containerfile: "FROM x",
+      "Containerfile.agent": "FROM y",
+      "package-lock.json": "{}",
+    });
+    const branch = await tree({
+      Containerfile: "FROM x",
+      "Containerfile.agent": "FROM y",
+      "package-lock.json": "b",
+    });
+    const agent: BuiltImage = {
+      tag: "agent",
+      containerfile: "Containerfile.agent",
+      rebuildOn: ["package-lock.json"],
+    };
+    const base = new Map([
+      ["app", (await fp(source))!],
+      ["agent", (await fp(source, agent))!],
+    ]);
+    const { branchImages, built } = harness([IMAGE, agent], base);
+
+    const map = await branchImages.resolve(branch, runs("app"));
+    expect([...map.keys()]).toEqual(["app"]);
+    expect(built.map((b) => b.tag)).toEqual([
+      variantImageTag("app", scope, (await fp(branch))!),
+    ]);
+  });
+
+  it("shares one build when the same entry is asked for in both roles", async () => {
+    // A consumer may give one image both roles (sandbar's own config does), and
+    // the tag is content-addressed, so the sandbox's resolution and the gate's
+    // name the same bytes. Two builds of it would be the thing the in-flight
+    // map exists to prevent, arriving through the second caller.
+    const source = await tree({ Containerfile: "FROM x", "package-lock.json": "{}" });
+    const branch = await tree({ Containerfile: "FROM x", "package-lock.json": "b" });
+    const base = new Map([["app", (await fp(source))!]]);
+    const { branchImages, built } = harness([IMAGE], base);
+
+    const sandbox = await resolveSandboxImage({
+      declaredTag: "app",
+      worktreePath: branch,
+      branchImages,
+      gateRunsSameImage: true,
+    });
+    const gate = await branchImages.resolve(branch, runs("app"));
+    expect(gate.get("app")).toBe(sandbox);
+    expect(built).toHaveLength(1);
+  });
+});
+
+// #46 — the agent sandbox's image is a function of the branch too, and the
+// issue worktree exists by the time the sandbox is created.
+describe("resolveSandboxImage", () => {
+  const scope = runScope("/repo") as RunScope;
+  // The tag is part of the fingerprint, so the base map has to be built from
+  // the same entry the resolver will use.
+  const SANDBOX: BuiltImage = { ...IMAGE, tag: "sandbox" };
+
+  function harness(base: Map<string, string>, build: () => Promise<void>) {
+    const present = new Map<string, string>();
+    return createBranchImages({
+      images: [SANDBOX],
+      scope,
+      baseFingerprints: base,
+      inputsLabel: async (tag) => present.get(tag) ?? null,
+      build,
+      log: () => {},
+    });
+  }
+
+  it("runs the branch's own image when it moved a declared input", async () => {
+    const source = await tree({ Containerfile: "FROM x", "package-lock.json": "{}" });
+    const branch = await tree({ Containerfile: "FROM x", "package-lock.json": "b" });
+    const base = new Map([["sandbox", (await fp(source, SANDBOX))!]]);
+    const image = await resolveSandboxImage({
+      declaredTag: "sandbox",
+      worktreePath: branch,
+      branchImages: harness(base, async () => {}),
+      gateRunsSameImage: false,
+    });
+    expect(image).toBe(
+      variantImageTag("sandbox", scope, (await fp(branch, SANDBOX))!),
+    );
+  });
+
+  it("runs the declared tag when the branch changed nothing, and when nothing resolves at all", async () => {
+    const source = await tree({ Containerfile: "FROM x", "package-lock.json": "{}" });
+    const base = new Map([["sandbox", (await fp(source, SANDBOX))!]]);
+    let builds = 0;
+    await expect(
+      resolveSandboxImage({
+        declaredTag: "sandbox",
+        worktreePath: source,
+        branchImages: harness(base, async () => {
+          builds += 1;
+        }),
+        gateRunsSameImage: false,
+      }),
+    ).resolves.toBe("sandbox");
+    expect(builds).toBe(0);
+    // A run with no per-branch resolver — a host that declares no `rebuildOn`.
+    await expect(
+      resolveSandboxImage({
+        declaredTag: "sandbox",
+        worktreePath: source,
+        gateRunsSameImage: false,
+      }),
+    ).resolves.toBe("sandbox");
+  });
+
+  // A build that fails, in both configurations. The fallback direction is the
+  // same in each — throwing wedges the branch rather than failing it, since the
+  // sandbox is where the fix gets written and the branch outlives the cycle —
+  // but what the operator is owed differs, and that is the part a message can
+  // get wrong.
+  async function fallback(gateRunsSameImage: boolean) {
+    const source = await tree({ Containerfile: "FROM x", "package-lock.json": "{}" });
+    const branch = await tree({ Containerfile: "FROM x", "package-lock.json": "b" });
+    const base = new Map([["sandbox", (await fp(source, SANDBOX))!]]);
+    const reported: string[] = [];
+    const image = await resolveSandboxImage({
+      declaredTag: "sandbox",
+      worktreePath: branch,
+      branchImages: harness(base, async () => {
+        throw new SandbarError("npm ci: ETARGET no matching version");
+      }),
+      gateRunsSameImage,
+      onFallback: (line) => {
+        reported.push(line);
+      },
+    });
+    return { image, reported };
+  }
+
+  it("falls back to the declared tag when the build fails, and never silently", async () => {
+    const { image, reported } = await fallback(false);
+    expect(image).toBe("sandbox");
+    // The operator's only sign that the agent is working in an environment a
+    // commit behind its own branch.
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toContain("ETARGET");
+  });
+
+  it("promises a second report only when a gate container runs the same image", async () => {
+    // The compensating control for falling back is that the GATE resolves the
+    // same entry and reds against the branch — and that exists only when a
+    // gateStack container runs this tag. `startStack` asks the resolver about
+    // the images its own spec names, so for a sandbox-only entry — the config
+    // this feature is for — no gate run ever touches it, the gate goes green on
+    // images that built, and this line is the whole of the report. Telling that
+    // operator to wait for a red sends them to watch for something that cannot
+    // arrive.
+    const alone = (await fallback(false)).reported[0]!;
+    expect(alone).toMatch(/only report/);
+    expect(alone).not.toMatch(/will red/);
+
+    const shared = (await fallback(true)).reported[0]!;
+    expect(shared).toMatch(/will red with this build's output, against the branch/);
+    expect(shared).not.toMatch(/only report/);
   });
 });

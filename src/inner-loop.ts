@@ -5,15 +5,18 @@
 //      stack in parallel. The worktree comes FIRST (not in the parallel pair,
 //      #20): stack mounts bind-mount fixture files from it, and mount sources
 //      are read at container start — only the expensive container bringups
-//      overlap. If the consumer marked any container `inSandbox`, the SANDBOX
-//      stack (#44) — the same containers again, in the agent container's own
-//      network namespace, so the agent can run the application before the gate
-//      does — is brought up INSIDE that first entry, through
-//      `beforeSandboxReady`: the siblings attach to the agent container, so it
-//      has to exist first, and a consumer's `onSandboxReady` hook is where the
-//      migration that wants them runs, so they have to be up before it. Not a
-//      third parallel entry for the same reason, and no serialisation against
-//      the gate stack either — it is still the same promise.
+//      overlap. That ordering is also what makes the sandbox's own image
+//      resolvable against the BRANCH (#46): the files a `rebuildOn` entry
+//      hashes are on disk before `createSandbox` is called. If the consumer
+//      marked any container `inSandbox`, the SANDBOX stack (#44) — the same
+//      containers again, in the agent container's own network namespace, so the
+//      agent can run the application before the gate does — is brought up
+//      INSIDE that first entry, through `beforeSandboxReady`: the siblings
+//      attach to the agent container, so it has to exist first, and a
+//      consumer's `onSandboxReady` hook is where the migration that wants them
+//      runs, so they have to be up before it. Not a third parallel entry for
+//      the same reason, and no serialisation against the gate stack either —
+//      it is still the same promise.
 //   2. Drive the state machine (inner-loop-machine.ts) to a verdict by
 //      executing the action it emits and feeding the result back as an event.
 //   3. Translate the verdict to a Terminal.
@@ -41,7 +44,7 @@ import { agentPartialOutput, podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
 import type { ResolvedGateStack } from "./config.js";
-import type { BranchImages } from "./ensure-images.js";
+import { type BranchImages, resolveSandboxImage } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { summarizeGateFailure } from "./gate.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
@@ -299,60 +302,90 @@ async function runSandboxCycle(
     const holder: { stack: SandboxStack | null } = { stack: null };
 
     const [sandboxResult, stackResult] = await Promise.allSettled([
-      agentSandbox.createSandbox({
-        branch: issue.branch,
-        layout: config.layout,
-        // Named explicitly rather than left to defaultImageName(repoDir): the
-        // implicit coupling between the sandbox image and the host's repo
-        // DIRECTORY NAME broke silently on a rename (#24 D7).
-        sandbox: podman({
-          imageName: config.sandboxImage,
-          namePrefix: scopedResourcePrefix(config.scope),
-        }),
-        hooks: opts.hooks,
-        env: config.env,
-        preparedWorktreePath: worktreePath,
-        ...(sbxContainers.length > 0
-          ? {
-              extraMounts: [
-                {
-                  hostPath: sandboxLogDir,
-                  sandboxPath: SANDBOX_LOG_MOUNT,
-                  readonly: true,
+      (async () => {
+        // The sandbox's own image is a function of the branch too (#46), and
+        // the worktree above is what makes that answerable here: it is on disk
+        // before this line, which is all the fingerprint needs. Resolved once
+        // per sandbox — the attempts accumulate in this container, so there is
+        // no later point that could re-resolve without discarding them — and
+        // falling back to the declared tag if the build fails, because this is
+        // the container the fix would be written in. See resolveSandboxImage.
+        const imageName = await resolveSandboxImage({
+          declaredTag: config.sandboxImage,
+          worktreePath,
+          branchImages,
+          // What a failed build costs the operator turns on this, so it is
+          // answered from the spec rather than assumed: only a gate container
+          // running the same tag makes the failure show up a second time, as a
+          // red against the branch.
+          gateRunsSameImage: config.gateStack.containers.some(
+            (c) => c.image === config.sandboxImage,
+          ),
+          onFallback: async (detail) => {
+            const line = `issue=${issue.id} sandbox-image fallback — ${detail}`;
+            console.error(`  ${line}`);
+            if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
+          },
+        });
+        return agentSandbox.createSandbox({
+          branch: issue.branch,
+          layout: config.layout,
+          // Named explicitly rather than left to defaultImageName(repoDir): the
+          // implicit coupling between the sandbox image and the host's repo
+          // DIRECTORY NAME broke silently on a rename (#24 D7). The tag itself
+          // is the one resolved above, not `config.sandboxImage` (#46).
+          sandbox: podman({
+            imageName,
+            namePrefix: scopedResourcePrefix(config.scope),
+          }),
+          hooks: opts.hooks,
+          env: config.env,
+          preparedWorktreePath: worktreePath,
+          ...(sbxContainers.length > 0
+            ? {
+                extraMounts: [
+                  {
+                    hostPath: sandboxLogDir,
+                    sandboxPath: SANDBOX_LOG_MOUNT,
+                    readonly: true,
+                  },
+                ],
+                // The siblings attach to the agent container, so they cannot be
+                // started before it — but they must be up before the
+                // `onSandboxReady` hooks, which is exactly where a consumer runs
+                // the migration that wants the database (#44 D6). Inside
+                // `createSandbox` rather than after it, so the container is torn
+                // down if an `issue`-lifecycle sibling refuses to start, and so
+                // this bringup still overlaps the gate stack's.
+                //
+                // A holder rather than a closed-over `let`: an assignment inside
+                // a callback is invisible to TypeScript's narrowing, so the
+                // binding would read as `null` forever at every later use.
+                beforeSandboxReady: async (containerName: string) => {
+                  holder.stack = await startSandboxStack({
+                    issueId: issue.id,
+                    scope: config.scope,
+                    spec: config.gateStack,
+                    worktreePath,
+                    anchorContainerName: containerName,
+                    logDir: sandboxLogDir,
+                  });
                 },
-              ],
-              // The siblings attach to the agent container, so they cannot be
-              // started before it — but they must be up before the
-              // `onSandboxReady` hooks, which is exactly where a consumer runs
-              // the migration that wants the database (#44 D6). Inside
-              // `createSandbox` rather than after it, so the container is torn
-              // down if an `issue`-lifecycle sibling refuses to start, and so
-              // this bringup still overlaps the gate stack's.
-              //
-              // A holder rather than a closed-over `let`: an assignment inside
-              // a callback is invisible to TypeScript's narrowing, so the
-              // binding would read as `null` forever at every later use.
-              beforeSandboxReady: async (containerName: string) => {
-                holder.stack = await startSandboxStack({
-                  issueId: issue.id,
-                  scope: config.scope,
-                  spec: config.gateStack,
-                  worktreePath,
-                  anchorContainerName: containerName,
-                  logDir: sandboxLogDir,
-                });
-              },
-            }
-          : {}),
-      }),
+              }
+            : {}),
+        });
+      })(),
       startStack({
         stackId: issue.id,
         scope: config.scope,
         spec: config.gateStack,
         worktreePath,
         // A thunk, not a value: the stack calls it before every gate run, and
-        // the answer changes as the agent commits (#37).
-        ...(branchImages ? { images: () => branchImages.resolve(worktreePath) } : {}),
+        // the answer changes as the agent commits (#37). It hands back the
+        // tags it runs, so the sandbox's entry is not resolved here (#46).
+        ...(branchImages
+          ? { images: (only: ReadonlySet<string>) => branchImages.resolve(worktreePath, only) }
+          : {}),
       }),
     ]);
     // Read out BEFORE the throw below, not after it. The callback runs inside

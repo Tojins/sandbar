@@ -30,6 +30,20 @@
 //     that differs gets its own tag, built from that worktree, and gate-stack.ts
 //     recreates the stack's containers from it.
 //
+// Since #46 the AGENT SANDBOX resolves through that same second path — see
+// `resolveSandboxImage` at the bottom of this file, which is the same question
+// asked for a container that produces no verdict, and therefore has a different
+// answer to a build that fails.
+//
+// `resolve` takes the declared tags its caller will actually RUN, and that
+// parameter is required rather than defaulting to "every participating entry".
+// The gate and the sandbox share one resolver (they must: a consumer may give
+// one image both roles, and the content-addressed tag is then the same build)
+// but they do not share a question. A gate run that also resolved the sandbox's
+// entry would pay a multi-GB build for an image no container in that stack
+// runs, and an `ImageBuildError` from it would red the gate over an image the
+// gate never touches.
+//
 // The per-branch tag is content-addressed (`naming.ts`), so the ordinary
 // tag-exists skip is what makes the common cases free: a gate run that changed
 // nothing rebuilds nothing, two issues that make the same lockfile change share
@@ -394,11 +408,23 @@ export async function ensureImages(
 export type ImageMap = ReadonlyMap<string, string>;
 
 export type BranchImages = {
-  // The images to run for a gate of `worktreePath`, building any that are
-  // missing. Called before EVERY gate run, not once per issue: the branch grows
-  // under the loop, so an attempt that adds a dependency has to be gated
-  // against an image that has it.
-  readonly resolve: (worktreePath: string) => Promise<ImageMap>;
+  // The images to run over `worktreePath`, building any that are missing.
+  //
+  // `only` is the set of DECLARED tags the caller is about to run — the gate
+  // stack's container images, or the agent sandbox's single image. Required,
+  // because the two callers ask about different containers at different moments
+  // and a superset is neither free nor harmless: the answer for an entry the
+  // caller does not run costs a build it will never use, and a build that fails
+  // reaches the caller as an error about an image it never asked for.
+  //
+  // Called before EVERY gate run, not once per issue: the branch grows under
+  // the loop, so an attempt that adds a dependency has to be gated against an
+  // image that has it. The sandbox's call is once per sandbox instead — see
+  // `resolveSandboxImage`.
+  readonly resolve: (
+    worktreePath: string,
+    only: ReadonlySet<string>,
+  ) => Promise<ImageMap>;
   // Every per-branch tag this run built, oldest first. Removed at the end of
   // the run; the layers stay in podman's build cache, so the next run's rebuild
   // of the same inputs is cache hits.
@@ -441,9 +467,13 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
   const builds = new Map<string, Promise<void>>();
   const order: string[] = [];
 
-  const resolve = async (worktreePath: string): Promise<ImageMap> => {
+  const resolve = async (
+    worktreePath: string,
+    only: ReadonlySet<string>,
+  ): Promise<ImageMap> => {
     const map = new Map<string, string>();
     for (const image of participating) {
+      if (!only.has(image.tag)) continue;
       const fingerprint = await fingerprintImageInputs(worktreePath, image, {
         mustExist: false,
       });
@@ -528,6 +558,97 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
   };
 
   return { resolve, builtTags: () => [...order] };
+}
+
+// ---------------------------------------------------------------------------
+// The agent sandbox's image (#46)
+// ---------------------------------------------------------------------------
+// #37 left the sandbox out of the per-branch resolution on the grounds that its
+// image "is resolved once, when the sandbox is created, before the branch it
+// would be a function of exists". The first half is true and the second is not:
+// `inner-loop.ts` prepares the issue worktree BEFORE it creates the sandbox
+// (#20, for the stack's mounts), so at that point the branch's files are on
+// disk, which is all a fingerprint needs.
+//
+// What the gap cost is not hypothetical — it is a consumer shell script that
+// compares lockfiles against copies kept in the image and re-installs at boot,
+// per package manager: image cache invalidation, re-implemented at run time
+// because the config could not express it. A stale baked dependency inside the
+// sandbox does not produce a false VERDICT (the gate resolves its own images),
+// but it reads to the agent as a bug in the code it is being asked to fix.
+//
+// Two things are deliberately narrower than the gate's version:
+//
+//   - It resolves ONCE PER SANDBOX, not per attempt. The ralph loop's whole
+//     shape is attempts accumulating in one container, so re-resolving mid-issue
+//     would mean disposing the sandbox the agent is working in — and the agent
+//     can install into its own sandbox with a command, which is a cost of one
+//     turn against the certainty of losing its state. What the branch adds
+//     during the run still reaches the GATE, per gate run, which is where
+//     verdicts come from.
+//
+//   - A failed build FALLS BACK to the declared tag rather than throwing, and
+//     this is the load-bearing half. The sandbox is where the fix gets written:
+//     an agent that commits a lockfile which does not install would otherwise
+//     make every later sandbox for that branch fail to start — including the
+//     ones whose entire purpose is to repair it — and the branch outlives the
+//     cycle, so a resumable issue would be wedged rather than merely red. The
+//     agent's environment is then one commit stale, which is exactly the
+//     pre-#46 state and is recoverable from inside the sandbox.
+//
+// What that fallback COSTS depends on whether a gate container runs the same
+// tag, and the report must not guess. Where it does — sandbar's own config
+// gives one image both roles — the gate resolves the entry itself, reds with
+// the same build output and blames the branch, so this line is a warning about
+// a verdict already on its way. Where the entry is the SANDBOX'S ALONE, which
+// is the configuration this feature exists to serve and the one the README's
+// example writes, no gate run ever resolves it: `startStack` asks only about
+// the images its own spec names. The gate then goes green on images that built
+// fine and this line is the only report the failure ever gets. Telling that
+// operator to wait for a gate red would send them to watch for something that
+// cannot arrive, so `gateRunsSameImage` is a required parameter rather than an
+// assumption the message makes on their behalf.
+//
+// The fallback is reported rather than swallowed: `onFallback` reaches the run
+// log and the operator's console at the call site.
+export async function resolveSandboxImage(opts: {
+  readonly declaredTag: string;
+  readonly worktreePath: string;
+  // Absent when the run has no per-branch resolver at all (tests, a host that
+  // declares no `rebuildOn`) — the declared tag is then the only answer.
+  readonly branchImages?: BranchImages | undefined;
+  // Does any `gateStack` container run `declaredTag`? It decides what the
+  // fallback report can honestly promise, and is required for exactly that
+  // reason — see above.
+  readonly gateRunsSameImage: boolean;
+  readonly onFallback?: (line: string) => void | Promise<void>;
+}): Promise<string> {
+  const { branchImages, declaredTag, worktreePath } = opts;
+  if (!branchImages) return declaredTag;
+  try {
+    const map = await branchImages.resolve(
+      worktreePath,
+      new Set([declaredTag]),
+    );
+    return map.get(declaredTag) ?? declaredTag;
+  } catch (err) {
+    await opts.onFallback?.(
+      `could not build a per-branch agent sandbox image from '${declaredTag}' ` +
+        `for ${worktreePath}; starting the sandbox on '${declaredTag}' as ` +
+        "declared, which carries the source branch's version of its declared " +
+        "inputs. " +
+        (opts.gateRunsSameImage
+          ? "A gate container runs this same image, so the gate resolves the " +
+            "entry itself and will red with this build's output, against the " +
+            "branch."
+          : "No `gateStack` container runs this image, so nothing else ever " +
+            "resolves it: the gate's verdict is computed from images that " +
+            "built, and this line is the only report this failure gets.") +
+        " The agent's environment is a commit behind its own branch until it " +
+        `installs for itself: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return declaredTag;
+  }
 }
 
 // The D3 uid rule applied to a per-branch variant, as an `ImageBuildError` so

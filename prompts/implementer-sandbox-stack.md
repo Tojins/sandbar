@@ -15,10 +15,13 @@ and watch it pass afterwards — a test you have never seen fail is not evidence
 Some things to know before you spend time on them:
 
 - **The gate is authoritative.** Its stack is a separate namespace you cannot
-  reach, and it rebuilds any image the branch changed while yours runs the image
-  as declared. So a suite that passes here can still red the gate — most likely
-  when you have just changed a lockfile or a dependency. Trust the gate's trace
-  over your own run when the two disagree.
+  reach, and it rebuilds any image the branch changed before every gate run.
+  Nothing here is rebuilt mid-issue: these neighbours run the image as declared,
+  and your own container was built from the branch as it stood when this sandbox
+  started. So a suite that passes here can still red the gate — most likely when
+  you have just changed a lockfile or a dependency, which is also the case where
+  installing it yourself is the quickest way to keep working. Trust the gate's
+  trace over your own run when the two disagree.
 - **Nothing restarts a sibling.** A service that reads its configuration at boot
   keeps the configuration it booted with, however you edit the file. Mounted
   code that is read per request is fine; a config change is not, and there is no

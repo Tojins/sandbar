@@ -44,9 +44,13 @@ Of the `Sandbox` handle, sandbar uses only `run()`, `worktreePath`, and
 ### The exact shape of sandbar's usage
 
 - **Always bind-mount + podman.** `podman()` is called with an explicit
-  `imageName: config.sandboxImage` (since #24 D7 — the implicit
-  `defaultImageName(repoDir)` coupled the image to the host's *directory name*
-  and broke silently on a rename) and an explicit
+  `imageName` (since #24 D7 — the implicit `defaultImageName(repoDir)` coupled
+  the image to the host's *directory name* and broke silently on a rename):
+  `config.sandboxImage`, or the per-branch variant of it when that entry
+  declares `rebuildOn` and this branch moved one of its inputs (#46 — the issue
+  worktree is prepared before the container is created, so the fingerprint is
+  answerable here; a build that fails falls back to the declared tag rather than
+  refusing to start the container the fix gets written in). Plus an explicit
   `namePrefix: scopedResourcePrefix(config.scope)` (since #28 — the container
   name must fall inside the run's scope, or the orphan sweeper of a *second*
   sandbar run on the same host force-removes this run's live sandbox), plus the

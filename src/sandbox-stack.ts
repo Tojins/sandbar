@@ -180,13 +180,15 @@
 // ---------------------------------------------------------------------------
 // Images, and the confusion mode that buys
 // ---------------------------------------------------------------------------
-// Siblings run the image their config NAMES, resolved once. #37 does not extend
-// here: the gate re-resolves before every gate run because an image that bakes
-// a lockfile is a function of the branch and a stale one is a WRONG VERDICT;
-// the sandbox is a workspace, not a verdict, so a stale layer costs the agent a
-// command (`npm ci` into its own container) rather than an answer. Same
-// argument CLAUDE.md already makes for keeping the agent sandbox image out of
-// `rebuildOn`'s uses.
+// Siblings run the image their config NAMES, resolved once — never a
+// `rebuildOn` variant. #37 does not extend here: the gate re-resolves before
+// every gate run because an image that bakes a lockfile is a function of the
+// branch and a stale one is a WRONG VERDICT; a sibling is part of a workspace
+// rather than of a verdict, so a stale layer costs the agent a command
+// (`npm ci` into its own container) rather than an answer. Note where the line
+// now falls: #46 makes the AGENT container's own image a function of the
+// branch, resolved once per sandbox for this same reason (a workspace wants a
+// fresh-enough image, not a per-attempt one) — its siblings are still not.
 //
 // The confusion mode that accepts, stated because it is real: the agent's suite
 // may pass against baked dependencies the branch has since changed while the
