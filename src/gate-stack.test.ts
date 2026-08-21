@@ -83,19 +83,25 @@ describe("mountSpec", () => {
   // Category C of sandcastle's permissions taxonomy, and a live bug in the code
   // #24 replaced: without `z` the mount is denied outright under SELinux, so
   // sandbar's gate simply did not work on Fedora/RHEL/CentOS. The relabel is
-  // the half `mode` may NOT touch, which is why this asserts the pair.
-  it("always carries the SELinux relabel, and read-only by default", () => {
-    const spec = mountSpec("/wt", {
-      hostPath: "a",
-      containerPath: "/b",
-      mode: "ro",
-    });
-    expect(spec.endsWith(":ro,z")).toBe(true);
+  // the half `mode` may NOT touch, so it is asserted on both modes rather than
+  // on one. What an OMITTED mode means is not this function's question and is
+  // not asserted here — `resolveGateStack` decides it, and pins it.
+  it("always carries the SELinux relabel", () => {
+    for (const mode of ["ro", "rw"] as const) {
+      const spec = mountSpec("/wt", {
+        hostPath: "a",
+        containerPath: "/b",
+        mode,
+      });
+      expect(spec.endsWith(`:${mode},z`)).toBe(true);
+    }
   });
 
-  // #48: a socket is a bidirectional channel, not a file to read, so the gate
-  // runner's podman socket is unusable under `ro`. The mode reaches the `-v`
-  // spec and takes the relabel with it.
+  // #48's motivating case: the gate runner identity-mounts the host's `/tmp`
+  // so a step can build fixtures at paths the host's podman also resolves,
+  // which is a mount written THROUGH rather than read. (The socket in the same
+  // config is not — it stays `ro`.) The mode reaches the `-v` spec and takes
+  // the relabel with it.
   it("emits rw for a mount that asked for it", () => {
     expect(
       mountSpec("/wt", { hostPath: "/tmp", containerPath: "/tmp", mode: "rw" }),

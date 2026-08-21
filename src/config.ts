@@ -81,9 +81,15 @@ export type StackMount = {
   readonly containerPath: string;
   // Default "ro", which is the right default for a fixture: a step that writes
   // into its own inputs makes the next run's verdict a function of the last
-  // one's. "rw" exists because not every mount is a fixture — a scratch
-  // directory a step writes through, or a socket, which is a bidirectional
-  // channel rather than a file to read.
+  // one's. "rw" exists because not every mount is a fixture — the motivating
+  // case (#48) is a scratch directory a step writes THROUGH: this repo's own
+  // gate identity-mounts the host's `/tmp`, so the fixtures the podman tests
+  // build with `mkdtemp` are paths the host's podman can resolve.
+  //
+  // A podman SOCKET is deliberately NOT such a case, and must not be read as
+  // one: a remote client drives it perfectly well under `ro` — measured, not
+  // assumed — and widening it would hand a gate step write access to the
+  // host's container runtime for no reason anyone had.
   //
   // This exposes the half of podman's `-v` that sandbar was hiding rather than
   // inventing anything: the hiding was the invention. Deliberately NOT a raw
