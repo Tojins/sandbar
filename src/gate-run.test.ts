@@ -9,11 +9,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type BuiltImage,
   type GateStackConfig,
   type ResolvedGateStack,
   resolveGateStack,
 } from "./config.js";
-import { gateReuseToken } from "./gate-run.js";
+import { gateReuseToken, gateStackImagesOf } from "./gate-run.js";
 
 const WT = "/wt";
 const V = "1.2.3";
@@ -168,5 +169,51 @@ describe("gateReuseToken", () => {
         steps: [{ name: "test", in: "runner", command: ["npm", "test"] }],
       });
     expect(token(none("a:1"))).toBe(token(none("b:2")));
+  });
+});
+
+// The other half of what this command decides before podman is touched: which
+// declared images it may build. `pulledImagesOf`'s test lives with its module;
+// this one is about the asymmetry with `run.ts`, which passes `config.images`
+// whole and is right to.
+describe("gateStackImagesOf", () => {
+  const img = (tag: string): BuiltImage => ({ tag, containerfile: "Containerfile" });
+
+  it("keeps the entries a gateStack container runs", () => {
+    expect(
+      gateStackImagesOf({
+        images: [img("localhost/app:gate"), img("docker.io/library/mariadb:10.11")],
+        gateStack: stack(),
+      }).map((i) => i.tag),
+    ).toEqual(["localhost/app:gate", "docker.io/library/mariadb:10.11"]);
+  });
+
+  // The one that matters, and the one this repo's own config cannot show:
+  // an agent sandbox image with its own `rebuildOn` that no container in this
+  // stack runs. Unfiltered, a cold checkout builds the whole agent image before
+  // the first gate container — and a failure in it stops the gate happening at
+  // all, for an image the verdict does not depend on.
+  it("drops an entry no gateStack container runs — the agent sandbox image", () => {
+    expect(
+      gateStackImagesOf({
+        images: [
+          img("localhost/app:gate"),
+          { ...img("localhost/app:sandbar"), rebuildOn: ["package-lock.json"] },
+        ],
+        gateStack: stack(),
+      }).map((i) => i.tag),
+    ).toEqual(["localhost/app:gate"]);
+  });
+
+  // One image in both roles — sandbar's own config — is kept, since a gate
+  // container does run it. The filter is about what the stack runs, never about
+  // what the entry is "for".
+  it("keeps an entry that is both the sandbox image and a stack container's", () => {
+    expect(
+      gateStackImagesOf({
+        images: [img("localhost/app:gate")],
+        gateStack: stack(),
+      }).map((i) => i.tag),
+    ).toEqual(["localhost/app:gate"]);
   });
 });

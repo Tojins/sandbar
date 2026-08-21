@@ -57,12 +57,13 @@
 // DIFFERENT worktrees are disjoint by construction, including a `sandbar gate`
 // beside a live `sandbar` run — see `gateScope`.
 
-import { existsSync, realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 import { installCleanupTraps, onCleanup } from "./cleanup.js";
 import {
+  type BuiltImage,
   type ResolvedConfig,
   type ResolvedGateStack,
   type ResolvedStackContainer,
@@ -71,6 +72,7 @@ import {
 } from "./config.js";
 import {
   type BranchImages,
+  ImageBuildError,
   checkWorktreeImageUids,
   createBranchImages,
   ensureImages,
@@ -171,6 +173,40 @@ export function gateReuseToken(
     .digest("hex");
 }
 
+// The `config.images` entries this command may build: exactly those a
+// `gateStack` container runs.
+//
+// `run.ts` passes `config.images` whole and is right to — a run creates an
+// agent sandbox, so the sandbox image is one of the images it runs. This
+// command creates no sandbox, and #46 already settled the same question one
+// level down when it made `BranchImages.resolve` take the tags its caller runs:
+// resolving an entry no container in this stack runs pays for a build nobody
+// uses, and lets that build's failure decide a gate the image has nothing to do
+// with. `startStack` derives its own `only` set "so no call site can hand the
+// shared resolver a superset" — handing `ensureImages` that superset one
+// statement earlier is the same mistake with the filter missing rather than
+// present.
+//
+// It is not a nicety on the headline path. The README's own worked config
+// declares `localhost/app:sandbar` with its own `rebuildOn` and no gateStack
+// container running it; on a cold CI checkout that tag is missing, so
+// `ensureImages` would build the whole agent image — the CLI, the toolchain —
+// before a single gate container started, and fail the run outright if it did
+// not build. This repo cannot notice, because its own config gives one image
+// both roles.
+//
+// `pulledImagesOf` is unaffected and still takes the whole config: the entries
+// dropped here are precisely the ones no container references, so they are
+// absent from its `referenced` set too and can never be reported as needing a
+// pull.
+export function gateStackImagesOf(config: {
+  readonly images: readonly BuiltImage[];
+  readonly gateStack: ResolvedGateStack;
+}): readonly BuiltImage[] {
+  const run = new Set(config.gateStack.containers.map((c) => c.image));
+  return config.images.filter((i) => run.has(i.tag));
+}
+
 // Every referenced image sandbar does not build, that podman does not have.
 // The same refusal preflight makes for a run (#24 D7): naming them with the
 // `podman pull` line beats a bringup failure minutes later, and pulling on the
@@ -205,12 +241,13 @@ async function missingPulledImages(
 // a host that wants the text somewhere other than stderr.
 //
 // Be precise about which failures are 2, because the two that sound like it
-// mostly are not: a `rebuildOn` variant that will not build is a gate RED
-// (`failedStep: "image:<tag>"`, #37 — the branch authored the recipe) and an
-// `attempt` container that will not come up is a gate RED too (D5). What
-// reaches 2 is a config error, an image sandbar does not build that is not
-// pulled, an unusable runtime, an `issue`-lifecycle container that will not
-// come up, and anything unexpected.
+// mostly are not: an image sandbar BUILDS that will not build is a gate RED
+// (`failedStep: "image:<tag>"` — the branch authored the recipe and its
+// declared inputs), whether it is the cold in-place build of a declared tag or
+// #37's per-branch variant, and an `attempt` container that will not come up is
+// a gate RED too (D5). What reaches 2 is a config error, an image sandbar does
+// not build that is not pulled, an unusable runtime, an `issue`-lifecycle
+// container that will not come up, and anything unexpected.
 export async function runGateCommand(
   rawConfig: RunConfig,
   opts: GateCommandOptions,
@@ -231,7 +268,11 @@ export async function runGateCommand(
   try {
     const config = resolveConfig(rawConfig);
     const requested = resolve(process.cwd(), opts.worktree);
-    if (!existsSync(requested)) {
+    // A DIRECTORY, not merely a path that exists: every mount resolves against
+    // this and podman will happily bind-mount a regular file, so
+    // `--worktree ./package.json` would otherwise reach a gate step as a
+    // nonsense tree rather than as a complaint.
+    if (!statSync(requested, { throwIfNoEntry: false })?.isDirectory()) {
       throw new SandbarError(
         `No such directory: ${requested}. \`--worktree\` names the tree to ` +
           "gate and defaults to the current directory.",
@@ -251,18 +292,24 @@ export async function runGateCommand(
     });
   } catch (e) {
     err(`${faultDetail(e)}\n`);
-    // Said here because it is the one thing the operator asked for that they
-    // are not getting, and `stack === null` is exactly "startStack threw", i.e.
-    // the bringup never completed (#45). A stack that came up and then failed
-    // — a dead `issue` container mid-gate — IS kept, which is useful and
-    // sound: it is not adoptable while that container is down, and its log is
-    // the diagnosis.
-    if (opts.keep && teardown.stack === null) {
+    // What `--keep` did with the stack, said on this path too — an operator
+    // who asked for something to poke at and is handed only an error must not
+    // have to work out from the wording which of the two happened, and a fault
+    // is when they most want the containers. `stack === null` is exactly
+    // "startStack threw", i.e. the bringup never completed (#45), and that
+    // stack is torn down. A stack that came up and then failed — a dead
+    // `issue` container caught mid-gate — IS kept, which is sound as well as
+    // useful: it is not adoptable while that container is down, and its log is
+    // the diagnosis. So that case gets the same notice the ordinary exit
+    // prints, naming the pod.
+    if (opts.keep) {
       err(
-        "The stack was NOT left up despite `--keep`: it never finished coming " +
-          "up, and a half-built stack is one the next invocation would adopt " +
-          "as if its postReadyCommands had run. The error above is what that " +
-          "bringup saw.\n",
+        teardown.stack === null
+          ? "The stack was NOT left up despite `--keep`: it never finished " +
+              "coming up, and a half-built stack is one the next invocation " +
+              "would adopt as if its postReadyCommands had run. The error " +
+              "above is what that bringup saw.\n"
+          : keptStackNotice(teardown.stack),
       );
     }
     return GATE_EXIT_NO_VERDICT;
@@ -376,12 +423,45 @@ async function gate(
   // command knows about — and unlike a run, it is deliberately allowed to be
   // dirty, so `rebuildInPlace: false` is what keeps that from rewriting a
   // declared tag some other process is relying on. See `ensureImages`.
-  const baseFingerprints = await ensureImages(config.images, worktreePath, {
-    rebuildInPlace: false,
-  });
+  //
+  // Over the images this stack RUNS, never `config.images` whole — see
+  // `gateStackImagesOf`.
+  const gateImages = gateStackImagesOf(config);
+  let baseFingerprints: ReadonlyMap<string, string>;
+  try {
+    baseFingerprints = await ensureImages(gateImages, worktreePath, {
+      rebuildInPlace: false,
+    });
+  } catch (e) {
+    // A build that fails is a RED, and it has to be the same red the variant
+    // path returns (`failedStep: "image:<tag>"`, #37): the recipe and its
+    // declared inputs are files in the tree being gated, so a lockfile that
+    // will not install is a fact about that tree rather than about the
+    // machine. Uncaught it would unwind to `runGateCommand`'s catch and come
+    // back as 2 — so the SAME branch would exit 1 on a warm laptop, where the
+    // declared tag exists and only the variant path runs, and 2 on a cold CI
+    // checkout, where it does not. The difference is invisible from the
+    // operator's side (it is image-cache state, nothing they wrote) and it
+    // points CI at its own infrastructure for a build the branch broke, which
+    // is the third code's own confusion running backwards.
+    //
+    // The build itself inherited the console rather than the `out` sink, which
+    // is `ensureImages`' own choice and the right one for a cold multi-minute
+    // build — so `e.message` here is the failure line and the output it is
+    // about is already above it on the terminal.
+    if (!(e instanceof ImageBuildError)) throw e;
+    err(
+      `\ngate: RED — step 'image:${e.tag}'\n` +
+        `Refusing to gate: image '${e.tag}' could not be built from ` +
+        `${worktreePath}. Sandbar builds it from a Containerfile in the tree ` +
+        "being gated, so this is a verdict about that tree and not an " +
+        `infrastructure failure.\n${e.message}\n`,
+    );
+    return GATE_EXIT_RED;
+  }
   const hostUid = process.getuid?.() ?? 0;
   const branchImages: BranchImages = createBranchImages({
-    images: config.images,
+    images: gateImages,
     scope,
     baseFingerprints,
     worktreeMountingTags: worktreeMountingTagsOf(config.gateStack),
@@ -453,15 +533,20 @@ async function gate(
     if (result.containerLogs) err(`${result.containerLogs}\n`);
   }
 
-  if (opts.keep) {
-    out(
-      `\nStack left up (\`--keep\`). Inspect it with \`${RUNTIME} pod ps\` / ` +
-        `\`${RUNTIME} exec -it <container> sh\`; the next \`sandbar gate\` over ` +
-        "this worktree reuses its issue-lifecycle containers. Remove it with: " +
-        `${RUNTIME} pod rm -f ${stack.podName} && ${RUNTIME} network rm -f ` +
-        `${stack.networkName}\n`,
-    );
-  }
+  if (opts.keep) out(keptStackNotice(stack));
 
   return result.ok ? GATE_EXIT_GREEN : GATE_EXIT_RED;
+}
+
+// What `--keep` left behind, and how to get rid of it. One function because
+// the throw path needs it too: a stack that came up and then failed is kept,
+// and its pod name is the whole value of having kept it.
+function keptStackNotice(stack: Stack): string {
+  return (
+    `\nStack left up (\`--keep\`). Inspect it with \`${RUNTIME} pod ps\` / ` +
+    `\`${RUNTIME} exec -it <container> sh\`; the next \`sandbar gate\` over ` +
+    "this worktree reuses its issue-lifecycle containers. Remove it with: " +
+    `${RUNTIME} pod rm -f ${stack.podName} && ${RUNTIME} network rm -f ` +
+    `${stack.networkName}\n`
+  );
 }

@@ -53,10 +53,11 @@ beside a live `sandbar` run on the same machine.
 
 **2 is narrower than it sounds, and the difference matters if you branch on it
 in CI.** A build that fails or a container that will not start is usually your
-branch's doing and is a **red**: an image with `rebuildOn` is rebuilt from the
-tree being gated, so a lockfile that won't install fails the gate as
-`image:<tag>`, and an `attempt`-lifecycle container that won't come up fails it
-as `container:<name>`. 2 is for the cases that are not about the code at all —
+branch's doing and is a **red**: any image sandbar builds for this stack is
+built from the tree being gated, so a lockfile that won't install fails the gate
+as `image:<tag>` — whether the tag was missing entirely or `rebuildOn` sent it
+to a per-branch variant — and an `attempt`-lifecycle container that won't come
+up fails it as `container:<name>`. 2 is for the cases that are not about the code at all —
 a config error, an image sandbar doesn't build that you haven't pulled, a
 podman it can't talk to, an `issue`-lifecycle container (your database, your
 mail catcher) that never becomes ready. Your `scripts/gate.sh`
@@ -82,6 +83,12 @@ one has no commit to be a verdict about and no orchestrator to report to:
   keeping it would let the next invocation adopt a database whose
   `postReadyCommands` never ran and then decline to re-run them. Remove a kept
   stack with the `podman pod rm -f …` line the command prints.
+
+It builds only the `config.images` entries a `gateStack` container actually
+runs. Your agent sandbox image is never built here — this command creates no
+sandbox, so building it would cost a cold CI checkout the whole agent image
+before the first gate container started, and let its build failure decide a
+gate it has nothing to do with.
 
 It does **not** run `sandboxHooks`. `onWorktreeReady` (your `npm ci`, typically)
 fires when *sandbar* creates a worktree; here the tree is yours and already

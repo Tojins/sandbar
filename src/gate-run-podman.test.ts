@@ -272,4 +272,111 @@ describe.runIf(available)("sandbar gate against real podman", () => {
     },
     300_000,
   );
+
+  // Which declared images this command builds, and what a build failure in one
+  // MEANS. Both are about `config.images` entries and neither is visible from a
+  // config that gives one image both roles — which is what this repo's own does,
+  // and why they are asserted here against podman rather than argued.
+  const BROKEN_CONTAINERFILE = `FROM ${IMAGE}\nRUN exit 7\n`;
+  const SANDBOX_ONLY_TAG = "localhost/sandbar-gate-run-sandbox:none";
+  const rmi = async (tag: string): Promise<void> => {
+    await exec(RUNTIME, ["rmi", "-f", tag]).catch(() => {});
+  };
+  const imageExists = async (tag: string): Promise<boolean> =>
+    await exec(RUNTIME, ["image", "exists", tag]).then(
+      () => true,
+      () => false,
+    );
+
+  it(
+    "does not build a declared image no gateStack container runs",
+    async () => {
+      await rmi(SANDBOX_ONLY_TAG);
+      await writeFile(join(repo, "Containerfile.broken"), BROKEN_CONTAINERFILE);
+      const out: string[] = [];
+      const cfg = config([
+        { name: "read", in: "runner", command: ["cat", "marker.txt"] },
+      ]);
+      const code = await runGateCommand(
+        {
+          ...cfg,
+          // Every consumer's `config.images` carries this entry —
+          // `resolveImages` requires one for `sandboxImage` — and in the
+          // configuration this feature exists to serve (the README's own), no
+          // gateStack container runs it. Missing, and unbuildable: so a command
+          // that built it would fail here, and one that merely built it would
+          // pay for the whole agent image before the first gate container on
+          // every cold CI checkout.
+          sandboxImage: SANDBOX_ONLY_TAG,
+          images: [
+            { tag: SANDBOX_ONLY_TAG, containerfile: "Containerfile.broken" },
+          ],
+        },
+        {
+          worktree: repo,
+          keep: false,
+          out: (t) => out.push(t),
+          err: (t) => out.push(t),
+        },
+      );
+
+      expect(code).toBe(GATE_EXIT_GREEN);
+      // Not merely "it did not fail": the tag is still absent, so the build was
+      // never attempted rather than attempted and forgiven.
+      expect(await imageExists(SANDBOX_ONLY_TAG)).toBe(false);
+      expect(await podExists()).toBe(false);
+    },
+    600_000,
+  );
+
+  it(
+    "reds — not 2 — when an image the stack DOES run will not build",
+    async () => {
+      await rmi(SANDBOX_ONLY_TAG);
+      await writeFile(join(repo, "Containerfile.broken"), BROKEN_CONTAINERFILE);
+      const out: string[] = [];
+      const cfg = config([
+        { name: "read", in: "runner", command: ["cat", "marker.txt"] },
+      ]);
+      const code = await runGateCommand(
+        {
+          ...cfg,
+          sandboxImage: SANDBOX_ONLY_TAG,
+          images: [
+            { tag: SANDBOX_ONLY_TAG, containerfile: "Containerfile.broken" },
+          ],
+          gateStack: {
+            ...cfg.gateStack,
+            containers: [
+              {
+                name: "runner",
+                image: SANDBOX_ONLY_TAG,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+          },
+        },
+        {
+          worktree: repo,
+          keep: false,
+          out: (t) => out.push(t),
+          err: (t) => out.push(t),
+        },
+      );
+
+      // The recipe and its inputs are files in the tree being gated, so this is
+      // a verdict about that tree. Left to unwind it would be a 2, and the SAME
+      // branch would then exit 1 on a warm laptop — where the tag exists and
+      // only #37's variant path runs — and 2 on a cold CI checkout, on a
+      // difference the operator cannot see.
+      expect(code).toBe(GATE_EXIT_RED);
+      expect(code).not.toBe(GATE_EXIT_NO_VERDICT);
+      // Named the way the variant path names it, so a CI log reads the same
+      // either way.
+      expect(out.join("")).toContain(`image:${SANDBOX_ONLY_TAG}`);
+      expect(await podExists()).toBe(false);
+    },
+    600_000,
+  );
 });
