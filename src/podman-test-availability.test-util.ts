@@ -20,10 +20,11 @@
 // TWO AXES, AND CONFLATING THEM MAKES THE GATE PERMANENTLY RED. "podman is
 // unreachable" is a fault: required-and-failing in the gate. "the client is not
 // local" is a fact about where the suite is running: the gate drives podman
-// through a socket, so a test that pins what a LOCAL client does (its signal
+// through a socket, so a test that holds only for a LOCAL client (its signal
 // semantics, its loopback topology) is not a test the gate can run at all, and
-// its file skips even under the flag. See gate-stack-hostpodman.test.ts, which
-// is the only file that asks for the local axis.
+// its file skips even under the flag. Two files ask for that axis and they are
+// the whole of the human's host-side step: gate-stack-hostpodman.test.ts and
+// agent-sandbox-podman.test.ts.
 //
 // A CONTRADICTION IS A FAILURE, NOT A CHOICE. `SANDBAR_SKIP_PODMAN_TESTS=1`
 // alongside the require flag is not an opt-out to honour; it is a run that has
@@ -57,8 +58,13 @@ export type PodmanTestInputs = {
     | { readonly ok: false; readonly reason: string };
   readonly skipRequested: boolean;
   readonly required: boolean;
-  // This file pins what a LOCAL podman client does, so a remote one cannot
-  // stand in for it.
+  // This file's assertions hold only for a LOCAL podman client, so a remote
+  // one cannot stand in for it. Two files ask for it and they ask for slightly
+  // different reasons, which is why the field is not named after either:
+  // gate-stack-hostpodman.test.ts PINS local-client behaviour (a remote client
+  // demonstrably does something else), while agent-sandbox-podman.test.ts has
+  // simply never been established through a remote one. Both want the same
+  // answer — do not run here — and neither wants a failure.
   readonly needsLocalClient: boolean;
   readonly clientIsLocal: boolean;
 };
@@ -71,9 +77,9 @@ export function decidePodmanTests(input: PodmanTestInputs): PodmanTestDecision {
     return {
       kind: "skip",
       reason:
-        `skipping ${input.what}: they pin what a LOCAL ${RUNTIME} client does ` +
-        "and CONTAINER_HOST is set, so this process drives a remote one. Run " +
-        "them on the host.",
+        `skipping ${input.what}: they hold only for a LOCAL ${RUNTIME} ` +
+        "client, and CONTAINER_HOST is set, so this process drives a remote " +
+        "one. Run them on the host.",
     };
   }
   if (input.required && input.skipRequested) {

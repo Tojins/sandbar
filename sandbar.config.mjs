@@ -116,12 +116,21 @@ export default {
     // second possible cause (the socket) that a `test` red does not.
     //
     // The exclude glob deliberately misses `gate-stack-hostpodman.test.ts`,
-    // which self-skips: it pins what a LOCAL client does, and this one is
+    // which self-skips: it holds only for a LOCAL client, and this one is
     // remote. `agent-sandbox-podman.test.ts` is excluded and not named below —
     // its `--init` reaping assertions were never measured through a socket, so
     // it stays a host-only file for now, exactly as it was before this change.
     //
-    // `npm test` on the host still runs everything.
+    // NEITHER of those depends on this comment being right. Both files declare
+    // `needsLocalClient`, so they skip against a remote client on their own
+    // say-so — which matters because a glob and a by-hand file list are two
+    // lists that drift, and the drift is silent in the direction that hurts
+    // (a host-only file quietly added to `podman-test` would be a red nobody
+    // asked for; one quietly dropped from BOTH would be a layer nobody runs).
+    //
+    // `npm test` on the host still runs everything. The two files above are
+    // the whole of the manual step: run them on the host after a cycle that
+    // touched the podman layer or the sandbox run args.
     steps: [
       { name: "check", in: "runner", command: ["npm", "run", "check"] },
       {

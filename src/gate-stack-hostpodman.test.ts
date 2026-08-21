@@ -27,8 +27,16 @@
 // (`CONTAINER_HOST` unset). It therefore skips in the gate EVEN under
 // `SANDBAR_REQUIRE_PODMAN_TESTS=1` — that flag is about a podman that should
 // have answered and did not, and a remote client answering correctly is not
-// that. Run it on the host: it is the whole of the manual step that used to be
-// "run the full suite before trusting a cycle that touched the podman layer".
+// that.
+//
+// THE MANUAL STEP IS THIS FILE AND `agent-sandbox-podman.test.ts`, both run on
+// the host. #48 shrank it from "run the full suite before trusting a cycle
+// that touched the podman layer" to those two, and the second one is easy to
+// forget precisely because its reason is different: it pins `--init` reaping
+// an orphan the entrypoint would not, which was never measured through a
+// socket rather than known to differ. It declares `needsLocalClient` for the
+// same reason this file does. Describe the step as one file and those
+// assertions are exercised by nobody, with nothing saying so.
 //
 // WHAT DELIBERATELY DID NOT MOVE. The test that carried fact (1)'s positive
 // half also asserted that an `issue` container keeps its id and its state
