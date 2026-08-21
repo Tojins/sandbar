@@ -44,7 +44,10 @@ const minimal: RunConfig = {
         image: "docker.io/library/mariadb:10.11",
         lifecycle: "issue",
         env: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "widgets" },
-        readiness: { kind: "exec", argv: ["mysql", "-uroot", "-e", "SELECT 1"] },
+        readiness: {
+          kind: "healthcheck",
+          command: ["mysql", "-uroot", "-e", "SELECT 1"],
+        },
       },
       {
         name: "app",

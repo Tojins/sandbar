@@ -58,8 +58,7 @@ export default {
   // What it takes to produce a verdict about a commit. Every container joins
   // one podman pod, so the stack addresses itself as 127.0.0.1 and publishes
   // no fixed ports — a gate run can't collide with your dev stack or another
-  // issue's. (A `tcp` readiness port is published loopback-only on an
-  // ephemeral host port, since sandbar probes it from the host.)
+  // issue's.
   gateStack: {
     containers: [
       {
@@ -67,7 +66,13 @@ export default {
         image: "docker.io/library/mariadb:10.11",  // must be fully qualified
         lifecycle: "issue",                        // started once per issue
         env: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "app" },
-        readiness: { kind: "tcp", port: 3306 },
+        // Argv podman runs INSIDE the container until it exits 0. Sandbar
+        // registers it with `--health-cmd` and polls it on demand, so there
+        // is nothing to publish and nothing scheduled.
+        readiness: {
+          kind: "healthcheck",
+          command: ["healthcheck.sh", "--connect", "--innodb_initialized"],
+        },
         readinessTimeoutMs: 120_000,               // default 60_000
         // Optional: args (image CMD args), mounts (fixture files, hostPath
         // relative to the GATED WORKTREE, read-only unless the entry says
@@ -371,6 +376,45 @@ sandbox's image alone is rejected: that image is resolved once, when the sandbox
 is created, before the branch it would depend on exists — and the agent can
 install into its own sandbox, so a stale layer there costs it a command rather
 than a verdict.
+
+### `readiness` — one kind, evaluated inside the container
+
+```ts
+readiness: { kind: "healthcheck", command: ["nc", "-z", "127.0.0.1", "3306"] }
+```
+
+Sandbar registers `command` as the container's healthcheck (`--health-cmd`, argv
+rather than a shell string) with podman's own scheduling **disabled**, and then
+invokes it from its own poll loop — bounded by `readinessTimeoutMs`, which is
+the only bound there is. Podman's `--health-timeout` is deliberately not exposed:
+it does not kill a slow probe, it lets it run to completion and labels the result
+afterwards, so a config field spelled like a per-probe bound would be a lie.
+Scheduling is disabled because a real interval makes podman create a **transient
+systemd timer** — needing a user session the host may not have, and named by
+container id, outside everything sandbar's cleanup can sweep.
+
+`command` is required; there is no fallback to the image's own `HEALTHCHECK`.
+Omitting `--health-cmd` is the one configuration in which podman schedules that
+timer anyway, and the fallback would buy almost nothing: `podman build` defaults
+to the OCI format, which has no `HEALTHCHECK` field at all, so no image sandbar
+builds carries one.
+
+A readiness failure reports the last five entries of `.State.Health.Log` — what
+the *probe* said — above the container's own log tail.
+
+> **Upgrading from `tcp` / `log` / `exec`.** All three are rejected at resolve
+> time, before the lock, with the replacement in the message. `exec` translates
+> exactly (same argv). `tcp` becomes any in-container probe of the port — and is
+> better there, with no publish and no settle window, because the rootless port
+> forwarder that made a bare connect meaningless is not in the path. `log` is
+> **not** a mechanical translation: write the check the pattern stood in for. A
+> reused `issue` container whose log the host journal has since vacuumed can
+> never match its boot-time pattern again, which is the failure retiring it
+> fixes.
+>
+> The one thing lost: a `scratch` image with no shell and no probe binary can no
+> longer declare readiness. Bake a static probe binary, or use `hold: true` plus
+> a `postReadyCommand`.
 
 ### Three constraints the gate stack imposes on your images and steps
 

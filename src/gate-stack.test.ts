@@ -19,14 +19,14 @@ import {
   imageFor,
   withImages,
   containerState,
-  logFollowArgs,
+  formatHealthLog,
+  healthCheckArgs,
+  lastProbeText,
   mountSpec,
-  parsePortBindings,
+  parseHealthLog,
   podCreateArgs,
   type PodmanProbe,
-  scanChunk,
   stepExecArgs,
-  tcpProbePorts,
 } from "./gate-stack.js";
 import { SandbarError } from "./errors.js";
 
@@ -114,7 +114,6 @@ describe("podCreateArgs", () => {
     const args = podCreateArgs({
       podName: "sandbar-pod-42",
       networkName: "sandbar-net-42",
-      publishPorts: [],
     });
     expect(args.slice(0, 6)).toEqual([
       "pod",
@@ -132,52 +131,53 @@ describe("podCreateArgs", () => {
     expect(args).toContain("8.8.8.8");
   });
 
-  it("publishes each probe port on loopback with a podman-assigned host port", () => {
-    const args = podCreateArgs({
-      podName: "p",
-      networkName: "n",
-      publishPorts: [3306, 1025],
-    });
-    // Empty host port = podman picks a free one, so two concurrent stacks
-    // cannot collide; 127.0.0.1 keeps it off-box.
-    expect(args).toContain("127.0.0.1::3306");
-    expect(args).toContain("127.0.0.1::1025");
-  });
-
-  it("publishes nothing when no container uses a tcp probe", () => {
-    const args = podCreateArgs({ podName: "p", networkName: "n", publishPorts: [] });
+  // Unconditional since #43: `tcp` readiness was the only thing that ever put
+  // a `-p` on a gate pod, and the probe runs inside the container now. The
+  // README's "publishes no fixed ports" lost its asterisk, and this is what
+  // keeps it that way.
+  it("publishes nothing at all", () => {
+    const args = podCreateArgs({ podName: "p", networkName: "n" });
     expect(args).not.toContain("-p");
+    expect(args.some((a) => a.includes("127.0.0.1::"))).toBe(false);
   });
 });
 
-describe("tcpProbePorts", () => {
-  const stack = (containers: ResolvedStackContainer[]) => ({
-    containers,
-    steps: [{ name: "s", in: "app", command: ["true"] }],
+// Both flags or neither (#43). `--health-interval=disable` is IGNORED without
+// a `--health-cmd`, so emitting it alone would be the one configuration that
+// schedules a transient systemd timer — the thing the pair exists to prevent.
+describe("healthCheckArgs", () => {
+  it("registers the probe as JSON argv with scheduling disabled", () => {
+    expect(
+      healthCheckArgs(
+        container({
+          readiness: {
+            kind: "healthcheck",
+            command: ["healthcheck.sh", "--connect"],
+          },
+        }),
+      ),
+    ).toEqual([
+      "--health-cmd",
+      '["healthcheck.sh","--connect"]',
+      "--health-interval=disable",
+    ]);
   });
 
-  it("collects only tcp readiness ports", () => {
-    expect(
-      tcpProbePorts(
-        stack([
-          container({ name: "db", readiness: { kind: "tcp", port: 3306 } }),
-          container({ name: "mail", readiness: { kind: "tcp", port: 1025 } }),
-          container({ name: "x", readiness: { kind: "log", pattern: "ready" } }),
-          container({ name: "y", readiness: null }),
-        ]),
-      ),
-    ).toEqual([3306, 1025]);
+  // JSON, so podman stores it as ["CMD", …] and runs it directly. A bare
+  // string would be wrapped in CMD-SHELL and re-split by a shell, which is the
+  // quoting dialect every other argv in this config avoids.
+  it("does not let an argument with spaces become two arguments", () => {
+    const args = healthCheckArgs(
+      container({
+        readiness: { kind: "healthcheck", command: ["sh", "-c", "a b || c"] },
+      }),
+    );
+    expect(args[1]).toBe('["sh","-c","a b || c"]');
+    expect(JSON.parse(args[1] as string)).toEqual(["sh", "-c", "a b || c"]);
   });
 
-  it("deduplicates — a repeated -p would make `pod create` fail outright", () => {
-    expect(
-      tcpProbePorts(
-        stack([
-          container({ name: "a", readiness: { kind: "tcp", port: 8080 } }),
-          container({ name: "b", readiness: { kind: "tcp", port: 8080 } }),
-        ]),
-      ),
-    ).toEqual([8080]);
+  it("emits neither flag for a container with no readiness", () => {
+    expect(healthCheckArgs(container({ readiness: null }))).toEqual([]);
   });
 });
 
@@ -267,6 +267,50 @@ describe("containerRunArgs", () => {
     const args = containerRunArgs({ ...base, container: container() });
     expect(args[args.indexOf("--label") + 1]).toBe("sandbar=true");
   });
+
+  // #43. The flags have to land BEFORE the image ref, or podman reads them as
+  // arguments to the image's own entrypoint — the same mistake `--entrypoint
+  // id` exists to avoid in `checkWorktreeImageUids`.
+  it("registers a readiness probe before the image ref", () => {
+    const args = containerRunArgs({
+      ...base,
+      container: container({
+        image: "docker.io/library/mariadb:10.11",
+        readiness: { kind: "healthcheck", command: ["healthcheck.sh"] },
+      }),
+    });
+    const imageIdx = args.indexOf("docker.io/library/mariadb:10.11");
+    expect(args.indexOf("--health-cmd")).toBeGreaterThan(-1);
+    expect(args.indexOf("--health-cmd")).toBeLessThan(imageIdx);
+    expect(args.indexOf("--health-interval=disable")).toBeLessThan(imageIdx);
+    expect(args[args.indexOf("--health-cmd") + 1]).toBe('["healthcheck.sh"]');
+  });
+
+  // Same placement rule for a held container, whose tail is
+  // `--entrypoint sleep <image> infinity` — a health flag appended after that
+  // would become an argument to `sleep`.
+  it("registers a readiness probe before a held container's entrypoint", () => {
+    const args = containerRunArgs({
+      ...base,
+      container: container({
+        image: "runner:gate",
+        hold: true,
+        readiness: { kind: "healthcheck", command: ["true"] },
+      }),
+    });
+    expect(args.slice(-4)).toEqual([
+      "--entrypoint",
+      "sleep",
+      "runner:gate",
+      "infinity",
+    ]);
+    expect(args.indexOf("--health-cmd")).toBeLessThan(args.length - 4);
+  });
+
+  it("registers no healthcheck for a container with no readiness", () => {
+    const args = containerRunArgs({ ...base, container: container() });
+    expect(args.some((a) => a.startsWith("--health"))).toBe(false);
+  });
 });
 
 describe("stepExecArgs", () => {
@@ -282,29 +326,115 @@ describe("stepExecArgs", () => {
   });
 });
 
-describe("parsePortBindings", () => {
-  it("maps container port to the host port podman assigned", () => {
-    const m = parsePortBindings(
-      '{"3306/tcp":[{"HostIp":"127.0.0.1","HostPort":"44719"}],' +
-        '"1025/tcp":[{"HostIp":"127.0.0.1","HostPort":"33001"}]}',
-    );
-    expect(m.get(3306)).toBe(44719);
-    expect(m.get(1025)).toBe(33001);
+// What the operator reads when a container never came ready (#43). The health
+// log is podman's own record of what each probe SAW, which is the thing
+// `podman healthcheck run`'s own output — the single word `unhealthy` — cannot
+// tell anyone.
+describe("parseHealthLog", () => {
+  const LOG =
+    '{"Status":"starting","FailingStreak":2,"Log":[' +
+    '{"Start":"2026-08-21T09:42:40Z","End":"2026-08-21T09:42:40Z",' +
+    '"ExitCode":1,"Output":"healthcheck connect failed"},' +
+    '{"Start":"2026-08-21T09:42:46Z","End":"2026-08-21T09:42:46Z",' +
+    '"ExitCode":0,"Output":""}]}';
+
+  it("reads podman's recorded probe invocations in order", () => {
+    const entries = parseHealthLog(LOG);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toEqual({
+      start: "2026-08-21T09:42:40Z",
+      exitCode: 1,
+      output: "healthcheck connect failed",
+    });
+    expect(entries[1]?.exitCode).toBe(0);
   });
 
-  it("returns empty for a pod with no publishes", () => {
-    expect(parsePortBindings("null").size).toBe(0);
-    expect(parsePortBindings("").size).toBe(0);
-    expect(parsePortBindings("{}").size).toBe(0);
+  // `.State.Health` is a zero-valued struct on a container with no check, and
+  // `Log` is null on one that has never been probed. Neither is an error.
+  it("returns nothing for a container that has no health record", () => {
+    expect(parseHealthLog("null")).toEqual([]);
+    expect(parseHealthLog("")).toEqual([]);
+    expect(parseHealthLog('{"Status":"","FailingStreak":0,"Log":null}')).toEqual(
+      [],
+    );
   });
 
-  it("skips malformed entries rather than inventing a port", () => {
-    // A bogus mapping would send the readiness probe at an unrelated host
-    // service and could read someone else's listener as this stack being ready.
-    const m = parsePortBindings(
-      '{"3306/tcp":[],"x/tcp":[{"HostPort":"1"}],"80/tcp":[{"HostPort":"nope"}]}',
+  // This runs while a ContainerBringupError is already being raised about
+  // something else. That error is the diagnosis; losing it to a JSON parse
+  // failure while assembling an addendum would be strictly worse than an error
+  // with no health block.
+  it("degrades to nothing rather than throwing on a shape it did not expect", () => {
+    expect(parseHealthLog("{not json")).toEqual([]);
+    expect(parseHealthLog("[1,2,3]")).toEqual([]);
+    expect(parseHealthLog('{"Log":[null,7,{"ExitCode":"x"}]}')).toEqual([
+      { start: "", exitCode: NaN, output: "" },
+    ]);
+  });
+});
+
+describe("formatHealthLog", () => {
+  it("renders each probe with its recorded exit code and output", () => {
+    const text = formatHealthLog([
+      { start: "T1", exitCode: 1, output: "connect failed\n" },
+      { start: "T2", exitCode: 0, output: "" },
+    ]);
+    expect(text).toContain("T1 exit 1");
+    expect(text).toContain("connect failed");
+    // An entry with no output must still be visible: "the probe ran and said
+    // nothing" and "the probe did not run" are different facts.
+    expect(text).toContain("T2 exit 0 (no output)");
+  });
+
+  it("renders nothing at all when there are no entries", () => {
+    // The caller only adds a "Container health log" heading for a non-empty
+    // string, so this is what keeps a heading from standing over nothing.
+    expect(formatHealthLog([])).toBe("");
+  });
+});
+
+// The `last probe:` slot of a readiness timeout. Three outcomes, and the third
+// is the one that needs the test: a probe sandbar KILLED at the deadline is
+// invisible to the health log, so the log's newest entry belongs to an earlier
+// failure and rendering it describes something that did not happen.
+describe("lastProbeText", () => {
+  const failed = { start: "T1", exitCode: 1, output: "connect failed\n" };
+
+  it("quotes the last recorded probe, not podman's `unhealthy`", () => {
+    expect(lastProbeText([failed], "unhealthy", false)).toBe(
+      "exit 1: connect failed",
     );
-    expect(m.size).toBe(0);
+  });
+
+  // An entry with an empty Output still says more than the client does — the
+  // probe ran and returned a code.
+  it("names the exit code when the probe recorded no output", () => {
+    expect(
+      lastProbeText([{ start: "T1", exitCode: 1, output: "" }], "x", false),
+    ).toBe("exit 1, no output");
+  });
+
+  it("falls back to the client's detail when nothing was recorded", () => {
+    expect(lastProbeText([], "no such container", false)).toBe(
+      "no such container",
+    );
+    expect(lastProbeText([], "", false)).toBe("no probe was recorded");
+  });
+
+  // The blocking case. Polls 1..N fail fast and record entries; the service
+  // then starts accepting and never answers, so probe N+1 hangs and is
+  // SIGKILLed at the deadline, recording nothing. Reporting the stale entry
+  // sends the operator to debug a connection error against a probe that in
+  // fact stopped returning — the #31 misdirection rebuilt in its replacement.
+  it("leads with the kill when the final probe was killed at the deadline", () => {
+    const text = lastProbeText([failed], "probe did not return within 800ms and was killed", true);
+    expect(text).toMatch(/^probe did not return within 800ms and was killed/);
+    // The stale entry is context, and is labelled as previous rather than as
+    // the verdict — dropping it would lose the only thing any probe ever said.
+    expect(text).toContain("previous probe: exit 1: connect failed");
+  });
+
+  it("reports the kill even with no entries at all to fall back on", () => {
+    expect(lastProbeText([], "", true)).toBe("probe was killed at the deadline");
   });
 });
 
@@ -626,27 +756,39 @@ describe("resolveGateStack validation", () => {
     ).toThrow(/must be absolute/);
   });
 
-  // Pod members share a network namespace, so only one of them can be
-  // listening — and one publish would report BOTH ready as soon as either
-  // binds, re-opening the green-on-red TCP_SETTLE_MS exists to close.
-  it("refuses two containers with the same tcp readiness port", () => {
-    expect(() =>
-      resolveGateStack({
-        ...ok,
-        containers: [
-          {
-            name: "app",
-            image: "a",
-            mountWorktree: "/app",
-            readiness: { kind: "tcp", port: 3306 },
-          },
-          { name: "db", image: "b", readiness: { kind: "tcp", port: 3306 } },
-        ],
-      }),
-    ).toThrow(/both declare tcp readiness on port 3306/);
+  // #43 retired three readiness kinds. A consumer crossing this change has a
+  // working config in front of them, so the only useful error names the
+  // replacement — "unknown kind" would send them to read the type instead. The
+  // break is loud and early: resolve time, before the lock.
+  it("refuses each retired readiness kind with its translation", () => {
+    const retired = [
+      { kind: "tcp", port: 3306 },
+      { kind: "log", pattern: "port: 3306" },
+      { kind: "exec", argv: ["mariadb", "-e", "SELECT 1"] },
+    ];
+    for (const readiness of retired) {
+      expect(() =>
+        resolveGateStack({
+          ...ok,
+          containers: [
+            {
+              name: "app",
+              image: "a",
+              mountWorktree: "/app",
+              readiness: readiness as never,
+            },
+          ],
+        }),
+      ).toThrow(
+        new RegExp(`retired '${readiness.kind}' readiness kind[\\s\\S]*healthcheck`),
+      );
+    }
   });
 
-  it("allows the same tcp port to reappear once the other container is gone", () => {
+  // The `log` message must not read as a mechanical rename. Retiring it is a
+  // statement that the log was never the right question — a pattern lifted
+  // verbatim into `sh -c` is a different wrong probe, not a translation.
+  it("tells a `log` consumer to write the probe the pattern stood in for", () => {
     expect(() =>
       resolveGateStack({
         ...ok,
@@ -655,9 +797,74 @@ describe("resolveGateStack validation", () => {
             name: "app",
             image: "a",
             mountWorktree: "/app",
-            readiness: { kind: "tcp", port: 3306 },
+            readiness: { kind: "log", pattern: "ready" } as never,
           },
-          { name: "db", image: "b", readiness: { kind: "tcp", port: 5432 } },
+        ],
+      }),
+    ).toThrow(/NOT a mechanical translation/);
+  });
+
+  it("refuses a readiness kind it does not recognise at all", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "app",
+            image: "a",
+            mountWorktree: "/app",
+            readiness: { kind: "http", url: "/health" } as never,
+          },
+        ],
+      }),
+    ).toThrow(/unknown readiness kind/);
+  });
+
+  // Checked like every other argv in this config: `--health-cmd '[]'`
+  // registers a probe that can never pass, and the container then spends its
+  // whole readiness budget before saying so.
+  it("refuses an empty healthcheck command", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "app",
+            image: "a",
+            mountWorktree: "/app",
+            readiness: { kind: "healthcheck", command: [] },
+          },
+        ],
+      }),
+    ).toThrow(/empty healthcheck readiness command/);
+  });
+
+  // The rule that went WITH the tcp kind: two containers could not share a
+  // readiness port because the pod published one host socket per port and
+  // whichever container bound it marked both ready. Nothing is published now
+  // and each probe runs inside its own container, so the shape is simply legal.
+  it("allows two containers to probe the same port, now that nothing is published", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "app",
+            image: "a",
+            mountWorktree: "/app",
+            readiness: {
+              kind: "healthcheck",
+              command: ["nc", "-z", "127.0.0.1", "3306"],
+            },
+          },
+          {
+            name: "db",
+            image: "b",
+            readiness: {
+              kind: "healthcheck",
+              command: ["nc", "-z", "127.0.0.1", "3306"],
+            },
+          },
         ],
       }),
     ).not.toThrow();
@@ -860,22 +1067,6 @@ describe("resolveGateStack validation", () => {
         ],
       }),
     ).toThrow(/unknown mode/);
-  });
-
-  it("refuses an out-of-range tcp readiness port", () => {
-    expect(() =>
-      resolveGateStack({
-        ...ok,
-        containers: [
-          {
-            name: "app",
-            image: "a",
-            mountWorktree: "/app",
-            readiness: { kind: "tcp", port: 70000 },
-          },
-        ],
-      }),
-    ).toThrow(/out-of-range/);
   });
 
   // `Number(process.env.X)` on an unset var is NaN, which fails every
@@ -1120,88 +1311,6 @@ describe("resolveImages", () => {
   });
 });
 
-describe("logFollowArgs", () => {
-  // No `--tail`/`--since` window: the pattern may already have been printed
-  // before the first poll, and a window is a bound on how far back it can be.
-  it("follows from the first log line", () => {
-    expect(logFollowArgs("sandbar-w0000000-abc-app")).toEqual([
-      "logs",
-      "-f",
-      "sandbar-w0000000-abc-app",
-    ]);
-  });
-});
-
-// A followed stream splits lines wherever the log driver feels like it, so
-// these are the whole readiness verdict for a `log` container (#31).
-describe("scanChunk", () => {
-  const feed = (
-    chunks: readonly string[],
-    pattern: string,
-  ): { found: boolean; carry: string } => {
-    let carry = "";
-    let found = false;
-    for (const chunk of chunks) {
-      const r = scanChunk(carry, chunk, pattern);
-      carry = r.carry;
-      found = found || r.found;
-    }
-    return { found, carry };
-  };
-
-  it("finds a pattern contained in one chunk", () => {
-    expect(scanChunk("", "server listening on 3000\n", "listening").found).toBe(
-      true,
-    );
-  });
-
-  // The reason the carry exists. `podman logs -f` under the k8s-file driver
-  // emits an unterminated partial line as its own chunk (pinned in
-  // gate-stack-podman.test.ts), so without this the container never goes ready
-  // and the operator is told the pattern never appeared.
-  it("finds a pattern split across two chunks", () => {
-    expect(feed(["boot: PAR", "TIAL-READY\n"], "PARTIAL-READY").found).toBe(true);
-  });
-
-  it("finds a pattern split one character at a time", () => {
-    expect(feed([..."xx ready yy"], "ready").found).toBe(true);
-  });
-
-  // A chunk boundary must not manufacture a match either: the carry is a
-  // suffix of what really arrived, never a re-delivery of it.
-  it("does not match text that never appeared in the stream", () => {
-    // Boundary properties, not case checks. Each pattern appears only if the
-    // carry were RE-delivered at the head of the next chunk ("ab" + "abcd",
-    // "xy" + "xyz") — which is why this design follows the stream once instead
-    // of re-reading a window.
-    expect(feed(["ab", "cd"], "bab").found).toBe(false);
-    expect(feed(["xy", "z"], "yxy").found).toBe(false);
-  });
-
-  it("keeps at most pattern.length - 1 bytes between chunks", () => {
-    const r = scanChunk("", "x".repeat(10_000), "ready");
-    expect(r.found).toBe(false);
-    expect(r.carry).toBe("xxxx");
-  });
-
-  it("carries nothing for a single-character pattern", () => {
-    expect(scanChunk("", "abc", "z")).toEqual({ found: false, carry: "" });
-  });
-
-  it("never carries more than it has seen", () => {
-    expect(scanChunk("", "ab", "ready")).toEqual({ found: false, carry: "ab" });
-  });
-
-  // Once found the carry is irrelevant, and holding it would keep bytes alive
-  // for a watcher that is about to be killed.
-  it("drops the carry on a match", () => {
-    expect(scanChunk("rea", "dy now", "ready")).toEqual({
-      found: true,
-      carry: "",
-    });
-  });
-});
-
 // ---------------------------------------------------------------------------
 // containerState (#36)
 //
@@ -1265,9 +1374,10 @@ describe("containerState", () => {
     expect(calls).toEqual(["inspect", "exists"]);
   });
 
-  // The second producer of `unknown`, and the one the watchLog restart trade
-  // leans on: the container demonstrably EXISTS, we just cannot say whether it
-  // is running. Reading this as death would be the retry storm.
+  // The second producer of `unknown`, and the one the readiness poll leans on
+  // when it keeps probing rather than declaring a container dead: it
+  // demonstrably EXISTS, we just cannot say whether it is running. Reading this
+  // as death would be the retry storm.
   it("is `unknown` when inspect fails but `exists` says the container is there", async () => {
     const { probe } = probeOf({
       inspect: podmanSaid({ exitCode: 125 }),

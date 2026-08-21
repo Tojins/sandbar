@@ -82,12 +82,12 @@
 // step because a lint step and a browser suite do not want the same ceiling);
 // readiness probes and postReadyCommands by the container's own readiness
 // budget; the calls sandbar makes ABOUT a container rather than through it
-// (`logs`, `inspect`, `container exists`) by LOG_READ_TIMEOUT_MS; everything
-// that creates or
-// destroys a pod, network or container by CONTROL_TIMEOUT_MS; and the tcp probe
-// carries a socket timeout because a dropped SYN produces neither `connect` nor
-// `error`. The one thing a gate run still shells out to unbounded is not
-// podman: `dirtyWorktreePaths`' `git status` (git-ops.ts).
+// (`logs`, `inspect`, `container exists`) by LOG_READ_TIMEOUT_MS; and
+// everything that creates or destroys a pod, network or container by
+// CONTROL_TIMEOUT_MS. Podman's own `--health-timeout` is NOT one of these and
+// is not passed: it does not kill, it retro-labels (see Readiness below). The
+// one thing a gate run still shells out to unbounded is not podman:
+// `dirtyWorktreePaths`' `git status` (git-ops.ts).
 // Note that `readinessTimeoutMs` alone does not do this: the poll loop only
 // tests its deadline BETWEEN probes, so one probe that never returns hangs
 // forever inside a perfectly valid budget.
@@ -123,79 +123,89 @@
 // A recreate that fails is the one case where a killed step does not produce a
 // gate red: the bringup error wins and the run takes a HARD-ERROR instead.
 //
-// The `log` follower (#31) is the one thing here with no deadline at all, and
-// its bound is a kill rather than a timeout: `podman logs -f` is unbounded BY
-// DESIGN, so what makes it safe is that `waitForReady` owns it in a `finally`
-// and kills it on every path out — ready, timeout, or throw. It is deliberately
-// not registered with `onCleanup`: that registry never forgets an action, so
-// one entry per container per bringup would grow without limit.
-//
-// What covers a SIGNAL is weaker, and worth stating exactly rather than
-// waving at. On SIGINT/SIGTERM the trapped cleanup tears the pod down, and a
-// follower whose container has been removed exits ~1s later on its own —
-// verified. That chain does NOT cover SIGKILL, SIGHUP (untrapped), or a
-// teardown that throws before `pod rm`: an orphaned follower on a QUIET
-// container blocks in read, never notices the broken pipe, and survives its
-// parent indefinitely. It holds no lock and no podman resource, so it is a
-// stray process rather than a leak that blocks the next run — which is why
-// this is documented rather than defended against with a pidfile.
+// Every podman call this module makes is now a bounded `execFile`. The one
+// long-lived `spawn` it used to hold — the `podman logs -f` follower behind
+// `log` readiness — went with that kind in #43, and with it the whole
+// signal-coverage caveat that followed: there is no longer any child here that
+// can outlive its parent on SIGKILL or an untrapped SIGHUP.
 //
 // ---------------------------------------------------------------------------
-// Readiness
+// Readiness: podman owns the probe, sandbar owns the schedule (#43)
 // ---------------------------------------------------------------------------
-// `exec` is direct. `log` FOLLOWS the log with `podman logs -f` and scans the
-// stream as it arrives, because the obvious implementation — re-read the whole
-// log every poll — is quadratic in the log's size and, past `MAX_BUFFER`, node
-// kills every read so the container can never become ready EVEN AFTER the
-// pattern is printed, and reports it as "logs unavailable", which reads as
-// "the pattern never appeared" and sends the operator to the wrong place
-// (#31). Following also means a genuine podman failure is reported as what
-// podman said rather than flattened into that same string.
+// One kind. The container is created with `--health-cmd '<json argv>'` and
+// `--health-interval=disable`, and every poll calls `podman healthcheck run`.
+// The probe therefore runs INSIDE the container, which is what retires the
+// three hand-rolled kinds this replaced — `tcp` (a host-side connect through a
+// published port), `log` (a followed `podman logs -f` scanned for a substring)
+// and `exec` (a bare `podman exec`) — along with roughly 250 lines that existed
+// only to make the first two work.
 //
-// A followed stream delivers a line in as many chunks as it likes — an
-// unterminated partial line arrives as its own chunk under the `k8s-file`
-// driver, pinned in gate-stack-podman.test.ts — so the scan carries the last
-// `pattern.length - 1` bytes of each stream across chunk boundaries. Without
-// that carry, a pattern written as `PAR` then `TIAL` is missed forever: a new
-// silent failure, and exactly the one that makes the cheap `--tail N` fix
-// unacceptable. The carry is sound here only because a followed stream is
-// delivered ONCE, in order — the other candidate fix, a rolling `--since`
-// cursor, must re-read an overlap window to avoid losing lines, and re-delivery
-// makes `carry + chunk` manufacture matches that were never in the log.
+// SANDBAR POLLS; PODMAN DOES NOT SCHEDULE, and that inverts the obvious
+// implementation on purpose. `--health-interval=Ns` plus one
+// `podman wait --condition=healthy --condition=unhealthy` looks like less code
+// and is worse on three counts, each measured against podman 4.9.3:
 //
-// The chunk boundary is a BYTE boundary, so the stream is decoded through a
-// StringDecoder rather than per-chunk `toString`; decoding independently
-// destroys a multi-byte character split across two chunks, and the patterns
-// most likely to be given to a frontend dev server are not ASCII.
+//   - podman schedules healthchecks with TRANSIENT SYSTEMD TIMERS, so a real
+//     interval needs a systemd user session (a rootless podman inside a CI
+//     container may have none) and creates a unit named by CONTAINER ID —
+//     outside the `sandbar-<scope>-*` namespace `cleanupOrphanContainers`
+//     sweeps, so a SIGKILLed run leaks a timer nothing reaps that keeps firing
+//     against a container that is gone. #28's scope has no reach into the
+//     systemd unit namespace. With `--health-cmd` AND `disable`, podman creates
+//     no unit at all: the dependency is designed out rather than probed for.
+//   - `podman wait` buys no verdict. It accepts both conditions and then prints
+//     `-1` and EXITS 0 for either outcome, so the `inspect` happens anyway.
+//   - `--health-timeout` DOES NOT KILL. A 2s timeout against a 30s probe
+//     returns after 30.3s and then labels the result `exceeded timeout of 2s`,
+//     recorded as `ExitCode: -1`. Under `wait` that means blocking on a probe
+//     podman has declined to kill — "nothing here may hang" reintroduced
+//     through its own fix. So the flag is deliberately NOT passed and not
+//     exposed in config: a number that looks like a per-probe bound but only
+//     retro-labels is #26's green-on-red wearing podman's colours.
+//     `readinessTimeoutMs` remains the single real bound, enforced here.
 //
-// One behaviour change worth knowing: a container that prints its pattern and
-// EXITS within the first poll now fails bringup instead of going ready. The
-// old full read could answer from a dead container's log; a follower has ~200ms
-// of startup latency, so the first poll finds nothing and `throwIfDead` fires.
-// A readiness container that exits is not a service — every step that execs
-// into it would fail anyway — so failing loudly at bringup is the better
-// answer, but it IS an answer the old probe did not give.
+// What the poll keeps unchanged: `readinessTimeoutMs`, the `remainingMs`
+// arithmetic, `throwIfDead` between probes, `READY_POLL_INTERVAL_MS`.
 //
-// `tcp` is the interesting one: the port is probed from the HOST, through a
-// loopback-only publish with a podman-assigned ephemeral host port. Probing
-// from inside the namespace would need a shell and
-// a socket tool in an image sandbar does not control, and the images that most
-// need a TCP probe (mail catchers, scratch-based services) are exactly the ones
-// that have neither.
+// TWO THINGS ABOUT THE HEALTH LOG MISLEAD SILENTLY, so read them before
+// debugging a probe:
 //
-// A bare TCP connect to that published port is NOT a readiness signal, and
-// treating it as one would be a green-on-red of the same family as #22's: the
-// rootless port forwarder accepts the connection at the host and only then
-// tries the backend, so `connect` succeeds against a pod with nothing listening
-// at all. Verified: dead backend and mid-initialisation mariadb both connect
-// and are closed ~190ms later, while a serving mariadb stays open. So the probe
-// requires the socket to STAY open for a settle window. A server that accepts
-// and immediately hangs up for its own reasons would read as not-ready
-// forever — such a service should use `exec` readiness instead.
+//   - EXIT CODES ARE NORMALISED. A probe that exits 3 is recorded as
+//     `ExitCode: 1`; a podman-timeout is recorded as `-1`. The number in the
+//     log is not the number the probe returned.
+//   - `lastErr` MUST COME FROM THE HEALTH LOG, NOT FROM THE CLIENT — WITH ONE
+//     EXCEPTION THAT IS NOT OPTIONAL. `podman healthcheck run`'s own stdout on
+//     failure is the single word `unhealthy`, so a "last probe: unhealthy"
+//     built from the client's output says less than the probe it replaced. The
+//     last entry's `Output` is the useful text, so the timeout reads it — once,
+//     at the deadline, where it also collects the most recent entries for the
+//     trace, sliced to HEALTH_LOG_ENTRIES.
+//     The exception is a probe SANDBAR KILLED at the deadline: it records no
+//     entry at all, because the client died before podman could write one. The
+//     newest entry is then some earlier, faster failure, and rendering it
+//     reports "exit 1: connect failed" for a probe that in fact stopped
+//     returning — nothing else in the message, health block or log tail
+//     included, would mention the kill. So `probeOnce` carries `timedOut` out
+//     beside the detail and `lastProbeText` leads with it. Since our deadline is
+//     the only bound there is (`--health-timeout` does not kill, above), that
+//     kill is the single most useful thing the error can say.
+//
+// The health block is ADDED TO `ContainerBringupError`, not swapped for the
+// container log tail. The health log says what the probe saw; D9's argument
+// runs the other way too — WHY a probe failed is usually in the container's own
+// log — so the error carries both, health above tail.
+//
+// Residual, stated: killing the `podman healthcheck run` client leaves the
+// probe process running inside the container. That is what the `exec` kind
+// already did and what this module's header already documents for steps — no
+// regression and no new reap.
+//
+// Known limitation: a `scratch` image with no shell and no probe binary can no
+// longer declare readiness, where `tcp` could, since there is nothing in it to
+// run. No stack has such a container; the escape hatches are a static probe
+// binary in the image, or `hold: true` plus a `postReadyCommand`.
 
-import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { StringDecoder } from "node:string_decoder";
-import { connect } from "node:net";
+import { execFile } from "node:child_process";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
 
@@ -330,10 +340,12 @@ async function mustSucceed(
 
 export const READY_POLL_INTERVAL_MS = 500;
 
-// How long a TCP connection must stay open before the listener counts as real.
-// 300ms clears the ~190ms in which the rootless port forwarder accepts and then
-// closes a connection whose backend refused it.
-export const TCP_SETTLE_MS = 300;
+// How many `.State.Health.Log` entries a bringup failure carries. Podman keeps
+// five by default, which is the number this matches, but retention is a host
+// setting (`--health-max-log-count`, containers.conf) — so this is SANDBAR's
+// cap and the trace is sliced to it, rather than a restatement of podman's that
+// a configured host would quietly falsify.
+export const HEALTH_LOG_ENTRIES = 5;
 
 // Public resolvers on the pod, so external name resolution survives the
 // `--disable-dns` network (#18). `--dns` writes resolv.conf directly, bypassing
@@ -416,14 +428,46 @@ export type Stack = {
 // A container failed to start or never became ready. Thrown for `issue`
 // containers (infra → HARD-ERROR); caught and converted to a red gate for
 // `attempt` ones.
+//
+// `healthLog` is ADDED to the container log tail rather than replacing it
+// (#43). The health log says what the PROBE saw, which is what the tail cannot
+// tell you; D9's argument runs the other way as well, since why a probe failed
+// is usually in the service's own output.
+//
+// Only the readiness TIMEOUT fills it in. Most bringup failures happen before
+// or beside the probe and have no entries to show, so a heading there would
+// stand over nothing — but one does not: `throwIfDead` reached from inside the
+// readiness poll is a container that failed probes and THEN exited, and its
+// entries exist. That omission is a deliberate small loss, not an oversight. A
+// container that dies during startup is diagnosed by its own log, which that
+// error already carries in full, and the alternative is an `inspect` on the
+// path where podman has just told us the container is stopped or gone.
 export class ContainerBringupError extends SandbarError {
   readonly containerName: string;
   readonly logTail: string;
-  constructor(containerName: string, message: string, logTail: string) {
-    super(`${message}\nContainer log tail:\n${logTail}`);
+  readonly healthLog: string;
+  constructor(
+    containerName: string,
+    message: string,
+    logTail: string,
+    healthLog = "",
+  ) {
+    super(
+      `${message}\n` +
+        // No count in the heading: a container that failed twice has two
+        // entries, so "last 5 probes" over two lines would be a small lie in
+        // exactly the place someone is counting — and the caller, not this
+        // heading, is what bounds the list to HEALTH_LOG_ENTRIES.
+        (healthLog
+          ? `Container health log (most recent probes, oldest first):\n` +
+            `${healthLog}\n`
+          : "") +
+        `Container log tail:\n${logTail}`,
+    );
     this.name = "ContainerBringupError";
     this.containerName = containerName;
     this.logTail = logTail;
+    this.healthLog = healthLog;
   }
 }
 
@@ -450,11 +494,12 @@ export function mountSpec(
   return `${hostPath}:${mount.containerPath}:${mount.mode},z`;
 }
 
+// No `-p` at all, and since #43 that is unconditional: `tcp` readiness was the
+// only thing that ever made a gate pod publish anything, and the probe now runs
+// inside the container. "Publishes no fixed ports" lost its asterisk.
 export function podCreateArgs(opts: {
   readonly podName: string;
   readonly networkName: string;
-  // Container ports needing a host-side probe (tcp readiness).
-  readonly publishPorts: readonly number[];
 }): string[] {
   return [
     "pod",
@@ -464,9 +509,32 @@ export function podCreateArgs(opts: {
     "--network",
     opts.networkName,
     ...DNS_SERVERS.flatMap((s) => ["--dns", s]),
-    // Loopback-only, podman picks the host port: two concurrent stacks cannot
-    // collide, and nothing is reachable off-box.
-    ...opts.publishPorts.flatMap((p) => ["-p", `127.0.0.1::${p}`]),
+  ];
+}
+
+// The `run` flags that register a readiness probe podman will evaluate on
+// demand (#43). Both flags or neither: `--health-interval=disable` is IGNORED
+// unless a `--health-cmd` accompanies it, so the pair is what suppresses the
+// transient systemd timer, and a container with no readiness must register no
+// check at all (nothing would ever invoke it, and the timer would be the only
+// thing the flags achieved).
+//
+// JSON argv, so podman stores it as `["CMD", …]` and runs it directly. A string
+// would be wrapped in `CMD-SHELL` and re-split by a shell, which is the
+// quoting-dialect problem `step.command` and `postReadyCommands` avoid by being
+// argv everywhere else in this config.
+//
+// No `--health-timeout`, no `--health-retries`, no `--health-start-period`.
+// The last two are podman's status-TRANSITION bookkeeping and have no effect on
+// `healthcheck run`'s exit code, which is the only thing sandbar reads, so they
+// would be config that does nothing. `--health-timeout` is worse than inert —
+// see the header: it does not kill.
+export function healthCheckArgs(c: ResolvedStackContainer): string[] {
+  if (c.readiness === null) return [];
+  return [
+    "--health-cmd",
+    JSON.stringify(c.readiness.command),
+    "--health-interval=disable",
   ];
 }
 
@@ -491,6 +559,7 @@ export function containerRunArgs(opts: {
     ...Object.entries(c.env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
     ...Object.entries(RESERVED_ENV).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
     ...c.mounts.flatMap((m) => ["-v", mountSpec(opts.worktreePath, m)]),
+    ...healthCheckArgs(c),
   ];
   if (c.mountWorktree !== null) {
     args.push("-v", `${opts.worktreePath}:${c.mountWorktree}:rw,z`);
@@ -546,36 +615,75 @@ export function stepExecArgs(
   ];
 }
 
-// Container ports that need a host-side publish, deduplicated. Two containers
-// cannot listen on the same port in one namespace anyway, but a duplicate here
-// would make `pod create` fail rather than merely waste a mapping.
-export function tcpProbePorts(spec: ResolvedGateStack): number[] {
-  const ports = new Set<number>();
-  for (const c of spec.containers) {
-    if (c.readiness?.kind === "tcp") ports.add(c.readiness.port);
-  }
-  return [...ports];
-}
+// One recorded probe invocation, out of `.State.Health.Log`.
+//
+// `exitCode` is what PODMAN recorded, which is not what the probe returned: a
+// probe exiting 3 is normalised to 1, and a probe podman decided had exceeded
+// `--health-timeout` is recorded as -1 (having been allowed to run to
+// completion first). Carried verbatim rather than re-interpreted — the whole
+// value of the block is that it is podman's own record.
+export type HealthLogEntry = {
+  readonly start: string;
+  readonly exitCode: number;
+  readonly output: string;
+};
 
-// Parse `podman pod inspect --format '{{json .InfraConfig.PortBindings}}'` into
-// containerPort → hostPort. Shape:
-//   {"3306/tcp":[{"HostIp":"127.0.0.1","HostPort":"44719"}]}
-export function parsePortBindings(json: string): Map<number, number> {
-  const out = new Map<number, number>();
+// Parse `podman inspect --format '{{json .State.Health}}'`. Shape:
+//   {"Status":"starting","FailingStreak":2,
+//    "Log":[{"Start":"…","End":"…","ExitCode":1,"Output":"…"}]}
+//
+// Total, never throwing, and that is deliberate: this feeds an error message
+// that is already being raised about something else, so a shape sandbar did not
+// expect must degrade to "no health block" rather than replace a readiness
+// timeout with a JSON parse error. `Log` is `null` for a container that has a
+// check registered but has never been probed, and `.State.Health` itself is a
+// zero-valued struct for one with no check at all.
+export function parseHealthLog(json: string): HealthLogEntry[] {
   const trimmed = json.trim();
-  if (!trimmed || trimmed === "null") return out;
-  const parsed: unknown = JSON.parse(trimmed);
-  if (typeof parsed !== "object" || parsed === null) return out;
-  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-    const containerPort = Number(key.split("/")[0]);
-    if (!Number.isInteger(containerPort)) continue;
-    if (!Array.isArray(value) || value.length === 0) continue;
-    const first = value[0] as { HostPort?: unknown };
-    const hostPort = Number(first?.HostPort);
-    if (!Number.isInteger(hostPort) || hostPort <= 0) continue;
-    out.set(containerPort, hostPort);
+  if (!trimmed || trimmed === "null") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return [];
+  }
+  if (typeof parsed !== "object" || parsed === null) return [];
+  const log = (parsed as { Log?: unknown }).Log;
+  if (!Array.isArray(log)) return [];
+  const out: HealthLogEntry[] = [];
+  for (const raw of log) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const e = raw as { Start?: unknown; ExitCode?: unknown; Output?: unknown };
+    out.push({
+      start: typeof e.Start === "string" ? e.Start : "",
+      exitCode: typeof e.ExitCode === "number" ? e.ExitCode : NaN,
+      output: typeof e.Output === "string" ? e.Output : "",
+    });
   }
   return out;
+}
+
+// The health log as it goes into a bringup error. Oldest first, which is the
+// order podman stores it in and the order it reads in: a probe's output is
+// usually a progression ("connect failed" → "connect failed" → the real error).
+export function formatHealthLog(entries: readonly HealthLogEntry[]): string {
+  if (entries.length === 0) return "";
+  return entries
+    .map((e) => {
+      const head = `  ${e.start || "(no timestamp)"} exit ${
+        Number.isNaN(e.exitCode) ? "?" : String(e.exitCode)
+      }`;
+      const body = stripAnsi(e.output).trim();
+      return body ? `${head}\n${indent(body)}` : `${head} (no output)`;
+    })
+    .join("\n");
+}
+
+function indent(text: string): string {
+  return text
+    .split("\n")
+    .map((l) => `    ${l}`)
+    .join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -658,15 +766,9 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       `create network ${networkName}`,
     );
     await mustSucceed(
-      podCreateArgs({
-        podName,
-        networkName,
-        publishPorts: tcpProbePorts(opts.spec),
-      }),
+      podCreateArgs({ podName, networkName }),
       `create pod ${podName}`,
     );
-
-    const hostPorts = await readPortBindings(podName);
 
     const issueContainers = opts.spec.containers.filter(
       (c) => c.lifecycle === "issue",
@@ -687,7 +789,6 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       podName,
       worktreePath: opts.worktreePath,
       nameOf,
-      hostPorts,
     });
 
     const attemptContainers = opts.spec.containers.filter(
@@ -711,7 +812,6 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
           issueContainers,
           podName,
           worktreePath: opts.worktreePath,
-          hostPorts,
           nameOf,
           images: opts.images ?? (async () => new Map()),
           running,
@@ -729,35 +829,64 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   }
 }
 
-async function readPortBindings(podName: string): Promise<Map<number, number>> {
+// The container's recorded probe history, for a bringup error. Read ONCE, at
+// the readiness deadline, rather than on every failed poll: podman is already
+// keeping the recent entries for us (five by default), so the read at the
+// deadline sees the right window and a per-poll read would buy nothing but a
+// podman call every 500ms.
+//
+// Never throws, and returns "" for everything it cannot answer. This runs on a
+// path where a `ContainerBringupError` is already being raised — that error is
+// the diagnosis, and losing it to a flaked `inspect` while assembling an
+// addendum to it would be a strictly worse outcome than an error with no health
+// block.
+async function readHealthLog(
+  containerName: string,
+): Promise<HealthLogEntry[]> {
   const r = await boundedPodman(
-    [
-      "pod",
-      "inspect",
-      podName,
-      "--format",
-      "{{json .InfraConfig.PortBindings}}",
-    ],
+    ["inspect", "--format", "{{json .State.Health}}", containerName],
     LOG_READ_TIMEOUT_MS,
   );
-  // A plain Error, deliberately. `SandbarError` is the "operator-actionable,
-  // this run cannot proceed" class, and `inner-loop.ts` rethrows it PAST
-  // HARD-ERROR — so raising one here for a flaked `pod inspect` would drop that
-  // issue for the whole cycle with no terminal, no comment, no label flip and
-  // no retry, while leaving it queued to burn another budget next run. Podman
-  // failing to answer is infrastructure; HARD-ERROR's fresh stack is the right
-  // response. (`parsePortBindings` still raises SandbarError for a shape it
-  // cannot parse — that one really is sandbar's bug.)
-  if (!boundedOk(r)) {
-    throw new Error(
-      `gate stack: could not read the port bindings of pod ${podName}` +
-        (r.timedOut
-          ? ` (${RUNTIME} pod inspect did not return within ` +
-            `${LOG_READ_TIMEOUT_MS}ms)`
-          : `: ${r.errorMessage}`),
-    );
+  if (!boundedOk(r)) return [];
+  return parseHealthLog(r.stdout);
+}
+
+// The text the readiness timeout puts in its `last probe:` slot.
+//
+// Ordinarily the health log, not the client's own output, and that is the
+// difference between a useful message and a worse one than this replaced:
+// `podman healthcheck run` prints the single word `unhealthy` on failure, so a
+// detail built from its stdout says nothing about what the probe saw.
+//
+// `clientTimedOut` overrides that, and it is the one thing the health log
+// CANNOT say. A probe killed at the deadline records no entry — the client died
+// before podman wrote one — so the newest entry belongs to some earlier, faster
+// failure. Rendering it would report "exit 1: connect failed" for a probe that
+// in fact stopped returning, which is the #31 misdirection ("pattern not in log
+// yet" over a buffer wall) rebuilt in the replacement for it: the operator is
+// sent to debug a connection error that is not what happened. Since sandbar's
+// own deadline is the ONLY bound on a probe — podman's `--health-timeout` does
+// not kill — the kill is exactly the fact worth reporting, so it is reported
+// first and the stale entry is offered after it as context rather than as the
+// verdict.
+export function lastProbeText(
+  entries: readonly HealthLogEntry[],
+  clientDetail: string,
+  clientTimedOut: boolean,
+): string {
+  const last = entries[entries.length - 1];
+  const recorded = last === undefined ? "" : describeHealthEntry(last);
+  if (clientTimedOut) {
+    const detail = clientDetail || "probe was killed at the deadline";
+    return recorded ? `${detail} (previous probe: ${recorded})` : detail;
   }
-  return parsePortBindings(r.stdout);
+  return recorded || clientDetail || "no probe was recorded";
+}
+
+function describeHealthEntry(e: HealthLogEntry): string {
+  const output = stripAnsi(e.output).trim();
+  const code = Number.isNaN(e.exitCode) ? "?" : String(e.exitCode);
+  return output ? `exit ${code}: ${output}` : `exit ${code}, no output`;
 }
 
 type BringUpCtx = {
@@ -766,7 +895,6 @@ type BringUpCtx = {
   // Passed as a closure rather than rebuilt from (scope, stackId) here: the
   // name is the stack's identity, and one place composes it.
   readonly nameOf: (c: ResolvedStackContainer) => string;
-  readonly hostPorts: ReadonlyMap<number, number>;
 };
 
 // Start every container, THEN wait for all of them, then run their post-ready
@@ -813,7 +941,7 @@ async function bringUp(
   }
 
   for (const c of containers) {
-    await waitForReady(ctx.nameOf(c), c, ctx);
+    await waitForReady(ctx.nameOf(c), c);
   }
 
   for (const c of containers) {
@@ -864,7 +992,6 @@ function remainingMs(deadline: number): number {
 async function waitForReady(
   containerName: string,
   c: ResolvedStackContainer,
-  ctx: BringUpCtx,
 ): Promise<void> {
   if (c.readiness === null) {
     // No probe was declared, so nothing else ever looks at this container: the
@@ -879,44 +1006,38 @@ async function waitForReady(
     await throwIfDead(containerName, c);
     return;
   }
-  const readiness = c.readiness;
-  // Started before the loop and killed in the `finally`: the follower is the
-  // one thing here that is unbounded by design, so its bound is this ownership.
-  const watcher =
-    readiness.kind === "log" ? watchLog(containerName, readiness.pattern) : null;
-  try {
-    await pollUntilReady(containerName, c, ctx, readiness, watcher);
-  } finally {
-    watcher?.stop();
-  }
+  // No `finally` and nothing to own: since #43 the probe is a bounded
+  // `execFile` like every other podman call here, rather than a `podman logs
+  // -f` follower whose only bound was this function holding it.
+  await pollUntilReady(containerName, c, c.readiness);
 }
 
 async function pollUntilReady(
   containerName: string,
   c: ResolvedStackContainer,
-  ctx: BringUpCtx,
   readiness: NonNullable<ResolvedStackContainer["readiness"]>,
-  watcher: LogWatcher | null,
 ): Promise<void> {
   const deadline = Date.now() + c.readinessTimeoutMs;
   let lastErr = "";
+  // Tracked beside the string rather than sniffed out of it: a probe killed at
+  // the deadline is the one outcome the health log cannot record, so the error
+  // below has to be told, not left to guess (see `lastProbeText`).
+  let lastTimedOut = false;
   while (Date.now() < deadline) {
     // Bounded by what is LEFT of the readiness budget, not by the budget: the
     // loop's `Date.now() < deadline` is only tested between probes, so a single
-    // probe that never returns — an `exec` curl against a service that accepts
-    // and then never answers, the very accept-first behaviour this module's
-    // header documents — hangs the run forever, holding the single-instance
-    // lock, with no HARD-ERROR and no teardown. config.ts rejects a NaN
+    // probe that never returns — a curl against a service that accepts and then
+    // never answers — hangs the run forever, holding the single-instance lock,
+    // with no HARD-ERROR and no teardown. config.ts rejects a NaN
     // readinessTimeoutMs for exactly this hang; a valid one must not reach it.
-    const probe = await probeOnce(
-      containerName,
-      readiness,
-      ctx,
-      remainingMs(deadline),
-      watcher,
-    );
+    //
+    // This is the ONLY bound on a probe. Podman's `--health-timeout` is not
+    // passed and would not help if it were: it lets the probe run to
+    // completion and then labels the result as having exceeded the bound.
+    const probe = await probeOnce(containerName, remainingMs(deadline));
     if (probe.ready) return;
     lastErr = probe.detail;
+    lastTimedOut = probe.timedOut;
     // The recipe is untrusted consumer input and the branch's own code, so a
     // container whose entrypoint dies at startup is an EXPECTED failure. Report
     // it immediately with its log instead of polling a corpse for the full
@@ -924,318 +1045,67 @@ async function pollUntilReady(
     await throwIfDead(containerName, c);
     await sleep(READY_POLL_INTERVAL_MS);
   }
+  // Read once, here, rather than on every failed poll: this sees the most
+  // recent probes podman still holds, and a per-poll read would be a podman
+  // call every 500ms for text nobody looks at until now.
+  const entries = await readHealthLog(containerName);
   throw new ContainerBringupError(
     containerName,
     `gate stack: container '${c.name}' (${c.image}) did not become ready ` +
       `within ${c.readinessTimeoutMs}ms (${describeReadiness(readiness)}; ` +
-      `last probe: ${lastErr}${watcher?.deathNote() ?? ""})`,
+      `last probe: ${lastProbeText(entries, lastErr, lastTimedOut)})`,
     await logTail(containerName),
+    // Sliced here rather than trusted to be short: podman keeps five by
+    // default, but `--health-max-log-count` and containers.conf can raise it,
+    // and the heading is a claim about what follows.
+    formatHealthLog(entries.slice(-HEALTH_LOG_ENTRIES)),
   );
 }
 
-function describeReadiness(r: NonNullable<ResolvedStackContainer["readiness"]>): string {
-  switch (r.kind) {
-    case "tcp":
-      return `tcp port ${r.port}`;
-    case "log":
-      return `log pattern ${JSON.stringify(r.pattern)}`;
-    case "exec":
-      return `exec ${JSON.stringify(r.argv)}`;
-  }
+function describeReadiness(
+  r: NonNullable<ResolvedStackContainer["readiness"]>,
+): string {
+  return `healthcheck ${JSON.stringify(r.command)}`;
 }
 
+// One probe, run by podman inside the container.
+//
+// `healthcheck run` exits 0 for a healthy probe, 1 for an unhealthy one, and
+// 125 when podman could not run it at all — most often because the container
+// is not running, which the `throwIfDead` beside this loop turns into a proper
+// bringup failure rather than a readiness timeout. The 125 branch needs no
+// special handling here for the same reason: it is not-ready either way, and
+// the state question is asked by something that can answer it.
+//
+// The detail is the CLIENT's view, and for an ordinary failed probe it is only
+// a fallback: `healthcheck run` prints `unhealthy` and nothing else, so what the
+// probe actually said lives in the health log, which the timeout above reads.
+//
+// `timedOut` is the exception, and it is carried separately rather than left to
+// be inferred from the detail string: a probe sandbar KILLED at the deadline
+// records no health-log entry at all — the client died before podman could
+// write one — so the health log's newest entry is some earlier, faster failure
+// and nothing else in the error would ever say a probe stopped returning.
 async function probeOnce(
   containerName: string,
-  readiness: NonNullable<ResolvedStackContainer["readiness"]>,
-  ctx: BringUpCtx,
   timeoutMs: number,
-  watcher: LogWatcher | null,
-): Promise<{ ready: boolean; detail: string }> {
-  switch (readiness.kind) {
-    case "exec": {
-      const r = await boundedPodman(
-        ["exec", containerName, ...readiness.argv],
-        timeoutMs,
-      );
-      if (boundedOk(r)) return { ready: true, detail: "" };
-      // A probe that never returns is NOT ready, and saying so is the whole
-      // point of doing the timing here rather than through node's `timeout:`,
-      // which would have killed the client, seen it exit 0, and reported the
-      // container ready — an `exec` curl against a service that accepts and
-      // then never answers is the exact shape this module's header describes.
-      return {
-        ready: false,
-        detail: r.timedOut
-          ? `probe did not return within ${timeoutMs}ms`
-          : r.errorMessage,
-      };
-    }
-    case "log": {
-      if (watcher === null) {
-        // waitForReady starts a follower for every log readiness, so its
-        // absence is a sandbar bug. Never a silent unready: that would spend
-        // the whole budget and then blame the consumer's pattern.
-        throw new SandbarError(
-          `gate stack: no log follower for container ${containerName}. ` +
-            "waitForReady starts one for every log readiness, so this is an " +
-            "internal inconsistency.",
-        );
-      }
-      return watcher.poll();
-    }
-    case "tcp": {
-      const hostPort = ctx.hostPorts.get(readiness.port);
-      if (hostPort === undefined) {
-        // The publish is derived from this same readiness declaration, so its
-        // absence is a sandbar bug, not a consumer one. Never a silent skip:
-        // skipping would make "ready" mean "I could not check".
-        throw new SandbarError(
-          `gate stack: no host publish for container port ${readiness.port} on ` +
-            `pod ${ctx.podName}. The pod is created with a publish for every ` +
-            "tcp readiness port, so this is an internal inconsistency.",
-        );
-      }
-      return probeTcp(hostPort, timeoutMs);
-    }
-  }
-}
-
-// The follower's argv. `-f` from the container's first log line, never a
-// `--tail`/`--since` window: a window can only be justified by a bound on how
-// far back the pattern might be, and there is none — a container that printed
-// "ready" before the first poll is the ordinary case, not an edge one.
-export function logFollowArgs(containerName: string): string[] {
-  return ["logs", "-f", containerName];
-}
-
-// Scan one chunk of a followed stream for the pattern, carrying whatever suffix
-// could still be the head of a match into the next chunk.
-//
-// The carry is the whole point. A followed stream splits a line wherever the
-// driver feels like it — `podman logs -f` under `k8s-file` emits an
-// unterminated partial line as its own chunk, verified in
-// gate-stack-podman.test.ts — so a per-chunk `includes` alone never sees a
-// pattern written as `PAR` then `TIAL`, and reports a timeout against a
-// container that printed exactly what was asked for.
-//
-// `pattern.length - 1` code units is exactly the right amount to keep and no
-// more: a match straddling the boundary can overlap the previous chunk by at
-// most that, and keeping more is the unbounded retention this whole change
-// exists to remove. Code units, not bytes — the caller decodes before it gets
-// here, which it must (see watchLog), so a chunk boundary in the middle of a
-// multi-byte character is not this function's problem to solve.
-export function scanChunk(
-  carry: string,
-  chunk: string,
-  pattern: string,
-): { found: boolean; carry: string } {
-  const text = carry + chunk;
-  if (text.includes(pattern)) return { found: true, carry: "" };
-  // `<= 0`, not `=== 0`: an empty pattern makes this -1, and `slice(1)` would
-  // grow the carry without bound forever. config.ts rejects an empty pattern
-  // and `includes("")` returns above, so this is unreachable through sandbar —
-  // but an exported pure function defends itself rather than relying on that.
-  const keep = Math.min(pattern.length - 1, text.length);
-  return { found: false, carry: keep <= 0 ? "" : text.slice(-keep) };
-}
-
-// How much of a follower's stderr is kept to explain its death. `podman logs`
-// writes podman's OWN diagnostics and the container's stderr to one fd, so this
-// is a tail of whichever spoke last — on a non-zero exit that is overwhelmingly
-// podman, which is the case worth explaining.
-const FOLLOWER_ERR_TAIL = 500;
-
-// A running `podman logs -f`, scanning for the readiness pattern as the log
-// arrives. Owned by waitForReady, which kills it on every path out.
-export type LogWatcher = {
-  readonly poll: () => { ready: boolean; detail: string };
-  // What has gone wrong with the follower itself, for the timeout message.
-  // Separate from `poll`'s detail because a death is overwritten within one
-  // poll: the restart succeeds, the next poll says "pattern not in log yet",
-  // and an intermittently-dying follower would otherwise leave no trace at all
-  // in the error the operator reads.
-  readonly deathNote: () => string;
-  readonly stop: () => void;
-};
-
-export function watchLog(containerName: string, pattern: string): LogWatcher {
-  let found = false;
-  let child: ChildProcess | null = null;
-  let lastDeath = "";
-  let deaths = 0;
-  let stopped = false;
-
-  const start = (): void => {
-    // Decoders and carries are per-START, not per-watcher: a restart re-reads
-    // the log from the beginning, so anything they held is about to arrive
-    // again.
-    //
-    // StringDecoder, not `chunk.toString("utf8")`: a chunk boundary can fall
-    // INSIDE a multi-byte character, and decoding each chunk independently
-    // replaces both halves with U+FFFD before scanChunk ever sees them — so the
-    // carry preserves corrupted text and the pattern is missed. That is not
-    // exotic for the container this feature is aimed at: Next.js prints
-    // "✓ Ready in" and Vite prints "➜  Local:", and either is a natural
-    // readiness pattern. The failure would be silent and reported as "pattern
-    // not in log yet", which is the exact misdirection #31 exists to remove.
-    const decoders = { out: new StringDecoder("utf8"), err: new StringDecoder("utf8") };
-    let outCarry = "";
-    let errCarry = "";
-    let errTail = "";
-    // stdin is never written to, so don't allocate a pipe for it.
-    const ch = spawn(RUNTIME, logFollowArgs(containerName), {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    child = ch;
-    // Scanned per stream rather than on a concatenation of the two. `podman
-    // logs` keeps the container's stdout and stderr separate (verified), so
-    // joining them manufactures a seam that no reader of the log would ever
-    // see and that a pattern could straddle.
-    ch.stdout?.on("data", (b: Buffer) => {
-      const r = scanChunk(outCarry, decoders.out.write(b), pattern);
-      outCarry = r.carry;
-      if (r.found) found = true;
-    });
-    ch.stderr?.on("data", (b: Buffer) => {
-      const text = decoders.err.write(b);
-      errTail = (errTail + text).slice(-FOLLOWER_ERR_TAIL);
-      const r = scanChunk(errCarry, text, pattern);
-      errCarry = r.carry;
-      if (r.found) found = true;
-    });
-    ch.on("error", (err: Error) => {
-      // Node emits this when the process could not be spawned OR could not be
-      // killed, so the process may still be alive. Dropping the handle would
-      // leak a follower `stop` can no longer reach, so kill first and only then
-      // let go of it.
-      if (child === ch) {
-        ch.kill("SIGKILL");
-        child = null;
-      }
-      deaths += 1;
-      lastDeath = `could not run ${RUNTIME} logs (${err.message})`;
-    });
-    // An 'error' on a child's stdio stream is an UNHANDLED event otherwise, and
-    // an unhandled event takes the whole run down — a readiness follower must
-    // never be able to do that. The handle is dropped here as well: a stream
-    // that has errored delivers nothing more, and if the process happens to
-    // survive it, leaving `child` set would leave the watcher permanently blind
-    // AND permanently silent, reporting "pattern not in log yet" for the rest
-    // of the budget. That is the failure #31 is about, so it must not be
-    // reachable through the fix for it. Never swallowed: it is counted and
-    // reported through deathNote.
-    for (const stream of [ch.stdout, ch.stderr]) {
-      stream?.on("error", (err: Error) => {
-        if (child === ch) {
-          ch.kill("SIGKILL");
-          child = null;
-        }
-        deaths += 1;
-        lastDeath = `${RUNTIME} logs stream failed (${err.message})`;
-      });
-    }
-    // `close`, not `exit`: `exit` fires when the process ends, which can be
-    // before its stdout has delivered everything it read. `close` waits for the
-    // stdio streams too, so a container that prints the pattern and exits in
-    // the same breath still has that chunk scanned before the follower counts
-    // as gone — and before the poll that would restart it.
-    ch.on("close", (code: number | null) => {
-      if (child === ch) child = null;
-      if (stopped) return;
-      deaths += 1;
-      lastDeath =
-        code === 0
-          ? "log stream ended"
-          : `${RUNTIME} logs exited ${String(code)}` +
-            (errTail.trim() ? `: ${errTail.trim()}` : "");
-    });
-  };
-
-  start();
-
+): Promise<{ ready: boolean; detail: string; timedOut: boolean }> {
+  const r = await boundedPodman(
+    ["healthcheck", "run", containerName],
+    timeoutMs,
+  );
+  if (boundedOk(r)) return { ready: true, detail: "", timedOut: false };
+  // A probe that never returns is NOT ready, and saying so is the whole point
+  // of doing the timing here rather than through node's `timeout:`, which
+  // would have killed the client, seen it exit 0, and reported the container
+  // ready.
   return {
-    poll: () => {
-      if (found) return { ready: true, detail: "" };
-      if (child === null && !stopped) {
-        // Restart rather than latch unready. `podman logs -f` ends when the
-        // CONTAINER ends, and it can also die of a podman hiccup — under the
-        // old re-read both became a permanent "logs unavailable" (#31). Re-
-        // reading from the start is idempotent for a substring test, so the
-        // only cost is the reread, and the poll interval rate-limits it.
-        //
-        // It can still restart for the whole budget, but only for a container
-        // whose state podman will not report: `throwIfDead` ends the wait for
-        // one that EXITED and, since #36, for one that was REMOVED, leaving
-        // only `unknown` to poll to the deadline — podman refusing to answer,
-        // or answering that the container is there while inspect still cannot
-        // say whether it is running. That is the right trade, since the
-        // alternative is treating a flaked podman as a corpse, and deathNote is
-        // what stops it being mysterious: the timeout says podman kept dying on
-        // this container rather than blaming the consumer's pattern.
-        const detail = lastDeath;
-        start();
-        return { ready: false, detail };
-      }
-      return { ready: false, detail: "pattern not in log yet" };
-    },
-    deathNote: () =>
-      deaths === 0
-        ? ""
-        : `; log follower died ${deaths}x, last: ${lastDeath}`,
-    stop: () => {
-      stopped = true;
-      // SIGKILL: there is nothing to flush, and a follower that ignored SIGTERM
-      // would outlive the run holding a pipe to a container being torn down.
-      child?.kill("SIGKILL");
-      child = null;
-    },
+    ready: false,
+    timedOut: r.timedOut,
+    detail: r.timedOut
+      ? `probe did not return within ${timeoutMs}ms and was killed`
+      : r.errorMessage,
   };
-}
-
-// Connect, then require the socket to stay open (see the header): the rootless
-// port forwarder accepts at the host before it learns the backend is refusing,
-// so "connected" alone is not a listener.
-function probeTcp(
-  hostPort: number,
-  timeoutMs: number,
-): Promise<{ ready: boolean; detail: string }> {
-  return new Promise((resolveProbe) => {
-    const socket = connect({ port: hostPort, host: "127.0.0.1" });
-    let settled = false;
-    let connected = false;
-    let settleTimer: NodeJS.Timeout | null = null;
-    const finish = (ready: boolean, detail: string): void => {
-      if (settled) return;
-      settled = true;
-      if (settleTimer) clearTimeout(settleTimer);
-      socket.destroy();
-      resolveProbe({ ready, detail });
-    };
-    // A dropped SYN produces neither `connect` nor `error` — the socket just
-    // sits there. Without this the probe never resolves and `waitForReady`
-    // never regains control to notice its deadline passed.
-    socket.setTimeout(timeoutMs, () =>
-      finish(false, `no response within ${timeoutMs}ms`),
-    );
-    socket.on("connect", () => {
-      connected = true;
-      settleTimer = setTimeout(
-        () => finish(true, ""),
-        TCP_SETTLE_MS,
-      );
-    });
-    socket.on("close", () =>
-      finish(
-        false,
-        connected
-          ? "forwarder accepted then closed — nothing listening inside the pod"
-          : "connection closed before connect",
-      ),
-    );
-    socket.on("error", (err: NodeJS.ErrnoException) =>
-      finish(false, `connect failed (${err.code ?? err.message})`),
-    );
-  });
 }
 
 // What podman says about a container right now.
@@ -1247,8 +1117,9 @@ function probeTcp(
 // producers, and the second is the one worth naming: podman would not answer at
 // all, OR it answered that the container EXISTS while `inspect` still could not
 // say whether it is running. The latter is a real pairing (a 15s inspect
-// timeout under load, a cheap `exists` answering 0) and it is the case the
-// follower-restart trade in `watchLog` leans on.
+// timeout under load, a cheap `exists` answering 0), and it is what lets the
+// readiness poll keep probing a container podman will not describe rather than
+// declaring it dead on no evidence.
 //
 // `gone` is the state this used to lose (#36). A container that no longer
 // EXISTS is the strongest evidence of death there is, but `inspect` reports it
@@ -1387,7 +1258,6 @@ type RunGateCtx = {
   readonly issueContainers: readonly ResolvedStackContainer[];
   readonly podName: string;
   readonly worktreePath: string;
-  readonly hostPorts: ReadonlyMap<number, number>;
   readonly nameOf: (c: ResolvedStackContainer) => string;
   readonly images: () => Promise<ImageMap>;
   // Mutable, owned by `startStack`: what the issue containers are running now.
@@ -1521,7 +1391,6 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
         podName: ctx.podName,
         worktreePath: ctx.worktreePath,
         nameOf: ctx.nameOf,
-        hostPorts: ctx.hostPorts,
       });
     } catch (err) {
       if (err instanceof ContainerBringupError) {
@@ -1568,7 +1437,6 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
       podName: ctx.podName,
       worktreePath: ctx.worktreePath,
       nameOf: ctx.nameOf,
-      hostPorts: ctx.hostPorts,
     });
   } catch (err) {
     if (err instanceof ContainerBringupError) {
@@ -1753,7 +1621,6 @@ async function reapKilledStep(
       podName: ctx.podName,
       worktreePath: ctx.worktreePath,
       nameOf: ctx.nameOf,
-      hostPorts: ctx.hostPorts,
     });
   } catch (err) {
     // Deliberately not swallowed, even though it costs the red gate we were

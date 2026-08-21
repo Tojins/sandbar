@@ -82,9 +82,9 @@
 // dropped as redundant. `pod rm -f` takes its member containers and the pod's
 // unreachably-named infra container, but it reaches neither the fixture
 // containers these files start with a bare `podman run -d --name`
-// (`killprobe`, `logsplit`, `chunking` — and `killprobe` is a `sleep infinity`,
-// i.e. a container left RUNNING forever) nor the network sandbar created for
-// the pod, which outlives it. Under the old fixed scope both classes reaped
+// (`killprobe`, `hcprobe`, `portprobe`, `hctimer`, `hcnotimer` — and
+// `killprobe` is a `sleep infinity`, i.e. a container left RUNNING forever) nor
+// the network sandbar created for the pod, which outlives it. Under the old fixed scope both classes reaped
 // themselves, because the next run recomputed the same names and the fixtures'
 // own `rm -f` / `startStack` reclaimed them; per-process, nothing ever
 // recomputes the scope, so this list is the whole of it.
@@ -119,8 +119,10 @@
 // one does is the point of writing this down. Run that pair against the
 // pre-#47 tree and both processes fail 24-27 of their 30 tests, on every
 // attempt — `startStack` force-removing the namesake pod out from under the
-// sibling. Against this tree both pass, all of them (28 since #48 moved three
-// host-only facts to gate-stack-hostpodman.test.ts).
+// sibling. Against this tree both pass, all of them (30: #48 moved three
+// host-only facts out to gate-stack-hostpodman.test.ts, and #43 deleted the
+// `log` follower's tests, handed one of those three back — an in-container port
+// probe needs no local client — and added the `healthcheck run` layer).
 //
 // The same pair over `ensure-images-podman.test.ts` proves nothing on its own
 // and must not be recorded as evidence: it passes pre-#47 too, 0 failures in 6

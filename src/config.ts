@@ -99,26 +99,50 @@ export type StackMount = {
   readonly mode?: "ro" | "rw";
 };
 
-// How sandbar decides a container is ready to be used.
+// How sandbar decides a container is ready to be used: ONE kind, an argv that
+// podman registers as the container's healthcheck and that sandbar's own poll
+// loop invokes on demand (#43).
 //
-//   tcp  — connect to the port from the HOST, through a loopback-only,
-//          podman-assigned ephemeral publish on the pod. The alternative
-//          (exec a probe inside the namespace) needs a shell and a socket tool
-//          in an image sandbar does not control — mailhog, pause images and
-//          most scratch-based services have neither. The publish is
-//          `127.0.0.1::<port>` with podman picking the host side, so two
-//          concurrent stacks cannot collide and nothing is reachable off-box.
-//   log  — a substring that must appear in the container's log.
-//   exec — argv run inside the container until it exits 0 (#20's
-//          `readinessCommand`). `podman exec` sessions see the container's own
-//          env, so a password can be referenced via `sh -c '… $PASSWORD …'`.
+// `command` is REQUIRED, and that is a measurement rather than a preference.
+// Omitting `--health-cmd` — i.e. falling back to the image's own `HEALTHCHECK`
+// — is the only configuration in which podman SCHEDULES the check, and it does
+// so with a transient systemd timer named by container id, outside the
+// `sandbar-<scope>-*` namespace the orphan sweep can reach. `gate-stack.ts`
+// passes `--health-interval=disable` to suppress that, and the flag is ignored
+// unless a `--health-cmd` is given. So the fallback would re-import, for that
+// one container, a systemd-session dependency and a timer a SIGKILLed run
+// leaks forever. Its reach would be small anyway: `podman build` defaults to
+// the OCI format, which has no `HEALTHCHECK` field at all, so no image sandbar
+// itself builds carries one — and `mariadb:10.11`, the worked example this
+// feature was designed against, declares none either (it ships
+// `/usr/local/bin/healthcheck.sh` and leaves the instruction out).
+//
+// Argv, not a shell string, matching `step.command` and `postReadyCommands`.
+// A shell probe is spelled `["sh", "-c", "…"]`; the probe runs inside the
+// container and sees its env, so a password can be referenced as
+// `sh -c '… $PASSWORD …'`.
+//
+// This replaces the `tcp`, `log` and `exec` kinds, which are rejected by name
+// at resolve time with their translation (see `resolveStackContainer`). `exec`
+// is subsumed exactly. `log` is subsumed AND fixed — a reused `issue`
+// container whose log the host's journal has since vacuumed could never match
+// its boot-time pattern again, so it burned the whole readiness budget and
+// reddened the gate on a service that was answering the whole time. `tcp` is
+// subsumed by an in-container probe, which is strictly better where it applies:
+// no publish, and no settle window, because the rootless port forwarder that
+// made a bare connect a green-on-red is not in the path.
+//
+// Known limitation, recorded rather than solved: a genuine `scratch` image with
+// no shell and no probe binary can no longer declare readiness, where `tcp`
+// could. The escape hatches are a static probe binary in the image, or
+// `hold: true` plus a `postReadyCommand`.
 //
 // Omitting readiness means "running is ready" — right for a held container
 // (`hold: true`), wrong for anything with a startup sequence.
-export type Readiness =
-  | { readonly kind: "tcp"; readonly port: number }
-  | { readonly kind: "log"; readonly pattern: string }
-  | { readonly kind: "exec"; readonly argv: readonly string[] };
+export type Readiness = {
+  readonly kind: "healthcheck";
+  readonly command: readonly string[];
+};
 
 // One container in the stack.
 //
@@ -735,27 +759,12 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
     );
   }
 
-  // Two containers cannot both bind the same port inside one network namespace,
-  // so a repeated tcp readiness port is always a config error. It has to be
-  // rejected rather than tolerated: the pod publishes ONE host port per distinct
-  // container port, so both containers would probe the same forwarded socket and
-  // whichever one actually listens marks BOTH ready — handing the other to a
-  // step, or to a dependant, mid-initialisation. That is exactly the green-on-red
-  // TCP_SETTLE_MS was added to close, re-entering through config.
-  const tcpPorts = new Map<number, string>();
-  for (const c of containers) {
-    if (c.readiness?.kind !== "tcp") continue;
-    const prior = tcpPorts.get(c.readiness.port);
-    if (prior !== undefined) {
-      throw new SandbarError(
-        `config.gateStack: containers '${prior}' and '${c.name}' both declare ` +
-          `tcp readiness on port ${c.readiness.port}. Pod members share one ` +
-          "network namespace, so only one of them can be listening — and a " +
-          "single publish would report both ready as soon as either binds.",
-      );
-    }
-    tcpPorts.set(c.readiness.port, c.name);
-  }
+  // There is deliberately no rule here about two containers declaring the same
+  // readiness "port" any more (#43). It existed because a `tcp` probe forced
+  // the pod to publish one host port per distinct container port, so two
+  // containers on 3306 shared one forwarded socket and whichever one bound it
+  // marked BOTH ready. Nothing is published now and every probe runs inside its
+  // own container, so the rule has nothing left to be about.
 
   const byName = new Set(containers.map((c) => c.name));
   const stepNames = new Set<string>();
@@ -877,6 +886,77 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
   }
 
   return { containers, steps };
+}
+
+// The three readiness kinds #43 retired, and what each becomes. Rejected BY
+// NAME rather than falling into the generic unknown-kind arm below, because a
+// consumer upgrading across this change has a working config in front of them
+// and the only useful error is the replacement line — not "unknown kind".
+//
+// The `log` translation deliberately does not pretend to be mechanical: the
+// whole point of retiring it is that the log was never the right question, and
+// a pattern lifted verbatim into a `sh -c` would be a different wrong probe.
+const RETIRED_READINESS: Readonly<Record<string, string>> = {
+  tcp:
+    '{ kind: "tcp", port: 3306 } becomes ' +
+    '{ kind: "healthcheck", command: ["nc", "-z", "127.0.0.1", "3306"] } — ' +
+    "any in-container probe of the port will do. Nothing is published any " +
+    "more, and an in-namespace connect needs no settle window because the " +
+    "rootless port forwarder is not in the path.",
+  log:
+    '{ kind: "log", pattern: "port: 3306" } becomes ' +
+    '{ kind: "healthcheck", command: ["sh", "-c", "… a real probe …"] }. ' +
+    "This one is NOT a mechanical translation: a reused container whose log " +
+    "the host journal has vacuumed can never match its boot-time pattern " +
+    "again, so write the check the pattern was standing in for — for " +
+    "mariadb, `healthcheck.sh --connect --innodb_initialized`, which rejects " +
+    "the temporary init server the log pattern was there to see past.",
+  exec:
+    '{ kind: "exec", argv: [...] } becomes ' +
+    "{ kind: \"healthcheck\", command: [...] } — the same argv, the same " +
+    "semantics, run through podman's healthcheck machinery instead of a bare " +
+    "`podman exec`.",
+};
+
+// Rejected at resolve time, before the lock: a readiness mistake otherwise
+// surfaces as a container that never comes ready, minutes in, after a full
+// readiness budget.
+function checkReadiness(containerName: string, readiness: Readiness): void {
+  // Read through a widened view. Consumer config is a PROGRAM, not a
+  // type-checked call site, so the retired kinds arrive as values the
+  // `Readiness` type says cannot exist — which is exactly the case that needs
+  // the good message.
+  const kind = (readiness as { readonly kind?: unknown }).kind;
+  // `Object.hasOwn`, not `kind in`: `in` walks the prototype chain, so a
+  // config declaring `kind: "toString"` would match and interpolate a function
+  // into the message.
+  const retired =
+    typeof kind === "string" && Object.hasOwn(RETIRED_READINESS, kind)
+      ? RETIRED_READINESS[kind]
+      : undefined;
+  if (retired !== undefined) {
+    throw new SandbarError(
+      `config.gateStack: container '${containerName}' declares the retired ` +
+        `'${kind as string}' readiness kind (#43). Podman evaluates the probe ` +
+        `inside the container now, so there is one kind: ${retired}`,
+    );
+  }
+  if (kind !== "healthcheck") {
+    throw new SandbarError(
+      `config.gateStack: container '${containerName}' has an unknown ` +
+        `readiness kind (${JSON.stringify(kind)}). The only kind is ` +
+        '"healthcheck".',
+    );
+  }
+  // Checked like `step.command` and `postReadyCommands`, which it sits beside:
+  // an empty argv reaches podman as `--health-cmd '[]'`, which registers a
+  // check that can never pass and spends the whole readiness budget.
+  if (!Array.isArray(readiness.command) || readiness.command.length === 0) {
+    throw new SandbarError(
+      `config.gateStack: container '${containerName}' has an empty ` +
+        "healthcheck readiness command.",
+    );
+  }
 }
 
 function resolveStackContainer(
@@ -1012,30 +1092,9 @@ function resolveStackContainer(
     }
   }
   const readiness = c.readiness ?? null;
-  if (readiness?.kind === "tcp") {
-    if (
-      !Number.isInteger(readiness.port) ||
-      readiness.port < 1 ||
-      readiness.port > 65535
-    ) {
-      throw new SandbarError(
-        `config.gateStack: container '${c.name}' has an out-of-range tcp ` +
-          `readiness port (${readiness.port}).`,
-      );
-    }
-  }
-  if (readiness?.kind === "exec" && readiness.argv.length === 0) {
-    throw new SandbarError(
-      `config.gateStack: container '${c.name}' has an empty exec readiness argv.`,
-    );
-  }
-  if (readiness?.kind === "log" && !readiness.pattern) {
-    throw new SandbarError(
-      `config.gateStack: container '${c.name}' has an empty log readiness pattern.`,
-    );
-  }
+  if (readiness !== null) checkReadiness(c.name, readiness);
   for (const command of c.postReadyCommands ?? []) {
-    // Checked like `step.command` and `readiness.exec.argv`, which it sits
+    // Checked like `step.command` and `readiness.command`, which it sits
     // beside: an empty argv reaches podman as a bare `exec <container>` and
     // fails as a bringup error — two wasted HARD-ERROR retries for an
     // `issue` container, a branch-blamed gate red for an `attempt` one.
