@@ -175,7 +175,42 @@ describe("cleanupOrphanContainers", () => {
     const anchor = `${scopedResourcePrefix(A)}0123abcd-uuid`;
     const { run, calls } = fakeRuntime({ containers: [anchor] });
     await cleanupOrphanContainers(A, run);
-    expect(calls).toContainEqual(["rm", "-f", "-t", "0", "--depend", anchor]);
+    expect(calls).toContainEqual([
+      "rm",
+      "-f",
+      "-v",
+      "-t",
+      "0",
+      "--depend",
+      anchor,
+    ]);
+  });
+
+  // #50. Podman's default `--image-volume=bind` gives every container an
+  // anonymous volume per builtin `VOLUME` in its image, and each one holds a
+  // lock out of the host's pool of 2048 until it is removed — 2000 of them
+  // stopped a real host from creating any podman object at all. Every container
+  // sandbar creates now passes `--image-volume=ignore`, so the `-v` here is a
+  // transitional backstop: this sweep is one of the few paths that still meets
+  // a container a PRE-UPGRADE sandbar created, and without it that container's
+  // volume outlives the sweep that was supposed to clear the run's debris.
+  //
+  // The pod removal is deliberately NOT symmetrical — `podman pod rm` has no
+  // `-v` — so this asserts the pair, or a later consistency pass adds a flag
+  // podman rejects and every leaked pod stops being reapable.
+  it("reaps a pre-upgrade container's anonymous volume, but never asks the pod to", async () => {
+    // A LOOSE container, not one of the pod's members: `pod rm -f` cascades
+    // over those before the container kind's listing can reach them, which is
+    // the documented reason this backstop cannot cover a pre-upgrade pod.
+    const { run, calls } = fakeRuntime({
+      pods: [podNameFor(A, "42")],
+      containers: [`sandbar-${A}-someuuid`],
+    });
+    await cleanupOrphanContainers(A, run);
+    const rm = (kind: string): string[] =>
+      calls.find((c) => c[0] === kind && c.includes("rm")) ?? [];
+    expect(rm("rm")).toContain("-v");
+    expect(rm("pod")).not.toContain("-v");
   });
 
   it("throws rather than silently sweeping nothing when podman fails", async () => {

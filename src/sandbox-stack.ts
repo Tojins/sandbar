@@ -219,6 +219,7 @@ import type { ResolvedGateStack, ResolvedStackContainer } from "./config.js";
 import { SandbarError } from "./errors.js";
 import {
   type BringUpCtx,
+  CONTAINER_RM_ARGS,
   type ContainerAttachment,
   CONTROL_TIMEOUT_MS,
   ContainerBringupError,
@@ -512,7 +513,12 @@ export async function startSandboxStack(
 // "could not answer" as "not there" is what silences the report this exists to
 // make.
 async function removeSibling(containerName: string): Promise<string | null> {
-  const args = ["rm", "-f", "-t", "0", containerName];
+  // The gate's own builder, so the `-v` story is stated in exactly one place
+  // (#50). It cannot fire here — a sibling is created by `containerRunArgs`,
+  // which passes `--image-volume=ignore` — and is carried because a flag
+  // present at some container removals and absent at others reads as a
+  // decision about this one.
+  const args = CONTAINER_RM_ARGS(containerName);
   const r = await boundedPodman(args, CONTROL_TIMEOUT_MS);
   if (boundedOk(r)) return null;
   if ((await containerState(containerName)) === "gone") return null;

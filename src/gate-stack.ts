@@ -56,6 +56,85 @@
 // container in it inherits them.
 //
 // ---------------------------------------------------------------------------
+// No anonymous volumes (#50)
+// ---------------------------------------------------------------------------
+// Every container is created with `--image-volume=ignore`, and without it a
+// gate walks the whole HOST into a wall it cannot get out of.
+//
+// Podman's default is `--image-volume=bind`, which provisions one ANONYMOUS
+// volume per container per builtin `VOLUME` directive in the image — and
+// `mariadb`, `postgres`, `redis` and most other service images declare one.
+// Podman allocates a lock from a single SHM pool (`num_locks`, default 2048)
+// for every container, pod AND volume, so each of those volumes is a
+// permanently consumed lock: sandbar's removals did not pass `-v`, so the
+// volume outlived its container, and 2000 volumes + 47 containers + 1 pod =
+// 2048 was measured on a real host — at which point EVERY podman object
+// creation fails host-wide, including in projects that have nothing to do with
+// sandbar. Nothing degrades on the way up: the 2047th object works and the
+// 2048th does not.
+//
+// The decisive point is that the volume is pure waste, always, which is what
+// makes this a one-flag change rather than a removal-hygiene campaign. An
+// anonymous volume is by definition never reused, and an `attempt` container is
+// recreated on every gate run by design (D5 below), so each recreate got a
+// fresh, empty one: provisioned, written to once, read by nothing, abandoned.
+// It bought no persistence, no reuse and no correctness.
+//
+// `ignore` over `tmpfs` (the third value the flag takes): both create no
+// volume, but tmpfs is RAM-backed and unbounded by default, and three issues
+// gate in parallel each with a database — that trades a leak bounded by a known
+// number for an OOM bounded by nothing. `ignore` puts the `VOLUME` path in the
+// container's own writable layer: disk-backed, same lifetime as the container,
+// which is exactly sandbar's model. The historical reason images declare
+// `VOLUME` — overlayfs being poor for database writes — is much weaker on the
+// kernel `overlay` driver than on fuse-overlayfs, and mariadb was measured
+// coming up healthy under all three values.
+//
+// No config knob. Nothing a consumer can want from the default is reachable
+// through an ANONYMOUS volume, so an `imageVolume` escape hatch would exist for
+// a preference nobody has expressed. Add one when someone measures a slow gate
+// and can state the case.
+//
+// `-v` ON REMOVAL IS A BACKSTOP, NOT THE FIX, and the distinction decides which
+// site needs it and which merely carries it. Past the flag, every container
+// sandbar creates holds no anonymous volume, so `-v` can only ever fire against
+// one a PRE-UPGRADE sandbar left behind. That population is real and this
+// module reaches it from exactly one site: `bringUpContainers`' pre-create
+// removal of a stale namesake. `reapKilledStep` removes a container this run
+// created, so `-v` can never fire there and is carried for consistency — a flag
+// present at some removals and absent at others invites the next reader to
+// conclude the absence is meaningful. Both go through `CONTAINER_RM_ARGS`.
+//
+// `-v` REACHES ONLY THE ANONYMOUS VOLUME PODMAN CREATED FOR THE CONTAINER, so
+// it is far less dangerous than "add `-v` to a force-remove" reads: it cannot
+// touch a NAMED volume, and sandbar declares none — every mount this module
+// builds is a host bind mount (`mountSpec`, `mountWorktree`), which `-v` does
+// not touch either.
+//
+// Three measured negatives, recorded so they are not re-derived:
+//   - `podman pod rm` has NO `-v` at all (4.9.3: `-a -f -i -l --pod-id-file
+//     -t`), so `POD_RM_ARGS` cannot carry one and the stale-pod recycle in
+//     `startStack` cannot reclaim a pre-upgrade member's volume. `stop()`
+//     deliberately does not enumerate and remove the members first to get round
+//     that: under the flag every member it removes was created by THIS run and
+//     carries no volume, so it would buy nothing.
+//   - `podman run --rm` already reaps its own anonymous volume (measured: 95
+//     volumes -> 95 across `run --rm --entrypoint id mariadb`), so
+//     ensure-images.ts's uid probe is not a leak site, despite looking like one
+//     to an "add `-v` everywhere" audit.
+//   - `[engine] num_locks` in `containers.conf` is raisable (plus `podman
+//     system renumber`), but it is host configuration sandbar does not own, and
+//     without the flag it only moves the wall. No config surface, no preflight
+//     probe.
+//
+// Already-leaked volumes are the OPERATOR's to clear and nothing in sandbar may
+// do it for them — an anonymous volume carries no label, and nothing
+// distinguishes sandbar's from another project's, which is the argument
+// `findUnattributableResources` already makes for pre-scope debris. The
+// recovery command lives in containers.ts's header, beside the sweep an
+// operator arrives at from this symptom.
+//
+// ---------------------------------------------------------------------------
 // Whose failure is a failed bringup
 // ---------------------------------------------------------------------------
 // `lifecycle` decides, and it is the most consequential field in the config.
@@ -405,13 +484,36 @@ const RESERVED_ENV: Readonly<Record<string, string>> = { CI: "true" };
 // flushing — the containers are recreated from the image every attempt — and
 // paying 10s a container on every teardown is real wall-clock across three
 // parallel issues and eight attempts each.
-const POD_RM_ARGS = (podName: string): string[] => [
+//
+// No `-v`: `podman pod rm` does not accept one at all (4.9.3), which is why the
+// anonymous-volume backstop above is a per-CONTAINER measure — and why this
+// builder must not grow one in a later consistency pass, since that would fail
+// every teardown rather than tidy it.
+export const POD_RM_ARGS = (podName: string): string[] => [
   "pod",
   "rm",
   "-f",
   "-t",
   "0",
   podName,
+];
+
+// Removing one container by name, everywhere this module does it.
+//
+// `-v` takes the anonymous volume podman's default `--image-volume=bind`
+// provisions (#50). Since `containerRunArgs` now passes `--image-volume=ignore`
+// there is no such volume on anything THIS sandbar created, so the flag is a
+// backstop for containers a pre-upgrade sandbar left behind: live at
+// `bringUpContainers`' pre-create removal, dead weight at `reapKilledStep`, and
+// carried at both so the absence of a flag never has to be read as meaningful.
+// It cannot reach a named volume, and sandbar declares none. See the header.
+export const CONTAINER_RM_ARGS = (containerName: string): string[] => [
+  "rm",
+  "-f",
+  "-v",
+  "-t",
+  "0",
+  containerName,
 ];
 
 export type StackOptions = {
@@ -609,6 +711,10 @@ export function containerRunArgs(opts: {
     ...(opts.attach.kind === "pod"
       ? ["--pod", opts.attach.podName]
       : ["--network", `container:${opts.attach.anchorContainerName}`]),
+    // Never provision the anonymous volume podman's default creates for the
+    // image's builtin `VOLUME` directives (#50). It is never reused, so it buys
+    // nothing and costs one lock out of the host's 2048 — see the header.
+    "--image-volume=ignore",
     "--label",
     "sandbar=true",
     // Consumer env first, sandbar's reserved key last: podman keeps the final
@@ -1002,10 +1108,13 @@ export async function bringUpContainers(
     // Bounded, and that bound is load-bearing rather than tidy: this remove is
     // the fallback `reapTimedOutStep` leans on when its own remove fails, so an
     // unbounded one here would turn a red gate into a run that hangs forever.
-    await boundedPodman(
-      ["rm", "-f", "-t", "0", containerName],
-      CONTROL_TIMEOUT_MS,
-    );
+    //
+    // `CONTAINER_RM_ARGS`' `-v` is LIVE here and nowhere else in this module
+    // (#50): a namesake surviving a crashed run may have been created by a
+    // pre-upgrade sandbar, i.e. before `--image-volume=ignore`, and its
+    // anonymous volume would otherwise outlive it as a permanently consumed
+    // podman lock.
+    await boundedPodman(CONTAINER_RM_ARGS(containerName), CONTROL_TIMEOUT_MS);
     const started = await boundedPodman(
       containerRunArgs({
         containerName,
@@ -1656,7 +1765,7 @@ async function reapKilledStep(
   stepName: string,
 ): Promise<void> {
   const removed = await boundedPodman(
-    ["rm", "-f", "-t", "0", containerName],
+    CONTAINER_RM_ARGS(containerName),
     LOG_READ_TIMEOUT_MS,
   );
   if (!boundedOk(removed)) {

@@ -1014,6 +1014,12 @@ export function sandboxRunArgs(opts: {
     ...(opts.userns
       ? [`--userns=keep-id:uid=${opts.containerUid},gid=${opts.containerGid}`]
       : []),
+    // No anonymous volume for the image's builtin `VOLUME` directives (#50).
+    // The consumer's own `sandboxImage` is free to declare one, and podman's
+    // default (`--image-volume=bind`) would provision a fresh volume per
+    // sandbox that nothing ever reads and that outlives the container as one
+    // consumed lock out of the host's 2048. See gate-stack.ts's header.
+    "--image-volume=ignore",
     ...opts.networks.flatMap((n) => ["--network", n]),
     ...opts.groups.flatMap((g) => ["--group-add", String(g)]),
     ...opts.devices.flatMap((d) => ["--device", d]),
@@ -1043,8 +1049,17 @@ export function sandboxRunArgs(opts: {
 // what covers the paths that ordering cannot — a `stop` that threw, a SIGKILL
 // between the two removals. A no-op with no dependants, which is every consumer
 // that declares no `inSandbox` container.
+//
+// `-v` is consistency rather than a fix (#50). `sandboxRunArgs` passes
+// `--image-volume=ignore`, so a container this code created carries no
+// anonymous volume for `-v` to reap — and unlike the gate stack's pre-create
+// removal, this argv only ever names a container from this same process, so it
+// can never meet a pre-upgrade one. It is carried anyway because a `-v` present
+// at some removals and absent at others reads as a decision. It cannot reach a
+// named volume; sandbar declares none, and every mount here is a host bind
+// mount.
 export function sandboxRemoveArgs(containerName: string): string[] {
-  return ["rm", "-f", "--depend", containerName];
+  return ["rm", "-f", "-v", "--depend", containerName];
 }
 
 export const podman = (options?: PodmanOptions): SandboxProvider => {

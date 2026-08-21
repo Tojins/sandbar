@@ -15,6 +15,8 @@ import {
 } from "./ensure-images.js";
 import {
   type BoundedResult,
+  CONTAINER_RM_ARGS,
+  POD_RM_ARGS,
   containerRunArgs,
   imageFor,
   withImages,
@@ -181,6 +183,45 @@ describe("healthCheckArgs", () => {
   });
 });
 
+// The removal argv, and the asymmetry between the two builders is the point
+// (#50). `-v` reaps the anonymous volume podman's default `--image-volume=bind`
+// provisioned for a container; `podman pod rm` has no such flag at all.
+describe("the removal argv", () => {
+  // A backstop rather than the fix. Past `--image-volume=ignore` no container
+  // sandbar creates carries an anonymous volume, so this can only ever fire
+  // against one a PRE-UPGRADE sandbar left behind — which `bringUpContainers`'
+  // pre-create removal of a stale namesake really does meet. It reaches only
+  // the anonymous volume podman made for the container: sandbar declares no
+  // named volume, and every mount it builds is a host bind mount.
+  it("takes the container's anonymous volume with it", () => {
+    expect(CONTAINER_RM_ARGS("sandbar-42-app")).toEqual([
+      "rm",
+      "-f",
+      "-v",
+      "-t",
+      "0",
+      "sandbar-42-app",
+    ]);
+  });
+
+  // `podman pod rm` accepts `-a -f -i -l --pod-id-file -t` and nothing else
+  // (4.9.3), so a later "make the removals consistent" pass adding `-v` here
+  // would not tidy the teardown — it would fail every one of them. That is why
+  // the pod's own members are not chased for their volumes either: under the
+  // flag they carry none.
+  it("does not put -v on the pod, which podman would reject", () => {
+    expect(POD_RM_ARGS("sandbar-pod-42")).toEqual([
+      "pod",
+      "rm",
+      "-f",
+      "-t",
+      "0",
+      "sandbar-pod-42",
+    ]);
+    expect(POD_RM_ARGS("sandbar-pod-42")).not.toContain("-v");
+  });
+});
+
 describe("containerRunArgs", () => {
   const base = {
     containerName: "sandbar-42-app",
@@ -199,6 +240,38 @@ describe("containerRunArgs", () => {
       "sandbar-pod-42",
     ]);
   });
+
+  // #50, and the single most consequential flag in this argv: podman's default
+  // (`--image-volume=bind`) provisions an ANONYMOUS volume per container for
+  // every builtin `VOLUME` the image declares — which mariadb, postgres and
+  // redis all do — and each one holds a lock out of the host's single pool of
+  // 2048 for as long as it exists. An `attempt` container is recreated every
+  // gate run, so the volume is never reused: written once, read by nothing,
+  // abandoned. A backlog of a few dozen issues then walks the whole HOST into
+  // refusing to create any podman object at all.
+  //
+  // Asserted on both topologies: the sandbox stack's siblings run mariadb
+  // beside the agent for the entire issue and go through this same builder.
+  it.each(["pod", "netns"] as const)(
+    "provisions no anonymous volume, on the %s topology",
+    (kind) => {
+      const args = containerRunArgs({
+        ...base,
+        attach:
+          kind === "pod"
+            ? { kind: "pod", podName: "sandbar-pod-42" }
+            : { kind: "netns", anchorContainerName: "sandbar-w1-uuid" },
+        container: container({ image: "docker.io/library/mariadb:10.11" }),
+      });
+      expect(args).toContain("--image-volume=ignore");
+      // An option of `run`, not an argument of the image: everything after the
+      // image name is the container's own argv, where the flag would be a
+      // silent no-op that `toContain` still accepts.
+      expect(args.indexOf("--image-volume=ignore")).toBeLessThan(
+        args.indexOf("docker.io/library/mariadb:10.11"),
+      );
+    },
+  );
 
   // The sandbox stack's topology (#44). Not a second builder: everything after
   // the attachment — env, mounts, the worktree, `hold` — is the same container

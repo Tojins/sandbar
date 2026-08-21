@@ -1153,6 +1153,21 @@ describe("sandboxRunArgs (#42)", () => {
     expect(sandboxRunArgs(base)).toContain("--init");
   });
 
+  // #50. `sandboxImage` is the CONSUMER's image and is free to declare a
+  // builtin `VOLUME`; podman's default would then provision an anonymous
+  // volume per sandbox that nothing ever reads and that outlives the container
+  // as one permanently consumed lock out of the host's 2048.
+  it("provisions no anonymous volume for the image's VOLUME directives", () => {
+    const args = sandboxRunArgs(base);
+    expect(args).toContain("--image-volume=ignore");
+    // An option of `run`, not an argument of `sleep` — everything after the
+    // image name belongs to the entrypoint, where it would be a silent no-op
+    // that `toContain` still accepts.
+    expect(args.indexOf("--image-volume=ignore")).toBeLessThan(
+      args.indexOf(base.imageName),
+    );
+  });
+
   it("keeps --init an option of run, not an argument of the entrypoint", () => {
     // `podman run ... --entrypoint sleep <image> infinity`: everything after the
     // image name belongs to `sleep`, so an --init appended there would be a
@@ -1235,9 +1250,20 @@ describe("sandboxRunArgs (#42)", () => {
     expect(sandboxRemoveArgs("sandbar-w0011223-abc")).toEqual([
       "rm",
       "-f",
+      "-v",
       "--depend",
       "sandbar-w0011223-abc",
     ]);
+  });
+
+  // #50. The flag that matters is on `run`, not here: with
+  // `--image-volume=ignore` there is no anonymous volume left for this `-v` to
+  // reap, and this argv only ever names a container this same process created,
+  // so it can never meet a pre-upgrade one either. It is asserted so that a
+  // later reader cannot take a missing `-v` at one removal and a present one at
+  // another as a statement about either.
+  it("carries -v, so no container removal is the odd one out", () => {
+    expect(sandboxRemoveArgs("c")).toContain("-v");
   });
 
   it("emits no empty optional flags", () => {
@@ -1250,6 +1276,7 @@ describe("sandboxRunArgs (#42)", () => {
       "--user",
       "1000:1000",
       "--userns=keep-id:uid=1000,gid=1000",
+      "--image-volume=ignore",
       "-w",
       SANDBOX_REPO_DIR,
       "--entrypoint",
