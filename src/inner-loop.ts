@@ -5,11 +5,15 @@
 //      stack in parallel. The worktree comes FIRST (not in the parallel pair,
 //      #20): stack mounts bind-mount fixture files from it, and mount sources
 //      are read at container start — only the expensive container bringups
-//      overlap. Then, if the consumer marked any container `inSandbox`, the
-//      SANDBOX stack (#44) — the same containers again, in the agent
-//      container's own network namespace, so the agent can run the application
-//      before the gate does. Sequential rather than a third parallel entry:
-//      the siblings attach to the agent container, so it has to exist first.
+//      overlap. If the consumer marked any container `inSandbox`, the SANDBOX
+//      stack (#44) — the same containers again, in the agent container's own
+//      network namespace, so the agent can run the application before the gate
+//      does — is brought up INSIDE that first entry, through
+//      `beforeSandboxReady`: the siblings attach to the agent container, so it
+//      has to exist first, and a consumer's `onSandboxReady` hook is where the
+//      migration that wants them runs, so they have to be up before it. Not a
+//      third parallel entry for the same reason, and no serialisation against
+//      the gate stack either — it is still the same promise.
 //   2. Drive the state machine (inner-loop-machine.ts) to a verdict by
 //      executing the action it emits and feeding the result back as an event.
 //   3. Translate the verdict to a Terminal.
