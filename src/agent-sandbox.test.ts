@@ -352,6 +352,10 @@ function makeLocalProvider(live: Set<ChildProcess> = new Set()): SandboxProvider
       const worktreePath = opts.worktreePath;
       return {
         worktreePath,
+        // The name the sandbox stack's siblings would attach to (#44). A
+        // constant here: this provider starts no container, and the only thing
+        // that reads it is `Sandbox.containerName`.
+        containerName: "fake-sandbox-container",
         exec: (command, execOpts) =>
           new Promise((resolveExec, rejectExec) => {
             const proc = spawn("sh", ["-c", command], {
@@ -1059,6 +1063,7 @@ describe("sandboxRunArgs (#42)", () => {
     containerUid: 1000,
     containerGid: 1000,
     networks: [],
+    publishPorts: [],
     groups: [],
     devices: [],
     cpus: undefined,
@@ -1130,6 +1135,19 @@ describe("sandboxRunArgs (#42)", () => {
     expect(args).toContain("--user");
     // ...and the reaper is not conditional on any of it.
     expect(args).toContain("--init");
+  });
+
+  // #44: the sandbox is the anchor of the sandbox stack's network namespace,
+  // and podman refuses `-p` on a `--network container:` joiner — so a sibling's
+  // `tcp` readiness port can only be published HERE. Loopback-only with podman
+  // choosing the host side, so two concurrent sandboxes cannot collide and
+  // nothing an agent's stack runs is reachable off-box.
+  it("publishes the sandbox stack's probe ports loopback-only", () => {
+    const args = sandboxRunArgs({ ...base, publishPorts: [3306, 1025] });
+    const published = args.filter((a, i) => i > 0 && args[i - 1] === "-p");
+    expect(published).toEqual(["127.0.0.1::3306", "127.0.0.1::1025"]);
+    // Before the image ref, or they are arguments to `sleep`.
+    expect(args.indexOf("-p")).toBeLessThan(args.indexOf(base.imageName));
   });
 
   it("emits no empty optional flags", () => {

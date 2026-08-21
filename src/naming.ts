@@ -161,6 +161,32 @@ export function stackContainerNameFor(
   return `${scopedResourcePrefix(scope)}${stackId}-${name}`;
 }
 
+// ---------------------------------------------------------------------------
+// Sandbox-stack container names (#44)
+//
+//   sandbox sibling   sandbar-<scope>-sbx-<issueId>-<containerName>
+//
+// A fourth shape rather than a fourth `stackId`, and the `sbx-` segment is what
+// makes it safe: `stackContainerNameFor` would produce the identical string for
+// a stack whose id were the literal `sbx`, and ids are issue numbers or the
+// literal `merger`, so no gate container can ever alias a sandbox one. The
+// alias would matter — the two stacks bind-mount the same worktree and the gate
+// force-removes its own containers before every gate run, so a collision is one
+// stack reaping the other's live sibling mid-attempt.
+//
+// There is no new pod and no new network under #44's anchor-chain topology: the
+// siblings join the AGENT container's namespace, and the agent container keeps
+// its `sandbar-<scope>-<uuid>` name because nothing about it changed. So the
+// existing scoped prefix sweep in containers.ts reaps these for free, which is
+// the reason the prefix is not extended here.
+export function sandboxContainerNameFor(
+  scope: RunScope,
+  issueId: string,
+  name: string,
+): string {
+  return `${scopedResourcePrefix(scope)}sbx-${issueId}-${name}`;
+}
+
 // Reverse of the branch-naming convention: pull the issue number out of a
 // per-issue branch name (`<prefix>issue-<n>-<slug>`), recognizing every
 // current + legacy prefix. Returns null for anything that doesn't match the

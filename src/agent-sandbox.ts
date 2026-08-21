@@ -37,6 +37,16 @@
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
+//
+// Since #44 this container is also the ANCHOR of the sandbox stack's network
+// namespace: the application containers an agent needs in front of it join it
+// with `--network container:<name>`, so its name is public (`containerName`),
+// it carries the chain's publish ports, and its removal is `--depend`-aware
+// because podman refuses to remove a container others are attached to. Nothing
+// else about it moved — keep-id, uid 1000, `HOME`, `--init` and
+// `--dangerously-skip-permissions` are exactly what they were, which is the
+// whole reason #44 is an anchor chain and not a pod (a pod cannot carry
+// keep-id, and the agent CLI refuses to run as root).
 
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -145,6 +155,11 @@ type ExecResult = { stdout: string; stderr: string; exitCode: number };
 
 type SandboxHandle = {
   readonly worktreePath: string;
+  // The podman container's name. Carried out of the provider since #44,
+  // because the sandbox stack's siblings join THIS container's network
+  // namespace (`--network container:<name>`) and there is no other way to
+  // learn it — the name is a uuid the provider mints.
+  readonly containerName: string;
   exec(command: string, opts?: ExecOptions): Promise<ExecResult>;
   close(): Promise<void>;
 };
@@ -176,6 +191,15 @@ export type PodmanOptions = {
   containerUid?: number;
   containerGid?: number;
   network?: string | string[];
+  // Container ports to publish loopback-only on a podman-assigned ephemeral
+  // host port (`-p 127.0.0.1::<port>`), for the sandbox stack's `tcp` readiness
+  // probes (#44). They go on the AGENT container because it is the anchor of
+  // the netns chain: podman refuses `-p` on a `--network container:` joiner,
+  // since a publish is a property of the namespace and the namespace is this
+  // container's. Which means they must be known BEFORE the sandbox is created —
+  // the resolved stack is available by then, so that is a sequencing
+  // requirement rather than a limitation.
+  publishPorts?: readonly number[];
   maxOutputTailChars?: number;
   cpus?: number;
   groups?: Array<string | number>;
@@ -203,6 +227,8 @@ export type SandboxRunResult = {
 export interface Sandbox {
   readonly branch: string;
   readonly worktreePath: string;
+  // The anchor the sandbox stack's siblings attach to (#44). See SandboxHandle.
+  readonly containerName: string;
   run(o: RunOptions): Promise<SandboxRunResult>;
   close(): Promise<{ preservedWorktreePath?: string }>;
 }
@@ -237,6 +263,15 @@ export type CreateSandboxOptions = {
   // is a loud error — the copy
   // belongs in prepareWorktree, silently skipping it would be worse.
   preparedWorktreePath?: string;
+  // Extra bind mounts, appended after the worktree and the git common dir
+  // (#44). The one caller is the sandbox stack's log directory — a host
+  // directory the followers write each sibling's `podman logs -f` into, mounted
+  // read-only so the agent can read its neighbours' logs without being handed
+  // anything that can write to them. Read-only is not incidental: the whole
+  // isolation argument is that the agent cannot reach the stack its verdict is
+  // formed in, and a writable log mount is a channel out of the sandbox into
+  // the host's run-log tree.
+  extraMounts?: readonly Mount[];
 };
 
 export type PrepareWorktreeOptions = {
@@ -961,6 +996,7 @@ export function sandboxRunArgs(opts: {
   readonly containerUid: number;
   readonly containerGid: number;
   readonly networks: readonly string[];
+  readonly publishPorts: readonly number[];
   readonly groups: ReadonlyArray<string | number>;
   readonly devices: readonly string[];
   readonly cpus: number | undefined;
@@ -977,6 +1013,12 @@ export function sandboxRunArgs(opts: {
       ? [`--userns=keep-id:uid=${opts.containerUid},gid=${opts.containerGid}`]
       : []),
     ...opts.networks.flatMap((n) => ["--network", n]),
+    // Loopback-only, podman picks the host side — the same shape the gate's pod
+    // publishes with, and for the same two reasons: two concurrent sandboxes
+    // cannot collide on a host port, and nothing an agent's stack runs is
+    // reachable off-box. Empty for every consumer that declares no `inSandbox`
+    // container, which is what keeps #44 free when it is not used.
+    ...opts.publishPorts.flatMap((p) => ["-p", `127.0.0.1::${p}`]),
     ...opts.groups.flatMap((g) => ["--group-add", String(g)]),
     ...opts.devices.flatMap((d) => ["--device", d]),
     ...(opts.cpus !== undefined ? ["--cpus", String(opts.cpus)] : []),
@@ -1038,6 +1080,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
             containerUid,
             containerGid,
             networks,
+            publishPorts: options?.publishPorts ?? [],
             groups: options?.groups ?? [],
             devices: options?.devices ?? [],
             cpus: options?.cpus,
@@ -1049,9 +1092,20 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
         );
       });
 
+      // `--depend`, since #44. This container is the anchor of the sandbox
+      // stack's netns chain, and podman REFUSES to remove a container other
+      // containers depend on — so with a sibling still alive this call fails
+      // and leaks the whole chain. The normal path removes the siblings first
+      // (sandbox-stack.ts's `stop`, ordered ahead of `close()` by the inner
+      // loop and, on a signal, by the cleanup registry's LIFO order), and
+      // `--depend` is what makes that ordering a belt rather than the only
+      // thing holding it up: on any path where a sibling outlived its stack,
+      // this takes it too instead of leaking both. A no-op with no dependants,
+      // which is every consumer that declares no `inSandbox` container.
+      const removeArgs = ["rm", "-f", "--depend", containerName];
       const removeContainerSync = (): void => {
         try {
-          execFileSync("podman", ["rm", "-f", containerName], {
+          execFileSync("podman", removeArgs, {
             stdio: "ignore",
             timeout: 5000,
           });
@@ -1063,6 +1117,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
 
       const handle: SandboxHandle = {
         worktreePath: sandboxWorktreePath,
+        containerName,
         exec: (command, opts) => {
           const effectiveCommand = opts?.sudo ? `sudo ${command}` : command;
           const args = ["exec"];
@@ -1133,7 +1188,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
         close: async () => {
           unregisterShutdown();
           await new Promise<void>((resolveClose, rejectClose) => {
-            execFile("podman", ["rm", "-f", containerName], (error) => {
+            execFile("podman", removeArgs, (error) => {
               if (error) rejectClose(new Error(`podman rm failed: ${error.message}`));
               else resolveClose();
             });
@@ -1451,6 +1506,7 @@ export const createSandbox = async (
     const mounts: Mount[] = [
       { hostPath: worktreePath, sandboxPath: SANDBOX_REPO_DIR },
       ...gitMounts,
+      ...(options.extraMounts ?? []),
     ];
 
     providerHandle = await options.sandbox.create({
@@ -1599,6 +1655,7 @@ export const createSandbox = async (
   return {
     branch,
     worktreePath,
+    containerName: providerHandle.containerName,
     async run(o) {
       const iterations = o.maxIterations ?? 1;
       const completionSignals =

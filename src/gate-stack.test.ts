@@ -184,7 +184,7 @@ describe("tcpProbePorts", () => {
 describe("containerRunArgs", () => {
   const base = {
     containerName: "sandbar-42-app",
-    podName: "sandbar-pod-42",
+    attach: { kind: "pod", podName: "sandbar-pod-42" } as const,
     worktreePath: "/wt",
   };
 
@@ -198,6 +198,45 @@ describe("containerRunArgs", () => {
       "--pod",
       "sandbar-pod-42",
     ]);
+  });
+
+  // The sandbox stack's topology (#44). Not a second builder: everything after
+  // the attachment — env, mounts, the worktree, `hold` — is the same container
+  // definition, and a copy would be the place the two silently diverge.
+  it("joins an anchor's network namespace when told to", () => {
+    const args = containerRunArgs({
+      ...base,
+      attach: { kind: "netns", anchorContainerName: "sandbar-w1-uuid" },
+      container: container(),
+    });
+    expect(args.slice(0, 6)).toEqual([
+      "run",
+      "-d",
+      "--name",
+      "sandbar-42-app",
+      "--network",
+      "container:sandbar-w1-uuid",
+    ]);
+    // The chain's tax: a publish belongs to the namespace, and the namespace
+    // belongs to the anchor. podman refuses `-p` here outright.
+    expect(args).not.toContain("--pod");
+    expect(args).not.toContain("-p");
+  });
+
+  // The joiner must write the worktree as the invoking user, which under
+  // rootless podman is what container ROOT maps to — the same reason the pod's
+  // members carry neither flag. `--userns=keep-id` is available outside a pod,
+  // and using it here would map the container to uid 1000 and break every image
+  // that needs its own root (the mariadb of #44's fact 3).
+  it("passes no --userns and no --user to a netns joiner either", () => {
+    const args = containerRunArgs({
+      ...base,
+      attach: { kind: "netns", anchorContainerName: "sandbar-w1-uuid" },
+      container: container({ mountWorktree: "/app" }),
+    });
+    expect(args.some((a) => a.startsWith("--userns"))).toBe(false);
+    expect(args).not.toContain("--user");
+    expect(args).toContain("/wt:/app:rw,z");
   });
 
   // The pod is why: podman refuses `--userns` alongside `--pod`, and uid 1000

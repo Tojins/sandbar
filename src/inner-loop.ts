@@ -5,7 +5,11 @@
 //      stack in parallel. The worktree comes FIRST (not in the parallel pair,
 //      #20): stack mounts bind-mount fixture files from it, and mount sources
 //      are read at container start — only the expensive container bringups
-//      overlap.
+//      overlap. Then, if the consumer marked any container `inSandbox`, the
+//      SANDBOX stack (#44) — the same containers again, in the agent
+//      container's own network namespace, so the agent can run the application
+//      before the gate does. Sequential rather than a third parallel entry:
+//      the siblings attach to the agent container, so it has to exist first.
 //   2. Drive the state machine (inner-loop-machine.ts) to a verdict by
 //      executing the action it emits and feeding the result back as an event.
 //   3. Translate the verdict to a Terminal.
@@ -25,6 +29,8 @@
 // its outcome is two distinct events; this file's remaining job is to adapt
 // `sandbox.run`'s throw into the shape that policy classifies, which is why the
 // try/catch below returns a value instead of substituting prose.
+
+import { join } from "node:path";
 
 import * as agentSandbox from "./agent-sandbox.js";
 import { agentPartialOutput, podman } from "./agent-sandbox.js";
@@ -55,6 +61,15 @@ import {
 import type { AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { parsePromise } from "./promise-parser.js";
+import {
+  type SandboxContainerStatus,
+  type SandboxStack,
+  SANDBOX_LOG_MOUNT,
+  prepareSandboxLogDir,
+  sandboxContainers,
+  sandboxPublishPorts,
+  startSandboxStack,
+} from "./sandbox-stack.js";
 import {
   REVIEWER_MAX_INVOCATIONS,
   runReviewerInvocations,
@@ -159,6 +174,12 @@ export type InnerLoopOptions = {
   // its build cache is: two branches that make the same lockfile change produce
   // the same content-addressed tag and must not build it twice.
   readonly branchImages?: BranchImages;
+  // Where each sandbox sibling's followed log is written on the host (#44 D4),
+  // one subdirectory per issue. The run's cycle log directory, so the files are
+  // an offline artefact beside the attempt transcripts rather than a second
+  // tree nobody remembers to look in. Absent, the sandbox stack still runs and
+  // the logs go under the state directory's `logs/`.
+  readonly sandboxLogBaseDir?: string;
   readonly attemptLogger?: AttemptLogger;
   readonly onOrchestratorLog?: (line: string) => Promise<void> | void;
 };
@@ -233,7 +254,9 @@ async function runSandboxCycle(
   const { config } = opts;
   const branchImages = opts.branchImages;
   let sandbox: Sandbox | null = null;
+  let sandboxStack: SandboxStack | null = null;
   let stack: Stack | null = null;
+  let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
 
   try {
@@ -256,6 +279,21 @@ async function runSandboxCycle(
       copyToWorktree: [...opts.copyToWorktree],
     });
 
+    // The sandbox's siblings (#44). Everything about them is derived from the
+    // `inSandbox` subset, which is empty for every consumer that declares none
+    // — and then the publish list is empty, the log mount is absent, no
+    // sibling is created and the prompt slot renders to nothing.
+    const sbxContainers = sandboxContainers(config.gateStack);
+    const sandboxLogDir = join(
+      opts.sandboxLogBaseDir ?? config.layout.logsDir,
+      `issue-${issue.id}`,
+      "sandbox-logs",
+    );
+    // Before the sandbox container, not after: the directory is a bind-mount
+    // SOURCE and podman reads it at container start, so a missing one is a
+    // bringup failure rather than an empty mount.
+    if (sbxContainers.length > 0) await prepareSandboxLogDir(sandboxLogDir);
+
     const [sandboxResult, stackResult] = await Promise.allSettled([
       agentSandbox.createSandbox({
         branch: issue.branch,
@@ -266,10 +304,26 @@ async function runSandboxCycle(
         sandbox: podman({
           imageName: config.sandboxImage,
           namePrefix: scopedResourcePrefix(config.scope),
+          // The anchor of the netns chain carries the chain's publishes,
+          // because podman refuses `-p` on a `--network container:` joiner —
+          // which is why this has to be known here, before the container
+          // exists, rather than when the siblings are created (#44 D6).
+          publishPorts: sandboxPublishPorts(sbxContainers),
         }),
         hooks: opts.hooks,
         env: config.env,
         preparedWorktreePath: worktreePath,
+        ...(sbxContainers.length > 0
+          ? {
+              extraMounts: [
+                {
+                  hostPath: sandboxLogDir,
+                  sandboxPath: SANDBOX_LOG_MOUNT,
+                  readonly: true,
+                },
+              ],
+            }
+          : {}),
       }),
       startStack({
         stackId: issue.id,
@@ -287,6 +341,28 @@ async function runSandboxCycle(
       throw sandboxResult.status === "rejected"
         ? sandboxResult.reason
         : (stackResult as PromiseRejectedResult).reason;
+    }
+
+    // The siblings can only be created once the anchor exists, so this is
+    // sequential rather than a third entry in the pair above (#44 D6). What it
+    // costs is the overlap between this bringup and the gate stack's, which is
+    // small: `startStack` brings up only the `issue` half of the gate.
+    //
+    // A throw here is an `issue`-lifecycle sibling that would not start, which
+    // is infrastructure and takes the HARD-ERROR path to a fresh sandbox — the
+    // same treatment the gate stack's would get, and the reason it is NOT
+    // wrapped in a catch. A failed `attempt` sibling never throws: the sandbox
+    // comes up degraded and the agent is told (D3).
+    if (sbxContainers.length > 0) {
+      sandboxStack = await startSandboxStack({
+        issueId: issue.id,
+        scope: config.scope,
+        spec: config.gateStack,
+        worktreePath,
+        anchorContainerName: sandbox.containerName,
+        logDir: sandboxLogDir,
+      });
+      sandboxStatuses = sandboxStack.statuses;
     }
 
     // startStack already registered stack.stop with onCleanup before it created
@@ -323,6 +399,7 @@ async function runSandboxCycle(
         gateStack,
         worktreePath,
         accumulated,
+        sandboxStatuses,
       });
       const r = step(state, event);
       state = r.state;
@@ -375,6 +452,21 @@ async function runSandboxCycle(
         console.error(err instanceof Error ? err.message : String(err));
       }
     }
+    // Then the sandbox's own siblings, and BEFORE `sandbox.close()` (#44). They
+    // are attached to the agent container's network namespace, and podman
+    // refuses to remove a container others depend on — so the reverse order
+    // does not merely leak the siblings, it fails to remove the anchor too.
+    // (`close()` passes `--depend` as a backstop for the paths this ordering
+    // cannot cover, but the ordering is what makes the ordinary path clean.)
+    // They also write into the worktree, so the same argument that puts the
+    // gate stack ahead of the worktree removal applies to them.
+    if (sandboxStack) {
+      try {
+        await sandboxStack.stop();
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+      }
+    }
     if (sandbox) {
       try {
         await sandbox.close();
@@ -396,6 +488,9 @@ type ExecuteActionCtx = {
   // clean-assert reads — one tree, which is the whole point of D1.
   readonly worktreePath: string;
   readonly accumulated: { sha: string }[];
+  // What came up beside the agent, for the implementer's prompt slot (#44 D8).
+  // Empty when the consumer declares no `inSandbox` container.
+  readonly sandboxStatuses: readonly SandboxContainerStatus[];
 };
 
 async function executeAction(
@@ -431,6 +526,7 @@ async function runImplementer(
       ...(action.latestReviewerProse !== null
         ? { latestReviewerProse: action.latestReviewerProse }
         : {}),
+      sandboxStack: ctx.sandboxStatuses,
     },
     anchorOpts,
   );

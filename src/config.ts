@@ -165,6 +165,32 @@ export type StackContainer = {
   // mounts the worktree); this is how the other shape says so out loud, and is
   // needed ONLY by a stack that has no stepped-into mount at all.
   readonly servesWorktree?: boolean;
+  // Run a copy of this container beside the AGENT too, in the sandbox's own
+  // network namespace (#44). Default false, and the default is what makes the
+  // whole feature opt-in per container: declare it nowhere and no sandbox stack
+  // is created, so nothing about an existing consumer's cost or topology moves.
+  //
+  // It exists because an agent that cannot run the application before the gate
+  // does writes a test it has never watched fail and a fix it has never watched
+  // pass — and the only way to give it one today is to rebuild the whole stack
+  // as PROCESSES inside the sandbox image (a consumer really did apt-install
+  // mariadb, download a libc-matched mailhog binary and hand-write 163 lines of
+  // `pgrep`/`mysqladmin ping`/`setsid` supervision). Every bug in that is a bug
+  // podman does not have, and the description of what it takes to run the app
+  // already exists right here.
+  //
+  // Deliberately its own flag rather than the `lifecycle: "issue"` set: that
+  // field answers a different question (whose failure a failed bringup is), and
+  // the motivating consumer's application server is `attempt`-lifecycle and is
+  // precisely what the agent needs to see. Deliberately not a separate
+  // `config.sandboxStack` either — that reintroduces the second description of
+  // the application this flag exists to delete.
+  //
+  // The sandbox copy is a SIBLING of the gate's, never the same container: the
+  // agent must not be able to reach the stack its verdict is formed in, and
+  // that property comes from being a different network namespace rather than
+  // from the absence of a runtime. See sandbox-stack.ts.
+  readonly inSandbox?: boolean;
   // The image has no long-running process of its own: hold it open with
   // `sleep infinity` so steps can `podman exec` into it. This is what makes a
   // one-shot task runner an ordinary container rather than a special case.
@@ -270,6 +296,7 @@ export type ResolvedStackContainer = {
   readonly mounts: readonly ResolvedStackMount[];
   readonly mountWorktree: string | null;
   readonly servesWorktree: boolean;
+  readonly inSandbox: boolean;
   readonly hold: boolean;
   readonly readiness: Readiness | null;
   readonly readinessTimeoutMs: number;
@@ -969,6 +996,30 @@ function resolveStackContainer(
         "'postReadyCommands' entry.",
     );
   }
+  // The same decidable-emptiness rule, asked of the sandbox copy (#44 D2). A
+  // held container runs `sleep infinity` and nothing else, so held with nothing
+  // exec'd after readiness is a container that provably serves the agent
+  // nothing — and the sandbox slot in the implementer's prompt would then name
+  // an address behind which there is no process, which is worse than not
+  // offering it. Separate from the `servesWorktree` rule above rather than
+  // folded into it because the two describe different consumers: that one is
+  // about the gate's steps reaching the code, this one is about the agent
+  // reaching a service, and a container can legitimately be one without being
+  // the other.
+  if (
+    c.inSandbox === true &&
+    hold &&
+    (c.postReadyCommands?.length ?? 0) === 0
+  ) {
+    throw new SandbarError(
+      `config.gateStack: container '${c.name}' sets 'inSandbox' with 'hold' ` +
+        "and no 'postReadyCommands'. 'hold' overrides the entrypoint with " +
+        "`sleep infinity`, so the sandbox copy would run nothing at all and " +
+        "the agent would be told about a service that does not exist. Either " +
+        "drop 'inSandbox', or start the service from a 'postReadyCommands' " +
+        "entry.",
+    );
+  }
   for (const m of c.mounts ?? []) {
     // podman's `-v` spec is colon-delimited with no escape mechanism, so a
     // colon anywhere would re-split the spec into different paths + options.
@@ -1080,6 +1131,7 @@ function resolveStackContainer(
     })),
     mountWorktree: c.mountWorktree ?? null,
     servesWorktree: c.servesWorktree ?? false,
+    inSandbox: c.inSandbox ?? false,
     hold,
     readiness,
     readinessTimeoutMs,

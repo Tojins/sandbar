@@ -11,6 +11,8 @@
 //                              anchor. A fetch failure throws (SandbarError)
 //                              instead of degrading to a placeholder.
 // Layer 3 (per-attempt slot):  implementer: attempt counter, full branch diff,
+//                              the sandbox stack running beside the agent and
+//                              what did or did not come up in it (#44),
 //                              last 200 lines of the previous gate-1 trace,
 //                              the previous reviewer's prose (when the prior
 //                              round returned CHANGES-REQUESTED), escalation
@@ -47,6 +49,7 @@ import { SandbarError } from "./errors.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
+import type { SandboxContainerStatus } from "./sandbox-stack.js";
 
 const exec = promisify(execFile);
 
@@ -59,6 +62,7 @@ const IMPLEMENTER_TPL = loadTemplate("implementer");
 const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
 const IMPLEMENTER_REVIEWER_FEEDBACK_TPL = loadTemplate("implementer-reviewer-feedback");
 const IMPLEMENTER_ESCALATION_TPL = loadTemplate("implementer-escalation");
+const IMPLEMENTER_SANDBOX_STACK_TPL = loadTemplate("implementer-sandbox-stack");
 
 // Attempt at which the implementer prompt starts surfacing the escalation block.
 const ESCALATION_ATTEMPT = 6;
@@ -170,6 +174,17 @@ export type PromptInputs = {
   readonly sourceBranch: string;
   readonly extraReprompt?: string;
   readonly latestReviewerProse?: string;
+  // What came up beside the agent this sandbox cycle (#44 D8). Absent for a
+  // consumer that declares no `inSandbox` container, and an empty array is the
+  // same thing — the slot renders to "" either way.
+  //
+  // NOT left to the consumer's own CLAUDE.md/CONTEXT.md, which is where the
+  // temptation is: sandbar is the only party that knows which containers came
+  // up THIS attempt, which did not, and where their logs are, and a document
+  // that states it goes stale the first time it is wrong. Semantics —
+  // credentials, which database, what the fixtures are — stay in the anchor
+  // docs, where they already are.
+  readonly sandboxStack?: readonly SandboxContainerStatus[];
 };
 
 export type ReviewerPromptInputs = {
@@ -356,6 +371,8 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     ? render(IMPLEMENTER_REVIEWER_FEEDBACK_TPL, { prose: latestReviewerProse })
     : "";
 
+  const sandboxStack = renderSandboxStackSlot(inputs.sandboxStack ?? []);
+
   const orchestratorNote = extraReprompt
     ? `## Orchestrator note\n\n${extraReprompt}`
     : "";
@@ -375,10 +392,51 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     issueTitle: issue.title,
     branch: issue.branch,
     workDone: section(workDone),
+    sandboxStack: section(sandboxStack),
     gateFailure: section(gateFailure),
     reviewerFeedback: section(reviewerFeedback),
     orchestratorNote: section(orchestratorNote),
     escalation: section(escalation),
+  });
+}
+
+// The sandbox-stack slot (#44 D8) — pure, over the resolved subset plus this
+// cycle's runtime status.
+//
+// Renders to "" for an empty list, which is what every consumer that declares
+// no `inSandbox` container gets: the feature is opt-in and its prompt cost is
+// opt-in with it.
+//
+// A DOWN container is listed rather than omitted, and that is the whole reason
+// the status carries a failure string. An `attempt`-lifecycle sibling that will
+// not start is the branch's own bootstrap breaking, and the agent is the one
+// entity that can fix it — omitting it would leave the agent to discover a
+// missing service by watching a connection refuse, which is the guessing this
+// feature exists to end. (An `issue`-lifecycle one never reaches here: it
+// throws, and the runner takes a HARD-ERROR and a fresh sandbox.)
+//
+// The log tail rides along for the same reason and only for a down container:
+// for a live one the path is enough, and pasting a tail of a healthy service's
+// log into every attempt's prompt is pure noise.
+export function renderSandboxStackSlot(
+  statuses: readonly SandboxContainerStatus[],
+): string {
+  if (statuses.length === 0) return "";
+  const lines: string[] = [];
+  for (const s of statuses) {
+    const where = s.address ? ` at \`${s.address}\`` : "";
+    lines.push(
+      s.up
+        ? `- **${s.name}**${where} — running \`${s.image}\`. Log: \`${s.logPath}\``
+        : `- **${s.name}**${where} — **DID NOT START** (\`${s.image}\`). ` +
+          `Log: \`${s.logPath}\``,
+    );
+    if (!s.up && s.failure) {
+      lines.push("", "```", s.failure.trim(), "```", "");
+    }
+  }
+  return render(IMPLEMENTER_SANDBOX_STACK_TPL, {
+    containers: lines.join("\n").trim(),
   });
 }
 
