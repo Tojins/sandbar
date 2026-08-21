@@ -24,6 +24,21 @@
 // none of that: the pod is created first, holds the resolver config, and
 // survives every container's removal. There is no `anchor` in sandbar's config.
 //
+// SANDBAR NOW RUNS BOTH TOPOLOGIES, and the paragraph above is why the second
+// one is not a contradiction (#44). The sandbox stack — the same containers,
+// beside the AGENT rather than beside the steps — uses the anchor chain, and
+// every objection just made is an objection to the anchor being a FOREIGN
+// container. There the anchor is the agent's own sandbox: created first,
+// outliving every sibling, never recreated per attempt, and the natural owner
+// of any namespace-wide flag — of which, since #43 moved every readiness probe
+// inside the container, there are none left to want. What forces the choice is
+// that a pod cannot host it at all — `--pod` and `--userns=keep-id` are
+// refused together, and the agent needs keep-id (uid 1000, `HOME=/home/agent`,
+// and a `--dangerously-skip-permissions` that refuses to run as root). So:
+// pods where a pod is possible, the chain where it is not. See
+// sandbox-stack.ts, and `ContainerAttachment` below for the one place the two
+// meet in this module.
+//
 // What the pod costs: `--userns=keep-id` and `--pod` cannot be combined
 // (podman refuses outright), and `--user 1000:1000` inside a pod maps to a
 // SUBUID, not to the invoking user — a container that writes to the mounted
@@ -127,7 +142,9 @@
 // long-lived `spawn` it used to hold — the `podman logs -f` follower behind
 // `log` readiness — went with that kind in #43, and with it the whole
 // signal-coverage caveat that followed: there is no longer any child here that
-// can outlive its parent on SIGKILL or an untrapped SIGHUP.
+// can outlive its parent on SIGKILL or an untrapped SIGHUP. sandbox-stack.ts
+// spawns one deliberately — a `podman logs -f` per sibling, producing an
+// artefact rather than deciding readiness — and states that caveat itself.
 //
 // ---------------------------------------------------------------------------
 // Readiness: podman owns the probe, sandbar owns the schedule (#43)
@@ -268,7 +285,10 @@ export type BoundedResult = {
   readonly errorMessage: string;
 };
 
-function boundedPodman(
+// Exported since #44: sandbox-stack.ts drives podman for the sandbox siblings
+// and every claim this module makes about not hanging (and about `podman exec`
+// exiting 0 on SIGTERM) applies there verbatim.
+export function boundedPodman(
   args: readonly string[],
   timeoutMs: number,
 ): Promise<BoundedResult> {
@@ -313,7 +333,7 @@ function boundedPodman(
 }
 
 // Did the call exit 0 on its own?
-function boundedOk(r: BoundedResult): boolean {
+export function boundedOk(r: BoundedResult): boolean {
   return r.exitCode === 0 && !r.timedOut && !r.maxBufferExceeded;
 }
 
@@ -538,9 +558,39 @@ export function healthCheckArgs(c: ResolvedStackContainer): string[] {
   ];
 }
 
+// How a container gets its network namespace, and the only thing #44 had to
+// generalise in this module.
+//
+// `pod` is the gate's own topology and everything the header says about it
+// stands. `netns` is the anchor chain — `--network container:<anchor>` — and it
+// exists for exactly one caller, the sandbox stack (sandbox-stack.ts), where
+// the argument the header makes AGAINST the chain inverts: the anchor there is
+// the agent container, which is created first, outlives every sibling and is
+// never recreated per attempt. A pod is unavailable to it for a hard podman
+// reason (`--pod` refuses `--userns=keep-id`, and the agent must keep it), so
+// the chain is not a docker tax there but the only shape available.
+//
+// The joiner takes NO `-p` and NO `--dns`: podman refuses both alongside
+// `--network container:`, since those are properties of the namespace and the
+// namespace belongs to the anchor. Since #43 that is the whole of the chain's
+// tax and it costs nothing, because neither flag has a caller left. Nothing
+// publishes: the readiness probe runs INSIDE the container (`podman
+// healthcheck run`), so a joiner needs no host port any more than a pod member
+// does. And the `--dns` servers above exist to survive this module's
+// `--disable-dns` network (#18), while the agent container sits on podman's
+// default one with its resolver intact — the joiners inherit that.
+export type ContainerAttachment =
+  | { readonly kind: "pod"; readonly podName: string }
+  | { readonly kind: "netns"; readonly anchorContainerName: string };
+
+// What this module's own stack is called in the messages it raises. The sandbox
+// stack passes its own (`BringUpCtx.label`), which is the only reason this is a
+// value at all.
+const GATE_LABEL = "gate stack";
+
 export function containerRunArgs(opts: {
   readonly containerName: string;
-  readonly podName: string;
+  readonly attach: ContainerAttachment;
   readonly container: ResolvedStackContainer;
   readonly worktreePath: string;
 }): string[] {
@@ -550,8 +600,9 @@ export function containerRunArgs(opts: {
     "-d",
     "--name",
     opts.containerName,
-    "--pod",
-    opts.podName,
+    ...(opts.attach.kind === "pod"
+      ? ["--pod", opts.attach.podName]
+      : ["--network", `container:${opts.attach.anchorContainerName}`]),
     "--label",
     "sandbar=true",
     // Consumer env first, sandbar's reserved key last: podman keeps the final
@@ -566,8 +617,11 @@ export function containerRunArgs(opts: {
     args.push("-w", c.mountWorktree);
   }
   if (c.hold) {
-    // No `--user`/`--userns`: neither is available in a pod, and the image's
-    // default user is what the uid preflight checked.
+    // No `--user`/`--userns`: neither is available in a pod, the image's
+    // default user is what the uid preflight checked, and a `netns` joiner
+    // deliberately runs the same way — its worktree writes have to land as the
+    // invoking user, which under rootless podman is what container root maps
+    // to, exactly as in the pod.
     args.push("--entrypoint", "sleep", c.image, "infinity");
   } else {
     args.push(c.image, ...c.args);
@@ -770,6 +824,8 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       `create pod ${podName}`,
     );
 
+    const attach: ContainerAttachment = { kind: "pod", podName };
+
     const issueContainers = opts.spec.containers.filter(
       (c) => c.lifecycle === "issue",
     );
@@ -785,8 +841,9 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // Nothing of the branch runs at this point in any case: `resolveGateStack`
     // refuses `lifecycle: "issue"` on an un-held container that mounts the
     // worktree, and a held one's entrypoint is `sleep infinity`.
-    await bringUp(issueContainers, {
-      podName,
+    await bringUpContainers(issueContainers, {
+      attach,
+      label: GATE_LABEL,
       worktreePath: opts.worktreePath,
       nameOf,
     });
@@ -810,7 +867,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
           spec: opts.spec,
           attemptContainers,
           issueContainers,
-          podName,
+          attach,
           worktreePath: opts.worktreePath,
           nameOf,
           images: opts.images ?? (async () => new Map()),
@@ -889,8 +946,27 @@ function describeHealthEntry(e: HealthLogEntry): string {
   return output ? `exit ${code}: ${output}` : `exit ${code}, no output`;
 }
 
-type BringUpCtx = {
-  readonly podName: string;
+// Exported since #44: the sandbox stack brings its siblings up through exactly
+// this, so the readiness probes, the liveness asserts and the postReadyCommands
+// discipline exist once rather than twice. `attach` is the only thing that
+// differs between the two callers.
+export type BringUpCtx = {
+  readonly attach: ContainerAttachment;
+  // Which stack this is, for the messages raised below — `gate stack` or
+  // `sandbox stack`. A field rather than something derived from `attach.kind`,
+  // even though the two agree today, because they answer different questions:
+  // one is a topology, the other is whose failure this is. Derive it and the
+  // day a gate needs a chain every gate message names the sandbox.
+  //
+  // It is not cosmetic. The one string D3 hands a degraded `attempt` sibling is
+  // this message, rendered into the implementer's prompt directly under a
+  // paragraph telling the agent the gate's stack is a namespace it cannot
+  // reach — so a `gate stack:` prefix there reads as a red gate that never ran,
+  // against a stack the agent has just been told not to touch. The operator's
+  // half is the same error one arm along: an `issue` sibling's throw surfaces
+  // as the HARD-ERROR reason, sending whoever reads the run log to inspect a
+  // pod where nothing is wrong.
+  readonly label: string;
   readonly worktreePath: string;
   // Passed as a closure rather than rebuilt from (scope, stackId) here: the
   // name is the stack's identity, and one place composes it.
@@ -902,7 +978,7 @@ type BringUpCtx = {
 // its neighbours to be ready — there is no reason for a frontend that builds
 // the app on startup to queue behind a database initialising a schema it never
 // reads.
-async function bringUp(
+export async function bringUpContainers(
   containers: readonly ResolvedStackContainer[],
   ctx: BringUpCtx,
 ): Promise<void> {
@@ -921,7 +997,7 @@ async function bringUp(
     const started = await boundedPodman(
       containerRunArgs({
         containerName,
-        podName: ctx.podName,
+        attach: ctx.attach,
         container: c,
         worktreePath: ctx.worktreePath,
       }),
@@ -930,7 +1006,7 @@ async function bringUp(
     if (!boundedOk(started)) {
       throw new ContainerBringupError(
         containerName,
-        `gate stack: container '${c.name}' (${c.image}) failed to start: ${
+        `${ctx.label}: container '${c.name}' (${c.image}) failed to start: ${
           started.timedOut
             ? `${RUNTIME} run did not return within ${CONTROL_TIMEOUT_MS}ms`
             : started.errorMessage
@@ -941,7 +1017,7 @@ async function bringUp(
   }
 
   for (const c of containers) {
-    await waitForReady(ctx.nameOf(c), c);
+    await waitForReady(ctx.nameOf(c), c, ctx.label);
   }
 
   for (const c of containers) {
@@ -964,7 +1040,7 @@ async function bringUp(
       // never returned was reported as having succeeded.
       throw new ContainerBringupError(
         containerName,
-        `gate stack: postReadyCommand ${JSON.stringify(command)} ` +
+        `${ctx.label}: postReadyCommand ${JSON.stringify(command)} ` +
           (r.timedOut
             ? `did not finish within the container's ${c.readinessTimeoutMs}ms ` +
               `readiness budget and was killed, in container '${c.name}'. ` +
@@ -992,6 +1068,7 @@ function remainingMs(deadline: number): number {
 async function waitForReady(
   containerName: string,
   c: ResolvedStackContainer,
+  label: string,
 ): Promise<void> {
   if (c.readiness === null) {
     // No probe was declared, so nothing else ever looks at this container: the
@@ -1003,19 +1080,20 @@ async function waitForReady(
     // has to get far enough to fail) and then the same liveness assert every
     // probed container gets.
     await sleep(READY_POLL_INTERVAL_MS);
-    await throwIfDead(containerName, c);
+    await throwIfDead(containerName, c, label);
     return;
   }
   // No `finally` and nothing to own: since #43 the probe is a bounded
   // `execFile` like every other podman call here, rather than a `podman logs
   // -f` follower whose only bound was this function holding it.
-  await pollUntilReady(containerName, c, c.readiness);
+  await pollUntilReady(containerName, c, c.readiness, label);
 }
 
 async function pollUntilReady(
   containerName: string,
   c: ResolvedStackContainer,
   readiness: NonNullable<ResolvedStackContainer["readiness"]>,
+  label: string,
 ): Promise<void> {
   const deadline = Date.now() + c.readinessTimeoutMs;
   let lastErr = "";
@@ -1042,7 +1120,7 @@ async function pollUntilReady(
     // container whose entrypoint dies at startup is an EXPECTED failure. Report
     // it immediately with its log instead of polling a corpse for the full
     // timeout and then reporting a misleading "did not become ready".
-    await throwIfDead(containerName, c);
+    await throwIfDead(containerName, c, label);
     await sleep(READY_POLL_INTERVAL_MS);
   }
   // Read once, here, rather than on every failed poll: this sees the most
@@ -1051,7 +1129,7 @@ async function pollUntilReady(
   const entries = await readHealthLog(containerName);
   throw new ContainerBringupError(
     containerName,
-    `gate stack: container '${c.name}' (${c.image}) did not become ready ` +
+    `${label}: container '${c.name}' (${c.image}) did not become ready ` +
       `within ${c.readinessTimeoutMs}ms (${describeReadiness(readiness)}; ` +
       `last probe: ${lastProbeText(entries, lastErr, lastTimedOut)})`,
     await logTail(containerName),
@@ -1197,6 +1275,7 @@ export async function containerState(
 async function throwIfDead(
   containerName: string,
   c: ResolvedStackContainer,
+  label: string,
 ): Promise<void> {
   const state = await containerState(containerName);
   // A flaked inspect is not evidence of death; let the deadline arbitrate.
@@ -1204,9 +1283,9 @@ async function throwIfDead(
   throw new ContainerBringupError(
     containerName,
     state === "gone"
-      ? `gate stack: container '${c.name}' (${c.image}) no longer exists — ` +
+      ? `${label}: container '${c.name}' (${c.image}) no longer exists — ` +
         "something removed it during startup."
-      : `gate stack: container '${c.name}' (${c.image}) exited during startup.`,
+      : `${label}: container '${c.name}' (${c.image}) exited during startup.`,
     state === "gone" ? GONE_LOG_NOTE : await logTail(containerName),
   );
 }
@@ -1256,7 +1335,7 @@ type RunGateCtx = {
   readonly spec: ResolvedGateStack;
   readonly attemptContainers: readonly ResolvedStackContainer[];
   readonly issueContainers: readonly ResolvedStackContainer[];
-  readonly podName: string;
+  readonly attach: ContainerAttachment;
   readonly worktreePath: string;
   readonly nameOf: (c: ResolvedStackContainer) => string;
   readonly images: () => Promise<ImageMap>;
@@ -1387,8 +1466,9 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   );
   if (staleIssueContainers.length > 0) {
     try {
-      await bringUp(withImages(staleIssueContainers, images), {
-        podName: ctx.podName,
+      await bringUpContainers(withImages(staleIssueContainers, images), {
+        attach: ctx.attach,
+        label: GATE_LABEL,
         worktreePath: ctx.worktreePath,
         nameOf: ctx.nameOf,
       });
@@ -1433,8 +1513,9 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   // code, so reusing one would gate an earlier attempt's process against a
   // later attempt's source.
   try {
-    await bringUp(withImages(ctx.attemptContainers, images), {
-      podName: ctx.podName,
+    await bringUpContainers(withImages(ctx.attemptContainers, images), {
+      attach: ctx.attach,
+      label: GATE_LABEL,
       worktreePath: ctx.worktreePath,
       nameOf: ctx.nameOf,
     });
@@ -1617,8 +1698,9 @@ async function reapKilledStep(
     // it must be the map as it STANDS: this is a restore of what was running,
     // not a new resolution, and re-resolving mid-red would pay a build for a
     // gate whose verdict is already decided.
-    await bringUp(withImages([container], ctx.running.map), {
-      podName: ctx.podName,
+    await bringUpContainers(withImages([container], ctx.running.map), {
+      attach: ctx.attach,
+      label: GATE_LABEL,
       worktreePath: ctx.worktreePath,
       nameOf: ctx.nameOf,
     });

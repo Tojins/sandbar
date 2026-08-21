@@ -5,7 +5,15 @@
 //      stack in parallel. The worktree comes FIRST (not in the parallel pair,
 //      #20): stack mounts bind-mount fixture files from it, and mount sources
 //      are read at container start — only the expensive container bringups
-//      overlap.
+//      overlap. If the consumer marked any container `inSandbox`, the SANDBOX
+//      stack (#44) — the same containers again, in the agent container's own
+//      network namespace, so the agent can run the application before the gate
+//      does — is brought up INSIDE that first entry, through
+//      `beforeSandboxReady`: the siblings attach to the agent container, so it
+//      has to exist first, and a consumer's `onSandboxReady` hook is where the
+//      migration that wants them runs, so they have to be up before it. Not a
+//      third parallel entry for the same reason, and no serialisation against
+//      the gate stack either — it is still the same promise.
 //   2. Drive the state machine (inner-loop-machine.ts) to a verdict by
 //      executing the action it emits and feeding the result back as an event.
 //   3. Translate the verdict to a Terminal.
@@ -25,6 +33,8 @@
 // its outcome is two distinct events; this file's remaining job is to adapt
 // `sandbox.run`'s throw into the shape that policy classifies, which is why the
 // try/catch below returns a value instead of substituting prose.
+
+import { join } from "node:path";
 
 import * as agentSandbox from "./agent-sandbox.js";
 import { agentPartialOutput, podman } from "./agent-sandbox.js";
@@ -55,6 +65,14 @@ import {
 import type { AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { parsePromise } from "./promise-parser.js";
+import {
+  type SandboxContainerStatus,
+  type SandboxStack,
+  SANDBOX_LOG_MOUNT,
+  prepareSandboxLogDir,
+  sandboxContainers,
+  startSandboxStack,
+} from "./sandbox-stack.js";
 import {
   REVIEWER_MAX_INVOCATIONS,
   runReviewerInvocations,
@@ -159,6 +177,12 @@ export type InnerLoopOptions = {
   // its build cache is: two branches that make the same lockfile change produce
   // the same content-addressed tag and must not build it twice.
   readonly branchImages?: BranchImages;
+  // Where each sandbox sibling's followed log is written on the host (#44 D4),
+  // one subdirectory per issue. The run's cycle log directory, so the files are
+  // an offline artefact beside the attempt transcripts rather than a second
+  // tree nobody remembers to look in. Absent, the sandbox stack still runs and
+  // the logs go under the state directory's `logs/`.
+  readonly sandboxLogBaseDir?: string;
   readonly attemptLogger?: AttemptLogger;
   readonly onOrchestratorLog?: (line: string) => Promise<void> | void;
 };
@@ -233,7 +257,9 @@ async function runSandboxCycle(
   const { config } = opts;
   const branchImages = opts.branchImages;
   let sandbox: Sandbox | null = null;
+  let sandboxStack: SandboxStack | null = null;
   let stack: Stack | null = null;
+  let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
 
   try {
@@ -256,6 +282,22 @@ async function runSandboxCycle(
       copyToWorktree: [...opts.copyToWorktree],
     });
 
+    // The sandbox's siblings (#44). Everything about them is derived from the
+    // `inSandbox` subset, which is empty for every consumer that declares none
+    // — and then the log mount is absent, no sibling is created and the prompt
+    // slot renders to nothing.
+    const sbxContainers = sandboxContainers(config.gateStack);
+    const sandboxLogDir = join(
+      opts.sandboxLogBaseDir ?? config.layout.logsDir,
+      `issue-${issue.id}`,
+      "sandbox-logs",
+    );
+    // Before the sandbox container, not after: the directory is a bind-mount
+    // SOURCE and podman reads it at container start, so a missing one is a
+    // bringup failure rather than an empty mount.
+    if (sbxContainers.length > 0) await prepareSandboxLogDir(sandboxLogDir);
+    const holder: { stack: SandboxStack | null } = { stack: null };
+
     const [sandboxResult, stackResult] = await Promise.allSettled([
       agentSandbox.createSandbox({
         branch: issue.branch,
@@ -270,6 +312,38 @@ async function runSandboxCycle(
         hooks: opts.hooks,
         env: config.env,
         preparedWorktreePath: worktreePath,
+        ...(sbxContainers.length > 0
+          ? {
+              extraMounts: [
+                {
+                  hostPath: sandboxLogDir,
+                  sandboxPath: SANDBOX_LOG_MOUNT,
+                  readonly: true,
+                },
+              ],
+              // The siblings attach to the agent container, so they cannot be
+              // started before it — but they must be up before the
+              // `onSandboxReady` hooks, which is exactly where a consumer runs
+              // the migration that wants the database (#44 D6). Inside
+              // `createSandbox` rather than after it, so the container is torn
+              // down if an `issue`-lifecycle sibling refuses to start, and so
+              // this bringup still overlaps the gate stack's.
+              //
+              // A holder rather than a closed-over `let`: an assignment inside
+              // a callback is invisible to TypeScript's narrowing, so the
+              // binding would read as `null` forever at every later use.
+              beforeSandboxReady: async (containerName: string) => {
+                holder.stack = await startSandboxStack({
+                  issueId: issue.id,
+                  scope: config.scope,
+                  spec: config.gateStack,
+                  worktreePath,
+                  anchorContainerName: containerName,
+                  logDir: sandboxLogDir,
+                });
+              },
+            }
+          : {}),
       }),
       startStack({
         stackId: issue.id,
@@ -281,6 +355,21 @@ async function runSandboxCycle(
         ...(branchImages ? { images: () => branchImages.resolve(worktreePath) } : {}),
       }),
     ]);
+    // Read out BEFORE the throw below, not after it. The callback runs inside
+    // `createSandbox`, so a failure anywhere after it — a sandbox-ready hook, a
+    // later sibling — rejects that promise with a stack already created, and
+    // reading the holder only on the success path would leave those containers
+    // to `createSandbox`'s own `--depend` teardown alone and their log
+    // followers running with nothing left to follow.
+    //
+    // What the stack itself throwing means: an `issue`-lifecycle sibling that
+    // would not start is infrastructure → HARD-ERROR → a fresh sandbox, the
+    // same treatment the gate stack's failure gets. A failed `attempt` one
+    // never throws at all — the sandbox comes up degraded and the agent is told
+    // in its prompt (D3).
+    sandboxStack = holder.stack;
+    sandboxStatuses = sandboxStack?.statuses ?? [];
+
     if (sandboxResult.status === "fulfilled") sandbox = sandboxResult.value;
     if (stackResult.status === "fulfilled") stack = stackResult.value;
     if (sandbox === null || stack === null) {
@@ -323,6 +412,7 @@ async function runSandboxCycle(
         gateStack,
         worktreePath,
         accumulated,
+        sandboxStatuses,
       });
       const r = step(state, event);
       state = r.state;
@@ -375,6 +465,21 @@ async function runSandboxCycle(
         console.error(err instanceof Error ? err.message : String(err));
       }
     }
+    // Then the sandbox's own siblings, and BEFORE `sandbox.close()` (#44). They
+    // are attached to the agent container's network namespace, and podman
+    // refuses to remove a container others depend on — so the reverse order
+    // does not merely leak the siblings, it fails to remove the anchor too.
+    // (`close()` passes `--depend` as a backstop for the paths this ordering
+    // cannot cover, but the ordering is what makes the ordinary path clean.)
+    // They also write into the worktree, so the same argument that puts the
+    // gate stack ahead of the worktree removal applies to them.
+    if (sandboxStack) {
+      try {
+        await sandboxStack.stop();
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+      }
+    }
     if (sandbox) {
       try {
         await sandbox.close();
@@ -396,6 +501,9 @@ type ExecuteActionCtx = {
   // clean-assert reads — one tree, which is the whole point of D1.
   readonly worktreePath: string;
   readonly accumulated: { sha: string }[];
+  // What came up beside the agent, for the implementer's prompt slot (#44 D8).
+  // Empty when the consumer declares no `inSandbox` container.
+  readonly sandboxStatuses: readonly SandboxContainerStatus[];
 };
 
 async function executeAction(
@@ -431,6 +539,7 @@ async function runImplementer(
       ...(action.latestReviewerProse !== null
         ? { latestReviewerProse: action.latestReviewerProse }
         : {}),
+      sandboxStack: ctx.sandboxStatuses,
     },
     anchorOpts,
   );

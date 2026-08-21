@@ -8,13 +8,14 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveGateStack } from "./config.js";
 import { ImageBuildError } from "./ensure-images.js";
 import {
+  bringUpContainers,
   ContainerBringupError,
   containerState,
   parseHealthLog,
   type Stack,
   startStack,
 } from "./gate-stack.js";
-import { stackContainerNameFor } from "./naming.js";
+import { scopedResourcePrefix, stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import { podmanTestScope } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
@@ -472,6 +473,71 @@ describe.runIf(available)(
             }),
           }),
         ).rejects.toThrow(/exited during startup/);
+      },
+      180_000,
+    );
+
+    // Since #44 this bringup serves two stacks, and its errors are the only
+    // thing either one says about a container that would not start: the gate's
+    // become a red or a HARD-ERROR, the sandbox's go verbatim into the
+    // implementer's prompt, directly under a paragraph telling the agent the
+    // gate's stack is a namespace it cannot reach. Hardcoded, every one of them
+    // reads there as a red gate that never ran.
+    //
+    // The netns attachment is the sandbox's own topology, and nothing about it
+    // needs a local client: since #43 no probe runs on the host at all, and
+    // this container dies before readiness is even asked. So it runs in the
+    // gate, every attempt, rather than joining the host-only set.
+    it(
+      "a bringup failure names the stack it was told it belongs to",
+      async () => {
+        const anchor = `${scopedResourcePrefix(SCOPE)}labelanchor`;
+        await exec(RUNTIME, ["rm", "-f", "-t", "0", "--depend", anchor]).catch(
+          () => {},
+        );
+        await exec(RUNTIME, [
+          "run",
+          "-d",
+          "--name",
+          anchor,
+          "--entrypoint",
+          "sleep",
+          IMAGE,
+          "infinity",
+        ]);
+        const spec = resolveGateStack({
+          containers: [
+            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "dead",
+              image: IMAGE,
+              args: ["sh", "-c", "echo sibling-died >&2; exit 1"],
+            },
+          ],
+          steps: [{ name: "ok", in: "runner", command: ["true"] }],
+        });
+        const dead = spec.containers.filter((c) => c.name === "dead");
+        try {
+          await expect(
+            bringUpContainers(dead, {
+              attach: { kind: "netns", anchorContainerName: anchor },
+              label: "sandbox stack",
+              worktreePath: repo,
+              nameOf: (c) => cName(c.name),
+            }),
+          ).rejects.toThrow(/^sandbox stack: .*exited during startup/);
+        } finally {
+          // `--depend` takes the joiner with it, which is the removal order
+          // this topology forces everywhere else too.
+          await exec(RUNTIME, [
+            "rm",
+            "-f",
+            "-t",
+            "0",
+            "--depend",
+            anchor,
+          ]).catch(() => {});
+        }
       },
       180_000,
     );

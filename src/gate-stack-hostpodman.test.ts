@@ -38,14 +38,19 @@
 // have answered and did not, and a remote client answering correctly is not
 // that.
 //
-// THE MANUAL STEP IS THIS FILE AND `agent-sandbox-podman.test.ts`, both run on
-// the host. #48 shrank it from "run the full suite before trusting a cycle that
-// touched the podman layer" to those two, and the second one is easy to forget
-// precisely because its reason is different: it pins `--init` reaping an orphan
-// the entrypoint would not, which was never measured through a socket rather
-// than known to differ. It declares `needsLocalClient` for the same reason this
-// file does. Describe the step as one file and those assertions are exercised
-// by nobody, with nothing saying so.
+// THE MANUAL STEP IS THIS FILE, `agent-sandbox-podman.test.ts` AND
+// `sandbox-stack-podman.test.ts`, all run on the host. #48 shrank it from "run
+// the full suite before trusting a cycle that touched the podman layer" to that
+// set, and the two beside this one are easy to forget precisely because their
+// reasons are different. The second pins `--init` reaping an orphan the
+// entrypoint would not, which was never measured through a socket rather than
+// known to differ — the easiest of the three to lose, since its exclusion is
+// incidental. The third (#44) is here for a reason closer to this file's own:
+// it drives the production `sandboxRunArgs` — keep-id, uid 1000, `--init` — and
+// then `podman exec`s into that container to assert the agent reaches its
+// siblings, so it is a claim about the LOCAL client's own topology. All three
+// declare `needsLocalClient`. Describe the step as one file and those
+// assertions are exercised by nobody, with nothing saying so.
 
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";

@@ -530,6 +530,11 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             hooks: config.sandboxHooks,
             copyToWorktree: config.copyToWorktree,
             branchImages,
+            // Sandbox-sibling logs land beside this cycle's attempt
+            // transcripts (#44 D4), so the offline artefact of what the
+            // agent's stack was doing sits next to the transcript of what the
+            // agent did.
+            sandboxLogBaseDir: cycleLogger.cycleDir,
             attemptLogger: cycleLogger,
             onOrchestratorLog: (line) => runLogger.appendOrchestrator(line),
           }),

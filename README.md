@@ -77,7 +77,9 @@ export default {
         // Optional: args (image CMD args), mounts (fixture files, hostPath
         // relative to the GATED WORKTREE, read-only unless the entry says
         // `mode: "rw"`), postReadyCommands (one-shot setup exec'd after
-        // readiness).
+        // readiness). Add `inSandbox: true` to also run this container beside
+        // the AGENT, so it can exercise the app before the gate does — see
+        // below.
       },
       {
         name: "runner",
@@ -468,6 +470,68 @@ image whose `ENTRYPOINT` is not a shell.
 > `attempt` container is recreated on every gate run. Such a container's own
 > `postReadyCommands` do re-open the misblame window if they build branch code;
 > that is your argv and your call, not something sandbar can decide for you.
+
+### `inSandbox` — letting the agent run the app before the gate does
+
+An implementer that can't run your application writes a test it has never
+watched fail and a fix it has never watched pass. Mark a gate-stack container
+`inSandbox: true` and sandbar runs a **second copy of it beside the agent**, in
+the agent container's own network namespace:
+
+```ts
+{ name: "db", image: "docker.io/library/mariadb:10.11", lifecycle: "issue",
+  readiness: { kind: "healthcheck",
+               command: ["healthcheck.sh", "--connect", "--innodb_initialized"] },
+  inSandbox: true }
+```
+
+The agent then reaches it on `127.0.0.1` exactly as a gate step does — one
+namespace, so the address is the same one your `gateStack` steps already use —
+and you delete the database, the mail catcher and the web server from your
+sandbox image along with whatever start-and-wait script was supervising them.
+One description of what it takes to run the app, not two. Sandbar names no port
+in the agent's prompt, because since the readiness probe moved inside the
+container there is no port written down in the config for it to read; say which
+port is which in your own anchor docs, beside the credentials.
+
+- **Opt-in per container.** Declare it nowhere and nothing changes: no extra
+  container, no prompt section, no cost.
+- **It is a different namespace from the gate's**, deliberately. The agent must
+  not be able to reach the stack its verdict is formed in, and that comes from
+  the topology rather than from the absence of a container runtime inside the
+  sandbox. There is no podman in there, and there is not meant to be.
+- **The gate is authoritative.** Sandbox siblings run the image your config
+  names; the gate re-resolves `rebuildOn` images per gate run. So a suite that
+  passes in the sandbox can still red the gate — most often right after the
+  branch changed a lockfile. The agent is told this in its prompt.
+- **Nothing restarts a sibling.** A service that reads configuration at *boot*
+  keeps what it booted with for the rest of the issue, however the agent edits
+  the file. Mounted interpreted code is unaffected; a config change is not.
+- **Your `onSandboxReady` hooks run after the siblings are up**, so that is the
+  place to run a migration or load fixtures against them. (`onWorktreeReady`
+  still runs before anything is started — it is where `npm ci` belongs.)
+- **The agent can read their logs.** Each sibling's `podman logs -f` is followed
+  into a file on the host and mounted read-only at `/sandbar/logs/<name>.log`.
+  Those files also land in the run log tree, and they are not rotated or
+  capped — a service that logs every request writes for as long as the issue
+  runs. A container that failed to come up is followed too, with the bringup
+  error written in ahead of it: the usual failure is a service that started and
+  then missed its readiness check, and it keeps logging.
+- **A sibling that will not start is reported, not fatal** — for an `attempt`
+  container. The sandbox comes up degraded and the agent gets that container's
+  log tail in its prompt, because the agent is the one party that can fix its
+  own app's bootstrap. An `issue` container failing is still infrastructure: the
+  issue retries with a fresh sandbox.
+- **`inSandbox` with `hold` and no `postReadyCommands` is rejected** — the same
+  decidable emptiness `servesWorktree` is checked for. `sleep infinity` plus
+  nothing exec'd after it would advertise a service that does not exist.
+- **Cost.** At the default plan size, three issues run at once, so N `inSandbox`
+  containers means 3N extra containers per cycle. That is the price of the
+  isolation.
+
+Note the sandbox siblings share the issue worktree with the gate and keep
+writing while a gate run is in progress, so the rule below applies to them too —
+and give them cache paths of their own if they compile anything.
 
 **A gate step must write only into gitignored paths.** The gate is a verdict
 about a *commit*, so sandbar refuses to run it against a worktree with

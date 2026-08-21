@@ -37,6 +37,18 @@
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
+//
+// Since #44 this container is also the ANCHOR of the sandbox stack's network
+// namespace: the application containers an agent needs in front of it join it
+// with `--network container:<name>`, so its name is public (`containerName`)
+// and its removal is `--depend`-aware because podman refuses to remove a
+// container others are attached to. It publishes nothing on their behalf —
+// #43 moved every readiness probe inside its own container, so a joiner needs
+// a host port no more than a pod member does. Nothing else about it moved —
+// keep-id, uid 1000, `HOME`, `--init` and `--dangerously-skip-permissions`
+// are exactly what they were, which is the whole reason #44 is an anchor chain
+// and not a pod (a pod cannot carry keep-id, and the agent CLI refuses to run
+// as root).
 
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -145,6 +157,11 @@ type ExecResult = { stdout: string; stderr: string; exitCode: number };
 
 type SandboxHandle = {
   readonly worktreePath: string;
+  // The podman container's name. Carried out of the provider since #44,
+  // because the sandbox stack's siblings join THIS container's network
+  // namespace (`--network container:<name>`) and there is no other way to
+  // learn it — the name is a uuid the provider mints.
+  readonly containerName: string;
   exec(command: string, opts?: ExecOptions): Promise<ExecResult>;
   close(): Promise<void>;
 };
@@ -203,6 +220,8 @@ export type SandboxRunResult = {
 export interface Sandbox {
   readonly branch: string;
   readonly worktreePath: string;
+  // The anchor the sandbox stack's siblings attach to (#44). See SandboxHandle.
+  readonly containerName: string;
   run(o: RunOptions): Promise<SandboxRunResult>;
   close(): Promise<{ preservedWorktreePath?: string }>;
 }
@@ -237,6 +256,25 @@ export type CreateSandboxOptions = {
   // is a loud error — the copy
   // belongs in prepareWorktree, silently skipping it would be worse.
   preparedWorktreePath?: string;
+  // Run after the container exists and BEFORE the sandbox-ready hooks (#44).
+  // The one caller starts the sandbox stack's siblings, which attach to this
+  // container's network namespace and so cannot be created any earlier, and
+  // which an `onSandboxReady` hook may well want to talk to.
+  //
+  // A callback rather than a return-then-continue split, because the container
+  // has to be torn down if this throws and only this module knows how: the
+  // caller has no handle yet. It is passed the container's name for the same
+  // reason `containerName` is public at all.
+  beforeSandboxReady?: (containerName: string) => Promise<void>;
+  // Extra bind mounts, appended after the worktree and the git common dir
+  // (#44). The one caller is the sandbox stack's log directory — a host
+  // directory the followers write each sibling's `podman logs -f` into, mounted
+  // read-only so the agent can read its neighbours' logs without being handed
+  // anything that can write to them. Read-only is not incidental: the whole
+  // isolation argument is that the agent cannot reach the stack its verdict is
+  // formed in, and a writable log mount is a channel out of the sandbox into
+  // the host's run-log tree.
+  extraMounts?: readonly Mount[];
 };
 
 export type PrepareWorktreeOptions = {
@@ -991,6 +1029,24 @@ export function sandboxRunArgs(opts: {
   ];
 }
 
+// The sandbox container's removal argv (#44), pure and exported for the same
+// reason `sandboxRunArgs` is: the provider needs a real podman and a real
+// image, so the suite drives a fake one and anything left inline in it is
+// asserted by nothing.
+//
+// `--depend` is the whole content. This container is the ANCHOR of the sandbox
+// stack's netns chain, and podman REFUSES to remove a container other
+// containers depend on — so with a sibling still alive a plain `rm -f` fails
+// and leaks the chain rather than half of it. The ordinary path removes the
+// siblings first (sandbox-stack.ts's `stop`, ordered ahead of `close()` by the
+// inner loop and, on a signal, by the cleanup registry's LIFO order); this is
+// what covers the paths that ordering cannot — a `stop` that threw, a SIGKILL
+// between the two removals. A no-op with no dependants, which is every consumer
+// that declares no `inSandbox` container.
+export function sandboxRemoveArgs(containerName: string): string[] {
+  return ["rm", "-f", "--depend", containerName];
+}
+
 export const podman = (options?: PodmanOptions): SandboxProvider => {
   const configuredImageName = options?.imageName;
   const namePrefix = options?.namePrefix ?? CONTAINER_NAME_PREFIX;
@@ -1049,9 +1105,10 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
         );
       });
 
+      const removeArgs = sandboxRemoveArgs(containerName);
       const removeContainerSync = (): void => {
         try {
-          execFileSync("podman", ["rm", "-f", containerName], {
+          execFileSync("podman", removeArgs, {
             stdio: "ignore",
             timeout: 5000,
           });
@@ -1063,6 +1120,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
 
       const handle: SandboxHandle = {
         worktreePath: sandboxWorktreePath,
+        containerName,
         exec: (command, opts) => {
           const effectiveCommand = opts?.sudo ? `sudo ${command}` : command;
           const args = ["exec"];
@@ -1133,7 +1191,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
         close: async () => {
           unregisterShutdown();
           await new Promise<void>((resolveClose, rejectClose) => {
-            execFile("podman", ["rm", "-f", containerName], (error) => {
+            execFile("podman", removeArgs, (error) => {
               if (error) rejectClose(new Error(`podman rm failed: ${error.message}`));
               else resolveClose();
             });
@@ -1451,6 +1509,7 @@ export const createSandbox = async (
     const mounts: Mount[] = [
       { hostPath: worktreePath, sandboxPath: SANDBOX_REPO_DIR },
       ...gitMounts,
+      ...(options.extraMounts ?? []),
     ];
 
     providerHandle = await options.sandbox.create({
@@ -1461,12 +1520,27 @@ export const createSandbox = async (
     });
     sandboxRepoDir = providerHandle.worktreePath;
 
-    // onSandboxReady (parallel) — only when hooks present; tear the container
-    // down first on failure (the outer catch then removes the worktree).
+    // Everything between the container existing and the sandbox being handed
+    // over. It shares ONE catch, whose whole job is to tear the container down
+    // before rethrowing — the outer catch below removes the worktree but knows
+    // nothing about the container, so anything that throws outside this block
+    // and after `create` leaks it.
     const sandboxOnReady = options.hooks?.sandbox?.onSandboxReady;
     const hostOnReady = options.hooks?.host?.onSandboxReady;
-    if (sandboxOnReady?.length || hostOnReady?.length) {
-      try {
+    try {
+      // BEFORE the hooks, deliberately (#44 D6). The sandbox stack's siblings
+      // attach to this container, so they cannot exist earlier — and an
+      // `onSandboxReady` hook is exactly the place a consumer runs migrations
+      // or seeds fixtures, which is work that wants the database it is talking
+      // to to be up. Ordered the other way, the one hook that most wants the
+      // stack is the one hook that cannot see it.
+      if (options.beforeSandboxReady) {
+        await options.beforeSandboxReady(providerHandle.containerName);
+      }
+      // Only when hooks are present: `safe.directory` is set per-run anyway
+      // (see runOneIteration), so this exec is not worth paying for on the
+      // common path that declares none.
+      if (sandboxOnReady?.length || hostOnReady?.length) {
         await sandboxExecOk(
           providerHandle,
           `git config --global --add safe.directory "${sandboxRepoDir}"`,
@@ -1481,10 +1555,10 @@ export const createSandbox = async (
           effects.push(runHostHooks(hostOnReady, worktreePath));
         }
         await Promise.all(effects);
-      } catch (e) {
-        await providerHandle.close().catch(() => {});
-        throw e;
       }
+    } catch (e) {
+      await providerHandle.close().catch(() => {});
+      throw e;
     }
   } catch (e) {
     // F4: a failure after worktree create removes the worktree first — but
@@ -1599,6 +1673,7 @@ export const createSandbox = async (
   return {
     branch,
     worktreePath,
+    containerName: providerHandle.containerName,
     async run(o) {
       const iterations = o.maxIterations ?? 1;
       const completionSignals =

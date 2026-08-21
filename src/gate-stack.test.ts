@@ -184,7 +184,7 @@ describe("healthCheckArgs", () => {
 describe("containerRunArgs", () => {
   const base = {
     containerName: "sandbar-42-app",
-    podName: "sandbar-pod-42",
+    attach: { kind: "pod", podName: "sandbar-pod-42" } as const,
     worktreePath: "/wt",
   };
 
@@ -198,6 +198,46 @@ describe("containerRunArgs", () => {
       "--pod",
       "sandbar-pod-42",
     ]);
+  });
+
+  // The sandbox stack's topology (#44). Not a second builder: everything after
+  // the attachment — env, mounts, the worktree, `hold` — is the same container
+  // definition, and a copy would be the place the two silently diverge.
+  it("joins an anchor's network namespace when told to", () => {
+    const args = containerRunArgs({
+      ...base,
+      attach: { kind: "netns", anchorContainerName: "sandbar-w1-uuid" },
+      container: container(),
+    });
+    expect(args.slice(0, 6)).toEqual([
+      "run",
+      "-d",
+      "--name",
+      "sandbar-42-app",
+      "--network",
+      "container:sandbar-w1-uuid",
+    ]);
+    // A publish belongs to the namespace and the namespace belongs to the
+    // anchor, so podman refuses `-p` here outright — which since #43 costs the
+    // chain nothing, there being no port to publish for anyone.
+    expect(args).not.toContain("--pod");
+    expect(args).not.toContain("-p");
+  });
+
+  // The joiner must write the worktree as the invoking user, which under
+  // rootless podman is what container ROOT maps to — the same reason the pod's
+  // members carry neither flag. `--userns=keep-id` is available outside a pod,
+  // and using it here would map the container to uid 1000 and break every image
+  // that needs its own root (the mariadb of #44's fact 3).
+  it("passes no --userns and no --user to a netns joiner either", () => {
+    const args = containerRunArgs({
+      ...base,
+      attach: { kind: "netns", anchorContainerName: "sandbar-w1-uuid" },
+      container: container({ mountWorktree: "/app" }),
+    });
+    expect(args.some((a) => a.startsWith("--userns"))).toBe(false);
+    expect(args).not.toContain("--user");
+    expect(args).toContain("/wt:/app:rw,z");
   });
 
   // The pod is why: podman refuses `--userns` alongside `--pod`, and uid 1000
@@ -915,6 +955,109 @@ describe("resolveGateStack validation", () => {
         ],
       }),
     ).toThrow(/duplicate step name/);
+  });
+
+  // ---------------------------------------------------------------------
+  // inSandbox (#44 D2)
+  // ---------------------------------------------------------------------------
+
+  // Opt-in by construction: the flag's absence is what keeps every existing
+  // consumer's topology and cost exactly where they were.
+  it("defaults inSandbox to false, so no stack declares a sandbox by accident", () => {
+    expect(resolveGateStack(ok).containers.map((c) => c.inSandbox)).toEqual([
+      false,
+      false,
+    ]);
+  });
+
+  it("carries an explicit inSandbox onto the resolved container", () => {
+    const resolved = resolveGateStack({
+      ...ok,
+      containers: [
+        { name: "db", image: "mariadb", lifecycle: "issue", inSandbox: true },
+        { name: "app", image: "app", mountWorktree: "/app", hold: true },
+      ],
+    });
+    expect(resolved.containers.map((c) => c.inSandbox)).toEqual([true, false]);
+  });
+
+  // The one decidable emptiness: `hold` replaces the entrypoint with
+  // `sleep infinity`, so held with nothing exec'd after readiness is a
+  // container that provably runs nothing — and the sandbox slot would then name
+  // the agent a neighbour with no process behind it, which is worse than not
+  // listing it at all. (The gate's copy of that container is fine: steps
+  // `exec` into it. The sandbox's is not: nothing execs into a sibling.)
+  it("refuses inSandbox on a held container that runs nothing", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          { name: "db", image: "mariadb", lifecycle: "issue" },
+          {
+            name: "app",
+            image: "app",
+            mountWorktree: "/app",
+            hold: true,
+            inSandbox: true,
+          },
+        ],
+      }),
+    ).toThrow(/inSandbox/);
+  });
+
+  it("accepts inSandbox on a held container that starts something after readiness", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          { name: "db", image: "mariadb", lifecycle: "issue" },
+          {
+            name: "app",
+            image: "app",
+            mountWorktree: "/app",
+            hold: true,
+            inSandbox: true,
+            postReadyCommands: [["sh", "-c", "httpd &"]],
+          },
+        ],
+      }),
+    ).not.toThrow();
+  });
+
+  // Two siblings probing the same port is fine here for the same reason it is
+  // fine in the gate (above): the probe runs inside its own container and
+  // nothing is published, so there is no host socket for two of them to
+  // disagree over. #44 inherited the rule that used to forbid it and #43 had
+  // already deleted it — the sandbox never needed one of its own.
+  it("allows two sandbox containers to probe the same port", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        containers: [
+          {
+            name: "db",
+            image: "mariadb",
+            lifecycle: "issue",
+            inSandbox: true,
+            readiness: {
+              kind: "healthcheck",
+              command: ["nc", "-z", "127.0.0.1", "3306"],
+            },
+          },
+          {
+            name: "db2",
+            image: "mariadb",
+            lifecycle: "issue",
+            inSandbox: true,
+            readiness: {
+              kind: "healthcheck",
+              command: ["nc", "-z", "127.0.0.1", "3306"],
+            },
+          },
+          { name: "app", image: "app", mountWorktree: "/app", hold: true },
+        ],
+      }),
+    ).not.toThrow();
   });
 
   // #26. An unbounded step is not a slow gate, it is a run that never ends and

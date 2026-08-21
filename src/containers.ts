@@ -95,7 +95,14 @@ const KINDS: readonly ResourceKind[] = [
       "--format",
       "{{.Names}}",
     ],
-    rmArgs: (n) => ["rm", "-f", "-t", "0", n],
+    // `--depend` since #44: the agent sandbox is the anchor of the sandbox
+    // stack's network namespace, and podman REFUSES to remove a container
+    // others are attached to. Debris of a dead run can hold both, and this
+    // sweep removes by name in whatever order podman listed them — so without
+    // it an anchor listed before its siblings fails to remove, and reports a
+    // leak the operator then has to clear by hand. It removes only containers
+    // attached to one this sweep already proved is in our scope.
+    rmArgs: (n) => ["rm", "-f", "-t", "0", "--depend", n],
     infix: "",
   },
   {

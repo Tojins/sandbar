@@ -21,10 +21,13 @@
 // unreachable" is a fault: required-and-failing in the gate. "the client is not
 // local" is a fact about where the suite is running: the gate drives podman
 // through a socket, so a test that holds only for a LOCAL client (its signal
-// semantics, its loopback topology) is not a test the gate can run at all, and
-// its file skips even under the flag. Two files ask for that axis and they are
-// the whole of the human's host-side step: gate-stack-hostpodman.test.ts and
-// agent-sandbox-podman.test.ts.
+// semantics, whose user the invoking user is) is not a test the gate can run
+// at all, and
+// its file skips even under the flag. THREE files ask for that axis and they
+// are the whole of the human's host-side step: gate-stack-hostpodman.test.ts,
+// agent-sandbox-podman.test.ts and sandbox-stack-podman.test.ts. Each says so
+// in its own header, because a list kept only here goes stale the first time a
+// file is added and nothing points back.
 //
 // A CONTRADICTION IS A FAILURE, NOT A CHOICE. `SANDBAR_SKIP_PODMAN_TESTS=1`
 // alongside the require flag is not an opt-out to honour; it is a run that has
@@ -59,12 +62,17 @@ export type PodmanTestInputs = {
   readonly skipRequested: boolean;
   readonly required: boolean;
   // This file's assertions hold only for a LOCAL podman client, so a remote
-  // one cannot stand in for it. Two files ask for it and they ask for slightly
-  // different reasons, which is why the field is not named after either:
-  // gate-stack-hostpodman.test.ts PINS local-client behaviour (a remote client
-  // demonstrably does something else), while agent-sandbox-podman.test.ts has
-  // simply never been established through a remote one. Both want the same
-  // answer — do not run here — and neither wants a failure.
+  // one cannot stand in for it. Three files ask for it and they do not all ask
+  // for the same reason, which is why the field is not named after any of them.
+  // gate-stack-hostpodman.test.ts PINS local-client behaviour (`podman exec`
+  // exits 0 on SIGTERM only there, and whether a transient systemd timer was
+  // created is a question about the host's own session).
+  // sandbox-stack-podman.test.ts builds its anchor with the production sandbox
+  // run args — keep-id, uid 1000 — and execs into it as the agent, so the
+  // invoking user has to be whoever runs the suite rather than whoever owns the
+  // socket. And agent-sandbox-podman.test.ts has simply never been established
+  // through a remote one. All three want the same answer — do not run here —
+  // and none of them wants a failure.
   readonly needsLocalClient: boolean;
   readonly clientIsLocal: boolean;
 };
