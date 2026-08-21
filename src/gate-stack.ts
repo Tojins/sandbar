@@ -1314,6 +1314,12 @@ export type HealthVerdict = "healthy" | "unhealthy" | "abandoned";
 // the deadline the verdict comes from what the poll actually observed:
 // `unhealthy` if any probe ever answered, `abandoned` if none did — no probe
 // having answered is no evidence, which is the same rule again.
+//
+// It raises `GATE_LABEL` directly rather than taking a label the way
+// `bringUpContainers` does, because there is exactly one caller and no second
+// stack has a pre-gate anything: the sandbox siblings form no verdict, so
+// nothing there ever asks this question.
+//
 // Exported for the seam: the `error` rules above are the classification half of
 // this feature, and a real podman will not produce a timed-out `healthcheck
 // run` or a SIGKILLed client on demand — the same argument `containerState`
@@ -1443,7 +1449,7 @@ export async function containerState(
 // operator sent to look at a container's startup for a database that wedged at
 // attempt four reads the run log for the wrong five minutes.
 const DIED_DURING_STARTUP = "during startup";
-export const DIED_DURING_RECOVERY =
+const DIED_DURING_RECOVERY =
   "while sandbar waited for it to become healthy again";
 
 async function throwIfDead(
