@@ -32,9 +32,19 @@
 //     to run has them already.
 //   - NO PREFLIGHT. Preflight is about the repository — the cache, the source
 //     branch, the tracker, credentials — and none of it bears on running a
-//     stack. The two checks that DO are re-asked here directly: every
-//     referenced image sandbar does not build must already be pulled, and D3's
-//     root-or-host-uid rule over the worktree-mounting images.
+//     stack. The three checks that DO are re-asked here directly: is podman
+//     usable at all, is every referenced image sandbar does not build already
+//     pulled, and D3's root-or-host-uid rule over the worktree-mounting images.
+//   - NO `sandboxHooks`, and this is the omission a consumer will actually
+//     trip over, so it is stated rather than left to be discovered.
+//     `onWorktreeReady` (a repo's `npm ci`, typically) runs when SANDBAR
+//     creates a worktree; here the tree already existed and belongs to the
+//     operator. Running it would mean `sandbar gate` reinstalling dependencies
+//     in someone's own checkout every invocation — slow, surprising, and a
+//     hook whose name is then false. A CI job that starts from a bare checkout
+//     therefore runs its own install line before `npx sandbar gate`, which is
+//     one line and visible, rather than inheriting one from a field named for
+//     a different moment.
 //
 // ---------------------------------------------------------------------------
 // Concurrency, stated rather than guarded

@@ -71,6 +71,12 @@ one has no commit to be a verdict about and no orchestrator to report to:
   worktree, or sandbar's version, and the stack is rebuilt instead. Remove a
   kept stack with the `podman pod rm -f …` line the command prints.
 
+It does **not** run `sandboxHooks`. `onWorktreeReady` (your `npm ci`, typically)
+fires when *sandbar* creates a worktree; here the tree is yours and already
+exists, and reinstalling dependencies in your checkout on every invocation would
+be a surprise. A CI job starting from a bare checkout runs its own install line
+before `npx sandbar gate`.
+
 Two `sandbar gate` invocations over the **same** worktree collide — they share
 one set of podman names, which is what makes the reuse possible — so don't run
 two at once against one tree. Different worktrees, and a `sandbar` run on the
