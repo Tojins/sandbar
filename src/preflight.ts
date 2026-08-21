@@ -47,6 +47,38 @@
 //                               Unit-tested with hand-built fixtures.
 //   - gatherState() / runPreflight() — I/O wrappers that shell out to git/gh.
 //
+// HOST STATE is what this module is for, and `missingMountSources` (#51) is the
+// same class as the `missingImages` check beside it. Nothing used to verify
+// that a gate-stack container's `mounts[].hostPath` exists before the run: a
+// missing one fails `podman run` at bringup, and a gate container is
+// `attempt`-lifecycle, so #24 D5 charges that failure to the BRANCH. The
+// implementer is then handed a gate red about a statfs source it can neither
+// see nor fix, on every attempt, for every issue in the cycle — the whole
+// budget spent onto `agent-stuck` with an "environment" trace. #48 made it
+// reachable rather than theoretical: this repo's own gate mounts
+// `/run/user/<uid>/podman/podman.sock`, which exists only while that user's
+// `podman.socket` unit is active.
+//
+// Two limits on it, both deliberate and both stated here so neither reads as an
+// oversight:
+//   - Only ABSOLUTE `hostPath`s are checked. A relative one resolves against
+//     the worktree being gated, which does not exist when preflight runs. See
+//     `absoluteMountSources` for why resolving them anyway would be worse than
+//     the gap.
+//   - It NARROWS the window rather than closing it. A source that exists here
+//     and goes away mid-run — `podman.socket` stopped, a tmpfs unmounted — is
+//     still a bringup failure, still a gate red, still misattributed. That is
+//     not an argument for a second stat between attempts: it would cost a call
+//     per container per gate run to shrink a window that the common case, a
+//     config typo, does not have at all. Preflight catches the state that is
+//     wrong BEFORE the run starts, which is the one an operator can act on
+//     from the message.
+// The agent sandbox needs no equivalent, and that is settled rather than open:
+// its mounts are entirely sandbar-derived (the worktree plus whatever
+// `resolveGitMounts` answers) and `config.ts` exposes no mount surface for it,
+// so `gateStack.containers[].mounts[]` is the whole class of consumer-supplied
+// host paths and this check is complete at that scope.
+//
 // Leftover `sandbar/issue-*` branches are classified three ways (#13):
 //   - resumable — the branch maps to a still-open `ready-for-agent` issue, i.e.
 //                 stranded work from an interrupted run (killed after the issue
@@ -60,8 +92,11 @@
 //                 issue no longer queued. Stays a hard error as before.
 
 import { execFile, execFileSync } from "node:child_process";
+import { stat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
 
+import type { ResolvedStackContainer } from "./config.js";
 import type { EnvReader } from "./env.js";
 import { ALL_BRANCH_PREFIXES, issueNumberFromBranch } from "./naming.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
@@ -93,7 +128,68 @@ export type PreflightConfig = {
   // image discovered mid-cycle fails a container bringup that then has to be
   // triaged as infra-or-branch.
   readonly pulledImages: readonly string[];
+  // Every ABSOLUTE `mounts[].hostPath` the gate stack declares, paired with the
+  // container that declares it (#51). Built by `absoluteMountSources` below —
+  // `run.ts` calls it rather than deriving the list itself, so the rule about
+  // which paths are checkable lives beside the check that depends on it.
+  readonly mountSources: readonly DeclaredMount[];
 };
+
+// A gate-stack mount source, carrying the container that declared it. A stack
+// with several containers otherwise leaves the operator grepping their config
+// for a path that appears in one of them.
+export type DeclaredMount = {
+  readonly container: string;
+  readonly hostPath: string;
+};
+
+// One that podman will not be able to resolve, with what the stat actually
+// said. The detail is carried rather than assumed because ENOENT is not the
+// only way this fails: an EACCES traversing a parent means sandbar cannot tell
+// whether the path exists, and podman — running as the same user — will not do
+// better, so refusing is still right while "does not exist" would be a lie.
+export type MissingMountSource = DeclaredMount & {
+  readonly detail: string;
+};
+
+// The subset of the stack's mount sources preflight can decide anything about.
+//
+// A RELATIVE `hostPath` resolves against the worktree being GATED — the issue
+// worktree in the inner loop, the merger worktree for gate-2 — and none of
+// those exist when preflight runs, so those paths are a bringup concern by
+// construction. Do not close that gap by resolving them against
+// `worktrees/source` instead: a branch is free to add, move or delete its own
+// fixtures, so a preflight built on the source tree would refuse runs over
+// paths that are correct for the tree that will actually be gated — turning a
+// misattributed gate red into a run that cannot start at all.
+//
+// Kind (a socket where a directory was meant) and readability by the
+// container's uid are both deliberately out of scope: real, and neither
+// decidable from the host side without guessing at the userns mapping.
+//
+// `isAbsolute` rather than a `startsWith("/")` lookalike, because this has to
+// select exactly the paths `mountSpec` will NOT resolve against the worktree.
+// The two answering the same question is the whole basis for checking one set
+// and not the other.
+//
+// One behaviour change a consumer could feel: an absolute source that a
+// `onWorktreeReady` hook creates during the run did not have to exist at
+// startup and now does. That is the accepted cost of the check — a path the
+// consumer's own config names is the consumer's to have ready — and it is the
+// only shape of working config this refuses.
+export function absoluteMountSources(
+  containers: readonly ResolvedStackContainer[],
+): readonly DeclaredMount[] {
+  const out: DeclaredMount[] = [];
+  for (const c of containers) {
+    for (const m of c.mounts) {
+      if (isAbsolute(m.hostPath)) {
+        out.push({ container: c.name, hostPath: m.hostPath });
+      }
+    }
+  }
+  return out;
+}
 
 export type SandbarBranch = {
   readonly name: string;
@@ -106,6 +202,8 @@ export type RepoState = {
   readonly hasContainerRuntime: boolean;
   // Referenced-but-not-built images absent from the local store.
   readonly missingImages: readonly string[];
+  // Declared gate-stack mount sources podman will not be able to resolve (#51).
+  readonly missingMountSources: readonly MissingMountSource[];
   readonly ghAuthOk: boolean;
   readonly sandboxGhTokenOk: boolean;
   readonly hasAgentCredential: boolean;
@@ -159,6 +257,28 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
         `${s.missingImages.length} gate-stack image(s) referenced by ` +
         `config.gateStack are missing in ${RUNTIME}. Sandbar builds only what ` +
         `config.images lists and refuses to pull the rest, so pull them:\n${list}`,
+    });
+  }
+  // Host state, exactly like the image check above, and refused for the same
+  // reason (#51): left to bringup, a mount source podman cannot resolve fails
+  // an `attempt`-lifecycle container, which #24 D5 reports as a gate RED. The
+  // implementer is then asked to fix host state it cannot see from inside its
+  // sandbox, on every attempt, for every issue in the cycle.
+  if (s.missingMountSources.length > 0) {
+    const list = s.missingMountSources
+      .map((m) => `  ${m.hostPath}  (container '${m.container}': ${m.detail})`)
+      .join("\n");
+    out.push({
+      ok: false,
+      message:
+        `${s.missingMountSources.length} gate-stack mount source(s) declared ` +
+        "by config.gateStack cannot be read on this host:\n" +
+        list +
+        "\nEach is a `-v` source podman resolves when the container starts, " +
+        "and a bringup failure there is charged to the branch under test " +
+        "rather than to the host — so left to the gate this arrives as a red " +
+        "no agent can act on. Create the path, or correct it in " +
+        "`config.gateStack`.",
     });
   }
   if (!s.ghAuthOk) {
@@ -338,6 +458,8 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     }
   }
 
+  const missingMountSources = await findMissingMountSources(cfg.mountSources);
+
   const ghAuthOk = hasGh ? await runOk(repoDir, "gh", ["auth", "status"]) : false;
   const sandboxGhTokenOk = hasGh
     ? await checkSandboxGhToken(repoDir, env)
@@ -365,6 +487,7 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
     hasGh,
     hasContainerRuntime,
     missingImages,
+    missingMountSources,
     ghAuthOk,
     sandboxGhTokenOk,
     hasAgentCredential,
@@ -397,6 +520,34 @@ async function readOriginUrl(cwd: string): Promise<string | null> {
   if (!ok) return null;
   const url = stdout.trim();
   return url === "" ? null : url;
+}
+
+// Stat every absolute mount source the stack declares. `stat` rather than
+// `lstat` on purpose: podman resolves the `-v` source through symlinks, so a
+// link whose target is gone is a bringup failure and must read as one here.
+async function findMissingMountSources(
+  mounts: readonly DeclaredMount[],
+): Promise<readonly MissingMountSource[]> {
+  const out: MissingMountSource[] = [];
+  for (const m of mounts) {
+    try {
+      await stat(m.hostPath);
+    } catch (err) {
+      out.push({ ...m, detail: statDetail(err) });
+    }
+  }
+  return out;
+}
+
+// What to tell the operator the stat said. ENOENT — a path that was never
+// created, or a `podman.socket` whose unit is not running — is the case worth
+// spelling out in words; anything else keeps node's own code rather than being
+// flattened into a claim about existence that sandbar has not established.
+function statDetail(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === "ENOENT") return "no such file or directory";
+  if (typeof code === "string") return code;
+  return err instanceof Error ? err.message : String(err);
 }
 
 // The set of issue numbers currently in the planner queue (open +
