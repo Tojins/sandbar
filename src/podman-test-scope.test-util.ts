@@ -1,17 +1,22 @@
 // Per-PROCESS podman resource scope for the test files that shell out to a real
 // podman (#47).
 //
-// Two of the three podman-touching test files create host-global resources
-// under names they choose: pods, networks, containers and image tags.
-// (`agent-sandbox-podman.test.ts` is the third and needs no SCOPE from here —
-// audited rather than assumed: its only host-global names are already
-// per-container uuids plus a read-only image probe. It takes the fixture
-// helpers below, which every podman-touching file does.) Podman's namespace is one
+// The podman-touching test files create host-global resources under names they
+// choose: pods, networks, containers and image tags. Podman's namespace is one
 // per host, so two processes running the same file concurrently want the same
-// names — and
-// `startStack` FORCE-REMOVES a namesake before creating one, on the correct
-// assumption that a survivor is a crashed run's debris (#28). One process
-// therefore tears down the other's live stack mid-test.
+// names — and `startStack` FORCE-REMOVES a namesake before creating one, on the
+// correct assumption that a survivor is a crashed run's debris (#28). One
+// process therefore tears down the other's live stack mid-test.
+//
+// EVERY podman-touching file takes a scope now, including the ones whose own
+// names could not collide. `agent-sandbox-podman.test.ts` names its containers
+// after a uuid, so #47 audited it and cleared it — rightly, for the question #47
+// was asking. #52 moved that file into the gate and the OTHER question started
+// to matter: an unscoped `sandbar-`-prefixed name is what
+// `findUnattributableResources` reports and no sweep may remove, so a SIGKILLed
+// gate run would put permanent noise in the operator's debris report,
+// attributed to nothing. A uuid answers collision; only a scope answers
+// attribution.
 //
 // That was invisible only because nothing ran them concurrently: vitest's fork
 // pool gives each FILE its own process, and no two files shared a scope. #48
@@ -82,8 +87,8 @@
 // All four lines are load-bearing, and the middle two are the ones easily
 // dropped as redundant. `pod rm -f` takes its member containers and the pod's
 // unreachably-named infra container, but it reaches neither the fixture
-// containers these files start with `runFixtureContainer` (`killprobe`,
-// `hcprobe`, `portprobe`, `hctimer`, `hcnotimer` — and `killprobe` is a
+// containers these files start outside a pod (`killprobe`, `hcprobe`,
+// `portprobe`, `hctimer`, `hcnotimer`, `initprobe` — and `killprobe` is a
 // `sleep infinity`, i.e. a container left RUNNING forever) nor
 // the network sandbar created for the pod, which outlives it. Under the old fixed scope both classes reaped
 // themselves, because the next run recomputed the same names and the fixtures'

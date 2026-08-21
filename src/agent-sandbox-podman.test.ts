@@ -15,31 +15,45 @@
 // drives a fake provider against a real temp git repo), and this one needs a
 // real podman and a real image.
 //
-// It stays a HOST-ONLY file after #48, which gave the gate runner a podman over
-// the host's socket and moved gate-stack-podman.test.ts and
-// ensure-images-podman.test.ts into the gate with it. This file was never
-// measured through that socket — whether `--init` reaping observes the same way
-// through a remote client is exactly the sort of thing this file exists to
-// establish empirically rather than assume — so it declares
-// `needsLocalClient`, neither gate step names it, and it runs where it always
-// ran: on the host, before trusting a cycle that touched this module's run
-// args.
+// IT RUNS IN THE GATE (#52), in the `podman-test` step beside
+// gate-stack-podman.test.ts and ensure-images-podman.test.ts, over the host's
+// podman through the socket #48 mounted. #48 left it host-only on an explicit
+// UNKNOWN rather than a measured difference — whether `--init` reaping observes
+// the same way through a remote client was exactly the sort of thing this file
+// exists to establish empirically rather than assume — and the measurement came
+// back the same both ways.
 //
-// SO IT IS HALF OF THE HUMAN'S STEP, not a footnote to it. #48 shrank that
-// step from "run the full suite on the host" to two files, and this is one of
-// them (gate-stack-hostpodman.test.ts is the other). Anything that describes
-// the manual step as one file leaves these assertions exercised by nobody,
-// with nothing saying so — which is #48's own failure mode moved into the
-// handoff text.
+// Unsurprising in hindsight, and the reason is written down rather than left to
+// be re-derived: every assertion here is made INSIDE the target container, by
+// `podman exec`ing a `/proc` read. Nothing in it depends on the caller's
+// network namespace, its filesystem, or its signal handling. Those three are
+// what keep work host-only elsewhere — the retired tcp readiness pair landed
+// its publish on the host's loopback while the probe ran in the runner's pod
+// netns, and gate-stack-hostpodman.test.ts pins the local client's own SIGTERM
+// behaviour and the host session's systemd units. This file touches none of
+// them.
+//
+// SO IT IS NO LONGER PART OF THE HUMAN'S STEP. #48 shrank that step from "run
+// the full suite on the host" to three files; this leaves two,
+// gate-stack-hostpodman.test.ts and sandbox-stack-podman.test.ts, each
+// host-only because a remote client demonstrably does something else rather
+// than because nobody looked. Prose describing that step is load-bearing in
+// both directions: naming this file still sends a human to re-run what the gate
+// now runs every attempt, and dropping either of the other two leaves its
+// assertions exercised by nobody, with nothing saying so.
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 
+import { scopedResourcePrefix } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
-import { removeFixtureContainer } from "./podman-test-scope.test-util.js";
+import {
+  podmanTestScope,
+  removeFixtureContainer,
+} from "./podman-test-scope.test-util.js";
 import { sandboxRunArgs } from "./agent-sandbox.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -53,17 +67,32 @@ const IMAGE = "docker.io/library/mariadb:10.11";
 // while building the suite, so a flag set in a hook arrives too late and
 // silently skips everything — a test file that always passes by never running.
 //
-// `needsLocalClient` is what makes "host-only" a property this FILE enforces
-// rather than one that lives in a gate step's file list the file cannot see.
-// Without it, host-only status is the accident of a glob in
-// `sandbar.config.mjs` excluding `**/*-podman.test.ts` and a second step
-// naming its two files by hand — two lists that can drift silently, which is
-// how this file came to be in neither.
+// No `needsLocalClient`, which is the whole of the wiring change (#52): the
+// `test` step's `**/*-podman.test.ts` exclude already misses this file, so
+// naming it in `podman-test` is what runs it. Dropping the flag is also what
+// makes `SANDBAR_REQUIRE_PODMAN_TESTS=1` reach these two tests — under it an
+// unreachable podman is a failing test here rather than a silent skip, which is
+// the point of putting the file in a step at all.
 const available = podmanTestsEnabled({
   what: "agent-sandbox podman tests",
   image: IMAGE,
-  needsLocalClient: true,
 });
+
+// Container names carry this process's SCOPE (#47) rather than a bare uuid.
+// #47 audited this file and cleared it, correctly — the question it asked was
+// COLLISION, and against a uuid the answer needs nothing from a scope. The
+// debris report asks a different question: `findUnattributableResources` names
+// every `sandbar-`-prefixed resource that fails `isScopedResourceName`,
+// nothing sweeps it, and it repeats at every startup until an operator clears
+// it by hand. `afterEach` removes these, so only a SIGKILL leaks one — and
+// moving into the gate is precisely what changes those odds, from a human
+// running the file occasionally to three runners on every cycle.
+const { scope: SCOPE, cleanup } = podmanTestScope("agent-sandbox");
+
+// This process's own scoped sweep, for whatever `afterEach` did not reach.
+afterAll(async () => {
+  if (available) await cleanup();
+}, 120_000);
 
 const delay = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));
@@ -79,7 +108,12 @@ describe.runIf(available)("the sandbox container against real podman", () => {
 
   // The production argv, verbatim, minus whichever flags a test wants gone.
   const start = async (drop: readonly string[] = []): Promise<string> => {
-    const name = `sandbar-initprobe-${randomUUID()}`;
+    // The scope carries the uniqueness; the suffix only separates this file's
+    // two containers from each other, so a slice of a uuid is enough — and it
+    // keeps the name well clear of the 64 characters a hostname derived from it
+    // has to fit in, which a full uuid on top of a scope lands exactly on.
+    const name =
+      `${scopedResourcePrefix(SCOPE)}initprobe-${randomUUID().slice(0, 8)}`;
     const args = sandboxRunArgs({
       containerName: name,
       imageName: IMAGE,

@@ -10,9 +10,11 @@
 // topology: the anchor is created here with `sandboxRunArgs` — the production
 // argv, `--init` and `--userns=keep-id` included — and every claim below is
 // made by `podman exec`ing into it as the agent, so "the invoking user" has to
-// be the user running the test rather than whoever owns the socket. That is the
-// pairing agent-sandbox-podman.test.ts was left host-only for, and this file
-// inherits it.
+// be the user running the test rather than whoever owns the socket. That is a
+// reason of this file's own and does not lean on any other file's: it once read
+// as the pairing agent-sandbox-podman.test.ts was host-only for, and #52
+// measured that file through a remote client, found its in-container `/proc`
+// assertions unaffected, and moved it into the gate.
 //
 // Note what is NOT the reason, because it was until #43 and the prose is easy
 // to restore by hand: no readiness probe here runs on the host any more. The

@@ -38,19 +38,24 @@
 // have answered and did not, and a remote client answering correctly is not
 // that.
 //
-// THE MANUAL STEP IS THIS FILE, `agent-sandbox-podman.test.ts` AND
-// `sandbox-stack-podman.test.ts`, all run on the host. #48 shrank it from "run
-// the full suite before trusting a cycle that touched the podman layer" to that
-// set, and the two beside this one are easy to forget precisely because their
-// reasons are different. The second pins `--init` reaping an orphan the
-// entrypoint would not, which was never measured through a socket rather than
-// known to differ — the easiest of the three to lose, since its exclusion is
-// incidental. The third (#44) is here for a reason closer to this file's own:
-// it drives the production `sandboxRunArgs` — keep-id, uid 1000, `--init` — and
-// then `podman exec`s into that container to assert the agent reaches its
-// siblings, so it is a claim about the LOCAL client's own topology. All three
-// declare `needsLocalClient`. Describe the step as one file and those
-// assertions are exercised by nobody, with nothing saying so.
+// THE MANUAL STEP IS THIS FILE AND `sandbox-stack-podman.test.ts`, both run on
+// the host. #48 shrank it from "run the full suite before trusting a cycle that
+// touched the podman layer" to three files; #52 took it to these two. The one
+// that left was `agent-sandbox-podman.test.ts`, and it is worth knowing why,
+// because it is the difference between the two reasons a file can sit here: it
+// was host-only on an UNKNOWN — whether `--init` reaping observes the same way
+// through a remote client had never been measured — and when it was measured it
+// survived, because its assertions are made inside the container by `podman
+// exec`ing a `/proc` read. It now runs in the gate's `podman-test` step every
+// attempt. The two that remain are host-only on a MEASURED difference: this
+// file's facts are the local client's own and the host session's, and
+// `sandbox-stack-podman.test.ts` (#44) drives the production `sandboxRunArgs` —
+// keep-id, uid 1000, `--init` — and then `podman exec`s into that container to
+// assert the agent reaches its siblings, so "the invoking user" has to be
+// whoever runs the suite rather than whoever owns the socket. Both declare
+// `needsLocalClient`. Describe the step as one file and the other's assertions
+// are exercised by nobody, with nothing saying so; describe it as three and a
+// human re-runs by hand what the gate already ran.
 
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
