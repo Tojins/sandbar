@@ -39,6 +39,7 @@ import {
   parseStreamJsonLine,
   prepareWorktree,
   registerShutdown,
+  sandboxRemoveArgs,
   sandboxRunArgs,
 } from "./agent-sandbox.js";
 import { existsSync } from "node:fs";
@@ -1148,6 +1149,19 @@ describe("sandboxRunArgs (#42)", () => {
     expect(published).toEqual(["127.0.0.1::3306", "127.0.0.1::1025"]);
     // Before the image ref, or they are arguments to `sleep`.
     expect(args.indexOf("-p")).toBeLessThan(args.indexOf(base.imageName));
+  });
+
+  // The mirror of the publish above, and the other half of the anchor's tax
+  // (#44): podman refuses to remove a container others are attached to, so a
+  // plain `rm -f` leaks the WHOLE chain on any path where a sibling outlived
+  // its stack — a `stop` that threw, a SIGKILL between the two removals.
+  it("removes the sandbox with its dependants, so an anchor is always removable", () => {
+    expect(sandboxRemoveArgs("sandbar-w0011223-abc")).toEqual([
+      "rm",
+      "-f",
+      "--depend",
+      "sandbar-w0011223-abc",
+    ]);
   });
 
   it("emits no empty optional flags", () => {

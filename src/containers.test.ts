@@ -165,6 +165,19 @@ describe("cleanupOrphanContainers", () => {
     expect(calls).toContainEqual(["pod", "rm", "-f", "-t", "0", podNameFor(A, "42")]);
   });
 
+  // #44: the agent sandbox is the anchor of the sandbox stack's network
+  // namespace, and podman refuses to remove a container others are attached to.
+  // This sweep removes by name in whatever order podman listed them, so without
+  // `--depend` an anchor listed before its joiners fails to remove and lands in
+  // `failures` — a leak of the whole chain that the operator then clears by
+  // hand, on a path whose entire job is to clear a dead run's debris.
+  it("removes a container's dependants with it, or an anchor can never be swept", async () => {
+    const anchor = `${scopedResourcePrefix(A)}0123abcd-uuid`;
+    const { run, calls } = fakeRuntime({ containers: [anchor] });
+    await cleanupOrphanContainers(A, run);
+    expect(calls).toContainEqual(["rm", "-f", "-t", "0", "--depend", anchor]);
+  });
+
   it("throws rather than silently sweeping nothing when podman fails", async () => {
     // Preflight hard-fails on a missing runtime before the sweep, so a failure
     // here is a real podman fault. Swallowed, it read as "no debris found" and

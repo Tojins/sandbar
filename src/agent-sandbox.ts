@@ -1033,6 +1033,24 @@ export function sandboxRunArgs(opts: {
   ];
 }
 
+// The sandbox container's removal argv (#44), pure and exported for the same
+// reason `sandboxRunArgs` is: the provider needs a real podman and a real
+// image, so the suite drives a fake one and anything left inline in it is
+// asserted by nothing.
+//
+// `--depend` is the whole content. This container is the ANCHOR of the sandbox
+// stack's netns chain, and podman REFUSES to remove a container other
+// containers depend on — so with a sibling still alive a plain `rm -f` fails
+// and leaks the chain rather than half of it. The ordinary path removes the
+// siblings first (sandbox-stack.ts's `stop`, ordered ahead of `close()` by the
+// inner loop and, on a signal, by the cleanup registry's LIFO order); this is
+// what covers the paths that ordering cannot — a `stop` that threw, a SIGKILL
+// between the two removals. A no-op with no dependants, which is every consumer
+// that declares no `inSandbox` container.
+export function sandboxRemoveArgs(containerName: string): string[] {
+  return ["rm", "-f", "--depend", containerName];
+}
+
 export const podman = (options?: PodmanOptions): SandboxProvider => {
   const configuredImageName = options?.imageName;
   const namePrefix = options?.namePrefix ?? CONTAINER_NAME_PREFIX;
@@ -1092,17 +1110,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
         );
       });
 
-      // `--depend`, since #44. This container is the anchor of the sandbox
-      // stack's netns chain, and podman REFUSES to remove a container other
-      // containers depend on — so with a sibling still alive this call fails
-      // and leaks the whole chain. The normal path removes the siblings first
-      // (sandbox-stack.ts's `stop`, ordered ahead of `close()` by the inner
-      // loop and, on a signal, by the cleanup registry's LIFO order), and
-      // `--depend` is what makes that ordering a belt rather than the only
-      // thing holding it up: on any path where a sibling outlived its stack,
-      // this takes it too instead of leaking both. A no-op with no dependants,
-      // which is every consumer that declares no `inSandbox` container.
-      const removeArgs = ["rm", "-f", "--depend", containerName];
+      const removeArgs = sandboxRemoveArgs(containerName);
       const removeContainerSync = (): void => {
         try {
           execFileSync("podman", removeArgs, {

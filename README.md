@@ -72,7 +72,9 @@ export default {
         // Optional: args (image CMD args), mounts (fixture files, hostPath
         // relative to the GATED WORKTREE, read-only unless the entry says
         // `mode: "rw"`), postReadyCommands (one-shot setup exec'd after
-        // readiness).
+        // readiness). Add `inSandbox: true` to also run this container beside
+        // the AGENT, so it can exercise the app before the gate does — see
+        // below.
       },
       {
         name: "runner",
@@ -425,7 +427,57 @@ image whose `ENTRYPOINT` is not a shell.
 > `postReadyCommands` do re-open the misblame window if they build branch code;
 > that is your argv and your call, not something sandbar can decide for you.
 
-**A gate step must write only into gitignored paths.** The gate is a verdict
+### `inSandbox` — letting the agent run the app before the gate does
+
+An implementer that can't run your application writes a test it has never
+watched fail and a fix it has never watched pass. Mark a gate-stack container
+`inSandbox: true` and sandbar runs a **second copy of it beside the agent**, in
+the agent container's own network namespace:
+
+```ts
+{ name: "db", image: "docker.io/library/mariadb:10.11", lifecycle: "issue",
+  readiness: { kind: "tcp", port: 3306 }, inSandbox: true }
+```
+
+The agent then reaches it on `127.0.0.1:3306` exactly as a gate step does, and
+you delete the database, the mail catcher and the web server from your sandbox
+image along with whatever start-and-wait script was supervising them. One
+description of what it takes to run the app, not two.
+
+- **Opt-in per container.** Declare it nowhere and nothing changes: no extra
+  container, no published port, no prompt section, no cost.
+- **It is a different namespace from the gate's**, deliberately. The agent must
+  not be able to reach the stack its verdict is formed in, and that comes from
+  the topology rather than from the absence of a container runtime inside the
+  sandbox. There is no podman in there, and there is not meant to be.
+- **The gate is authoritative.** Sandbox siblings run the image your config
+  names; the gate re-resolves `rebuildOn` images per gate run. So a suite that
+  passes in the sandbox can still red the gate — most often right after the
+  branch changed a lockfile. The agent is told this in its prompt.
+- **Nothing restarts a sibling.** A service that reads configuration at *boot*
+  keeps what it booted with for the rest of the issue, however the agent edits
+  the file. Mounted interpreted code is unaffected; a config change is not.
+- **The agent can read their logs.** Each sibling's `podman logs -f` is followed
+  into a file on the host and mounted read-only at `/sandbar/logs/<name>.log`.
+  Those files also land in the run log tree.
+- **A sibling that will not start is reported, not fatal** — for an `attempt`
+  container. The sandbox comes up degraded and the agent gets that container's
+  log tail in its prompt, because the agent is the one party that can fix its
+  own app's bootstrap. An `issue` container failing is still infrastructure: the
+  issue retries with a fresh sandbox.
+- **`inSandbox` with `hold` and no `postReadyCommands` is rejected** — the same
+  decidable emptiness `servesWorktree` is checked for. `sleep infinity` plus
+  nothing exec'd after it would advertise a service that does not exist.
+- **Cost.** At the default plan size, three issues run at once, so N `inSandbox`
+  containers means 3N extra containers per cycle. That is the price of the
+  isolation.
+
+Note the sandbox siblings share the issue worktree with the gate and keep
+writing while a gate run is in progress, so the rule below applies to them too —
+and give them cache paths of their own if they compile anything.
+
+**A gate step must write only into gitignored paths.**
+ The gate is a verdict
 about a *commit*, so sandbar refuses to run it against a worktree with
 uncommitted changes — including untracked files. Ignored build artifacts are
 exempt (that is what lets `node_modules` survive between attempts), but a step
