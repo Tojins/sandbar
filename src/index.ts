@@ -1,4 +1,15 @@
 export { run } from "./run.js";
+// The gate stack on its own (#45), for the same reason `run` is exported: the
+// bin is thin, so anything it can do a host embedding sandbar can do too. The
+// exit codes are exported with it because the number IS the verdict and a host
+// re-deriving 0/1/2 from a boolean would be a second statement of it.
+export {
+  GATE_EXIT_GREEN,
+  GATE_EXIT_NO_VERDICT,
+  GATE_EXIT_RED,
+  type GateCommandOptions,
+  runGateCommand,
+} from "./gate-run.js";
 export { SandbarError } from "./errors.js";
 // Opt-in, not contract (#38). `config.env` is a plain record; this is the
 // convenience for hosts that keep their credentials in a dotenv-style file

@@ -53,6 +53,7 @@ import { resolve } from "node:path";
 
 import { installCleanupTraps, onCleanup, runCleanup } from "./cleanup.js";
 import {
+  type ResolvedConfig,
   type ResolvedGateStack,
   type ResolvedStackContainer,
   type RunConfig,
@@ -68,9 +69,15 @@ import {
 } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { summarizeGateFailure } from "./gate.js";
-import { type Stack, boundedOk, boundedPodman, startStack } from "./gate-stack.js";
+import {
+  LOG_READ_TIMEOUT_MS,
+  type Stack,
+  boundedOk,
+  boundedPodman,
+  startStack,
+} from "./gate-stack.js";
 import { dirtyWorktreePaths } from "./git-ops.js";
-import { gateScope } from "./naming.js";
+import { type RunScope, gateScope } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 import { sandbarVersion } from "./version.js";
 
@@ -162,7 +169,7 @@ async function missingPulledImages(
 ): Promise<readonly string[]> {
   const missing: string[] = [];
   for (const image of images) {
-    const r = await boundedPodman(["image", "exists", image], 15_000);
+    const r = await boundedPodman(["image", "exists", image], LOG_READ_TIMEOUT_MS);
     if (!boundedOk(r)) missing.push(image);
   }
   return missing;
@@ -192,8 +199,52 @@ export async function runGateCommand(
   // a symlink must not get a second scope, or `--keep` leaves a stack the next
   // invocation cannot find. It is also what podman gets as every `-v` source.
   const worktreePath = realpathSync(requested);
+  const scope = gateScope(worktreePath);
 
   installCleanupTraps();
+  try {
+    return await gate(config, opts, { worktreePath, scope, out, err });
+  } finally {
+    // Every teardown this command owns is an `onCleanup` action — the stack's
+    // `stop`, the built images' removal — so the success path, the throw path
+    // and the signal path run the identical actions in the identical order.
+    // `runCleanup` swallows an action's own failure, so this cannot displace
+    // the error it is unwinding.
+    await runCleanup();
+  }
+}
+
+// The body, split out only so the `finally` above wraps every exit from it
+// without a `let` for the return value.
+async function gate(
+  config: ResolvedConfig,
+  opts: GateCommandOptions,
+  ctx: {
+    readonly worktreePath: string;
+    readonly scope: RunScope;
+    readonly out: (text: string) => void;
+    readonly err: (text: string) => void;
+  },
+): Promise<number> {
+  const { worktreePath, scope, out, err } = ctx;
+
+  // First, because everything below is a podman call and the failure otherwise
+  // arrives as a raw `spawn podman ENOENT` stack out of whichever call got
+  // there first — which for a config whose images sandbar builds is a `podman
+  // build`, i.e. an unexplained crash where preflight would have said one
+  // sentence. This is preflight's runtime check, re-asked where preflight does
+  // not run.
+  const probe = await boundedPodman(["--version"], LOG_READ_TIMEOUT_MS);
+  if (!boundedOk(probe)) {
+    throw new SandbarError(
+      `\`${RUNTIME}\` is not usable: \`${RUNTIME} --version\` ` +
+        (probe.timedOut
+          ? `did not return within ${LOG_READ_TIMEOUT_MS}ms.`
+          : `failed (${probe.errorMessage.trim() || "no output"}).`) +
+        ` Sandbar runs the gate stack in ${RUNTIME}; install it, or start its ` +
+        "service if the client is configured to talk to a remote one.",
+    );
+  }
 
   const missing = await missingPulledImages(pulledImagesOf(config));
   if (missing.length > 0) {
@@ -215,7 +266,7 @@ export async function runGateCommand(
   const hostUid = process.getuid?.() ?? 0;
   const branchImages: BranchImages = createBranchImages({
     images: config.images,
-    scope: gateScope(worktreePath),
+    scope,
     baseFingerprints,
     worktreeMountingTags: new Set(
       config.gateStack.containers
@@ -254,38 +305,32 @@ export async function runGateCommand(
     );
   }
 
-  const scope = gateScope(worktreePath);
-  let stack: Stack;
-  try {
-    stack = await startStack({
-      stackId: GATE_STACK_ID,
-      scope,
-      spec: config.gateStack,
+  // A bringup failure is not a verdict about the code, and it does not need
+  // catching to say so: `runGate` converts an `attempt` container's failure to
+  // a red before this point, so what can throw here is D5's infra half plus
+  // anything unexpected — and the bin turns both into `GATE_EXIT_NO_VERDICT`,
+  // never into one of the two codes that IS a verdict.
+  const stack: Stack = await startStack({
+    stackId: GATE_STACK_ID,
+    scope,
+    spec: config.gateStack,
+    worktreePath,
+    images: (only) => branchImages.resolve(worktreePath, only),
+    reuseToken: gateReuseToken(
+      config.gateStack,
       worktreePath,
-      images: (only) => branchImages.resolve(worktreePath, only),
-      reuseToken: gateReuseToken(
-        config.gateStack,
-        worktreePath,
-        sandbarVersion(),
-      ),
-      keepAlive: opts.keep,
-      allowDirtyWorktree: true,
-      onStepOutput: out,
-    });
-  } catch (e) {
-    // A bringup failure is not a verdict about the code. `ContainerBringupError`
-    // for an `attempt` container never reaches here — `runGate` converts it to a
-    // red — so what lands here is D5's infra half plus anything unexpected, and
-    // both mean "no verdict", never "your branch is broken".
-    await runCleanup();
-    throw e;
-  }
+      sandbarVersion(),
+    ),
+    keepAlive: opts.keep,
+    allowDirtyWorktree: true,
+    onStepOutput: out,
+  });
 
   if (stack.reused.length > 0) {
     out(
-      `Reusing ${stack.reused.length} issue-lifecycle container(s) from a ` +
-        `previous \`${RUNTIME}\`-kept stack: ${stack.reused.join(", ")}. ` +
-        "Their postReadyCommands are not re-run; anything they accumulated is " +
+      `Reusing ${stack.reused.length} issue-lifecycle container(s) left by a ` +
+        `previous \`--keep\` invocation: ${stack.reused.join(", ")}. Their ` +
+        "postReadyCommands are not re-run, so whatever they accumulated is " +
         `still in them. Start clean by removing the pod: ${RUNTIME} pod rm -f ` +
         `${stack.podName}\n`,
     );
@@ -318,10 +363,5 @@ export async function runGateCommand(
     );
   }
 
-  // Teardown (or, under `--keep`, the no-op `stop` plus the image removal that
-  // is also skipped) goes through the registry rather than a direct
-  // `stack.stop()`, so the success path and the signal path run the identical
-  // actions in the identical order.
-  await runCleanup();
   return result.ok ? GATE_EXIT_GREEN : GATE_EXIT_RED;
 }
