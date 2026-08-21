@@ -11,11 +11,18 @@
 // same argv runs twice, once with `--init` filtered back out, and the pair
 // pins the difference rather than the flag.
 //
-// Not merged into agent-sandbox.test.ts: that file is podman-free by design
-// (it drives a fake provider against a real temp git repo) and runs in the gate
-// runner, which has no podman. This one skips there. See CLAUDE.md's "the local
-// gate cannot see podman" — run the suite on the host before trusting a cycle
-// that touched this module's run args.
+// Not merged into agent-sandbox.test.ts: that file is podman-free by design (it
+// drives a fake provider against a real temp git repo), and this one needs a
+// real podman and a real image.
+//
+// It stays a HOST-ONLY file after #48, which gave the gate runner a podman over
+// the host's socket and moved gate-stack-podman.test.ts and
+// ensure-images-podman.test.ts into the gate with it. This file was never
+// measured through that socket — whether `--init` reaping observes the same way
+// through a remote client is exactly the sort of thing this file exists to
+// establish empirically rather than assume — so neither gate step names it, and
+// it runs where it always ran: on the host, before trusting a cycle that
+// touched this module's run args.
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
