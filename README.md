@@ -460,10 +460,11 @@ description of what it takes to run the app, not two.
 - **Your `onSandboxReady` hooks run after the siblings are up**, so that is the
   place to run a migration or load fixtures against them. (`onWorktreeReady`
   still runs before anything is started — it is where `npm ci` belongs.)
-- **The agent can read their logs.**
- Each sibling's `podman logs -f` is followed
+- **The agent can read their logs.** Each sibling's `podman logs -f` is followed
   into a file on the host and mounted read-only at `/sandbar/logs/<name>.log`.
-  Those files also land in the run log tree.
+  Those files also land in the run log tree, and they are not rotated or
+  capped — a service that logs every request writes for as long as the issue
+  runs.
 - **A sibling that will not start is reported, not fatal** — for an `attempt`
   container. The sandbox comes up degraded and the agent gets that container's
   log tail in its prompt, because the agent is the one party that can fix its

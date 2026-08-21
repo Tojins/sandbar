@@ -12,7 +12,7 @@
 // pod is refused outright — is in sandbox-stack-podman.test.ts, which is
 // host-only.
 
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -385,6 +385,19 @@ describe("startSandboxStack (#44 D3)", () => {
     expect(written).toMatch(/PHP Fatal error/);
     // And the live one is followed rather than written by hand.
     expect(r.followed).toEqual([`sandbar-${SCOPE}-sbx-44-db`]);
+  });
+
+  // The log directory is per ISSUE, so a HARD-ERROR retry's containers write
+  // into the files the previous sandbox left. Truncating would throw away the
+  // only record of what the run did before it restarted — which is exactly the
+  // record an operator reads to find out why it restarted.
+  it("appends the placeholder rather than truncating an earlier sandbox's log", async () => {
+    await writeFile(join(logDir, "app.log"), "earlier sandbox: boot, then OOM\n");
+    const r = recorder((n) => (n === "app" ? bringupError(n) : null));
+    await start(r);
+    const written = await readFile(join(logDir, "app.log"), "utf8");
+    expect(written).toMatch(/earlier sandbox: boot, then OOM/);
+    expect(written).toMatch(/did not come up/);
   });
 
   // A name is claimed BEFORE the container is created, because one that

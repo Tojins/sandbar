@@ -45,10 +45,19 @@
 //
 // So "put the sandbox in a pod" is "make the agent run as root and bet the
 // whole loop on an undocumented `IS_SANDBOX=1` escape hatch". The chain costs
-// two mechanical items instead — publish ports and DNS flags must be decided
-// before the anchor is created (they are: the resolved stack is available by
-// then), and teardown must remove joiners BEFORE the anchor — and nothing about
-// the agent's own environment moves.
+// two mechanical items instead — the subset's `tcp` readiness publishes must be
+// decided before the anchor is created (they are: the resolved stack is
+// available by then), and teardown must remove joiners BEFORE the anchor — and
+// nothing about the agent's own environment moves.
+//
+// The gate's other anchor-owned flag is NOT one of them, and the symmetry is
+// close enough to be worth writing down: the pod carries `--dns` because #18
+// puts it on a `--disable-dns` network, while the agent container sits on
+// podman's default network with its resolver intact — it has always had to
+// reach the API through it. Nothing here changes that, and the joiners inherit
+// the anchor's resolv.conf. Give the sandbox a `--disable-dns` network one day
+// and the `--dns` would have to go on the anchor, since podman refuses one on
+// a `--network container:` joiner.
 //
 // The isolation the issue asks for comes from this being a DIFFERENT namespace
 // from the gate's pod, not from the absence of a runtime inside the sandbox.
@@ -125,6 +134,16 @@
 // offering `restart <name>` / `logs <name>`, with sandbar making the podman
 // call host-side so the agent still never gets a runtime. Its own issue.
 //
+// The file is UNCAPPED, and the two consequences are worth stating rather than
+// discovering. A service that logs every query writes for as long as the issue
+// lasts, into the state directory — which is disposable by construction, so the
+// cost is disk rather than correctness, and the alternative is worse: a rotated
+// or truncated file removes exactly the tail the prompt is telling the agent to
+// read. And the path is per ISSUE, not per sandbox, so a HARD-ERROR retry's
+// containers append to the same file; every write here is therefore an append,
+// including the placeholder for a container that never came up, or the retry
+// would silently take the previous sandbox's log with it.
+//
 // ---------------------------------------------------------------------------
 // Images, and the confusion mode that buys
 // ---------------------------------------------------------------------------
@@ -157,7 +176,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, type WriteStream } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
 import { onCleanup } from "./cleanup.js";
@@ -417,7 +436,12 @@ export async function startSandboxStack(
         // resolve to something that explains itself rather than to ENOENT. The
         // prompt carries the same text; this is the copy an agent finds by
         // following the path it was given.
-        await writeFile(
+        //
+        // Appended, like the follower's own writes: the log directory is per
+        // issue, so on a HARD-ERROR retry this file may already hold the
+        // previous sandbox's log, and truncating it would throw away the only
+        // record of what the run did before it restarted.
+        await appendFile(
           join(opts.logDir, `${c.name}.log`),
           `[sandbar] container '${c.name}' did not come up.\n\n${status.failure ?? ""}\n`,
           "utf8",

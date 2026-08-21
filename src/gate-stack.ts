@@ -500,8 +500,12 @@ export function podCreateArgs(opts: {
 //
 // The joiner takes NO `-p` and NO `--dns`: podman refuses both alongside
 // `--network container:`, since those are properties of the namespace and the
-// namespace belongs to the anchor. That is the whole of the chain's tax, and it
-// is paid by the anchor's own run args (agent-sandbox.ts's `sandboxRunArgs`).
+// namespace belongs to the anchor. That is the whole of the chain's tax. The
+// publish half is paid by the anchor's own run args (agent-sandbox.ts's
+// `sandboxRunArgs`, fed from `sandboxPublishPorts`); the `--dns` half costs
+// nothing, because the resolvers above exist to survive this module's
+// `--disable-dns` network (#18) and the agent container is on podman's default
+// one instead.
 export type ContainerAttachment =
   | { readonly kind: "pod"; readonly podName: string }
   | { readonly kind: "netns"; readonly anchorContainerName: string };
