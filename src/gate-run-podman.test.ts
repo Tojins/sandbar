@@ -171,10 +171,13 @@ describe.runIf(available)("sandbar gate against real podman", () => {
     600_000,
   );
 
-  // Both of these THROW rather than returning a code, and the bin turns a throw
-  // on this path into GATE_EXIT_NO_VERDICT — never 0 or 1. That is the whole
-  // reason the command has a third code: a stack that could not be brought up
-  // reported as a red sends someone to debug a branch that was never gated.
+  // Both of these RETURN GATE_EXIT_NO_VERDICT rather than throwing, and that
+  // is the contract rather than an implementation detail: the constant is
+  // exported from the package root beside `runGateCommand`, and the README
+  // tells a host to `process.exit(await runGateCommand(…))` — so a throw here
+  // would be an uncaught stack trace on exactly the path the third code exists
+  // to make legible. Never 0 or 1 either way: a stack that could not be brought
+  // up reported as a red sends someone to debug a branch that was never gated.
   it(
     "refuses up front when a referenced image is missing, naming the pull",
     async () => {
@@ -182,7 +185,8 @@ describe.runIf(available)("sandbar gate against real podman", () => {
         { name: "read", in: "runner", command: ["cat", "marker.txt"] },
       ]);
       const missing = "localhost/sandbar-gate-run-nonexistent:none";
-      const err = await runGateCommand(
+      const out: string[] = [];
+      const code = await runGateCommand(
         {
           ...cfg,
           gateStack: {
@@ -193,25 +197,34 @@ describe.runIf(available)("sandbar gate against real podman", () => {
             ],
           },
         },
-        { worktree: repo, keep: false, out: () => {}, err: () => {} },
-      ).then(() => null, (e: unknown) => e);
+        {
+          worktree: repo,
+          keep: false,
+          out: (t) => out.push(t),
+          err: (t) => out.push(t),
+        },
+      );
 
+      expect(code).toBe(GATE_EXIT_NO_VERDICT);
       // Preflight's rule, re-asked where preflight does not run: sandbar builds
       // what `images` lists and refuses to pull the rest, so the operator gets
-      // the command rather than a bringup failure minutes later.
-      expect((err as Error | null)?.message).toContain(`pull ${missing}`);
+      // the command rather than a bringup failure minutes later — and gets it
+      // through the sink, since returning the code means nothing else prints
+      // it.
+      expect(out.join("")).toContain(`pull ${missing}`);
       expect(await podExists()).toBe(false);
     },
     300_000,
   );
 
   it(
-    "throws rather than reddening when an issue container will not come up",
+    "reports no verdict rather than a red when an issue container will not come up, and does not keep the wreckage",
     async () => {
       const cfg = config([
         { name: "read", in: "runner", command: ["cat", "marker.txt"] },
       ]);
-      const err = await runGateCommand(
+      const out: string[] = [];
+      const code = await runGateCommand(
         {
           ...cfg,
           gateStack: {
@@ -231,16 +244,31 @@ describe.runIf(available)("sandbar gate against real podman", () => {
             ],
           },
         },
-        { worktree: repo, keep: false, out: () => {}, err: () => {} },
-      ).then(() => null, (e: unknown) => e);
+        // `--keep`, deliberately: this is the combination that must not stand.
+        // A kept half-built stack carries a pod label the next invocation of
+        // the same config matches, and its `issue` container is `running` and
+        // healthy — so it would be adopted, its postReadyCommands would not be
+        // re-run because they never ran, and the gate would form a verdict
+        // against a database whose declared setup does not exist.
+        {
+          worktree: repo,
+          keep: true,
+          out: (t) => out.push(t),
+          err: (t) => out.push(t),
+        },
+      );
 
-      expect((err as Error | null)?.message).toContain("did not become ready");
+      expect(code).toBe(GATE_EXIT_NO_VERDICT);
       // Distinct constants, so a refactor cannot quietly collapse "no verdict"
       // into one of the two codes that IS one.
       expect(GATE_EXIT_NO_VERDICT).not.toBe(GATE_EXIT_RED);
       expect(GATE_EXIT_NO_VERDICT).not.toBe(GATE_EXIT_GREEN);
-      // And the half-built stack did not survive the throw.
+      expect(out.join("")).toContain("did not become ready");
+      // Torn down despite the flag, and SAID so — an operator who asked for a
+      // stack to poke at and finds none must not be left guessing whether the
+      // teardown or the bringup is what went wrong.
       expect(await podExists()).toBe(false);
+      expect(out.join("")).toContain("NOT left up");
     },
     300_000,
   );

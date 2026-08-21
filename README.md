@@ -47,10 +47,19 @@ npx sandbar gate --keep               # leave the stack up to poke at
 ```
 
 Brings up `gateStack`, runs its steps in order, stops at the first red, and
-exits **0** green, **1** red, **2** if it could not reach a verdict at all (a
-config error, an image that would not build, a container that would not come
-up). No tracker, no agents, no worktrees, no lock — so it runs on a laptop, in
-CI, and beside a live `sandbar` run on the same machine. Your `scripts/gate.sh`
+exits **0** green, **1** red, **2** if it could not reach a verdict at all. No
+tracker, no agents, no worktrees, no lock — so it runs on a laptop, in CI, and
+beside a live `sandbar` run on the same machine.
+
+**2 is narrower than it sounds, and the difference matters if you branch on it
+in CI.** A build that fails or a container that will not start is usually your
+branch's doing and is a **red**: an image with `rebuildOn` is rebuilt from the
+tree being gated, so a lockfile that won't install fails the gate as
+`image:<tag>`, and an `attempt`-lifecycle container that won't come up fails it
+as `container:<name>`. 2 is for the cases that are not about the code at all —
+a config error, an image sandbar doesn't build that you haven't pulled, a
+podman it can't talk to, an `issue`-lifecycle container (your database, your
+mail catcher) that never becomes ready. Your `scripts/gate.sh`
 becomes this line, and readiness, step timeouts, teardown and log capture stop
 having a second implementation that drifts.
 
@@ -68,8 +77,11 @@ one has no commit to be a verdict about and no orchestrator to report to:
   keeps its schema and its rows, and its `postReadyCommands` are not re-run.
   That reuse is checked, not assumed: change any of those containers' config
   (image, env, args, mounts, readiness, `postReadyCommands`, name), the
-  worktree, or sandbar's version, and the stack is rebuilt instead. Remove a
-  kept stack with the `podman pod rm -f …` line the command prints.
+  worktree, or sandbar's version, and the stack is rebuilt instead. A stack
+  whose bringup never finished is torn down despite the flag, and says so —
+  keeping it would let the next invocation adopt a database whose
+  `postReadyCommands` never ran and then decline to re-run them. Remove a kept
+  stack with the `podman pod rm -f …` line the command prints.
 
 It does **not** run `sandboxHooks`. `onWorktreeReady` (your `npm ci`, typically)
 fires when *sandbar* creates a worktree; here the tree is yours and already
@@ -82,8 +94,12 @@ one set of podman names, which is what makes the reuse possible — so don't run
 two at once against one tree. Different worktrees, and a `sandbar` run on the
 same host, are disjoint by construction.
 
-`runGateCommand(config, { worktree, keep })` is the API, returning that exit
-code.
+`runGateCommand(config, { worktree, keep })` is the API, and it **returns** that
+exit code rather than throwing — including the 2, which is the whole reason
+`GATE_EXIT_GREEN`/`GATE_EXIT_RED`/`GATE_EXIT_NO_VERDICT` are exported beside it.
+`process.exit(await runGateCommand(config, { worktree: ".", keep: false }))` is
+the bin, near enough. Faults are rendered to stderr on the way out; pass `out`
+and `err` sinks to put them somewhere else.
 
 `RunConfig` is **deviations-only**. Supply the repo-specific facts sandbar can't guess (required) plus only the knobs you want different from the defaults. Everything else falls through — don't restate a default.
 

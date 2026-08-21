@@ -132,6 +132,22 @@ export function pulledImagesOf(config: {
   return [...referenced].filter((i) => !built.has(i));
 }
 
+// The images D3's root-or-host-uid rule has to be re-asked about: those a
+// worktree-mounting container runs. `createBranchImages` probes a freshly-built
+// variant of one of these before any container gets it, because the branch may
+// have edited the Containerfile's `USER` and the startup check only ever saw
+// the declared images (#37). Beside `pulledImagesOf` and for the same reason:
+// two callers since #45, and which images the rule covers is one rule.
+export function worktreeMountingTagsOf(
+  gateStack: ResolvedGateStack,
+): ReadonlySet<string> {
+  return new Set(
+    gateStack.containers
+      .filter((c) => c.mountWorktree !== null)
+      .map((c) => c.image),
+  );
+}
+
 // The baseline recorded for a declared tag whose own provenance is unknown,
 // under `ensureImages`' `rebuildInPlace: false` (#45). Not hex, so no
 // `fingerprintImageInputs` output can ever equal it, which is the whole

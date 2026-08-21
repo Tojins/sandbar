@@ -21,3 +21,19 @@ export class SandbarError extends Error {
     this.name = "SandbarError";
   }
 }
+
+// How a fault is rendered for an operator, wherever sandbar prints one and
+// stops: run.ts's top-level handler, the bin's, and `runGateCommand`'s (#45).
+// An operator-actionable SandbarError prints as its message alone; anything
+// else prints a stack, because an unexpected bug that prints like a config
+// error is a bug nobody can locate.
+//
+// Here rather than in cli.ts because since #45 there are two callers and the
+// rule is one rule — the same argument `pulledImagesOf` moved on.
+export function faultDetail(err: unknown): string {
+  return err instanceof SandbarError
+    ? err.message
+    : err instanceof Error
+      ? (err.stack ?? err.message)
+      : String(err);
+}

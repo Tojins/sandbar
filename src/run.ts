@@ -50,6 +50,7 @@ import {
   pulledImagesOf,
   removeBranchImages,
   sweepBranchImages,
+  worktreeMountingTagsOf,
 } from "./ensure-images.js";
 import { makeEnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
@@ -325,11 +326,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     // D3, re-asked for anything the branch rebuilds. The startup check below
     // covers the declared images once; a variant is built from a Containerfile
     // the branch may have edited, so its uid is not the one that was probed.
-    worktreeMountingTags: new Set(
-      config.gateStack.containers
-        .filter((c) => c.mountWorktree !== null)
-        .map((c) => c.image),
-    ),
+    worktreeMountingTags: worktreeMountingTagsOf(config.gateStack),
     hostUid: process.getuid?.() ?? 0,
   });
   onCleanup(async () => {

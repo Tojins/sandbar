@@ -159,10 +159,13 @@ export default {
         // It declares no `needsLocalClient` because it needs none — nothing in
         // it asks a question about the host's own session.
         //
-        // 30 minutes against 229s measured for the pair alone. The runtime
-        // is dominated by mariadb bringup and by readiness timeouts the tests
-        // ask for deliberately, and three gates run concurrently at the
-        // default plan size, contending for one podman.
+        // 30 minutes. The 229s that number was set against was measured
+        // over two of these three files, so read the headroom as smaller than
+        // the ratio suggests — `gate-run-podman.test.ts` adds bringups of its
+        // own, including two it deliberately drives to a readiness timeout.
+        // The runtime is dominated by mariadb bringup and by those timeouts,
+        // and three gates run concurrently at the default plan size,
+        // contending for one podman.
         timeoutMs: 1_800_000,
       },
     ],

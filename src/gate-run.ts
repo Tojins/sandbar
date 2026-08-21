@@ -76,8 +76,9 @@ import {
   ensureImages,
   pulledImagesOf,
   removeBranchImages,
+  worktreeMountingTagsOf,
 } from "./ensure-images.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, faultDetail } from "./errors.js";
 import { summarizeGateFailure } from "./gate.js";
 import {
   LOG_READ_TIMEOUT_MS,
@@ -190,26 +191,32 @@ async function missingPulledImages(
 // Returns rather than exits, so the bin owns the exit and the command is
 // testable — the same split `run()` declines to make because it owns a run's
 // terminal semantics and this owns nothing.
+//
+// It returns ALL THREE codes, faults included, and does not throw. That is not
+// a stylistic choice about error handling: `GATE_EXIT_NO_VERDICT` is exported
+// from the package root beside this function, and a host that wired
+// `process.exit(await runGateCommand(…))` — which is what the README tells it
+// to do, and what "a thin bin can do nothing an embedding host cannot" claims —
+// would get an uncaught stack trace on precisely the path the third code exists
+// to make legible. So every fault is rendered through the `err` sink under
+// `faultDetail`'s rule (a SandbarError as its message, anything else with its
+// stack, so an unexpected bug cannot masquerade as a config error) and comes
+// back as the number. The caller loses the error OBJECT; `err` is the seam for
+// a host that wants the text somewhere other than stderr.
+//
+// Be precise about which failures are 2, because the two that sound like it
+// mostly are not: a `rebuildOn` variant that will not build is a gate RED
+// (`failedStep: "image:<tag>"`, #37 — the branch authored the recipe) and an
+// `attempt` container that will not come up is a gate RED too (D5). What
+// reaches 2 is a config error, an image sandbar does not build that is not
+// pulled, an unusable runtime, an `issue`-lifecycle container that will not
+// come up, and anything unexpected.
 export async function runGateCommand(
   rawConfig: RunConfig,
   opts: GateCommandOptions,
 ): Promise<number> {
   const out = opts.out ?? ((t: string) => process.stdout.write(t));
   const err = opts.err ?? ((t: string) => process.stderr.write(t));
-  const config = resolveConfig(rawConfig);
-
-  const requested = resolve(process.cwd(), opts.worktree);
-  if (!existsSync(requested)) {
-    throw new SandbarError(
-      `No such directory: ${requested}. \`--worktree\` names the tree to gate ` +
-        "and defaults to the current directory.",
-    );
-  }
-  // Canonical, for the reason `gateScope` gives: the same tree reached through
-  // a symlink must not get a second scope, or `--keep` leaves a stack the next
-  // invocation cannot find. It is also what podman gets as every `-v` source.
-  const worktreePath = realpathSync(requested);
-  const scope = gateScope(worktreePath);
 
   installCleanupTraps();
   // The teardown is called DIRECTLY on the way out, and registered with
@@ -222,7 +229,43 @@ export async function runGateCommand(
   const teardown = teardownFor(opts, err);
   onCleanup(teardown.run);
   try {
-    return await gate(config, opts, { worktreePath, scope, out, err, teardown });
+    const config = resolveConfig(rawConfig);
+    const requested = resolve(process.cwd(), opts.worktree);
+    if (!existsSync(requested)) {
+      throw new SandbarError(
+        `No such directory: ${requested}. \`--worktree\` names the tree to ` +
+          "gate and defaults to the current directory.",
+      );
+    }
+    // Canonical, for the reason `gateScope` gives: the same tree reached
+    // through a symlink must not get a second scope, or `--keep` leaves a
+    // stack the next invocation cannot find. It is also what podman gets as
+    // every `-v` source.
+    const worktreePath = realpathSync(requested);
+    return await gate(config, opts, {
+      worktreePath,
+      scope: gateScope(worktreePath),
+      out,
+      err,
+      teardown,
+    });
+  } catch (e) {
+    err(`${faultDetail(e)}\n`);
+    // Said here because it is the one thing the operator asked for that they
+    // are not getting, and `stack === null` is exactly "startStack threw", i.e.
+    // the bringup never completed (#45). A stack that came up and then failed
+    // — a dead `issue` container mid-gate — IS kept, which is useful and
+    // sound: it is not adoptable while that container is down, and its log is
+    // the diagnosis.
+    if (opts.keep && teardown.stack === null) {
+      err(
+        "The stack was NOT left up despite `--keep`: it never finished coming " +
+          "up, and a half-built stack is one the next invocation would adopt " +
+          "as if its postReadyCommands had run. The error above is what that " +
+          "bringup saw.\n",
+      );
+    }
+    return GATE_EXIT_NO_VERDICT;
   } finally {
     await teardown.run();
   }
@@ -255,7 +298,8 @@ function teardownFor(
       // A teardown failure is reported, never thrown: this runs in a `finally`
       // and from a signal handler, and replacing the verdict — or the error
       // being unwound — with a `pod rm` complaint loses the thing the operator
-      // was waiting for. `stop` is idempotent and is a no-op under `--keep`.
+      // was waiting for. `stop` is idempotent, and a no-op under `--keep` —
+      // once the bringup it is keeping actually finished.
       await t.stack?.stop().catch((e: unknown) => {
         err(`${e instanceof Error ? e.message : String(e)}\n`);
       });
@@ -263,6 +307,15 @@ function teardownFor(
       // Not under `--keep`: the containers the operator asked to keep are
       // running these, and podman's `rmi -f` takes a container using the image
       // with it — which would delete the thing `--keep` exists to preserve.
+      //
+      // On the flag, not on whether a stack actually survived, even though a
+      // bringup that never finished is torn down regardless and leaves nothing
+      // running them. `t.stack` is the only handle on that distinction and it
+      // is null for a moment after `startStack` returns, so a signal landing in
+      // that window would read "nothing survived" about a stack that is up and
+      // kept, and `rmi -f` it out from under the operator. A content-addressed
+      // variant left behind costs disk until the next gate over the same inputs
+      // reuses it, which is the leak the SIGKILL path already accepts.
       if (opts.keep || tags.length === 0) return;
       const failures = await removeBranchImages(tags);
       if (failures.length > 0) {
@@ -331,11 +384,7 @@ async function gate(
     images: config.images,
     scope,
     baseFingerprints,
-    worktreeMountingTags: new Set(
-      config.gateStack.containers
-        .filter((c) => c.mountWorktree !== null)
-        .map((c) => c.image),
-    ),
+    worktreeMountingTags: worktreeMountingTagsOf(config.gateStack),
     hostUid,
   });
   teardown.builtTags = branchImages.builtTags;
@@ -356,10 +405,10 @@ async function gate(
   }
 
   // A bringup failure is not a verdict about the code, and it does not need
-  // catching to say so: `runGate` converts an `attempt` container's failure to
-  // a red before this point, so what can throw here is D5's infra half plus
-  // anything unexpected — and the bin turns both into `GATE_EXIT_NO_VERDICT`,
-  // never into one of the two codes that IS a verdict.
+  // catching HERE to say so: `runGate` converts an `attempt` container's
+  // failure to a red before this point, so what can throw is D5's infra half
+  // plus anything unexpected, and the caller's own catch turns both into
+  // `GATE_EXIT_NO_VERDICT` — never into one of the two codes that IS a verdict.
   const stack: Stack = await startStack({
     stackId: GATE_STACK_ID,
     scope,

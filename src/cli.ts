@@ -55,7 +55,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { RunConfig } from "./config.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, faultDetail } from "./errors.js";
 import { GATE_EXIT_NO_VERDICT, runGateCommand } from "./gate-run.js";
 import { run } from "./run.js";
 import { sandbarVersion } from "./version.js";
@@ -239,46 +239,40 @@ async function main(): Promise<number> {
   // allowed to decide anything. From here on `cwd` is the config's directory.
   const configPath = resolve(process.cwd(), parsed.configPath);
   if (parsed.kind === "gate") {
-    // Everything from here down exits `GATE_EXIT_NO_VERDICT`, config faults
-    // included — a `sandbar gate` that never reached a verdict must never
-    // report one of the two codes that IS a verdict, and to a CI job a config
-    // typo and an unbuildable image are the same "we do not know" (#45).
+    // `runGateCommand` returns its own exit code for every outcome INCLUDING
+    // the faults — that is the point of it having a third code, and of that
+    // code being exported (#45) — so the only throw left on this path is
+    // loading the config file itself, which happens before the command exists
+    // to have an opinion. It lands on the same code: a `sandbar gate` that
+    // never reached a verdict must never report one of the two codes that IS a
+    // verdict, and to a CI job a config typo and a container that would not
+    // start are the same "we do not know".
+    //
     // Argument faults are the exception and stay on the outer handler's 1:
     // they are answered before any config is loaded, they are the operator's
     // shell rather than their repo, and a usage error exiting like a gate
     // outcome is its own confusion.
+    let config: RunConfig;
     try {
-      // `--worktree` stays relative to the process cwd, NOT to the config's
-      // directory. `cwd`'s default is the config's directory because a run
-      // operates on the repo the config sits in and there is no other
-      // candidate; a worktree is a path the operator typed at a shell, and
-      // re-rooting it somewhere else is the class of surprise this file exists
-      // to remove.
-      return await runGateCommand(
-        withDefaultCwd(await loadConfig(configPath), configPath),
-        { worktree: parsed.worktree, keep: parsed.keep },
-      );
+      config = withDefaultCwd(await loadConfig(configPath), configPath);
     } catch (err) {
       console.error(faultDetail(err));
       return GATE_EXIT_NO_VERDICT;
     }
+    // `--worktree` stays relative to the process cwd, NOT to the config's
+    // directory. `cwd`'s default is the config's directory because a run
+    // operates on the repo the config sits in and there is no other candidate;
+    // a worktree is a path the operator typed at a shell, and re-rooting it
+    // somewhere else is the class of surprise this file exists to remove.
+    return await runGateCommand(config, {
+      worktree: parsed.worktree,
+      keep: parsed.keep,
+    });
   }
   // `run()` owns its own exit codes and calls `process.exit` for anything
   // non-zero, so there is no code to return here.
   await run(withDefaultCwd(await loadConfig(configPath), configPath));
   return 0;
-}
-
-// How a fault is rendered, in both handlers below and in the gate branch above.
-// Same rule as run.ts's: an operator-actionable SandbarError prints as its
-// message alone, anything else prints a stack, because an unexpected bug that
-// prints like a config error is a bug nobody can locate.
-function faultDetail(err: unknown): string {
-  return err instanceof SandbarError
-    ? err.message
-    : err instanceof Error
-      ? (err.stack ?? err.message)
-      : String(err);
 }
 
 // The bin's whole prize, and the reason it is a function rather than three
