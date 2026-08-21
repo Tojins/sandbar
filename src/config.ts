@@ -72,13 +72,25 @@ export const DEFAULT_LABELS: LabelConfig = {
 // loop; the merger worktree for gate-2), so a branch that changes its schema
 // fixture gates against its own version. Relative paths are the convention, not
 // a jail — `..` and absolute paths are honored, since consumer config is
-// trusted. Always mounted read-only, always SELinux-relabelled (`ro,z`).
-// Neither path may contain `:` (podman `-v` specs are colon-delimited, with no
-// escape mechanism; enforced fail-loud).
+// trusted. Always SELinux-relabelled (`z`); read-only unless `mode` says
+// otherwise. Neither path may contain `:` (podman `-v` specs are
+// colon-delimited, with no escape mechanism; enforced fail-loud).
 export type StackMount = {
   // Path relative to the gated worktree root (absolute paths pass through).
   readonly hostPath: string;
   readonly containerPath: string;
+  // Default "ro", which is the right default for a fixture: a step that writes
+  // into its own inputs makes the next run's verdict a function of the last
+  // one's. "rw" exists because not every mount is a fixture — a scratch
+  // directory a step writes through, or a socket, which is a bidirectional
+  // channel rather than a file to read.
+  //
+  // This exposes the half of podman's `-v` that sandbar was hiding rather than
+  // inventing anything: the hiding was the invention. Deliberately NOT a raw
+  // `-v` spec string, which would take the colon and empty-`hostPath`
+  // validation with it — a mis-specced `-v` is the most-travelled string
+  // sandbar builds.
+  readonly mode?: "ro" | "rw";
 };
 
 // How sandbar decides a container is ready to be used.
@@ -236,13 +248,20 @@ export type GateStackConfig = {
 // Every defaultable field made concrete. Optional fields become `| null` rather
 // than staying optional so no consumer of the resolved shape has to re-decide
 // what absence means.
+// A `StackMount` with its `mode` decided, so `mountSpec` re-decides nothing.
+export type ResolvedStackMount = {
+  readonly hostPath: string;
+  readonly containerPath: string;
+  readonly mode: "ro" | "rw";
+};
+
 export type ResolvedStackContainer = {
   readonly name: string;
   readonly image: string;
   readonly lifecycle: "issue" | "attempt";
   readonly env: Readonly<Record<string, string>>;
   readonly args: readonly string[];
-  readonly mounts: readonly StackMount[];
+  readonly mounts: readonly ResolvedStackMount[];
   readonly mountWorktree: string | null;
   readonly servesWorktree: boolean;
   readonly hold: boolean;
@@ -974,6 +993,17 @@ function resolveStackContainer(
           "container and must be absolute.",
       );
     }
+    // A typo'd mode is checked here rather than left to podman, for the same
+    // reason every other mount mistake is: podman would reject the `-v` spec
+    // at container-create time, which on an `attempt` container is a gate RED
+    // blamed on the branch, minutes into a run, over a config string.
+    if (m.mode !== undefined && m.mode !== "ro" && m.mode !== "rw") {
+      throw new SandbarError(
+        `config.gateStack: container '${c.name}' has a mount with an unknown ` +
+          `mode ('${String(m.mode)}' for ${m.hostPath} -> ${m.containerPath}). ` +
+          'Use "ro" (the default) or "rw".',
+      );
+    }
   }
   const readiness = c.readiness ?? null;
   if (readiness?.kind === "tcp") {
@@ -1037,7 +1067,11 @@ function resolveStackContainer(
     lifecycle: c.lifecycle ?? "attempt",
     env: c.env ?? {},
     args: c.args ?? [],
-    mounts: c.mounts ?? [],
+    mounts: (c.mounts ?? []).map((m) => ({
+      hostPath: m.hostPath,
+      containerPath: m.containerPath,
+      mode: m.mode ?? "ro",
+    })),
     mountWorktree: c.mountWorktree ?? null,
     servesWorktree: c.servesWorktree ?? false,
     hold,
