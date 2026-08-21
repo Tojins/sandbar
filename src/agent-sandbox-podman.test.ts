@@ -43,7 +43,6 @@
 // assertions exercised by nobody, with nothing saying so.
 
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -78,15 +77,18 @@ const available = podmanTestsEnabled({
   image: IMAGE,
 });
 
-// Container names carry this process's SCOPE (#47) rather than a bare uuid.
-// #47 audited this file and cleared it, correctly — the question it asked was
-// COLLISION, and against a uuid the answer needs nothing from a scope. The
-// debris report asks a different question: `findUnattributableResources` names
-// every `sandbar-`-prefixed resource that fails `isScopedResourceName`,
-// nothing sweeps it, and it repeats at every startup until an operator clears
-// it by hand. `afterEach` removes these, so only a SIGKILL leaks one — and
-// moving into the gate is precisely what changes those odds, from a human
-// running the file occasionally to three runners on every cycle.
+// Container names carry this process's SCOPE (#47), where they used to be a
+// bare uuid. #47 audited this file and cleared it, correctly — the question it
+// asked was COLLISION, and against a uuid the answer needs nothing from a
+// scope. The debris report asks a different question:
+// `findUnattributableResources` names every `sandbar-`-prefixed resource that
+// fails `isScopedResourceName`, nothing sweeps it, and it repeats at every
+// startup until an operator clears it by hand. `afterEach` removes these, so
+// only a SIGKILL leaks one — and moving into the gate is precisely what changes
+// those odds, from a human running the file occasionally to three runners on
+// every cycle. With the scope carrying the uniqueness, the per-container part
+// of the name is free to be the one thing a human reading debris wants from
+// it: which of the two variants this was.
 const { scope: SCOPE, cleanup } = podmanTestScope("agent-sandbox");
 
 // This process's own scoped sweep, for whatever `afterEach` did not reach.
@@ -106,14 +108,15 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     }
   }, 60_000);
 
-  // The production argv, verbatim, minus whichever flags a test wants gone.
-  const start = async (drop: readonly string[] = []): Promise<string> => {
-    // The scope carries the uniqueness; the suffix only separates this file's
-    // two containers from each other, so a slice of a uuid is enough — and it
-    // keeps the name well clear of the 64 characters a hostname derived from it
-    // has to fit in, which a full uuid on top of a scope lands exactly on.
-    const name =
-      `${scopedResourcePrefix(SCOPE)}initprobe-${randomUUID().slice(0, 8)}`;
+  // The production argv, verbatim, with `--init` kept or filtered out — the
+  // only axis this file has. Taking that axis rather than a list of flags to
+  // drop is what lets the container's NAME state which variant it is without
+  // the two being able to disagree: one argument decides both, so a leftover
+  // `…-noinit` can only ever be a container that really was started without it.
+  const start = async (init: "with-init" | "without-init"): Promise<string> => {
+    const name = `${scopedResourcePrefix(SCOPE)}initprobe-${
+      init === "with-init" ? "init" : "noinit"
+    }`;
     const args = sandboxRunArgs({
       containerName: name,
       imageName: IMAGE,
@@ -129,7 +132,7 @@ describe.runIf(available)("the sandbox container against real podman", () => {
       groups: [],
       devices: [],
       cpus: undefined,
-    }).filter((a) => !drop.includes(a));
+    }).filter((a) => init === "with-init" || a !== "--init");
     started.push(name);
     await exec(RUNTIME, args);
     return name;
@@ -155,6 +158,24 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     return stdout.split("\n").filter((l) => /\)\s+Z\s/.test(l)).length;
   };
 
+  // The control's claim — a zombie APPEARED — is satisfiable by waiting, so it
+  // polls to a deadline instead of sleeping a fixed interval: it returns the
+  // moment the orphan's `sleep 1` has exited and been left unreaped, and no
+  // amount of contention between three concurrent gate stacks and one podman
+  // can make it report early. Its mirror cannot be written this way and is not
+  // — "none yet" and "none ever" are the same observation, so the `toBe(0)`
+  // assertions keep the fixed settle below, which is what makes them mean
+  // anything. Returns the last count rather than throwing, so a deadline that
+  // does expire fails as the assertion it belongs to.
+  const waitForZombie = async (name: string): Promise<number> => {
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      const n = await zombieCount(name);
+      if (n > 0 || Date.now() >= deadline) return n;
+      await delay(250);
+    }
+  };
+
   const pid1Comm = async (name: string): Promise<string> => {
     const { stdout } = await exec(RUNTIME, [
       "exec",
@@ -168,15 +189,12 @@ describe.runIf(available)("the sandbox container against real podman", () => {
   it(
     "leaks a zombie per orphan when pid 1 is the sleep entrypoint",
     async () => {
-      const name = await start(["--init"]);
+      const name = await start("without-init");
       // The control's own premise: without --init, `sleep infinity` is pid 1.
       expect(await pid1Comm(name)).toBe("sleep");
 
       await orphan(name);
-      // Long enough for the orphan's own `sleep 1` to finish and for its exit
-      // status to sit unreaped.
-      await delay(2500);
-      expect(await zombieCount(name)).toBeGreaterThan(0);
+      expect(await waitForZombie(name)).toBeGreaterThan(0);
     },
     60_000,
   );
@@ -184,13 +202,16 @@ describe.runIf(available)("the sandbox container against real podman", () => {
   it(
     "reaps the same orphan under --init",
     async () => {
-      const name = await start();
+      const name = await start("with-init");
       // podman's init takes pid 1 and the entrypoint becomes its child; the
       // binary's comm has been both `catatonit` and `podman-init` across
       // versions, so what is asserted is that `sleep` is no longer pid 1.
       expect(await pid1Comm(name)).not.toBe("sleep");
 
       await orphan(name);
+      // Fixed, and it has to be: nothing distinguishes "reaped" from "the
+      // orphan has not exited yet" except having waited longer than it takes.
+      // Comfortably over the orphan's own `sleep 1`.
       await delay(2500);
       expect(await zombieCount(name)).toBe(0);
 

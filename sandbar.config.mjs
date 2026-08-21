@@ -160,11 +160,17 @@ export default {
           "src/ensure-images-podman.test.ts",
           "src/agent-sandbox-podman.test.ts",
         ],
-        // 30 minutes against 229s measured for the first two, plus the third's
-        // two container starts and the ~8s of deliberate waiting its orphans
-        // need (#52). The runtime is dominated by mariadb bringup and by
-        // readiness timeouts the tests ask for deliberately, and three gates run
-        // concurrently at the default plan size, contending for one podman.
+        // 30 minutes. The only wall-clock measurement anyone has taken here is
+        // #48's 229s, and it is quoted as the historical figure it is: it timed
+        // the first two files when they held 33 tests between them, and #45,
+        // #49 and #50 have since taken them to 42 — several of the additions
+        // being readiness timeouts the tests ask for deliberately. #52 adds this
+        // step's third file, whose cost is two container starts and ~8s of
+        // waiting on orphans. The bound stays where it is because it was never
+        // sized against that figure: the runtime is dominated by mariadb
+        // bringup and by those deliberate timeouts, and three gates run
+        // concurrently at the default plan size, contending for one podman. Do
+        // not tighten it towards a number that has not been re-measured.
         timeoutMs: 1_800_000,
       },
     ],
