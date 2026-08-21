@@ -9,12 +9,10 @@ import { resolveGateStack } from "./config.js";
 import { ImageBuildError } from "./ensure-images.js";
 import {
   ContainerBringupError,
-  type LogWatcher,
-  logFollowArgs,
-  scanChunk,
+  containerState,
+  parseHealthLog,
   type Stack,
   startStack,
-  watchLog,
 } from "./gate-stack.js";
 import { stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
@@ -54,13 +52,17 @@ const runExit = async (
 //      answer" needs `container exists` — 0 in any state, 1 for gone (#36);
 //   3. an `issue` container keeps its id and its state across gate runs while
 //      the `attempt` container gets a new one, which no `ok`-only assertion
-//      can see.
+//      can see;
+//   4. `podman healthcheck run` exits 0/1/125, appends one entry per
+//      invocation to `.State.Health.Log`, NORMALISES a probe that exited 3 to
+//      1, and — the one that decides a design — does not enforce
+//      `--health-timeout` at all (#43).
 //
 // Since #48 this file runs IN THE GATE, against the host's podman over a
 // mounted socket, so every fact above is exercised per attempt rather than by a
-// human remembering to. The three that a remote client cannot pin — the tcp
-// probe's topology and the local client's signal semantics — moved to
-// gate-stack-hostpodman.test.ts, which states why.
+// human remembering to. What a remote client cannot pin — the local client's
+// signal semantics, and whether podman created a transient systemd timer on the
+// HOST — lives in gate-stack-hostpodman.test.ts, which states why.
 //
 // Any local image with a shell will do. mariadb is chosen because it serves a
 // real listener for the readiness and pod-namespace assertions, and because
@@ -261,12 +263,12 @@ describe.runIf(available)(
       180_000,
     );
 
-    // The tcp half of this test moved to gate-stack-hostpodman.test.ts (#48):
-    // the probe runs on the HOST, and a gate runner driving podman over a
-    // socket sits in a different network namespace from the pod's publish. The
-    // fact left here is the one the socket preserves perfectly and that an
-    // `ok`-only assertion cannot see, so readiness becomes `exec` — inside the
-    // namespace, no host-side connect — rather than the test leaving with it.
+    // This test's readiness declaration is incidental — what it pins is the
+    // lifecycle split, which the socket preserves perfectly and which no
+    // `ok`-only assertion can see. It has been through two readiness kinds for
+    // that reason: #48 moved the tcp half of the original away (a host-side
+    // probe a gate runner cannot reach) and left an `exec` probe behind, and
+    // #43 retired `exec` in turn.
     it(
       "issue containers keep their id and their state across gate runs",
       async () => {
@@ -282,8 +284,8 @@ describe.runIf(available)(
                 lifecycle: "issue",
                 env: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "app" },
                 readiness: {
-                  kind: "exec",
-                  argv: ["mariadb", "-h", "127.0.0.1", "-uroot", "-e", "SELECT 1"],
+                  kind: "healthcheck",
+                  command: ["mariadb", "-h", "127.0.0.1", "-uroot", "-e", "SELECT 1"],
                 },
                 readinessTimeoutMs: 120_000,
               },
@@ -380,7 +382,12 @@ describe.runIf(available)(
                 // Dies immediately, the way a branch that breaks its own
                 // service bootstrap does.
                 args: ["sh", "-c", "echo bootstrap-failed >&2; exit 1"],
-                readiness: { kind: "tcp", port: 9999 },
+                // A probe that would PASS, deliberately: what fails here is the
+                // container, and `podman healthcheck run` against a container
+                // that is not running exits 125 whatever the command is. That
+                // keeps the assertion about D5's blame mapping rather than
+                // about a probe verdict.
+                readiness: { kind: "healthcheck", command: ["true"] },
                 readinessTimeoutMs: 4_000,
               },
             ],
@@ -584,15 +591,19 @@ describe.runIf(available)(
       180_000,
     );
 
-    // #31. `log` readiness had no end-to-end coverage at all — this is that,
-    // not a regression test for the buffer wall it fixes: reproducing that
-    // needs 50MB of log, which journald would rate-limit (dropping the pattern
-    // line and failing for an unrelated reason) and which no test should write
-    // to an operator's journal. What actually removes the wall — that the
-    // reader retains a bounded carry rather than the stream — is pinned in
-    // gate-stack.test.ts, where it costs nothing.
+    // #43 end to end, and written as the issue's own worked example: mariadb's
+    // `healthcheck.sh --connect --innodb_initialized` is exactly the probe the
+    // retired `log` kind existed to approximate. The entrypoint runs a
+    // TEMPORARY server while it applies init files, and that server accepts
+    // connections — so a naive probe goes green on a database that is about to
+    // be shut down and restarted. This one does not, which is why a log pattern
+    // is no longer needed to tell them apart.
+    //
+    // The image declares no HEALTHCHECK of its own (it ships the script and
+    // leaves the instruction out), which is the other half of why `command` is
+    // required rather than optional.
     it(
-      "log readiness goes green on a pattern printed after startup, under a noisy log",
+      "healthcheck readiness goes green on the image's own probe",
       async () => {
         stack = await startStack({
           stackId: STACK_ID,
@@ -602,59 +613,95 @@ describe.runIf(available)(
             containers: [
               { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
               {
-                name: "svc",
+                name: "db",
                 image: IMAGE,
                 lifecycle: "issue",
-                // Chatty first, pattern last: the shape of a frontend dev
-                // server printing a build, which is exactly the container
-                // someone gives a `log` readiness to.
-                args: [
-                  "sh",
-                  "-c",
-                  "i=0; while [ $i -lt 4000 ]; do echo \"building chunk $i\"; i=$((i+1)); done; " +
-                    "sleep 2; echo SERVICE-READY; sleep 300",
-                ],
-                readiness: { kind: "log", pattern: "SERVICE-READY" },
-                readinessTimeoutMs: 60_000,
+                env: {
+                  MYSQL_ALLOW_EMPTY_PASSWORD: "yes",
+                  MYSQL_DATABASE: "app",
+                },
+                readiness: {
+                  kind: "healthcheck",
+                  command: [
+                    "healthcheck.sh",
+                    "--connect",
+                    "--innodb_initialized",
+                  ],
+                },
+                readinessTimeoutMs: 120_000,
               },
             ],
-            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+            steps: [
+              {
+                name: "query",
+                in: "runner",
+                command: ["mariadb", "-h", "127.0.0.1", "-uroot", "-e", "SELECT 1"],
+              },
+            ],
           }),
         });
+        // Bringup returning is the readiness assertion; the step is what makes
+        // it a claim about a REAL server rather than about the probe giving up.
         expect((await stack.runGate()).ok).toBe(true);
       },
-      180_000,
+      240_000,
     );
 
-    // The half of #31 that misdirected the operator: a pattern that genuinely
-    // never appears must say so. Under the old read this same message was
-    // produced by a log that had merely outgrown node's buffer.
+    // The failing half, and the thing #43's notes say misleads silently:
+    // `podman healthcheck run` prints the single word `unhealthy` on failure,
+    // so a message built from the CLIENT's output would say LESS than the
+    // `exec` probe this replaced. What the probe actually saw is in
+    // `.State.Health.Log`, and the error has to carry it.
     it(
-      "log readiness that never matches times out naming the pattern",
+      "a readiness timeout quotes the probe's own output, not podman's `unhealthy`",
       async () => {
-        await expect(
-          startStack({
+        const spec = resolveGateStack({
+          containers: [
+            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "svc",
+              image: IMAGE,
+              lifecycle: "issue",
+              args: ["sh", "-c", "echo starting-up; sleep 300"],
+              readiness: {
+                kind: "healthcheck",
+                command: ["sh", "-c", "echo PROBE-SAW-THIS; exit 1"],
+              },
+              readinessTimeoutMs: 5_000,
+            },
+          ],
+          steps: [{ name: "ok", in: "runner", command: ["true"] }],
+        });
+
+        let caught: unknown = null;
+        try {
+          stack = await startStack({
             stackId: STACK_ID,
             scope: SCOPE,
             worktreePath: repo,
-            spec: resolveGateStack({
-              containers: [
-                { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
-                {
-                  name: "svc",
-                  image: IMAGE,
-                  lifecycle: "issue",
-                  args: ["sh", "-c", "echo starting-up; sleep 300"],
-                  readiness: { kind: "log", pattern: "NEVER-PRINTED" },
-                  readinessTimeoutMs: 3_000,
-                },
-              ],
-              steps: [{ name: "ok", in: "runner", command: ["true"] }],
-            }),
-          }),
-        ).rejects.toThrow(/NEVER-PRINTED.*pattern not in log yet/s);
+            spec,
+          });
+        } catch (err) {
+          caught = err;
+        }
+
+        expect(caught).toBeInstanceOf(ContainerBringupError);
+        const e = caught as ContainerBringupError;
+        // Names the container and the probe, so an operator is not left
+        // guessing which of several containers timed out.
+        expect(e.message).toMatch(/'svc'[\s\S]*did not become ready/);
+        expect(e.message).toContain("PROBE-SAW-THIS");
+        // NOT the word podman's client printed. If this is what the message
+        // quotes, the health log is not being read at all.
+        expect(e.message).not.toMatch(/last probe: unhealthy/);
+        // The health block is ADDED to the container log tail, never swapped
+        // for it: the probe's output says what failed, the container's own log
+        // usually says why.
+        expect(e.healthLog).toContain("PROBE-SAW-THIS");
+        expect(e.message).toContain("Container log tail:");
+        expect(e.message).toContain("starting-up");
       },
-      180_000,
+      120_000,
     );
 
     // #26. Before this, a step that hung hung the issue, the outer loop and the
@@ -1093,184 +1140,243 @@ describe.runIf(available)("podman exec under a killed client", () => {
   );
 });
 
-// The follower itself (#31), against real podman. The end-to-end log-readiness
-// tests above are coverage, not regression tests: on this host the log driver
-// is whatever podman is configured with — journald buffers per line, so nothing
-// ever splits — and their logs are three orders of magnitude under MAX_BUFFER.
-// Mutation-tested: both of them pass with the carry removed AND with the
-// pre-#31 full re-read restored. These do not. The driver is pinned explicitly
-// because the split is the entire point.
-describe.runIf(available)("watchLog", () => {
-  // Scoped like every other resource in this file. A bare `sandbar-` name would
-  // be unattributable debris (#28): an interrupted run leaves a container that
-  // `findUnattributableResources` reports at every future sandbar startup and
-  // that the sweep deliberately refuses to remove.
-  const NAME = cName("logsplit");
-  let watcher: LogWatcher | null = null;
+// ---------------------------------------------------------------------------
+// `podman healthcheck run` itself (#43)
+// ---------------------------------------------------------------------------
+// Everything that made #43 the right shape is a fact about podman rather than
+// about sandbar, so it is asserted by running podman. These drive the client
+// directly, the way the SIGTERM tests do: `containerRunArgs` proves sandbar
+// emits the flags it means to and cannot prove what podman does with them.
+//
+// The systemd half — that `--health-cmd` plus `--health-interval=disable`
+// creates NO transient timer, which is the whole argument for polling
+// ourselves — is not here. It has to read the HOST's user session, and the gate
+// runner drives podman through a socket from a container that has none, so it
+// lives in gate-stack-hostpodman.test.ts with the other local-client facts.
+describe.runIf(available)("podman healthcheck run", () => {
+  const NAME = cName("hcprobe");
 
-  const runSplitter = async (script: string): Promise<void> => {
+  // Register a probe the same way `containerRunArgs` does — JSON argv,
+  // scheduling disabled — and nothing else.
+  const runWithProbe = async (
+    command: readonly string[],
+    extra: readonly string[] = [],
+  ): Promise<void> => {
     await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
     await exec(RUNTIME, [
       "run", "-d",
-      // journald buffers per line and would never split, so the fact under
-      // test would silently not be exercised on this host.
-      "--log-driver", "k8s-file",
       "--name", NAME,
-      IMAGE, "sh", "-c", script,
+      "--health-cmd", JSON.stringify(command),
+      "--health-interval=disable",
+      ...extra,
+      IMAGE, "sleep", "infinity",
     ]);
   };
 
-  // Poll the way waitForReady does, so what is asserted is the loop that runs
-  // in production rather than a bespoke one.
-  const pollUntil = async (
-    w: LogWatcher,
-    budgetMs: number,
-  ): Promise<{ ready: boolean; detail: string }> => {
-    const deadline = Date.now() + budgetMs;
-    let last = { ready: false, detail: "" };
-    while (Date.now() < deadline) {
-      last = w.poll();
-      if (last.ready) return last;
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    return last;
+  const healthLog = async (): Promise<ReturnType<typeof parseHealthLog>> => {
+    const { stdout } = await exec(RUNTIME, [
+      "inspect", "--format", "{{json .State.Health}}", NAME,
+    ]);
+    return parseHealthLog(stdout);
   };
 
   afterEach(async () => {
-    watcher?.stop();
-    watcher = null;
     await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
   }, 60_000);
 
-  // Fails without the carry: neither chunk contains the pattern.
+  // The mapping the poll loop reads, and the only part of it sandbar acts on.
   it(
-    "goes ready on a pattern split across two chunks",
+    "exits 0 for a healthy probe and 1 for an unhealthy one",
     async () => {
-      await runSplitter('printf "boot: PAR"; sleep 2; printf "TIAL-READY\\n"; sleep 60');
-      watcher = watchLog(NAME, "PARTIAL-READY");
-      expect((await pollUntil(watcher, 20_000)).ready).toBe(true);
+      await runWithProbe(["true"]);
+      expect((await runExit(["healthcheck", "run", NAME])).code).toBe(0);
+
+      await runWithProbe(["false"]);
+      expect((await runExit(["healthcheck", "run", NAME])).code).toBe(1);
     },
-    60_000,
+    120_000,
   );
 
-  // Fails without the StringDecoder: the split falls INSIDE the three bytes of
-  // U+2713, and decoding each chunk on its own replaces both halves with U+FFFD
-  // before the carry can help. `✓ Ready in` is what Next.js prints, which is
-  // exactly the container a `log` readiness is for.
+  // M6. A stopped container cannot be probed, and podman says so with 125 —
+  // the same code it uses for "no such container". The poll loop does not try
+  // to read death out of that: `throwIfDead` asks the question podman has a
+  // purpose-built answer for, and must classify this one as `stopped` (there is
+  // still a log to read) rather than `gone` or `unknown`.
   it(
-    "goes ready on a pattern split inside a multi-byte character",
+    "exits 125 on a stopped container, which containerState calls `stopped`",
     async () => {
-      await runSplitter(
-        'printf "boot \\342\\234"; sleep 2; printf "\\223 Ready in 1s\\n"; sleep 60',
-      );
-      watcher = watchLog(NAME, "✓ Ready in");
-      expect((await pollUntil(watcher, 20_000)).ready).toBe(true);
+      await runWithProbe(["true"]);
+      await exec(RUNTIME, ["stop", "-t", "0", NAME]);
+      const r = await runExit(["healthcheck", "run", NAME]);
+      expect(r.code).toBe(125);
+      expect(await containerState(NAME)).toBe("stopped");
     },
-    60_000,
+    120_000,
   );
 
-  // The other half of #31: a genuine podman failure must say what podman said.
-  // The old probe flattened this to "logs unavailable", which reads as "the
-  // pattern never appeared".
+  // Every invocation appends, and podman keeps the last five — which is why the
+  // readiness timeout reads the log ONCE at the deadline instead of on every
+  // poll, and why the error's window is five and not a number sandbar chose.
   it(
-    "reports podman's own words when the container does not exist",
+    "appends one entry per invocation, keeping the probe's own output",
     async () => {
-      watcher = watchLog(cName("never-created"), "READY");
-      const r = await pollUntil(watcher, 5_000);
-      expect(r.ready).toBe(false);
-      // Restarted rather than latched, and each death is counted and quoted.
-      expect(watcher.deathNote()).toMatch(/log follower died \d+x/);
-      expect(watcher.deathNote()).toContain("no such container");
+      await runWithProbe(["sh", "-c", "echo PROBE-SPOKE >&2; exit 1"]);
+      await runExit(["healthcheck", "run", NAME]);
+      await runExit(["healthcheck", "run", NAME]);
+
+      const entries = await healthLog();
+      expect(entries.length).toBe(2);
+      // The output is the whole reason the health log is read at all: the
+      // CLIENT prints the single word `unhealthy` and nothing else.
+      expect(entries.at(-1)?.output).toContain("PROBE-SPOKE");
     },
-    60_000,
+    120_000,
   );
 
-  // The bound on an unbounded stream is this kill, so it is asserted rather
-  // than assumed: an orphaned follower outlives the run.
+  // Stated in the module header because it misleads silently: the number in the
+  // health log is NOT the number the probe returned. Asserted directly rather
+  // than trusted, since a reader debugging their own probe would otherwise
+  // discover it the hard way.
   it(
-    "stop() leaves no follower behind",
+    "normalises a probe that exits 3 to ExitCode 1",
     async () => {
-      await runSplitter("echo quiet; sleep 60");
-      const w = watchLog(NAME, "NEVER");
-      await pollUntil(w, 1_500);
-      w.stop();
-      await new Promise((r) => setTimeout(r, 500));
-      const { stdout } = await exec("ps", ["-eo", "args"]).catch(() => ({
-        stdout: "",
-      }));
-      expect(stdout).not.toContain(`logs -f ${NAME}`);
+      await runWithProbe(["sh", "-c", "exit 3"]);
+      const r = await runExit(["healthcheck", "run", NAME]);
+      expect(r.code).toBe(1);
+      expect((await healthLog()).at(-1)?.exitCode).toBe(1);
     },
-    60_000,
+    120_000,
+  );
+
+  // M4, and the reason `--health-timeout` is neither passed nor exposed in
+  // config. It does not KILL the probe: it lets it run to completion and then
+  // labels the result as having exceeded the bound. A number in a config that
+  // looks like a per-probe bound and only retro-labels is #26's green-on-red
+  // wearing podman's colours.
+  it(
+    "`--health-timeout` does not kill the probe — it labels it afterwards",
+    async () => {
+      await runWithProbe(["sleep", "20"], ["--health-timeout=2s"]);
+      const started = Date.now();
+      await runExit(["healthcheck", "run", NAME]);
+      const elapsed = Date.now() - started;
+      // A bound that killed would have returned at ~2s. It returns at ~20.
+      expect(elapsed).toBeGreaterThan(15_000);
+    },
+    120_000,
+  );
+
+  // The CONTROL half, and it carries the weight: the test above passes just as
+  // happily with `--health-timeout` added back to `healthCheckArgs`, because
+  // asserting that podman does not enforce says nothing about who does. This is
+  // the assertion that fails if sandbar's own deadline ever stops being the
+  // bound — the container's `readinessTimeoutMs`, enforced by `boundedPodman`
+  // through the production bringup path.
+  it(
+    "sandbar's readinessTimeoutMs IS the bound on a probe that never returns",
+    async () => {
+      const repo = await mkdtemp(join(tmpdir(), "sandbar-hcbound-"));
+      try {
+        await exec("git", ["init", "-q", "-b", "main"], { cwd: repo });
+        const started = Date.now();
+        await expect(
+          startStack({
+            stackId: STACK_ID,
+            scope: SCOPE,
+            worktreePath: repo,
+            spec: resolveGateStack({
+              containers: [
+                {
+                  name: "runner",
+                  image: IMAGE,
+                  mountWorktree: "/work",
+                  hold: true,
+                  // `issue`, so the probe runs during `startStack` rather than
+                  // inside a `runGate` this test never reaches. Legal on a
+                  // worktree-mounting container only because it is held —
+                  // `sleep infinity` runs none of the branch's code.
+                  lifecycle: "issue",
+                  // Never returns. Podman would let it run forever.
+                  readiness: { kind: "healthcheck", command: ["sleep", "600"] },
+                  readinessTimeoutMs: 5_000,
+                },
+              ],
+              steps: [{ name: "ok", in: "runner", command: ["true"] }],
+            }),
+          }),
+        ).rejects.toThrow(/did not become ready/);
+        // Generous, because bringup also pulls/creates the pod — the claim is
+        // that the wait ENDS, not that it ends to the millisecond. Without
+        // sandbar's own kill it would not end at all.
+        expect(Date.now() - started).toBeLessThan(120_000);
+      } finally {
+        await rm(repo, { recursive: true, force: true });
+      }
+    },
+    180_000,
   );
 });
 
-// The reason scanChunk carries bytes between chunks, asserted against podman
-// rather than argued from a man page: a followed log delivers an unterminated
-// partial line as its own chunk, so the two halves of a readiness pattern can
-// arrive seconds apart. The host's own log driver decides this — journald
-// buffers per line and would never split — so the driver is pinned explicitly
-// here. Without the carry the container never goes ready and the operator is
-// told the pattern never appeared.
-describe.runIf(available)("podman logs -f chunking", () => {
-  // Scoped like every other resource in this file. A bare `sandbar-` name is
-  // unattributable debris (#28): an interrupted run leaves a container that
-  // findUnattributableResources reports at every future sandbar startup and
-  // that the sweep deliberately refuses to remove.
-  const NAME = cName("chunking");
+// M5, and what licenses deleting `TCP_SETTLE_MS` along with the `tcp` kind.
+//
+// The retired host-side probe could not treat a successful `connect` as a
+// readiness signal: rootless podman's port forwarder accepts at the host and
+// asks the backend afterwards, so a bare connect succeeded against a pod with
+// nothing listening, and only a socket that STAYED open for a settle window
+// told them apart. Inside the container that forwarder is not in the path, so a
+// dead port and a live one separate outright.
+//
+// Asserted with the client the image actually ships rather than with a socket
+// tool that may not be installed — which is also the realistic shape of a
+// `healthcheck` command.
+describe.runIf(available)("in-namespace port probe", () => {
+  const NAME = cName("portprobe");
+
+  beforeEach(async () => {
+    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
+    await exec(RUNTIME, [
+      "run", "-d",
+      "--name", NAME,
+      "-e", "MYSQL_ALLOW_EMPTY_PASSWORD=yes",
+      IMAGE,
+    ]);
+    // Let the server come up, using the probe this feature exists to run.
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      const r = await runExit([
+        "exec", NAME, "healthcheck.sh", "--connect", "--innodb_initialized",
+      ]);
+      if (r.code === 0) return;
+      await new Promise((r2) => setTimeout(r2, 1_000));
+    }
+    throw new Error("mariadb never came up");
+  }, 180_000);
 
   afterEach(async () => {
     await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
-  });
+  }, 60_000);
 
   it(
-    "delivers an unterminated partial line as its own chunk",
+    "separates a live port from a dead one with no settle window",
     async () => {
-      await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
-      await exec(RUNTIME, [
-        "run",
-        "-d",
-        "--log-driver",
-        "k8s-file",
-        "--name",
-        NAME,
-        IMAGE,
-        "sh",
-        "-c",
-        // 6s, not 3: if the follower attaches after the second write both
-        // halves arrive in one chunk and the assertion below fails for a
-        // scheduling reason rather than a real one.
-        'printf PAR; sleep 6; printf "TIAL-READY\n"; sleep 60',
+      const live = await runExit([
+        "exec", NAME,
+        "mariadb", "-h", "127.0.0.1", "-P", "3306", "-uroot", "-e", "SELECT 1",
       ]);
+      expect(live.code).toBe(0);
 
-      const chunks = await new Promise<string[]>((resolveChunks, rejectChunks) => {
-        const seen: string[] = [];
-        const ch = spawn(RUNTIME, logFollowArgs(NAME));
-        const done = setTimeout(() => {
-          ch.kill("SIGKILL");
-          resolveChunks(seen);
-        }, 11_000);
-        ch.stdout.on("data", (b: Buffer) => seen.push(b.toString("utf8")));
-        ch.on("error", (err) => {
-          clearTimeout(done);
-          rejectChunks(err);
-        });
-      });
-
-      // Two chunks, neither containing the pattern; concatenated they do.
-      expect(chunks.length).toBeGreaterThan(1);
-      expect(chunks.some((c) => c.includes("PARTIAL-READY"))).toBe(false);
-      expect(chunks.join("")).toContain("PARTIAL-READY");
-
-      // And that is precisely what scanChunk is for.
-      let carry = "";
-      let found = false;
-      for (const c of chunks) {
-        const r = scanChunk(carry, c, "PARTIAL-READY");
-        carry = r.carry;
-        found = found || r.found;
-      }
-      expect(found).toBe(true);
+      const started = Date.now();
+      const dead = await runExit([
+        "exec", NAME,
+        "mariadb", "-h", "127.0.0.1", "-P", "9999", "-uroot", "-e", "SELECT 1",
+      ]);
+      // The assertion the host-side probe could not make: nothing listening is
+      // a REFUSED connection, not an accepted one that closes 190ms later.
+      expect(dead.code).not.toBe(0);
+      // And it says so immediately, which is what makes the settle window
+      // unnecessary rather than merely unused.
+      expect(Date.now() - started).toBeLessThan(10_000);
     },
-    60_000,
+    120_000,
   );
 });
