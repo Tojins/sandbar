@@ -568,9 +568,17 @@ async function gate(
 
   await checkWorktreeImageUids(config.gateStack, hostUid);
 
-  // Reported, not refused (see `StackOptions.allowDirtyWorktree`). Tolerant of
-  // a tree that is not a git worktree at all, because nothing about running a
-  // stack requires one.
+  // Reported, not refused (see `StackOptions.allowDirtyWorktree`).
+  //
+  // Tolerant of ANY failure to read, not only of a tree that is not a git
+  // worktree — which is the commonest one and the reason the read is optional
+  // at all, but not the only way `git status` declines to answer: no `git` on
+  // the PATH, an unreadable index, a repository whose gitlink points nowhere.
+  // The catch is deliberately as wide as that list rather than narrowed to
+  // match the sentence above, because what it costs is one informational line
+  // and what a narrowed one costs is the opposite trade: matching on git's
+  // prose, and a fault exit for a tree the gate could have run against
+  // perfectly well.
   const dirty = await dirtyWorktreePaths(worktreePath).catch(() => null);
   if (dirty !== null && dirty.length > 0) {
     out(

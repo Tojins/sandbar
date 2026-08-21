@@ -886,10 +886,12 @@ export async function checkWorktreeImageUids(
 ): Promise<void> {
   // Only worktree-mounting containers. Widening this to every image would
   // refuse a perfectly good stack whose mariadb runs as uid 999 and never
-  // writes to the tree — a hard, wrong halt on every run.
-  const images = new Set(
-    stack.containers.filter((c) => c.mountWorktree !== null).map((c) => c.image),
-  );
+  // writes to the tree — a hard, wrong halt on every run. Through the shared
+  // `worktreeMountingTagsOf` rather than inline, because `createBranchImages`
+  // is handed the same set and the two are one rule: the startup check over
+  // the declared images and the per-branch check over what the branch built
+  // have to cover the same containers or the second is not the first re-asked.
+  const images = worktreeMountingTagsOf(stack);
   for (const image of images) {
     const uid = await probe(image);
     if (uid === 0 || uid === hostUid) continue;
