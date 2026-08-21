@@ -481,8 +481,7 @@ Note the sandbox siblings share the issue worktree with the gate and keep
 writing while a gate run is in progress, so the rule below applies to them too —
 and give them cache paths of their own if they compile anything.
 
-**A gate step must write only into gitignored paths.**
- The gate is a verdict
+**A gate step must write only into gitignored paths.** The gate is a verdict
 about a *commit*, so sandbar refuses to run it against a worktree with
 uncommitted changes — including untracked files. Ignored build artifacts are
 exempt (that is what lets `node_modules` survive between attempts), but a step
