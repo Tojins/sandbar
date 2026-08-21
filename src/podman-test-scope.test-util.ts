@@ -1,9 +1,13 @@
 // Per-PROCESS podman resource scope for the test files that shell out to a real
 // podman (#47).
 //
-// The three podman-touching test files create host-global resources: pods,
-// networks, containers and image tags. Podman's namespace is one per host, so
-// two processes running the same file concurrently want the same names — and
+// Two of the three podman-touching test files create host-global resources
+// under names they choose: pods, networks, containers and image tags.
+// (`agent-sandbox-podman.test.ts` is the third and needs nothing from here —
+// audited rather than assumed: its only host-global names are already
+// per-container uuids plus a read-only image probe.) Podman's namespace is one
+// per host, so two processes running the same file concurrently want the same
+// names — and
 // `startStack` FORCE-REMOVES a namesake before creating one, on the correct
 // assumption that a survivor is a crashed run's debris (#28). One process
 // therefore tears down the other's live stack mid-test.
@@ -19,12 +23,18 @@
 // construction. `stackId` is deliberately NOT tokenised: it is what makes
 // leftover debris readable, and the scope already separates it. What needs the
 // token are the names the scope does not reach, which is exactly the fixture
-// IMAGE TAGS the files write by hand. That is the worse half of the bug and a
-// scope fix alone leaves it untouched: `ensure-images-podman.test.ts` does
-// `rmi -f` on its fixture tag in `beforeEach` and rebuilds it inside the tests,
-// so two concurrent processes destroy and rebuild each other's image
-// mid-assertion with no pod involved. So `testImageTag` exists and is the only
-// way to name one — a future fixture tag cannot be written without the token.
+// IMAGE TAGS the files write by hand: `ensure-images-podman.test.ts` does
+// `rmi -f` on its fixture tag in `beforeEach` and rebuilds it inside the
+// tests, so two concurrent processes destroy and rebuild each other's image
+// with no pod involved. So `testImageTag` exists and is the only way to name
+// one — a future fixture tag cannot be written without the token.
+//
+// The issue called that tag collision the worse half of the bug. Measurement
+// says the opposite and the correction is kept here rather than lost, because
+// it decides which check is worth a human's time: the POD collision is the
+// severe, deterministic one, and the tag collision is invisible from a single
+// tree. See the verification note below for the numbers and for why the tag
+// race is nonetheless real under #48.
 //
 // WHY A UUID, NOT THE PID. A pid is unique only within a pid namespace, and
 // #48 puts these tests inside containers: three gate runners, three namespaces,
@@ -93,6 +103,35 @@
 // process, or wire `additionalimagestores` read-only at the user's real store,
 // which is a rough corner rootless. Every build would also run cold, and the
 // tests would exercise a podman configuration nothing in production uses.
+//
+// VERIFYING THIS BY HAND, and which check is worth running. The gate has no
+// podman, and `cleanup` sits in an `afterAll` inside a `describe.runIf` that
+// skips without one, so nothing automated ever executes any of this. The check
+// is two concurrent runners of one file, both passing:
+//
+//   npx vitest run src/gate-stack-podman.test.ts &
+//   npx vitest run src/gate-stack-podman.test.ts &
+//   wait
+//
+// `gate-stack-podman.test.ts` is the file that DISCRIMINATES, and knowing which
+// one does is the point of writing this down. Run that pair against the
+// pre-#47 tree and both processes fail 24-27 of their 30 tests, on every
+// attempt — `startStack` force-removing the namesake pod out from under the
+// sibling. Against this tree both pass 30/30.
+//
+// The same pair over `ensure-images-podman.test.ts` proves nothing on its own
+// and must not be recorded as evidence: it passes pre-#47 too, 0 failures in 6
+// concurrent double-runs with confirmed overlap. Two runners from ONE tree
+// build byte-identical images carrying identical fingerprint labels, so
+// clobbering the shared fixture tag rewrites it with the same content and no
+// assertion can see it happen. That does not make the tag fix ornamental — it
+// makes the race unobservable from one tree. It becomes real exactly where #48
+// puts it: three gate runners on three issue branches, three different
+// lockfiles, three different fingerprints, at which point the clobber stops
+// being idempotent. Demonstrating that needs two worktrees, not two processes.
+//
+// If either run is interrupted, kill the process GROUP and check
+// `ps -ef | grep [f]orks.js` (#25).
 //
 // `.test-util.ts` shares `*.test.ts`'s tsconfig exclusion, for the same reason:
 // without it this compiles into `dist/` and ships as importable dead weight.
