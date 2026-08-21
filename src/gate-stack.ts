@@ -437,9 +437,13 @@ export class ContainerBringupError extends SandbarError {
   ) {
     super(
       `${message}\n` +
+        // Phrased as a fact about the SOURCE, not a count of what follows:
+        // podman keeps five entries, and a container that failed fewer times
+        // than that has fewer. "last 5 probes" over three lines would be a
+        // small lie in exactly the place someone is counting.
         (healthLog
-          ? `Container health log (last ${HEALTH_LOG_ENTRIES} probes):\n` +
-            `${healthLog}\n`
+          ? `Container health log (podman keeps the last ` +
+            `${HEALTH_LOG_ENTRIES} probes):\n${healthLog}\n`
           : "") +
         `Container log tail:\n${logTail}`,
     );
@@ -843,10 +847,8 @@ function lastProbeText(
   clientDetail: string,
 ): string {
   const last = entries[entries.length - 1];
-  const output = last === undefined ? "" : stripAnsi(last.output).trim();
-  if (last === undefined) {
-    return clientDetail || "no probe was recorded";
-  }
+  if (last === undefined) return clientDetail || "no probe was recorded";
+  const output = stripAnsi(last.output).trim();
   const code = Number.isNaN(last.exitCode) ? "?" : String(last.exitCode);
   return output ? `exit ${code}: ${output}` : `exit ${code}, no output`;
 }

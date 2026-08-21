@@ -927,12 +927,18 @@ function checkReadiness(containerName: string, readiness: Readiness): void {
   // `Readiness` type says cannot exist — which is exactly the case that needs
   // the good message.
   const kind = (readiness as { readonly kind?: unknown }).kind;
-  if (typeof kind === "string" && kind in RETIRED_READINESS) {
+  // `Object.hasOwn`, not `kind in`: `in` walks the prototype chain, so a
+  // config declaring `kind: "toString"` would match and interpolate a function
+  // into the message.
+  const retired =
+    typeof kind === "string" && Object.hasOwn(RETIRED_READINESS, kind)
+      ? RETIRED_READINESS[kind]
+      : undefined;
+  if (retired !== undefined) {
     throw new SandbarError(
       `config.gateStack: container '${containerName}' declares the retired ` +
-        `'${kind}' readiness kind (#43). Podman evaluates the probe inside ` +
-        "the container now, so there is one kind: " +
-        `${RETIRED_READINESS[kind] ?? ""}`,
+        `'${kind as string}' readiness kind (#43). Podman evaluates the probe ` +
+        `inside the container now, so there is one kind: ${retired}`,
     );
   }
   if (kind !== "healthcheck") {
