@@ -140,9 +140,10 @@ export default {
           "src/gate-stack-podman.test.ts",
           "src/ensure-images-podman.test.ts",
         ],
-        // 30 minutes: ~4 measured for the pair alone, dominated by mariadb
-        // bringup and deliberate readiness timeouts, and three concurrent
-        // gates contend for one podman.
+        // 30 minutes against 229s measured for the pair alone. The runtime
+        // is dominated by mariadb bringup and by readiness timeouts the tests
+        // ask for deliberately, and three gates run concurrently at the
+        // default plan size, contending for one podman.
         timeoutMs: 1_800_000,
       },
     ],

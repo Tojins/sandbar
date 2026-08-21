@@ -245,9 +245,6 @@ export type GateStackConfig = {
   readonly steps: readonly GateStep[];
 };
 
-// Every defaultable field made concrete. Optional fields become `| null` rather
-// than staying optional so no consumer of the resolved shape has to re-decide
-// what absence means.
 // A `StackMount` with its `mode` decided, so `mountSpec` re-decides nothing.
 export type ResolvedStackMount = {
   readonly hostPath: string;
@@ -255,6 +252,9 @@ export type ResolvedStackMount = {
   readonly mode: "ro" | "rw";
 };
 
+// Every defaultable field made concrete. Optional fields become `| null` rather
+// than staying optional so no consumer of the resolved shape has to re-decide
+// what absence means.
 export type ResolvedStackContainer = {
   readonly name: string;
   readonly image: string;
