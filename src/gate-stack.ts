@@ -84,6 +84,29 @@
 // does what it exists to do instead of burning the rest of the budget against a
 // corpse.
 //
+// SINCE #49 THAT PRE-GATE CHECK ASKS A SECOND QUESTION: not only "is the
+// process still there" but "does it still work". `.State.Running` is `true` for
+// a database that accepts connections and never answers, a service wedged on a
+// lock, a process that survived an OOM with its worker pool dead — so the check
+// passed, every step that talked to the container failed, and the gate reddened
+// against a branch that never touched it. That is the same misblame #36 closed,
+// arriving through the other half of the question, and #43 is what makes it
+// cheap to close: the stack already carries a consumer-authored predicate for
+// "this service is working", and the check was not using it.
+//
+// The state question decides first and the health question is asked only of a
+// container that is RUNNING, because `podman healthcheck run` cannot classify
+// death (stopped, removed and an unwell podman are all 125 with different
+// prose). A healthcheck is also not a liveness check — it can be transiently
+// false — so it polls rather than deciding on one shot, an unanswerable probe
+// abandons rather than escalating, and a container still unhealthy at the
+// deadline is recreated in place before anything is thrown. See
+// `pollUntilHealthy` and `assertIssueContainerHealthy`, which carry the whole
+// argument; the short version is that every one of those three would otherwise
+// turn a service that is unhealthy for ten seconds into a retry storm that
+// exhausts HARD_ERROR_MAX_RETRIES and parks the issue with an "environment"
+// trace — D5 running backwards, introduced by the check meant to prevent it.
+//
 // ---------------------------------------------------------------------------
 // Nothing here may hang
 // ---------------------------------------------------------------------------
@@ -215,7 +238,12 @@
 // Residual, stated: killing the `podman healthcheck run` client leaves the
 // probe process running inside the container. That is what the `exec` kind
 // already did and what this module's header already documents for steps — no
-// regression and no new reap.
+// regression and no new reap. #49 gives the pre-gate check a second poll over
+// the same probe, so the ceiling is now (probed issue containers × attempts)
+// rather than (probed containers × 1); it is only reached on the path where a
+// probe outlives its budget, and the recreate that path can end in is also what
+// clears them. It matters at all because a held `issue` container has `sleep
+// infinity` as pid 1 and reaps nothing.
 //
 // Known limitation: a `scratch` image with no shell and no probe binary can no
 // longer declare readiness, where `tcp` could, since there is nothing in it to
@@ -468,8 +496,18 @@ export type Stack = {
 // container that dies during startup is diagnosed by its own log, which that
 // error already carries in full, and the alternative is an `inspect` on the
 // path where podman has just told us the container is stopped or gone.
+//
+// `reason` is the message WITHOUT the two blocks below it, and it exists
+// because one caller re-raises this error rather than only reporting it (#49):
+// the pre-gate health check recreates an unhealthy `issue` container, and a
+// recreate that fails has to be reported as the last step of a longer sequence
+// — healthy at bringup, unhealthy at the top of this gate run, no recovery,
+// recreated, still broken. Quoting `message` there would nest a second
+// "Container log tail:" heading inside the first; quoting `reason` and passing
+// the tail and health log on as fields keeps one of each.
 export class ContainerBringupError extends SandbarError {
   readonly containerName: string;
+  readonly reason: string;
   readonly logTail: string;
   readonly healthLog: string;
   constructor(
@@ -492,6 +530,7 @@ export class ContainerBringupError extends SandbarError {
     );
     this.name = "ContainerBringupError";
     this.containerName = containerName;
+    this.reason = message;
     this.logTail = logTail;
     this.healthLog = healthLog;
   }
@@ -1125,7 +1164,14 @@ async function pollUntilReady(
     // passed and would not help if it were: it lets the probe run to
     // completion and then labels the result as having exceeded the bound.
     const probe = await probeOnce(containerName, remainingMs(deadline));
-    if (probe.ready) return;
+    if (probe.status === "healthy") return;
+    // `unhealthy` and `error` are the same thing HERE and are deliberately not
+    // separated: nothing has yet been known to work, so a probe that failed and
+    // a probe podman could not run have exactly the same standing, and the
+    // deadline arbitrates between them. The pre-gate check (#49) shares this
+    // probe and splits them, because there the container HAD worked and an
+    // unanswerable probe is no evidence that it stopped — see
+    // `pollUntilHealthy`.
     lastErr = probe.detail;
     lastTimedOut = probe.timedOut;
     // The recipe is untrusted consumer input and the branch's own code, so a
@@ -1158,14 +1204,29 @@ function describeReadiness(
   return `healthcheck ${JSON.stringify(r.command)}`;
 }
 
-// One probe, run by podman inside the container.
+// What one probe found. THREE-VALUED since #49, and the third value is the
+// whole of that issue's third design question.
 //
-// `healthcheck run` exits 0 for a healthy probe, 1 for an unhealthy one, and
-// 125 when podman could not run it at all — most often because the container
-// is not running, which the `throwIfDead` beside this loop turns into a proper
-// bringup failure rather than a readiness timeout. The 125 branch needs no
-// special handling here for the same reason: it is not-ready either way, and
-// the state question is asked by something that can answer it.
+//   healthy   — the probe exited 0.
+//   unhealthy — the probe ran and said no. `healthcheck run` exits 1 for EVERY
+//               non-zero probe exit, a probe that itself exits 125 included
+//               (podman normalises it), so podman's own 125 can never be
+//               impersonated by the consumer's command.
+//   error     — podman could not answer: its own exit 125 (the container is
+//               not running, has no check registered), a timeout, a kill, an
+//               exit code with no meaning here, a maxBuffer overflow. Never the
+//               service answering "no".
+//
+// The two callers disagree about what `error` MEANS, which is why the split
+// lives here rather than in either loop. At bringup nothing has yet been known
+// to work, so an unanswerable probe and a failing one have identical standing
+// and the deadline arbitrates. At the top of a gate run the container HAD
+// worked, so an unanswerable probe is no evidence it stopped — and reading it
+// as evidence is `containerState`'s `unknown` rule broken through a different
+// door, i.e. a flaked podman becoming the HARD-ERROR storm.
+export type HealthProbeStatus = "healthy" | "unhealthy" | "error";
+
+// One probe, run by podman inside the container.
 //
 // The detail is the CLIENT's view, and for an ordinary failed probe it is only
 // a fallback: `healthcheck run` prints `unhealthy` and nothing else, so what the
@@ -1179,23 +1240,115 @@ function describeReadiness(
 async function probeOnce(
   containerName: string,
   timeoutMs: number,
-): Promise<{ ready: boolean; detail: string; timedOut: boolean }> {
-  const r = await boundedPodman(
-    ["healthcheck", "run", containerName],
-    timeoutMs,
-  );
-  if (boundedOk(r)) return { ready: true, detail: "", timedOut: false };
-  // A probe that never returns is NOT ready, and saying so is the whole point
+  podman: PodmanProbe = boundedPodman,
+): Promise<{ status: HealthProbeStatus; detail: string; timedOut: boolean }> {
+  const r = await podman(["healthcheck", "run", containerName], timeoutMs);
+  if (boundedOk(r)) return { status: "healthy", detail: "", timedOut: false };
+  // Exit 1 AND nothing else went wrong. The flags are tested alongside the code
+  // for the same reason `containerGone` tests them: under the timer's SIGKILL
+  // `exitCode` is null, but a 1 that arrived in the same tick the timer fired
+  // is still not the probe having answered.
+  const status: HealthProbeStatus =
+    r.exitCode === 1 && !r.timedOut && !r.maxBufferExceeded
+      ? "unhealthy"
+      : "error";
+  // A probe that never returns is NOT healthy, and saying so is the whole point
   // of doing the timing here rather than through node's `timeout:`, which
   // would have killed the client, seen it exit 0, and reported the container
   // ready.
   return {
-    ready: false,
+    status,
     timedOut: r.timedOut,
     detail: r.timedOut
       ? `probe did not return within ${timeoutMs}ms and was killed`
       : r.errorMessage,
   };
+}
+
+// What the pre-gate recovery poll concluded (#49).
+//
+// `abandoned` is not a third failure — it is the check declining to have an
+// opinion, and the gate proceeds exactly as it did before this existed.
+export type HealthVerdict = "healthy" | "unhealthy" | "abandoned";
+
+// Is a container that is RUNNING actually working? (#49)
+//
+// `containerState` answers "is the process still there", which is the right
+// question for the failures it was written against and cannot see the other
+// half: a database that accepts connections and never answers, a service wedged
+// on a lock, a process that survived an OOM with its worker pool dead.
+// `.State.Running` is `true` for all of them, every step that talks to the
+// container fails, and the gate reds against a branch that never touched it —
+// the same misblame #36 closed, arriving through the other half of the
+// question. Since #43 the consumer has already written the predicate that
+// separates them, so this asks it.
+//
+// A HEALTHCHECK IS NOT A LIVENESS CHECK, and the difference is that it can be
+// transiently false: a database mid-GC, a service reloading config, a probe
+// that flakes under load. One shot would turn any of those into a HARD-ERROR,
+// two fresh stacks, and an issue parked with an "environment" trace — D5
+// running backwards, introduced by the check meant to prevent it. So it polls,
+// and it polls to `readinessTimeoutMs` rather than to a new knob: the loop
+// probes BEFORE it sleeps and returns on the first success, so the healthy case
+// costs one probe and no wait, and the budget is only ever spent where today's
+// outcome is a HARD-ERROR that pays the same number again on each of two fresh
+// stacks. A second field would also have to mean "how long this may take to
+// RECOVER as distinct from to start", which is not a distinction a consumer can
+// calibrate, and any fixed constant is wrong for both a 2s mailhog and a 180s
+// mariadb — which is why the number is per-container to begin with.
+//
+// AN `error` ABANDONS, AT ANY POINT IN THE POLL, and does not wait for the
+// deadline. Escalating on an unanswerable probe is `containerState`'s `unknown`
+// rule broken through a different door: read as death, a flaked podman becomes
+// the retry storm this is trying not to introduce. Abandoning costs at most the
+// misblame that exists today, i.e. the status quo, and the asymmetry decides
+// it.
+//
+// The one thing that is NOT an `error` here is sandbar's own deadline expiring.
+// Each probe is bounded by what is LEFT of the budget, so the last probe of a
+// poll is routinely the one that gets killed — treated as an error, that would
+// make the escalation below fire or not fire depending on where a 500ms sleep
+// happened to land relative to a 300ms probe, i.e. a coin flip. Podman did not
+// fail there; the poll ended. So a timeout is an error only while there is
+// still budget left (a shape the seam can produce and the loop cannot), and at
+// the deadline the verdict comes from what the poll actually observed:
+// `unhealthy` if any probe ever answered, `abandoned` if none did — no probe
+// having answered is no evidence, which is the same rule again.
+// Exported for the seam: the `error` rules above are the classification half of
+// this feature, and a real podman will not produce a timed-out `healthcheck
+// run` or a SIGKILLed client on demand — the same argument `containerState`
+// makes for `PodmanProbe`. What only a real podman can produce, an actually
+// unhealthy container, is pinned in gate-stack-podman.test.ts.
+export async function pollUntilHealthy(
+  containerName: string,
+  c: ResolvedStackContainer,
+  podman: PodmanProbe = boundedPodman,
+): Promise<{ readonly verdict: HealthVerdict; readonly detail: string }> {
+  const deadline = Date.now() + c.readinessTimeoutMs;
+  let answered = false;
+  let detail = "";
+  while (Date.now() < deadline) {
+    const probe = await probeOnce(containerName, remainingMs(deadline), podman);
+    if (probe.status === "healthy") return { verdict: "healthy", detail: "" };
+    if (probe.status === "error") {
+      if (!(probe.timedOut && Date.now() >= deadline)) {
+        return { verdict: "abandoned", detail: probe.detail };
+      }
+      break;
+    }
+    answered = true;
+    detail = probe.detail;
+    // Between probes, exactly as bringup does it. A container that DIED while
+    // this waited is the case `containerState` already owns, and it must reach
+    // the caller as that error rather than as an unhealthy verdict — there is
+    // nothing for the recreate below to fix and its own bringup would report
+    // something less precise.
+    await throwIfDead(containerName, c, GATE_LABEL, DIED_DURING_RECOVERY, podman);
+    await sleep(READY_POLL_INTERVAL_MS);
+  }
+  return answered
+    ? { verdict: "unhealthy", detail }
+    : { verdict: "abandoned", detail };
 }
 
 // What podman says about a container right now.
@@ -1284,20 +1437,31 @@ export async function containerState(
   return (await containerGone(containerName, probe)) ? "gone" : "unknown";
 }
 
+// When the death this reports happened, as a phrase the two messages below
+// complete. Bringup is the original caller and keeps the original wording; the
+// pre-gate recovery poll (#49) is not startup and must not say it is — an
+// operator sent to look at a container's startup for a database that wedged at
+// attempt four reads the run log for the wrong five minutes.
+const DIED_DURING_STARTUP = "during startup";
+export const DIED_DURING_RECOVERY =
+  "while sandbar waited for it to become healthy again";
+
 async function throwIfDead(
   containerName: string,
   c: ResolvedStackContainer,
   label: string,
+  during: string = DIED_DURING_STARTUP,
+  podman: PodmanProbe = boundedPodman,
 ): Promise<void> {
-  const state = await containerState(containerName);
+  const state = await containerState(containerName, podman);
   // A flaked inspect is not evidence of death; let the deadline arbitrate.
   if (state === "running" || state === "unknown") return;
   throw new ContainerBringupError(
     containerName,
     state === "gone"
       ? `${label}: container '${c.name}' (${c.image}) no longer exists — ` +
-        "something removed it during startup."
-      : `${label}: container '${c.name}' (${c.image}) exited during startup.`,
+        `something removed it ${during}.`
+      : `${label}: container '${c.name}' (${c.image}) exited ${during}.`,
     state === "gone" ? GONE_LOG_NOTE : await logTail(containerName),
   );
 }
@@ -1372,10 +1536,18 @@ type RunGateCtx = {
 // and was waved through, which is the exact failure above reached through the
 // check meant to prevent it.
 //
+// SINCE #49 IT ASKS TWO QUESTIONS, and the state question decides first. That
+// order is forced rather than chosen: `podman healthcheck run` cannot classify
+// death — stopped, removed and a podman that is merely unwell all arrive as 125
+// with different prose, and matching podman's prose is precisely what #36
+// refused to do. So `stopped` and `gone` throw with the two messages below,
+// `unknown` stays inert, and only a container that is RUNNING is asked whether
+// it WORKS (`assertIssueContainerHealthy`).
+//
 // Residual, stated rather than hidden: this runs ONCE per gate run (just after
 // the per-branch image recreate, for the reason given at the call site). An
-// issue container that dies after it and before step N still reds that
-// gate against the branch — the misblame is narrowed from "every remaining
+// issue container that dies or wedges after it and before step N still reds
+// that gate against the branch — the misblame is narrowed from "every remaining
 // attempt" to "exactly one", not eliminated. Re-checking between steps would
 // cost a podman call per step per gate run to shave one attempt off a failure
 // that is already rare, and would still leave a window inside the step itself.
@@ -1383,7 +1555,11 @@ async function assertIssueContainersAlive(ctx: RunGateCtx): Promise<void> {
   for (const c of ctx.issueContainers) {
     const containerName = ctx.nameOf(c);
     const state = await containerState(containerName);
-    if (state === "running" || state === "unknown") continue;
+    if (state === "running") {
+      await assertIssueContainerHealthy(c, containerName, ctx);
+      continue;
+    }
+    if (state === "unknown") continue;
     // The two death states get different prose because they imply different
     // next steps: a stopped container is still there to be inspected and its
     // log read, whereas a removed one cannot be looked at at all and the
@@ -1407,6 +1583,122 @@ async function assertIssueContainersAlive(ctx: RunGateCtx): Promise<void> {
         "the branch.",
       state === "gone" ? GONE_LOG_NOTE : await logTail(containerName),
     );
+  }
+}
+
+// The half of the pre-gate check that asks whether a running container WORKS
+// (#49). See `pollUntilHealthy` for why it polls and why an unanswerable probe
+// abandons; this is what happens to the answer.
+//
+// SCOPE: `issue` containers that declared a `readiness`, and neither of those
+// restrictions is arbitrary. An `attempt` container is removed and recreated at
+// the top of every gate run, and that same `bringUp` polls its health to the
+// full budget moments before the first step — a second probe would be a
+// duplicate call with no window between it and the steps it protects — and
+// there is nothing to fix anyway, since D5 already maps its failure to a gate
+// red, so a wedged one is CORRECTLY charged to the branch. And a container with
+// no `readiness` keeps today's behaviour exactly: the consumer declared no
+// predicate for "this is working", so sandbar has none to ask.
+//
+// A PERSISTENTLY UNHEALTHY CONTAINER IS RECREATED IN PLACE BEFORE ANYTHING IS
+// THROWN. Cheapest and least destructive first, and the precedent is
+// `reapKilledStep`, whose argument transfers verbatim: the alternative is
+// throwing away a working stack and the rest of the issue's attempts for a
+// container sandbar knows exactly how to put back. It cannot lose more than the
+// retry it replaces, either — a HARD-ERROR destroys a strict superset, since it
+// recreates this container AND every other one in the stack, discards the agent
+// sandbox and restarts the issue at attempt 1. In the MERGE phase it is not
+// even an optimisation: a throw out of `runGate` in gate-2 is not a
+// `MergerError`, it halts the merge phase for the cycle, so the recreate is the
+// only recovery there is. What it does cost is real and is the one
+// `reapKilledStep` records: everything the container accumulated beyond its
+// declared setup — a schema an earlier gate step migrated, rows an earlier
+// attempt wrote — goes with it. Against a container that is unhealthy, that
+// state is already suspect.
+//
+// `ctx.running.map`, not the declared spec and not a fresh `ctx.images()`: this
+// is the other bringup that neither precedes nor follows a `running.map`
+// update, so recreating from the base image while the map still says the
+// container is on the branch's variant is #37 reintroduced — never seen as
+// stale again, every remaining attempt gated against the source branch's
+// dependencies, silently, green included.
+//
+// STILL UNHEALTHY AFTER THE RECREATE IS A HARD-ERROR, with no #37-style
+// carve-out for a branch that authored the problem. #37 carved out the case
+// where the branch authors the IMAGE, an explicit content-addressed mechanism
+// sandbar runs per branch; there is no analogous mechanism for health, whose
+// inputs are image + env + `postReadyCommands`, and `postReadyCommands` are
+// config. The tempting exception — "unhealthy because a `postReadyCommand` the
+// branch changed left it that way" — is already answered the other way one
+// function up: a `postReadyCommand` that FAILS raises `ContainerBringupError`
+// today, i.e. infra. Making the same misconfiguration a gate red when a later
+// gate run notices it and a HARD-ERROR when bringup notices it is one question
+// with two answers chosen by timing. Blame is genuinely undecidable here in any
+// case — a container healthy after its `postReadyCommands` and unhealthy now
+// was wedged by something that ran since, gate steps (branch code) or the
+// environment, and nothing distinguishes them — so what matters is which way it
+// fails: a wrong HARD-ERROR costs two stack rebuilds and a misleading terminal,
+// while a wrong red asks an implementer to fix a service it never touched and
+// burns the attempt budget against it, which is the failure this exists to
+// close.
+async function assertIssueContainerHealthy(
+  c: ResolvedStackContainer,
+  containerName: string,
+  ctx: RunGateCtx,
+): Promise<void> {
+  if (c.readiness === null) return;
+  const image = imageFor(c, ctx.running.map);
+  const { verdict, detail } = await pollUntilHealthy(containerName, c);
+  if (verdict === "healthy") return;
+  if (verdict === "abandoned") {
+    // Not silent, even though nothing follows from it: a check that declined to
+    // run is exactly the thing an operator debugging a red gate needs to know
+    // was not asked.
+    console.error(
+      `gate stack: could not get a health answer for issue-lifecycle container ` +
+        `'${c.name}' (${image}), so this gate run proceeds without one` +
+        (detail ? `: ${detail}` : "."),
+    );
+    return;
+  }
+  console.error(
+    `gate stack: issue-lifecycle container '${c.name}' (${image}) is running ` +
+      `but has been unhealthy for ${c.readinessTimeoutMs}ms ` +
+      `(${describeReadiness(c.readiness)}); recreating it in place before ` +
+      "treating it as an infrastructure failure. Anything it accumulated " +
+      "beyond its declared setup goes with it.",
+  );
+  try {
+    await bringUpContainers(withImages([c], ctx.running.map), {
+      attach: ctx.attach,
+      label: GATE_LABEL,
+      worktreePath: ctx.worktreePath,
+      nameOf: ctx.nameOf,
+    });
+  } catch (err) {
+    // The whole sequence, because none of it is recoverable afterwards: the
+    // recreate's own error describes a container that would not come up and
+    // says nothing about the wedge that caused it to be recreated, and the
+    // attempt logs are offline by the time anyone reads the terminal. `reason`
+    // rather than `message` so the tail and health log below are not nested
+    // inside a second copy of themselves.
+    if (err instanceof ContainerBringupError) {
+      throw new ContainerBringupError(
+        containerName,
+        `gate stack: issue-lifecycle container '${c.name}' (${image}) was ` +
+          "healthy when it came up for this issue, reported unhealthy at the " +
+          `top of this gate run (${describeReadiness(c.readiness)}` +
+          (detail ? `; last probe: ${detail}` : "") +
+          `), did not recover within ${c.readinessTimeoutMs}ms, and did not ` +
+          `come back when sandbar recreated it: ${err.reason}\n` +
+          "Every attempt since bringup has depended on this container, so " +
+          "this is an infrastructure failure and not a verdict about the " +
+          "branch.",
+        err.logTail,
+        err.healthLog,
+      );
+    }
+    throw err;
   }
 }
 
