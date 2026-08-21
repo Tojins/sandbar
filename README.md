@@ -448,6 +448,19 @@ builds carries one.
 A readiness failure reports the last five entries of `.State.Health.Log` — what
 the *probe* said — above the container's own log tail.
 
+**On a `lifecycle: "issue"` container this buys more than bringup gating.**
+Sandbar re-asks the probe at the top of every gate run, so a long-lived service
+that is *running but wedged* — a database that accepts connections and never
+answers, a process that survived an OOM with its worker pool dead — is caught as
+infrastructure instead of reddening the gate against a branch that never touched
+it. Because a healthcheck can be transiently false, it polls to
+`readinessTimeoutMs` rather than deciding on one shot (the healthy case is one
+probe and no wait), a probe podman could not run at all is ignored rather than
+escalated, and a container still unhealthy at the deadline is recreated in place
+before the run gives up on it. A container with no `readiness` is not asked, and
+behaves exactly as it always has. Worth declaring one where you previously would
+not have bothered.
+
 > **Upgrading from `tcp` / `log` / `exec`.** All three are rejected at resolve
 > time, before the lock, with the replacement in the message. `exec` translates
 > exactly (same argv). `tcp` becomes any in-container probe of the port — and is
