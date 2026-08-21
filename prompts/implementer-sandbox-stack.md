@@ -25,7 +25,8 @@ Some things to know before you spend time on them:
   tree the gate is a verdict about, so a service writing outside gitignored
   paths shows up as uncommitted work and costs you attempts. If that happens,
   fix where it writes rather than deleting the files each time.
-- **`podman` is not available to you and is not supposed to be.** If a service
-  is missing or wrong, that is a change to the project's `gateStack`, which is
-  ordinary code you can edit — not something to work around by installing a
-  database into this container.
+- **You are not given a container runtime, and that is deliberate.** These
+  containers are your neighbours, not yours to start, stop or rebuild. If a
+  service is missing or wrong, that is a change to the project's `gateStack`,
+  which is ordinary code you can edit — not something to work around by
+  installing a database into this container.
