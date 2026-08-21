@@ -51,8 +51,10 @@ export type PodmanTestDecision =
 export type PodmanTestInputs = {
   // What is being decided about, for the message: "gate-stack podman tests".
   readonly what: string;
-  // The literal "ok", or the reason podman/the image could not be reached.
-  readonly probe: string;
+  // Whether podman answered, and if not, why not.
+  readonly probe:
+    | { readonly ok: true }
+    | { readonly ok: false; readonly reason: string };
   readonly skipRequested: boolean;
   readonly required: boolean;
   // This file pins what a LOCAL podman client does, so a remote one cannot
@@ -90,8 +92,8 @@ export function decidePodmanTests(input: PodmanTestInputs): PodmanTestDecision {
       reason: `skipping ${input.what}: SANDBAR_SKIP_PODMAN_TESTS=1.`,
     };
   }
-  if (input.probe !== "ok") {
-    const reason = `${input.what}: ${input.probe}`;
+  if (!input.probe.ok) {
+    const reason = `${input.what}: ${input.probe.reason}`;
     return input.required
       ? {
           kind: "fail",
@@ -120,20 +122,25 @@ export function podmanTestsEnabled(opts: {
   // proof that the client can reach a daemon at all.
   readonly image: string;
   readonly needsLocalClient?: boolean;
-  readonly env?: Readonly<Record<string, string | undefined>>;
 }): boolean {
-  const env = opts.env ?? process.env;
-  const probe = ((): string => {
+  // No `env` seam, deliberately: `decidePodmanTests` above IS the seam, and it
+  // is where the policy this module exists for is proved. An injectable
+  // environment here would only let a test re-read `process.env` through a
+  // different name.
+  const env = process.env;
+  const probe = ((): PodmanTestInputs["probe"] => {
     try {
       execFileSync(RUNTIME, ["image", "exists", opts.image], {
         stdio: "ignore",
       });
-      return "ok";
+      return { ok: true };
     } catch {
-      return (
-        `${RUNTIME} or ${opts.image} unavailable ` +
-        `(\`${RUNTIME} pull ${opts.image}\` to enable them)`
-      );
+      return {
+        ok: false,
+        reason:
+          `${RUNTIME} or ${opts.image} unavailable ` +
+          `(\`${RUNTIME} pull ${opts.image}\` to enable them)`,
+      };
     }
   })();
 

@@ -14,9 +14,11 @@ import {
   decidePodmanTests,
 } from "./podman-test-availability.test-util.js";
 
+const UNREACHABLE = { ok: false, reason: "podman unavailable" } as const;
+
 const inputs = (over: Partial<PodmanTestInputs> = {}): PodmanTestInputs => ({
   what: "gate-stack podman tests",
-  probe: "ok",
+  probe: { ok: true },
   skipRequested: false,
   required: false,
   needsLocalClient: false,
@@ -32,7 +34,7 @@ describe("decidePodmanTests", () => {
   // Today's behaviour on a contributor's machine, and it is deliberately kept:
   // a missing podman should not redden a suite nobody promised it to.
   it("skips an unreachable podman when it was not required", () => {
-    const d = decidePodmanTests(inputs({ probe: "podman unavailable" }));
+    const d = decidePodmanTests(inputs({ probe: UNREACHABLE }));
     expect(d.kind).toBe("skip");
     expect(d.kind === "skip" && d.reason).toMatch(/podman unavailable/);
   });
@@ -40,9 +42,7 @@ describe("decidePodmanTests", () => {
   // The issue itself: a silent skip in the gate is a green verdict over a layer
   // that was never exercised, which is worse than no verdict at all.
   it("FAILS an unreachable podman when it was required", () => {
-    const d = decidePodmanTests(
-      inputs({ probe: "podman unavailable", required: true }),
-    );
+    const d = decidePodmanTests(inputs({ probe: UNREACHABLE, required: true }));
     expect(d.kind).toBe("fail");
     // The message has to send its reader to the socket, which is the only
     // thing that can have broken in the gate.
