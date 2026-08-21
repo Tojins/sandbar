@@ -29,14 +29,16 @@
 // have answered and did not, and a remote client answering correctly is not
 // that.
 //
-// THE MANUAL STEP IS THIS FILE AND `agent-sandbox-podman.test.ts`, both run on
-// the host. #48 shrank it from "run the full suite before trusting a cycle
-// that touched the podman layer" to those two, and the second one is easy to
-// forget precisely because its reason is different: it pins `--init` reaping
-// an orphan the entrypoint would not, which was never measured through a
-// socket rather than known to differ. It declares `needsLocalClient` for the
-// same reason this file does. Describe the step as one file and those
-// assertions are exercised by nobody, with nothing saying so.
+// THE MANUAL STEP IS THIS FILE, `agent-sandbox-podman.test.ts` AND
+// `sandbox-stack-podman.test.ts`, all run on the host. #48 shrank it from "run
+// the full suite before trusting a cycle that touched the podman layer" to that
+// set, and the second one is easy to forget precisely because its reason is
+// different: it pins `--init` reaping an orphan the entrypoint would not, which
+// was never measured through a socket rather than known to differ. The third
+// (#44) is here for this file's own reason — a `tcp` readiness probed from the
+// host, through a publish on the sandbox's anchor container. All three declare
+// `needsLocalClient`. Describe the step as one file and those assertions are
+// exercised by nobody, with nothing saying so.
 //
 // WHAT DELIBERATELY DID NOT MOVE. The test that carried fact (1)'s positive
 // half also asserted that an `issue` container keeps its id and its state

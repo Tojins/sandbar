@@ -117,20 +117,23 @@ export default {
     //
     // The exclude glob deliberately misses `gate-stack-hostpodman.test.ts`,
     // which self-skips: it holds only for a LOCAL client, and this one is
-    // remote. `agent-sandbox-podman.test.ts` is excluded and not named below —
-    // its `--init` reaping assertions were never measured through a socket, so
-    // it stays a host-only file for now, exactly as it was before this change.
+    // remote. `agent-sandbox-podman.test.ts` and `sandbox-stack-podman.test.ts`
+    // are excluded and not named below — the first's `--init` reaping
+    // assertions were never measured through a socket, and the second (#44)
+    // probes a `tcp` readiness from the host through a publish on the sandbox's
+    // anchor container, which a gate runner's own network namespace cannot
+    // reach. Both stay host-only.
     //
-    // NEITHER of those depends on this comment being right. Both files declare
+    // NONE of those depends on this comment being right. All three declare
     // `needsLocalClient`, so they skip against a remote client on their own
     // say-so — which matters because a glob and a by-hand file list are two
     // lists that drift, and the drift is silent in the direction that hurts
     // (a host-only file quietly added to `podman-test` would be a red nobody
     // asked for; one quietly dropped from BOTH would be a layer nobody runs).
     //
-    // `npm test` on the host still runs everything. The two files above are
+    // `npm test` on the host still runs everything. The three files above are
     // the whole of the manual step: run them on the host after a cycle that
-    // touched the podman layer or the sandbox run args.
+    // touched the podman layer, the sandbox run args or the sandbox stack.
     steps: [
       { name: "check", in: "runner", command: ["npm", "run", "check"] },
       {
