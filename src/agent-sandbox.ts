@@ -263,6 +263,16 @@ export type CreateSandboxOptions = {
   // is a loud error — the copy
   // belongs in prepareWorktree, silently skipping it would be worse.
   preparedWorktreePath?: string;
+  // Run after the container exists and BEFORE the sandbox-ready hooks (#44).
+  // The one caller starts the sandbox stack's siblings, which attach to this
+  // container's network namespace and so cannot be created any earlier, and
+  // which an `onSandboxReady` hook may well want to talk to.
+  //
+  // A callback rather than a return-then-continue split, because the container
+  // has to be torn down if this throws and only this module knows how: the
+  // caller has no handle yet. It is passed the container's name for the same
+  // reason `containerName` is public at all.
+  beforeSandboxReady?: (containerName: string) => Promise<void>;
   // Extra bind mounts, appended after the worktree and the git common dir
   // (#44). The one caller is the sandbox stack's log directory — a host
   // directory the followers write each sibling's `podman logs -f` into, mounted
@@ -1525,12 +1535,27 @@ export const createSandbox = async (
     });
     sandboxRepoDir = providerHandle.worktreePath;
 
-    // onSandboxReady (parallel) — only when hooks present; tear the container
-    // down first on failure (the outer catch then removes the worktree).
+    // Everything between the container existing and the sandbox being handed
+    // over. It shares ONE catch, whose whole job is to tear the container down
+    // before rethrowing — the outer catch below removes the worktree but knows
+    // nothing about the container, so anything that throws outside this block
+    // and after `create` leaks it.
     const sandboxOnReady = options.hooks?.sandbox?.onSandboxReady;
     const hostOnReady = options.hooks?.host?.onSandboxReady;
-    if (sandboxOnReady?.length || hostOnReady?.length) {
-      try {
+    try {
+      // BEFORE the hooks, deliberately (#44 D6). The sandbox stack's siblings
+      // attach to this container, so they cannot exist earlier — and an
+      // `onSandboxReady` hook is exactly the place a consumer runs migrations
+      // or seeds fixtures, which is work that wants the database it is talking
+      // to to be up. Ordered the other way, the one hook that most wants the
+      // stack is the one hook that cannot see it.
+      if (options.beforeSandboxReady) {
+        await options.beforeSandboxReady(providerHandle.containerName);
+      }
+      // Only when hooks are present: `safe.directory` is set per-run anyway
+      // (see runOneIteration), so this exec is not worth paying for on the
+      // common path that declares none.
+      if (sandboxOnReady?.length || hostOnReady?.length) {
         await sandboxExecOk(
           providerHandle,
           `git config --global --add safe.directory "${sandboxRepoDir}"`,
@@ -1545,10 +1570,10 @@ export const createSandbox = async (
           effects.push(runHostHooks(hostOnReady, worktreePath));
         }
         await Promise.all(effects);
-      } catch (e) {
-        await providerHandle.close().catch(() => {});
-        throw e;
       }
+    } catch (e) {
+      await providerHandle.close().catch(() => {});
+      throw e;
     }
   } catch (e) {
     // F4: a failure after worktree create removes the worktree first — but

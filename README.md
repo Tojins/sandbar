@@ -457,7 +457,11 @@ description of what it takes to run the app, not two.
 - **Nothing restarts a sibling.** A service that reads configuration at *boot*
   keeps what it booted with for the rest of the issue, however the agent edits
   the file. Mounted interpreted code is unaffected; a config change is not.
-- **The agent can read their logs.** Each sibling's `podman logs -f` is followed
+- **Your `onSandboxReady` hooks run after the siblings are up**, so that is the
+  place to run a migration or load fixtures against them. (`onWorktreeReady`
+  still runs before anything is started — it is where `npm ci` belongs.)
+- **The agent can read their logs.**
+ Each sibling's `podman logs -f` is followed
   into a file on the host and mounted read-only at `/sandbar/logs/<name>.log`.
   Those files also land in the run log tree.
 - **A sibling that will not start is reported, not fatal** — for an `attempt`

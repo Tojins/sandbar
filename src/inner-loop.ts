@@ -293,6 +293,7 @@ async function runSandboxCycle(
     // SOURCE and podman reads it at container start, so a missing one is a
     // bringup failure rather than an empty mount.
     if (sbxContainers.length > 0) await prepareSandboxLogDir(sandboxLogDir);
+    const holder: { stack: SandboxStack | null } = { stack: null };
 
     const [sandboxResult, stackResult] = await Promise.allSettled([
       agentSandbox.createSandbox({
@@ -322,6 +323,27 @@ async function runSandboxCycle(
                   readonly: true,
                 },
               ],
+              // The siblings attach to the agent container, so they cannot be
+              // started before it — but they must be up before the
+              // `onSandboxReady` hooks, which is exactly where a consumer runs
+              // the migration that wants the database (#44 D6). Inside
+              // `createSandbox` rather than after it, so the container is torn
+              // down if an `issue`-lifecycle sibling refuses to start, and so
+              // this bringup still overlaps the gate stack's.
+              //
+              // A holder rather than a closed-over `let`: an assignment inside
+              // a callback is invisible to TypeScript's narrowing, so the
+              // binding would read as `null` forever at every later use.
+              beforeSandboxReady: async (containerName: string) => {
+                holder.stack = await startSandboxStack({
+                  issueId: issue.id,
+                  scope: config.scope,
+                  spec: config.gateStack,
+                  worktreePath,
+                  anchorContainerName: containerName,
+                  logDir: sandboxLogDir,
+                });
+              },
             }
           : {}),
       }),
@@ -335,34 +357,27 @@ async function runSandboxCycle(
         ...(branchImages ? { images: () => branchImages.resolve(worktreePath) } : {}),
       }),
     ]);
+    // Read out BEFORE the throw below, not after it. The callback runs inside
+    // `createSandbox`, so a failure anywhere after it — a sandbox-ready hook, a
+    // later sibling — rejects that promise with a stack already created, and
+    // reading the holder only on the success path would leave those containers
+    // to `createSandbox`'s own `--depend` teardown alone and their log
+    // followers running with nothing left to follow.
+    //
+    // What the stack itself throwing means: an `issue`-lifecycle sibling that
+    // would not start is infrastructure → HARD-ERROR → a fresh sandbox, the
+    // same treatment the gate stack's failure gets. A failed `attempt` one
+    // never throws at all — the sandbox comes up degraded and the agent is told
+    // in its prompt (D3).
+    sandboxStack = holder.stack;
+    sandboxStatuses = sandboxStack?.statuses ?? [];
+
     if (sandboxResult.status === "fulfilled") sandbox = sandboxResult.value;
     if (stackResult.status === "fulfilled") stack = stackResult.value;
     if (sandbox === null || stack === null) {
       throw sandboxResult.status === "rejected"
         ? sandboxResult.reason
         : (stackResult as PromiseRejectedResult).reason;
-    }
-
-    // The siblings can only be created once the anchor exists, so this is
-    // sequential rather than a third entry in the pair above (#44 D6). What it
-    // costs is the overlap between this bringup and the gate stack's, which is
-    // small: `startStack` brings up only the `issue` half of the gate.
-    //
-    // A throw here is an `issue`-lifecycle sibling that would not start, which
-    // is infrastructure and takes the HARD-ERROR path to a fresh sandbox — the
-    // same treatment the gate stack's would get, and the reason it is NOT
-    // wrapped in a catch. A failed `attempt` sibling never throws: the sandbox
-    // comes up degraded and the agent is told (D3).
-    if (sbxContainers.length > 0) {
-      sandboxStack = await startSandboxStack({
-        issueId: issue.id,
-        scope: config.scope,
-        spec: config.gateStack,
-        worktreePath,
-        anchorContainerName: sandbox.containerName,
-        logDir: sandboxLogDir,
-      });
-      sandboxStatuses = sandboxStack.statuses;
     }
 
     // startStack already registered stack.stop with onCleanup before it created

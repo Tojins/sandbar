@@ -9,7 +9,7 @@
 // and the two-phase completion timer (F5).
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -888,6 +888,86 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     } finally {
       await sandbox.close();
     }
+  });
+
+  // #44 D6. The sandbox stack's siblings attach to this container, so they
+  // cannot exist earlier — and `onSandboxReady` is exactly where a consumer
+  // runs the migration that wants the database. Ordered the other way, the one
+  // hook that most wants the stack is the one hook that cannot see it.
+  it("runs beforeSandboxReady after the container exists and before the sandbox-ready hooks", async () => {
+    await git(["branch", "sandbar/issue-44-order"], dir);
+    const orderLog = join(dir, "order-44.log");
+    const provider = makeLocalProvider();
+    // One shared file, because the two events happen on opposite sides of the
+    // boundary: an in-process callback and a host hook shelling out. Comparing
+    // them any other way would be comparing two clocks.
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-44-order",
+      sandbox: provider,
+      layout: layoutFor(dir),
+      beforeSandboxReady: async (containerName) => {
+        await appendFile(orderLog, `before:${containerName}\n`);
+      },
+      hooks: {
+        host: {
+          onSandboxReady: [{ command: `printf 'hook\\n' >> ${orderLog}` }],
+        },
+      },
+    });
+    try {
+      // The name is the anchor the siblings would join, so it has to be the
+      // real container's rather than a placeholder.
+      expect((await readFile(orderLog, "utf8")).trim().split("\n")).toEqual([
+        "before:fake-sandbox-container",
+        "hook",
+      ]);
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // The container is created by then and only this module has a handle to it,
+  // so a throw that escaped without closing it would leak a container per
+  // issue — and the outer catch below knows about the worktree, not the
+  // container.
+  it("tears the container down when beforeSandboxReady throws", async () => {
+    await git(["branch", "sandbar/issue-44-teardown"], dir);
+    const worktreePath = await prepareWorktree({
+      branch: "sandbar/issue-44-teardown",
+      layout: layoutFor(dir),
+    });
+    let closed = false;
+    const provider: SandboxProvider = {
+      tag: "bind-mount",
+      name: "podman",
+      env: {},
+      sandboxHomedir: "/home/agent",
+      create: async (opts: ProviderCreateOptions) => ({
+        worktreePath: opts.worktreePath,
+        containerName: "fake-sandbox-container",
+        exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+        close: async () => {
+          closed = true;
+        },
+      }),
+    };
+    await expect(
+      createSandbox({
+        env: {},
+        branch: "sandbar/issue-44-teardown",
+        sandbox: provider,
+        layout: layoutFor(dir),
+        preparedWorktreePath: worktreePath,
+        beforeSandboxReady: async () => {
+          throw new Error("issue-lifecycle sibling would not start");
+        },
+      }),
+    ).rejects.toThrow("issue-lifecycle sibling would not start");
+    expect(closed).toBe(true);
+    // Caller-owned, so it survives — the same rule the bringup case below pins.
+    expect(existsSync(worktreePath)).toBe(true);
+    await git(["worktree", "remove", "--force", worktreePath], dir);
   });
 
   it("a container bringup failure leaves the caller-owned prepared worktree in place", async () => {

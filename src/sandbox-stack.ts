@@ -57,6 +57,30 @@
 // happened to be mounted.
 //
 // ---------------------------------------------------------------------------
+// Ordering
+// ---------------------------------------------------------------------------
+// Up: the issue worktree, then `hooks.host.onWorktreeReady` (a consumer's
+// `npm ci` — the siblings may need `node_modules` to exist before they boot),
+// then the ANCHOR carrying the chain's publish ports, then the siblings, then
+// `hooks.*.onSandboxReady`. That last position is the one worth stating: the
+// siblings are up BEFORE the sandbox-ready hooks, because those hooks are
+// exactly where a consumer runs the migration or the seed that wants the
+// database. Ordered the other way, the one hook that most wants the stack is
+// the one hook that cannot see it. `createSandbox`'s `beforeSandboxReady` is
+// what buys it.
+//
+// Down: JOINERS BEFORE THE ANCHOR, since removing the anchor destroys the
+// namespace under them — and podman refuses to do it at all while one is
+// attached, so getting this backwards leaks the whole chain rather than half.
+//
+// Siblings are created once per SANDBOX and disposed with it. The gate's
+// "recreate `attempt` containers every gate run" rule does not carry over: it
+// exists so a verdict is never formed against stale code, and this stack forms
+// no verdict, while recreating would throw away whatever the agent had
+// accumulated. A HARD-ERROR retry gets a whole fresh set, exactly as it gets a
+// fresh agent container.
+//
+// ---------------------------------------------------------------------------
 // Whose failure a failed bringup is
 // ---------------------------------------------------------------------------
 // D5's question, rotated onto a stack that has no verdict to redden:
