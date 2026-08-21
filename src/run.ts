@@ -47,6 +47,7 @@ import {
   checkWorktreeImageUids,
   createBranchImages,
   ensureImages,
+  pulledImagesOf,
   removeBranchImages,
   sweepBranchImages,
 } from "./ensure-images.js";
@@ -106,16 +107,6 @@ const MAX_ITERATIONS = 100;
 // The merge phase's stack id. Distinct from every issue id (which are numeric),
 // so its pod, network and containers can never collide with an issue's.
 const MERGER_STACK_ID = "merger";
-
-// Images the gate stack references that sandbar does NOT build. Preflight
-// refuses when one is missing rather than pulling it (#24 D7) — a run must not
-// do silent network work at startup, and a `podman pull` behind the lock turns
-// a config error into a slow one.
-function pulledImagesOf(config: ResolvedConfig): readonly string[] {
-  const built = new Set(config.images.map((i) => i.tag));
-  const referenced = new Set(config.gateStack.containers.map((c) => c.image));
-  return [...referenced].filter((i) => !built.has(i));
-}
 
 // A leaked resource is recoverable — the next cycle's `startStack` force-removes
 // a namesake before creating one — so a failed sweep is not fatal. It is also

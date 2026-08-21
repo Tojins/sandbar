@@ -108,6 +108,33 @@ export function runScope(lockedWorkDir: string): RunScope {
   return `w${hex}` as RunScope;
 }
 
+// The scope for a standalone `sandbar gate` (#45), which holds no run lock and
+// so cannot derive one from a locked workdir.
+//
+// It has to be BOTH stable and disjoint, and the two pull opposite ways.
+// Disjoint from every run's scope, because `cleanupOrphanContainers` and
+// `sweepBranchImages` force-remove everything in the scope they are handed: a
+// standalone gate sharing a run's scope would be swept away by that run's
+// between-cycle sweep mid-verdict, and #28's argument applies verbatim — the
+// two hold different locks (here, none at all), so neither may claim the
+// other's resources. Stable across invocations, because reusing an
+// `issue`-lifecycle container is the second half of #45's ask and a random
+// scope has nothing to reuse.
+//
+// The identity is the WORKTREE, not the config file and not the workdir: the
+// stack is a verdict about that tree, every mount resolves against it, and two
+// invocations that mean the same reuse are exactly two invocations over the
+// same tree. The literal prefix is what keeps it off a run's scope even when
+// the tree gated is the directory a run's `.sandbar` sits in — two different
+// strings into sha256, so no arithmetic relates the results.
+//
+// The caller passes the CANONICAL path, for the reason `runScope` gives one
+// paragraph up: a tree reached through a symlink must not get a second scope,
+// or a kept stack is invisible to the invocation that meant to reuse it.
+export function gateScope(canonicalWorktreePath: string): RunScope {
+  return runScope(`/sandbar-gate/${canonicalWorktreePath}`);
+}
+
 // Everything this run creates starts with this, and the sweeper's name filters
 // key on exactly this. `sandbar-w1a2b3c4d-`.
 export function scopedResourcePrefix(scope: RunScope): string {
