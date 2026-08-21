@@ -1725,4 +1725,87 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
     },
     300_000,
   );
+
+  // The combination that must not stand: `--keep` over a bringup that never
+  // finished. The token is a pod label written at pod-CREATE time and the adopt
+  // test is "podman says this container is running", so neither says the
+  // previous invocation got to the end — and `bringUpContainers` starts every
+  // container, then probes every one, then runs every `postReadyCommand`, so a
+  // failure in the last loop leaves a container that is up, healthy, and
+  // missing exactly the setup a reuse then declines to re-run.
+  //
+  // Modelled as the operator's own sequence, because that is what makes the
+  // token match on the second invocation: the seed reads a file in the
+  // worktree, so fixing it changes no config at all. With the wreckage kept,
+  // the second call adopts `db`, skips its postReadyCommands because they are
+  // "already done", and gates against a database that was never seeded.
+  it(
+    "does not keep — and so cannot adopt — a stack whose bringup never finished",
+    async () => {
+      const seedFlag = join(repo, "seed-flag");
+      const seeding = () =>
+        resolveGateStack({
+          containers: [
+            {
+              name: "db",
+              image: IMAGE,
+              lifecycle: "issue",
+              hold: true,
+              mounts: [{ hostPath: "seed-flag", containerPath: "/seed-flag" }],
+              postReadyCommands: [
+                ["sh", "-c", "grep -q ok /seed-flag && date +%s%N > /seeded"],
+              ],
+            },
+            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+          ],
+          steps: [
+            { name: "read-marker", in: "runner", command: ["cat", "marker.txt"] },
+          ],
+        });
+
+      await writeFile(seedFlag, "fail\n");
+      const failed = await startStack({
+        stackId: GATE_STACK_ID,
+        scope: SCOPE,
+        worktreePath: repo,
+        spec: seeding(),
+        reuseToken: "token-seed",
+        keepAlive: true,
+        allowDirtyWorktree: true,
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect((failed as Error | null)?.message).toContain("postReadyCommand");
+      // Torn down despite `keepAlive`: no pod to carry the token, and no
+      // running container behind it. Both halves of the adopt test are gone,
+      // which is the property — not that the pod happens to be missing.
+      expect(await idOf("db")).toBeNull();
+      await expect(
+        exec(RUNTIME, ["pod", "exists", podName]),
+      ).rejects.toBeTruthy();
+
+      // The operator fixes the seed and reruns. Same config, so the same token
+      // — the case a "the label matched, so it is ours" reuse gets wrong.
+      await writeFile(seedFlag, "ok\n");
+      const fixed = await startStack({
+        stackId: GATE_STACK_ID,
+        scope: SCOPE,
+        worktreePath: repo,
+        spec: seeding(),
+        reuseToken: "token-seed",
+        keepAlive: true,
+        allowDirtyWorktree: true,
+      });
+      expect(fixed.reused).toEqual([]);
+      // …and the seed the first invocation never got to has now run, which is
+      // what `reused: []` is worth asserting FOR: an adopted container would
+      // have skipped it and gated against an unseeded database.
+      expect(
+        (await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])).stdout.trim(),
+      ).not.toBe("");
+      await fixed.stop();
+    },
+    600_000,
+  );
 });

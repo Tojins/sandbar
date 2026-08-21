@@ -500,6 +500,12 @@ export type StackOptions = {
   // `stop` stays registered with `onCleanup` and stays idempotent; it simply
   // removes nothing, which is what makes a Ctrl-C mid-gate keep the stack too —
   // the state the operator asked to be able to inspect.
+  //
+  // It keeps a stack that CAME UP, and only that. A bringup that threw — or a
+  // signal during one — tears down regardless, because the reuse above would
+  // otherwise adopt a half-built stack as one this config describes; the
+  // argument is at `stop`'s own early return, since that is where the
+  // condition is enforced.
   readonly keepAlive?: boolean;
 
   // Skip D1's dirty-worktree refusal.
@@ -878,6 +884,10 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     stackContainerNameFor(opts.scope, opts.stackId, c.name);
 
   let stopped = false;
+  // Did the bringup below run to completion? `--keep` is conditioned on it,
+  // and that condition is the whole of what makes adopting a kept stack sound
+  // (#45) — see the early return in `stop`.
+  let broughtUp = false;
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
@@ -885,7 +895,28 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // about the cleanup contract changes — this teardown simply has nothing to
     // do. Placed after the `stopped` latch rather than before the registration
     // so a signal still runs the action and still finds it already spent.
-    if (opts.keepAlive === true) return;
+    //
+    // But ONLY for a stack that CAME UP, and that half is load-bearing rather
+    // than tidy. The reuse token is a pod LABEL written at pod-create time, and
+    // the adopt test is "podman says this container is running" — neither of
+    // which says the previous invocation's bringup finished. A half-built stack
+    // kept here is therefore fully adoptable by the next invocation of the same
+    // config, and `bringUpContainers` starts every container, then probes every
+    // one, then runs every `postReadyCommand`, so a failure anywhere in that
+    // sequence leaves earlier containers running, healthy, and missing the
+    // migration or the seed that was to follow. The next `sandbar gate`
+    // re-probes them (they pass — they were never unhealthy), deliberately does
+    // not re-run their `postReadyCommands`, and forms a verdict against a
+    // database whose declared setup never ran: a stack that does not match its
+    // config, reached through the mechanism whose whole soundness argument is
+    // that the token proves it does. So a stack that never came up is not a
+    // stack to keep. This covers the signal path too, which is why the flag is
+    // read here rather than at the one throw site: a Ctrl-C mid-bringup would
+    // otherwise leave exactly the same adoptable wreckage.
+    //
+    // A red gate STEP — which is what `--keep` is actually for — is untouched:
+    // that path never enters the catch and `broughtUp` is long since true.
+    if (opts.keepAlive === true && broughtUp) return;
     // `pod rm -f` takes the member containers AND the infra container with it.
     // The infra container is named `<pod-id-prefix>-infra`, which matches no
     // sandbar prefix — removing containers by name would leave it, and the pod,
@@ -1054,6 +1085,11 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // shared resolver a superset (#46).
     const imagesThisStackRuns = new Set(opts.spec.containers.map((c) => c.image));
 
+    // Every container is created, probed and past its `postReadyCommands`.
+    // This is the fact `--keep` is conditioned on above, so it is set here:
+    // after the last statement that can throw, and before the only value this
+    // function hands back.
+    broughtUp = true;
     return {
       podName,
       networkName,
