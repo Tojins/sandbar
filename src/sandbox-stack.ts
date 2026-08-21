@@ -124,6 +124,14 @@
 // READ-ONLY into the agent container at `/sandbar/logs/<name>.log`. Side
 // benefit: those files are an offline artefact in the run log tree.
 //
+// The statuses this returns are a snapshot of BRINGUP, not a live readout, and
+// nothing re-reads them: a sibling OOM-killed at attempt 4 still renders as
+// running in every later prompt. The gate re-checks its `issue` containers
+// before every gate run because a corpse there produces a wrong VERDICT (D5);
+// here the cost is an agent chasing a connection refused, so the prompt is told
+// what the list is instead — a per-attempt liveness sweep would be the fix if
+// that ever proves worse than it sounds.
+//
 // RESTART IS DELIBERATELY NOT HERE, and it is stated as a limit rather than
 // assumed away: a sibling that reads configuration at BOOT is stale for the
 // rest of the issue once the agent edits it, and nothing in this design

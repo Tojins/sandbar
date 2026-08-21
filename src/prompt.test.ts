@@ -316,6 +316,15 @@ describe("renderSandboxStackSlot (#44)", () => {
     expect(slot).toMatch(/restarts a sibling/i);
   });
 
+  // The list is written once, at bringup, and nothing re-reads it — so a
+  // sibling that has died since still renders as running. Saying so is the
+  // whole of what sandbar does about that, which makes the sentence load-
+  // bearing rather than decorative: without it the prompt asserts, every
+  // attempt, that a container it has not looked at in an hour is up.
+  it("says the list is a bringup snapshot rather than a live readout", () => {
+    expect(renderSandboxStackSlot([up])).toMatch(/came up when your sandbox was created/i);
+  });
+
   // D3: an `attempt` sibling that will not start is the branch's own bootstrap
   // breaking, and the agent is the one entity that can fix it. Omitting it
   // would leave the agent to discover a missing service by watching a
