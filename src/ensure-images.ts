@@ -593,10 +593,21 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
 //     make every later sandbox for that branch fail to start — including the
 //     ones whose entire purpose is to repair it — and the branch outlives the
 //     cycle, so a resumable issue would be wedged rather than merely red. The
-//     gate resolves the same entry independently, reds with the same build
-//     output and blames the branch, so nothing about the verdict path goes
-//     quiet; only the agent's environment is one commit stale, which is exactly
-//     the pre-#46 state and is recoverable from inside the sandbox.
+//     agent's environment is then one commit stale, which is exactly the
+//     pre-#46 state and is recoverable from inside the sandbox.
+//
+// What that fallback COSTS depends on whether a gate container runs the same
+// tag, and the report must not guess. Where it does — sandbar's own config
+// gives one image both roles — the gate resolves the entry itself, reds with
+// the same build output and blames the branch, so this line is a warning about
+// a verdict already on its way. Where the entry is the SANDBOX'S ALONE, which
+// is the configuration this feature exists to serve and the one the README's
+// example writes, no gate run ever resolves it: `startStack` asks only about
+// the images its own spec names. The gate then goes green on images that built
+// fine and this line is the only report the failure ever gets. Telling that
+// operator to wait for a gate red would send them to watch for something that
+// cannot arrive, so `gateRunsSameImage` is a required parameter rather than an
+// assumption the message makes on their behalf.
 //
 // The fallback is reported rather than swallowed: `onFallback` reaches the run
 // log and the operator's console at the call site.
@@ -606,6 +617,10 @@ export async function resolveSandboxImage(opts: {
   // Absent when the run has no per-branch resolver at all (tests, a host that
   // declares no `rebuildOn`) — the declared tag is then the only answer.
   readonly branchImages?: BranchImages | undefined;
+  // Does any `gateStack` container run `declaredTag`? It decides what the
+  // fallback report can honestly promise, and is required for exactly that
+  // reason — see above.
+  readonly gateRunsSameImage: boolean;
   readonly onFallback?: (line: string) => void | Promise<void>;
 }): Promise<string> {
   const { branchImages, declaredTag, worktreePath } = opts;
@@ -621,10 +636,16 @@ export async function resolveSandboxImage(opts: {
       `could not build a per-branch agent sandbox image from '${declaredTag}' ` +
         `for ${worktreePath}; starting the sandbox on '${declaredTag}' as ` +
         "declared, which carries the source branch's version of its declared " +
-        "inputs. The gate resolves this image independently and will report " +
-        `the same failure against the branch: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        "inputs. " +
+        (opts.gateRunsSameImage
+          ? "A gate container runs this same image, so the gate resolves the " +
+            "entry itself and will red with this build's output, against the " +
+            "branch."
+          : "No `gateStack` container runs this image, so nothing else ever " +
+            "resolves it: the gate's verdict is computed from images that " +
+            "built, and this line is the only report this failure gets.") +
+        " The agent's environment is a commit behind its own branch until it " +
+        `installs for itself: ${err instanceof Error ? err.message : String(err)}`,
     );
     return declaredTag;
   }

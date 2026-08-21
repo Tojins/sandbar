@@ -271,6 +271,13 @@ async function runSandboxCycle(
           declaredTag: config.sandboxImage,
           worktreePath,
           branchImages,
+          // What a failed build costs the operator turns on this, so it is
+          // answered from the spec rather than assumed: only a gate container
+          // running the same tag makes the failure show up a second time, as a
+          // red against the branch.
+          gateRunsSameImage: config.gateStack.containers.some(
+            (c) => c.image === config.sandboxImage,
+          ),
           onFallback: async (detail) => {
             const line = `issue=${issue.id} sandbox-image fallback — ${detail}`;
             console.error(`  ${line}`);

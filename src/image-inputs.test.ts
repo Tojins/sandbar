@@ -535,6 +535,7 @@ describe("createBranchImages", () => {
       declaredTag: "app",
       worktreePath: branch,
       branchImages,
+      gateRunsSameImage: true,
     });
     const gate = await branchImages.resolve(branch, runs("app"));
     expect(gate.get("app")).toBe(sandbox);
@@ -570,6 +571,7 @@ describe("resolveSandboxImage", () => {
       declaredTag: "sandbox",
       worktreePath: branch,
       branchImages: harness(base, async () => {}),
+      gateRunsSameImage: false,
     });
     expect(image).toBe(
       variantImageTag("sandbox", scope, (await fp(branch, SANDBOX))!),
@@ -587,21 +589,26 @@ describe("resolveSandboxImage", () => {
         branchImages: harness(base, async () => {
           builds += 1;
         }),
+        gateRunsSameImage: false,
       }),
     ).resolves.toBe("sandbox");
     expect(builds).toBe(0);
     // A run with no per-branch resolver — a host that declares no `rebuildOn`.
     await expect(
-      resolveSandboxImage({ declaredTag: "sandbox", worktreePath: source }),
+      resolveSandboxImage({
+        declaredTag: "sandbox",
+        worktreePath: source,
+        gateRunsSameImage: false,
+      }),
     ).resolves.toBe("sandbox");
   });
 
-  it("falls back to the declared tag when the build fails, and says so", async () => {
-    // Throwing here wedges the branch rather than failing it: the sandbox is
-    // where the fix gets written, the branch outlives the cycle, and every
-    // later attempt to start a sandbox for it would hit the same broken
-    // lockfile before the agent could touch anything. The gate resolves the
-    // same entry on its own and reds with this build's output.
+  // A build that fails, in both configurations. The fallback direction is the
+  // same in each — throwing wedges the branch rather than failing it, since the
+  // sandbox is where the fix gets written and the branch outlives the cycle —
+  // but what the operator is owed differs, and that is the part a message can
+  // get wrong.
+  async function fallback(gateRunsSameImage: boolean) {
     const source = await tree({ Containerfile: "FROM x", "package-lock.json": "{}" });
     const branch = await tree({ Containerfile: "FROM x", "package-lock.json": "b" });
     const base = new Map([["sandbox", (await fp(source, SANDBOX))!]]);
@@ -612,14 +619,38 @@ describe("resolveSandboxImage", () => {
       branchImages: harness(base, async () => {
         throw new SandbarError("npm ci: ETARGET no matching version");
       }),
+      gateRunsSameImage,
       onFallback: (line) => {
         reported.push(line);
       },
     });
+    return { image, reported };
+  }
+
+  it("falls back to the declared tag when the build fails, and never silently", async () => {
+    const { image, reported } = await fallback(false);
     expect(image).toBe("sandbox");
-    // Never silent: this is the operator's only sign that the agent is working
-    // in an environment one commit behind its own branch.
+    // The operator's only sign that the agent is working in an environment a
+    // commit behind its own branch.
     expect(reported).toHaveLength(1);
     expect(reported[0]).toContain("ETARGET");
+  });
+
+  it("promises a second report only when a gate container runs the same image", async () => {
+    // The compensating control for falling back is that the GATE resolves the
+    // same entry and reds against the branch — and that exists only when a
+    // gateStack container runs this tag. `startStack` asks the resolver about
+    // the images its own spec names, so for a sandbox-only entry — the config
+    // this feature is for — no gate run ever touches it, the gate goes green on
+    // images that built, and this line is the whole of the report. Telling that
+    // operator to wait for a red sends them to watch for something that cannot
+    // arrive.
+    const alone = (await fallback(false)).reported[0]!;
+    expect(alone).toMatch(/only report/);
+    expect(alone).not.toMatch(/will red/);
+
+    const shared = (await fallback(true)).reported[0]!;
+    expect(shared).toMatch(/will red with this build's output, against the branch/);
+    expect(shared).not.toMatch(/only report/);
   });
 });

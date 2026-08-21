@@ -706,6 +706,9 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // stale, and the empty map above is the honest starting value.
     const running = { map: new Map<string, string>() as ImageMap };
     const imageResolver = opts.images;
+    // Computed here, from this stack's own spec, so no caller can hand the
+    // shared resolver a superset (#46).
+    const imagesThisStackRuns = new Set(opts.spec.containers.map((c) => c.image));
 
     return {
       podName,
@@ -721,7 +724,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
           hostPorts,
           nameOf,
           images: imageResolver
-            ? () => imageResolver(new Set(opts.spec.containers.map((c) => c.image)))
+            ? () => imageResolver(imagesThisStackRuns)
             : async () => new Map(),
           running,
         }),

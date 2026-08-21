@@ -396,11 +396,21 @@ Two things differ from the gate's version:
   that container away — and an agent can install into its own sandbox with one
   command. What the branch adds *during* the run still reaches the gate, which
   is where verdicts come from;
-- a build that fails leaves the sandbox on the **declared** tag, with a line in
-  the run log, rather than refusing to start. The sandbox is where the fix gets
-  written and the branch outlives the cycle, so a throw would wedge the issue
-  instead of failing it. The gate resolves the same entry independently and reds
-  with the same build output, against the branch.
+- a build that fails leaves the sandbox on the **declared** tag, with a line on
+  the console and in the run log, rather than refusing to start. The sandbox is
+  where the fix gets written and the branch outlives the cycle, so a throw would
+  wedge the issue instead of failing it — every later sandbox for that branch,
+  including the ones meant to repair it, would fail before the agent's first
+  turn. The agent then works a commit behind its own branch, and can install
+  for itself.
+
+  Read that line, because how much else you will hear depends on your config.
+  If a `gateStack` container runs the **same tag**, the gate resolves the entry
+  itself and reds with the same build output, against the branch — the line is
+  advance warning. If the entry is the **sandbox's alone**, as in the example
+  above, nothing else resolves it: the gate's verdict is computed from images
+  that built fine, so it can go green and the fallback line is the only report
+  you will get. Sandbar says which case you are in.
 
 The rebuild lands in the issue's critical path, before the agent's first turn,
 and the sandbox image is usually the largest one — so it costs what your layer
