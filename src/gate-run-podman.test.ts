@@ -33,7 +33,12 @@ import {
   GATE_STACK_ID,
   runGateCommand,
 } from "./gate-run.js";
-import { gateScope, podNameFor } from "./naming.js";
+import {
+  gateScope,
+  networkNameFor,
+  podNameFor,
+  stackContainerNameFor,
+} from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -98,6 +103,16 @@ describe.runIf(available)("sandbar gate against real podman", () => {
 
   afterEach(async () => {
     await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(() => {});
+    // The network too, for the tests that end with a stack still up: `--keep`
+    // makes `stop` remove neither, and every test here gets a fresh `mkdtemp`
+    // worktree and so a scope no later run computes — debris nothing would
+    // ever reclaim.
+    await exec(RUNTIME, [
+      "network",
+      "rm",
+      "-f",
+      networkNameFor(gateScope(repo), GATE_STACK_ID),
+    ]).catch(() => {});
     await rm(repo, { recursive: true, force: true });
   }, 120_000);
 
@@ -167,6 +182,107 @@ describe.runIf(available)("sandbar gate against real podman", () => {
         await runGateCommand(cfg, { worktree: repo, keep: false, ...sink }),
       ).toBe(GATE_EXIT_GREEN);
       expect(await podExists()).toBe(false);
+    },
+    600_000,
+  );
+
+  // The case `--keep` exists for, and the one no fake can produce honestly:
+  // podman says a container is running while the service inside it is wedged
+  // (#45).
+  //
+  // `broughtUp` used to mean "this call finished a bringup", which is a
+  // different fact from "nothing in this pod is half-built" on exactly one
+  // path — this one. An ADOPTED stack creates nothing, so a failure in the
+  // re-probe that follows destroyed a complete stack: the database and
+  // everything its `postReadyCommands` built, at the moment its log was the
+  // only diagnosis available. Both halves are asserted, because each fails
+  // alone: the pod SURVIVES, and the notice does not claim a half-built
+  // bringup — the stack handle is null here exactly as it is for a bringup
+  // that never started, so a notice keyed on that alone says both untrue
+  // things at once.
+  it(
+    "keeps an adopted stack whose re-probe fails, and does not call it a half-built bringup",
+    async () => {
+      const out: string[] = [];
+      const sink = { out: (t: string) => out.push(t), err: (t: string) => out.push(t) };
+      const dbName = stackContainerNameFor(gateScope(repo), GATE_STACK_ID, "db");
+      const cfg = config([
+        { name: "read", in: "runner", command: ["cat", "marker.txt"] },
+      ]);
+      // Held, so the container is `sleep infinity` and its own service is
+      // nothing but the file the probe reads — which is what lets the test
+      // wedge it from outside without killing it. `/tmp`, because `podman
+      // exec` enters as the image's user and this one is not root's to write.
+      const withDb: RunConfig = {
+        ...cfg,
+        gateStack: {
+          ...cfg.gateStack,
+          containers: [
+            ...cfg.gateStack.containers,
+            {
+              name: "db",
+              image: IMAGE,
+              lifecycle: "issue",
+              hold: true,
+              readiness: {
+                kind: "healthcheck",
+                command: ["sh", "-c", "test ! -f /tmp/wedged"],
+              },
+              readinessTimeoutMs: 5_000,
+              // One-shot setup, deliberately not re-run for an adopted
+              // container — so this file is what the teardown would have
+              // destroyed, and its survival is what the fix is FOR.
+              postReadyCommands: [["sh", "-c", "date +%s%N > /tmp/seeded"]],
+            },
+          ],
+        },
+      };
+      const dbId = async (): Promise<string | null> =>
+        await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", dbName])
+          .then((r) => r.stdout.trim())
+          .catch(() => null);
+
+      expect(
+        await runGateCommand(withDb, { worktree: repo, keep: true, ...sink }),
+      ).toBe(GATE_EXIT_GREEN);
+      const keptPod = await podId();
+      const keptDb = await dbId();
+      const seeded = (
+        await exec(RUNTIME, ["exec", dbName, "cat", "/tmp/seeded"])
+      ).stdout.trim();
+      expect(keptPod).not.toBeNull();
+      expect(seeded).not.toBe("");
+
+      // The service wedges. The container is untouched and podman still calls
+      // it `running`, which is precisely why `containerState` cannot tell this
+      // from a healthy one and why the adopted container is re-probed at all.
+      await exec(RUNTIME, ["exec", dbName, "touch", "/tmp/wedged"]);
+
+      out.length = 0;
+      expect(
+        await runGateCommand(withDb, { worktree: repo, keep: true, ...sink }),
+      ).toBe(GATE_EXIT_NO_VERDICT);
+
+      // Kept: the same pod, the same container, and the state its
+      // `postReadyCommands` built still in it. The pod alone would be
+      // satisfied by a namesake recreated in its place, and the container id
+      // alone says nothing about what is inside it.
+      expect(await podId()).toBe(keptPod);
+      expect(await dbId()).toBe(keptDb);
+      expect(
+        (await exec(RUNTIME, ["exec", dbName, "cat", "/tmp/seeded"])).stdout.trim(),
+      ).toBe(seeded);
+
+      // …and it is described as what it is. Both negatives are the assertion:
+      // each is the sentence a notice reasoning from the null stack handle
+      // prints instead, and each is false here.
+      expect(out.join("")).toContain("Stack left up");
+      expect(out.join("")).toContain(`pod rm -f ${podName}`);
+      expect(out.join("")).not.toContain("never finished coming up");
+      expect(out.join("")).not.toContain("before any container was created");
+      // The wedge is not silent either: an operator told only that the stack
+      // is up would go looking for a verdict that was never formed.
+      expect(out.join("")).toContain("did not become ready");
     },
     600_000,
   );

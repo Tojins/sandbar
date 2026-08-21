@@ -164,8 +164,8 @@ export default {
         // read the headroom as smaller than the ratio suggests: ten more
         // `startStack` cycles in `gate-stack-podman.test.ts` (reuse and
         // keep-alive are only assertable by bringing a stack up more than
-        // once) and ten `runGateCommand` invocations here, most of which
-        // bring one up and one of which is driven to a readiness timeout
+        // once) and eleven `runGateCommand` invocations here, most of which
+        // bring one up and two of which are driven to a readiness timeout
         // deliberately. The runtime is dominated by container bringup and by
         // those timeouts, and three gates run concurrently at the default plan
         // size, contending for one podman.
