@@ -164,12 +164,14 @@ import { onCleanup } from "./cleanup.js";
 import type { ResolvedGateStack, ResolvedStackContainer } from "./config.js";
 import { SandbarError } from "./errors.js";
 import {
+  type BringUpCtx,
   CONTROL_TIMEOUT_MS,
   ContainerBringupError,
   LOG_READ_TIMEOUT_MS,
   boundedOk,
   boundedPodman,
   bringUpContainers,
+  containerState,
   logFollowArgs,
   parsePortBindings,
 } from "./gate-stack.js";
@@ -253,6 +255,41 @@ export type SandboxStackOptions = {
   readonly logDir: string;
 };
 
+// Everything this module does to podman, behind one seam — because what is
+// worth testing here is the DECISIONS above it, and every one of them is a
+// decision about a failure a real podman will not produce on demand. D3's blame
+// mapping is the sharpest: an `issue` sibling that will not start is
+// infrastructure and throws, an `attempt` one is the branch's own bootstrap and
+// comes up degraded with its log tail in the agent's prompt. Get that backwards
+// and the symptom is two fresh-sandbox retries reproducing an error the agent
+// could have read — a failure invisible in a green suite. The same argument
+// `PodmanProbe` and `UidProbe` make; the real implementations are below and are
+// what production uses, the argv they build is table-tested next door
+// (`containerRunArgs` with a `netns` attachment), and the whole chain is
+// exercised against a real podman in sandbox-stack-podman.test.ts.
+export type SandboxStackDeps = {
+  readonly bringUp: (
+    containers: readonly ResolvedStackContainer[],
+    ctx: BringUpCtx,
+  ) => Promise<void>;
+  readonly portBindings: (
+    anchorContainerName: string,
+  ) => Promise<Map<number, number>>;
+  // Null when the container is gone — removed, or never created at all. Any
+  // other value is the operator-facing description of what leaked, so the
+  // judgment of "leaked" versus "was never there" lives in the real
+  // implementation rather than in `stop`.
+  readonly remove: (containerName: string) => Promise<string | null>;
+  readonly follow: (containerName: string, filePath: string) => LogFollower;
+};
+
+export const realSandboxStackDeps: SandboxStackDeps = {
+  bringUp: bringUpContainers,
+  portBindings: readAnchorPortBindings,
+  remove: removeSibling,
+  follow: startLogFollower,
+};
+
 // Create the log directory before the anchor is created. Separate from
 // `startSandboxStack` for a sequencing reason rather than a stylistic one: the
 // mount source has to exist when the AGENT container starts, and that is before
@@ -263,6 +300,7 @@ export async function prepareSandboxLogDir(logDir: string): Promise<void> {
 
 export async function startSandboxStack(
   opts: SandboxStackOptions,
+  deps: SandboxStackDeps = realSandboxStackDeps,
 ): Promise<SandboxStack> {
   const containers = sandboxContainers(opts.spec);
   const nameOf = (c: ResolvedStackContainer): string =>
@@ -284,25 +322,26 @@ export async function startSandboxStack(
     // are attached to is refused outright, so getting that backwards leaks the
     // whole chain rather than half of it.
     //
-    // Failures are reported, never swallowed: what leaks here is a running
-    // container holding a worktree mount, and the only backstop is the next
-    // cycle's scoped sweep — which on the last cycle, or on a halt, never runs.
+    // A genuine failure is reported, never swallowed: what leaks here is a
+    // running container holding a worktree mount, and the only backstop is the
+    // next cycle's scoped sweep — which on the last cycle, or on a halt, never
+    // runs. "Genuine" is `removeSibling`'s judgment, not this loop's, and it is
+    // the difference between a report worth reading and one an operator learns
+    // to skip: two ordinary paths arrive here with the container already gone.
     const failures: string[] = [];
+    const leaked: string[] = [];
     for (const name of [...created].reverse()) {
-      const args = ["rm", "-f", "-t", "0", name];
-      const r = await boundedPodman(args, CONTROL_TIMEOUT_MS);
-      if (boundedOk(r)) continue;
-      failures.push(
-        `  ${RUNTIME} ${args.join(" ")}\n    ${
-          r.timedOut ? `timed out after ${CONTROL_TIMEOUT_MS}ms` : r.errorMessage
-        }`,
-      );
+      const failure = await deps.remove(name);
+      if (failure === null) continue;
+      failures.push(failure);
+      leaked.push(name);
     }
     if (failures.length > 0) {
       throw new SandbarError(
         `sandbox stack: teardown of the sandbox siblings for issue ` +
           `${opts.issueId} failed, leaking podman resources:\n` +
-          `${failures.join("\n")}`,
+          `${failures.join("\n")}\n` +
+          `Clean up with: ${RUNTIME} rm -f -t 0 ${leaked.join(" ")}`,
       );
     }
   };
@@ -312,7 +351,7 @@ export async function startSandboxStack(
   // without limit across a run.
   onCleanup(stop);
 
-  const hostPorts = await readAnchorPortBindings(opts.anchorContainerName);
+  const hostPorts = await deps.portBindings(opts.anchorContainerName);
   const ctx = {
     attach: {
       kind: "netns" as const,
@@ -350,7 +389,7 @@ export async function startSandboxStack(
       claim(issueContainers);
       // As a group, and a throw here is infra: these depend only on image and
       // env, so a fresh sandbox is exactly the right response.
-      await bringUpContainers(issueContainers, ctx);
+      await deps.bringUp(issueContainers, ctx);
       for (const c of issueContainers) statuses.push(record(c, null));
     }
 
@@ -359,7 +398,7 @@ export async function startSandboxStack(
     for (const c of containers.filter((c) => c.lifecycle === "attempt")) {
       claim([c]);
       try {
-        await bringUpContainers([c], ctx);
+        await deps.bringUp([c], ctx);
         statuses.push(record(c, null));
       } catch (err) {
         if (!(err instanceof ContainerBringupError)) throw err;
@@ -372,7 +411,7 @@ export async function startSandboxStack(
       // `containers` is what `statuses` was built from, so this cannot miss.
       if (c === undefined) continue;
       if (status.up) {
-        followers.push(startLogFollower(nameOf(c), join(opts.logDir, `${c.name}.log`)));
+        followers.push(deps.follow(nameOf(c), join(opts.logDir, `${c.name}.log`)));
       } else {
         // The path is quoted in the agent's prompt either way, so it has to
         // resolve to something that explains itself rather than to ENOENT. The
@@ -430,7 +469,34 @@ async function readAnchorPortBindings(
   return parsePortBindings(r.stdout);
 }
 
-type LogFollower = { readonly stop: () => void };
+// Remove one sibling, and decide whether a podman that said no means a leak.
+//
+// Two ordinary paths reach this with the container already gone, so a failed
+// `rm` cannot be reported as a leak on its own: a name is claimed BEFORE
+// `podman run` is attempted (a container that started and then failed
+// readiness still has to be removed, and nothing outside `bringUp` can tell
+// the two apart), and `sandbox.close()` removes the anchor with `--depend`,
+// which takes every joiner with it — reachable whenever `createSandbox` throws
+// after this stack came up, an `onSandboxReady` hook being the obvious one.
+// Reported as a leak, each would send an operator to clear debris that does not
+// exist, every cycle, which is how a real report gets ignored.
+//
+// So the second question is asked only where the first one failed — #36's
+// discipline, and its limit too: `gone` is conclusive, everything else
+// (podman wedged, an inspect that timed out) stays a leak, because reading
+// "could not answer" as "not there" is what silences the report this exists to
+// make.
+async function removeSibling(containerName: string): Promise<string | null> {
+  const args = ["rm", "-f", "-t", "0", containerName];
+  const r = await boundedPodman(args, CONTROL_TIMEOUT_MS);
+  if (boundedOk(r)) return null;
+  if ((await containerState(containerName)) === "gone") return null;
+  return `  ${RUNTIME} ${args.join(" ")}\n    ${
+    r.timedOut ? `timed out after ${CONTROL_TIMEOUT_MS}ms` : r.errorMessage
+  }`;
+}
+
+export type LogFollower = { readonly stop: () => void };
 
 // One `podman logs -f` per sibling, appended to a file on the host (#44 D4).
 //
