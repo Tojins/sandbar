@@ -124,6 +124,18 @@
 // READ-ONLY into the agent container at `/sandbar/logs/<name>.log`. Side
 // benefit: those files are an offline artefact in the run log tree.
 //
+// EVERY sibling is followed, including one that did not come up, and the
+// degraded case is the one that needs it rather than the exception to it: the
+// commonest shape of a failed bringup is a container that started and then
+// missed its readiness probe or a postReadyCommand, so it keeps running and
+// keeps logging for the rest of the issue — exactly when the agent has been
+// told, in the same prompt, that its log says why. A file frozen at the bringup
+// tail makes that sentence false. A container that never started at all costs
+// nothing here: `podman logs -f` fails, its complaint lands in the same file,
+// and the follower notes its exit. The bringup error is written in ahead of it
+// either way, because the path is quoted to an agent that will follow it and an
+// ENOENT reads as sandbar having lost the log.
+//
 // The statuses this returns are a snapshot of BRINGUP, not a live readout, and
 // nothing re-reads them: a sibling OOM-killed at attempt 4 still renders as
 // running in every later prompt. The gate re-checks its `issue` containers
@@ -192,18 +204,25 @@ import type { ResolvedGateStack, ResolvedStackContainer } from "./config.js";
 import { SandbarError } from "./errors.js";
 import {
   type BringUpCtx,
+  type ContainerAttachment,
   CONTROL_TIMEOUT_MS,
   ContainerBringupError,
-  LOG_READ_TIMEOUT_MS,
   boundedOk,
   boundedPodman,
   bringUpContainers,
   containerState,
   logFollowArgs,
-  parsePortBindings,
+  readPortBindings,
 } from "./gate-stack.js";
 import { type RunScope, sandboxContainerNameFor } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
+
+// What this stack is called in the messages `bringUpContainers` raises about
+// it. The whole reason `BringUpCtx` carries a label: the shared bringup is the
+// gate's code, and its errors are the string D3 hands the agent and the
+// operator — see that field's comment for what a `gate stack:` prefix does to
+// both of them.
+const SANDBOX_LABEL = "sandbox stack";
 
 // Where the followers' files appear INSIDE the agent container. A fixed path,
 // because it is quoted in the implementer's prompt and an agent should be able
@@ -312,7 +331,15 @@ export type SandboxStackDeps = {
 
 export const realSandboxStackDeps: SandboxStackDeps = {
   bringUp: bringUpContainers,
-  portBindings: readAnchorPortBindings,
+  // The gate's own reader, told which object holds the publish. A joiner cannot
+  // take `-p`, so for this topology every probe port is on the anchor — which
+  // is the whole of the difference, and is why `ContainerAttachment` carries it
+  // rather than a second copy of the call.
+  portBindings: (anchorContainerName) =>
+    readPortBindings(
+      { kind: "netns", anchorContainerName },
+      SANDBOX_LABEL,
+    ),
   remove: removeSibling,
   follow: startLogFollower,
 };
@@ -379,17 +406,18 @@ export async function startSandboxStack(
   onCleanup(stop);
 
   const hostPorts = await deps.portBindings(opts.anchorContainerName);
-  const ctx = {
-    attach: {
-      kind: "netns" as const,
-      anchorContainerName: opts.anchorContainerName,
-    },
+  const attach: ContainerAttachment = {
+    kind: "netns",
+    anchorContainerName: opts.anchorContainerName,
+  };
+  const ctx: BringUpCtx = {
+    attach,
+    label: SANDBOX_LABEL,
     worktreePath: opts.worktreePath,
     nameOf,
     hostPorts,
   };
 
-  const statuses: SandboxContainerStatus[] = [];
   const record = (
     c: ResolvedStackContainer,
     failure: string | null,
@@ -410,6 +438,13 @@ export async function startSandboxStack(
     for (const c of group) if (!created.includes(nameOf(c))) created.push(nameOf(c));
   };
 
+  // Why a sibling is not up, by container name. Collected rather than pushed
+  // into `statuses` as the bringups go, so the list the agent reads is in the
+  // consumer's DECLARATION order: the two lifecycle groups are brought up
+  // separately for the reason above, and ordering the prompt by that internal
+  // detail would show a stack the consumer never wrote.
+  const failed = new Map<string, string>();
+
   try {
     const issueContainers = containers.filter((c) => c.lifecycle === "issue");
     if (issueContainers.length > 0) {
@@ -417,7 +452,6 @@ export async function startSandboxStack(
       // As a group, and a throw here is infra: these depend only on image and
       // env, so a fresh sandbox is exactly the right response.
       await deps.bringUp(issueContainers, ctx);
-      for (const c of issueContainers) statuses.push(record(c, null));
     }
 
     // One at a time, so one broken app server does not take the database's
@@ -426,20 +460,15 @@ export async function startSandboxStack(
       claim([c]);
       try {
         await deps.bringUp([c], ctx);
-        statuses.push(record(c, null));
       } catch (err) {
         if (!(err instanceof ContainerBringupError)) throw err;
-        statuses.push(record(c, err.message));
+        failed.set(c.name, err.message);
       }
     }
 
-    for (const status of statuses) {
-      const c = containers.find((x) => x.name === status.name);
-      // `containers` is what `statuses` was built from, so this cannot miss.
-      if (c === undefined) continue;
-      if (status.up) {
-        followers.push(deps.follow(nameOf(c), join(opts.logDir, `${c.name}.log`)));
-      } else {
+    for (const c of containers) {
+      const failure = failed.get(c.name);
+      if (failure !== undefined) {
         // The path is quoted in the agent's prompt either way, so it has to
         // resolve to something that explains itself rather than to ENOENT. The
         // prompt carries the same text; this is the copy an agent finds by
@@ -451,10 +480,19 @@ export async function startSandboxStack(
         // record of what the run did before it restarted.
         await appendFile(
           join(opts.logDir, `${c.name}.log`),
-          `[sandbar] container '${c.name}' did not come up.\n\n${status.failure ?? ""}\n`,
+          `[sandbar] container '${c.name}' did not come up.\n\n${failure}\n`,
           "utf8",
         ).catch(() => {});
       }
+      // Followed whether or not it came up, and the degraded case is the one
+      // that needs it: the commonest shape there is a container that STARTED
+      // and then missed its readiness or a postReadyCommand, so it is running
+      // and logging for the rest of the issue while the prompt tells the agent
+      // its log says why. Frozen at the bringup tail, that sentence is false.
+      // For a container that never started, the follower writes podman's own
+      // complaint into the same file and notes its exit — which is what the
+      // placeholder above says in more words, not a contradiction of it.
+      followers.push(deps.follow(nameOf(c), join(opts.logDir, `${c.name}.log`)));
     }
   } catch (err) {
     await stop().catch((stopErr: unknown) => {
@@ -467,38 +505,10 @@ export async function startSandboxStack(
     throw err;
   }
 
-  return { statuses, stop };
-}
-
-// The anchor's own publishes, in the shape the gate reads off a pod. Same JSON
-// shape (`{"3306/tcp":[{"HostIp":…,"HostPort":"44719"}]}`), so `parsePortBindings`
-// is shared rather than re-derived.
-async function readAnchorPortBindings(
-  anchorContainerName: string,
-): Promise<Map<number, number>> {
-  const r = await boundedPodman(
-    [
-      "inspect",
-      anchorContainerName,
-      "--format",
-      "{{json .NetworkSettings.Ports}}",
-    ],
-    LOG_READ_TIMEOUT_MS,
-  );
-  // A plain Error, deliberately, for the reason `readPortBindings` gives: a
-  // SandbarError is rethrown past HARD-ERROR by the inner loop and would drop
-  // the issue for the cycle with no terminal and no label flip, when podman
-  // failing to answer is precisely what a fresh sandbox fixes.
-  if (!boundedOk(r)) {
-    throw new Error(
-      `sandbox stack: could not read the port bindings of the agent ` +
-        `container ${anchorContainerName}` +
-        (r.timedOut
-          ? ` (${RUNTIME} inspect did not return within ${LOG_READ_TIMEOUT_MS}ms)`
-          : `: ${r.errorMessage}`),
-    );
-  }
-  return parsePortBindings(r.stdout);
+  return {
+    statuses: containers.map((c) => record(c, failed.get(c.name) ?? null)),
+    stop,
+  };
 }
 
 // Remove one sibling, and decide whether a podman that said no means a leak.

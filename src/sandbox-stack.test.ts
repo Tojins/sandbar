@@ -224,6 +224,7 @@ describe("startSandboxStack (#44 D3)", () => {
 
   type Recorder = {
     readonly broughtUp: string[][];
+    readonly labels: string[];
     readonly removed: string[];
     readonly followed: string[];
     readonly deps: SandboxStackDeps;
@@ -233,11 +234,13 @@ describe("startSandboxStack (#44 D3)", () => {
     fail: (name: string) => ContainerBringupError | Error | null = () => null,
   ): Recorder => {
     const broughtUp: string[][] = [];
+    const labels: string[] = [];
     const removed: string[] = [];
     const followed: string[] = [];
     const deps: SandboxStackDeps = {
-      bringUp: async (containers) => {
+      bringUp: async (containers, ctx) => {
         broughtUp.push(containers.map((c) => c.name));
+        labels.push(ctx.label);
         for (const c of containers) {
           const err = fail(c.name);
           if (err) throw err;
@@ -253,7 +256,7 @@ describe("startSandboxStack (#44 D3)", () => {
         return { stop: () => {} };
       },
     };
-    return { broughtUp, removed, followed, deps };
+    return { broughtUp, labels, removed, followed, deps };
   };
 
   const start = (r: Recorder) =>
@@ -272,9 +275,21 @@ describe("startSandboxStack (#44 D3)", () => {
   const bringupError = (name: string) =>
     new ContainerBringupError(
       `sandbar-x-sbx-44-${name}`,
-      `gate stack: container '${name}' did not become ready within 60000ms`,
+      `sandbox stack: container '${name}' did not become ready within 60000ms`,
       "PHP Fatal error: syntax error, unexpected ';'",
     );
+
+  // The bringup code is the GATE's, and its messages are the one string D3
+  // hands a degraded sibling — rendered into the implementer's prompt right
+  // under a paragraph saying the gate's stack is a namespace it cannot reach.
+  // Told nothing, it would prefix every one of them `gate stack:` and read as a
+  // red gate that never ran. This half is the telling; that the message uses
+  // what it is told is pinned against a real podman next door.
+  it("tells the shared bringup which stack it is", async () => {
+    const r = recorder();
+    await start(r);
+    expect(r.labels).toEqual(["sandbox stack", "sandbox stack"]);
+  });
 
   it("reports every declared sibling, with its address and log path", async () => {
     const r = recorder();
@@ -365,6 +380,33 @@ describe("startSandboxStack (#44 D3)", () => {
     ]);
   });
 
+  // The two lifecycle groups go up separately, which is an internal detail of
+  // whose failure is whose — and the list this returns is read by an agent, in
+  // its prompt, as a description of the stack the consumer wrote. Ordering it
+  // by the bringup groups would show a `gateStack` nobody authored.
+  it("reports the siblings in declaration order, not bringup order", async () => {
+    const r = recorder();
+    const stack = await startSandboxStack(
+      {
+        issueId: "44",
+        scope: SCOPE,
+        spec: resolveGateStack({
+          containers: [
+            { name: "app", image: "app", mountWorktree: "/app", inSandbox: true },
+            { name: "db", image: "mariadb", lifecycle: "issue", inSandbox: true },
+          ],
+          steps: [{ name: "test", in: "app", command: ["npm", "test"] }],
+        }),
+        worktreePath: "/wt",
+        anchorContainerName: ANCHOR,
+        logDir,
+      },
+      r.deps,
+    );
+    expect(r.broughtUp).toEqual([["db"], ["app"]]);
+    expect(stack.statuses.map((st) => st.name)).toEqual(["app", "db"]);
+  });
+
   // Anything that is not a bringup failure is not a verdict about a container
   // at all — a podman that would not answer, a bug in this module — and
   // swallowing it into a "degraded" status would report a service as broken
@@ -383,8 +425,14 @@ describe("startSandboxStack (#44 D3)", () => {
     const written = await readFile(join(logDir, "app.log"), "utf8");
     expect(written).toMatch(/did not come up/);
     expect(written).toMatch(/PHP Fatal error/);
-    // And the live one is followed rather than written by hand.
-    expect(r.followed).toEqual([`sandbar-${SCOPE}-sbx-44-db`]);
+    // And it is followed anyway. The commonest degraded shape is a container
+    // that started and then missed its readiness, so it keeps logging for the
+    // rest of the issue — and the prompt tells the agent this file says why.
+    // Frozen at the placeholder, that is a lie the agent cannot check.
+    expect(r.followed).toEqual([
+      `sandbar-${SCOPE}-sbx-44-db`,
+      `sandbar-${SCOPE}-sbx-44-app`,
+    ]);
   });
 
   // The log directory is per ISSUE, so a HARD-ERROR retry's containers write

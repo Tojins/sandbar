@@ -510,8 +510,13 @@ export type ContainerAttachment =
   | { readonly kind: "pod"; readonly podName: string }
   | { readonly kind: "netns"; readonly anchorContainerName: string };
 
+// What this module's own stack is called in the messages it raises. The sandbox
+// stack passes its own (`BringUpCtx.label`), which is the only reason this is a
+// value at all.
+const GATE_LABEL = "gate stack";
+
 // What an attachment is called in an error message.
-export function describeAttachment(attach: ContainerAttachment): string {
+function describeAttachment(attach: ContainerAttachment): string {
   return attach.kind === "pod"
     ? `pod ${attach.podName}`
     : `the network namespace of container ${attach.anchorContainerName}`;
@@ -717,7 +722,8 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       `create pod ${podName}`,
     );
 
-    const hostPorts = await readPortBindings(podName);
+    const attach: ContainerAttachment = { kind: "pod", podName };
+    const hostPorts = await readPortBindings(attach, GATE_LABEL);
 
     const issueContainers = opts.spec.containers.filter(
       (c) => c.lifecycle === "issue",
@@ -734,10 +740,9 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // Nothing of the branch runs at this point in any case: `resolveGateStack`
     // refuses `lifecycle: "issue"` on an un-held container that mounts the
     // worktree, and a held one's entrypoint is `sleep infinity`.
-    const attach: ContainerAttachment = { kind: "pod", podName };
-
     await bringUpContainers(issueContainers, {
       attach,
+      label: GATE_LABEL,
       worktreePath: opts.worktreePath,
       nameOf,
       hostPorts,
@@ -782,15 +787,34 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   }
 }
 
-async function readPortBindings(podName: string): Promise<Map<number, number>> {
+// Where the `tcp` probes connect. Both topologies publish loopback-only on a
+// podman-assigned host port and both report the mapping in the same JSON shape
+// (`{"3306/tcp":[{"HostIp":…,"HostPort":"44719"}]}`); only the object holding
+// the publish differs, which is exactly what `ContainerAttachment` is for. Two
+// copies of this — one per topology — would be two places to keep the bound,
+// the `boundedOk` check and the plain-Error-not-SandbarError judgment below in
+// step, for one differing argv (#44).
+export async function readPortBindings(
+  attach: ContainerAttachment,
+  label: string,
+): Promise<Map<number, number>> {
   const r = await boundedPodman(
-    [
-      "pod",
-      "inspect",
-      podName,
-      "--format",
-      "{{json .InfraConfig.PortBindings}}",
-    ],
+    attach.kind === "pod"
+      ? [
+          "pod",
+          "inspect",
+          attach.podName,
+          "--format",
+          "{{json .InfraConfig.PortBindings}}",
+        ]
+      : // The anchor's own publishes: a joiner cannot take `-p`, so for the
+        // chain every one of the subset's probe ports lives on this container.
+        [
+          "inspect",
+          attach.anchorContainerName,
+          "--format",
+          "{{json .NetworkSettings.Ports}}",
+        ],
     LOG_READ_TIMEOUT_MS,
   );
   // A plain Error, deliberately. `SandbarError` is the "operator-actionable,
@@ -803,9 +827,10 @@ async function readPortBindings(podName: string): Promise<Map<number, number>> {
   // cannot parse — that one really is sandbar's bug.)
   if (!boundedOk(r)) {
     throw new Error(
-      `gate stack: could not read the port bindings of pod ${podName}` +
+      `${label}: could not read the port bindings of ` +
+        `${describeAttachment(attach)}` +
         (r.timedOut
-          ? ` (${RUNTIME} pod inspect did not return within ` +
+          ? ` (${RUNTIME} inspect did not return within ` +
             `${LOG_READ_TIMEOUT_MS}ms)`
           : `: ${r.errorMessage}`),
     );
@@ -819,6 +844,21 @@ async function readPortBindings(podName: string): Promise<Map<number, number>> {
 // differs between the two callers.
 export type BringUpCtx = {
   readonly attach: ContainerAttachment;
+  // Which stack this is, for the messages raised below — `gate stack` or
+  // `sandbox stack`. A field rather than something derived from `attach.kind`,
+  // even though the two agree today, because they answer different questions:
+  // one is a topology, the other is whose failure this is. Derive it and the
+  // day a gate needs a chain every gate message names the sandbox.
+  //
+  // It is not cosmetic. The one string D3 hands a degraded `attempt` sibling is
+  // this message, rendered into the implementer's prompt directly under a
+  // paragraph telling the agent the gate's stack is a namespace it cannot
+  // reach — so a `gate stack:` prefix there reads as a red gate that never ran,
+  // against a stack the agent has just been told not to touch. The operator's
+  // half is the same error one arm along: an `issue` sibling's throw surfaces
+  // as the HARD-ERROR reason, sending whoever reads the run log to inspect a
+  // pod where nothing is wrong.
+  readonly label: string;
   readonly worktreePath: string;
   // Passed as a closure rather than rebuilt from (scope, stackId) here: the
   // name is the stack's identity, and one place composes it.
@@ -859,7 +899,7 @@ export async function bringUpContainers(
     if (!boundedOk(started)) {
       throw new ContainerBringupError(
         containerName,
-        `gate stack: container '${c.name}' (${c.image}) failed to start: ${
+        `${ctx.label}: container '${c.name}' (${c.image}) failed to start: ${
           started.timedOut
             ? `${RUNTIME} run did not return within ${CONTROL_TIMEOUT_MS}ms`
             : started.errorMessage
@@ -893,7 +933,7 @@ export async function bringUpContainers(
       // never returned was reported as having succeeded.
       throw new ContainerBringupError(
         containerName,
-        `gate stack: postReadyCommand ${JSON.stringify(command)} ` +
+        `${ctx.label}: postReadyCommand ${JSON.stringify(command)} ` +
           (r.timedOut
             ? `did not finish within the container's ${c.readinessTimeoutMs}ms ` +
               `readiness budget and was killed, in container '${c.name}'. ` +
@@ -933,7 +973,7 @@ async function waitForReady(
     // has to get far enough to fail) and then the same liveness assert every
     // probed container gets.
     await sleep(READY_POLL_INTERVAL_MS);
-    await throwIfDead(containerName, c);
+    await throwIfDead(containerName, c, ctx.label);
     return;
   }
   const readiness = c.readiness;
@@ -978,12 +1018,12 @@ async function pollUntilReady(
     // container whose entrypoint dies at startup is an EXPECTED failure. Report
     // it immediately with its log instead of polling a corpse for the full
     // timeout and then reporting a misleading "did not become ready".
-    await throwIfDead(containerName, c);
+    await throwIfDead(containerName, c, ctx.label);
     await sleep(READY_POLL_INTERVAL_MS);
   }
   throw new ContainerBringupError(
     containerName,
-    `gate stack: container '${c.name}' (${c.image}) did not become ready ` +
+    `${ctx.label}: container '${c.name}' (${c.image}) did not become ready ` +
       `within ${c.readinessTimeoutMs}ms (${describeReadiness(readiness)}; ` +
       `last probe: ${lastErr}${watcher?.deathNote() ?? ""})`,
     await logTail(containerName),
@@ -1033,7 +1073,7 @@ async function probeOnce(
         // absence is a sandbar bug. Never a silent unready: that would spend
         // the whole budget and then blame the consumer's pattern.
         throw new SandbarError(
-          `gate stack: no log follower for container ${containerName}. ` +
+          `${ctx.label}: no log follower for container ${containerName}. ` +
             "waitForReady starts one for every log readiness, so this is an " +
             "internal inconsistency.",
         );
@@ -1047,7 +1087,7 @@ async function probeOnce(
         // absence is a sandbar bug, not a consumer one. Never a silent skip:
         // skipping would make "ready" mean "I could not check".
         throw new SandbarError(
-          `gate stack: no host publish for container port ${readiness.port} on ` +
+          `${ctx.label}: no host publish for container port ${readiness.port} on ` +
             `${describeAttachment(ctx.attach)}. A publish is created for every ` +
             "tcp readiness port, so this is an internal inconsistency.",
         );
@@ -1383,6 +1423,7 @@ export async function containerState(
 async function throwIfDead(
   containerName: string,
   c: ResolvedStackContainer,
+  label: string,
 ): Promise<void> {
   const state = await containerState(containerName);
   // A flaked inspect is not evidence of death; let the deadline arbitrate.
@@ -1390,14 +1431,14 @@ async function throwIfDead(
   throw new ContainerBringupError(
     containerName,
     state === "gone"
-      ? `gate stack: container '${c.name}' (${c.image}) no longer exists — ` +
+      ? `${label}: container '${c.name}' (${c.image}) no longer exists — ` +
         "something removed it during startup."
-      : `gate stack: container '${c.name}' (${c.image}) exited during startup.`,
+      : `${label}: container '${c.name}' (${c.image}) exited during startup.`,
     state === "gone" ? GONE_LOG_NOTE : await logTail(containerName),
   );
 }
 
-export async function logTail(
+async function logTail(
   containerName: string,
   lines = CONTAINER_LOG_TAIL,
 ): Promise<string> {
@@ -1576,6 +1617,7 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     try {
       await bringUpContainers(withImages(staleIssueContainers, images), {
         attach: ctx.attach,
+        label: GATE_LABEL,
         worktreePath: ctx.worktreePath,
         nameOf: ctx.nameOf,
         hostPorts: ctx.hostPorts,
@@ -1623,6 +1665,7 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   try {
     await bringUpContainers(withImages(ctx.attemptContainers, images), {
       attach: ctx.attach,
+      label: GATE_LABEL,
       worktreePath: ctx.worktreePath,
       nameOf: ctx.nameOf,
       hostPorts: ctx.hostPorts,
@@ -1808,6 +1851,7 @@ async function reapKilledStep(
     // gate whose verdict is already decided.
     await bringUpContainers(withImages([container], ctx.running.map), {
       attach: ctx.attach,
+      label: GATE_LABEL,
       worktreePath: ctx.worktreePath,
       nameOf: ctx.nameOf,
       hostPorts: ctx.hostPorts,

@@ -464,7 +464,9 @@ description of what it takes to run the app, not two.
   into a file on the host and mounted read-only at `/sandbar/logs/<name>.log`.
   Those files also land in the run log tree, and they are not rotated or
   capped — a service that logs every request writes for as long as the issue
-  runs.
+  runs. A container that failed to come up is followed too, with the bringup
+  error written in ahead of it: the usual failure is a service that started and
+  then missed its readiness check, and it keeps logging.
 - **A sibling that will not start is reported, not fatal** — for an `attempt`
   container. The sandbox comes up degraded and the agent gets that container's
   log tail in its prompt, because the agent is the one party that can fix its

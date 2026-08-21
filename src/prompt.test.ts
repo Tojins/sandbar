@@ -289,7 +289,7 @@ describe("renderSandboxStackSlot (#44)", () => {
     logPath: "/sandbar/logs/app.log",
     up: false,
     failure:
-      "gate stack: container 'app' did not become ready within 60000ms\n" +
+      "sandbox stack: container 'app' did not become ready within 60000ms\n" +
       "Container log tail:\nPHP Fatal error: syntax error, unexpected ';'",
   };
 
