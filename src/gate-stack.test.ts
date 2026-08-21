@@ -15,6 +15,7 @@ import {
 } from "./ensure-images.js";
 import {
   type BoundedResult,
+  ContainerBringupError,
   containerRunArgs,
   imageFor,
   withImages,
@@ -1753,5 +1754,44 @@ describe("pollUntilHealthy", () => {
       (await pollUntilHealthy("c", probed({ readinessTimeoutMs: 100 }), probe))
         .verdict,
     ).toBe("abandoned");
+  });
+
+  // A container that DIES while this waits is `containerState`'s case, and it
+  // has to reach the caller as that error rather than as an unhealthy verdict:
+  // there is nothing for the recreate to fix. Two things about what it says.
+  //
+  // WHEN: not "during startup". A database that wedged at attempt four died
+  // now, and an operator sent to read a container's startup reads the run log
+  // for the wrong five minutes.
+  //
+  // WHICH IMAGE: the one on the spec it was handed, which is a contract on the
+  // CALLER — since #37 an `issue` container can be sitting on a
+  // content-addressed variant the branch authored, so the spec has to be the
+  // one that came through `withImages` and not the one config declared.
+  // Nothing in the loop reads `.image`; the `throwIfDead` between its probes
+  // does.
+  it("throws a mid-poll death as one, dated to the wait and naming the spec's image", async () => {
+    const calls: string[] = [];
+    const probe: PodmanProbe = (args) => {
+      const key = args[0] === "container" ? "exists" : String(args[0]);
+      calls.push(key);
+      // Unhealthy, then an inspect that fails and an `exists` that says 1 —
+      // #36's only conclusive evidence of removal.
+      return Promise.resolve(
+        podmanSaid({ exitCode: key === "healthcheck" ? 1 : key === "inspect" ? 125 : 1 }),
+      );
+    };
+    const c = probed({ image: "localhost/db:gate-w1a2b3c4-deadbeef" });
+    const err = await pollUntilHealthy("c", c, probe).then(
+      (v) => v as never,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ContainerBringupError);
+    const message = (err as ContainerBringupError).message;
+    expect(message).toContain("'db' (localhost/db:gate-w1a2b3c4-deadbeef)");
+    expect(message).toContain("no longer exists");
+    expect(message).toMatch(/while sandbar waited for it to become healthy/);
+    expect(message).not.toContain("during startup");
+    expect(calls).toEqual(["healthcheck", "inspect", "exists"]);
   });
 });

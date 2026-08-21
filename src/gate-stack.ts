@@ -1321,6 +1321,18 @@ export type HealthVerdict = "healthy" | "unhealthy" | "abandoned";
 // stack has a pre-gate anything: the sandbox siblings form no verdict, so
 // nothing there ever asks this question.
 //
+// `c` IS THE CONTAINER AS IT RUNS, not as config declares it. Nothing in this
+// loop reads `c.image` directly, but the `throwIfDead` between its probes
+// does, and since #37 an `issue` container can be sitting on a
+// content-addressed variant tag the branch authored — so a declared spec makes
+// a container that dies mid-poll report a tag that is not the one that died,
+// which is the wrong answer to the first question its reader will ask and the
+// one `assertIssueContainersAlive` goes out of its way to avoid a few lines
+// along. That is `withImages`' whole contract — the substituted image rides on
+// the spec rather than being threaded past each reader of `c.image` — so the
+// caller remaps once and hands the result to this poll and to the recreate
+// alike.
+//
 // Exported for the seam: the `error` rules above are the classification half of
 // this feature, and a real podman will not produce a timed-out `healthcheck
 // run` or a SIGKILLed client on demand — the same argument `containerState`
@@ -1639,7 +1651,11 @@ async function assertIssueContainersAlive(ctx: RunGateCtx): Promise<void> {
 // update, so recreating from the base image while the map still says the
 // container is on the branch's variant is #37 reintroduced — never seen as
 // stale again, every remaining attempt gated against the source branch's
-// dependencies, silently, green included.
+// dependencies, silently, green included. The remap happens ONCE, at the top,
+// and the remapped spec is what the poll, every message here and the recreate
+// all see — the poll renders `c.image` too, through the `throwIfDead` between
+// its probes, so a declared spec handed to it names a tag that is not the one
+// that died.
 //
 // STILL UNHEALTHY AFTER THE RECREATE IS A HARD-ERROR, with no #37-style
 // carve-out for a branch that authored the problem. #37 carved out the case
@@ -1665,8 +1681,9 @@ async function assertIssueContainerHealthy(
   ctx: RunGateCtx,
 ): Promise<void> {
   if (c.readiness === null) return;
-  const image = imageFor(c, ctx.running.map);
-  const { verdict, detail } = await pollUntilHealthy(containerName, c);
+  const running = withImages([c], ctx.running.map)[0] ?? c;
+  const image = running.image;
+  const { verdict, detail } = await pollUntilHealthy(containerName, running);
   if (verdict === "healthy") return;
   if (verdict === "abandoned") {
     // Not silent, even though nothing follows from it: a check that declined to
@@ -1687,7 +1704,7 @@ async function assertIssueContainerHealthy(
       "beyond its declared setup goes with it.",
   );
   try {
-    await bringUpContainers(withImages([c], ctx.running.map), {
+    await bringUpContainers([running], {
       attach: ctx.attach,
       label: GATE_LABEL,
       worktreePath: ctx.worktreePath,
