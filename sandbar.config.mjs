@@ -120,23 +120,30 @@ export default {
     //
     // The exclude glob deliberately misses `gate-stack-hostpodman.test.ts`,
     // which self-skips: it holds only for a LOCAL client, and this one is
-    // remote. `agent-sandbox-podman.test.ts` and `sandbox-stack-podman.test.ts`
-    // are excluded and not named below — the first's `--init` reaping
-    // assertions were never measured through a socket, and the second (#44)
-    // builds its anchor with those same production run args and then execs into
-    // it as the agent, so "the invoking user" has to be whoever runs the test
-    // rather than whoever owns the socket. Both stay host-only.
+    // remote. `sandbox-stack-podman.test.ts` (#44) is excluded and not named
+    // below for the same kind of reason — it builds its anchor with the
+    // production sandbox run args and then execs into it as the agent, so "the
+    // invoking user" has to be whoever runs the test rather than whoever owns
+    // the socket. Those two stay host-only.
     //
-    // NONE of those depends on this comment being right. All three declare
-    // `needsLocalClient`, so they skip against a remote client on their own
-    // say-so — which matters because a glob and a by-hand file list are two
+    // `agent-sandbox-podman.test.ts` USED to be a third, on an unknown rather
+    // than a measured difference; #52 measured it — its `--init` assertions are
+    // made inside the container through `podman exec`, so a remote client
+    // observes them identically — and it is named below. The glob still
+    // excludes it from `test`, which is why naming it here is the whole of the
+    // wiring.
+    //
+    // NONE of that depends on this comment being right. Both host-only files
+    // declare `needsLocalClient`, so they skip against a remote client on their
+    // own say-so — which matters because a glob and a by-hand file list are two
     // lists that drift, and the drift is silent in the direction that hurts
     // (a host-only file quietly added to `podman-test` would be a red nobody
     // asked for; one quietly dropped from BOTH would be a layer nobody runs).
     //
-    // `npm test` on the host still runs everything. The three files above are
-    // the whole of the manual step: run them on the host after a cycle that
-    // touched the podman layer, the sandbox run args or the sandbox stack.
+    // `npm test` on the host still runs everything. The two host-only files
+    // above are the whole of the manual step: run them on the host after a
+    // cycle that touched the podman layer, the sandbox run args or the sandbox
+    // stack.
     steps: [
       { name: "check", in: "runner", command: ["npm", "run", "check"] },
       {
@@ -154,11 +161,19 @@ export default {
           "--",
           "src/gate-stack-podman.test.ts",
           "src/ensure-images-podman.test.ts",
+          "src/agent-sandbox-podman.test.ts",
         ],
-        // 30 minutes against 229s measured for the pair alone. The runtime
-        // is dominated by mariadb bringup and by readiness timeouts the tests
-        // ask for deliberately, and three gates run concurrently at the
-        // default plan size, contending for one podman.
+        // 30 minutes. The only wall-clock measurement anyone has taken here is
+        // #48's 229s, and it is quoted as the historical figure it is: it timed
+        // the first two files when they held 33 tests between them, and #45,
+        // #49 and #50 have since taken them to 42 — several of the additions
+        // being readiness timeouts the tests ask for deliberately. #52 adds this
+        // step's third file, whose cost is two container starts and ~8s of
+        // waiting on orphans. The bound stays where it is because it was never
+        // sized against that figure: the runtime is dominated by mariadb
+        // bringup and by those deliberate timeouts, and three gates run
+        // concurrently at the default plan size, contending for one podman. Do
+        // not tighten it towards a number that has not been re-measured.
         timeoutMs: 1_800_000,
       },
     ],
