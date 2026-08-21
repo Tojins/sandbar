@@ -209,10 +209,11 @@ describe.runIf(available)("sandbar gate against real podman", () => {
       const cfg = config([
         { name: "read", in: "runner", command: ["cat", "marker.txt"] },
       ]);
-      // Held, so the container is `sleep infinity` and its own service is
-      // nothing but the file the probe reads — which is what lets the test
-      // wedge it from outside without killing it. `/tmp`, because `podman
-      // exec` enters as the image's user and this one is not root's to write.
+      // Held, so the container is `sleep infinity` and its whole service is
+      // the file its probe reads — which is what lets the test wedge it from
+      // outside without killing it, since the point is a container podman
+      // still calls `running`. Markers under `/tmp`, so nothing here depends
+      // on which user the image runs as.
       const withDb: RunConfig = {
         ...cfg,
         gateStack: {
