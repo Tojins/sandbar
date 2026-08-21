@@ -871,8 +871,14 @@ describe.runIf(available)(
     it(
       "a persistently unhealthy issue container is recreated on its running image, then throws",
       async () => {
+        // A built image, not a `podman tag` alias — see `buildVariantImage`.
+        // Since #45 an alias is not a changed image: the staleness check
+        // settles a difference in the reference STRING by comparing image IDs
+        // before believing it, so re-tagging identical bytes correctly
+        // recreates nothing and `svc` would still be on the declared `IMAGE`
+        // when the assertion below reads it back.
         const ALIAS = testImageTag("health-image");
-        await exec(RUNTIME, ["tag", IMAGE, ALIAS]);
+        await buildVariantImage(ALIAS);
         stack = await startStack({
           stackId: STACK_ID,
           scope: SCOPE,
