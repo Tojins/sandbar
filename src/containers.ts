@@ -23,6 +23,32 @@
 // scope are not reported at all: they may be live, and they are that run's to
 // reap.
 //
+// THE CONTAINER REMOVAL CARRIES `-v`, AND IT IS A TRANSITIONAL BACKSTOP (#50).
+// Podman's default `--image-volume=bind` provisions an anonymous volume per
+// container for the image's builtin `VOLUME` directives, and each one consumes
+// a lock out of the host's single pool (`num_locks`, default 2048) for as long
+// as it exists — 2000 of them walked a real host into refusing to create any
+// podman object at all. Since #50 every container sandbar creates passes
+// `--image-volume=ignore`, so the ones this sweep removes carry no such volume;
+// debris a PRE-UPGRADE sandbar left behind does, and this sweep is one of the
+// few places that population is still reachable. `-v` removes only the
+// anonymous volume podman created for the container: it cannot touch a named
+// one, and sandbar declares none. The rationale in full is gate-stack.ts's
+// header.
+//
+// It does not reach a pre-upgrade POD's members, and that is a decision rather
+// than an oversight: `pod rm -f` cascade-removes them before the container
+// kind's listing can see them, `podman pod rm` has no `-v` at all, and flipping
+// the deliberate KINDS ordering below to buy a transitional benefit is the
+// wrong trade. Nor does this sweep reclaim already-leaked volumes, and it must
+// not try: an anonymous volume carries no label and nothing distinguishes
+// sandbar's from another project's — the same argument
+// `findUnattributableResources` makes for pre-scope debris, where a wrong guess
+// deletes data that is not ours. They are the operator's to clear, with:
+//
+//   podman volume ls -q --filter dangling=true | grep -E '^[0-9a-f]{64}$' \
+//     | xargs -r podman volume rm
+//
 // PODS MUST BE SWEPT SEPARATELY, and not as a tidiness measure (#24). A pod's
 // infra container is named `<pod-id-prefix>-infra` — a podman-assigned hash,
 // e.g. `c5968a5425d7-infra` — which matches no sandbar prefix at all. Removing
@@ -102,7 +128,10 @@ const KINDS: readonly ResourceKind[] = [
     // it an anchor listed before its siblings fails to remove, and reports a
     // leak the operator then has to clear by hand. It removes only containers
     // attached to one this sweep already proved is in our scope.
-    rmArgs: (n) => ["rm", "-f", "-t", "0", "--depend", n],
+    // `-v` since #50: see the header. It is live here only for debris a
+    // pre-upgrade sandbar created — everything this sandbar creates carries
+    // `--image-volume=ignore` and has no anonymous volume to reap.
+    rmArgs: (n) => ["rm", "-f", "-v", "-t", "0", "--depend", n],
     infix: "",
   },
   {

@@ -39,6 +39,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
+import { removeFixtureContainer } from "./podman-test-scope.test-util.js";
 import { sandboxRunArgs } from "./agent-sandbox.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -72,7 +73,7 @@ describe.runIf(available)("the sandbox container against real podman", () => {
 
   afterEach(async () => {
     for (const name of started.splice(0)) {
-      await exec(RUNTIME, ["rm", "-f", name]).catch(() => {});
+      await removeFixtureContainer(name).catch(() => {});
     }
   }, 60_000);
 

@@ -44,7 +44,10 @@ import { sandboxRunArgs } from "./agent-sandbox.js";
 import { resolveGateStack } from "./config.js";
 import { sandboxContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
-import { podmanTestScope } from "./podman-test-scope.test-util.js";
+import {
+  podmanTestScope,
+  removeFixtureContainer,
+} from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 import { type SandboxStack, startSandboxStack } from "./sandbox-stack.js";
 
@@ -107,7 +110,7 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
   // with hosting joiners has to fail here rather than in a cycle.
   const startAnchor = async (): Promise<string> => {
     const name = `sandbar-${SCOPE}-anchor`;
-    await exec(RUNTIME, ["rm", "-f", "-t", "0", "--depend", name]).catch(() => {});
+    await removeFixtureContainer("--depend", name).catch(() => {});
     await exec(
       RUNTIME,
       sandboxRunArgs({
@@ -148,9 +151,7 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
     if (stack) await stack.stop().catch(() => {});
     stack = null;
     if (anchor) {
-      await exec(RUNTIME, ["rm", "-f", "-t", "0", "--depend", anchor]).catch(
-        () => {},
-      );
+      await removeFixtureContainer("--depend", anchor).catch(() => {});
     }
     await rm(repo, { recursive: true, force: true });
     await rm(logDir, { recursive: true, force: true });
@@ -169,6 +170,9 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
       await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(() => {});
       await exec(RUNTIME, ["pod", "create", "--name", podName]);
       try {
+        // Hand-written rather than `runFixtureContainer`: this argv IS the
+        // subject, and podman refuses it, so no container and no anonymous
+        // volume (#50) ever come of it.
         await expect(
           exec(RUNTIME, [
             "run",
@@ -388,9 +392,7 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
         logDir,
       });
 
-      await expect(
-        exec(RUNTIME, ["rm", "-f", "-t", "0", anchor]),
-      ).rejects.toThrow(/depend/i);
+      await expect(removeFixtureContainer(anchor)).rejects.toThrow(/depend/i);
 
       // Joiners first, and then the anchor goes.
       await stack.stop();
@@ -402,7 +404,7 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
           sandboxContainerNameFor(SCOPE, ISSUE_ID, "app"),
         ]),
       ).rejects.toThrow();
-      await exec(RUNTIME, ["rm", "-f", "-t", "0", anchor]);
+      await removeFixtureContainer(anchor);
       anchor = "";
     },
     300_000,
@@ -438,7 +440,7 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
         logDir,
       });
 
-      await exec(RUNTIME, ["rm", "-f", "-t", "0", "--depend", anchor]);
+      await removeFixtureContainer("--depend", anchor);
       const joiner = sandboxContainerNameFor(SCOPE, ISSUE_ID, "app");
       await expect(exec(RUNTIME, ["container", "exists", joiner])).rejects.toThrow();
       stack = null;

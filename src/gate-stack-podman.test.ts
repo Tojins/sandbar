@@ -9,6 +9,7 @@ import { resolveGateStack } from "./config.js";
 import { ImageBuildError } from "./ensure-images.js";
 import {
   bringUpContainers,
+  CONTAINER_RM_ARGS,
   ContainerBringupError,
   containerState,
   parseHealthLog,
@@ -17,7 +18,11 @@ import {
 } from "./gate-stack.js";
 import { scopedResourcePrefix, stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
-import { podmanTestScope } from "./podman-test-scope.test-util.js";
+import {
+  podmanTestScope,
+  removeFixtureContainer,
+  runFixtureContainer,
+} from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -38,6 +43,19 @@ const runExit = async (
     };
   }
 };
+
+// Every VOLUME-typed mount a container holds, space-separated (#50). Bind
+// mounts are excluded by the type test: sandbar builds those by the dozen and
+// they are not what leaks. A host-wide `podman volume ls | wc -l` baseline is
+// deliberately NOT how this is measured — since #48 these containers are
+// siblings of the run's own on one podman, with three issues gating in
+// parallel, so that count moves under the assertion for unrelated reasons.
+const VOLUMES_OF = (name: string): string[] => [
+  "inspect",
+  "-f",
+  '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}',
+  name,
+];
 
 // Behaviour PODMAN defines, asserted by running podman — the same argument as
 // forge-verify-git.test.ts makes for git. The pure argv builders in
@@ -492,12 +510,8 @@ describe.runIf(available)(
       "a bringup failure names the stack it was told it belongs to",
       async () => {
         const anchor = `${scopedResourcePrefix(SCOPE)}labelanchor`;
-        await exec(RUNTIME, ["rm", "-f", "-t", "0", "--depend", anchor]).catch(
-          () => {},
-        );
-        await exec(RUNTIME, [
-          "run",
-          "-d",
+        await removeFixtureContainer("--depend", anchor).catch(() => {});
+        await runFixtureContainer([
           "--name",
           anchor,
           "--entrypoint",
@@ -529,14 +543,7 @@ describe.runIf(available)(
         } finally {
           // `--depend` takes the joiner with it, which is the removal order
           // this topology forces everywhere else too.
-          await exec(RUNTIME, [
-            "rm",
-            "-f",
-            "-t",
-            "0",
-            "--depend",
-            anchor,
-          ]).catch(() => {});
+          await removeFixtureContainer("--depend", anchor).catch(() => {});
         }
       },
       180_000,
@@ -601,7 +608,7 @@ describe.runIf(available)(
         });
         expect((await stack.runGate()).ok).toBe(true);
 
-        await exec(RUNTIME, ["rm", "-f", "-t", "0", cName("svc")]);
+        await removeFixtureContainer(cName("svc"));
 
         // Not `.ok === false`: reddening is precisely the bug — and pre-fix
         // this was not even a red, it was a fully GREEN gate, because no step
@@ -649,12 +656,55 @@ describe.runIf(available)(
         expect(await runExit(inspect)).toEqual({ code: 0, stdout: "false" });
         expect((await runExit(exists)).code).toBe(0);
 
-        await exec(RUNTIME, ["rm", "-f", "-t", "0", name]);
+        await removeFixtureContainer(name);
         // Removed: inspect's 125 is the exit code a broken podman also gives.
         expect((await runExit(inspect)).code).toBe(125);
         expect((await runExit(exists)).code).toBe(1);
       },
       180_000,
+    );
+
+    // #50, layer 1. Podman's default `--image-volume=bind` provisions an
+    // ANONYMOUS volume per container for every builtin `VOLUME` in the image,
+    // and `mariadb` — this file's image — declares `/var/lib/mysql`. Each one
+    // holds a lock out of the host's single pool of 2048 until it is removed,
+    // and sandbar's removals did not take it: 2000 of them stopped a real host
+    // from creating any podman object at all, in unrelated projects too.
+    //
+    // Asserted WHILE THE STACK IS UP, which is what makes it race-free and
+    // needs no baseline: the question is whether the volume was ever created,
+    // not whether something later reaped it. The control that keeps it from
+    // being vacuous — that this image really does declare a `VOLUME`, so an
+    // empty list means the flag worked rather than that there was nothing to
+    // suppress — is the layer-2 test at the bottom of this file, which creates
+    // the same image WITHOUT the flag and finds one.
+    it(
+      "creates no anonymous volume for the image's VOLUME directives",
+      async () => {
+        stack = await startStack({
+          stackId: STACK_ID,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              { name: "db", image: IMAGE, lifecycle: "issue", hold: true },
+              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            ],
+            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+          }),
+        });
+        expect((await stack.runGate()).ok).toBe(true);
+
+        // Both containers: `issue` and `attempt` differ in lifetime, and the
+        // `attempt` one is the expensive half — it is RECREATED on every gate
+        // run, so pre-fix each attempt bought another volume that nothing
+        // would ever read.
+        for (const name of ["db", "runner"]) {
+          const { code, stdout } = await runExit(VOLUMES_OF(cName(name)));
+          expect({ name, code, stdout }).toEqual({ name, code: 0, stdout: "" });
+        }
+      },
+      300_000,
     );
 
     // -----------------------------------------------------------------------
@@ -868,7 +918,7 @@ describe.runIf(available)(
         // readiness budget against a container that cannot answer.
         expect((caught as Error).message).not.toMatch(/did not recover/);
 
-        await exec(RUNTIME, ["rm", "-f", "-t", "0", cName("svc")]);
+        await removeFixtureContainer(cName("svc"));
         await expect(stack.runGate()).rejects.toThrow(/no longer exists/);
       },
       240_000,
@@ -1400,12 +1450,12 @@ describe.runIf(available)("podman exec under a killed client", () => {
   const NAME = cName("killprobe");
 
   beforeEach(async () => {
-    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
-    await exec(RUNTIME, ["run", "-d", "--name", NAME, IMAGE, "sleep", "infinity"]);
+    await removeFixtureContainer(NAME).catch(() => {});
+    await runFixtureContainer(["--name", NAME, IMAGE, "sleep", "infinity"]);
   }, 60_000);
 
   afterEach(async () => {
-    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
+    await removeFixtureContainer(NAME).catch(() => {});
   }, 60_000);
 
   // The kill buys nothing, which is why a timeout has to reap the container
@@ -1425,7 +1475,7 @@ describe.runIf(available)("podman exec under a killed client", () => {
       expect(stdout).toContain(marker);
 
       // Removing the container IS total, which is what `reapTimedOutStep` uses.
-      await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]);
+      await removeFixtureContainer(NAME);
       await expect(
         exec(RUNTIME, ["exec", NAME, "ps", "-eo", "args"]),
       ).rejects.toThrow();
@@ -1456,9 +1506,8 @@ describe.runIf(available)("podman healthcheck run", () => {
     command: readonly string[],
     extra: readonly string[] = [],
   ): Promise<void> => {
-    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
-    await exec(RUNTIME, [
-      "run", "-d",
+    await removeFixtureContainer(NAME).catch(() => {});
+    await runFixtureContainer([
       "--name", NAME,
       "--health-cmd", JSON.stringify(command),
       "--health-interval=disable",
@@ -1475,7 +1524,7 @@ describe.runIf(available)("podman healthcheck run", () => {
   };
 
   afterEach(async () => {
-    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
+    await removeFixtureContainer(NAME).catch(() => {});
   }, 60_000);
 
   // The mapping the poll loop reads, and the only part of it sandbar acts on.
@@ -1632,9 +1681,8 @@ describe.runIf(available)("in-namespace port probe", () => {
   const NAME = cName("portprobe");
 
   beforeEach(async () => {
-    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
-    await exec(RUNTIME, [
-      "run", "-d",
+    await removeFixtureContainer(NAME).catch(() => {});
+    await runFixtureContainer([
       "--name", NAME,
       "-e", "MYSQL_ALLOW_EMPTY_PASSWORD=yes",
       IMAGE,
@@ -1652,7 +1700,7 @@ describe.runIf(available)("in-namespace port probe", () => {
   }, 180_000);
 
   afterEach(async () => {
-    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
+    await removeFixtureContainer(NAME).catch(() => {});
   }, 60_000);
 
   it(
@@ -1677,5 +1725,63 @@ describe.runIf(available)("in-namespace port probe", () => {
       expect(Date.now() - started).toBeLessThan(10_000);
     },
     120_000,
+  );
+});
+
+// #50, layer 2 — and the control for layer 1, since it is what proves this
+// image declares a builtin `VOLUME` at all.
+//
+// Past `--image-volume=ignore` no container sandbar creates carries an
+// anonymous volume, so `-v` on the removals can only ever fire against one a
+// PRE-UPGRADE sandbar left behind — which `bringUpContainers`' pre-create
+// removal of a stale namesake and the orphan sweep both really do meet. That
+// population cannot be produced by sandbar any more, so the fixture is created
+// with a hand-written `podman run` at podman's DEFAULT, deliberately bypassing
+// `runFixtureContainer`: it is the pre-upgrade container, not a fixture.
+describe.runIf(available)("removing a pre-upgrade container's volume", () => {
+  const NAME = cName("volprobe");
+
+  afterEach(async () => {
+    await removeFixtureContainer(NAME).catch(() => {});
+  }, 60_000);
+
+  it(
+    "takes the anonymous volume with the container",
+    async () => {
+      await exec(RUNTIME, [
+        "run",
+        "-d",
+        "--name",
+        NAME,
+        "--entrypoint",
+        "sleep",
+        IMAGE,
+        "infinity",
+      ]);
+
+      // The control half. If this ever comes back empty the layer-1 assertion
+      // above has quietly stopped meaning anything, and the failure belongs
+      // here rather than there.
+      const { code, stdout } = await runExit(VOLUMES_OF(NAME));
+      expect(code).toBe(0);
+      const volumes = stdout.split(" ").filter(Boolean);
+      expect(volumes.length).toBeGreaterThan(0);
+      for (const v of volumes) {
+        expect({ v, code: (await runExit(["volume", "exists", v])).code }).toEqual(
+          { v, code: 0 },
+        );
+      }
+
+      // Sandbar's own removal argv, not a hand-written one: the `-v` is the
+      // whole subject, and a literal here would pass with the production
+      // builder reverted.
+      await exec(RUNTIME, CONTAINER_RM_ARGS(NAME));
+      for (const v of volumes) {
+        expect({ v, code: (await runExit(["volume", "exists", v])).code }).toEqual(
+          { v, code: 1 },
+        );
+      }
+    },
+    300_000,
   );
 });

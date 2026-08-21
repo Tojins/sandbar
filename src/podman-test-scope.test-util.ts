@@ -3,9 +3,10 @@
 //
 // Two of the three podman-touching test files create host-global resources
 // under names they choose: pods, networks, containers and image tags.
-// (`agent-sandbox-podman.test.ts` is the third and needs nothing from here —
+// (`agent-sandbox-podman.test.ts` is the third and needs no SCOPE from here —
 // audited rather than assumed: its only host-global names are already
-// per-container uuids plus a read-only image probe.) Podman's namespace is one
+// per-container uuids plus a read-only image probe. It takes the fixture
+// helpers below, which every podman-touching file does.) Podman's namespace is one
 // per host, so two processes running the same file concurrently want the same
 // names — and
 // `startStack` FORCE-REMOVES a namesake before creating one, on the correct
@@ -81,9 +82,9 @@
 // All four lines are load-bearing, and the middle two are the ones easily
 // dropped as redundant. `pod rm -f` takes its member containers and the pod's
 // unreachably-named infra container, but it reaches neither the fixture
-// containers these files start with a bare `podman run -d --name`
-// (`killprobe`, `hcprobe`, `portprobe`, `hctimer`, `hcnotimer` — and
-// `killprobe` is a `sleep infinity`, i.e. a container left RUNNING forever) nor
+// containers these files start with `runFixtureContainer` (`killprobe`,
+// `hcprobe`, `portprobe`, `hctimer`, `hcnotimer` — and `killprobe` is a
+// `sleep infinity`, i.e. a container left RUNNING forever) nor
 // the network sandbar created for the pod, which outlives it. Under the old fixed scope both classes reaped
 // themselves, because the next run recomputed the same names and the fixtures'
 // own `rm -f` / `startStack` reclaimed them; per-process, nothing ever
@@ -138,6 +139,42 @@
 // If either run is interrupted, kill the process GROUP and check
 // `ps -ef | grep [f]orks.js` (#25).
 //
+// FIXTURE CONTAINERS GO THROUGH `runFixtureContainer`/`removeFixtureContainer`,
+// AND THAT IS A CORRECTNESS RULE RATHER THAN A TIDINESS ONE (#50). Podman's
+// default `--image-volume=bind` provisions an ANONYMOUS volume per container
+// for every builtin `VOLUME` the image declares — `mariadb:10.11`, this
+// suite's own image, declares `/var/lib/mysql` — and podman allocates one lock
+// per container, pod AND volume out of a single pool (`num_locks`, default
+// 2048). A `rm` without `-v` leaves the volume, and therefore the lock, behind
+// forever. Measured on a real host: 2000 volumes + 47 containers + 1 pod =
+// 2048, at which point EVERY podman object creation fails host-wide, in
+// projects that have nothing to do with sandbar. These files are the most
+// efficient producer there is — mariadb-heavy, and since #48 running inside
+// the gate on every attempt across three concurrent issues.
+//
+// So the create helper carries `--image-volume=ignore` (production's flag, so
+// the fixtures model what sandbar really runs) and the remove helper carries
+// `-f -v -t 0`. Helpers rather than the literals they replace, because this
+// class of bug is invisible until it is total: a dozen identical argvs are
+// exactly the shape that regresses one at a time, and the next podman test
+// someone writes has to inherit the fix rather than remember it. `-t 0` is in
+// the remove helper for the reason gate-stack.ts uses it — without it podman
+// waits out its 10-second graceful stop PER CONTAINER.
+//
+// `cleanup` needs nothing of this: it removes containers through
+// `cleanupOrphanContainers`, which carries `-v` itself.
+//
+// Already-leaked volumes are the operator's to clear, and no sweep may do it —
+// an anonymous volume carries no label, so sandbar's are indistinguishable
+// from another project's. With no sandbar and no test run in flight:
+//
+//   podman volume ls -q --filter dangling=true | grep -E '^[0-9a-f]{64}$' \
+//     | xargs -r podman volume rm
+//
+// (The same four lines are in containers.ts's header. The duplication is
+// deliberate: the two readers arrive from two different symptoms, and a
+// cross-reference is a worse experience than four repeated lines.)
+//
 // `.test-util.ts` shares `*.test.ts`'s tsconfig exclusion, for the same reason:
 // without it this compiles into `dist/` and ships as importable dead weight.
 
@@ -151,6 +188,29 @@ import { type RunScope, runScope } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
+
+// Create a fixture container the way production does. `args` is everything
+// after `run -d`, so a call site still writes its own `--name`, flags, image
+// and command — the only thing this adds is the flag it must not be possible
+// to forget. See the header.
+export async function runFixtureContainer(
+  args: readonly string[],
+): Promise<void> {
+  await exec(RUNTIME, ["run", "-d", "--image-volume=ignore", ...args]);
+}
+
+// Remove fixture containers. `args` is everything after `rm -f -v -t 0`: one or
+// more container names, optionally preceded by a flag such as `--depend`.
+//
+// It THROWS on failure, exactly as the bare `exec` it replaces did. A call site
+// that means "remove it if it is there" keeps its own `.catch(() => {})`, and
+// one in the middle of a test keeps the throw — swallowing here would decide
+// that for both.
+export async function removeFixtureContainer(
+  ...args: readonly string[]
+): Promise<void> {
+  await exec(RUNTIME, ["rm", "-f", "-v", "-t", "0", ...args]);
+}
 
 export type PodmanTestScope = {
   // This process's scope. Every pod, network, container and variant image tag

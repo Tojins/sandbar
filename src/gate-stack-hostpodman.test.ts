@@ -58,7 +58,11 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
-import { podmanTestScope } from "./podman-test-scope.test-util.js";
+import {
+  podmanTestScope,
+  removeFixtureContainer,
+  runFixtureContainer,
+} from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -99,12 +103,12 @@ describe.runIf(available)("podman exec under a killed local client", () => {
   const NAME = cName("killprobe");
 
   beforeEach(async () => {
-    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
-    await exec(RUNTIME, ["run", "-d", "--name", NAME, IMAGE, "sleep", "infinity"]);
+    await removeFixtureContainer(NAME).catch(() => {});
+    await runFixtureContainer(["--name", NAME, IMAGE, "sleep", "infinity"]);
   }, 60_000);
 
   afterEach(async () => {
-    await exec(RUNTIME, ["rm", "-f", "-t", "0", NAME]).catch(() => {});
+    await removeFixtureContainer(NAME).catch(() => {});
   }, 60_000);
 
   // The green-on-red this whole mechanism exists to avoid. Node's `timeout:`
@@ -178,7 +182,7 @@ describe.runIf(hasUserSystemd)("healthcheck scheduling", () => {
 
   beforeEach(async () => {
     for (const n of [SCHEDULED, UNSCHEDULED]) {
-      await exec(RUNTIME, ["rm", "-f", "-t", "0", n]).catch(() => {});
+      await removeFixtureContainer(n).catch(() => {});
     }
   }, 60_000);
 
@@ -186,7 +190,7 @@ describe.runIf(hasUserSystemd)("healthcheck scheduling", () => {
     // `rm` is also what removes the transient unit podman created, so this is
     // cleanup of two things rather than one.
     for (const n of [SCHEDULED, UNSCHEDULED]) {
-      await exec(RUNTIME, ["rm", "-f", "-t", "0", n]).catch(() => {});
+      await removeFixtureContainer(n).catch(() => {});
     }
   }, 60_000);
 
@@ -195,8 +199,7 @@ describe.runIf(hasUserSystemd)("healthcheck scheduling", () => {
     async () => {
       // Control: a real interval, which is what sandbar deliberately never
       // passes. Without this half the assertion below is vacuous.
-      await exec(RUNTIME, [
-        "run", "-d",
+      await runFixtureContainer([
         "--name", SCHEDULED,
         "--health-cmd", JSON.stringify(["true"]),
         "--health-interval=2s",
@@ -207,8 +210,7 @@ describe.runIf(hasUserSystemd)("healthcheck scheduling", () => {
       // Exactly what `healthCheckArgs` emits. M2/M9: with a `--health-cmd`
       // present, `disable` suppresses the unit entirely — and `.Config` still
       // carries the probe, so `podman healthcheck run` works on demand.
-      await exec(RUNTIME, [
-        "run", "-d",
+      await runFixtureContainer([
         "--name", UNSCHEDULED,
         "--health-cmd", JSON.stringify(["true"]),
         "--health-interval=disable",
