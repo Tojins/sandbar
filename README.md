@@ -104,9 +104,18 @@ same host, are disjoint by construction.
 `runGateCommand(config, { worktree, keep })` is the API, and it **returns** that
 exit code rather than throwing — including the 2, which is the whole reason
 `GATE_EXIT_GREEN`/`GATE_EXIT_RED`/`GATE_EXIT_NO_VERDICT` are exported beside it.
-`process.exit(await runGateCommand(config, { worktree: ".", keep: false }))` is
-the bin, near enough. Faults are rendered to stderr on the way out; pass `out`
-and `err` sinks to put them somewhere else.
+
+```js
+process.exitCode = await runGateCommand(config, { worktree: ".", keep: false });
+```
+
+That is the bin, near enough — and **set the code rather than calling
+`process.exit(code)`**, which is not a style preference: the steps stream
+through `process.stdout.write`, and to a pipe (a CI log, a `| tee`) those writes
+are asynchronous, so exiting on the spot truncates the failing step's output —
+the diagnosis the exit code is about, lost only on red. Setting the code and
+letting node drain cannot. Faults are rendered to stderr on the way out; pass
+`out` and `err` sinks to put them somewhere else.
 
 `RunConfig` is **deviations-only**. Supply the repo-specific facts sandbar can't guess (required) plus only the knobs you want different from the defaults. Everything else falls through — don't restate a default.
 

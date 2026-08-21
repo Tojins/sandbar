@@ -910,9 +910,21 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // database whose declared setup never ran: a stack that does not match its
     // config, reached through the mechanism whose whole soundness argument is
     // that the token proves it does. So a stack that never came up is not a
-    // stack to keep. This covers the signal path too, which is why the flag is
-    // read here rather than at the one throw site: a Ctrl-C mid-bringup would
-    // otherwise leave exactly the same adoptable wreckage.
+    // stack to keep. This covers the signal paths that RUN it, which is why the
+    // flag is read here rather than at the one throw site: a Ctrl-C mid-bringup
+    // would otherwise leave exactly the same adoptable wreckage.
+    //
+    // SIGKILL is the residual, and it is stated rather than closed. Killed
+    // between the `pod create` that writes the token label and the end of the
+    // bringup, nothing runs at all, so what is left is a pod carrying a
+    // matching token over an `issue` container that is up and healthy and
+    // whose `postReadyCommands` never ran — adoptable by the next invocation
+    // of the same config, which is the failure this paragraph exists to
+    // prevent, arriving by the one route no teardown can cover. Podman cannot
+    // relabel a pod after the fact, so the close is to write the label only
+    // once the bringup has finished, which is a second control-plane call on
+    // every ordinary path for a case whose cost is one `pod rm -f`. Same shape
+    // as the variant image a SIGKILLed gate leaks, and recorded beside it.
     //
     // A red gate STEP — which is what `--keep` is actually for — is untouched:
     // that path never enters the catch and `broughtUp` is long since true.

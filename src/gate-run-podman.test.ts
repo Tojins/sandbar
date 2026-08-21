@@ -174,10 +174,15 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   // Both of these RETURN GATE_EXIT_NO_VERDICT rather than throwing, and that
   // is the contract rather than an implementation detail: the constant is
   // exported from the package root beside `runGateCommand`, and the README
-  // tells a host to `process.exit(await runGateCommand(…))` — so a throw here
-  // would be an uncaught stack trace on exactly the path the third code exists
+  // tells a host to take its exit code straight off the call — so a throw here
+  // would be an unhandled rejection on exactly the path the third code exists
   // to make legible. Never 0 or 1 either way: a stack that could not be brought
   // up reported as a red sends someone to debug a branch that was never gated.
+  //
+  // They are also the two halves of what `--keep` may CLAIM on a fault. Both
+  // leave no stack, and for different reasons that the operator has to be able
+  // to tell apart: one failed before any container existed, the other left a
+  // half-built stack that had to be destroyed rather than kept.
   it(
     "refuses up front when a referenced image is missing, naming the pull",
     async () => {
@@ -197,9 +202,11 @@ describe.runIf(available)("sandbar gate against real podman", () => {
             ],
           },
         },
+        // `--keep`, so the notice below is reached: this refusal happens
+        // before a single container exists.
         {
           worktree: repo,
-          keep: false,
+          keep: true,
           out: (t) => out.push(t),
           err: (t) => out.push(t),
         },
@@ -212,6 +219,13 @@ describe.runIf(available)("sandbar gate against real podman", () => {
       // through the sink, since returning the code means nothing else prints
       // it.
       expect(out.join("")).toContain(`pull ${missing}`);
+      // And the `--keep` notice tells the truth about THIS path. A stack
+      // handle is null here exactly as it is for a bringup that started and
+      // threw, so a notice keyed on it alone says a bringup ran and that the
+      // error above is what it saw — for a `podman pull` line. The negative is
+      // the assertion that fails if the two collapse back into one.
+      expect(out.join("")).toContain("before any container was created");
+      expect(out.join("")).not.toContain("never finished coming up");
       expect(await podExists()).toBe(false);
     },
     300_000,
@@ -269,6 +283,11 @@ describe.runIf(available)("sandbar gate against real podman", () => {
       // teardown or the bringup is what went wrong.
       expect(await podExists()).toBe(false);
       expect(out.join("")).toContain("NOT left up");
+      // The other half of the pair above: HERE a bringup really did start and
+      // fail, so this is the one path on which that sentence is true — and it
+      // must not be the sentence the pre-container refusal gets.
+      expect(out.join("")).toContain("never finished coming up");
+      expect(out.join("")).not.toContain("before any container was created");
     },
     300_000,
   );

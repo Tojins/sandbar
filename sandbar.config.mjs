@@ -160,12 +160,15 @@ export default {
         // it asks a question about the host's own session.
         //
         // 30 minutes. The 229s that number was set against was measured
-        // over two of these three files, so read the headroom as smaller than
-        // the ratio suggests — `gate-run-podman.test.ts` adds bringups of its
-        // own, including two it deliberately drives to a readiness timeout.
-        // The runtime is dominated by mariadb bringup and by those timeouts,
-        // and three gates run concurrently at the default plan size,
-        // contending for one podman.
+        // over two of these three files, and #45 added to both of them, so
+        // read the headroom as smaller than the ratio suggests: ten more
+        // `startStack` cycles in `gate-stack-podman.test.ts` (reuse and
+        // keep-alive are only assertable by bringing a stack up more than
+        // once) and ten `runGateCommand` invocations here, most of which
+        // bring one up and one of which is driven to a readiness timeout
+        // deliberately. The runtime is dominated by container bringup and by
+        // those timeouts, and three gates run concurrently at the default plan
+        // size, contending for one podman.
         timeoutMs: 1_800_000,
       },
     ],
