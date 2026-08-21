@@ -5,7 +5,9 @@
 //      stack in parallel. The worktree comes FIRST (not in the parallel pair,
 //      #20): stack mounts bind-mount fixture files from it, and mount sources
 //      are read at container start — only the expensive container bringups
-//      overlap.
+//      overlap. That ordering is also what makes the sandbox's own image
+//      resolvable against the BRANCH (#46): the files a `rebuildOn` entry
+//      hashes are on disk before `createSandbox` is called.
 //   2. Drive the state machine (inner-loop-machine.ts) to a verdict by
 //      executing the action it emits and feeding the result back as an event.
 //   3. Translate the verdict to a Terminal.
@@ -31,7 +33,7 @@ import { agentPartialOutput, podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
 import type { ResolvedGateStack } from "./config.js";
-import type { BranchImages } from "./ensure-images.js";
+import { type BranchImages, resolveSandboxImage } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { summarizeGateFailure } from "./gate.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
@@ -257,28 +259,50 @@ async function runSandboxCycle(
     });
 
     const [sandboxResult, stackResult] = await Promise.allSettled([
-      agentSandbox.createSandbox({
-        branch: issue.branch,
-        layout: config.layout,
-        // Named explicitly rather than left to defaultImageName(repoDir): the
-        // implicit coupling between the sandbox image and the host's repo
-        // DIRECTORY NAME broke silently on a rename (#24 D7).
-        sandbox: podman({
-          imageName: config.sandboxImage,
-          namePrefix: scopedResourcePrefix(config.scope),
-        }),
-        hooks: opts.hooks,
-        env: config.env,
-        preparedWorktreePath: worktreePath,
-      }),
+      (async () => {
+        // The sandbox's own image is a function of the branch too (#46), and
+        // the worktree above is what makes that answerable here: it is on disk
+        // before this line, which is all the fingerprint needs. Resolved once
+        // per sandbox — the attempts accumulate in this container, so there is
+        // no later point that could re-resolve without discarding them — and
+        // falling back to the declared tag if the build fails, because this is
+        // the container the fix would be written in. See resolveSandboxImage.
+        const imageName = await resolveSandboxImage({
+          declaredTag: config.sandboxImage,
+          worktreePath,
+          branchImages,
+          onFallback: async (detail) => {
+            const line = `issue=${issue.id} sandbox-image fallback — ${detail}`;
+            console.error(`  ${line}`);
+            if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
+          },
+        });
+        return agentSandbox.createSandbox({
+          branch: issue.branch,
+          layout: config.layout,
+          // Named explicitly rather than left to defaultImageName(repoDir): the
+          // implicit coupling between the sandbox image and the host's repo
+          // DIRECTORY NAME broke silently on a rename (#24 D7).
+          sandbox: podman({
+            imageName,
+            namePrefix: scopedResourcePrefix(config.scope),
+          }),
+          hooks: opts.hooks,
+          env: config.env,
+          preparedWorktreePath: worktreePath,
+        });
+      })(),
       startStack({
         stackId: issue.id,
         scope: config.scope,
         spec: config.gateStack,
         worktreePath,
         // A thunk, not a value: the stack calls it before every gate run, and
-        // the answer changes as the agent commits (#37).
-        ...(branchImages ? { images: () => branchImages.resolve(worktreePath) } : {}),
+        // the answer changes as the agent commits (#37). It hands back the
+        // tags it runs, so the sandbox's entry is not resolved here (#46).
+        ...(branchImages
+          ? { images: (only: ReadonlySet<string>) => branchImages.resolve(worktreePath, only) }
+          : {}),
       }),
     ]);
     if (sandboxResult.status === "fulfilled") sandbox = sandboxResult.value;

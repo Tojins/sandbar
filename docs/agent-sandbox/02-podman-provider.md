@@ -18,7 +18,7 @@ everything else:
 
 | Option | Default | Sandbar value |
 | --- | --- | --- |
-| `imageName` | `defaultImageName(hostRepoPath)` = `sandbar:<dir>` | **`config.sandboxImage`** (explicit since #24 D7 — the default coupled the image to the host's directory name and broke on a rename) |
+| `imageName` | `defaultImageName(hostRepoPath)` = `sandbar:<dir>` | **`config.sandboxImage`**, or its per-branch variant (explicit since #24 D7 — the default coupled the image to the host's directory name and broke on a rename; resolved against the issue worktree since #46, when that entry declares `rebuildOn`) |
 | `namePrefix` | `RESOURCE_PREFIX` = `sandbar-` | **`sandbar-<scope>-`** (explicit since #28 — the container must be inside the run's scope or a sibling run's orphan sweeper force-removes it) |
 | `selinuxLabel` | `"z"` | `"z"` |
 | `userns` | `"keep-id"` | `"keep-id"` |

@@ -366,11 +366,45 @@ exist in your checkout (a path that matches nothing makes the whole declaration
 inert, which is the failure above), it cannot be combined with `stdinContext`
 (that build has no context, so nothing in the repo can change it) or with an
 absolute `containerfile` (the rebuild re-roots the build at the worktree), and
-the image must be one a `gateStack` container runs. Declaring it on the agent
-sandbox's image alone is rejected: that image is resolved once, when the sandbox
-is created, before the branch it would depend on exists — and the agent can
-install into its own sandbox, so a stale layer there costs it a command rather
-than a verdict.
+the image must be one something actually runs — a `gateStack` container's, or
+`sandboxImage`. An entry sandbar builds and nothing ever runs is rejected: the
+declaration would be inert, which is this feature's own failure mode.
+
+### `rebuildOn` on `sandboxImage`
+
+The agent's sandbox has the same problem the gate does. An image that bakes
+dependencies so the agent starts working immediately is a function of the
+branch, and an issue that moves the lockfile gets a sandbox built from the
+source branch's — which reads, from inside, as a bug in the code the agent was
+asked to fix. Declaring `rebuildOn` on the `sandboxImage` entry closes it:
+
+```ts
+sandboxImage: "localhost/app:sandbar",
+images: [
+  { tag: "localhost/app:sandbar", containerfile: "Containerfile.sandbar",
+    rebuildOn: ["package-lock.json", "bower.json"] },
+]
+```
+
+Sandbar prepares the issue worktree **before** it creates the sandbox container
+(the gate stack's mounts need the files on disk), so the branch's inputs are
+there in time to be hashed, and the sandbox starts on an image built from them.
+Two things differ from the gate's version:
+
+- it resolves **once per sandbox**, not per attempt. The attempts of an issue
+  accumulate in one container, so re-resolving mid-issue would mean throwing
+  that container away — and an agent can install into its own sandbox with one
+  command. What the branch adds *during* the run still reaches the gate, which
+  is where verdicts come from;
+- a build that fails leaves the sandbox on the **declared** tag, with a line in
+  the run log, rather than refusing to start. The sandbox is where the fix gets
+  written and the branch outlives the cycle, so a throw would wedge the issue
+  instead of failing it. The gate resolves the same entry independently and reds
+  with the same build output, against the branch.
+
+The rebuild lands in the issue's critical path, before the agent's first turn,
+and the sandbox image is usually the largest one — so it costs what your layer
+cache says it costs, and only for an entry that declares `rebuildOn`.
 
 ### Three constraints the gate stack imposes on your images and steps
 

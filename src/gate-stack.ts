@@ -402,7 +402,13 @@ export type StackOptions = {
   //
   // Omitted, every container runs the image its config names, which is what
   // every stack without a `rebuildOn` image does.
-  readonly images?: () => Promise<ImageMap>;
+  //
+  // The argument is the set of declared tags THIS stack runs, computed here
+  // from the spec rather than by the caller (#46). The resolver is shared with
+  // the agent sandbox, and asking it about an entry no container in this stack
+  // runs would pay for a build the gate cannot use and let that build's failure
+  // red a gate it has nothing to do with.
+  readonly images?: (only: ReadonlySet<string>) => Promise<ImageMap>;
 };
 
 export type Stack = {
@@ -699,6 +705,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // it is how `runGate` knows which issue containers a changed image leaves
     // stale, and the empty map above is the honest starting value.
     const running = { map: new Map<string, string>() as ImageMap };
+    const imageResolver = opts.images;
 
     return {
       podName,
@@ -713,7 +720,9 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
           worktreePath: opts.worktreePath,
           hostPorts,
           nameOf,
-          images: opts.images ?? (async () => new Map()),
+          images: imageResolver
+            ? () => imageResolver(new Set(opts.spec.containers.map((c) => c.image)))
+            : async () => new Map(),
           running,
         }),
     };

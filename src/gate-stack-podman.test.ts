@@ -824,11 +824,19 @@ describe.runIf(available)(
         const ALIAS = testImageTag("image-swap");
         await exec(RUNTIME, ["tag", IMAGE, ALIAS]);
         let swap = new Map<string, string>();
+        // What the stack ASKS about, recorded: since #46 the resolver is shared
+        // with the agent sandbox, and the stack — not its caller — names the
+        // images it runs, so it can never be handed an entry no container here
+        // runs and be reddened by a build it has no use for.
+        let askedFor: ReadonlySet<string> | null = null;
         stack = await startStack({
           stackId: STACK_ID,
           scope: SCOPE,
           worktreePath: repo,
-          images: async () => swap,
+          images: async (only) => {
+            askedFor = only;
+            return swap;
+          },
           spec: resolveGateStack({
             containers: [
               { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
@@ -849,6 +857,9 @@ describe.runIf(available)(
           ).stdout.trim();
 
         expect((await stack.runGate()).ok).toBe(true);
+        // Exactly the two containers' images — this stack's own, and only its
+        // own (#46).
+        expect([...(askedFor ?? [])]).toEqual([IMAGE]);
         const idBefore = await inspectOf("held", "{{.Id}}");
         expect(await inspectOf("held", "{{.ImageName}}")).toContain("mariadb");
 

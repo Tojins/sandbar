@@ -224,7 +224,12 @@ export type BuiltImage = {
   //   - before every gate run, the gated worktree's hash is compared against
   //     the base image's. A branch that changed one of these paths gets its own
   //     image, built from that worktree, and the stack's containers are
-  //     recreated from it.
+  //     recreated from it;
+  //   - and, for `sandboxImage`, once per agent sandbox, against the issue
+  //     worktree the sandbox is about to mount (#46). Same comparison, one
+  //     resolution per sandbox rather than per attempt, and a build that fails
+  //     leaves the sandbox on the declared tag instead of refusing to start the
+  //     container the fix would be written in.
   //
   // Undeclared, an image that bakes dependencies is pinned to the source branch
   // for the whole run, so a branch that adds a dependency reds the gate with a
@@ -1221,30 +1226,33 @@ export function resolveImages(
   return resolved;
 }
 
-// `rebuildOn` on an image no gate-stack container runs is inert, and inertness
-// is exactly the failure mode #37 is about: the operator has written down what
-// the image is a function of, and sandbar would silently never act on it.
+// `rebuildOn` on an image nothing runs is inert, and inertness is exactly the
+// failure mode #37 is about: the operator has written down what the image is a
+// function of, and sandbar would silently never act on it.
 //
-// The agent sandbox is deliberately NOT counted as a use. Its image is resolved
-// once, when the sandbox is created, and the branch it would be a function of
-// does not exist yet at that point — the agent writes it during the run. It is
-// also an environment the agent controls and can install into, so a stale baked
-// dependency there costs it a command, not a false verdict. Rebuilding it
-// mid-cycle would mean disposing the sandbox the attempts accumulate in.
+// The agent sandbox IS a use since #46. #37 excluded it on the grounds that its
+// image is "resolved once, when the sandbox is created, and the branch it would
+// be a function of does not exist yet" — a true statement about the wrong
+// moment, since the issue worktree is prepared before the sandbox is created
+// and the branch's files are on disk in time. It is resolved once per sandbox
+// rather than once per attempt, and a failed build falls back to the declared
+// tag rather than wedging the container the fix would be written in;
+// `resolveSandboxImage` in ensure-images.ts carries both halves of that
+// argument.
 export function checkRebuildOnIsUsed(
   images: readonly BuiltImage[],
   gateStack: ResolvedGateStack,
+  sandboxImage: string,
 ): void {
-  const gated = new Set(gateStack.containers.map((c) => c.image));
+  const used = new Set(gateStack.containers.map((c) => c.image));
+  used.add(sandboxImage);
   for (const img of images) {
     if ((img.rebuildOn ?? []).length === 0) continue;
-    if (gated.has(img.tag)) continue;
+    if (used.has(img.tag)) continue;
     throw new SandbarError(
-      `config.images: entry '${img.tag}' declares \`rebuildOn\`, but no ` +
-        "`gateStack.containers` entry runs that image, so nothing would ever " +
-        "act on it. `rebuildOn` governs the per-branch rebuild of gate " +
-        "images; the agent sandbox's image is resolved once, before the branch " +
-        "it would depend on exists.",
+      `config.images: entry '${img.tag}' declares \`rebuildOn\`, but nothing ` +
+        "runs that image — it is neither `sandboxImage` nor the image of any " +
+        "`gateStack.containers` entry — so nothing would ever act on it.",
     );
   }
 }
@@ -1294,7 +1302,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   const ghRepo = requireRepoPart("ghRepo", config.ghRepo);
   const gateStack = resolveGateStack(config.gateStack);
   const images = resolveImages(config.images, config.sandboxImage);
-  checkRebuildOnIsUsed(images, gateStack);
+  checkRebuildOnIsUsed(images, gateStack, config.sandboxImage);
   // Resolved to absolute HERE, not left as the host wrote it (#34). Since every
   // git call now runs with `cwd` as its process cwd, a RELATIVE `cwd` is
   // double-rooted the moment a path derived from it is passed as an argument:
