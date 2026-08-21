@@ -122,6 +122,8 @@ import {
 import { SandbarError, faultDetail } from "./errors.js";
 import { summarizeGateFailure } from "./gate.js";
 import {
+  ContainerBringupError,
+  type KeptStack,
   LOG_READ_TIMEOUT_MS,
   type Stack,
   boundedOk,
@@ -338,7 +340,7 @@ export async function runGateCommand(
     });
   } catch (e) {
     err(`${faultDetail(e)}\n`);
-    if (opts.keep) err(keepFaultNotice(progress));
+    if (opts.keep) err(keepFaultNotice(progress, e));
     return GATE_EXIT_NO_VERDICT;
   } finally {
     await teardown();
@@ -350,22 +352,48 @@ export async function runGateCommand(
 // work out from the wording which of the cases happened, and a fault is when
 // they most want the containers.
 //
-// THREE cases, not two, and that is the whole reason `bringupStarted` exists.
-// The stack handle alone cannot tell "no container was ever created" from "the
-// bringup started and did not finish": every throw BEFORE `startStack` leaves
-// it null too — the config validation, the not-a-directory refusal, the runtime
-// probe, the missing-pull refusal, a non-`ImageBuildError` out of
-// `ensureImages`, D3's uid check. A message saying a bringup ran and that the
-// error above is what it saw is then false for a config typo and for a `podman
-// pull` line, which is the class of not-true-on-every-path a message in this
-// repo does not get to be.
-function keepFaultNotice(progress: GateProgress): string {
+// FOUR cases, and not one of them can be told from the others by the stack
+// handle alone — which is why `bringupStarted` exists and why the error is read
+// as well. The handle is null for "no container was ever created" AND for
+// "the bringup started and did not finish" AND for "a stack this call only
+// ADOPTED is still standing": every throw before `startStack` leaves it null
+// (the config validation, the not-a-directory refusal, the runtime probe, the
+// missing-pull refusal, a non-`ImageBuildError` out of `ensureImages`, D3's uid
+// check), and so does every throw out of `startStack` itself, whether or not
+// its teardown kept the pod. A message saying a bringup ran and that the error
+// above is what it saw is then false for a config typo and for a `podman pull`
+// line, and a message saying nothing was kept is false for the adopted stack —
+// which is the class of not-true-on-every-path a message in this repo does not
+// get to be.
+function keepFaultNotice(progress: GateProgress, cause: unknown): string {
   // Came up, and then something failed — a dead `issue` container caught at the
   // top of the gate run. That stack IS kept, which is sound as well as useful:
   // it is not adoptable while one of its containers is down, and its log is the
   // diagnosis. So it gets the same notice the ordinary exit prints, naming the
   // pod.
   if (progress.stack !== null) return keptStackNotice(progress.stack);
+  // Adopted from a previous `--keep` and re-probed by this call, which failed:
+  // `startStack` threw, so there is no handle, and its teardown kept the pod
+  // anyway because nothing in it is half-built (#45). Only that catch can know
+  // this, so it says so on the error rather than leaving it to be guessed here.
+  const kept: KeptStack | null =
+    cause instanceof ContainerBringupError ? cause.keptStack : null;
+  if (kept !== null) {
+    return (
+      keptStackNotice(kept) +
+      // The one thing the ordinary notice cannot be read as promising here.
+      // Its first sentence — the next invocation reuses these containers — is
+      // still true and is now the problem rather than the point:
+      // `containerState` reports a wedged-but-running container as `running`,
+      // so it is adopted and re-probed and fails identically, where a stopped
+      // one would simply be recreated. Hence the removal line above, and hence
+      // saying which of the two an operator is looking at.
+      `The failure above is about a container in that stack. If it is still ` +
+      `running and merely unhealthy, the next \`sandbar gate\` over this ` +
+      `worktree adopts it, re-probes it and fails the same way — fix it in ` +
+      `place, or remove the pod to start from a clean one.\n`
+    );
+  }
   if (progress.bringupStarted) {
     return (
       "The stack was NOT left up despite `--keep`: it never finished coming " +
@@ -525,7 +553,7 @@ async function gate(
     // asked for containers to poke at and got a red, which is exactly the
     // shape that otherwise reads as a teardown bug. No container was created,
     // so `keepFaultNotice` renders that case and no new one is needed.
-    if (opts.keep) err(keepFaultNotice(progress));
+    if (opts.keep) err(keepFaultNotice(progress, e));
     return GATE_EXIT_RED;
   }
   const hostUid = process.getuid?.() ?? 0;
@@ -615,7 +643,11 @@ async function gate(
 // What `--keep` left behind, and how to get rid of it. One function because
 // the throw path needs it too: a stack that came up and then failed is kept,
 // and its pod name is the whole value of having kept it.
-function keptStackNotice(stack: Stack): string {
+//
+// It takes the two NAMES rather than a `Stack`, because one of its callers does
+// not have one: a stack `startStack` adopted and then threw over is standing,
+// and the only thing that reached the caller is the error (#45).
+function keptStackNotice(stack: KeptStack): string {
   return (
     `\nStack left up (\`--keep\`). Inspect it with \`${RUNTIME} pod ps\` / ` +
     `\`${RUNTIME} exec -it <container> sh\`; the next \`sandbar gate\` over ` +

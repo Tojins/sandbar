@@ -501,11 +501,14 @@ export type StackOptions = {
   // removes nothing, which is what makes a Ctrl-C mid-gate keep the stack too —
   // the state the operator asked to be able to inspect.
   //
-  // It keeps a stack that CAME UP, and only that. A bringup that threw — or a
-  // signal during one — tears down regardless, because the reuse above would
-  // otherwise adopt a half-built stack as one this config describes; the
-  // argument is at `stop`'s own early return, since that is where the
-  // condition is enforced.
+  // It keeps a stack in which nothing is HALF-BUILT, and only that. A bringup
+  // of this call's own that threw — or a signal during one — tears down
+  // regardless, because the reuse above would otherwise adopt a half-built
+  // stack as one this config describes. A failure over containers this call
+  // only ADOPTED does not tear down: they were completed under the invocation
+  // that kept them, which kept them under this same condition. The argument is
+  // at `stop`'s own early return, since that is where the condition is
+  // enforced.
   readonly keepAlive?: boolean;
 
   // Skip D1's dirty-worktree refusal.
@@ -560,10 +563,31 @@ export type Stack = {
 // container that dies during startup is diagnosed by its own log, which that
 // error already carries in full, and the alternative is an `inspect` on the
 // path where podman has just told us the container is stopped or gone.
+//
+// `keptStack` is the pod this error was raised over when `--keep` left it
+// standing (#45) — see the field.
 export class ContainerBringupError extends SandbarError {
   readonly containerName: string;
   readonly logTail: string;
   readonly healthLog: string;
+  // The stack a `--keep` invocation left up when this error was raised, or
+  // null — which is what it is for every throw inside a run, and for every
+  // standalone gate that kept nothing.
+  //
+  // Not a constructor argument, because no throw site can know it: the answer
+  // is "did `startStack`'s own `stop()` return early", and only that catch
+  // knows both halves — the pod identity, and what its own teardown did with
+  // it. So it is filled in there, in the statement that computes the fact.
+  //
+  // It exists because the caller cannot infer it, and got it wrong in exactly
+  // the case `--keep` is for. `gate-run.ts` had only the absent stack handle to
+  // reason from, so an ADOPTED stack whose re-probe failed — standing,
+  // complete, and the one thing its operator asked to be able to poke at — was
+  // announced as "it never finished coming up, and a half-built stack is one
+  // the next invocation would adopt as if its postReadyCommands had run". Both
+  // clauses false: it finished coming up under the invocation that kept it, and
+  // nothing in it is half-built.
+  keptStack: KeptStack | null = null;
   constructor(
     containerName: string,
     message: string,
@@ -588,6 +612,13 @@ export class ContainerBringupError extends SandbarError {
     this.healthLog = healthLog;
   }
 }
+
+// A stack that is still up, named the two ways it has to be named for anyone to
+// inspect it or get rid of it again.
+export type KeptStack = {
+  readonly podName: string;
+  readonly networkName: string;
+};
 
 // ---------------------------------------------------------------------------
 // Pure argv builders — the real adapters' blind spot is that a fake satisfies
@@ -884,10 +915,16 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     stackContainerNameFor(opts.scope, opts.stackId, c.name);
 
   let stopped = false;
-  // Did the bringup below run to completion? `--keep` is conditioned on it,
-  // and that condition is the whole of what makes adopting a kept stack sound
-  // (#45) — see the early return in `stop`.
+  // Is the pod free of anything half-built? `--keep` is conditioned on it, and
+  // that condition is the whole of what makes adopting a kept stack sound
+  // (#45) — see the early return in `stop`. Set the moment the bringup THIS
+  // CALL performs is past, which on the adoption path is immediately: what it
+  // adopted was completed under the invocation that kept it.
   let broughtUp = false;
+  // …and what `stop` then did with the pod, for the catch below to attach to
+  // the error. Read rather than recomputed, so it cannot come to disagree with
+  // the early return that produced it.
+  let podKept = false;
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
@@ -896,23 +933,46 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // do. Placed after the `stopped` latch rather than before the registration
     // so a signal still runs the action and still finds it already spent.
     //
-    // But ONLY for a stack that CAME UP, and that half is load-bearing rather
-    // than tidy. The reuse token is a pod LABEL written at pod-create time, and
-    // the adopt test is "podman says this container is running" — neither of
-    // which says the previous invocation's bringup finished. A half-built stack
-    // kept here is therefore fully adoptable by the next invocation of the same
-    // config, and `bringUpContainers` starts every container, then probes every
-    // one, then runs every `postReadyCommand`, so a failure anywhere in that
-    // sequence leaves earlier containers running, healthy, and missing the
-    // migration or the seed that was to follow. The next `sandbar gate`
-    // re-probes them (they pass — they were never unhealthy), deliberately does
-    // not re-run their `postReadyCommands`, and forms a verdict against a
-    // database whose declared setup never ran: a stack that does not match its
-    // config, reached through the mechanism whose whole soundness argument is
-    // that the token proves it does. So a stack that never came up is not a
-    // stack to keep. This covers the signal paths that RUN it, which is why the
-    // flag is read here rather than at the one throw site: a Ctrl-C mid-bringup
-    // would otherwise leave exactly the same adoptable wreckage.
+    // But ONLY while nothing in the pod is HALF-BUILT, and that half is
+    // load-bearing rather than tidy. The reuse token is a pod LABEL written at
+    // pod-create time, and the adopt test is "podman says this container is
+    // running" — neither of which says the previous invocation's bringup
+    // finished. A half-built stack kept here is therefore fully adoptable by
+    // the next invocation of the same config, and `bringUpContainers` starts
+    // every container, then probes every one, then runs every
+    // `postReadyCommand`, so a failure anywhere in that sequence leaves earlier
+    // containers running, healthy, and missing the migration or the seed that
+    // was to follow. The next `sandbar gate` re-probes them (they pass — they
+    // were never unhealthy), deliberately does not re-run their
+    // `postReadyCommands`, and forms a verdict against a database whose
+    // declared setup never ran: a stack that does not match its config, reached
+    // through the mechanism whose whole soundness argument is that the token
+    // proves it does. So a stack carrying such wreckage is not a stack to keep.
+    // This covers the signal paths that RUN it, which is why the flag is read
+    // here rather than at the one throw site: a Ctrl-C mid-bringup would
+    // otherwise leave exactly the same adoptable wreckage.
+    //
+    // `broughtUp` is that fact and NOT the stronger "every container in this
+    // pod came up under this call", because the two differ on exactly one path
+    // and it is the path `--keep` exists to serve. On the adoption path this
+    // call creates nothing: it re-probes containers an earlier invocation
+    // built, and a probe that fails there — a database that has wedged since,
+    // a host that suspended — leaves a pod in which nothing is half-built.
+    // Destroying it would take the database and everything its
+    // `postReadyCommands` built, at the moment its log is the only diagnosis
+    // available, which is the entire reason someone typed the flag. The
+    // invariant survives inductively: invocation N keeps its pod only if its
+    // own `broughtUp` was true, so whatever this call adopted was completed
+    // under that invocation's own guarantee.
+    //
+    // The counter-argument, recorded because it is real: an adopted container
+    // that can never pass its probe wedges every LATER invocation too, since
+    // `containerState` reports wedged-but-running as `running`, where a stopped
+    // one would simply be recreated. What answers it is that the wedge is one
+    // documented command deep — the `pod rm -f` line the kept-stack notice
+    // prints — while what tearing it down destroys is unrecoverable. A
+    // debugging flag should hand back the broken thing, not a fresh one and not
+    // nothing.
     //
     // SIGKILL is the residual, and it is stated rather than closed. Killed
     // between the `pod create` that writes the token label and the end of the
@@ -928,7 +988,10 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     //
     // A red gate STEP — which is what `--keep` is actually for — is untouched:
     // that path never enters the catch and `broughtUp` is long since true.
-    if (opts.keepAlive === true && broughtUp) return;
+    if (opts.keepAlive === true && broughtUp) {
+      podKept = true;
+      return;
+    }
     // `pod rm -f` takes the member containers AND the infra container with it.
     // The infra container is named `<pod-id-prefix>-infra`, which matches no
     // sandbar prefix — removing containers by name would leave it, and the pod,
@@ -1059,6 +1122,15 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       worktreePath: opts.worktreePath,
       nameOf,
     });
+    // Past this statement nothing THIS CALL created is half-built, which is the
+    // fact `--keep` is conditioned on (see `stop`). Here rather than after the
+    // last statement that can throw, because everything below creates nothing:
+    // the re-probe asks an adopted container a question and `runningImages`
+    // reads. So on a fresh bringup the position makes no difference at all —
+    // `reused` is empty, neither of those can fail — and on the adoption path
+    // it is the whole difference between keeping a wedged database and
+    // destroying it.
+    broughtUp = true;
 
     // A reused container is not re-created, but it IS re-probed (#45). Its
     // `postReadyCommands` are deliberately not re-run — they are one-shot setup
@@ -1097,11 +1169,6 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // shared resolver a superset (#46).
     const imagesThisStackRuns = new Set(opts.spec.containers.map((c) => c.image));
 
-    // Every container is created, probed and past its `postReadyCommands`.
-    // This is the fact `--keep` is conditioned on above, so it is set here:
-    // after the last statement that can throw, and before the only value this
-    // function hands back.
-    broughtUp = true;
     return {
       podName,
       networkName,
@@ -1131,6 +1198,21 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
         stopErr instanceof Error ? stopErr.message : String(stopErr),
       );
     });
+    // What that `stop` DID with the pod, carried out on the error rather than
+    // left for whoever catches it to infer (#45). This is the one place that
+    // knows both — the pod identity, and whether its own early return kept it
+    // — so the fact and the claim made about it are computed in one statement.
+    // A caller reasoning instead from the absence of a stack handle gets it
+    // wrong in exactly one case, and it is the case the flag exists for: an
+    // adopted stack whose re-probe failed is still standing, and telling its
+    // operator that it never finished coming up is false twice over.
+    //
+    // Only `ContainerBringupError` carries it, which costs nothing: reaching
+    // here with a kept pod means `broughtUp` was already true, and the only
+    // thing that throws past that point is the adopted containers' re-probe.
+    if (podKept && err instanceof ContainerBringupError) {
+      err.keptStack = { podName, networkName };
+    }
     throw err;
   }
 }

@@ -79,9 +79,14 @@ one has no commit to be a verdict about and no orchestrator to report to:
   That reuse is checked, not assumed: change any of those containers' config
   (image, env, args, mounts, readiness, `postReadyCommands`, name), the
   worktree, or sandbar's version, and the stack is rebuilt instead. A stack
-  whose bringup never finished is torn down despite the flag, and says so —
+  whose own bringup never finished is torn down despite the flag, and says so —
   keeping it would let the next invocation adopt a database whose
-  `postReadyCommands` never ran and then decline to re-run them. Remove a kept
+  `postReadyCommands` never ran and then decline to re-run them. A stack it
+  merely *adopted* is kept even when that fails: if the database it picked up
+  has wedged since, you get it, its log and its pod name rather than a fresh
+  one, which is the whole reason to type `--keep`. Note the flip side — a
+  container that is running but permanently unhealthy is adopted and re-probed
+  by every later invocation, so fix it in place or remove the pod. Remove a kept
   stack with the `podman pod rm -f …` line the command prints.
 
 It builds only the `config.images` entries a `gateStack` container actually
