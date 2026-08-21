@@ -123,6 +123,55 @@ describe.runIf(available)("ensureImages against real podman", () => {
     600_000,
   );
 
+  // #45. `rebuildInPlace: false` is what the standalone `sandbar gate` passes,
+  // and it is a safety property rather than a speed one: rewriting a DECLARED
+  // tag mutates the one podman resource class no scope partitions, and that
+  // command holds no lock, so beside a live run it would rebuild that run's
+  // base image from another tree. The two assertions here are the two halves of
+  // it working — the tag on disk is untouched, and the baseline handed back is
+  // what the IMAGE records rather than what the context hashes to, which is the
+  // only input that makes `createBranchImages` route the difference into a
+  // scoped variant instead of trusting the base tag.
+  it(
+    "leaves a stale declared tag alone and reports the image's own fingerprint",
+    async () => {
+      const first = await ensureImages([image], root);
+      const fingerprint = first.get(TAG);
+      const id = await idOf();
+
+      await writeFile(join(root, "package-lock.json"), '{"v":9}\n');
+      const held = await ensureImages([image], root, { rebuildInPlace: false });
+
+      // Not rebuilt, and not re-tagged: this is the process that must not
+      // clobber a tag someone else is relying on.
+      expect(await idOf()).toBe(id);
+      expect(await readInputsLabel(TAG)).toBe(fingerprint);
+      // And the baseline describes the IMAGE, not this tree — hand back the
+      // tree's own fingerprint here and the per-branch resolver compares equal,
+      // uses the base tag, and gates against an image built from other bytes.
+      expect(held.get(TAG)).toBe(fingerprint);
+
+      // The default is unchanged, which is what a run still gets.
+      const rebuilt = await ensureImages([image], root);
+      expect(rebuilt.get(TAG)).not.toBe(fingerprint);
+      expect(await idOf()).not.toBe(id);
+    },
+    600_000,
+  );
+
+  // A MISSING tag is still built either way: there is nothing to clobber, and
+  // refusing would mean `sandbar gate` could not run in CI from a fresh
+  // checkout, which is most of the point of it existing.
+  it(
+    "still builds a declared tag that does not exist yet",
+    async () => {
+      const built = await ensureImages([image], root, { rebuildInPlace: false });
+      expect(await readInputsLabel(TAG)).toBe(built.get(TAG));
+      expect(built.get(TAG)).toEqual(expect.any(String));
+    },
+    600_000,
+  );
+
   it(
     "reports a failing CAPTURED build with the build's own output — the diagnosis a gate red has to carry",
     async () => {

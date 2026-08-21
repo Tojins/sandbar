@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  gateScope,
   isScopedResourceName,
   networkNameFor,
   podNameFor,
@@ -208,5 +209,41 @@ describe("run scope (#28)", () => {
     expect(isScopedResourceName("sandbar-1a2b3c4d-5e6f-7081-9234-56789abcdef0")).toBe(
       false,
     );
+  });
+});
+
+// #45 — the standalone gate's scope.
+describe("gate scope (#45)", () => {
+  it("is stable for a worktree and distinct between worktrees", () => {
+    expect(gateScope("/repo")).toBe(gateScope("/repo"));
+    expect(gateScope("/repo")).not.toBe(gateScope("/other"));
+  });
+
+  // The whole point. A run's sweeps force-remove everything in the scope they
+  // are handed, so a `sandbar gate` sharing a run's scope would be torn down by
+  // that run's between-cycle sweep mid-verdict — and the likeliest collision is
+  // the one that looks safest: a consumer gating the very checkout whose
+  // `.sandbar` a run locked, or that directory itself.
+  it("never equals the run scope of the same path", () => {
+    for (const p of ["/repo", "/repo/.sandbar", "/", "sandbar-gate"]) {
+      expect(gateScope(p)).not.toBe(runScope(p));
+    }
+  });
+
+  it("is a legal podman name segment, so the sweeps see it as SOMEONE's", () => {
+    expect(gateScope("/repo")).toMatch(/^w[0-9a-f]{8}$/);
+    // Scoped, therefore invisible to `findUnattributableResources`, which
+    // reports only names carrying no scope at all — a kept stack must not turn
+    // up in the operator's debris report every time a run starts.
+    expect(isScopedResourceName(podNameFor(gateScope("/repo"), "gate"))).toBe(
+      true,
+    );
+  });
+
+  // Same argument `runScope` makes one function up: the caller canonicalises,
+  // because a tree reached through a symlink getting a second scope means a
+  // `--keep` stack the next invocation cannot find.
+  it("is a pure hash, so the caller must canonicalise", () => {
+    expect(gateScope("/repo/./")).not.toBe(gateScope("/repo"));
   });
 });

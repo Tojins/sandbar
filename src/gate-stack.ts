@@ -1117,12 +1117,22 @@ async function podReuseToken(podName: string): Promise<string | null> {
 // What the reused containers are actually running, as the declared-tag ->
 // running-tag map `runGate`'s staleness check compares against (#45).
 //
-// `.Config.Image` is the reference the container was CREATED from, which is the
-// same string `containerRunArgs` put on the command line — an image ID would
-// answer a different question, since a variant tag and its base can name one
-// ID. A read that fails contributes nothing, which leaves the declared tag as
-// the assumed answer and so recreates: wrong only in the direction that costs
-// time.
+// An UNMAPPED container means "running what its config names", which is the
+// same convention `imageFor` uses everywhere else and the honest answer for
+// every reused container the tree has not moved under. A mapping is recorded
+// only when the container is on something else — a per-branch variant an
+// earlier invocation built — and that is exactly what makes the staleness check
+// recreate it.
+//
+// `.Config.Image` is the reference the container was CREATED from: the same
+// string `containerRunArgs` put on the command line, which is what the check
+// compares against. But podman is free to answer in a spelling the config did
+// not use, and an unqualified `mariadb:10.11` coming back
+// `docker.io/library/mariadb:10.11` would make every reused container look
+// stale and be recreated — reuse defeated, silently, by a string comparison.
+// So a difference in the STRING is settled by comparing image IDs before it is
+// believed. Anything unreadable contributes nothing and therefore recreates:
+// wrong only in the direction that costs time.
 async function runningImages(
   reused: readonly ResolvedStackContainer[],
   nameOf: (c: ResolvedStackContainer) => string,
@@ -1135,9 +1145,27 @@ async function runningImages(
     );
     if (!boundedOk(r)) continue;
     const image = r.stdout.trim();
-    if (image) map.set(c.image, image);
+    if (!image || image === c.image) continue;
+    if (!(await sameImage(image, c.image))) map.set(c.image, image);
   }
   return map;
+}
+
+// Do two references name the same image right now? Used only to stop a
+// spelling difference from reading as staleness (#45). A reference podman
+// cannot resolve — a tag removed since the container was created — answers
+// false, which is both true and the safe direction.
+async function sameImage(a: string, b: string): Promise<boolean> {
+  const idOf = async (ref: string): Promise<string | null> => {
+    const r = await boundedPodman(
+      ["image", "inspect", "--format", "{{.Id}}", ref],
+      LOG_READ_TIMEOUT_MS,
+    );
+    if (!boundedOk(r)) return null;
+    return r.stdout.trim() || null;
+  };
+  const idA = await idOf(a);
+  return idA !== null && idA === (await idOf(b));
 }
 
 async function readHealthLog(
