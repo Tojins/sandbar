@@ -816,8 +816,13 @@ describe.runIf(available)(
         expect(e.message).toMatch(/was healthy when it came up/);
         expect(e.message).toMatch(/did not recover within 4000ms/);
         expect(e.message).toMatch(/did not come back when sandbar recreated it/);
-        // What the PROBE said, from `.State.Health.Log` — the client prints
-        // only the word `unhealthy`, so this can have come from nowhere else.
+        // What the OLD container's probe said, read at the deadline BEFORE the
+        // recreate removed it — that container is gone by the time anyone reads
+        // this, so nothing else can ever recover it.
+        expect(e.message).toMatch(/last probe: [\s\S]*PROBE-SAW-WEDGE/);
+        // And the FRESH container's own record, from `.State.Health.Log`. Both
+        // are the probe talking: the client prints only the word `unhealthy`,
+        // so neither can have come from it.
         expect(e.healthLog).toContain("PROBE-SAW-WEDGE");
         expect(e.message).toContain("Container log tail:");
         // …and exactly one of each block: `reason` exists so re-raising does

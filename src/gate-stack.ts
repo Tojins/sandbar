@@ -950,8 +950,9 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
 // block.
 async function readHealthLog(
   containerName: string,
+  podman: PodmanProbe = boundedPodman,
 ): Promise<HealthLogEntry[]> {
-  const r = await boundedPodman(
+  const r = await podman(
     ["inspect", "--format", "{{json .State.Health}}", containerName],
     LOG_READ_TIMEOUT_MS,
   );
@@ -1332,6 +1333,7 @@ export async function pollUntilHealthy(
 ): Promise<{ readonly verdict: HealthVerdict; readonly detail: string }> {
   const deadline = Date.now() + c.readinessTimeoutMs;
   let answered = false;
+  let killedAtDeadline = false;
   let detail = "";
   while (Date.now() < deadline) {
     const probe = await probeOnce(containerName, remainingMs(deadline), podman);
@@ -1340,6 +1342,8 @@ export async function pollUntilHealthy(
       if (!(probe.timedOut && Date.now() >= deadline)) {
         return { verdict: "abandoned", detail: probe.detail };
       }
+      killedAtDeadline = true;
+      detail = probe.detail;
       break;
     }
     answered = true;
@@ -1352,9 +1356,17 @@ export async function pollUntilHealthy(
     await throwIfDead(containerName, c, GATE_LABEL, DIED_DURING_RECOVERY, podman);
     await sleep(READY_POLL_INTERVAL_MS);
   }
-  return answered
-    ? { verdict: "unhealthy", detail }
-    : { verdict: "abandoned", detail };
+  if (!answered) return { verdict: "abandoned", detail };
+  // Read HERE, not by the caller, because the caller's next move destroys the
+  // evidence: the recreate removes this container, and with it the only record
+  // of what the wedge looked like. Same discipline as the readiness timeout —
+  // once, at the deadline, and from the health log rather than from the client,
+  // whose entire output on a failed probe is the word `unhealthy`.
+  const entries = await readHealthLog(containerName, podman);
+  return {
+    verdict: "unhealthy",
+    detail: lastProbeText(entries, detail, killedAtDeadline),
+  };
 }
 
 // What podman says about a container right now.
