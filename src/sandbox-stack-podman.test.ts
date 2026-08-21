@@ -112,7 +112,11 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
         containerName: name,
         imageName: IMAGE,
         workdir: "/",
-        env: {},
+        // keep-id maps the invoking user onto uid 1000, which the images here
+        // have no passwd entry for — harmless for the exec below, but a client
+        // that looks for a home directory should find one it can write. The
+        // production provider always supplies HOME for the same reason.
+        env: { HOME: "/tmp" },
         volumeMounts: [],
         userns: "keep-id",
         containerUid: 1000,
