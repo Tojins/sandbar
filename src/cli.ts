@@ -321,8 +321,15 @@ function isEntrypoint(): boolean {
 // report it to.
 if (isEntrypoint()) {
   main()
+    // `process.exitCode`, NOT `process.exit(code)`. `sandbar gate` streams a
+    // whole test suite through `process.stdout.write`, and to a pipe — a CI
+    // log, a `| tee` — those writes are asynchronous, so `process.exit` on the
+    // red path would truncate the output the exit code is about. Setting the
+    // code and letting node drain is the only spelling that cannot. Nothing
+    // here holds the loop open afterwards: the teardown is awaited, and node's
+    // signal handles are unref'd.
     .then((code) => {
-      if (code !== 0) process.exit(code);
+      process.exitCode = code;
     })
     .catch((err: unknown) => {
       console.error(faultDetail(err));

@@ -1098,6 +1098,17 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
 // the diagnosis, and losing it to a flaked `inspect` while assembling an
 // addendum to it would be a strictly worse outcome than an error with no health
 // block.
+async function readHealthLog(
+  containerName: string,
+): Promise<HealthLogEntry[]> {
+  const r = await boundedPodman(
+    ["inspect", "--format", "{{json .State.Health}}", containerName],
+    LOG_READ_TIMEOUT_MS,
+  );
+  if (!boundedOk(r)) return [];
+  return parseHealthLog(r.stdout);
+}
+
 // The reuse token recorded on an existing pod (#45), or null for a pod that is
 // absent, unreadable, or predates the label.
 //
@@ -1166,17 +1177,6 @@ async function sameImage(a: string, b: string): Promise<boolean> {
   };
   const idA = await idOf(a);
   return idA !== null && idA === (await idOf(b));
-}
-
-async function readHealthLog(
-  containerName: string,
-): Promise<HealthLogEntry[]> {
-  const r = await boundedPodman(
-    ["inspect", "--format", "{{json .State.Health}}", containerName],
-    LOG_READ_TIMEOUT_MS,
-  );
-  if (!boundedOk(r)) return [];
-  return parseHealthLog(r.stdout);
 }
 
 // The text the readiness timeout puts in its `last probe:` slot.
