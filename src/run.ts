@@ -978,18 +978,24 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         await runFinalize("merge outcomes", inputs);
       }
 
-      // #64 — a landed chunk whose wrap-up could not finish. Like the unclosed
-      // list below and unlike a parked chunk (which is already fully reported
-      // on its own pull request), this is durable work with tracker state left
-      // wrong: the chunk is on the source branch, and some member is still open
-      // or some branch is still there. The next run's reconciler retries it —
-      // the branch is kept precisely so it can — but a run that carried on
-      // silently would keep landing work past a repair nobody had been told
-      // about.
+      // Two reports about DURABLE work with tracker state left wrong, and both
+      // are printed before either stops the run. Neither may gate on the other
+      // having stayed quiet: they share a cause — a `gh` that is having a bad
+      // minute — so a cycle that hits one hits the other more often than a
+      // cycle picked at random does, and the report that lost would be the
+      // operator's only notice that some issue is closed-in-name-only.
+      const haltReasons: string[] = [];
+
+      // #64 — a landed chunk whose wrap-up could not finish. Unlike a parked
+      // chunk (already fully reported on its own pull request), the chunk is on
+      // the source branch and some member is still open or some branch is still
+      // there. The next run's reconciler retries it — the branch is kept
+      // precisely so it can — but a run that carried on silently would keep
+      // landing work past a repair nobody had been told about.
       const chunkResidue = (mergerSummary?.mergedChunks ?? []).flatMap(
         (c) => c.residue,
       );
-      if (chunkResidue.length > 0 && !halt) {
+      if (chunkResidue.length > 0) {
         console.error(
           `\nSandbar landed ${mergerSummary?.mergedChunks.length} chunk(s) on ` +
             `${config.sourceBranch} but could not finish reconciling them:\n` +
@@ -1000,16 +1006,15 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         await runLogger.appendOrchestrator(
           `merger: chunk wrap-up residue: ${chunkResidue.join("; ")}`,
         );
-        halt = true;
-        cleanupReason = "chunk-wrapup-incomplete";
+        haltReasons.push("chunk-wrapup-incomplete");
       }
-  
+
       // Post-push close failures (issue #14): the merges are durable on origin
       // and Phase 4b above already dropped `ready-for-agent` for every merged
       // issue, so the planner won't re-pick them — but they're still OPEN on the
       // tracker. Surface them as an operator-actionable list and halt loud,
       // AFTER finalise so the merged work is fully reconciled locally.
-      if (mergerSummary && mergerSummary.unclosed.length > 0 && !halt) {
+      if (mergerSummary && mergerSummary.unclosed.length > 0) {
         const list = mergerSummary.unclosed
           .map((u) => `#${issueNumberOf(u.issue)} (${u.error})`)
           .join(", ");
@@ -1023,8 +1028,17 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         await runLogger.appendOrchestrator(
           `merger: unclosed after retries: ${list}`,
         );
+        haltReasons.push("merger-close-failed");
+      }
+
+      if (haltReasons.length > 0) {
+        // Both, when both fired: this label is the run log's one handle on why
+        // the run stopped, and naming only the first would hide the other from
+        // exactly the archaeology it exists for. Guarded on `halt` so a merger
+        // that threw keeps `merger-halted` — a case neither report can reach
+        // anyway, since a throw leaves no `mergerSummary` to read.
+        if (!halt) cleanupReason = haltReasons.join("+");
         halt = true;
-        cleanupReason = "merger-close-failed";
       }
 
       if (halt) {
