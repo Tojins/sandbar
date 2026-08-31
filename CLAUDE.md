@@ -63,8 +63,14 @@ an exit condition fires.
    **lane** (`src/lanes.ts`, #57): `auto-land` label else `config.defaultLane`,
    with review-gating inherited downward along the same `## Blocked by` edges,
    transitively — an `auto-land` contradicted by inheritance loses and sandbar
-   says so on the issue. Holding rule until chunks exist (#54): a review-gated
-   issue is held out of the plan. All inert under the default lane, `auto`.
+   says so on the issue. A blocker counts as satisfied when it is CLOSED, or
+   (#59) when it carries `in-chunk` and sits in the *same* chunk as its
+   dependent — cross-chunk edges stay strict. That second clause is why the
+   planner also lists the `in-chunk` issues back in (`fetchChunkMembers`) and
+   drops them by label: out of the graph, a chunk re-roots around its surviving
+   members and a descendant of a landed issue reads as auto. Holding rule until
+   chunks exist (#54): a review-gated issue is held out of the plan. All inert
+   under the default lane, `auto`.
 
 2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
    planned issue runs in parallel in its own agent sandbox + per-issue gate
@@ -180,8 +186,12 @@ default 50, exit 3).
   under the `## Blocked by` graph, rooted at its parentless member. Chunks are
   never merged to accommodate an issue that straddles two — that issue is
   blocked instead. The walk is topological because the two-chunk rule makes the
-  answer order-dependent; the header owns that argument. Derivation only so
-  far: nothing creates the branch and no planning outcome moved.
+  answer order-dependent; the header owns that argument. `IN_CHUNK_LABEL`
+  (#59) lives here too — the label a member carries once its branch has landed
+  on the chunk branch, OPEN and out of the queue. Derivation still creates
+  nothing: the planner reads `chunkOf` for its blocker criterion, but the
+  holding rule keeps every review-gated issue out of the plan, so no chunk
+  branch exists and nothing applies the label yet.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One cleanup registry owns signals and the exit (#35).** No module but

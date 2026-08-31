@@ -24,11 +24,39 @@
 // is not in any chunk and never appears in this module's output: it lands
 // through the merger, one branch per issue, exactly as before.
 //
-// DERIVATION ONLY. This module creates nothing, writes nothing and changes no
-// planning outcome. `plan-resolver.ts`'s holding rule still keeps every
-// review-gated issue out of the plan; giving a chunk a branch, working it, and
-// landing it are later issues under #54. What exists now is the pure function
-// they will all agree on, plus the branch NAME they will create.
+// DERIVATION ONLY, still. This module creates nothing and writes nothing:
+// `plan-resolver.ts`'s holding rule keeps every review-gated issue out of the
+// plan, so no chunk is ever worked, no chunk branch exists, and nothing applies
+// `IN_CHUNK_LABEL`. Giving a chunk a branch, working it, and landing its
+// members are later issues under #54. What exists now is the pure function they
+// will all agree on, the branch NAME they will create, and the label that names
+// a member already on it.
+//
+// ---------------------------------------------------------------------------
+// `in-chunk`, the label a landed member carries (#59, §3 of #54)
+// ---------------------------------------------------------------------------
+//
+// A review-gated issue whose branch has landed on its chunk's branch is done as
+// far as sandbar is concerned, and not done at all as far as a human is:
+// nothing has reached the source branch yet, and the review that would justify
+// closing the issue has not happened. So the issue stays OPEN, and `in-chunk`
+// REPLACES `ready-for-agent` on it.
+//
+// That swap is the de-queue. `fetchCandidates` lists on `ready-for-agent`, so
+// dropping that label is what stops the planner picking the same developed
+// issue again next cycle — a landed member that kept it would be re-planned
+// every cycle, each time rebuilding work already sitting on the chunk branch.
+// And ADDING a label rather than merely removing one is what keeps the issue
+// findable: `plan-resolver.ts` lists these back in (its header says why at
+// length) because a chunk that forgets its landed members re-derives itself
+// around whatever is left, under a different root, and therefore under a
+// different branch name than the one its members are already on.
+//
+// Hardcoded, not a `LabelConfig` knob, on the same grounds as `AUTO_LAND_LABEL`
+// in `lanes.ts`: the configurable labels name a HOST's handoff conventions,
+// and this one names sandbar's own internal state. Both ends of it — the write
+// in a later issue, the read in the planner — are sandbar's, so a knob could
+// only let the two spellings drift. The declaration is below the imports.
 //
 // ---------------------------------------------------------------------------
 // The two-chunk-parent rule
@@ -104,6 +132,12 @@
 
 import type { Lane } from "./lanes.js";
 import { chunkBranchName } from "./naming.js";
+
+// The label a review-gated issue carries once its branch has landed on its
+// chunk's branch: OPEN, out of the queue, and still to be reviewed. See the
+// header for why it replaces `ready-for-agent` rather than joining it, and why
+// it is hardcoded. Nothing applies it yet (#60).
+export const IN_CHUNK_LABEL = "in-chunk";
 
 // The minimum a chunk decision needs. `title` is here and not in `LaneIssue`
 // because a chunk, unlike a lane, has a NAME: the branch is slugged from the
