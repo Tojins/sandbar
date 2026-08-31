@@ -7,7 +7,14 @@
 //                              that have nowhere to land yet (#60: everything
 //                              but a chunk's root) and saying on the issue
 //                              where an `auto-land` label lost to inherited
-//                              gating.
+//                              gating. Then the RECONCILER (#64) finishes off
+//                              any chunk branch already contained in
+//                              origin/<sourceBranch> — hand-merged, or landed
+//                              by a run that died before it could close the
+//                              members — and the plan is rebuilt when it did,
+//                              because closing a member unblocks its
+//                              dependents and the plan-empty exit is one line
+//                              below.
 //   Phase 2 (Inner-loop ralph): Each issue runs in its own sandbox up to
 //                              config.maxImplAttempts times; on gate-1 green
 //                              the (strictly-advisory) reviewer runs in the
@@ -24,7 +31,10 @@
 //                              goes and carries a DRAFT pull request opened or
 //                              updated per cycle (#62); nothing of it reaches
 //                              the source branch until a human has reviewed
-//                              the chunk.
+//                              the chunk and put `land` on that pull request
+//                              (#64) — at which point the chunk branch is
+//                              merged in the SAME source pass, its members are
+//                              closed, and the branch is deleted.
 //   Phase 4 (Finalise):        Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels. Runs in TWO passes (#30): 4a
@@ -105,6 +115,11 @@ import {
   createMergerWorktree,
 } from "./merger-worktree.js";
 import { type Stack, startStack } from "./gate-stack.js";
+import { LAND_LABEL, selectLandRequests } from "./chunk-land.js";
+import {
+  fetchLandRequestPullRequests,
+  reconcileLandedChunks,
+} from "./chunk-reconcile.js";
 import { postLaneOverrideNotices } from "./lanes.js";
 import { type PlannedIssue, buildPlan } from "./plan-resolver.js";
 import {
@@ -509,10 +524,83 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // ---------------------------------------------------------------------
       // Phase 1: Plan
       // ---------------------------------------------------------------------
-      const resolution = await buildPlan(repo, {
+      let resolution = await buildPlan(repo, {
         excluded: mergedThisRun,
         defaultLane: config.defaultLane,
       });
+
+      // ---------------------------------------------------------------------
+      // Reconcile chunks that reached the source branch without us (#64)
+      //
+      // Between the plan and everything downstream of it, because it is the
+      // one step whose whole job is to make the tracker agree with git before
+      // anything reads either. It needs the derivation the plan just built
+      // (only that graph knows which issues are on a chunk branch), and what
+      // it does — closing members, dropping `in-chunk` — changes the answer to
+      // every question the plan asked, so the plan is REBUILT when it acted.
+      //
+      // Rebuilt rather than left stale for the next cycle: closing a member
+      // unblocks its dependents, and a run whose plan came out empty exits
+      // `success` right below. Without the re-plan a chunk somebody merged by
+      // hand would reconcile, unblock three issues, and stop the run anyway.
+      // The re-plan reads the same authoritative GraphQL batch, which is
+      // strongly consistent about the closes just made even while the search
+      // index that lists candidates lags.
+      const reconciliation = await reconcileLandedChunks({
+        layout,
+        repo,
+        sourceBranch: config.sourceBranch,
+        chunks: resolution.chunks,
+        log: (line) => runLogger.appendOrchestrator(line),
+      });
+      if (reconciliation.reconciled.length > 0) {
+        for (const r of reconciliation.reconciled) {
+          console.log(
+            `  ⇥ reconciled ${r.target.branch} (already on ${config.sourceBranch}): ` +
+              `closed ${r.closed.length} issue(s)${r.branchDeleted ? ", branch deleted" : ", branch kept"}`,
+          );
+        }
+        // Same exclusion the merger's own closes get (#16): the `gh` search
+        // backend the planner lists through lags a close by seconds, so an
+        // issue closed one line ago can still come back as a candidate.
+        for (const n of reconciliation.closedIssues) mergedThisRun.add(n);
+        resolution = await buildPlan(repo, {
+          excluded: mergedThisRun,
+          defaultLane: config.defaultLane,
+        });
+      }
+      if (reconciliation.residue.length > 0) {
+        console.error(
+          `\nSandbar could not finish reconciling ${reconciliation.reconciled.length} ` +
+            "landed chunk(s). Their branches were kept on origin, so the next run " +
+            "retries exactly these writes — but the work is already on " +
+            `\`${config.sourceBranch}\`, so the residue is tracker state a human may ` +
+            "prefer to fix by hand:\n" +
+            reconciliation.residue.map((r) => `  ${r}`).join("\n"),
+        );
+        await runLogger.appendOrchestrator(
+          `reconcile residue: ${reconciliation.residue.join("; ")}`,
+        );
+      }
+
+      // What a human has asked to land, read AFTER the reconciliation so a
+      // chunk it just finished off is not also merged again by the merge phase
+      // (its branch is gone by then, which the merger would park on, but
+      // asking in this order means it never gets there).
+      const landRequests = selectLandRequests(
+        await fetchLandRequestPullRequests(repo, LAND_LABEL),
+        resolution.chunks,
+      );
+      if (landRequests.length > 0) {
+        const named = landRequests
+          .map((r) => `${r.branch} (PR #${r.pullRequest})`)
+          .join(", ");
+        console.log(
+          `Chunks labelled \`${LAND_LABEL}\` to land on ${config.sourceBranch}: ${named}`,
+        );
+        await runLogger.appendOrchestrator(`plan: land requested — ${named}`);
+      }
+
       // `PlannedIssue`, not a structural subset of it: a planned review-gated
       // issue carries the CHUNK it lands on (#60), and a narrower annotation
       // here would drop that field on the way to phase 3 without an error —
@@ -546,11 +634,23 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         runLogger.appendOrchestrator(line),
       );
 
-      if (issues.length === 0) {
+      // A cycle with a `land` request has work even with an empty plan (#64):
+      // the merge phase lands the reviewed chunk, closes its members and
+      // unblocks whatever was waiting on them. Exiting `success` here would
+      // strand a chunk a human explicitly asked for, on the one cycle where
+      // there is nothing else to distract from it.
+      if (issues.length === 0 && landRequests.length === 0) {
         console.log("No unblocked issues to work on. Exiting.");
         await runLogger.appendOrchestrator(`exit: success — plan empty`);
         cleanupReason = "success";
         break;
+      }
+
+      if (issues.length === 0) {
+        console.log(
+          `No unblocked issues to work on, but ${landRequests.length} chunk(s) are ` +
+            `labelled \`${LAND_LABEL}\`. Running the merge phase for those alone.`,
+        );
       }
   
       console.log(
@@ -652,7 +752,11 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // MergerError.partial). Finalised even though the run is stopping.
       let haltPartial: MergerSummary | undefined;
       let halt = false;
-      if (completedIssues.length > 0) {
+      // Also for a land request alone (#64): a reviewed chunk merging onto the
+      // source branch needs the same worktree, the same gate-2 stack and the
+      // same resolve loop a DONE branch does, and a cycle can have one without
+      // the other.
+      if (completedIssues.length > 0 || landRequests.length > 0) {
         // The merger runs in a dedicated worktree detached at
         // origin/<sourceBranch>, NOT a checkout anyone stands in — so the
         // operator's uncommitted edits can never be swept into a merge commit
@@ -744,6 +848,14 @@ export async function run(rawConfig: RunConfig): Promise<void> {
               cycleIssues: issues,
               projectAnchor,
               ...(verified ? { verified } : {}),
+              ...(landRequests.length > 0
+                ? {
+                    chunkLanding: {
+                      requests: landRequests,
+                      sourceBranch: config.sourceBranch,
+                    },
+                  }
+                : {}),
             },
           );
           console.log(
@@ -764,9 +876,24 @@ export async function run(rawConfig: RunConfig): Promise<void> {
               `  ⊘ #${issueNumberOf(s.issue)} ${s.issue.title} (${s.reason})`,
             );
           }
+          // #64. A chunk that landed reads differently from an issue that did:
+          // one line names a branch and the issues it took with it.
+          for (const c of mergerSummary.mergedChunks) {
+            console.log(
+              `  ⇥ ${c.request.branch} → ${config.sourceBranch}, closing ` +
+                `${c.closed.map((n) => `#${n}`).join(", ") || "no issue"}`,
+            );
+          }
+          for (const c of mergerSummary.skippedChunks) {
+            console.log(
+              `  ⊘ ${c.request.branch} not landed (${c.reason}); \`${LAND_LABEL}\` removed`,
+            );
+          }
           await runLogger.appendOrchestrator(
             `merger: merged=${mergerSummary.merged.length} ` +
               `chunk-landed=${mergerSummary.chunkLanded.length} ` +
+              `chunks-landed-on-source=${mergerSummary.mergedChunks.length} ` +
+              `chunks-parked=${mergerSummary.skippedChunks.length} ` +
               `skipped=${mergerSummary.skipped.length} pushed=${mergerSummary.pushed}`,
           );
         } catch (err) {
@@ -838,7 +965,43 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         for (const m of mergerOutcome.merged) {
           mergedThisRun.add(issueNumberOf(m));
         }
+        // A chunk landing on the SOURCE branch (#64) is a different matter: its
+        // members really were closed and their work really is on the source
+        // branch, so they belong here for exactly the reason `merged` does —
+        // the search backend the planner lists through lags a close by seconds,
+        // and a re-picked closed issue is #16 verbatim. `mergedChunks` is empty
+        // on the halt path by construction, since the wrap-up only ever runs
+        // after the source branch has moved.
+        for (const c of mergerOutcome.mergedChunks) {
+          for (const n of c.closed) mergedThisRun.add(n);
+        }
         await runFinalize("merge outcomes", inputs);
+      }
+
+      // #64 — a landed chunk whose wrap-up could not finish. Like the unclosed
+      // list below and unlike a parked chunk (which is already fully reported
+      // on its own pull request), this is durable work with tracker state left
+      // wrong: the chunk is on the source branch, and some member is still open
+      // or some branch is still there. The next run's reconciler retries it —
+      // the branch is kept precisely so it can — but a run that carried on
+      // silently would keep landing work past a repair nobody had been told
+      // about.
+      const chunkResidue = (mergerSummary?.mergedChunks ?? []).flatMap(
+        (c) => c.residue,
+      );
+      if (chunkResidue.length > 0 && !halt) {
+        console.error(
+          `\nSandbar landed ${mergerSummary?.mergedChunks.length} chunk(s) on ` +
+            `${config.sourceBranch} but could not finish reconciling them:\n` +
+            chunkResidue.map((r) => `  ${r}`).join("\n") +
+            "\nThe work is durable. The next run reconciles what is left; fix it " +
+            "by hand if it is urgent.",
+        );
+        await runLogger.appendOrchestrator(
+          `merger: chunk wrap-up residue: ${chunkResidue.join("; ")}`,
+        );
+        halt = true;
+        cleanupReason = "chunk-wrapup-incomplete";
       }
   
       // Post-push close failures (issue #14): the merges are durable on origin
@@ -877,9 +1040,12 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         // `haltPartial` — a halt broke out above, and a halt means nothing
         // landed. A landed-but-unclosed cycle also broke out above (exit 1):
         // relaunching past an operator-actionable tracker mess would bury it.
+        // A chunk landing counts (#64): it moves the source branch exactly as
+        // a merged issue does, so the `dist/` driving this process is just as
+        // stale afterwards — which is the whole of what #65 relaunches for.
         landedMerges:
           mergerSummary && mergerSummary.pushed
-            ? mergerSummary.merged.length
+            ? mergerSummary.merged.length + mergerSummary.mergedChunks.length
             : 0,
       });
       if (decision.kind === "exit") {
