@@ -28,6 +28,16 @@
 // no revert-after-reviewer logic. All branching decisions live in the state
 // machine. This file only does I/O.
 //
+// One deliberate exception to "all branching lives in the SM": the promise
+// nudge in runImplementer. An implementer that ends with no `<promise>` tag at
+// all gets one `--continue` follow-up in the same conversation before the
+// NO-SIGNAL reaches the state machine — the SM never sees the nudge, only the
+// re-parsed result. It sits here rather than in the SM because it is not a
+// transition: it is part of OBSERVING the implementer, the same way
+// dirtyWorktreePaths is — the runner finishing an incomplete reading of the
+// agent's answer before reporting it. The full argument (why missing-tag only,
+// why one shot, why a nudge throw propagates) is at the call site.
+//
 // Which includes the one judgment this file used to make silently: what a
 // FAILED reviewer run means (#41). It caught the error, wrote the message into
 // `reviewerStdout`, and let the verdict parser turn it into CHANGES-REQUESTED —
@@ -70,6 +80,7 @@ import {
 import type { AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { parsePromise } from "./promise-parser.js";
+import { loadTemplate } from "./prompts.js";
 import {
   type SandboxContainerStatus,
   type SandboxStack,
@@ -92,6 +103,10 @@ import {
 import { parseVerdict } from "./verdict-parser.js";
 
 export const FAILURE_TAIL_LINES = 200;
+
+// The promise nudge (see runImplementer). Loaded at import time like every
+// other template; no placeholders.
+const PROMISE_NUDGE_TPL = loadTemplate("implementer-promise-nudge");
 
 export type IssueRef = {
   readonly id: string;
@@ -633,9 +648,63 @@ async function runImplementer(
   }
   accumulated.push(...run.commits);
 
-  const signal = parsePromise(run.stdout, {
+  let signal = parsePromise(run.stdout, {
     commitsAccumulated: accumulated.length,
   });
+
+  // The promise nudge: output with NO tag at all gets one same-conversation
+  // follow-up before it is allowed to cost an attempt. The observed failure is
+  // a finished agent forgetting the tag at the end of a long session, and the
+  // full-attempt answer to that is disproportionate — a fresh conversation
+  // that has to re-orient from the diff, ~minutes and an attempt slot for a
+  // two-second omission. `--continue` asks the SAME agent, so the tag stays
+  // the agent's own claim: nothing here infers COMPLETE from a clean tree,
+  // and a premature claim is gated exactly like any other (the orchestrator
+  // gates between attempts; agents never decide "green").
+  //
+  // Guarded on `missingTag`, not on NO-SIGNAL: a tag that failed its parse
+  // guard (COMPLETE with zero commits, an escalation missing its block) means
+  // the agent remembered the contract and got the substance wrong — the
+  // guard's specific re-prompt on a fresh attempt is the right correction, and
+  // a nudge would invite it to restate the same broken claim.
+  //
+  // One nudge, inline, never a loop. The reply is parsed over the COMBINED
+  // output so a bare `NEEDS-INFO` answer pairs with a `<questions>` block from
+  // the original message (last-wins semantics already handle concatenation),
+  // and the parse guards keep their authority over the result — a nudged
+  // zero-commit COMPLETE still downgrades. If the nudge run itself throws,
+  // that propagates like any other sandbox failure (HARD-ERROR, fresh
+  // sandbox): a container that cannot run a one-line follow-up cannot run the
+  // next attempt either, and swallowing it would hide the infra fault.
+  if (signal.kind === "NO-SIGNAL" && signal.missingTag) {
+    const nudge = await sandbox.run({
+      name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
+      maxIterations: 1,
+      agent: agentSandbox.claudeCode(config.implementerModelId, {
+        continueSession: true,
+      }),
+      prompt: PROMISE_NUDGE_TPL,
+      // Any of the three tags ends the wait, not just COMPLETE.
+      completionSignal: "</promise>",
+    });
+    accumulated.push(...nudge.commits);
+    const combined = `${run.stdout}\n${nudge.stdout}`;
+    signal = parsePromise(combined, {
+      commitsAccumulated: accumulated.length,
+    });
+    if (opts.attemptLogger) {
+      await opts.attemptLogger.writeAttempt(
+        issue.id,
+        action.attempt,
+        `${run.stdout}\n\n--- promise nudge ---\n\n${nudge.stdout}`,
+      );
+    }
+    if (opts.onOrchestratorLog) {
+      await opts.onOrchestratorLog(
+        `issue=${issue.id} attempt=${action.attempt} promise-nudge signal=${signal.kind}`,
+      );
+    }
+  }
   // Read here, not in the gate: a COMPLETE claim over a dirty tree should never
   // cost a stack bringup, and the state machine wants the paths to re-prompt
   // with (#24 D1). Read on every signal so the SM stays the only place that

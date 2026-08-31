@@ -202,6 +202,18 @@ describe("claudeCode", () => {
     expect(cmd.command).toContain("--model 'a'\\''b'");
     expect(cmd.command).not.toContain("--dangerously-skip-permissions");
   });
+
+  it("continueSession adds --continue before the stdin prompt; absent by default", () => {
+    const cmd = claudeCode("m", { continueSession: true }).buildPrintCommand({
+      prompt: "nudge",
+      dangerouslySkipPermissions: true,
+    });
+    expect(cmd.command).toContain(" --continue -p -");
+    expect(cmd.stdin).toBe("nudge");
+    expect(claudeCode("m").buildPrintCommand({ prompt: "p" }).command).not.toContain(
+      "--continue",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -127,6 +127,13 @@ export type AgentProvider = {
 export type ClaudeCodeOptions = {
   effort?: "low" | "medium" | "high" | "max";
   env?: Record<string, string>;
+  // `--continue`: resume the most recent conversation for the sandbox cwd
+  // instead of starting a fresh one. Sound inside an agent sandbox precisely
+  // because it is NOT sound in general: the container's $HOME persists for the
+  // life of the issue and only sandbar's own runs write conversations there,
+  // so "most recent" is exactly the run that just returned. The promise nudge
+  // (inner-loop.ts) is the consumer.
+  continueSession?: boolean;
 };
 
 export type Mount = {
@@ -446,8 +453,9 @@ export const claudeCode = (
       ? " --dangerously-skip-permissions"
       : "";
     const effortFlag = options?.effort ? ` --effort ${options.effort}` : "";
+    const continueFlag = options?.continueSession ? " --continue" : "";
     return {
-      command: `claude --print --verbose${skipPerms} --output-format stream-json --model ${shellEscape(model)}${effortFlag} -p -`,
+      command: `claude --print --verbose${skipPerms} --output-format stream-json --model ${shellEscape(model)}${effortFlag}${continueFlag} -p -`,
       stdin: prompt,
     };
   },
