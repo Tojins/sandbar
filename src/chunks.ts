@@ -24,13 +24,21 @@
 // is not in any chunk and never appears in this module's output: it lands
 // through the merger, one branch per issue, exactly as before.
 //
-// DERIVATION ONLY, still. This module creates nothing and writes nothing:
-// `plan-resolver.ts`'s holding rule keeps every review-gated issue out of the
-// plan, so no chunk is ever worked, no chunk branch exists, and nothing applies
-// `IN_CHUNK_LABEL`. Giving a chunk a branch, working it, and landing its
-// members are later issues under #54. What exists now is the pure function they
-// will all agree on, the branch NAME they will create, and the label that names
-// a member already on it.
+// Still a PURE FUNCTION: this module creates no branch and writes no label. It
+// answers which issues share a landing target and what that target is called,
+// and since #60 the merge phase acts on the answer — a DONE review-gated issue
+// is merged onto `chunk.branch` instead of onto the source branch, and finalise
+// then puts `IN_CHUNK_LABEL` on it.
+//
+// Only part of a chunk is WORKED, though. `plan-resolver.ts` lifts its holding
+// rule for a chunk's ROOT and for nothing else (#60): a root has no
+// review-gated blocker, so its issue branch seeds from `origin/<sourceBranch>`
+// — which is exactly where its chunk branch is created when absent — and the
+// two agree. A non-root member is built on a blocker whose commits are on the
+// chunk branch and NOT on the source branch, so working it needs the issue
+// branch to seed from the chunk branch instead. That is #61; until it lands,
+// those members stay held. So a chunk of one works end to end today, and a
+// chain grows by one member per issue after it.
 //
 // ---------------------------------------------------------------------------
 // `in-chunk`, the label a landed member carries (#59, §3 of #54)
@@ -136,8 +144,20 @@ import { chunkBranchName } from "./naming.js";
 // The label a review-gated issue carries once its branch has landed on its
 // chunk's branch: OPEN, out of the queue, and still to be reviewed. See the
 // header for why it replaces `ready-for-agent` rather than joining it, and why
-// it is hardcoded. Nothing applies it yet (#60).
+// it is hardcoded. Applied by finalise (#60), once the chunk branch carrying
+// the member's commits is on origin — never before, so the label is only ever
+// read as "these commits are somewhere durable".
 export const IN_CHUNK_LABEL = "in-chunk";
+
+// Where a review-gated issue lands. Carried on a planned issue so the merge
+// phase can point at a chunk without re-deriving one (#60): `root` identifies
+// the chunk, `branch` is the ref its members' commits are merged onto and
+// pushed to. Absent (or null) on an auto-lane issue, which lands on the source
+// branch as everything did before chunks existed.
+export type ChunkTarget = {
+  readonly root: number;
+  readonly branch: string;
+};
 
 // The minimum a chunk decision needs. `title` is here and not in `LaneIssue`
 // because a chunk, unlike a lane, has a NAME: the branch is slugged from the

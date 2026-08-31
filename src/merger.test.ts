@@ -4,7 +4,8 @@ import { SandbarError } from "./errors.js";
 import type { PushOutcome, VerifyAdapter } from "./forge-verify.js";
 import type { MergerGateOutput } from "./merger.js";
 import {
-  INSTALL_FAILED_COMMENT,
+  SOURCE_TARGET,
+  buildInstallFailedComment,
   buildForgeUnverifiedComment,
   MergerError,
   READY_FOR_AGENT_LABEL,
@@ -45,6 +46,9 @@ type Calls = {
   closeAttempts: { n: number }[];
   pushes: number;
   pulls: number;
+  chunkBases: string[];
+  checkouts: string[];
+  chunkPushes: string[];
 };
 
 type Script = {
@@ -55,6 +59,10 @@ type Script = {
   pushes?: PushResult[];
   pulls?: boolean[];
   heads?: string[];
+  // #60: what origin has for a chunk branch, by branch name. A missing entry
+  // means origin has no such branch and the base is the source branch.
+  chunkBases?: Record<string, string>;
+  chunkPushes?: PushResult[];
   // Per-issue number of leading close attempts that throw before one succeeds.
   // A value >= total attempts means the close never succeeds. Default 0.
   closeFailsBeforeSuccess?: Record<number, number>;
@@ -78,6 +86,9 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     closeAttempts: [],
     pushes: 0,
     pulls: 0,
+    chunkBases: [],
+    checkouts: [],
+    chunkPushes: [],
   };
   const closeAttemptsByIssue = new Map<number, number>();
   let mIdx = 0;
@@ -86,6 +97,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
   let gIdx = 0;
   let pIdx = 0;
   let plIdx = 0;
+  let cpIdx = 0;
   let headIdx = 0;
   let merging = false;
 
@@ -181,6 +193,25 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       calls.pulls++;
       return { ok: r };
     },
+    // #60. `chunkBases` scripts what origin has: a branch name mapped to its
+    // remote-tracking ref, or nothing for a chunk that has never landed — in
+    // which case the real adapter falls back to the source branch, so this
+    // does too.
+    async chunkBase(branch) {
+      calls.chunkBases.push(branch);
+      return script.chunkBases?.[branch] ?? "origin/main";
+    },
+    async checkoutDetached(ref) {
+      calls.checkouts.push(ref);
+      calls.order.push("checkout");
+      return undefined;
+    },
+    async pushChunkBranch(branch) {
+      const r = script.chunkPushes?.[cpIdx++] ?? { kind: "ok" as const };
+      calls.chunkPushes.push(branch);
+      calls.order.push("chunk-push");
+      return r;
+    },
   };
   return { adapter, calls };
 }
@@ -253,7 +284,9 @@ describe("runMergerWithAdapter — clean-merge happy paths", () => {
     expect(summary.pushed).toBe(false);
     expect(calls.resets).toEqual([{ sha: "pre-sha" }]);
     expect(calls.gates).toBe(0);
-    expect(calls.comments).toEqual([{ n: 42, msg: INSTALL_FAILED_COMMENT }]);
+    expect(calls.comments).toEqual([
+      { n: 42, msg: buildInstallFailedComment(SOURCE_TARGET) },
+    ]);
     expect(calls.removedLabels).toEqual([
       { n: 42, label: READY_FOR_AGENT_LABEL },
     ]);

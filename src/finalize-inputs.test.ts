@@ -17,6 +17,7 @@ const issue = (id: string): IssueRef => ({
 
 const summary = (over: Partial<MergerSummary> = {}): MergerSummary => ({
   merged: [],
+  chunkLanded: [],
   skipped: [],
   pushed: false,
   unclosed: [],
@@ -206,6 +207,43 @@ describe("mergeFinalizeInputs", () => {
     );
     expect(inputs.map((i) => [i.kind, i.issue.id])).toEqual([
       ["merged", "3"],
+      ["merge-conflict", "1"],
+    ]);
+  });
+
+  // #60 — the third outcome a cycle can produce.
+  it("turns chunk landings into chunk-landed inputs carrying the branch", () => {
+    const { inputs } = mergeFinalizeInputs(
+      summary({
+        chunkLanded: [
+          { issue: issue("4"), chunkBranch: "sandbar/chunk-4-thing" },
+        ],
+      }),
+      new Map(),
+    );
+    expect(inputs).toEqual([
+      {
+        kind: "chunk-landed",
+        issue: issue("4"),
+        chunkBranch: "sandbar/chunk-4-thing",
+      },
+    ]);
+  });
+
+  it("emits chunk landings with the merges, before the skips", () => {
+    const { inputs } = mergeFinalizeInputs(
+      summary({
+        merged: [issue("3")],
+        chunkLanded: [
+          { issue: issue("5"), chunkBranch: "sandbar/chunk-5-thing" },
+        ],
+        skipped: [{ issue: issue("1"), reason: "conflict" }],
+      }),
+      new Map(),
+    );
+    expect(inputs.map((i) => [i.kind, i.issue.id])).toEqual([
+      ["merged", "3"],
+      ["chunk-landed", "5"],
       ["merge-conflict", "1"],
     ]);
   });

@@ -14,11 +14,11 @@
 // preflight cleanup (it can't `git branch -D` a branch a worktree is on).
 //
 // `git branch -d` is escalated to `-D` only where the caller owns the certainty
-// that the work is preserved elsewhere. For `merged`/`fresh-attempt` that
-// certainty is structural — the merger just landed the branch on the source
-// branch (producing different bytes, so the tip is no longer an ancestor of
-// HEAD and `-d` correctly refuses), or the silent-noop path is deliberately
-// discarding it. `needs-ui-prototype` has no such guarantee (its `hasCommits`
+// that the work is preserved elsewhere. For `merged`/`chunk-landed`/
+// `fresh-attempt` that certainty is structural — the merger just landed the
+// branch on the source branch or on the chunk branch and PUSHED it (producing
+// different bytes, so the tip is no longer an ancestor of HEAD and `-d`
+// correctly refuses), or the silent-noop path is deliberately discarding it. `needs-ui-prototype` has no such guarantee (its `hasCommits`
 // is per-sandbox-cycle, not per-branch), so it *verifies* containment via
 // branchIsContainedInOrigin before forcing, and keeps the branch otherwise.
 // `-d` refusing is never on its own a licence to force.
@@ -39,6 +39,12 @@
 // silent-noop-exhausted, needs-human, review-budget-exhausted) parks the issue
 // under the single `agentStuck` label; the *reason* lives in the bot comment.
 //
+// `chunk-landed` (#60) is the one label flip that is neither a handoff nor
+// cosmetic: `in-chunk` is sandbar's own protocol label — hardcoded, like
+// `ready-for-agent`, for the reason chunks.ts gives — and applying it is what
+// takes a landed chunk member out of the queue while leaving it OPEN. Its arm
+// says why the ordering around it is load-bearing.
+//
 // Required side-effects fail loud, they don't swallow (#8). The original bug was
 // `editLabels` catching a "label doesn't exist" error, logging it, and returning
 // as if the issue had been parked — so the run continued and the issue, never
@@ -53,6 +59,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { IN_CHUNK_LABEL } from "./chunks.js";
 import type { LabelConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
 import type { HeadMismatch } from "./git-ops.js";
@@ -319,8 +326,39 @@ export const SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE = (attempts: number): string
   `integration drift hasn't healed. A human needs to land this — either by resolving the conflict manually ` +
   `or by re-scoping the issue.`;
 
+// #60 — what a chunk member is told when its branch lands on the chunk branch.
+//
+// Three things a human needs and none of them is "done": where the work is (a
+// branch on origin, not the source branch), why the issue is still open (the
+// review that closes it is a review of the whole chunk), and what happened to
+// the label they applied. The last one matters most in practice — an issue
+// that silently loses `ready-for-agent` reads as sandbar having dropped it.
+export const CHUNK_LANDED_COMMENT_TEMPLATE = (
+  chunkBranch: string,
+  inChunkLabel: string,
+  readyLabel: string,
+): string =>
+  `${BOT_COMMENT_PREFIX} this issue's work is merged and pushed to ` +
+  `\`${chunkBranch}\`, the branch its review chunk lands on. The gate is green ` +
+  `on the composed branch, and **nothing has reached the source branch** — this ` +
+  `issue is review-gated, so a human reviews \`${chunkBranch}\` as one unit ` +
+  `before any of it lands.\n\n` +
+  `The issue stays OPEN and \`${readyLabel}\` has been replaced with ` +
+  `\`${inChunkLabel}\`: it is out of the agent queue (its work is done and on ` +
+  `the branch) but not finished, and it closes when the chunk lands. The local ` +
+  `issue branch was deleted — \`${chunkBranch}\` carries its commits.`;
+
 export type FinalizeInput =
   | { readonly kind: "merged"; readonly issue: IssueRef }
+  // #60 — a review-gated issue whose branch landed on its chunk's branch, which
+  // is now on origin. NOT a close: nothing has reached the source branch and
+  // the review that would justify closing has not happened. The issue stays
+  // OPEN and swaps `ready-for-agent` for `in-chunk`.
+  | {
+      readonly kind: "chunk-landed";
+      readonly issue: IssueRef;
+      readonly chunkBranch: string;
+    }
   | { readonly kind: "merge-conflict"; readonly issue: IssueRef }
   | { readonly kind: "merge-gate-red"; readonly issue: IssueRef }
   // Verified merge mode (#22): merged + locally gated green, but the forge
@@ -502,6 +540,24 @@ function requireFlip(r: LabelEditResult, issueNum: number): void {
   );
 }
 
+// The chunk-landing flip (#60). Separate from `requireFlip` for the message
+// alone: `in-chunk` is sandbar's own protocol label, not one of `config.labels`
+// (chunks.ts says why it is hardcoded), so pointing the operator at a config
+// knob that cannot spell it would send them looking for a setting that does not
+// exist. What they have to do is create the label.
+function requireChunkFlip(r: LabelEditResult, issueNum: number): void {
+  if (r.ok) return;
+  throw new SandbarError(
+    `Issue #${issueNum} landed on its chunk's branch, but relabelling it ` +
+      `\`${IN_CHUNK_LABEL}\` failed (${r.error ?? "unknown error"}). The commits ` +
+      `are safe on the chunk branch; the run stops here because an issue that ` +
+      `keeps \`${READY_FOR_AGENT_LABEL}\` would be planned again and its work ` +
+      `written a second time. This is almost certainly a missing label — ` +
+      `sandbar never creates labels, and \`${IN_CHUNK_LABEL}\` is not ` +
+      `configurable. Create it in the repo, then re-run.`,
+  );
+}
+
 // `-d`, escalating to `-D` when it refuses. ONLY for callers that own the
 // certainty the work is preserved elsewhere — see the module header. Callers
 // without that certainty must verify it (branchIsContainedInOrigin) instead of
@@ -555,6 +611,40 @@ export async function finalizeOne(
       // source branch than the branch's diff, the branch tip isn't an ancestor
       // of HEAD. The merger just landed this branch, so we own the certainty
       // and escalate to `-D`.
+      return deleteBranchForcing(adapter, input.issue.branch);
+    }
+    case "chunk-landed": {
+      // #60. Same branch lifecycle as `merged` — the commits are on the chunk
+      // branch and that branch is on origin, so the local issue branch is a
+      // duplicate and `-D` is safe on the same structural certainty. What
+      // differs is everything issue-facing: no close (the review has not
+      // happened), and the label flip is LOAD-BEARING rather than cosmetic.
+      //
+      // Order is load-bearing too, and it is the opposite of `merged`'s
+      // best-effort flip: the flip must succeed BEFORE the branch is deleted.
+      // `in-chunk` is what de-queues the issue; an issue that kept
+      // `ready-for-agent` with its branch deleted would be re-planned next
+      // cycle onto a fresh branch seeded from `origin/<sourceBranch>` — which
+      // has none of this work — and the implementer would write it a second
+      // time, on top of a chunk branch that already carries the first. So a
+      // failed flip stops the run here (requireFlip), with the branch intact
+      // and the re-merge of it a no-op.
+      const n = issueNumberOf(input.issue);
+      await adapter.removeWorktreeFor(input.issue.branch);
+      await adapter.postComment(
+        n,
+        CHUNK_LANDED_COMMENT_TEMPLATE(
+          input.chunkBranch,
+          IN_CHUNK_LABEL,
+          READY_FOR_AGENT_LABEL,
+        ),
+      );
+      const r = await adapter.editLabels(
+        n,
+        [READY_FOR_AGENT_LABEL],
+        [IN_CHUNK_LABEL],
+      );
+      requireChunkFlip(r, n);
       return deleteBranchForcing(adapter, input.issue.branch);
     }
     case "merge-conflict": {

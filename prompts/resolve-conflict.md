@@ -1,5 +1,5 @@
-A `git merge --no-ff` of this branch into the source branch is in progress and
-has hit a conflict.
+A `git merge --no-ff` of this branch into {{target}} is in progress and has hit
+a conflict.
 
 {{digest}}
 

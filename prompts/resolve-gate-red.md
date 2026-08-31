@@ -1,4 +1,4 @@
-This branch merged cleanly into the source branch, but the post-merge gate
+This branch merged cleanly into {{target}}, but the post-merge gate
 (the project's gate steps) is failing against the merged tree.
 
 ## Gate output (last 200 lines)

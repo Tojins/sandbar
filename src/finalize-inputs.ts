@@ -138,7 +138,10 @@ export type MergeFinalizeInputs = {
  *
  * `summary` is either the merger's own result or, after a MergerError halt, the
  * partial tracker state it had already applied — the shapes are identical and
- * the halt path's `merged` is empty by construction.
+ * the halt path's `merged` is empty by construction. `chunkLanded` (#60) is
+ * NOT empty on that path and must not be: those commits are on origin's chunk
+ * branch whether the cycle went on to halt or not, and the label flip they earn
+ * is what stops the next cycle re-planning work that is already landed.
  */
 export function mergeFinalizeInputs(
   summary: MergerSummary,
@@ -148,6 +151,15 @@ export function mergeFinalizeInputs(
   const bumpedSilentNoop = new Map<string, number>();
   for (const m of summary.merged) {
     inputs.push({ kind: "merged", issue: m });
+  }
+  // #60. Before the skips for the same reason `merged` is: these are the
+  // cycle's successes, and finalise runs its inputs in order.
+  for (const c of summary.chunkLanded) {
+    inputs.push({
+      kind: "chunk-landed",
+      issue: c.issue,
+      chunkBranch: c.chunkBranch,
+    });
   }
   for (const s of summary.skipped) {
     if (s.reason === "silent-noop") {
