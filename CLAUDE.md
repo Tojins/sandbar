@@ -244,7 +244,10 @@ default 50, exit 3).
   open PR per chunk branch. Spelled once in `src/chunks.ts` beside
   `IN_CHUNK_LABEL`, and it is a QUEUE: a merge the resolve loop could not save
   takes the label off and says why, while a push race or an unreachable forge
-  leaves it on for the next run. Members are closed EXPLICITLY (a `Closes #N`
+  leaves it on for the next run — which is why `fetchChunkRef` answers in three
+  states (`ChunkRefLookup`) and buys "origin has no such branch" apart from
+  "origin could not be asked" with an `ls-remote` probe: only the first is a
+  fact about the chunk, and only a fact about the chunk may spend the label. Members are closed EXPLICITLY (a `Closes #N`
   trailer only fires on GitHub's own merge of that PR, and sandbar composes
   the merge locally), and the chunk branch is deleted only once every close
   worked — a kept branch is what makes `src/chunk-reconcile.ts` retry the
