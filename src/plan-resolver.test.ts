@@ -796,6 +796,10 @@ describe("resolvePlan landed chunks (#63, #64)", () => {
           { number: 10, title: "Root" },
           { number: 11, title: "Second" },
         ],
+        closeOrder: [
+          { number: 11, title: "Second" },
+          { number: 10, title: "Root" },
+        ],
         tips: [{ number: 11, title: "Second" }],
       },
     ]);

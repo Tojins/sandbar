@@ -1813,6 +1813,11 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     branch: `sandbar/chunk-${root}-c`,
     title: `chunk ${root}`,
     members: members.map((n) => ({ number: n, title: `t-${n}` })),
+    // A chain, so the deepest member closes first and the root last — the
+    // wrap-up acts on this list and `chunk-land.test.ts` owns why.
+    closeOrder: [...members]
+      .reverse()
+      .map((n) => ({ number: n, title: `t-${n}` })),
     pullRequest: 500 + root,
   });
 
@@ -1918,12 +1923,13 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     expect(calls.gates).toBe(1);
     expect(calls.pushes).toBe(1);
     expect(summary.pushed).toBe(true);
-    // …and only then the wrap-up: every member closed, `in-chunk` dropped, the
-    // pull request closed, the branch deleted.
-    expect(calls.closes.map((c) => c.n)).toEqual([42, 43]);
+    // …and only then the wrap-up: every member closed — deepest first, the
+    // root last — `in-chunk` dropped, the pull request closed, the branch
+    // deleted.
+    expect(calls.closes.map((c) => c.n)).toEqual([43, 42]);
     expect(calls.removedLabels).toEqual([
-      { n: 42, label: IN_CHUNK_LABEL },
       { n: 43, label: IN_CHUNK_LABEL },
+      { n: 42, label: IN_CHUNK_LABEL },
     ]);
     // `land` off before the close, so a pull request that would not close is
     // still not a request the next cycle honours.
@@ -2044,7 +2050,12 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     expect(calls.prLabelRemovals).toEqual([{ pr: 542, label: LAND_LABEL }]);
   });
 
-  it("keeps the branch and reports residue when a member will not close", async () => {
+  it("keeps the branch, and the root open, when a member will not close", async () => {
+    // #43 is first in the close order and it fails, so #42 — the root the
+    // branch is NAMED after — is never asked. That is what the kept branch is
+    // for: the next cycle re-derives the same chunk, under the same root, and
+    // retries. `chunk-land.ts` owns the argument; this pins that the merge
+    // phase's own landing runs it.
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
       gates: [{ ok: true }],
@@ -2060,7 +2071,8 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     );
 
     expect(summary.pushed).toBe(true);
-    expect(summary.mergedChunks[0]?.closed).toEqual([42]);
+    expect(summary.mergedChunks[0]?.closed).toEqual([]);
+    expect(calls.closeAttempts.map((c) => c.n)).toEqual([43]);
     expect(summary.mergedChunks[0]?.branchDeleted).toBe(false);
     expect(calls.chunkBranchDeletes).toEqual([]);
     expect(summary.mergedChunks[0]?.residue.join("\n")).toContain("#43");

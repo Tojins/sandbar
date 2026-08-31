@@ -63,6 +63,9 @@ const chunk = (
   branch: `sandbar/chunk-${root}-c`,
   title: `t-${root}`,
   members: members.map((n) => ({ number: n, title: `t-${n}` })),
+  // Ascending, which is what an unrelated pair closes in; a chain is
+  // `chunks.ts`'s business and `chunk-land.test.ts`'s to act on.
+  closeOrder: members.map((n) => ({ number: n, title: `t-${n}` })),
   // Unread here: the tips are the review scan's half of a `LandedChunk` (#63).
   tips: [],
 });

@@ -190,7 +190,8 @@ default 50, exit 3).
   candidate graph can give: the `in-chunk` members, which is the set a landing
   closes (#64) and whose tips a follow-up is blocked by (#63) — never the whole
   component, since a member that has never been worked has no commits
-  anywhere.
+  anywhere. It also carries the ORDER those closes must go in, for the reason
+  the `land` bullet below states.
 - **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,
   created or updated after every landing push; sandbar never re-drafts a PR a
   human made ready. `src/chunk-pr.ts` owns the prose and what it may claim.
@@ -215,10 +216,14 @@ default 50, exit 3).
   commits a review never covered on the source branch, so the label stays and
   the next quiet cycle lands it. Members are closed EXPLICITLY (a `Closes #N` trailer only
   fires on GitHub's own merge of that PR, and sandbar composes the merge
-  locally), and the chunk branch is deleted only once every close worked — a
-  kept branch is what makes `src/chunk-reconcile.ts` retry the remainder next
-  cycle, and therefore what `run.ts` halts on (`chunkResidue` splits a wrap-up's
-  leftovers on exactly that question; only the merge-phase report halts, since
+  locally), in `LandedChunk.closeOrder` — dependents first, ROOT LAST — and the
+  loop stops at the first failure: the reconciler finds a kept branch by its
+  NAME, which is re-derived from the open issues every cycle, so a closed root
+  re-roots the chunk and leaves that branch matching nothing. The chunk branch
+  is deleted only once every close worked — a kept branch is what makes
+  `src/chunk-reconcile.ts` retry the remainder next cycle, and therefore what
+  `run.ts` halts on (`chunkResidue` splits a wrap-up's leftovers on exactly
+  that question, `unnamed` included; only the merge-phase report halts, since
   the reconciler IS the retry). The reconciler is also the answer to a
   hand-merged PR: it runs at plan time, tests containment in
   `origin/<sourceBranch>` rather than intent, and does the identical wrap-up

@@ -1309,16 +1309,23 @@ export async function runMergerWithAdapter(
   // untouched — branch, members and labels all as they were — so what this
   // costs a human is re-applying one label once they have dealt with whatever
   // the comment describes.
+  //
+  // RECORDED FIRST, before either write, on the same argument `landChunkGroup`
+  // makes one phase up: the park is a decision already taken — the merge is
+  // reverted and nothing of this chunk is landing this cycle — while the two
+  // `gh` calls below can throw and halt. A `MergerError.partial` that omitted a
+  // pull request already commented on would report a reviewer as untold when
+  // they had been told, which is the one thing a partial exists to get right.
   const parkChunk = async (
     request: ChunkLandTarget,
     comment: string,
     reason: ChunkLandSkipReason,
   ): Promise<void> => {
+    skippedChunks.push({ target: request, reason });
     if (request.pullRequest > 0) {
       await adapter.commentOnPullRequest(request.pullRequest, comment);
       await adapter.removePullRequestLabel(request.pullRequest, LAND_LABEL);
     }
-    skippedChunks.push({ target: request, reason });
     await emit(`chunk ${request.branch}: not landed (${reason})`);
   };
 

@@ -127,6 +127,29 @@
 // rather than reporting a clean landing: it is the only thing that can be done
 // about it here, and a human reading either can close the issue in one click.
 //
+// THE MEMBERS ARE CLOSED IN DEPENDENCY ORDER — dependents first, the root last
+// — AND THE LOOP STOPS AT THE FIRST FAILURE. Both halves are about what the
+// branch means to the NEXT cycle, and neither is about this one.
+//
+// A wrap-up that could not close every member keeps the chunk branch, and the
+// promise made to a human on the strength of that (below, and in
+// `CHUNK_LANDED_PR_COMMENT`) is that the next cycle's reconciler finds the
+// branch and retries exactly the closes that failed. The reconciler matches a
+// branch to a chunk BY NAME, and the name is `sandbar/chunk-<root>-<slug>` —
+// derived every cycle from a graph of OPEN issues. Close the root and it
+// leaves that graph; the survivors re-root under a different member, on a
+// branch nothing on origin is called, and the kept branch matches no chunk at
+// all: it is reconciled as a chunk with no members, which closes nothing and
+// deletes it. The member that would not close is then OPEN, still carrying
+// `in-chunk`, on no queue, with nothing left to find it through.
+//
+// Closing dependents first and stopping leaves a set that cannot degrade that
+// way: everything still open is the failed member plus every member it is
+// built on top of, the root included, so the chunk re-derives under the same
+// root, on the same branch, carrying exactly those members. `closeOrder` is
+// computed by the derivation (`chunks.ts`), which is the only thing that has
+// the edges, and its comment carries the argument in full.
+//
 // EXPLICITLY is the load-bearing word on the first one. GitHub closes an issue
 // from a `Closes #N` trailer only when GitHub itself merges the pull request
 // carrying it — sandbar composes the merge locally and pushes the result, so no
@@ -206,11 +229,15 @@ export type ChunkLandTarget = {
   readonly title: string;
   // The members whose work is ON the branch, ascending — the `in-chunk` ones,
   // which is what `LandedChunk.members` carries and why it is filtered there.
-  // This list
-  // is what the wrap-up CLOSES, so a component member that has never been
-  // worked must not be in it. EMPTY is a real answer, not a failure: see
+  // This list is what the wrap-up CLOSES, so a component member that has never
+  // been worked must not be in it. EMPTY is a real answer, not a failure: see
   // `selectLandRequests`.
   readonly members: readonly ChunkMember[];
+  // The same members in the order they must be closed — dependents before
+  // blockers, root last. `LandedChunk.closeOrder` owns the argument for why a
+  // landing may not close them in any other order, and why it stops at the
+  // first failure.
+  readonly closeOrder: readonly ChunkMember[];
   // The pull request carrying the chunk. 0 when there is none to act on —
   // a reconciled chunk whose PR a human already closed.
   readonly pullRequest: number;
@@ -264,6 +291,7 @@ function targetFor(
     branch,
     title: chunk?.title ?? pr?.title ?? "",
     members: chunk?.members ?? [],
+    closeOrder: chunk?.closeOrder ?? [],
     pullRequest: pr?.number ?? 0,
   };
 }
@@ -416,14 +444,17 @@ export const CHUNK_LANDED_PR_COMMENT = (args: {
     // named issue by issue rather than summarised.
     lines.push(
       "",
-      "Still OPEN — sandbar could not close these, and they keep their " +
-        `\`${IN_CHUNK_LABEL}\` label so they stay off the agent queue:`,
+      "Still OPEN — sandbar stopped at the first issue it could not close, so " +
+        "this is that one and everything the rest of the chunk is built on top " +
+        `of. They keep their \`${IN_CHUNK_LABEL}\` label, so they stay off the ` +
+        "agent queue:",
       "",
       ...list(args.unclosed),
       "",
       `\`${args.chunkBranch}\` is KEPT on origin because of them: the next run finds ` +
         `it already contained in \`${args.sourceBranch}\` and retries exactly these ` +
-        `closes. Closing them by hand is just as good.`,
+        `closes. Closing them all by hand is just as good — the branch retires ` +
+        `either way, once nothing on it is open.`,
     );
   } else {
     lines.push("", "The chunk branch is being deleted.");
@@ -689,7 +720,11 @@ export async function wrapUpLandedChunk(
   const residue: string[] = [];
   const closed: number[] = [];
 
-  for (const member of target.members) {
+  // `closeOrder`, never `members`: dependents first and the root last, and the
+  // loop STOPS at the first failure rather than carrying on. That pair is what
+  // makes the retry this chunk is about to be promised a real one — see the
+  // header, and `LandedChunk.closeOrder` for the derivation half of it.
+  for (const member of target.closeOrder) {
     try {
       await adapter.closeIssue(
         member.number,
@@ -707,7 +742,13 @@ export async function wrapUpLandedChunk(
       );
       // The label stays with the issue that could not close. Dropping it here
       // would leave an OPEN member on no queue at all — see the header.
-      continue;
+      //
+      // And nothing after it is attempted. Every member still to come is one
+      // this one is built on top of, up to and including the root; closing any
+      // of them would cut this member out of the chunk that names the branch
+      // its commits are on, and the next cycle would find that branch matching
+      // no chunk, delete it, and close nothing.
+      break;
     }
     try {
       await adapter.removeLabel(member.number, IN_CHUNK_LABEL);
@@ -797,7 +838,7 @@ export async function wrapUpLandedChunk(
     residue.push(
       `${target.branch} is kept on origin so the next run retries the ${
         target.members.length - closed.length
-      } member(s) it could not close`,
+      } member(s) still open on it`,
     );
   }
 
@@ -805,7 +846,7 @@ export async function wrapUpLandedChunk(
 }
 
 // ---------------------------------------------------------------------------
-// Reading the residue back: two classes, and only one of them is retried
+// Reading the residue back: three classes, and only one of them is retried
 // ---------------------------------------------------------------------------
 //
 // `residue` is a flat list of lines because the wrap-up writes it as it goes,
@@ -826,6 +867,11 @@ export async function wrapUpLandedChunk(
 //                is gone — so they are cosmetic by construction, and telling a
 //                human otherwise sends them back next week to check on a
 //                repair that was never scheduled.
+//   UNNAMED  — the branch retired having closed nothing, because the chunk
+//                named no member. Every write worked, so there is no residue
+//                at all, and it is reported beside the other two because it is
+//                the same kind of news: durable work whose tracker state may
+//                still be wrong, with nothing left that will look at it again.
 //
 // A kept chunk always has residue (both paths that keep the branch push a
 // line), so `kept` needs no residue filter and `untidy` does. Both callers in
@@ -837,6 +883,12 @@ export async function wrapUpLandedChunk(
 export type ChunkResidue = {
   readonly kept: readonly ChunkWrapup[];
   readonly untidy: readonly ChunkWrapup[];
+  // Retired without closing anything, because the chunk named no member at
+  // all. Not residue in the sense above — no write went wrong — but the one
+  // outcome a human may still have to finish by hand, and the branch that
+  // would have led them to it is gone. A chunk can be `untidy` as well; the
+  // two say different things and both are worth saying.
+  readonly unnamed: readonly ChunkWrapup[];
 };
 
 export function chunkResidue(
@@ -845,6 +897,9 @@ export function chunkResidue(
   return {
     kept: wrapups.filter((w) => !w.branchDeleted),
     untidy: wrapups.filter((w) => w.branchDeleted && w.residue.length > 0),
+    unnamed: wrapups.filter(
+      (w) => w.branchDeleted && w.target.members.length === 0,
+    ),
   };
 }
 
@@ -878,6 +933,33 @@ export const CHUNK_RESIDUE_KEPT_BANNER = (args: ResidueBanner): string =>
       `next cycle's reconciler finds them contained in \`${args.sourceBranch}\` ` +
       "and retries exactly these writes. Fix them by hand if that is quicker.",
   );
+
+// A chunk that reached the wrap-up naming NO member to close, and whose branch
+// is therefore gone with nothing closed. Sandbar does that on purpose — see the
+// header on why an empty list still deletes — and this is the one repair that
+// remains available: telling a human, while the branch name is still on their
+// screen.
+//
+// Both passes report it. The merge phase's version is a `land` request whose
+// branch the derivation could not name; the reconciler's is a branch already on
+// the source branch that no chunk claims, which is the ordinary end of a chunk
+// somebody closed out by hand and the only trace of one whose members the graph
+// lost. Neither halts: the commits are durable, and every repair left is a
+// human's to make on the tracker.
+export const CHUNK_LANDED_UNNAMED_BANNER = (args: {
+  readonly chunks: readonly ChunkWrapup[];
+  readonly sourceBranch: string;
+  readonly provenance: LandingProvenance;
+}): string =>
+  `\nSandbar ${args.provenance === "sandbar" ? "landed" : "found"} ` +
+  `${args.chunks.length} chunk(s) ${
+    args.provenance === "sandbar" ? "on" : "already on"
+  } \`${args.sourceBranch}\` for which it knew no member issue, so it closed ` +
+  "none:\n" +
+  args.chunks.map((c) => `  ${c.target.branch}`).join("\n") +
+  "\nUsually that means they were closed by hand already. If any issue is still " +
+  `open under \`${IN_CHUNK_LABEL}\` for one of these, close it yourself — the ` +
+  "branch is deleted, so no later run will find it.";
 
 export const CHUNK_RESIDUE_RETIRED_BANNER = (args: ResidueBanner): string =>
   banner(

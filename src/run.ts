@@ -122,13 +122,13 @@ import {
 } from "./merger-worktree.js";
 import { type Stack, startStack } from "./gate-stack.js";
 import {
+  CHUNK_LANDED_UNNAMED_BANNER,
   CHUNK_RESIDUE_KEPT_BANNER,
   CHUNK_RESIDUE_RETIRED_BANNER,
   LAND_LABEL,
   chunkResidue,
   selectLandRequests,
 } from "./chunk-land.js";
-import { IN_CHUNK_LABEL } from "./chunks.js";
 import {
   fetchLandRequestPullRequests,
   reconcileLandedChunks,
@@ -624,8 +624,8 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           extraCandidates: followUps,
         });
       }
-      // What the reconciler could not finish, in the two shapes it comes in
-      // (#64). Split rather than reported as one list, and each half counting
+      // What the reconciler left behind, in the three shapes it comes in
+      // (#64). Split rather than reported as one list, and each report counting
       // its own chunks: three chunks reconciling with one stray label is one
       // chunk with bookkeeping left over, and calling it three sends a human
       // looking for leftovers that are not there. The claim differs too — a
@@ -638,6 +638,26 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // of the next cycle, so stopping the run in front of it would spend the
       // whole run on a repair that repairs itself.
       const reconcileResidue = chunkResidue(reconciliation.reconciled);
+      // The twin of the merge phase's own report, one phase down and for the
+      // same reason: a branch already on the source branch that no chunk
+      // claims is deleted having closed nothing, and the only trace of it left
+      // afterwards is this line. Ordinary when a human closed the members out
+      // by hand; the one thing it can also be is a member whose `in-chunk` the
+      // derivation lost, which is a repair nothing else will ever offer.
+      if (reconcileResidue.unnamed.length > 0) {
+        console.warn(
+          CHUNK_LANDED_UNNAMED_BANNER({
+            chunks: reconcileResidue.unnamed,
+            sourceBranch: config.sourceBranch,
+            provenance: "reconciled",
+          }),
+        );
+        await runLogger.appendOrchestrator(
+          `reconcile: retired with no named member: ${reconcileResidue.unnamed
+            .map((c) => c.target.branch)
+            .join(", ")}`,
+        );
+      }
       if (reconcileResidue.untidy.length > 0) {
         console.warn(
           CHUNK_RESIDUE_RETIRED_BANNER({
@@ -1060,15 +1080,15 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         }
         // A parked chunk (#64) is reported from HERE rather than beside the
         // merge summary above, and that is the whole difference `mergerOutcome`
-        // makes: parking is a tracker write already applied — the pull request
-        // was commented on and a human's `land` label taken off it — so it
-        // rides `MergerError.partial` exactly as `skipped` does, and a halt one
-        // issue later must not be the reason a reviewer never learns their
-        // label is gone.
+        // makes: parking writes to the pull request — a comment, and a human's
+        // `land` label taken off it — so it rides `MergerError.partial` exactly
+        // as `skipped` does, and a halt one issue later must not be the reason
+        // a reviewer never learns their label is gone. The line names the
+        // DECISION rather than the writes: `parkChunk` records before it makes
+        // them, so on the halt path this may be the entry whose own `gh` call
+        // threw, and the pull request is where the outcome is readable anyway.
         for (const c of mergerOutcome.skippedChunks) {
-          console.log(
-            `  ⊘ ${c.target.branch} not landed (${c.reason}); \`${LAND_LABEL}\` removed`,
-          );
+          console.log(`  ⊘ ${c.target.branch} not landed (${c.reason})`);
         }
         // Deferred, not parked (#61 + #64): the chunk grew this cycle, so the
         // label is still on and the next cycle lands it. Printed from here for
@@ -1121,20 +1141,16 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // `chunk-land.ts`), so nothing will ever look at this chunk again. That
       // is a warning rather than a halt: the commits are on the source branch
       // and the only repair left is one a human makes on the tracker.
-      const unnamedChunks = landedChunks.filter(
-        (c) => c.target.members.length === 0,
-      );
-      if (unnamedChunks.length > 0) {
+      if (landedResidue.unnamed.length > 0) {
         console.warn(
-          `\nSandbar landed ${unnamedChunks.length} chunk(s) on ${config.sourceBranch} ` +
-            "for which it knew no member issue, so it closed none:\n" +
-            unnamedChunks.map((c) => `  ${c.target.branch}`).join("\n") +
-            "\nUsually that means they were closed by hand already. If any issue " +
-            `is still open under \`${IN_CHUNK_LABEL}\` for one of these, close it ` +
-            "yourself — the branch is deleted, so no later run will find it.",
+          CHUNK_LANDED_UNNAMED_BANNER({
+            chunks: landedResidue.unnamed,
+            sourceBranch: config.sourceBranch,
+            provenance: "sandbar",
+          }),
         );
         await runLogger.appendOrchestrator(
-          `merger: landed with no named member: ${unnamedChunks
+          `merger: landed with no named member: ${landedResidue.unnamed
             .map((c) => c.target.branch)
             .join(", ")}`,
         );

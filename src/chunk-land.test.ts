@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CHUNK_LANDED_PR_COMMENT,
+  CHUNK_LANDED_UNNAMED_BANNER,
   CHUNK_RESIDUE_KEPT_BANNER,
   CHUNK_RESIDUE_RETIRED_BANNER,
   type ChunkWrapup,
@@ -32,6 +33,11 @@ const chunk = (
   branch,
   title,
   members: members.map(([number, t]) => ({ number, title: t })),
+  // A chain, which is what `members` ascending reads as here: the deepest
+  // member closes first and the root last. `chunks.ts` is where that order is
+  // derived and where the argument for it lives; this file only has to carry
+  // it through the selectors and act on it in the wrap-up.
+  closeOrder: [...members].reverse().map(([number, t]) => ({ number, title: t })),
   // The selectors read the members, never the tips — that half of a
   // `LandedChunk` belongs to the review scan (#63).
   tips: [],
@@ -62,6 +68,12 @@ describe("selectLandRequests (#64)", () => {
           { number: 42, title: "alpha" },
           { number: 43, title: "beta" },
         ],
+        // Carried through verbatim: the wrap-up closes in this order, and the
+        // derivation is the only thing that can compute it (#64).
+        closeOrder: [
+          { number: 43, title: "beta" },
+          { number: 42, title: "alpha" },
+        ],
         pullRequest: 9,
       },
     ]);
@@ -77,6 +89,7 @@ describe("selectLandRequests (#64)", () => {
       branch: "sandbar/chunk-42-alpha",
       title: "Sandbar chunk #42: alpha",
       members: [],
+      closeOrder: [],
       pullRequest: 9,
     });
   });
@@ -119,6 +132,7 @@ describe("selectReconciliations (#64)", () => {
         branch: "sandbar/chunk-42-alpha",
         title: "alpha",
         members: [{ number: 42, title: "alpha" }],
+        closeOrder: [{ number: 42, title: "alpha" }],
         pullRequest: 9,
       },
     ]);
@@ -199,6 +213,8 @@ function makeWrapupAdapter(
   };
 }
 
+// A chunk of two: #43's work is written on top of #42's, so #42 is the root
+// the branch is named after and #43 closes FIRST.
 const target = {
   root: 42,
   branch: "sandbar/chunk-42-alpha",
@@ -207,24 +223,30 @@ const target = {
     { number: 42, title: "alpha" },
     { number: 43, title: "beta" },
   ],
+  closeOrder: [
+    { number: 43, title: "beta" },
+    { number: 42, title: "alpha" },
+  ],
   pullRequest: 9,
 };
 
 describe("wrapUpLandedChunk (#64)", () => {
-  it("closes every member, drops in-chunk, closes the PR, deletes the branch", async () => {
+  it("closes every member in dependency order, drops in-chunk, closes the PR, deletes the branch", async () => {
     const { adapter, calls } = makeWrapupAdapter();
     const r = await wrapUpLandedChunk(target, adapter, {
       sourceBranch: "main",
       provenance: "sandbar",
     });
     expect(r.residue).toEqual([]);
+    // Ascending in the RESULT, which is a report, and dependents-first in the
+    // calls, which are the acts: #43 closes before the root it is built on.
     expect(r.closed).toEqual([42, 43]);
     expect(r.branchDeleted).toBe(true);
     expect(calls.map((c) => `${c.op} ${c.arg}`)).toEqual([
-      "closeIssue 42",
-      `removeLabel 42:${IN_CHUNK_LABEL}`,
       "closeIssue 43",
       `removeLabel 43:${IN_CHUNK_LABEL}`,
+      "closeIssue 42",
+      `removeLabel 42:${IN_CHUNK_LABEL}`,
       "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
       "closePullRequest 9",
@@ -232,38 +254,75 @@ describe("wrapUpLandedChunk (#64)", () => {
     ]);
   });
 
-  it("keeps the branch when a member could not be closed, so the next run retries", async () => {
+  it("stops at the first close it cannot make, and never closes the root behind it", async () => {
+    // THE invariant of the whole wrap-up. The branch is kept so the next
+    // cycle's reconciler retries it, and that reconciler finds it by NAME —
+    // `sandbar/chunk-<root>-<slug>`, re-derived from the open issues. Closing
+    // #42 here would take the root out of that graph, re-root the chunk under
+    // #43 on a branch origin has never had, and leave the kept branch matching
+    // nothing: deleted next cycle, with #43 open, `in-chunk`, on no queue.
     const { adapter, calls } = makeWrapupAdapter({ "closeIssue:43": "gh boom" });
     const r = await wrapUpLandedChunk(target, adapter, {
       sourceBranch: "main",
       provenance: "sandbar",
     });
-    expect(r.closed).toEqual([42]);
+    expect(r.closed).toEqual([]);
     expect(r.branchDeleted).toBe(false);
+    expect(calls.filter((c) => c.op === "closeIssue").map((c) => c.arg)).toEqual([
+      "43",
+    ]);
     expect(calls.some((c) => c.op === "deleteChunkBranch")).toBe(false);
     // And the un-closed member KEEPS `in-chunk`: an open issue that lost it
     // would be on no queue at all.
-    expect(calls.filter((c) => c.op === "removeLabel").map((c) => c.arg)).toEqual([
-      `42:${IN_CHUNK_LABEL}`,
-    ]);
+    expect(calls.some((c) => c.op === "removeLabel")).toBe(false);
     expect(r.residue.join("\n")).toContain("#43 could not be closed");
     expect(r.residue.join("\n")).toContain("kept on origin");
+  });
+
+  it("leaves everything behind a failed close untouched, the root included", async () => {
+    // A chain: #42 ← #43 ← #44, so the order is #44, #43, #42. #44 closes,
+    // #43 will not, and #42 is never asked — which is what the ORDER buys
+    // beyond simply holding the root back. Closing #42 now would re-root the
+    // chunk under #43 and rename its branch; the branch on origin is the one
+    // #44's commits are on, and it has to keep matching.
+    const chain = {
+      ...target,
+      members: [...target.members, { number: 44, title: "gamma" }],
+      closeOrder: [
+        { number: 44, title: "gamma" },
+        { number: 43, title: "beta" },
+        { number: 42, title: "alpha" },
+      ],
+    };
+    const { adapter, calls } = makeWrapupAdapter({ "closeIssue:43": "gh boom" });
+    const r = await wrapUpLandedChunk(chain, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+    });
+
+    expect(r.closed).toEqual([44]);
+    expect(calls.filter((c) => c.op === "closeIssue").map((c) => c.arg)).toEqual([
+      "44",
+      "43",
+    ]);
+    expect(r.branchDeleted).toBe(false);
+    expect(r.residue.join("\n")).toContain("2 member(s) still open");
   });
 
   it("tells the pull request what actually closed, not what was asked for", async () => {
     // The wrap-up knows the answer by the time it writes here — the member loop
     // is above it — so a comment reciting the target's member list would be
     // claiming a close that failed two calls earlier.
-    const { adapter, bodies } = makeWrapupAdapter({ "closeIssue:43": "gh boom" });
+    const { adapter, bodies } = makeWrapupAdapter({ "closeIssue:42": "gh boom" });
     await wrapUpLandedChunk(target, adapter, {
       sourceBranch: "main",
       provenance: "sandbar",
     });
 
     const prBody = bodies.at(-1) ?? "";
-    expect(prBody).toContain("- #42 — alpha");
-    expect(prBody).toContain("Still OPEN");
     expect(prBody).toContain("- #43 — beta");
+    expect(prBody).toContain("Still OPEN");
+    expect(prBody).toContain("- #42 — alpha");
     expect(prBody).toContain("is KEPT on origin");
     expect(prBody).not.toMatch(/branch is being deleted/);
   });
@@ -337,7 +396,7 @@ describe("wrapUpLandedChunk (#64)", () => {
   it("deletes a landed branch that has no members at all", async () => {
     const { adapter } = makeWrapupAdapter();
     const r = await wrapUpLandedChunk(
-      { ...target, members: [], pullRequest: 0 },
+      { ...target, members: [], closeOrder: [], pullRequest: 0 },
       adapter,
       { sourceBranch: "main", provenance: "reconciled" },
     );
@@ -475,8 +534,9 @@ describe("chunkResidue and the banners it feeds (#64)", () => {
     branch: string,
     branchDeleted: boolean,
     residue: readonly string[],
+    members: ChunkWrapup["target"]["members"] = target.members,
   ): ChunkWrapup => ({
-    target: { ...target, branch },
+    target: { ...target, branch, members },
     closed: [],
     branchDeleted,
     residue,
@@ -490,7 +550,47 @@ describe("chunkResidue and the banners it feeds (#64)", () => {
     expect(chunkResidue([clean, untidy, kept])).toEqual({
       kept: [kept],
       untidy: [untidy],
+      unnamed: [],
     });
+  });
+
+  it("calls a chunk that retired having named no member its own thing", () => {
+    // Every write worked, so there is no residue to split — and the chunk is
+    // still news: its branch is gone, so if any member was open under
+    // `in-chunk` and the graph had lost it, this line is the last mention of
+    // it anywhere.
+    const unnamed = wrapup("sandbar/chunk-4-unnamed", true, [], []);
+    const split = chunkResidue([unnamed]);
+
+    expect(split).toEqual({ kept: [], untidy: [], unnamed: [unnamed] });
+    const banner = CHUNK_LANDED_UNNAMED_BANNER({
+      chunks: split.unnamed,
+      sourceBranch: "main",
+      provenance: "sandbar",
+    });
+    expect(banner).toContain("knew no member issue");
+    expect(banner).toContain("sandbar/chunk-4-unnamed");
+    expect(banner).toContain(IN_CHUNK_LABEL);
+    expect(banner).toContain("no later run will find it");
+  });
+
+  it("says the reconciler FOUND such a chunk rather than landing it", () => {
+    expect(
+      CHUNK_LANDED_UNNAMED_BANNER({
+        chunks: [wrapup("sandbar/chunk-4-unnamed", true, [], [])],
+        sourceBranch: "main",
+        provenance: "reconciled",
+      }),
+    ).toContain("found 1 chunk(s) already on");
+  });
+
+  it("does not call a KEPT branch unnamed, whatever it named", () => {
+    // The delete is what makes it final, so a branch still on origin is the
+    // kept case and nothing else: the next cycle looks at it again.
+    expect(
+      chunkResidue([wrapup("sandbar/chunk-5-kept", false, ["#9 open"], [])])
+        .unnamed,
+    ).toEqual([]);
   });
 
   it("counts the chunks the lines came from, not every chunk that retired", () => {
