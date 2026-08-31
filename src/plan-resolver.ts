@@ -162,10 +162,11 @@ export function resolvePlan(
     const blockers = blockedBy.get(c.number) ?? [];
     if (!blockers.every((n) => issueStates.get(n) === "CLOSED")) return false;
     // LAST, so `heldForReview` counts only issues that would otherwise have
-    // been planned. A review-gated issue that is also blocked, closed or
-    // already merged is not being "held" by its lane — it was never going to
-    // be picked — and reporting it as such would make the holding rule look
-    // like it costs more than it does.
+    // been ELIGIBLE — not necessarily planned, since the K slice below can
+    // still drop an eligible one. A review-gated issue that is also blocked,
+    // closed or already merged is not being "held" by its lane; it was already
+    // out on some other filter, and reporting it as held would make the
+    // holding rule look like it costs more than it does.
     if (lanes.get(c.number)?.lane === "review") {
       heldForReview.push(c.number);
       return false;

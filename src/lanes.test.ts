@@ -79,16 +79,17 @@ describe("computeLanes", () => {
   });
 
   it("never inherits UPWARD — a blocker is unaffected by its dependents", () => {
-    // #2 is review-gated and blocked by #1. #1's commits are complete before #2
-    // starts, so nothing about #2 can reach back and gate #1.
-    expect(laneOf([auto(1), node(2, [1])], "auto")).toEqual({
+    // #2 is review-gated and blocked by #1, which is labelled `auto-land`.
+    // #1's commits are complete before #2 starts, so nothing about #2 can reach
+    // back and gate #1 — a bidirectional walk would make #1 review here.
+    expect(laneOf([auto(1), node(2, [1])], "review")).toEqual({
       1: "auto",
-      2: "auto",
+      2: "review",
     });
-    // Same shape, stated with an explicit review-gated dependent: the host
-    // default is auto, and #2 is review only because it says so.
-    const decisions = computeLanes([auto(1), node(2, [1])], "auto");
-    expect(decisions.get(1)?.lane).toBe("auto");
+    // ...and nothing reports #1's lane as inherited, since nothing reached it.
+    expect(
+      computeLanes([auto(1), node(2, [1])], "review").get(1)?.inheritedFrom,
+    ).toBe(null);
   });
 
   it("gates a dependent when ANY one of its blockers is review-gated", () => {

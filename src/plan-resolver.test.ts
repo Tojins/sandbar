@@ -296,9 +296,9 @@ describe("resolvePlan lanes (#57)", () => {
   });
 
   it("gates a descendant through a blocker THIS cycle would not pick", () => {
-    // #12 is open, so it is never planned — but it is a candidate, so its lane
-    // is known and it gates #13. Drop non-eligible issues from the lane graph
-    // and #13 reads as auto the moment its own blocker closes.
+    // #12 is CLOSED, so the #16 stale-search guard drops it from the plan —
+    // but it is still a candidate, so its lane is known and it gates #13. Drop
+    // non-planned issues from the lane graph and #13 reads as auto here.
     const r = resolvePlan(
       [
         issue(12, ""),

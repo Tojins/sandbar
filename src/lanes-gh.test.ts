@@ -71,8 +71,15 @@ describe("postLaneOverrideNotices", () => {
         "done",
         'printf "]\\n" >> "$log"',
         '[ -n "$SANDBAR_TEST_GH_FAIL" ] && exit 1',
+        // The default in its own variable, NOT inline in `${VAR:-...}`: the
+        // expansion ends at the first unquoted `}`, which in a JSON default
+        // word is the object's own closing brace — so an inline default emits
+        // a stray `}` after the variable's value whenever the variable is SET,
+        // and every test that supplies comments would take the JSON.parse
+        // failure path instead of the branch it names.
+        'empty=\'{"comments":[]}\'',
         'case "$*" in',
-        '  *--json*comments*) printf "%s" "${SANDBAR_TEST_COMMENTS:-{\\"comments\\":[]}}" ;;',
+        '  *--json*comments*) printf "%s" "${SANDBAR_TEST_COMMENTS:-$empty}" ;;',
         "esac",
         "exit 0",
       ].join("\n") + "\n",
@@ -110,6 +117,24 @@ describe("postLaneOverrideNotices", () => {
     expect(read?.slice(0, 3)).toEqual(["issue", "view", "42"]);
     expect(repoFlagOf(read ?? [])).toBe("acme/app");
     expect(read).toContain("comments");
+  });
+
+  it("posts on an issue whose existing comments are all unrelated", async () => {
+    // The other half of the marker check, and the one that pins the parse of
+    // gh's `--json comments` shape: an issue with a populated thread that says
+    // nothing about lanes must still be told. Read through the empty-comments
+    // default, this branch and the one below would both be satisfied by a
+    // `JSON.parse` that throws into the per-issue catch.
+    process.env["SANDBAR_TEST_COMMENTS"] = JSON.stringify({
+      comments: [{ body: "unrelated" }, { body: "**Sandbar:** something else" }],
+    });
+
+    const posted = await postLaneOverrideNotices(REPO, [
+      { issue: 42, gatedBy: 7 },
+    ]);
+
+    expect(posted).toEqual([42]);
+    expect((await commentCalls()).map((argv) => argv[2])).toEqual(["42"]);
   });
 
   it("says nothing on an issue already carrying the marker", async () => {
