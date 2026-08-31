@@ -18,7 +18,8 @@
 // `fresh-attempt` that certainty is structural — the merger just landed the
 // branch on the source branch or on the chunk branch and PUSHED it (producing
 // different bytes, so the tip is no longer an ancestor of HEAD and `-d`
-// correctly refuses), or the silent-noop path is deliberately discarding it. `needs-ui-prototype` has no such guarantee (its `hasCommits`
+// correctly refuses), or the silent-noop path is deliberately discarding it.
+// `needs-ui-prototype` has no such guarantee (its `hasCommits`
 // is per-sandbox-cycle, not per-branch), so it *verifies* containment via
 // branchIsContainedInOrigin before forcing, and keeps the branch otherwise.
 // `-d` refusing is never on its own a licence to force.
@@ -627,8 +628,12 @@ export async function finalizeOne(
       // cycle onto a fresh branch seeded from `origin/<sourceBranch>` — which
       // has none of this work — and the implementer would write it a second
       // time, on top of a chunk branch that already carries the first. So a
-      // failed flip stops the run here (requireFlip), with the branch intact
-      // and the re-merge of it a no-op.
+      // failed flip stops the run here (requireChunkFlip), with the branch
+      // intact and the re-merge of it a no-op. That throw is also why
+      // finalize-inputs.ts emits every `chunk-landed` input LAST: this is the
+      // only success arm that can abandon the rest of a fail-fast batch, and
+      // its own failure is the only one in that batch the next cycle repairs
+      // by itself.
       const n = issueNumberOf(input.issue);
       await adapter.removeWorktreeFor(input.issue.branch);
       await adapter.postComment(

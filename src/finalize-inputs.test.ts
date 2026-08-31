@@ -230,21 +230,30 @@ describe("mergeFinalizeInputs", () => {
     ]);
   });
 
-  it("emits chunk landings with the merges, before the skips", () => {
+  // Ordering, and it is a safety property rather than cosmetics: the
+  // `chunk-landed` arm is the only one here that can throw, `finalizeAll` is
+  // fail-fast, and a handoff that never runs leaves an issue on no queue at all
+  // (the merger already took `ready-for-agent` off it). A chunk landing that
+  // never runs is retried next cycle. So it goes last.
+  it("emits chunk landings after every skip, because its arm is the one that throws", () => {
     const { inputs } = mergeFinalizeInputs(
       summary({
         merged: [issue("3")],
         chunkLanded: [
           { issue: issue("5"), chunkBranch: "sandbar/chunk-5-thing" },
         ],
-        skipped: [{ issue: issue("1"), reason: "conflict" }],
+        skipped: [
+          { issue: issue("1"), reason: "conflict" },
+          { issue: issue("2"), reason: "silent-noop" },
+        ],
       }),
       new Map(),
     );
     expect(inputs.map((i) => [i.kind, i.issue.id])).toEqual([
       ["merged", "3"],
-      ["chunk-landed", "5"],
       ["merge-conflict", "1"],
+      ["fresh-attempt", "2"],
+      ["chunk-landed", "5"],
     ]);
   });
 
