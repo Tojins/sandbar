@@ -6,13 +6,82 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import type { ChunkTarget } from "./chunks.js";
+
 const exec = promisify(execFile);
 
-// Create the issue's branch at origin/<sourceBranch> if it doesn't already
-// exist. Seeding from origin (not local sourceBranch) means a per-issue
-// worktree never inherits in-progress state from the host's working tree —
-// sandbar can run while the user is mid-edit on cwd. Existing branches keep
-// their accumulated commits (resumed runs); we only pre-create when missing.
+// ---------------------------------------------------------------------------
+// Where an issue branch comes from (#61)
+// ---------------------------------------------------------------------------
+//
+// One value, two consumers, and they MUST be the same answer: the ref the issue
+// branch is seeded from, and the ref every range in the agents' prompts is
+// anchored at (#40, prompt.ts). Split them and the implementer is shown a diff
+// measured against a tree its branch was never cut from — for a chunk member
+// that is the whole chunk arriving as "your work", which is the failure mode
+// #61 names. `ensureIssueBranch` therefore RETURNS the base it used rather than
+// leaving each caller to re-derive one.
+export type IssueBranchBase = {
+  // What to pass to git: `origin/<sourceBranch>`, or the remote-tracking ref of
+  // a chunk branch. Always a ref that resolves in the bare cache — never a bare
+  // branch name, which the cache's local head namespace does not hold (#40).
+  readonly ref: string;
+  // The chunk branch `ref` is the tip of, when it is one. Null for the source
+  // branch — an auto-lane issue, a chunk's root, or a chunk whose branch origin
+  // does not carry yet. The prompt layer reads this to tell the agent that the
+  // work under its feet is a chunk's rather than the source branch's.
+  readonly chunkBranch: string | null;
+};
+
+export function sourceBranchBase(sourceBranch: string): IssueBranchBase {
+  return { ref: `origin/${sourceBranch}`, chunkBranch: null };
+}
+
+// Fetch ORIGIN's copy of a chunk branch into `cwd`'s object store and return
+// the remote-tracking ref, or null when origin has no such branch.
+//
+// Origin, every time, and never a local ref: a chunk branch outlives the run
+// that created it and nothing in the state directory is authoritative, so a
+// local copy is at best a cache and at worst a stale answer that would seed a
+// member on a base missing an earlier one. The refspec is explicit (and forced)
+// because a plain `git fetch origin <branch>` writes only FETCH_HEAD in a BARE
+// repository, which is what the object cache is.
+//
+// Shared by the two places that ask (#61): this module, seeding a chunk
+// member's issue branch, and the merger, choosing the base to land that member
+// on. One function because the two have to agree — a member developed against
+// one base and merged onto another is exactly the conflict the by-construction
+// property (#54 round-1 Q4) exists to rule out.
+//
+// A fetch that failed for some OTHER reason — network, auth — answers null too,
+// and both callers then fall back to the source branch. That is the safe way
+// for this to be wrong: the member is developed and merged against a base that
+// is missing the chunk's earlier work, so the merge conflicts loudly (or the
+// chunk push is rejected as non-fast-forward) rather than silently dropping it.
+export async function fetchOriginChunkBranch(
+  cwd: string,
+  chunkBranch: string,
+): Promise<string | null> {
+  const remoteRef = `refs/remotes/origin/${chunkBranch}`;
+  try {
+    await exec(
+      "git",
+      ["fetch", "origin", `+refs/heads/${chunkBranch}:${remoteRef}`, "--quiet"],
+      { cwd },
+    );
+    return remoteRef;
+  } catch {
+    return null;
+  }
+}
+
+// Create the issue's branch if it doesn't already exist, and report the base it
+// is measured against either way. Seeding from origin (not a local branch) means
+// a per-issue worktree never inherits in-progress state from the host's working
+// tree — sandbar can run while the user is mid-edit on cwd. Existing branches
+// keep their accumulated commits (resumed runs); we only pre-create when
+// missing, and the base is computed BEFORE that check so a resumed branch and a
+// fresh one report the same anchor.
 //
 // `repoDir` is explicit for the same reason preflight's is (#34): every other
 // function in this module is handed a worktree path, and this one — the only
@@ -23,36 +92,68 @@ const exec = promisify(execFile);
 // been created successfully. Since #38 it is `layout.repoDir`, the bare cache —
 // which is also why writing this ref cannot reach the operator's own branches.
 //
-// `origin/<sourceBranch>` is ALWAYS the seed, including for a review-gated
-// issue (#60) — and that is what bounds which chunk members the planner will
-// hand to the inner loop at all. A chunk's ROOT has no review-gated blocker, so
-// the source branch is the right base and the chunk branch is created there
-// too. A non-root member is built on commits that live only on the chunk
-// branch, so seeding it here would develop it against a tree missing the very
-// work it declares itself blocked by — which is why plan-resolver.ts holds
-// those members back until this function learns to seed from a chunk (#61).
+// TWO SEEDS since #61, and which one an issue gets is decided by the `chunk`
+// the planner attached to it (`PlannedIssue.chunk`), never re-derived here:
+//
+//   - No chunk (the auto lane) → `origin/<sourceBranch>`, as it always was.
+//   - A chunk whose branch is on ORIGIN → that branch's tip. This is the
+//     chained member (#61): its blocker's commits live on the chunk branch and
+//     nowhere else, so seeding from the source branch would develop it against
+//     a tree missing the very work it declares itself blocked by. Seeded from
+//     the tip, its commits sit on top of every ancestor's, so the chunk-merge
+//     of it cannot conflict with them (#54 round-1 Q4) — an UNRELATED member of
+//     the same chunk still can, and that stays the resolve loop's job.
+//   - A chunk whose branch origin does not have yet → `origin/<sourceBranch>`,
+//     which is exactly where the merge phase creates a chunk branch (#60). That
+//     is the chunk's ROOT, and the two agreeing is what makes its landing
+//     honest. A non-root member cannot reach this case: it plans only once a
+//     blocker of its own carries `in-chunk`, and finalise applies that label
+//     only after the chunk branch carrying the commits is on origin.
+//
+// The residual, stated rather than engineered around: a member whose commits
+// are ALREADY on the chunk branch while its issue still reads `ready-for-agent`
+// — the window a run leaves behind if it dies between the chunk push and the
+// label flip — is re-planned and seeded from a tip that already contains it, so
+// its diff slot renders empty. That window ends in a loud halt (finalise's
+// `requireChunkFlip`) and an operator, and the alternative reading (seed from
+// the source branch) would develop the retry against a tree the chunk has
+// already moved past, which is worse.
 export async function ensureIssueBranch(
   repoDir: string,
   branch: string,
   sourceBranch: string,
-): Promise<void> {
+  chunk?: ChunkTarget | null,
+): Promise<IssueBranchBase> {
+  const base = chunk
+    ? await chunkOrSourceBase(repoDir, chunk, sourceBranch)
+    : sourceBranchBase(sourceBranch);
   try {
     await exec(
       "git",
       ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
       { cwd: repoDir },
     );
-    return; // exists
+    return base; // exists
   } catch {
     // fall through
   }
   // --no-track: don't write upstream config (a) we never `git pull` these
   // branches and (b) parallel `git branch` calls race on `.git/config`.
-  await exec(
-    "git",
-    ["branch", "--no-track", branch, `origin/${sourceBranch}`],
-    { cwd: repoDir },
-  );
+  await exec("git", ["branch", "--no-track", branch, base.ref], {
+    cwd: repoDir,
+  });
+  return base;
+}
+
+async function chunkOrSourceBase(
+  repoDir: string,
+  chunk: ChunkTarget,
+  sourceBranch: string,
+): Promise<IssueBranchBase> {
+  const ref = await fetchOriginChunkBranch(repoDir, chunk.branch);
+  return ref === null
+    ? sourceBranchBase(sourceBranch)
+    : { ref, chunkBranch: chunk.branch };
 }
 
 // The paths `git status --porcelain` reports in a worktree — tracked

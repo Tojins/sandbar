@@ -43,6 +43,7 @@ import * as agentSandbox from "./agent-sandbox.js";
 import { agentPartialOutput, podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
+import type { ChunkTarget } from "./chunks.js";
 import type { ResolvedGateStack } from "./config.js";
 import { type BranchImages, resolveSandboxImage } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
@@ -50,6 +51,7 @@ import { summarizeGateFailure } from "./gate.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
 import {
   type HeadMismatch,
+  type IssueBranchBase,
   dirtyWorktreePaths,
   ensureIssueBranch,
   headMismatch,
@@ -95,6 +97,15 @@ export type IssueRef = {
   readonly id: string;
   readonly title: string;
   readonly branch: string;
+  // The chunk this issue belongs to, as the planner derived it (#60). Null (or
+  // absent) ⇒ the auto lane. Phase 2 reads it for one thing and one thing only:
+  // where the issue branch is SEEDED from (#61). A member chained behind an
+  // already-landed one is cut from the chunk's tip rather than from
+  // `origin/<sourceBranch>`, because that is where its blocker's commits are.
+  // Optional for the same reason merger.ts's `IssueRef` makes it optional — the
+  // shape is built by hand in places that have nothing to do with landing — and
+  // the one caller whose answer matters (the plan) always sets it.
+  readonly chunk?: ChunkTarget | null;
 };
 
 export type Terminal =
@@ -266,9 +277,29 @@ async function runSandboxCycle(
   const accumulated: { sha: string }[] = [];
 
   try {
-    // Seed the issue branch off origin/<sourceBranch> (not the host's local)
-    // so the sandbox never inherits cwd's in-progress state. Idempotent.
-    await ensureIssueBranch(config.layout.repoDir, issue.branch, config.sourceBranch);
+    // Seed the issue branch off origin — never the host's local refs, so the
+    // sandbox cannot inherit cwd's in-progress state. Idempotent. Off
+    // `origin/<sourceBranch>` for an ordinary issue, off the CHUNK TIP for a
+    // member chained behind one that has already landed (#61); which of the two
+    // is git-ops.ts's decision, made from `issue.chunk` and what origin
+    // actually carries.
+    //
+    // The return value is the whole reason this is one call and not two: it is
+    // the ref the branch was really cut from, and every range the prompts below
+    // render is anchored at it. Re-deriving `origin/<sourceBranch>` in the
+    // prompt layer would hand a chunk member its ancestors' entire chunk as
+    // "the work done so far" (#40's failure, re-entered from the other side).
+    const base: IssueBranchBase = await ensureIssueBranch(
+      config.layout.repoDir,
+      issue.branch,
+      config.sourceBranch,
+      issue.chunk ?? null,
+    );
+    if (base.chunkBranch && opts.onOrchestratorLog) {
+      await opts.onOrchestratorLog(
+        `issue=${issue.id} seeded from chunk tip ${base.ref} (${base.chunkBranch})`,
+      );
+    }
 
     // Worktree first (fast git ops), then container bringups in parallel: the
     // stack's mounts resolve against this worktree and must see its files on
@@ -442,6 +473,7 @@ async function runSandboxCycle(
         opts,
         config,
         anchorOpts,
+        base,
         gateStack,
         worktreePath,
         accumulated,
@@ -529,6 +561,10 @@ type ExecuteActionCtx = {
   readonly opts: InnerLoopOptions;
   readonly config: InnerLoopConfig;
   readonly anchorOpts: ProjectAnchorOptions;
+  // What `ensureIssueBranch` seeded the branch from, threaded to both prompt
+  // builders so the implementer's diff and the reviewer's changeset are the
+  // same range (#61).
+  readonly base: IssueBranchBase;
   readonly gateStack: Stack;
   // The issue worktree. Same tree the sandbox edits, the stack mounts and the
   // clean-assert reads — one tree, which is the whole point of D1.
@@ -567,7 +603,7 @@ async function runImplementer(
       maxAttempts: config.maxImplAttempts,
       worktreePath: sandbox.worktreePath,
       lastFailureTrace: action.failureTrace,
-      sourceBranch: config.sourceBranch,
+      base: ctx.base,
       ...(action.extraReprompt !== null ? { extraReprompt: action.extraReprompt } : {}),
       ...(action.latestReviewerProse !== null
         ? { latestReviewerProse: action.latestReviewerProse }
@@ -644,6 +680,7 @@ async function runReviewer(
     repoDir: config.layout.repoDir,
     worktreePath: sandbox.worktreePath,
     sourceBranch: config.sourceBranch,
+    base: ctx.base,
     codingStandardsPath: config.codingStandardsPath,
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,

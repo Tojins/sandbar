@@ -69,12 +69,13 @@ an exit condition fires.
    planner also lists the `in-chunk` issues back in (`fetchChunkMembers`) and
    drops them by label: out of the graph, a chunk re-roots around its surviving
    members and a descendant of a landed issue reads as auto. A review-gated
-   issue plans iff it is its chunk's ROOT (#60) — the only member whose issue
-   branch, seeded from `origin/<sourceBranch>`, agrees with the base its chunk
-   branch is created at; chained members and issues with no chunk stay held
-   (`heldForReview`) until #61. Each planned issue carries its `chunk` target,
-   which is how phase 3 knows where to land it. All inert under the default
-   lane, `auto`.
+   issue plans iff it HAS a chunk (#61) — the root seeds from
+   `origin/<sourceBranch>`, which is where its chunk branch is created, and a
+   chained member seeds from the chunk TIP, which is where its blockers'
+   commits are; only the issues `chunks.ts` could give no chunk (two-chunk
+   parent, cycle) stay held (`heldForReview`). Each planned issue carries its
+   `chunk` target, which is how phase 3 knows where to land it and how phase 2
+   knows what to seed from. All inert under the default lane, `auto`.
 
 2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
    planned issue runs in parallel in its own agent sandbox + per-issue gate
@@ -190,8 +191,11 @@ default 50, exit 3).
   `sandbar/issue-<n>-<kebab-slug>` and `sandbar/chunk-<root>-<kebab-slug>`
   (#58) — preflight cleanup, orphan sweep and worktree paths all key off them,
   so `src/naming.ts` owns both builders, both parsers and the one refglob list
-  every enumeration uses. Issue branches seed from `origin/<sourceBranch>`,
-  never local.
+  every enumeration uses. Issue branches seed from origin, never local:
+  `origin/<sourceBranch>`, or the chunk tip for a chained chunk member (#61).
+  `ensureIssueBranch` returns the base it used (`IssueBranchBase`) and the inner
+  loop hands that same value to both prompt builders, so the tree an agent's
+  diff is measured against is by construction the tree its branch was cut from.
 - **A chunk is derived, never declared (#54 §2, #58).** `src/chunks.ts` is a
   pure function: a chunk is a connected component of the *review-gated* issues
   under the `## Blocked by` graph, rooted at its parentless member. Chunks are
@@ -202,8 +206,11 @@ default 50, exit 3).
   on the chunk branch, OPEN and out of the queue; finalise applies it (#60),
   never before the chunk branch carrying the commits is on origin. The
   derivation itself still creates nothing: the planner turns `chunkOf` into a
-  blocker criterion and a `PlannedIssue.chunk` target, and the merge phase is
-  what makes a branch. **Origin owns the chunk branch** — it is the review
+  blocker criterion and a `PlannedIssue.chunk` target, phase 2 turns that target
+  into the seed for the member's issue branch (#61), and the merge phase is what
+  makes a branch. A chunk grows one LAYER per cycle — a member is unblocked by a
+  blocker carrying `in-chunk`, applied the cycle after it landed, so members
+  planned together are always siblings. **Origin owns the chunk branch** — it is the review
   artifact and the recovery point, so every landing bases on `origin/<chunk>`
   and preflight fetches that namespace to reason about it.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
@@ -224,8 +231,8 @@ default 50, exit 3).
   defaulting to CHANGES-REQUESTED only for a run that produced output (#41).
   The orchestrator gates between attempts; agents never decide "green".
 - **Prompt prose lives in `prompts/*.md`**, loaded by `src/prompts.ts`; TS
-  keeps only structure. Every git range a prompt renders anchors at
-  `origin/<sourceBranch>`, never the bare branch name (#40) — `src/prompt.ts`.
+  keeps only structure. Every git range a prompt renders anchors at the issue
+  branch's SEED REF, never a bare branch name (#40, #61) — `src/prompt.ts`.
 - **Logs are append-only and unbuffered** (`src/logs.ts`).
 
 ## This repo runs itself (#39)
