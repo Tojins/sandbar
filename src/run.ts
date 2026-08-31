@@ -63,8 +63,12 @@
 // success, repeated-plan-with-zero-DONEs or two consecutive zero-DONE cycles
 // → stuck, issuesAttempted hits maxTotalIssues → budget — and, with
 // config.relaunchAfterLanding, any cycle that landed merges → exit
-// EXIT_CODE_RELAUNCH so a looping launcher can pull, rebuild and relaunch
-// (#65). MAX_ITERATIONS is a defensive ceiling — the conditions above
+// EXIT_CODE_RELAUNCH so a looping launcher can start the next cycle from
+// re-resolved inputs (#65). Which inputs those are narrowed with #66 and is
+// `exit-conditions.ts`'s to state: the driver is a pinned release and does not
+// move at all, images ARE re-resolved from origin/<sourceBranch>, and the
+// config file is re-imported from the operator's checkout, which nothing
+// refreshes. MAX_ITERATIONS is a defensive ceiling — the conditions above
 // terminate first.
 
 import { realpathSync } from "node:fs";

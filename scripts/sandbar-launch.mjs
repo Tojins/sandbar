@@ -273,21 +273,21 @@ function repoRoot() {
   return resolve(dirname(fileURLToPath(import.meta.url)), "..");
 }
 
-async function main(argv) {
+function main(argv) {
   const root = repoRoot();
   // `--install-only` is for the hand paths — `sandbar gate`, or a config load —
   // which need the driver present but are not a series. Deliberately not a
   // `--config`-style flag: it configures nothing, it stops the loop before it
-  // starts.
+  // starts, and so it is never forwarded: the one launch it could reach is the
+  // one it returns ahead of.
   const installOnly = argv.includes("--install-only");
-  const forwarded = argv.filter((arg) => arg !== "--install-only");
   for (;;) {
     // Re-read every iteration, so a pin edited between cycles is honoured at
     // the next relaunch rather than at the next series.
     const { spec, cli } = ensureDriver(root);
     if (installOnly) return 0;
     say(`running ${spec}`);
-    const child = spawnSync(process.execPath, [cli, ...forwarded], {
+    const child = spawnSync(process.execPath, [cli, ...argv], {
       cwd: root,
       stdio: "inherit",
     });
@@ -318,18 +318,18 @@ function isEntrypoint() {
 }
 
 if (isEntrypoint()) {
-  main(process.argv.slice(2))
-    .then((code) => {
-      process.exitCode = code;
-    })
-    .catch((err) => {
-      // `LaunchError` is the class of failure an operator ACTS on — a pin that
-      // names nothing, an install that could not fetch it — and its message is
-      // written to be read alone. Anything else reaching here is a bug in this
-      // file, and a bug printed as one tidy line is a bug with its stack thrown
-      // away, so it is rethrown instead.
-      if (!(err instanceof LaunchError)) throw err;
-      console.error(`sandbar launcher: ${err.message}`);
-      process.exit(1);
-    });
+  // Synchronous throughout — every step of a launch is `spawnSync`, so there is
+  // nothing to await and a promise hop would only put this catch one tick away.
+  try {
+    process.exitCode = main(process.argv.slice(2));
+  } catch (err) {
+    // `LaunchError` is the class of failure an operator ACTS on — a pin that
+    // names nothing, an install that could not fetch it — and its message is
+    // written to be read alone. Anything else reaching here is a bug in this
+    // file, and a bug printed as one tidy line is a bug with its stack thrown
+    // away, so it is rethrown instead.
+    if (!(err instanceof LaunchError)) throw err;
+    console.error(`sandbar launcher: ${err.message}`);
+    process.exit(1);
+  }
 }
