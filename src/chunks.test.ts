@@ -314,7 +314,7 @@ describe("IN_CHUNK_LABEL (#59)", () => {
 });
 
 // #63 — what a chunk with work on origin looks like to the review scan. `tips`
-// is the load-bearing half: it is what a follow-up issue declares under
+// is what the scan is really after: it is what a follow-up issue declares under
 // `## Blocked by`, so it decides both which chunk that issue joins and whether
 // it waits for the work its review is about.
 describe("landedChunksOf (#63)", () => {
@@ -329,16 +329,12 @@ describe("landedChunksOf (#63)", () => {
     expect(landedChunksOf(chain.chunks, [], new Set())).toEqual([]);
   });
 
-  it("reports the landed members, and the tip is the deepest of them", () => {
+  it("names the chunk, its branch, and the deepest of what landed", () => {
     const issues = [issue(42, [], "First"), issue(43, [42], "Second"), issue(44, [43], "Third")];
     expect(landedChunksOf(chain.chunks, issues, new Set([42, 43]))).toEqual([
       {
         root: 42,
         branch: "sandbar/chunk-42-first",
-        landed: [
-          { number: 42, title: "First" },
-          { number: 43, title: "Second" },
-        ],
         tips: [{ number: 43, title: "Second" }],
       },
     ]);

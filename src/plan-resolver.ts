@@ -227,9 +227,9 @@ export type PlanResolution = {
   // being queued, not once it reaches the front.
   readonly overrides: readonly LaneOverride[];
   // The chunks with work ON ORIGIN — those with at least one member carrying
-  // `in-chunk` — and, per chunk, its landed members and its tips (#63). Empty
-  // for every host on the default lane, and empty before a chunk's first
-  // landing.
+  // `in-chunk` — and, per chunk, the TIPS of what its branch carries (#63).
+  // Empty for every host on the default lane, and empty before a chunk's
+  // first landing.
   //
   // Here for the same reason `PlannedIssue.chunk` is: the derivation needs the
   // whole candidate graph, and this graph only exists inside this function. It

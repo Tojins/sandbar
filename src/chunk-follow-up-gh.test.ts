@@ -31,10 +31,6 @@ const REPO = { owner: "acme", name: "app" };
 const CHUNK: LandedChunk = {
   root: 42,
   branch: "sandbar/chunk-42-first",
-  landed: [
-    { number: 42, title: "First" },
-    { number: 43, title: "Second" },
-  ],
   tips: [{ number: 43, title: "Second" }],
 };
 

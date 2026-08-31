@@ -209,22 +209,21 @@ export type Chunk = {
   readonly branch: string;
 };
 
-// A chunk that has WORK ON ORIGIN, and the two facts a consumer of the review
-// surface needs about it (#63). Derived after the fact from a `Chunk` and the
+// A chunk that has WORK ON ORIGIN, and what a consumer of the review surface
+// needs to know about it (#63). Derived after the fact from a `Chunk` and the
 // set of members carrying `IN_CHUNK_LABEL` — see `landedChunksOf`.
 export type LandedChunk = {
   readonly root: number;
   readonly branch: string;
-  // The members whose branches have landed on `branch`, ascending. Non-empty:
-  // a chunk with nothing landed is not one of these at all, because there is no
-  // branch on origin and so nothing for a human to have reviewed.
-  readonly landed: readonly ChunkMember[];
   // The landed members that no OTHER landed member is blocked by — the tips of
-  // what the branch carries, ascending. This is what a NEW member of the chunk
-  // declares under `## Blocked by` (#63): naming them is what puts it in THIS
-  // chunk (by the derivation above) and behind everything already on the
-  // branch, and naming only the tips keeps the section down to the edges the
-  // chunk's own graph does not already imply.
+  // what the branch carries, ascending. Non-empty, and the only member list
+  // here: it is what a NEW member of the chunk declares under `## Blocked by`
+  // (#63) — naming the tips is what puts it in THIS chunk (by the derivation
+  // above) and behind everything already on the branch, and naming only them
+  // keeps the section down to the edges the chunk's own graph does not already
+  // imply. The full landed set is derivable from `Chunk.members` and the label
+  // for anything that ever wants it; nothing does, and a field nothing reads is
+  // a contract nothing keeps honest.
   readonly tips: readonly ChunkMember[];
 };
 
@@ -382,7 +381,7 @@ export function deriveChunks(
 }
 
 /**
- * The chunks whose work is on origin, with their landed members and tips (#63).
+ * The chunks whose work is on origin, with the tips of what each carries (#63).
  *
  * `landed` is the caller's set of members carrying `IN_CHUNK_LABEL` — a label
  * applied only once the chunk branch carrying a member's commits has been
@@ -433,7 +432,6 @@ export function landedChunksOf(
     out.push({
       root: chunk.root,
       branch: chunk.branch,
-      landed: members.map(asMember),
       tips: (tips.length > 0 ? tips : members).map(asMember),
     });
   }

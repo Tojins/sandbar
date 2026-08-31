@@ -770,7 +770,7 @@ describe("resolvePlan chunk PR members (#62)", () => {
 // downstream of the plan could name the chunks that have work on origin, and
 // nothing that lists issues could see one filed sixty seconds ago.
 describe("resolvePlan landed chunks (#63)", () => {
-  it("reports a chunk with work on origin, its members and its tips", () => {
+  it("reports a chunk with work on origin, and the tips of its branch", () => {
     const r = resolvePlan(
       [
         issue(10, "", { title: "Root", labels: [IN_CHUNK_LABEL] }),
@@ -793,10 +793,6 @@ describe("resolvePlan landed chunks (#63)", () => {
       {
         root: 10,
         branch: "sandbar/chunk-10-root",
-        landed: [
-          { number: 10, title: "Root" },
-          { number: 11, title: "Second" },
-        ],
         tips: [{ number: 11, title: "Second" }],
       },
     ]);
