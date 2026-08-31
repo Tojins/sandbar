@@ -57,7 +57,7 @@ not a factory. Rationale in `src/cli.ts` and `src/config.ts` headers.
 The orchestrator (`src/run.ts`) cycles plan → execute → merge → finalise until
 an exit condition fires.
 
-1. **Plan** (`src/plan-resolver.ts`) — purely deterministic, no LLM: lists
+1. **Plan** (`src/plan-resolver.ts` + `src/chunk-reconcile.ts`) — purely deterministic, no LLM: lists
    issues labelled `ready-for-agent`, parses `## Blocked by` sections, selects
    the top-K unblocked issues (default 3) by number. Each candidate also gets a
    **lane** (`src/lanes.ts`, #57): `auto-land` label else `config.defaultLane`,
@@ -73,7 +73,11 @@ an exit condition fires.
    branch, seeded from `origin/<sourceBranch>`, agrees with the base its chunk
    branch is created at; chained members and issues with no chunk stay held
    (`heldForReview`) until #61. Each planned issue carries its `chunk` target,
-   which is how phase 3 knows where to land it. All inert under the default
+   which is how phase 3 knows where to land it. Then the **reconciler** (#64)
+   finishes off any chunk branch already contained in `origin/<sourceBranch>`
+   — hand-merged, or landed by a run that died before closing the members —
+   and the plan is rebuilt when it acted, since closing a member unblocks its
+   dependents and plan-empty exits one line later. All inert under the default
    lane, `auto`.
 
 2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
@@ -93,7 +97,7 @@ an exit condition fires.
    NEEDS-HUMAN-REVIEW | HARD-ERROR`.
 
 3. **Merge** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
-   + `src/forge-verify.ts`) — procedural, in a dedicated ephemeral worktree
+   + `src/forge-verify.ts` + `src/chunk-land.ts`) — procedural, in a dedicated ephemeral worktree
    detached at `origin/<sourceBranch>` (never the operator's checkout, #10).
    Per DONE branch in issue order: `git merge --no-ff`, and on conflict or
    post-merge-gate-red, the agentic resolve loop (which sees all sibling issue
@@ -111,12 +115,18 @@ an exit condition fires.
    `landed` argument about what a partial may claim are untouched. Each pushed
    chunk then gets its **draft PR** (#62), created-or-updated per cycle:
    `src/chunk-pr.ts` is the prose, `src/forge-pr.ts` the one `gh pr`
-   create-or-update both PR kinds share.
+   create-or-update both PR kinds share. A **`land` label on that PR** (#64)
+   makes the next cycle merge `origin/<chunk>` in the SAME source pass, before
+   the auto lane's branches, so one gate-2 and one landing cover both; the
+   wrap-up then closes every member, drops `in-chunk`, closes the PR and
+   deletes the branch. `src/chunk-land.ts` owns the label, the selection and
+   the wrap-up.
 
 4. **Finalise** (`src/finalize.ts` + `src/finalize-inputs.ts`) — per-issue
    branch lifecycle, bot comments, label flips (`ready-for-agent` ↔
    `labels.needsInfo`/`labels.agentStuck`, plus `in-chunk` for a chunk-landed
-   member, are the only labels sandbar applies).
+   member, are the only labels sandbar applies — `land` (#64) it only ever
+   REMOVES, from a pull request a human labelled).
    Runs in **two passes straddling the merge** (#30): Phase-2 terminals are
    finalised before Phase 3 so a merge-phase throw cannot discard them.
 
@@ -207,16 +217,32 @@ default 50, exit 3).
   derivation itself still creates nothing: the planner turns `chunkOf` into a
   blocker criterion and a `PlannedIssue.chunk` target, and the merge phase is
   what makes a branch. **Origin owns the chunk branch** — it is the review
-  artifact and the recovery point, so every landing bases on `origin/<chunk>`
-  and preflight fetches that namespace to reason about it.
+  artifact and the recovery point, so every landing bases on `origin/<chunk>`,
+  preflight fetches that namespace to reason about it, and the branch is
+  deleted there (not locally) when the chunk lands (#64). `PlanResolution.chunks`
+  is the derivation with its members NAMED, because only the candidate graph
+  knows which issues a chunk branch carries.
 - **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,
   created or updated after every landing push, listing everything the branch
   carries — the members landing now plus `ChunkTarget.landed`, the planner's
   snapshot of the members already holding `in-chunk` (only the plan has the
   graph that knows them). Draft is the mechanism (#54 Q14): it disables the
   merge button and leaves review intact. Sandbar re-titles and re-bodies, and
-  never re-drafts a PR a human made ready — that override is #64's to
-  reconcile. `src/chunk-pr.ts` owns the prose and what it may claim.
+  never re-drafts a PR a human made ready.
+  `src/chunk-pr.ts` owns the prose and what it may claim.
+- **`land` on the chunk PR is what lands it (#64).** The trigger is a label, not
+  an approval, so approve-now-land-later stays available; it sits on the PR
+  because that is where the reviewer is standing and sandbar keeps exactly one
+  open PR per chunk branch. Spelled once in `src/chunks.ts` beside
+  `IN_CHUNK_LABEL`, and it is a QUEUE: a merge the resolve loop could not save
+  takes the label off and says why, while a push race or an unreachable forge
+  leaves it on for the next run. Members are closed EXPLICITLY (a `Closes #N`
+  trailer only fires on GitHub's own merge of that PR, and sandbar composes
+  the merge locally), and the chunk branch is deleted only once every close
+  worked — a kept branch is what makes `src/chunk-reconcile.ts` retry the
+  remainder next run. That reconciler is also the answer to a hand-merged PR:
+  it runs at plan time, tests containment in `origin/<sourceBranch>` rather
+  than intent, and does the identical wrap-up without the merge.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One cleanup registry owns signals and the exit (#35).** No module but

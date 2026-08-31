@@ -456,13 +456,48 @@ comment per issue, naming the blocker that carried the gating in. To make such a
 issue auto-land, move the chain it depends on into the auto lane, or drop the
 dependency; relabelling the issue alone will not do it.
 
-> **Today, a review-gated issue is held out of the plan.** The lane says "a
-> human reviews this before it lands", and until the chunk machinery that gives
-> such work somewhere to land exists, sandbar has no way to honour that — so it
-> leaves the issue in the queue, untouched, `ready-for-agent` intact, and
-> reports it as held at the top of each cycle. `defaultLane: "review"` today
-> therefore means "queue this for a human", not "work it and hold it". The queue
-> is picked up as-is the day chunks arrive.
+#### What the review lane actually does
+
+A **chunk** is a connected component of review-gated issues under the same
+`## Blocked by` edges — the issues a human cannot sensibly review apart,
+because each one's diff is written on top of the last one's commits. It is
+derived, never declared: you label nothing, and a review-gated issue with no
+review-gated neighbours is a chunk of one. Its lowest parentless member is the
+**root**, and it names the chunk everywhere.
+
+A review-gated issue then goes:
+
+1. **worked** like any other issue, in its own sandbox, against its own gate;
+2. **merged onto `sandbar/chunk-<root>-<slug>`** instead of onto your source
+   branch, and that branch is pushed to origin. The issue stays **open** and
+   swaps `ready-for-agent` for **`in-chunk`** — out of the agent queue, not
+   finished;
+3. **opened as a DRAFT pull request**, chunk branch → source branch, re-titled
+   and re-bodied every time a member lands on it so it always lists everything
+   the branch carries. Draft is the mechanism: it disables GitHub's merge
+   button while leaving review completely functional;
+4. **landed when you put the `land` label on that pull request.** The next run
+   merges the chunk branch into your source branch, gates the composition (in
+   the same pass, and under the same forge verification, as that cycle's
+   ordinary work), pushes it, closes every issue on the branch, deletes the
+   branch and closes the pull request.
+
+Approving the pull request is deliberately **not** the trigger, so
+approve-now-land-later works. If you mark the PR ready and merge it by hand
+anyway, sandbar recovers: a later run finds the branch already contained in
+your source branch and does the same wrap-up without the merge.
+
+Two things your repository has to have for this: the **`in-chunk` and `land`
+labels must exist** (sandbar never creates labels, and neither name is
+configurable), and the `gh` token must be able to open, edit, comment on and
+close pull requests and to delete branches on origin.
+
+> **One issue per chunk per cycle, for now.** Sandbar works a chunk's ROOT and
+> holds its chained members — a member built on another member needs its branch
+> seeded from the chunk branch rather than from the source branch, which is not
+> built yet. Held issues are reported at the top of every cycle rather than
+> silently dropped. A chunk of one works end to end; a chain stops after its
+> root, and a human takes it from there.
 
 ### `images` — what sandbar builds
 

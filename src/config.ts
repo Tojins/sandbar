@@ -577,19 +577,25 @@ export type RunConfig = {
   // A review-gated issue is worked and lands on its CHUNK's branch (#60) —
   // `sandbar/chunk-<root>-<slug>`, pushed to origin, and opened as a DRAFT pull
   // request against the source branch (#62), which is what a human actually
-  // reviews. Nothing closes it until they do. Three things a host has to have
-  // for that: the `in-chunk` label must EXIST in the repo (sandbar never
-  // creates labels, and this one is not configurable — see chunks.ts), the
-  // `gh` credentials must be allowed to open and edit pull requests, and
-  // whoever reviews those branches has to know they are theirs to land — the
-  // draft PR says as much on itself, but nothing notifies them. Fourth thing,
+  // reviews. Nothing closes it until they say so, and they say so by putting
+  // `land` on that pull request (#64): the next cycle merges the chunk branch
+  // into the source branch, gates the composition, pushes it, closes every
+  // member, deletes the branch and closes the pull request. Approval is
+  // deliberately not the trigger — see `chunk-land.ts`.
+  //
+  // Four things a host has to have for that: the `in-chunk` and `land` labels
+  // must EXIST in the repo (sandbar never creates labels, and neither is
+  // configurable — see chunks.ts), the `gh` credentials must be allowed to
+  // open, edit, comment on and close pull requests AND to delete branches on
+  // origin, and whoever reviews those branches has to know they are theirs to
+  // land — the draft PR says as much on itself, but nothing notifies them. Fourth thing,
   // and it bounds what the lane can do rather than what a host must provide:
   // only a chunk's ROOT is worked until #61. A chained member — a review-gated
   // issue blocked by another one — is held out of the plan permanently, not for
   // a cycle or two: its blocker keeps `in-chunk` and keeps rooting the chunk, so
   // the member never becomes the root. Today's review lane therefore lands one
   // issue per chunk and hands the branch and its draft PR over; a chunk of one
-  // works end to end.
+  // works end to end, review and landing included.
   readonly defaultLane?: Lane;
 };
 
