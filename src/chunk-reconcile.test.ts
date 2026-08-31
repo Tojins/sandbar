@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ChunkWrapupAdapter, PullRequestSummary } from "./chunk-land.js";
 import { IN_CHUNK_LABEL, type NamedChunk } from "./chunks.js";
 import {
+  fetchLandRequestPullRequests,
+  fetchPullRequestsForBranches,
   findLandedChunkBranches,
   reconcileLandedChunks,
 } from "./chunk-reconcile.js";
@@ -249,5 +251,79 @@ describe("findLandedChunkBranches (real git)", () => {
     await git(cache, "push", "origin", "--delete", "refs/heads/sandbar/chunk-42-landed");
     await git(cache, "push", "origin", "--delete", "refs/heads/sandbar/chunk-77-open");
     expect(await findLandedChunkBranches(cache, "main")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+// Discovery FAILS SOFT, and this is the half of that claim a fake adapter can
+// never show: what the readers do with a `gh` that answered something they
+// cannot read. These run at PLAN time, before anything else in the cycle, so a
+// throw out of one is not a degraded reconciliation — it is a run that does not
+// start, over a repair that was never urgent.
+describe("the forge readers fail soft (#64)", () => {
+  let shimBin: string;
+  let originalPath: string | undefined;
+  const REPO_REF = { owner: "acme", name: "app" };
+
+  // A `gh` that exits 0 and prints `body`, or exits 1 when `body` is null.
+  const shimAnswering = async (body: string | null): Promise<void> => {
+    await writeFile(
+      join(shimBin, "gh"),
+      body === null
+        ? "#!/bin/sh\nexit 1\n"
+        : `#!/bin/sh\ncat <<'SANDBAR_EOF'\n${body}\nSANDBAR_EOF\n`,
+      { mode: 0o755 },
+    );
+  };
+
+  beforeEach(async () => {
+    shimBin = await mkdtemp(join(tmpdir(), "sandbar-ghsoft-"));
+    originalPath = process.env["PATH"];
+    process.env["PATH"] = `${shimBin}:${originalPath ?? ""}`;
+  });
+
+  afterEach(async () => {
+    if (originalPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = originalPath;
+    await rm(shimBin, { recursive: true, force: true });
+  });
+
+  it("answers 'no requests' when gh cannot be run at all", async () => {
+    await shimAnswering(null);
+    expect(await fetchLandRequestPullRequests(REPO_REF, "land")).toEqual([]);
+    expect(
+      await fetchPullRequestsForBranches(REPO_REF, ["sandbar/chunk-42-c"]),
+    ).toEqual([]);
+  });
+
+  it("answers 'no requests' on output that is not JSON at all", async () => {
+    await shimAnswering("gh: could not resolve to a Repository");
+    expect(await fetchLandRequestPullRequests(REPO_REF, "land")).toEqual([]);
+  });
+
+  it("drops the unreadable entries and keeps the rest", async () => {
+    // One good, one missing `number`, one whose `headRefName` is the wrong
+    // type. The good one must survive: dropping a whole list over one bad
+    // element would strand a chunk a human labelled.
+    await shimAnswering(
+      JSON.stringify([
+        { number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42" },
+        { headRefName: "sandbar/chunk-77-c", title: "no number" },
+        { number: 11, headRefName: 404, title: "wrong type" },
+      ]),
+    );
+    expect(await fetchLandRequestPullRequests(REPO_REF, "land")).toEqual([
+      { number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42" },
+    ]);
+  });
+
+  it("tolerates a missing title, which is only ever prose", async () => {
+    await shimAnswering(
+      JSON.stringify([{ number: 9, headRefName: "sandbar/chunk-42-c" }]),
+    );
+    expect(await fetchLandRequestPullRequests(REPO_REF, "land")).toEqual([
+      { number: 9, headRefName: "sandbar/chunk-42-c", title: "" },
+    ]);
   });
 });

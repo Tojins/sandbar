@@ -17,6 +17,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import {
+  fetchLandRequestPullRequests,
+  fetchPullRequestsForBranches,
+  realReconcileAdapter,
+} from "./chunk-reconcile.js";
 import { realAdapter as realFinalizeAdapter } from "./finalize.js";
 import { realAdapter as realMergerAdapter } from "./merger.js";
 import { repoLayout } from "./repo-cache.js";
@@ -216,6 +221,83 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       const [argv] = await calls();
       expect(argv?.slice(0, 3)).toEqual(["issue", "close", "7"]);
       expect(repoFlagOf(argv ?? [])).toBe("acme/app");
+    });
+  });
+
+  // #64 — the plan-time reconciler carries its OWN adapter, spelled out again
+  // rather than shared with the merger's: those run from the ephemeral merger
+  // worktree and these from the bare cache, which is the only thing that exists
+  // at plan time. Duplicated argv is duplicated opportunity to get `--repo`
+  // wrong, and this one CLOSES ISSUES — so it is asserted as its own surface
+  // rather than trusted to match the block above by inspection.
+  describe("chunk reconciler", () => {
+    const adapter = () =>
+      realReconcileAdapter({ repoDir: "/nonexistent-bare-cache", repo: REPO });
+
+    it("closes a reconciled member in the configured repo, with its comment", async () => {
+      await adapter().closeIssue(7, "the chunk was already on main");
+
+      const [argv] = await calls();
+      expect(argv?.slice(0, 3)).toEqual(["issue", "close", "7"]);
+      expect(repoFlagOf(argv ?? [])).toBe("acme/app");
+      expect(argv).toContain("the chunk was already on main");
+    });
+
+    it("drops in-chunk in the configured repo", async () => {
+      await adapter().removeLabel(7, "in-chunk");
+
+      const [argv] = await calls();
+      expect(argv?.slice(0, 3)).toEqual(["issue", "edit", "7"]);
+      expect(repoFlagOf(argv ?? [])).toBe("acme/app");
+      expect(argv).toContain("--remove-label");
+      expect(argv).toContain("in-chunk");
+    });
+
+    it("comments on and closes the chunk pull request in the configured repo", async () => {
+      await adapter().commentOnPullRequest(9, "reconciled");
+      await adapter().closePullRequest(9);
+
+      const [comment, close] = await calls();
+      expect(comment?.slice(0, 3)).toEqual(["pr", "comment", "9"]);
+      expect(repoFlagOf(comment ?? [])).toBe("acme/app");
+      expect(close?.slice(0, 3)).toEqual(["pr", "close", "9"]);
+      expect(repoFlagOf(close ?? [])).toBe("acme/app");
+      // Same reason as the merger's: the branch delete is the wrap-up's own
+      // last step, conditional on every member having closed.
+      expect(close).not.toContain("--delete-branch");
+    });
+
+    // The two READS that decide which chunks are acted on at all. A wrong repo
+    // here is SILENT: it answers "nothing to land, nothing to reconcile" and
+    // the run simply never does either.
+    it("lists the land-labelled pull requests of the configured repo", async () => {
+      await fetchLandRequestPullRequests(REPO, "land");
+
+      const [argv] = await calls();
+      expect(argv?.slice(0, 2)).toEqual(["pr", "list"]);
+      expect(repoFlagOf(argv ?? [])).toBe("acme/app");
+      const label = (argv ?? []).indexOf("--label");
+      expect(argv?.[label + 1]).toBe("land");
+      const state = (argv ?? []).indexOf("--state");
+      expect(argv?.[state + 1]).toBe("open");
+    });
+
+    it("asks per branch for a chunk branch's pull request, in the configured repo", async () => {
+      await fetchPullRequestsForBranches(REPO, [
+        "sandbar/chunk-42-a",
+        "sandbar/chunk-77-b",
+      ]);
+
+      const recorded = await calls();
+      expect(recorded).toHaveLength(2);
+      expect(recorded.map((argv) => argv[argv.indexOf("--head") + 1])).toEqual([
+        "sandbar/chunk-42-a",
+        "sandbar/chunk-77-b",
+      ]);
+      for (const argv of recorded) {
+        expect(argv.slice(0, 2)).toEqual(["pr", "list"]);
+        expect(repoFlagOf(argv)).toBe("acme/app");
+      }
     });
   });
 });
