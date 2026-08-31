@@ -547,7 +547,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // strongly consistent about the closes just made even while the search
       // index that lists candidates lags.
       const reconciliation = await reconcileLandedChunks({
-        layout,
+        repoDir: layout.repoDir,
         repo,
         sourceBranch: config.sourceBranch,
         chunks: resolution.chunks,

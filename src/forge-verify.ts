@@ -713,8 +713,9 @@ export type VerifiedLandingOptions = {
   readonly greenSettlePolls?: number;
   readonly openPullRequest?: boolean;
   readonly sourceBranch: string;
-  // Issues whose merges are in this cycle's merge result, ascending. The last
-  // one anchors the resolve loop (see below); all of them go into the PR body.
+  // Issues whose merges are in this cycle's merge result, in MERGE order —
+  // ascending, so the last one is the topmost commit. That is the one that
+  // anchors the resolve loop (see below); all of them go into the PR body.
   readonly mergedIssues: readonly IssueRef[];
   // Every issue in the cycle, for the resolve loop's cross-branch context.
   readonly cycleIssues: readonly IssueRef[];
@@ -1005,9 +1006,11 @@ export async function runVerifiedLanding(
         : "");
 
     // The red is a property of the COMPOSED merge result, so there is no single
-    // issue to blame. The topmost merge (last in ascending order) anchors the
-    // prompt and every other issue in the cycle rides along as related context —
-    // the same cross-branch framing the conflict/gate-red paths already use.
+    // issue to blame. The topmost merge — last in the ascending MERGE order the
+    // caller passes, which since #64 puts a landing chunk's members below the
+    // cycle's own branches — anchors the prompt, and every other issue in the
+    // cycle rides along as related context: the same cross-branch framing the
+    // conflict/gate-red paths already use.
     const primary = opts.mergedIssues[opts.mergedIssues.length - 1];
     if (!primary) {
       return abandon(

@@ -18,7 +18,6 @@ import {
   findLandedChunkBranches,
   reconcileLandedChunks,
 } from "./chunk-reconcile.js";
-import type { RepoLayout } from "./repo-cache.js";
 
 const exec = promisify(execFile);
 
@@ -70,7 +69,9 @@ function fakeAdapter(
   };
 }
 
-const LAYOUT = { repoDir: "/nonexistent" } as unknown as RepoLayout;
+// No layout cast: the reconciler takes the bare cache path itself, which is
+// all of a `RepoLayout` it ever read.
+const REPO_DIR = "/nonexistent";
 const REPO = { owner: "acme", name: "app" };
 
 const chunk = (
@@ -90,7 +91,7 @@ const run = (
   adapter: ChunkWrapupAdapter,
 ): ReturnType<typeof reconcileLandedChunks> =>
   reconcileLandedChunks({
-    layout: LAYOUT,
+    repoDir: REPO_DIR,
     repo: REPO,
     sourceBranch: "main",
     chunks,
@@ -104,7 +105,7 @@ describe("reconcileLandedChunks (#64)", () => {
     const { adapter, calls } = fakeAdapter();
     let prQueries = 0;
     const r = await reconcileLandedChunks({
-      layout: LAYOUT,
+      repoDir: REPO_DIR,
       repo: REPO,
       sourceBranch: "main",
       chunks: [chunk(42, [42])],
@@ -252,6 +253,7 @@ describe("findLandedChunkBranches (real git)", () => {
     await git(cache, "push", "origin", "--delete", "refs/heads/sandbar/chunk-77-open");
     expect(await findLandedChunkBranches(cache, "main")).toEqual([]);
   });
+
 });
 
 // ---------------------------------------------------------------------------

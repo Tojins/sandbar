@@ -26,12 +26,15 @@
 // (#64's `land` label) and this share one implementation of the wrap-up and
 // differ only in whether a merge happened first.
 //
-// EVERY COMMAND NAMES ITS REPOSITORY (#34), and every git command runs in
-// `layout.repoDir` — the bare cache. Nothing here writes to a worktree, and the
-// one destructive operation, `git push origin --delete`, is aimed at origin
-// rather than at any local ref, so the "cannot reach the operator's checkout"
-// property holds for the same structural reason the rest of the startup path's
-// does.
+// EVERY COMMAND NAMES ITS REPOSITORY (#34), and every git command runs in the
+// BARE CACHE — which is the only thing this module needs that the merge phase
+// does not have, and therefore the only argument its writes are its own. They
+// are not: `realReconcileAdapter` is `chunkForgeWrites` with that one cwd
+// supplied, so the argv that closes a member is written once (`chunk-land.ts`)
+// and read here. Nothing here writes to a worktree, and the one destructive
+// operation, `git push origin --delete`, is aimed at origin rather than at any
+// local ref, so the "cannot reach the operator's checkout" property holds for
+// the same structural reason the rest of the startup path's does.
 //
 // FAIL-SOFT ON DISCOVERY, loud on the writes. A `gh` or `git` failure while
 // working out what to reconcile answers "nothing to reconcile" — the state it
@@ -48,16 +51,15 @@ import {
   type ChunkWrapupAdapter,
   type ChunkWrapupResult,
   type PullRequestSummary,
+  chunkForgeWrites,
   selectReconciliations,
   wrapUpLandedChunk,
 } from "./chunk-land.js";
 import type { NamedChunk } from "./chunks.js";
-import { SandbarError } from "./errors.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
 } from "./naming.js";
-import type { RepoLayout } from "./repo-cache.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
 const exec = promisify(execFile);
@@ -223,69 +225,22 @@ function parsePullRequests(stdout: string): readonly PullRequestSummary[] {
 }
 
 /**
- * The wrap-up's writes, outside the merge phase.
+ * The wrap-up's writes, at plan time.
  *
- * Deliberately the same shape as the merger's own adapter methods, spelled out
- * again rather than shared with it: the merger's run from the ephemeral merger
- * worktree, and these run from the bare cache, which is the only place that
- * exists at plan time.
+ * The same primitive the merge phase uses (`chunkForgeWrites`), differing in
+ * the one thing that actually differs: `git push --delete` runs in the BARE
+ * CACHE here, because at plan time the merger worktree does not exist yet and
+ * may never. Nothing else about a reconciliation's writes is its own.
  */
 export function realReconcileAdapter(deps: {
   readonly repoDir: string;
   readonly repo: RepoRef;
 }): ChunkWrapupAdapter {
-  const slug = repoSlug(deps.repo);
-  const gh = async (args: readonly string[], what: string): Promise<void> => {
-    try {
-      await exec("gh", [...args]);
-    } catch (err) {
-      throw new SandbarError(
-        `reconcile: ${what}: ${err instanceof Error ? err.message : String(err)}`,
-        { cause: err },
-      );
-    }
-  };
-  return {
-    closeIssue: (n, comment) =>
-      gh(
-        ["issue", "close", String(n), "--repo", slug, "--comment", comment],
-        `failed to close issue #${n}`,
-      ),
-    removeLabel: (n, label) =>
-      gh(
-        ["issue", "edit", String(n), "--repo", slug, "--remove-label", label],
-        `failed to remove label '${label}' from issue #${n}`,
-      ),
-    commentOnPullRequest: (pr, body) =>
-      gh(
-        ["pr", "comment", String(pr), "--repo", slug, "--body", body],
-        `failed to comment on pull request #${pr}`,
-      ),
-    closePullRequest: (pr) =>
-      gh(
-        ["pr", "close", String(pr), "--repo", slug],
-        `failed to close pull request #${pr}`,
-      ),
-    async deleteChunkBranch(chunkBranch) {
-      // Origin, from the bare cache. Safe on the one precondition that put
-      // this branch in front of us: its commits are contained in
-      // `origin/<sourceBranch>`.
-      try {
-        await exec(
-          "git",
-          ["push", "origin", "--delete", `refs/heads/${chunkBranch}`],
-          { cwd: deps.repoDir },
-        );
-      } catch (err) {
-        throw new SandbarError(
-          `reconcile: failed to delete the landed chunk branch ${chunkBranch} on origin: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-          { cause: err },
-        );
-      }
-    },
-  };
+  return chunkForgeWrites({
+    repo: deps.repo,
+    gitCwd: deps.repoDir,
+    errPrefix: "reconcile",
+  });
 }
 
 export type ChunkReconciliation = ChunkWrapupResult & {
@@ -312,7 +267,10 @@ export type ReconcileResult = {
  * review lane.
  */
 export async function reconcileLandedChunks(cfg: {
-  readonly layout: RepoLayout;
+  // The bare object cache, which is the only checkout that exists at plan time.
+  // `repoDir` rather than the whole `RepoLayout` because that is all of it this
+  // reads, and it is what the two functions below already take.
+  readonly repoDir: string;
   readonly repo: RepoRef;
   readonly sourceBranch: string;
   // The plan's derivation: how a branch learns which issues are on it.
@@ -329,7 +287,7 @@ export async function reconcileLandedChunks(cfg: {
     branches: readonly string[],
   ) => Promise<readonly PullRequestSummary[]>;
 }): Promise<ReconcileResult> {
-  const repoDir = cfg.layout.repoDir;
+  const repoDir = cfg.repoDir;
   const log = cfg.log ?? ((): void => undefined);
   const landed = await (cfg.findLanded ?? findLandedChunkBranches)(
     repoDir,

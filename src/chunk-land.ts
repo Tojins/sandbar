@@ -104,6 +104,28 @@
 // has already moved by the time any of this runs; a throw here would abandon
 // the members after the failing one and report a landing that did not finish
 // as a landing that did not happen.
+//
+// ---------------------------------------------------------------------------
+// One implementation of the wrap-up's writes, for both callers
+// ---------------------------------------------------------------------------
+//
+// The wrap-up is adapter-driven, and its two callers sit at opposite ends of a
+// cycle: the merge phase passes itself (`MergerAdapter` is a superset of
+// `ChunkWrapupAdapter`), and the plan-time reconciler has no merger to pass.
+// What they need done is nevertheless the same four `gh` calls and one
+// `git push --delete`, so `chunkForgeWrites` below is the one place that argv
+// is spelled — the same argument `forge-pr.ts` makes one level up (#62).
+// Duplicated argv is argv that drifts, and this argv CLOSES ISSUES.
+//
+// Exactly one thing differs between the two, and it is therefore the one
+// parameter: the checkout `git push --delete` runs in. The merger's is its
+// ephemeral worktree; the reconciler's is the bare cache, which at plan time is
+// the only thing that exists. Neither passes a cwd to `gh` — with `--repo`
+// given, gh never looks at a git remote (#34), so there is no directory left
+// for one of them to be wrong about.
+
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 import {
   type ChunkMember,
@@ -111,8 +133,12 @@ import {
   LAND_LABEL,
   type NamedChunk,
 } from "./chunks.js";
+import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
 import { rootIssueFromChunkBranch } from "./naming.js";
+import { type RepoRef, repoSlug } from "./repo-ref.js";
+
+const exec = promisify(execFile);
 
 // Re-exported because every consumer of this module wants the label and the
 // behaviour together, and none of them should have to know the string lives one
@@ -391,6 +417,94 @@ export type ChunkWrapupAdapter = {
   closePullRequest(pr: number): Promise<void>;
   deleteChunkBranch(chunkBranch: string): Promise<void>;
 };
+
+/**
+ * The one implementation of those writes — see the header for why there is
+ * exactly one, and why `gitCwd` is its only parameter.
+ *
+ * Every method throws on failure rather than swallowing. That is not in tension
+ * with `wrapUpLandedChunk` never throwing: the wrap-up is what catches these
+ * and turns them into residue, and it can only do that if they are raised.
+ */
+export function chunkForgeWrites(deps: {
+  readonly repo: RepoRef;
+  // The checkout `git push --delete` runs in. The `gh` calls get no cwd.
+  readonly gitCwd: string;
+  // Which layer a failure is reported as — `merger` or `reconcile`. The two
+  // callers are a whole cycle apart, and the residue an operator reads is the
+  // only thing that says which of them was standing there.
+  readonly errPrefix: string;
+}): ChunkWrapupAdapter {
+  // Read per call, not once at construction. `realAdapter` is built for its git
+  // primitives alone in places that have no tracker to name (merger-git's
+  // real-repository tests are the standing example), and making the factory
+  // throw there would move a `gh` concern into a `git` one.
+  const slug = (): string => repoSlug(deps.repo);
+  const wrap = (what: string, err: unknown): SandbarError =>
+    new SandbarError(
+      `${deps.errPrefix}: ${what}: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  const gh = async (args: readonly string[], what: string): Promise<void> => {
+    try {
+      await exec("gh", [...args]);
+    } catch (err) {
+      throw wrap(what, err);
+    }
+  };
+  return {
+    // Throws on a single failed attempt, and both callers layer their own
+    // policy over that: the merger's auto-lane close loop retries with backoff
+    // and records `MergerSummary.unclosed` (#14), while the chunk wrap-up
+    // records residue and KEEPS the chunk branch so the next run retries.
+    closeIssue: (n, comment) =>
+      gh(
+        ["issue", "close", String(n), "--repo", slug(), "--comment", comment],
+        `failed to close issue #${n} after its work landed`,
+      ),
+    // Required, never best-effort: this is the #8 bug's shape. A label silently
+    // not dropped leaves whatever it queues on that queue forever.
+    removeLabel: (n, label) =>
+      gh(
+        ["issue", "edit", String(n), "--repo", slug(), "--remove-label", label],
+        `failed to remove label '${label}' from issue #${n}`,
+      ),
+    commentOnPullRequest: (pr, body) =>
+      gh(
+        ["pr", "comment", String(pr), "--repo", slug(), "--body", body],
+        `failed to comment on pull request #${pr}`,
+      ),
+    // Closed, never merged: the commits reached the source branch through
+    // sandbar's own push, so there is nothing for GitHub's merge to do — and
+    // the PR is a DRAFT, which has no merge available anyway (#62).
+    // `--delete-branch` is deliberately not passed: the branch delete is the
+    // wrap-up's own last step and it is conditional on every member having
+    // closed, which this call cannot know.
+    closePullRequest: (pr) =>
+      gh(
+        ["pr", "close", String(pr), "--repo", slug()],
+        `failed to close pull request #${pr}`,
+      ),
+    async deleteChunkBranch(chunkBranch) {
+      // Fully qualified, and not `--force`-anything: `git push --delete` has no
+      // force to give. It is safe on the one precondition every caller
+      // establishes first — the branch's commits are contained in
+      // `origin/<sourceBranch>`, so nothing is lost with the ref.
+      try {
+        await exec(
+          "git",
+          ["push", "origin", "--delete", `refs/heads/${chunkBranch}`],
+          { cwd: deps.gitCwd },
+        );
+      } catch (err) {
+        throw wrap(
+          `failed to delete the landed chunk branch ${chunkBranch} on origin`,
+          err,
+        );
+      }
+    },
+  };
+}
 
 export type ChunkWrapupResult = {
   // Members actually closed, ascending.

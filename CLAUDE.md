@@ -119,8 +119,10 @@ an exit condition fires.
    makes the next cycle merge `origin/<chunk>` in the SAME source pass, before
    the auto lane's branches, so one gate-2 and one landing cover both; the
    wrap-up then closes every member, drops `in-chunk`, closes the PR and
-   deletes the branch. `src/chunk-land.ts` owns the label, the selection and
-   the wrap-up.
+   deletes the branch. `src/chunk-land.ts` owns the label, the selection, the
+   wrap-up and — as `chunkForgeWrites` — the one spelling of the `gh`/`git`
+   writes the wrap-up makes, which the merge phase and the plan-time reconciler
+   both build their adapter from.
 
 4. **Finalise** (`src/finalize.ts` + `src/finalize-inputs.ts`) — per-issue
    branch lifecycle, bot comments, label flips (`ready-for-agent` ↔

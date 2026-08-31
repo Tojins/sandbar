@@ -1097,7 +1097,14 @@ function makeVerifyFake(opts: {
   // does. These escape runVerifiedLanding as plain Errors, not MergerErrors.
   listThrows?: Error;
 } = {}): VerifyFake {
-  const vCalls = { integrationPushes: [] as string[], fastForwards: [] as string[], prs: 0 };
+  const vCalls = {
+    integrationPushes: [] as string[],
+    fastForwards: [] as string[],
+    prs: 0,
+    // #64: the PR body lists `mergedIssues` in the order it is given, which is
+    // the only place that order is observable from out here.
+    prBodies: [] as string[],
+  };
   const verify: VerifyAdapter = {
     async pushIntegration(branch) {
       vCalls.integrationPushes.push(branch);
@@ -1129,8 +1136,9 @@ function makeVerifyFake(opts: {
     async syncWithSource() {
       return { ok: true, reason: "" };
     },
-    async ensurePullRequest() {
+    async ensurePullRequest(args: { body: string }) {
       vCalls.prs += 1;
+      vCalls.prBodies.push(args.body);
       return { number: 5, url: "u" };
     },
     async closePullRequest() {},
@@ -1986,6 +1994,33 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     // The comment says the forge judged the whole composition, naming the
     // issues that were in it beside this chunk.
     expect(calls.prComments[0]?.body).toContain("#10");
+  });
+
+  it("hands the forge the composition in MERGE order, chunk members underneath", async () => {
+    // `runVerifiedLanding` anchors its forge-red resolve prompt on the LAST
+    // entry and documents it as the topmost merge. Chunks are merged first and
+    // this cycle's branches on top, so the chunk's members have to come first
+    // here — the other way round, the agent would be pointed at the bottom-most
+    // commit in the composition and told it was the top.
+    const { adapter } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      chunkRefs: originHas(42),
+      heads: ["cycle-base", "p1", "p2", "verified"],
+    });
+    const { verify, vCalls } = makeVerifyFake();
+    await runMergerWithAdapter([issue(10)], adapter, undefined, undefined, {
+      ...landing(request(42, [42, 43])),
+      verified: {
+        adapter: verify,
+        options: { ...VERIFIED_OPTIONS, openPullRequest: true },
+      },
+    });
+
+    const body = vCalls.prBodies[0] ?? "";
+    expect(body).toContain("- #42 — t-42");
+    expect(body).toContain("- #10 — t-10");
+    expect(body.indexOf("- #43 —")).toBeLessThan(body.indexOf("- #10 —"));
   });
 
   it("carries parked chunks on a MergerError partial", async () => {
