@@ -247,12 +247,16 @@ default 50, exit 3).
   leaves it on for the next run — which is why `fetchChunkRef` answers in three
   states (`ChunkRefLookup`) and buys "origin has no such branch" apart from
   "origin could not be asked" with an `ls-remote` probe: only the first is a
-  fact about the chunk, and only a fact about the chunk may spend the label. Members are closed EXPLICITLY (a `Closes #N`
-  trailer only fires on GitHub's own merge of that PR, and sandbar composes
-  the merge locally), and the chunk branch is deleted only once every close
-  worked — a kept branch is what makes `src/chunk-reconcile.ts` retry the
-  remainder next run, and therefore what `run.ts` halts on: residue left by a
-  chunk that DID retire is cosmetic, and nothing would retry it anyway. The
+  fact about the chunk, and only a fact about the chunk may spend the label.
+  Members are closed EXPLICITLY (a `Closes #N` trailer only fires on GitHub's
+  own merge of that PR, and sandbar composes the merge locally), and the chunk
+  branch is deleted only once every close worked — a kept branch is what makes
+  `src/chunk-reconcile.ts` retry the remainder next cycle, and therefore what
+  `run.ts` halts on: `chunkResidue` splits a wrap-up's leftovers on exactly
+  that question, since residue left by a chunk that DID retire is cosmetic and
+  nothing would retry it anyway. Both of `run.ts`'s reports read that split,
+  and only the merge-phase one halts — the reconciler IS the retry, and it runs
+  again at the top of the next cycle. The
   label comes off beside the PR close, not instead of it — either write can
   fail, and a `land` on a pull request that stayed open is a request the next
   cycle spends a merger worktree and a gate stack honouring. The reconciler is

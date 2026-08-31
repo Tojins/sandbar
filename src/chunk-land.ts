@@ -138,7 +138,9 @@
 // Every failure is collected as RESIDUE rather than thrown. The source branch
 // has already moved by the time any of this runs; a throw here would abandon
 // the members after the failing one and report a landing that did not finish
-// as a landing that did not happen.
+// as a landing that did not happen. Residue is not one kind of thing, though,
+// and a caller must not report it as one — `chunkResidue` at the bottom of
+// this file is the split and owns that argument.
 //
 // ---------------------------------------------------------------------------
 // One implementation of the wrap-up's writes, for both callers
@@ -768,3 +770,90 @@ export async function wrapUpLandedChunk(
 
   return { closed: [...closed].sort((a, b) => a - b), branchDeleted, residue };
 }
+
+// ---------------------------------------------------------------------------
+// Reading the residue back: two classes, and only one of them is retried
+// ---------------------------------------------------------------------------
+//
+// `residue` is a flat list of lines because the wrap-up writes it as it goes,
+// but the lines are not one kind of thing, and a caller that reports them as
+// one makes a promise it cannot keep. The question that separates them is the
+// BRANCH, not the lines:
+//
+//   * KEPT     — the branch is still on origin, because a member would not
+//                close or the delete itself failed. Something WILL retry
+//                this: the next cycle's reconciler finds the branch contained
+//                in the source branch and does exactly the writes that
+//                failed. Operator-actionable, and honestly described as
+//                temporary.
+//   * UNTIDY   — the branch retired and a line was left behind anyway: an
+//                `in-chunk` label that would not come off a CLOSED issue, a
+//                pull request that would not close or lose its `land`. NOTHING
+//                will retry these — the branch a retry would be found through
+//                is gone — so they are cosmetic by construction, and telling a
+//                human otherwise sends them back next week to check on a
+//                repair that was never scheduled.
+//
+// A kept chunk always has residue (both paths that keep the branch push a
+// line), so `kept` needs no residue filter and `untidy` does. Both callers in
+// `run.ts` — the merge phase's own landings and the plan-time reconciler's —
+// report off this rather than off the flat list, and each counts its own
+// chunks: three chunks and one stray label is one chunk with bookkeeping left
+// over, not three.
+
+export type ChunkResidue = {
+  readonly kept: readonly ChunkWrapup[];
+  readonly untidy: readonly ChunkWrapup[];
+};
+
+export function chunkResidue(
+  wrapups: readonly ChunkWrapup[],
+): ChunkResidue {
+  return {
+    kept: wrapups.filter((w) => !w.branchDeleted),
+    untidy: wrapups.filter((w) => w.branchDeleted && w.residue.length > 0),
+  };
+}
+
+// One banner: a headline, the lines it is about, and the one sentence that
+// says whether anything will come back for them. What is worth spelling once
+// is not the words but that pairing — the way these were wrong before was one
+// banner keeping the other's closing sentence.
+type ResidueBanner = {
+  readonly chunks: readonly ChunkWrapup[];
+  readonly sourceBranch: string;
+  readonly provenance: LandingProvenance;
+};
+
+const banner = (headline: string, args: ResidueBanner, tail: string): string =>
+  `\n${headline}\n` +
+  args.chunks
+    .flatMap((c) => c.residue)
+    .map((r) => `  ${r}`)
+    .join("\n") +
+  `\n${tail}`;
+
+export const CHUNK_RESIDUE_KEPT_BANNER = (args: ResidueBanner): string =>
+  banner(
+    args.provenance === "sandbar"
+      ? `Sandbar landed ${args.chunks.length} chunk(s) on ` +
+        `\`${args.sourceBranch}\` and could not finish reconciling them:`
+      : `Sandbar found ${args.chunks.length} chunk(s) already on ` +
+        `\`${args.sourceBranch}\` and could not finish reconciling them:`,
+    args,
+    "The work is durable, and the chunk branch(es) were KEPT on origin: the " +
+      `next cycle's reconciler finds them contained in \`${args.sourceBranch}\` ` +
+      "and retries exactly these writes. Fix them by hand if that is quicker.",
+  );
+
+export const CHUNK_RESIDUE_RETIRED_BANNER = (args: ResidueBanner): string =>
+  banner(
+    args.provenance === "sandbar"
+      ? `Sandbar landed and retired ${args.chunks.length} chunk(s) on ` +
+        `\`${args.sourceBranch}\`, with some bookkeeping left over:`
+      : `Sandbar reconciled and retired ${args.chunks.length} chunk(s) ` +
+        `already on \`${args.sourceBranch}\`, with some bookkeeping left over:`,
+    args,
+    "Every member closed and the chunk branch is gone, so NOTHING retries " +
+      "these — they are cosmetic, and yours to tidy if you care to.",
+  );

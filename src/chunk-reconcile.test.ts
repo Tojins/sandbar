@@ -98,7 +98,7 @@ describe("reconcileLandedChunks (#64)", () => {
       },
     });
 
-    expect(r).toEqual({ reconciled: [], closedIssues: [], residue: [] });
+    expect(r).toEqual({ reconciled: [], closedIssues: [] });
     expect(calls).toEqual([]);
     expect(prQueries).toBe(0);
   });
@@ -113,7 +113,7 @@ describe("reconcileLandedChunks (#64)", () => {
     );
 
     expect(r.closedIssues).toEqual([42, 43]);
-    expect(r.residue).toEqual([]);
+    expect(r.reconciled[0]?.residue).toEqual([]);
     expect(calls.map((c) => `${c.op} ${c.arg}`)).toEqual([
       "closeIssue 42",
       `removeLabel 42:${IN_CHUNK_LABEL}`,
@@ -147,7 +147,7 @@ describe("reconcileLandedChunks (#64)", () => {
     const r = await run(["sandbar/chunk-42-c"], [], [], adapter);
 
     expect(r.closedIssues).toEqual([]);
-    expect(r.residue).toEqual([]);
+    expect(r.reconciled[0]?.residue).toEqual([]);
     expect(calls).toEqual([
       { op: "deleteChunkBranch", arg: "sandbar/chunk-42-c" },
     ]);
@@ -159,7 +159,9 @@ describe("reconcileLandedChunks (#64)", () => {
 
     expect(r.closedIssues).toEqual([42]);
     expect(calls.some((c) => c.op === "deleteChunkBranch")).toBe(false);
-    expect(r.residue.join("\n")).toContain("#43 could not be closed");
+    expect(r.reconciled[0]?.residue.join("\n")).toContain(
+      "#43 could not be closed",
+    );
   });
 
   it("finishes every target when the log sink throws", async () => {
@@ -183,7 +185,7 @@ describe("reconcileLandedChunks (#64)", () => {
 
     expect(r.closedIssues).toEqual([42, 99]);
     expect(r.reconciled.map((x) => x.branchDeleted)).toEqual([true, true]);
-    expect(r.residue).toEqual([]);
+    expect(r.reconciled.flatMap((x) => x.residue)).toEqual([]);
   });
 
   it("reconciles every landed chunk, in root order, and never stops on the first failure", async () => {

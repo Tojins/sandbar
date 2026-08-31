@@ -42,6 +42,19 @@
 // repair that is not urgent would be the wrong trade. Once a target is chosen,
 // its writes are the wrap-up's, and what they could not finish comes back as
 // residue the orchestrator reports.
+//
+// REPORTED, AND — unlike the merge phase's own landings — NOT HALTED ON. That
+// asymmetry is a decision rather than an oversight, and it rests on where the
+// two run. A wrap-up that kept its branch is retried by THIS function, at the
+// top of the very next cycle, minutes later and with no operator involved: the
+// reconciler is the retry, so halting in front of it stops a run before it has
+// done anything, over state the run did not create and that repairs itself.
+// The merge phase halts because its residue is its OWN unfinished landing,
+// discovered after the cycle's reconcile pass has already been and gone and
+// after the source branch has moved — carrying on there means landing more
+// work past a repair whose next attempt is a whole cycle away. Both report,
+// and both say which of the two residue classes they are reporting
+// (`chunkResidue`); only one of them ends the run.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -238,9 +251,14 @@ export type ReconcileResult = {
   // Every issue closed across all of them, which is what the caller adds to its
   // "already merged this run" exclusion set.
   readonly closedIssues: readonly number[];
-  // Everything no wrap-up could finish. Non-empty is operator-actionable, and
-  // the chunk branches involved were kept so the next run retries them.
-  readonly residue: readonly string[];
+  // What a wrap-up could not finish stays on the entry it belongs to and is
+  // deliberately NOT flattened into one list here. Two different things fail:
+  // a chunk whose branch is still on origin, which the next cycle's reconciler
+  // retries, and a retired chunk that left a cosmetic line nothing will ever
+  // look at again. One list of strings cannot tell a caller which it is
+  // holding, and a caller that guesses promises a repair that is not coming.
+  // `chunkResidue` in `chunk-land.ts` is the split, and it is what `run.ts`
+  // reports off.
 };
 
 /**
@@ -289,7 +307,7 @@ export async function reconcileLandedChunks(cfg: {
     cfg.sourceBranch,
   );
   if (landed.length === 0) {
-    return { reconciled: [], closedIssues: [], residue: [] };
+    return { reconciled: [], closedIssues: [] };
   }
   const prs = await (cfg.findPullRequests ?? fetchPullRequestsForBranches)(
     cfg.repo,
@@ -311,7 +329,6 @@ export async function reconcileLandedChunks(cfg: {
 
   const reconciled: ChunkWrapup[] = [];
   const closedIssues: number[] = [];
-  const residue: string[] = [];
   for (const target of targets) {
     await log(
       `reconcile ${target.branch}: already on ${cfg.sourceBranch}; ` +
@@ -324,7 +341,6 @@ export async function reconcileLandedChunks(cfg: {
     });
     reconciled.push({ target, ...wrapup });
     closedIssues.push(...wrapup.closed);
-    residue.push(...wrapup.residue);
   }
-  return { reconciled, closedIssues, residue };
+  return { reconciled, closedIssues };
 }

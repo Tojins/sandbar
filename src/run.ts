@@ -115,7 +115,13 @@ import {
   createMergerWorktree,
 } from "./merger-worktree.js";
 import { type Stack, startStack } from "./gate-stack.js";
-import { LAND_LABEL, selectLandRequests } from "./chunk-land.js";
+import {
+  CHUNK_RESIDUE_KEPT_BANNER,
+  CHUNK_RESIDUE_RETIRED_BANNER,
+  LAND_LABEL,
+  chunkResidue,
+  selectLandRequests,
+} from "./chunk-land.js";
 import { IN_CHUNK_LABEL } from "./chunks.js";
 import {
   fetchLandRequestPullRequests,
@@ -570,17 +576,46 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           defaultLane: config.defaultLane,
         });
       }
-      if (reconciliation.residue.length > 0) {
-        console.error(
-          `\nSandbar could not finish reconciling ${reconciliation.reconciled.length} ` +
-            "landed chunk(s). Their branches were kept on origin, so the next run " +
-            "retries exactly these writes — but the work is already on " +
-            `\`${config.sourceBranch}\`, so the residue is tracker state a human may ` +
-            "prefer to fix by hand:\n" +
-            reconciliation.residue.map((r) => `  ${r}`).join("\n"),
+      // What the reconciler could not finish, in the two shapes it comes in
+      // (#64). Split rather than reported as one list, and each half counting
+      // its own chunks: three chunks reconciling with one stray label is one
+      // chunk with bookkeeping left over, and calling it three sends a human
+      // looking for leftovers that are not there. The claim differs too — a
+      // KEPT branch really is retried next cycle, while a retired chunk's
+      // leftovers are reached through a branch that no longer exists, so
+      // promising a retry for those is promising nothing.
+      //
+      // Neither halts. See `chunk-reconcile.ts`'s header: this pass IS the
+      // retry the merge phase halts to defer to, and it runs again at the top
+      // of the next cycle, so stopping the run in front of it would spend the
+      // whole run on a repair that repairs itself.
+      const reconcileResidue = chunkResidue(reconciliation.reconciled);
+      if (reconcileResidue.untidy.length > 0) {
+        console.warn(
+          CHUNK_RESIDUE_RETIRED_BANNER({
+            chunks: reconcileResidue.untidy,
+            sourceBranch: config.sourceBranch,
+            provenance: "reconciled",
+          }),
         );
         await runLogger.appendOrchestrator(
-          `reconcile residue: ${reconciliation.residue.join("; ")}`,
+          `reconcile: retired chunk residue: ${reconcileResidue.untidy
+            .flatMap((c) => c.residue)
+            .join("; ")}`,
+        );
+      }
+      if (reconcileResidue.kept.length > 0) {
+        console.error(
+          CHUNK_RESIDUE_KEPT_BANNER({
+            chunks: reconcileResidue.kept,
+            sourceBranch: config.sourceBranch,
+            provenance: "reconciled",
+          }),
+        );
+        await runLogger.appendOrchestrator(
+          `reconcile: wrap-up incomplete: ${reconcileResidue.kept
+            .flatMap((c) => c.residue)
+            .join("; ")}`,
         );
       }
 
@@ -996,26 +1031,26 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // notice that some issue is closed-in-name-only.
       const haltReasons: string[] = [];
 
-      // #64 — a landed chunk whose wrap-up did not entirely finish. That comes
-      // in two shapes, and only one of them is worth stopping a run over.
+      // #64 — a landed chunk whose wrap-up did not entirely finish, in the same
+      // two shapes the reconcile-side report above uses (`chunkResidue`) and
+      // with the same two claims. What differs here is that one of them ENDS
+      // THE RUN.
       //
       // WHAT HALTS is a chunk still on origin: some member would not close, or
       // the branch delete itself failed. The work is on the source branch and
-      // the tracker does not agree with it, and carrying on would keep landing
-      // work past a repair nobody had been told about. The branch is kept
-      // precisely so the next run's reconciler retries it, which is also what
-      // makes `branchDeleted` the right test — it is exactly "will anything
-      // retry this?", where the residue list is only "did every write work?".
+      // the tracker does not agree with it, the cycle's reconcile pass is
+      // already behind us, and carrying on would keep landing work past a
+      // repair whose next attempt is a whole cycle away.
       //
       // WHAT DOES NOT HALT is a chunk that retired cleanly and left a cosmetic
-      // line behind: a `in-chunk` label that would not come off a CLOSED issue
+      // line behind: an `in-chunk` label that would not come off a CLOSED issue
       // (the wrap-up calls that harmless itself, and the planner lists open
       // issues only), or a pull request that would not close. Neither leaves an
       // issue on no queue, and halting on one would abandon the rest of the
       // run's budget over a label — while promising a next-run repair that
       // cannot happen, since the branch those lines came with is gone.
       const landedChunks = mergerSummary?.mergedChunks ?? [];
-      const keptChunks = landedChunks.filter((c) => !c.branchDeleted);
+      const landedResidue = chunkResidue(landedChunks);
 
       // A chunk that landed while naming no member to close. Sandbar honours
       // such a request on purpose — a human labelled a branch that origin has,
@@ -1044,39 +1079,30 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             .join(", ")}`,
         );
       }
-      // The chunks that retired AND left something behind — not every chunk
-      // that retired. Two landing cleanly and one leaving a stray label is
-      // "1 chunk … with some bookkeeping left over", and the count a human
-      // reads has to be the count of what the lines below are about.
-      const untidyChunks = landedChunks.filter(
-        (c) => c.branchDeleted && c.residue.length > 0,
-      );
-      const retiredResidue = untidyChunks.flatMap((c) => c.residue);
-      if (retiredResidue.length > 0) {
+      if (landedResidue.untidy.length > 0) {
         console.warn(
-          `\nSandbar landed and retired ${untidyChunks.length} ` +
-            `chunk(s) on ${config.sourceBranch}, with some bookkeeping left over:\n` +
-            retiredResidue.map((r) => `  ${r}`).join("\n") +
-            "\nEvery member closed and the chunk branch is gone, so nothing retries " +
-            "these — they are cosmetic, and yours to tidy if you care to.",
+          CHUNK_RESIDUE_RETIRED_BANNER({
+            chunks: landedResidue.untidy,
+            sourceBranch: config.sourceBranch,
+            provenance: "sandbar",
+          }),
         );
         await runLogger.appendOrchestrator(
-          `merger: retired chunk residue: ${retiredResidue.join("; ")}`,
+          `merger: retired chunk residue: ${landedResidue.untidy
+            .flatMap((c) => c.residue)
+            .join("; ")}`,
         );
       }
-      if (keptChunks.length > 0) {
+      if (landedResidue.kept.length > 0) {
         console.error(
-          `\nSandbar landed ${keptChunks.length} chunk(s) on ${config.sourceBranch} ` +
-            "but could not finish reconciling them:\n" +
-            keptChunks
-              .flatMap((c) => c.residue)
-              .map((r) => `  ${r}`)
-              .join("\n") +
-            "\nThe work is durable and the chunk branch(es) were KEPT on origin, so " +
-            "the next run reconciles what is left; fix it by hand if it is urgent.",
+          CHUNK_RESIDUE_KEPT_BANNER({
+            chunks: landedResidue.kept,
+            sourceBranch: config.sourceBranch,
+            provenance: "sandbar",
+          }),
         );
         await runLogger.appendOrchestrator(
-          `merger: chunk wrap-up incomplete: ${keptChunks
+          `merger: chunk wrap-up incomplete: ${landedResidue.kept
             .flatMap((c) => c.residue)
             .join("; ")}`,
         );

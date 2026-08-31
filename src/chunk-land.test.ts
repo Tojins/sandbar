@@ -6,6 +6,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   CHUNK_LANDED_PR_COMMENT,
+  CHUNK_RESIDUE_KEPT_BANNER,
+  CHUNK_RESIDUE_RETIRED_BANNER,
+  type ChunkWrapup,
+  chunkResidue,
   CHUNK_LAND_ABANDONED_PR_COMMENT,
   CHUNK_MEMBER_CLOSED_COMMENT,
   type ChunkWrapupAdapter,
@@ -441,5 +445,93 @@ describe("wrapUpLandedChunk never throws (#64)", () => {
     expect(r.branchDeleted).toBe(true);
     expect(r.residue).toEqual([]);
     expect(calls.at(-1)?.op).toBe("deleteChunkBranch");
+  });
+});
+
+// #64 — reading the residue back. Both of `run.ts`'s reports are built from
+// this, and the way they were wrong before was arithmetic and a promise: a
+// count of every chunk over the lines of some of them, and "the next run
+// retries these" said of a chunk whose branch is gone.
+describe("chunkResidue and the banners it feeds (#64)", () => {
+  const wrapup = (
+    branch: string,
+    branchDeleted: boolean,
+    residue: readonly string[],
+  ): ChunkWrapup => ({
+    target: { ...target, branch },
+    closed: [],
+    branchDeleted,
+    residue,
+  });
+
+  it("splits on the branch, which is the question 'will anything retry this?'", () => {
+    const clean = wrapup("sandbar/chunk-1-clean", true, []);
+    const untidy = wrapup("sandbar/chunk-2-untidy", true, ["a stray label"]);
+    const kept = wrapup("sandbar/chunk-3-kept", false, ["#9 would not close"]);
+
+    expect(chunkResidue([clean, untidy, kept])).toEqual({
+      kept: [kept],
+      untidy: [untidy],
+    });
+  });
+
+  it("counts the chunks the lines came from, not every chunk that retired", () => {
+    // Two landing cleanly and one leaving a stray label is ONE chunk with
+    // bookkeeping left over. Saying three sends a human looking for leftovers
+    // that are not there.
+    const { untidy } = chunkResidue([
+      wrapup("sandbar/chunk-1-a", true, []),
+      wrapup("sandbar/chunk-2-b", true, []),
+      wrapup("sandbar/chunk-3-c", true, ["a stray label"]),
+    ]);
+    const banner = CHUNK_RESIDUE_RETIRED_BANNER({
+      chunks: untidy,
+      sourceBranch: "main",
+      provenance: "sandbar",
+    });
+
+    expect(banner).toContain("retired 1 chunk(s)");
+    expect(banner).toContain("a stray label");
+    expect(banner).not.toContain("sandbar/chunk-1-a");
+  });
+
+  it("promises no retry for a chunk whose branch is gone", () => {
+    // The claim that was wrong: nothing looks for a retired chunk again,
+    // because the branch a reconciler would find it through is deleted.
+    const banner = CHUNK_RESIDUE_RETIRED_BANNER({
+      chunks: [wrapup("sandbar/chunk-3-c", true, ["a stray label"])],
+      sourceBranch: "main",
+      provenance: "reconciled",
+    });
+
+    expect(banner).toContain("NOTHING retries these");
+    expect(banner).toContain("cosmetic");
+    expect(banner).not.toMatch(/next (run|cycle)/);
+    // …and it says which pass is speaking: a chunk a human merged was not
+    // landed by sandbar.
+    expect(banner).toContain("reconciled and retired");
+  });
+
+  it("promises exactly one retry for a chunk whose branch was kept", () => {
+    const banner = CHUNK_RESIDUE_KEPT_BANNER({
+      chunks: [wrapup("sandbar/chunk-3-kept", false, ["#9 would not close"])],
+      sourceBranch: "main",
+      provenance: "sandbar",
+    });
+
+    expect(banner).toContain("landed 1 chunk(s)");
+    expect(banner).toContain("#9 would not close");
+    expect(banner).toContain("KEPT on origin");
+    expect(banner).toContain("next cycle's reconciler");
+  });
+
+  it("says the reconciler found a chunk rather than landing it", () => {
+    expect(
+      CHUNK_RESIDUE_KEPT_BANNER({
+        chunks: [wrapup("sandbar/chunk-3-kept", false, ["#9 would not close"])],
+        sourceBranch: "main",
+        provenance: "reconciled",
+      }),
+    ).toContain("found 1 chunk(s) already on");
   });
 });
