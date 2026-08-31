@@ -467,6 +467,30 @@ describe("the chunk-base slots (#61)", () => {
     expect(reviewerSlot(baseInputs.base)).toContain("against `origin/main`");
   });
 
+  // Where the section SITS, not just what it says. Both templates render it
+  // ahead of the changeset, so both must point downwards — and a reviewer sent
+  // looking the other way lands on the issue anchor and the header, which is
+  // the one place the earlier members work is not. Asserted as an ordering
+  // rather than as a word, because the word is only right relative to the
+  // template that places it: move the slot and this fails, which is the point.
+  it("puts each section above the changeset it points at, and points down", () => {
+    const impl = implementerSlot(chunkBase);
+    expect(impl.indexOf("## This branch is part of a chunk")).toBeLessThan(
+      impl.indexOf("No commits yet on this branch."),
+    );
+    expect(impl).toContain("The diff below is");
+
+    const rev = reviewerSlot(chunkBase);
+    expect(rev.indexOf("## This branch is part of a chunk")).toBeLessThan(
+      rev.indexOf("## Commits on this branch"),
+    );
+    expect(rev.indexOf("## This branch is part of a chunk")).toBeLessThan(
+      rev.indexOf("## Branch diff"),
+    );
+    expect(rev).toContain("the commits and diff below");
+    expect(rev).not.toContain("the commits and diff above");
+  });
+
   // Every auto-lane issue and every chunk root. The section must leave no
   // trace: an issue that is NOT in a chunk being told about chunk branches is
   // an invitation to go looking for one.
