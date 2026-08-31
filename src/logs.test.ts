@@ -104,6 +104,61 @@ describe("startRunLogger", () => {
     );
   });
 
+  // #67 — the file that exists so a resolve attempt is not a black box, and
+  // the path it answers with, which is what the abandon comment points at.
+  it("writeResolveAttempt files an attempt beside the gate artefact and answers with its path", async () => {
+    const base = await makeBase();
+    const logger = await startRunLogger({ baseDir: base });
+    const c = logger.cycle(1);
+
+    const path = await c.writeResolveAttempt("64", {
+      attempt: 2,
+      issueId: "64",
+      mode: "still-conflicted",
+      stdout: "agent said this",
+      stderr: "agent complained about that",
+      end: "exit",
+      exitCode: 1,
+      signal: null,
+      durationMs: 6_300,
+      container: "sandbar-wdeadbeef-resolve-2-uuid",
+    });
+
+    expect(path).toBe(
+      join(logger.runDir, "cycle-1", "resolve-64-attempt-2.log"),
+    );
+    const body = await readFile(path, "utf8");
+    expect(body).toContain("agent said this");
+    expect(body).toContain("agent complained about that");
+    expect(body).toContain("sandbar-wdeadbeef-resolve-2-uuid");
+    expect(body).toContain("6300ms");
+  });
+
+  // The header is the whole artefact on the failure this file exists for: a
+  // container that died at startup has neither stream to show.
+  it("writes a readable header even when both streams are empty", async () => {
+    const base = await makeBase();
+    const logger = await startRunLogger({ baseDir: base });
+    const path = await logger.cycle(2).writeResolveAttempt("chunk-42", {
+      attempt: 1,
+      issueId: "42",
+      mode: "still-conflicted",
+      stdout: "",
+      stderr: "",
+      end: "spawn-error",
+      exitCode: null,
+      signal: null,
+      durationMs: 12,
+      container: "sandbar-wdeadbeef-resolve-1-uuid",
+      detail: "spawn podman ENOENT",
+    });
+
+    expect(path).toContain("resolve-chunk-42-attempt-1.log");
+    const body = await readFile(path, "utf8");
+    expect(body).toContain("spawn-error (spawn podman ENOENT)");
+    expect(body).toContain("stdout:     0 bytes");
+  });
+
   it("finalize() writes a run-end marker to orchestrator.log", async () => {
     const base = await makeBase();
     const logger = await startRunLogger({ baseDir: base });

@@ -205,6 +205,37 @@
 //
 // Merge commits and agent-authored commits inside the loop are attributed to
 // the configured bot identity with a co-author trailer.
+//
+// ---------------------------------------------------------------------------
+// What a resolve attempt leaves behind (#67)
+// ---------------------------------------------------------------------------
+//
+// This file owns the two ENDS of that: the invocation, and the prose.
+//
+// `runResolveAgent` runs claude in a NAMED, run-scoped container and answers
+// with a whole `ResolveAgentRun` — both streams, the exit code, the signal, the
+// duration and the container's name. Before, stderr was piped to a listener
+// that was never attached and stdout was returned to the token parser and
+// dropped, so a container that died at startup was indistinguishable from an
+// agent that said nothing, and the four attempts of one abandoned merge left
+// five log lines between them. `captureAgentRun` is the seam that does it; the
+// classification and the pipe-drain deadline are its header's.
+//
+// `buildAbandonComment` is the other end, and the reason all of it is carried:
+// that comment is the only artefact a human reads when they find a stuck issue
+// in the morning. It now names the conflicted paths, what each attempt did and
+// where its output was written — enough to tell a hard conflict from a broken
+// container without reading this file. `chunk-land.ts`'s parked-chunk comment
+// carries the identical block, from the same renderer, because a reviewer
+// standing at a pull request is asking the same question.
+//
+// What HALTS is resolve-loop.ts's decision, not this file's: an attempt that
+// captured nothing throws out of the loop, and it arrives here as any other
+// internal failure does — wrapped by `asHalt` into a `MergerError` carrying
+// the partial, so the issues this cycle already commented on still reach Phase
+// 4 (#33). For a chunk, the label policy of #64 gives the same answer for free:
+// a host that could not run a container has said nothing ABOUT the chunk, so
+// `land` stays on and the next run tries again.
 
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -1901,6 +1932,112 @@ function gitAuthorEnv(deps: RealAdapterDeps): NodeJS.ProcessEnv {
 // process that has already exited.
 const STDIO_FLUSH_GRACE_MS = 2_000;
 
+// One bounded child process, captured whole (#67).
+//
+// Lifted out of the adapter and exported because this is where the delicate
+// part of #67 lives, and none of it is about podman: the classification, the
+// pipe-drain race and the EPIPE are facts about `child_process`, so they are
+// asserted by RUNNING a process rather than by mocking one. The adapter above
+// contributes only the argv.
+//
+// SETTLES ON `close`, NOT `exit`. `exit` fires when the process is gone,
+// which is before the last chunk of its stdout has been delivered to us — and
+// since an empty capture is now read as an infrastructure failure that halts
+// the run, settling there would turn a large, perfectly good agent transcript
+// into a halt at random. `close` waits for the stdio fds instead. Its own
+// hazard is the mirror image: a grandchild holding a pipe open would keep it
+// from ever firing, so the exit arms a deadline (STDIO_FLUSH_GRACE_MS) and the
+// capture settles with whatever arrived by then.
+export function captureAgentRun(
+  file: string,
+  args: readonly string[],
+  input: string,
+  opts: { readonly container: string; readonly timeoutMs: number },
+): Promise<ResolveAgentRun> {
+  const startedAt = Date.now();
+  return new Promise<ResolveAgentRun>((resolve) => {
+    const child = spawn(file, [...args], { stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (chunk) => {
+      out += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      err += chunk.toString();
+    });
+
+    let timedOut = false;
+    let exit: { code: number | null; signal: string | null } | null = null;
+    let spawnError: string | null = null;
+    let settled = false;
+    let flushTimer: NodeJS.Timeout | null = null;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* already exited */
+      }
+    }, opts.timeoutMs);
+
+    // Which of the four ways it ended, decided in ONE place so the log line,
+    // the log file and the abandon comment cannot come to disagree. The
+    // timeout outranks the signal it sent: that SIGTERM is ours, and reporting
+    // it as "killed by a signal" would bury the one fact an operator needs,
+    // which is that the full budget elapsed.
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (flushTimer) clearTimeout(flushTimer);
+      const end: ResolveAgentRun["end"] = spawnError
+        ? "spawn-error"
+        : timedOut
+          ? "timeout"
+          : exit?.signal
+            ? "signal"
+            : "exit";
+      resolve({
+        stdout: out,
+        stderr: err,
+        end,
+        exitCode: exit?.code ?? null,
+        signal: exit?.signal ?? null,
+        durationMs: Date.now() - startedAt,
+        container: opts.container,
+        ...(spawnError ? { detail: spawnError } : {}),
+      });
+    };
+
+    child.on("error", (e) => {
+      // The runtime never produced a process (a missing binary, EPERM). There
+      // is no output coming, so there is nothing to wait to drain.
+      spawnError = e.message;
+      settle();
+    });
+    child.on("exit", (code, signal) => {
+      exit = { code, signal };
+      flushTimer = setTimeout(settle, STDIO_FLUSH_GRACE_MS);
+      flushTimer.unref();
+    });
+    child.on("close", settle);
+    // A child that exits before reading its prompt — a missing binary, an
+    // agent that dies on startup, the SIGTERM above — makes this write fail
+    // with EPIPE. With no listener on the stream that is an UNCAUGHT
+    // exception: it would take the whole run down from inside a promise
+    // executor, skipping the orchestrator's structured handling entirely. Not
+    // swallowed — the handlers above still settle with whatever was captured,
+    // and an invocation that captured NOTHING is classed as the infrastructure
+    // failure it is (#67) rather than re-prompted.
+    child.stdin.on("error", () => {
+      /* the child is gone; the exit/close handlers are the reporting path */
+    });
+    child.stdin.write(input);
+    child.stdin.end();
+  });
+}
+
 export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   const cwd = deps.cwd;
   // The merger worktree is always detached, so every push it makes is HEAD to a
@@ -2028,141 +2165,57 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       const container =
         `${scopedResourcePrefix(deps.scope)}resolve-${attempt}-${randomUUID()}`;
       const extraMounts = await gitMountsForWorktree(cwd);
-      const startedAt = Date.now();
-      return await new Promise<ResolveAgentRun>((resolve) => {
-        const args: string[] = [
-          "run",
-          "--rm",
-          "-i",
-          "--name",
-          container,
-          "--userns=keep-id",
-          "--user",
-          "1000:1000",
-          "-v",
-          `${cwd}:/workspace`,
-          ...extraMounts.flatMap((m) => ["-v", `${m}:${m}`]),
-          "-w",
-          "/workspace",
-          "-e",
-          "HOME=/tmp",
-          "--label",
-          "sandbar=true",
-        ];
-        for (const key of [
-          "CLAUDE_CODE_OAUTH_TOKEN",
-          "ANTHROPIC_API_KEY",
-          "GH_TOKEN",
-        ]) {
-          const v = deps.env(key);
-          if (v) args.push("-e", `${key}=${v}`);
-        }
-        args.push(
-          "-e",
-          `GIT_AUTHOR_NAME=${deps.botName}`,
-          "-e",
-          `GIT_AUTHOR_EMAIL=${deps.botEmail}`,
-          "-e",
-          `GIT_COMMITTER_NAME=${deps.botName}`,
-          "-e",
-          `GIT_COMMITTER_EMAIL=${deps.botEmail}`,
-        );
-        args.push(
-          "--entrypoint",
-          "claude",
-          deps.sandboxImage,
-          "--print",
-          "--dangerously-skip-permissions",
-          "--model",
-          deps.modelId,
-          "-p",
-          "-",
-        );
-        const child = spawn(RUNTIME, args, {
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-        let out = "";
-        let err = "";
-        child.stdout.on("data", (chunk) => {
-          out += chunk.toString();
-        });
-        child.stderr.on("data", (chunk) => {
-          err += chunk.toString();
-        });
-
-        let timedOut = false;
-        let exit: { code: number | null; signal: string | null } | null = null;
-        let spawnError: string | null = null;
-        let settled = false;
-        let flushTimer: NodeJS.Timeout | null = null;
-
-        const timer = setTimeout(() => {
-          timedOut = true;
-          try {
-            child.kill("SIGTERM");
-          } catch {
-            /* already exited */
-          }
-        }, RESOLVE_AGENT_TIMEOUT_MS);
-
-        // Which of the four ways it ended, decided in one place so the log
-        // line, the log file and the abandon comment cannot disagree. The
-        // timeout wins over the signal it sent: SIGTERM here is OURS, and
-        // reporting it as "killed by a signal" would hide the one fact the
-        // operator needs, which is that ten minutes elapsed.
-        const settle = (): void => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          if (flushTimer) clearTimeout(flushTimer);
-          const end: ResolveAgentRun["end"] = spawnError
-            ? "spawn-error"
-            : timedOut
-              ? "timeout"
-              : exit?.signal
-                ? "signal"
-                : "exit";
-          resolve({
-            stdout: out,
-            stderr: err,
-            end,
-            exitCode: exit?.code ?? null,
-            signal: exit?.signal ?? null,
-            durationMs: Date.now() - startedAt,
-            container,
-            ...(spawnError ? { detail: spawnError } : {}),
-          });
-        };
-
-        child.on("error", (e) => {
-          // The runtime never produced a process (podman missing, EPERM). No
-          // output is coming, so there is nothing to wait to drain.
-          spawnError = e.message;
-          settle();
-        });
-        child.on("exit", (code, signal) => {
-          exit = { code, signal };
-          // Not settled here: `exit` fires before the pipes have drained, and
-          // an empty capture is now read as an infrastructure failure. `close`
-          // is the real end; this is only its deadline — see
-          // STDIO_FLUSH_GRACE_MS.
-          flushTimer = setTimeout(settle, STDIO_FLUSH_GRACE_MS);
-          flushTimer.unref();
-        });
-        child.on("close", settle);
-        // A child that exits before reading its prompt — a missing binary, an
-        // agent that dies on startup, the SIGTERM above — makes this write
-        // fail with EPIPE. With no listener on the stream that is an UNCAUGHT
-        // exception: it would take the whole run down from inside a promise
-        // executor, skipping the orchestrator's structured handling entirely.
-        // Not swallowed — the handlers above still settle with whatever was
-        // captured, and an invocation that captured NOTHING is now classed as
-        // the infrastructure failure it is (#67) rather than re-prompted.
-        child.stdin.on("error", () => {
-          /* the child is gone; its exit handler is the reporting path */
-        });
-        child.stdin.write(prompt);
-        child.stdin.end();
+      const args: string[] = [
+        "run",
+        "--rm",
+        "-i",
+        "--name",
+        container,
+        "--userns=keep-id",
+        "--user",
+        "1000:1000",
+        "-v",
+        `${cwd}:/workspace`,
+        ...extraMounts.flatMap((m) => ["-v", `${m}:${m}`]),
+        "-w",
+        "/workspace",
+        "-e",
+        "HOME=/tmp",
+        "--label",
+        "sandbar=true",
+      ];
+      for (const key of [
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "GH_TOKEN",
+      ]) {
+        const v = deps.env(key);
+        if (v) args.push("-e", `${key}=${v}`);
+      }
+      args.push(
+        "-e",
+        `GIT_AUTHOR_NAME=${deps.botName}`,
+        "-e",
+        `GIT_AUTHOR_EMAIL=${deps.botEmail}`,
+        "-e",
+        `GIT_COMMITTER_NAME=${deps.botName}`,
+        "-e",
+        `GIT_COMMITTER_EMAIL=${deps.botEmail}`,
+      );
+      args.push(
+        "--entrypoint",
+        "claude",
+        deps.sandboxImage,
+        "--print",
+        "--dangerously-skip-permissions",
+        "--model",
+        deps.modelId,
+        "-p",
+        "-",
+      );
+      return captureAgentRun(RUNTIME, args, prompt, {
+        container,
+        timeoutMs: RESOLVE_AGENT_TIMEOUT_MS,
       });
     },
     async isMergeInProgress() {
