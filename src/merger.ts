@@ -207,6 +207,7 @@
 // the configured bot identity with a co-author trailer.
 
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
@@ -241,13 +242,20 @@ import {
 import type { GateResult } from "./gate.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { gitMountsForWorktree } from "./merger-worktree.js";
+import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 import { RUNTIME } from "./runtime.js";
 import {
-  RESOLVE_MAX_ATTEMPTS,
+  RESOLVE_AGENT_TIMEOUT_MS,
   type ResolveAdapter,
+  type ResolveAgentRun,
+  type ResolveAttemptRecord,
+  type ResolveAttemptSink,
+  type ResolveAttemptSummary,
   type ResolveLogger,
   SOURCE_TARGET_PHRASE,
+  formatConflictPaths,
+  formatResolveAttempts,
   runResolveLoop,
 } from "./resolve-loop.js";
 
@@ -318,27 +326,51 @@ export function buildInstallFailedComment(target: MergeTarget): string {
   );
 }
 
+// The one artefact a human reads when they find a stuck issue in the morning,
+// which is why it says so much more than it used to (#67). Before, it named no
+// conflicted file, no timing, no agent output and no log path — so "bailed
+// after 4 attempts" read identically whether four agents had genuinely failed
+// at a hard conflict or one had timed out and three containers had died at
+// startup in eleven seconds. The two want completely different things done
+// about them.
 function buildAbandonComment(args: {
   mode: "conflict" | "gate-red";
   reason: string;
-  attempts: number;
+  // The loop's own journal. Its LENGTH is the attempt count in the lede —
+  // `RESOLVE_MAX_ATTEMPTS` was a claim about the budget, not about what ran,
+  // and an abandon can now leave the loop early.
+  attempts: readonly ResolveAttemptSummary[];
+  conflictPaths: readonly string[];
   target: MergeTarget;
 }): string {
   const where = describeMergeTarget(args.target);
-  if (args.mode === "conflict") {
-    return [
-      `Sandbar attempted to merge this branch into ${where} and the agentic resolve loop bailed after ${args.attempts} attempt${args.attempts === 1 ? "" : "s"}.`,
-      "The merge has been aborted and `ready-for-agent` removed.",
-      "",
-      `Agent's reason: ${args.reason}`,
-    ].join("\n");
-  }
+  const n = args.attempts.length;
+  const plural = n === 1 ? "" : "s";
+  const lede =
+    args.mode === "conflict"
+      ? [
+          `Sandbar attempted to merge this branch into ${where} and the agentic resolve loop bailed after ${n} attempt${plural}.`,
+          "The merge has been aborted and `ready-for-agent` removed.",
+        ]
+      : [
+          `Sandbar merged this branch into ${where} locally, but the post-merge gate was still red after ${n} agentic fix attempt${plural}.`,
+          "The merge has been reverted and `ready-for-agent` removed.",
+        ];
   return [
-    `Sandbar merged this branch into ${where} locally, but the post-merge gate was still red after ${args.attempts} agentic fix attempt${args.attempts === 1 ? "" : "s"}.`,
-    "The merge has been reverted and `ready-for-agent` removed.",
+    ...lede,
     "",
     `Agent's reason: ${args.reason}`,
+    ...blockIfAny(formatConflictPaths(args.conflictPaths)),
+    "",
+    "**What each attempt did:**",
+    formatResolveAttempts(args.attempts),
   ].join("\n");
+}
+
+// A section, or nothing at all — never an empty heading. Used for the
+// conflicted-path list, which a gate-red abandon legitimately has none of.
+function blockIfAny(section: string): string[] {
+  return section ? ["", section] : [];
 }
 
 // Verified merge mode (#22). The forge rejected the cycle's composed merge
@@ -461,6 +493,12 @@ type MergeAttempt =
       // different with it (a fresh attempt next cycle); a chunk has no
       // implementer to re-run, so it parks like any other abandon.
       readonly silent: boolean;
+      // What the resolve loop actually spent, for the prose the caller writes
+      // (#67). Carried through `MergeAttempt` rather than re-derived, because
+      // only the loop knows how a container exited and only it can say which
+      // paths were still unmerged when it gave up.
+      readonly attempts: readonly ResolveAttemptSummary[];
+      readonly conflictPaths: readonly string[];
     };
 
 export type PushResult =
@@ -792,6 +830,16 @@ export type MergerGateOutputSink = (
   gate: MergerGateOutput,
 ) => void | Promise<void>;
 
+// Where a resolve attempt's captured stdout and stderr go (#67), and what it
+// answers with: the path it wrote, so the abandon comment can point at a file
+// rather than at a pattern this module would have to spell a second time. The
+// key is the gate artefact's — an issue id, `chunk-<root>`, or
+// `verify-round-<n>` for a forge-red round.
+export type MergerResolveAttemptSink = (
+  key: string,
+  record: ResolveAttemptRecord,
+) => Promise<string | null>;
+
 export type RunMergerOptions = {
   // Full set of issues in this cycle (typically the plan's DONE branches).
   // The resolve loop loads the bodies of all *other* entries so the agent has
@@ -806,6 +854,9 @@ export type RunMergerOptions = {
   // Landing reviewed chunks on the source branch (#64). Absent ⇒ none, which
   // is the whole of the auto lane.
   readonly chunkLanding?: ChunkLandingOptions;
+  // Per-resolve-attempt output capture (#67). Absent ⇒ nothing is written and
+  // every comment says so outright instead of naming a file that is not there.
+  readonly onResolveAttempt?: MergerResolveAttemptSink;
   // Verified merge mode (#22). Absent → direct mode (today's push straight to
   // the source branch). Present → the forge gates the landing. The adapter is
   // required *by the type* exactly when the mode is on, so there is no
@@ -834,6 +885,10 @@ type MergeAttemptDeps = {
   readonly projectAnchor: string;
   readonly resolveLog: ResolveLogger;
   readonly onGateRed?: MergerGateOutputSink | undefined;
+  // Bound to a KEY by the caller (#67) — `attemptMerge` already carries the one
+  // the gate artefact is filed under, so a resolve attempt lands beside the
+  // gate output it was prompted from.
+  readonly resolveSinkFor: (key: string) => ResolveAttemptSink | undefined;
 };
 
 // One ref, merged onto whatever the worktree is currently detached at, with
@@ -869,6 +924,7 @@ async function attemptMerge(
 ): Promise<MergeAttempt> {
   const { adapter, emit, projectAnchor, resolveLog, onGateRed } = deps;
   const { unit, target, label } = args;
+  const onAttempt = deps.resolveSinkFor(args.gateKey);
   await emit(`merge-attempt ${label} ${unit.branch}`);
   const preMergeSha = await adapter.getHeadSha();
   const m = await adapter.mergeNoFf(unit);
@@ -880,7 +936,12 @@ async function attemptMerge(
       args.related,
       { kind: "conflict" },
       adapter,
-      { projectAnchor, preMergeSha, target: describeMergeTarget(target) },
+      {
+        projectAnchor,
+        preMergeSha,
+        target: describeMergeTarget(target),
+        ...(onAttempt ? { onAttempt } : {}),
+      },
       resolveLog,
     );
     if (outcome.kind === "abandon") {
@@ -894,6 +955,8 @@ async function attemptMerge(
         mode: "conflict",
         reason: outcome.reason,
         silent: outcome.silent === true,
+        attempts: outcome.attempts,
+        conflictPaths: outcome.conflictPaths,
       };
     }
     await emit(`merged ${label} (via resolve-loop)`);
@@ -934,7 +997,12 @@ async function attemptMerge(
         },
       },
       adapter,
-      { projectAnchor, preMergeSha, target: describeMergeTarget(target) },
+      {
+        projectAnchor,
+        preMergeSha,
+        target: describeMergeTarget(target),
+        ...(onAttempt ? { onAttempt } : {}),
+      },
       resolveLog,
     );
     if (outcome.kind === "abandon") {
@@ -944,6 +1012,8 @@ async function attemptMerge(
         mode: "gate-red",
         reason: outcome.reason,
         silent: outcome.silent === true,
+        attempts: outcome.attempts,
+        conflictPaths: outcome.conflictPaths,
       };
     }
     await emit(`merged ${label} (gate-red recovered via resolve-loop)`);
@@ -1087,6 +1157,16 @@ export async function runMergerWithAdapter(
     ? { ...opts.verified, cycleBaseSha: await adapter.getHeadSha() }
     : null;
 
+  // One key's worth of the cycle's attempt sink, or nothing when no sink was
+  // wired. Curried here rather than at each call site because `attemptMerge`
+  // and the verified landing both need the same binding and only differ in
+  // what they call the key.
+  const resolveSinkFor = (key: string): ResolveAttemptSink | undefined => {
+    const sink = opts.onResolveAttempt;
+    if (!sink) return undefined;
+    return (record) => sink(key, record);
+  };
+
   // Everything module-scope `attemptMerge` needs of this cycle, bound once.
   const mergeDeps: MergeAttemptDeps = {
     adapter,
@@ -1094,6 +1174,7 @@ export async function runMergerWithAdapter(
     projectAnchor,
     resolveLog,
     onGateRed,
+    resolveSinkFor,
   };
 
   // One DONE issue branch. TRUE when a commit for this issue is on HEAD; FALSE
@@ -1138,7 +1219,8 @@ export async function runMergerWithAdapter(
         buildAbandonComment({
           mode: outcome.mode,
           reason: outcome.reason,
-          attempts: RESOLVE_MAX_ATTEMPTS,
+          attempts: outcome.attempts,
+          conflictPaths: outcome.conflictPaths,
           target,
         }),
       );
@@ -1460,7 +1542,14 @@ export async function runMergerWithAdapter(
             mode:
               outcome.kind === "install-failed" ? "install-failed" : outcome.mode,
             reason: outcome.kind === "install-failed" ? "" : outcome.reason,
-            attempts: RESOLVE_MAX_ATTEMPTS,
+            // The same diagnostics the auto lane's issue comment carries
+            // (#67). A reviewer reading a parked chunk needs to tell a real
+            // collision from a broken container exactly as an issue's author
+            // does, and `install-failed` never entered the loop at all.
+            attempts:
+              outcome.kind === "install-failed" ? [] : outcome.attempts,
+            conflictPaths:
+              outcome.kind === "install-failed" ? [] : outcome.conflictPaths,
           }),
           outcome.kind === "install-failed" ? "install-failed" : outcome.mode,
         );
@@ -1562,6 +1651,10 @@ export async function runMergerWithAdapter(
         mergedIssues: landingIssues,
         cycleIssues: cycle,
         projectAnchor,
+        // Keyed by ROUND (#67): each round runs a fresh resolve loop whose
+        // attempts start again at 1, so a single key would have round 2
+        // overwrite round 1's capture attempt for attempt.
+        onResolveAttempt: (round) => resolveSinkFor(`verify-round-${round}`),
       },
       {
         verify: verified.adapter,
@@ -1752,6 +1845,12 @@ async function closeMergedIssues(
 
 export type RealAdapterDeps = {
   readonly cwd: string;
+  // The run's podman namespace (#28), for the one container this module starts
+  // — the resolve agent's. It was ANONYMOUS until #67, which meant a container
+  // that died at startup could not even be named in the failure it caused; and
+  // an unscoped name would be swept by no run and reported as unattributable
+  // debris by every one of them.
+  readonly scope: RunScope;
   // The tracker the comment / label / close calls address, NAMED rather than
   // inferred from the merger worktree's git remotes (#34). This is the phase
   // that closes issues, so a repository resolved from a directory is a repository
@@ -1789,10 +1888,18 @@ function gitAuthorEnv(deps: RealAdapterDeps): NodeJS.ProcessEnv {
   };
 }
 
-// 10 minutes per agent invocation: each iteration may need to read multiple
-// related issues + the conflict / gate trace + edit files. The loop above
-// bounds total agentic time at RESOLVE_MAX_ATTEMPTS × this.
-const RESOLVE_AGENT_TIMEOUT_MS = 10 * 60_000;
+// How long the stdio pipes are given to drain after the child has exited
+// (#67). The capture settles on `close`, not `exit`, because `exit` fires
+// before the last chunk of a large agent transcript has been delivered — and
+// since an EMPTY capture is now read as an infrastructure failure and halts the
+// run, settling early would turn a perfectly good attempt into a halt.
+//
+// `close` waits for every copy of the stdio fds to be released, though, which
+// a grandchild can hold open indefinitely. So the exit is the deadline: once
+// the child is gone, the pipes get this long and then the capture settles with
+// whatever arrived. Otherwise the one bound on the merge phase would be a
+// process that has already exited.
+const STDIO_FLUSH_GRACE_MS = 2_000;
 
 export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   const cwd = deps.cwd;
@@ -1899,21 +2006,36 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         return { ok: false };
       }
     },
-    async runResolveAgent(prompt) {
+    async runResolveAgent(prompt, attempt) {
       // Runs claude inside a podman container off the SANDBOX image (claude is
       // pre-installed there; no gate-stack image is required to have it).
       // Bind-mounts the merger worktree at /workspace so
       // the agent's edits and commits are live on host. `cwd` is a git worktree
       // (detached at origin/<sourceBranch>), so its `.git` is a gitlink file
       // pointing at the parent repo's common git dir — that dir is identity-
-      // mounted too so in-container git can follow the link. Captures stdout
-      // for the promise-token parser to inspect.
+      // mounted too so in-container git can follow the link.
+      //
+      // Captures stdout for the promise-token parser AND stderr, the exit
+      // status, the duration and the container's name (#67). Before, stderr was
+      // piped and never read: the process that told us why it could not start
+      // wrote its reason into a pipe nobody had attached a listener to.
+      //
+      // NAMED, and scoped like everything else this run creates (#28), so the
+      // existing prefix sweep reaps a leftover and the failure message has
+      // something an operator can pass to `podman logs`. The uuid is what keeps
+      // two cycles resolving the same issue from colliding on the name; the
+      // attempt number is in it so the name is greppable against the log line.
+      const container =
+        `${scopedResourcePrefix(deps.scope)}resolve-${attempt}-${randomUUID()}`;
       const extraMounts = await gitMountsForWorktree(cwd);
-      const stdout = await new Promise<string>((resolve) => {
+      const startedAt = Date.now();
+      return await new Promise<ResolveAgentRun>((resolve) => {
         const args: string[] = [
           "run",
           "--rm",
           "-i",
+          "--name",
+          container,
           "--userns=keep-id",
           "--user",
           "1000:1000",
@@ -1959,40 +2081,89 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         const child = spawn(RUNTIME, args, {
           stdio: ["pipe", "pipe", "pipe"],
         });
-        let buf = "";
+        let out = "";
+        let err = "";
         child.stdout.on("data", (chunk) => {
-          buf += chunk.toString();
+          out += chunk.toString();
         });
+        child.stderr.on("data", (chunk) => {
+          err += chunk.toString();
+        });
+
+        let timedOut = false;
+        let exit: { code: number | null; signal: string | null } | null = null;
+        let spawnError: string | null = null;
+        let settled = false;
+        let flushTimer: NodeJS.Timeout | null = null;
+
         const timer = setTimeout(() => {
+          timedOut = true;
           try {
             child.kill("SIGTERM");
           } catch {
             /* already exited */
           }
         }, RESOLVE_AGENT_TIMEOUT_MS);
-        child.on("error", () => {
+
+        // Which of the four ways it ended, decided in one place so the log
+        // line, the log file and the abandon comment cannot disagree. The
+        // timeout wins over the signal it sent: SIGTERM here is OURS, and
+        // reporting it as "killed by a signal" would hide the one fact the
+        // operator needs, which is that ten minutes elapsed.
+        const settle = (): void => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timer);
-          resolve(buf);
+          if (flushTimer) clearTimeout(flushTimer);
+          const end: ResolveAgentRun["end"] = spawnError
+            ? "spawn-error"
+            : timedOut
+              ? "timeout"
+              : exit?.signal
+                ? "signal"
+                : "exit";
+          resolve({
+            stdout: out,
+            stderr: err,
+            end,
+            exitCode: exit?.code ?? null,
+            signal: exit?.signal ?? null,
+            durationMs: Date.now() - startedAt,
+            container,
+            ...(spawnError ? { detail: spawnError } : {}),
+          });
+        };
+
+        child.on("error", (e) => {
+          // The runtime never produced a process (podman missing, EPERM). No
+          // output is coming, so there is nothing to wait to drain.
+          spawnError = e.message;
+          settle();
         });
-        child.on("exit", () => {
-          clearTimeout(timer);
-          resolve(buf);
+        child.on("exit", (code, signal) => {
+          exit = { code, signal };
+          // Not settled here: `exit` fires before the pipes have drained, and
+          // an empty capture is now read as an infrastructure failure. `close`
+          // is the real end; this is only its deadline — see
+          // STDIO_FLUSH_GRACE_MS.
+          flushTimer = setTimeout(settle, STDIO_FLUSH_GRACE_MS);
+          flushTimer.unref();
         });
+        child.on("close", settle);
         // A child that exits before reading its prompt — a missing binary, an
         // agent that dies on startup, the SIGTERM above — makes this write
         // fail with EPIPE. With no listener on the stream that is an UNCAUGHT
         // exception: it would take the whole run down from inside a promise
         // executor, skipping the orchestrator's structured handling entirely.
-        // Not swallowed — the exit/error handlers above still resolve with
-        // whatever was captured, and an agent that produced no promise token
-        // is re-prompted by the caller.
+        // Not swallowed — the handlers above still settle with whatever was
+        // captured, and an invocation that captured NOTHING is now classed as
+        // the infrastructure failure it is (#67) rather than re-prompted.
         child.stdin.on("error", () => {
           /* the child is gone; its exit handler is the reporting path */
         });
         child.stdin.write(prompt);
         child.stdin.end();
       });
-      return { stdout };
     },
     async isMergeInProgress() {
       // NOT `<cwd>/.git/MERGE_HEAD`. Since #10 the merger always runs in a
@@ -2035,7 +2206,27 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       } catch {
         diff = "(git diff failed)";
       }
-      return { status: status.trim(), diff: diff.trim() };
+      // The unmerged set, asked for as such rather than parsed back out of the
+      // porcelain above (#67): the abandon comment lists these files, and a
+      // status-line parser that silently produced an empty list would make a
+      // hard conflict read like a broken container — the exact confusion the
+      // comment exists to end. An empty list on failure is honest: the comment
+      // renders no section at all rather than claiming nothing conflicted.
+      let paths: readonly string[] = [];
+      try {
+        const r = await exec(
+          "git",
+          ["diff", "--name-only", "--diff-filter=U"],
+          { cwd },
+        );
+        paths = r.stdout
+          .split("\n")
+          .map((l) => l.trim())
+          .filter(Boolean);
+      } catch {
+        /* the status text above is what the agent reads; this is for prose */
+      }
+      return { status: status.trim(), diff: diff.trim(), paths };
     },
     async getIssueBody(issueId) {
       // Throws (SandbarError) on fetch failure: a resolve agent reasoning

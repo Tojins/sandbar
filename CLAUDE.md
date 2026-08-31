@@ -246,6 +246,19 @@ default 50, exit 3).
   keeps only structure. Every git range a prompt renders anchors at the issue
   branch's SEED REF, never a bare branch name (#40, #61) — `src/prompt.ts`.
 - **Logs are append-only and unbuffered** (`src/logs.ts`).
+- **The resolve loop leaves a trace, and a container that never ran halts
+  (#67).** Every attempt's stdout AND stderr go to
+  `cycle-N/resolve-<key>-attempt-<k>.log`, keyed like the gate artefact beside
+  it, and the merger log line carries the container, the exit code, the
+  duration and which of timeout / clean exit / signal ended it. An attempt that
+  captured NO output is an infra failure, not an answer: the loop throws rather
+  than re-prompting, so an image that is gone or a refused socket cannot launder
+  itself into "the agent tried and failed" and spend the budget doing it. The
+  ONE exception is the ten-minute `RESOLVE_AGENT_TIMEOUT_MS`, which ran the
+  whole budget in the container and is a spent attempt named as one. What a
+  human reads afterwards — the abandon comment on the issue, or on the parked
+  chunk's PR — carries the conflicted paths, the per-attempt outcome and the
+  log paths. `src/resolve-loop.ts`'s header owns the argument.
 
 ## This repo runs itself (#39)
 

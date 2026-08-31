@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import type { MergerGateOutput } from "./merger.js";
+import { SandbarError } from "./errors.js";
 import {
   RESOLVE_MAX_ATTEMPTS,
   type IssueRef,
   type ResolveAdapter,
+  type ResolveAgentRun,
+  type ResolveAttemptRecord,
   type ResolveMode,
+  formatConflictPaths,
+  formatResolveAttempts,
+  isInfraFailure,
   parseResolveSignal,
   runResolveLoop,
 } from "./resolve-loop.js";
@@ -24,13 +30,35 @@ function gateOut(): MergerGateOutput {
   };
 }
 
-type AgentResult = { stdout: string };
+// The one-field shape every scripted run is written in; `agentRun` fills in
+// the eight the adapter really answers with (#67).
+type AgentResult = ResolveAgentRun;
+
+// A scripted invocation that ran, printed and exited 0 — the shape almost every
+// test in this file wants, so that only the tests ABOUT the invocation have to
+// spell out an exit code or a signal.
+function agentRun(over: Partial<ResolveAgentRun> = {}): ResolveAgentRun {
+  return {
+    stdout: "",
+    stderr: "",
+    end: "exit",
+    exitCode: 0,
+    signal: null,
+    durationMs: 1234,
+    container: "sandbar-wdeadbeef-resolve-1-uuid",
+    ...over,
+  };
+}
 type GateResp =
   | { ok: true }
   | ({ ok: false } & MergerGateOutput);
 
 type Script = {
-  agentRuns: { stdout: string; leavesConflict?: boolean }[];
+  agentRuns: {
+    stdout: string;
+    leavesConflict?: boolean;
+    run?: Partial<ResolveAgentRun>;
+  }[];
   initiallyConflicted: boolean;
   installs?: boolean[];
   gates?: GateResp[];
@@ -68,6 +96,8 @@ function makeAdapter(script: Script): { adapter: ResolveAdapter; calls: Calls } 
 
   const adapter: ResolveAdapter = {
     async runResolveAgent(prompt: string): Promise<AgentResult> {
+      // The `attempt` arg is ignored here; the tests that care about it assert
+      // on the record the sink receives.
       const entry = script.agentRuns[aIdx++];
       if (!entry) throw new Error("agent run not scripted");
       calls.agentRuns++;
@@ -78,7 +108,7 @@ function makeAdapter(script: Script): { adapter: ResolveAdapter; calls: Calls } 
       } else if (signal.kind === "ABANDON") {
         if (entry.leavesConflict !== undefined) merging = entry.leavesConflict;
       }
-      return { stdout: entry.stdout };
+      return agentRun({ stdout: entry.stdout, ...entry.run });
     },
     async isMergeInProgress() {
       calls.isMergeInProgressCalls++;
@@ -86,7 +116,11 @@ function makeAdapter(script: Script): { adapter: ResolveAdapter; calls: Calls } 
     },
     async conflictDigest() {
       calls.conflictDigestCalls++;
-      return { status: "UU foo.ts\nUU bar.ts", diff: "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>>" };
+      return {
+        status: "UU foo.ts\nUU bar.ts",
+        diff: "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>>",
+        paths: ["foo.ts", "bar.ts"],
+      };
     },
     async npmInstall() {
       const r = script.installs?.[iIdx++] ?? true;
@@ -190,7 +224,7 @@ describe("runResolveLoop — conflict mode", () => {
       adapter,
       { projectAnchor },
     );
-    expect(out).toEqual({
+    expect(out).toMatchObject({
       kind: "abandon",
       reason: "#42 supersedes #40; let #40 lose",
       mergeInProgress: true,
@@ -392,7 +426,7 @@ describe("runResolveLoop — gate-red mode", () => {
       adapter,
       { projectAnchor },
     );
-    expect(out).toEqual({
+    expect(out).toMatchObject({
       kind: "abandon",
       reason: "tests collide with #44; revert this one",
       mergeInProgress: false,

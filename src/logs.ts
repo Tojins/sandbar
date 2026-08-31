@@ -6,6 +6,7 @@
 //   cycle(n).writePlan(plan)              → run-<UTC>/cycle-<n>/plan.json
 //   cycle(n).appendMerger(line)           → run-<UTC>/cycle-<n>/merger.log
 //   cycle(n).writeMergerGate(id, gate)    → run-<UTC>/cycle-<n>/merger-gate-<id>.{out,err,meta.json,containers.log}
+//   cycle(n).writeResolveAttempt(k, rec)  → run-<UTC>/cycle-<n>/resolve-<k>-attempt-<m>.log
 //   cycle(n).writeAttempt(id, m, content) → run-<UTC>/cycle-<n>/issue-<id>/attempt-<m>.log
 //   cycle(n).writeAttemptReviewer(...)    → run-<UTC>/cycle-<n>/issue-<id>/attempt-<m>-reviewer.log
 //
@@ -18,6 +19,11 @@
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+
+// Type-only, so this module still pulls in nothing at runtime — resolve-loop.ts
+// loads prompt templates from disk at import, and the log tree must not depend
+// on those existing.
+import type { ResolveAttemptRecord } from "./resolve-loop.js";
 
 export type AttemptLogger = {
   writeAttempt(
@@ -51,6 +57,18 @@ export type CycleLogger = AttemptLogger & {
   writePlan(plan: unknown): Promise<void>;
   appendMerger(line: string): Promise<void>;
   writeMergerGate(issueId: string, gate: MergerGateRecord): Promise<void>;
+  // One resolve-loop attempt's captured stdout and stderr (#67), keyed like the
+  // gate artefact beside it: an issue id for an issue branch, `chunk-<root>`
+  // for a chunk, `verify-round-<n>` for a forge-red round — so a chunk and its
+  // own root issue resolving in one cycle cannot overwrite each other.
+  //
+  // ANSWERS WITH THE PATH IT WROTE. The abandon comment points a human at these
+  // files, and the alternative is the merger composing the same filename a
+  // second time from the same three parts.
+  writeResolveAttempt(
+    key: string,
+    record: ResolveAttemptRecord,
+  ): Promise<string>;
 };
 
 export type RunLogger = {
@@ -169,6 +187,31 @@ function makeCycleLogger(runDir: string, n: number): CycleLogger {
           2,
         ),
       );
+    },
+    async writeResolveAttempt(key, record) {
+      await ensureCycleDir();
+      const path = join(cycleDir, `resolve-${key}-attempt-${record.attempt}.log`);
+      // A header before the streams, because the streams are what a container
+      // that died at startup does NOT have: on the failure this file exists for,
+      // everything below the header is empty and the header is the whole
+      // artefact.
+      const header = [
+        `resolve attempt ${record.attempt} for #${record.issueId} (mode=${record.mode})`,
+        `container:  ${record.container}`,
+        `ended:      ${record.end}` +
+          (record.detail ? ` (${record.detail})` : ""),
+        `exit code:  ${record.exitCode ?? "-"}`,
+        `signal:     ${record.signal ?? "-"}`,
+        `duration:   ${record.durationMs}ms`,
+        `stdout:     ${record.stdout.length} bytes`,
+        `stderr:     ${record.stderr.length} bytes`,
+        "",
+      ].join("\n");
+      await writeFile(
+        path,
+        `${header}\n--- stdout ---\n${record.stdout}\n--- stderr ---\n${record.stderr}\n`,
+      );
+      return path;
     },
     async writeAttempt(issueId, attempt, content) {
       const dir = await ensureIssueDir(issueId);

@@ -22,6 +22,26 @@ import {
   wrapUpLandedChunk,
 } from "./chunk-land.js";
 import { IN_CHUNK_LABEL, type LandedChunk } from "./chunks.js";
+import type { ResolveAttemptSummary } from "./resolve-loop.js";
+
+// One entry of the resolve loop's journal (#67), as the abandoned-chunk comment
+// receives it.
+const resolveAttempt = (
+  attempt: number,
+  over: Partial<ResolveAttemptSummary> = {},
+): ResolveAttemptSummary => ({
+  attempt,
+  end: "exit",
+  exitCode: 0,
+  signal: null,
+  durationMs: 12_000,
+  container: `sandbar-wdeadbeef-resolve-${attempt}-uuid`,
+  stdoutBytes: 900,
+  stderrBytes: 0,
+  verdict: "still-conflicted",
+  logPath: `.sandbar/logs/run-x/cycle-1/resolve-chunk-42-attempt-${attempt}.log`,
+  ...over,
+});
 
 const chunk = (
   root: number,
@@ -495,12 +515,54 @@ describe("the prose (#64)", () => {
       sourceBranch: "main",
       mode: "conflict",
       reason: "two branches rewrote the same file",
-      attempts: 4,
+      attempts: [resolveAttempt(1), resolveAttempt(2)],
+      conflictPaths: ["src/run.ts"],
     });
     expect(body).toContain("conflicted");
-    expect(body).toContain("4 attempts");
+    // The COUNT comes from the journal, not from the budget: a loop that
+    // halted on an infra failure spent fewer attempts than it was allowed, and
+    // reporting the cap would describe attempts that never happened (#67).
+    expect(body).toContain("2 attempts");
     expect(body).toContain("two branches rewrote the same file");
     expect(body).toContain(`\`${LAND_LABEL}\` label has been removed`);
+  });
+
+  // #67 — a reviewer looking at a parked chunk gets the same diagnostics an
+  // issue's author does: what conflicted, what each attempt did, where to read
+  // the output.
+  it("carries the conflicted paths, the per-attempt outcome and the log paths", () => {
+    const body = CHUNK_LAND_ABANDONED_PR_COMMENT({
+      chunkBranch: "sandbar/chunk-42-alpha",
+      sourceBranch: "main",
+      mode: "conflict",
+      reason: "two branches rewrote the same file",
+      attempts: [
+        resolveAttempt(1, { end: "timeout", exitCode: null, signal: "SIGTERM", durationMs: 600_777 }),
+        resolveAttempt(2),
+      ],
+      conflictPaths: ["src/run.ts", "CLAUDE.md"],
+    });
+    expect(body).toContain("`src/run.ts`");
+    expect(body).toContain("`CLAUDE.md`");
+    expect(body).toContain("10-minute per-attempt timeout");
+    expect(body).toContain("resolve-chunk-42-attempt-2.log");
+  });
+
+  // `install-failed` never enters the resolve loop, so there is no journal to
+  // report — and an empty "what each attempt did" heading would read as four
+  // attempts that produced nothing.
+  it("renders no attempt list when the loop never ran", () => {
+    const body = CHUNK_LAND_ABANDONED_PR_COMMENT({
+      chunkBranch: "sandbar/chunk-42-alpha",
+      sourceBranch: "main",
+      mode: "install-failed",
+      reason: "",
+      attempts: [],
+      conflictPaths: [],
+    });
+    expect(body).toContain("npm install");
+    expect(body).not.toContain("What each attempt did");
+    expect(body).not.toContain("Conflicted path");
   });
 });
 

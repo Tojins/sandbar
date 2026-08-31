@@ -30,7 +30,16 @@ function issue(n: number, title = `t-${n}`): IssueRef {
 
 type GateResp = { ok: true } | ({ ok: false } & MergerGateOutput);
 
-type AgentScript = { stdout: string; leavesConflict?: boolean };
+// The invocation's own outcome (#67) defaults to a clean exit: only the tests
+// about a container that died or timed out say otherwise.
+type AgentScript = {
+  stdout: string;
+  leavesConflict?: boolean;
+  stderr?: string;
+  end?: "exit" | "timeout" | "signal" | "spawn-error";
+  exitCode?: number | null;
+  signal?: string | null;
+};
 
 type Calls = {
   merges: string[];
@@ -160,7 +169,15 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       ) {
         merging = entry.leavesConflict;
       }
-      return { stdout: entry.stdout };
+      return {
+        stdout: entry.stdout,
+        stderr: entry.stderr ?? "",
+        end: entry.end ?? "exit",
+        exitCode: entry.exitCode ?? 0,
+        signal: entry.signal ?? null,
+        durationMs: 5_000,
+        container: `sandbar-wdeadbeef-resolve-${aIdx}-uuid`,
+      };
     },
     async isMergeInProgress() {
       calls.isMergeChecks++;
@@ -168,7 +185,11 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     },
     async conflictDigest() {
       calls.conflictDigests++;
-      return { status: "UU foo", diff: "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>>" };
+      return {
+        status: "UU foo",
+        diff: "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>>",
+        paths: ["foo"],
+      };
     },
     async getIssueBody(id) {
       calls.bodies.push(id);

@@ -209,6 +209,11 @@ import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
 import { rootIssueFromChunkBranch } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
+import {
+  type ResolveAttemptSummary,
+  formatConflictPaths,
+  formatResolveAttempts,
+} from "./resolve-loop.js";
 
 const exec = promisify(execFile);
 
@@ -473,22 +478,34 @@ export const CHUNK_LAND_ABANDONED_PR_COMMENT = (args: {
   readonly sourceBranch: string;
   readonly mode: "conflict" | "gate-red" | "install-failed";
   readonly reason: string;
-  readonly attempts: number;
+  // The resolve loop's own journal (#67), and the paths it was still stuck on.
+  // Empty for `install-failed`, which never reaches the loop — so the comment
+  // renders no attempt list rather than an empty heading. A reviewer has to
+  // tell a genuine collision from a container that died at startup exactly as
+  // an issue's author does, which is why this is the same block `merger.ts`
+  // puts on an issue.
+  readonly attempts: readonly ResolveAttemptSummary[];
+  readonly conflictPaths: readonly string[];
 }): string => {
   const what =
     args.mode === "conflict"
       ? `merging \`${args.chunkBranch}\` into \`${args.sourceBranch}\` conflicted, and ` +
-        `the agentic resolve loop bailed after ${args.attempts} attempt${args.attempts === 1 ? "" : "s"}`
+        `the agentic resolve loop bailed after ${args.attempts.length} attempt${args.attempts.length === 1 ? "" : "s"}`
       : args.mode === "gate-red"
         ? `\`${args.chunkBranch}\` merged into \`${args.sourceBranch}\` cleanly, but the ` +
-          `post-merge gate was still red after ${args.attempts} agentic fix ` +
-          `attempt${args.attempts === 1 ? "" : "s"}`
+          `post-merge gate was still red after ${args.attempts.length} agentic fix ` +
+          `attempt${args.attempts.length === 1 ? "" : "s"}`
         : `\`${args.chunkBranch}\` merged into \`${args.sourceBranch}\` cleanly, but ` +
           "`npm install` against the merged tree failed, so the post-merge gate " +
           "could not run";
+  const paths = formatConflictPaths(args.conflictPaths);
   return (
     `${BOT_COMMENT_PREFIX} this chunk was NOT landed: ${what}.\n\n` +
     (args.reason ? `Agent's reason: ${args.reason}\n\n` : "") +
+    (paths ? `${paths}\n\n` : "") +
+    (args.attempts.length > 0
+      ? `**What each attempt did:**\n${formatResolveAttempts(args.attempts)}\n\n`
+      : "") +
     `The merge was reverted, nothing reached \`${args.sourceBranch}\`, and the ` +
     `\`${LAND_LABEL}\` label has been removed so the same failing merge is not ` +
     `retried every cycle. The chunk branch and its issues are untouched — fix the ` +

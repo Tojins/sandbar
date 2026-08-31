@@ -605,13 +605,21 @@ function makeVerify(script: VerifyScript): {
       // A resolve attempt means the current round's verdict is spent; the next
       // listCheckRuns belongs to the next round.
       round += 1;
-      return { stdout: script.agents?.[agents++] ?? "<promise>COMMITTED</promise>" };
+      return {
+        stdout: script.agents?.[agents++] ?? "<promise>COMMITTED</promise>",
+        stderr: "",
+        end: "exit",
+        exitCode: 0,
+        signal: null,
+        durationMs: 42,
+        container: "sandbar-wdeadbeef-resolve-1-uuid",
+      };
     },
     async isMergeInProgress() {
       return false;
     },
     async conflictDigest() {
-      return { status: "", diff: "" };
+      return { status: "", diff: "", paths: [] };
     },
     async npmInstall() {
       return { ok: true };

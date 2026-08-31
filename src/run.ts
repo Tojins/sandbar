@@ -894,6 +894,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           const stackForGate2 = mergerStack;
           const adapter = realAdapter({
             cwd: mergerWorktree.path,
+            scope,
             repo,
             sourceBranch: config.sourceBranch,
             botName: config.botName,
@@ -952,6 +953,11 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             {
               cycleIssues: issues,
               projectAnchor,
+              // #67: every resolve attempt's stdout and stderr, beside the
+              // gate artefact it was prompted from. The writer answers with
+              // the path, which is what the abandon comment points at.
+              onResolveAttempt: (key, record) =>
+                cycleLogger.writeResolveAttempt(key, record),
               ...(verified ? { verified } : {}),
               ...(landRequests.length > 0
                 ? {

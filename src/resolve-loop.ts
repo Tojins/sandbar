@@ -12,12 +12,59 @@
 // In `forge-red` mode the loop's local gate is a cheap pre-filter between
 // expensive CI rounds: `resolved` means "worth asking the forge again", not
 // "verified". forge-verify.ts owns the re-push and the real verdict.
+//
+// ---------------------------------------------------------------------------
+// What an attempt leaves behind (#67)
+// ---------------------------------------------------------------------------
+//
+// Every attempt is RECORDED, in three places, because this loop was
+// load-bearing and mute: four of them once produced five log lines between
+// them, and the only artefact a human read afterwards named no file, no timing
+// and no container.
+//
+//   * `ResolveAttemptSink` takes the invocation's stdout AND stderr, verbatim,
+//     for the run log tree. The adapter never read stderr at all before, so a
+//     container that failed to start took its own diagnosis with it.
+//   * `log` gets one line per attempt carrying the container name, the exit
+//     code, the duration and which of timeout / clean exit / signal ended it.
+//   * `ResolveOutcome.abandon` carries the whole journal plus the conflicted
+//     paths, so the comment the merger posts can say what actually happened
+//     instead of "bailed after 4 attempts".
+//
+// And the case that motivated all of it: AN ATTEMPT THAT PRODUCED NO OUTPUT IS
+// AN INFRASTRUCTURE FAILURE, NOT AN ANSWER. `parseResolveSignal` reads empty
+// output as NO-SIGNAL, which the loop otherwise treats exactly like a COMMITTED
+// that left the tree dirty — re-prompt, spend an attempt. So an image that is
+// gone, a refused podman socket, an OOM kill or a bad mount was laundered into
+// "the agent tried and failed", and burned three quarters of the budget doing
+// it in eleven seconds. `isInfraFailure` classes it and the loop THROWS: the
+// merger wraps that into a halt as it does every other internal failure (#33),
+// and the remaining attempts are not spent.
+//
+// The one exception is the TIMEOUT. An attempt SIGTERM'd at
+// `RESOLVE_AGENT_TIMEOUT_MS` demonstrably ran for the whole budget — it just
+// never got to print — so it is a spent attempt like any other. It is NAMED as
+// one in the log line and in the comment, which is the entire difference
+// between it and the sub-three-second no-ops it used to be indistinguishable
+// from.
 
+import { SandbarError } from "./errors.js";
 import { summarizeGateFailure } from "./gate.js";
 import type { MergerGateOutput } from "./merger.js";
 import { loadTemplate, render } from "./prompts.js";
 
 export const RESOLVE_MAX_ATTEMPTS = 4;
+
+// 10 minutes per agent invocation: each iteration may need to read several
+// related issues + the conflict / gate trace + edit files. The loop bounds
+// total agentic time at RESOLVE_MAX_ATTEMPTS × this.
+//
+// Here rather than beside the adapter that enforces it (#67): the prose this
+// module writes has to name the budget an attempt hit, and a comment telling a
+// human "the ten-minute timeout" while the adapter counts to five is a comment
+// lying about the one number it exists to report.
+export const RESOLVE_AGENT_TIMEOUT_MS = 10 * 60_000;
+
 const TRACE_LINES = 200;
 
 // The gate trace the resolve agent is shown: the failing STEP's output, cascade-
@@ -62,10 +109,106 @@ export type ResolveMode =
       readonly failedChecks: string;
     };
 
+// How one `podman run … claude` invocation ended. `timeout` is sandbar's own
+// SIGTERM at RESOLVE_AGENT_TIMEOUT_MS and nothing else; `signal` is anything
+// else that killed the process (an OOM kill, an operator's Ctrl-C reaching the
+// group); `spawn-error` is a runtime that never produced a process at all.
+export type ResolveAgentEnd = "exit" | "timeout" | "signal" | "spawn-error";
+
+// What one invocation actually did. The token parser only ever needed
+// `stdout`; every other field here exists so that an attempt which produced
+// nothing can be told apart from an agent that chose to say nothing (#67).
+export type ResolveAgentRun = {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly end: ResolveAgentEnd;
+  // The process's exit code, or null when it was killed before it had one.
+  readonly exitCode: number | null;
+  // The signal that killed it, or null. Both are carried because a SIGTERM'd
+  // process reports one and not the other, and "which of the two ended it" is
+  // exactly the question the old log line could not answer.
+  readonly signal: string | null;
+  readonly durationMs: number;
+  // The container it ran in, so an infra failure names something an operator
+  // can go and look at (`podman ps -a`, `podman logs`) rather than describing
+  // an anonymous process that is already gone.
+  readonly container: string;
+  // Why the runtime never started, when `end` is `spawn-error`.
+  readonly detail?: string;
+};
+
+// Which prompt the attempt was answering — the same three shapes the loop's
+// own `AttemptTrace` has, named separately because this one is written to disk
+// and read by a human.
+export type ResolveAttemptMode = "still-conflicted" | "gate-red" | "forge-red";
+
+// One attempt, handed to the sink for durable capture.
+export type ResolveAttemptRecord = ResolveAgentRun & {
+  readonly attempt: number;
+  // The unit the loop is resolving for — an issue number, or a chunk's root.
+  readonly issueId: string;
+  readonly mode: ResolveAttemptMode;
+};
+
+// Writes one attempt's captured output somewhere durable and answers WHERE.
+//
+// It answers with the path rather than the caller composing one, because the
+// abandon comment has to point a human at these files: a second spelling of
+// the filename here is a comment that keeps pointing at `attempt-3.log` for a
+// year after the sink started writing `attempt-03.log`. `null` ⇒ captured
+// nowhere a human can be sent, which the prose then says outright rather than
+// inventing a path.
+export type ResolveAttemptSink = (
+  record: ResolveAttemptRecord,
+) => Promise<string | null>;
+
+// What the loop concluded about the tree the attempt left behind. Recorded per
+// attempt so the abandon comment can distinguish four genuine resolution
+// failures from one timeout and three containers that never ran.
+export type ResolveAttemptVerdict =
+  | "still-conflicted"
+  | "install-failed"
+  | "gate-red"
+  | "resolved"
+  | "abandon"
+  | "silent-noop";
+
+// One attempt as the abandon comment reports it: how the invocation ended, and
+// what the loop then made of it. Deliberately holds SIZES and not the output
+// itself — the output is on disk, and a comment that inlined four agent
+// transcripts would be unreadable and would hit GitHub's body limit.
+export type ResolveAttemptSummary = {
+  readonly attempt: number;
+  readonly end: ResolveAgentEnd;
+  readonly exitCode: number | null;
+  readonly signal: string | null;
+  readonly durationMs: number;
+  readonly container: string;
+  readonly stdoutBytes: number;
+  readonly stderrBytes: number;
+  readonly verdict: ResolveAttemptVerdict;
+  // Where this attempt's stdout/stderr were written, when a sink took them.
+  readonly logPath: string | null;
+};
+
 export type ResolveAdapter = {
-  runResolveAgent(prompt: string): Promise<{ readonly stdout: string }>;
+  // `attempt` is passed so the invocation can be NAMED after it — the
+  // container name is the handle on a failure that produced nothing else, and
+  // an anonymous one leaves an operator grepping `podman events` by timestamp.
+  runResolveAgent(
+    prompt: string,
+    attempt: number,
+  ): Promise<ResolveAgentRun>;
   isMergeInProgress(): Promise<boolean>;
-  conflictDigest(): Promise<{ readonly status: string; readonly diff: string }>;
+  // `paths` is the unmerged set (`git diff --name-only --diff-filter=U`), kept
+  // apart from the human-readable `status` because the abandon comment lists
+  // the conflicted files and parsing them back out of porcelain prose is a
+  // parser nobody would trust (#67).
+  conflictDigest(): Promise<{
+    readonly status: string;
+    readonly diff: string;
+    readonly paths: readonly string[];
+  }>;
   npmInstall(): Promise<{ readonly ok: boolean }>;
   runGate(): Promise<
     { readonly ok: true } | ({ readonly ok: false } & MergerGateOutput)
@@ -90,6 +233,14 @@ export type ResolveOutcome =
       // implementer will re-attempt against current source with a different
       // conflict surface.
       readonly silent?: boolean;
+      // Every attempt this loop spent, in order (#67). The merger's abandon
+      // comment is the only artefact a human reads when they find a stuck
+      // issue in the morning, and "bailed after 4 attempts" described one
+      // ten-minute timeout plus three containers that died at startup.
+      readonly attempts: readonly ResolveAttemptSummary[];
+      // The unmerged paths as of the last conflict digest taken, or empty when
+      // the loop never saw a conflict (a gate-red or forge-red run).
+      readonly conflictPaths: readonly string[];
     };
 
 export type ResolveLogger = (line: string) => void | Promise<void>;
@@ -111,6 +262,11 @@ export type ResolveLoopDeps = {
   // about the source branch by construction — gets the right answer without
   // saying so.
   readonly target?: string;
+  // Where each attempt's stdout and stderr go (#67). Optional: forge-verify's
+  // own callers and every test that only cares about the loop's decisions pass
+  // nothing, and the loop then reports `logPath: null` rather than pretending
+  // a file exists.
+  readonly onAttempt?: ResolveAttemptSink;
 };
 
 export const SOURCE_TARGET_PHRASE = "the source branch";
@@ -152,9 +308,16 @@ export async function runResolveLoop(
     });
   }
 
+  // The journal the abandon comment is written from, and the paths it names.
+  // Both accumulate as the loop runs; both are reported on every abandon,
+  // including the exhausted one that used to say nothing but a count.
+  const attempts: ResolveAttemptSummary[] = [];
+  let conflictPaths: readonly string[] = [];
+
   let trace: AttemptTrace;
   if (initialMode.kind === "conflict") {
     const d = await adapter.conflictDigest();
+    conflictPaths = d.paths;
     trace = { kind: "still-conflicted", digest: formatConflictDigest(d) };
   } else if (initialMode.kind === "forge-red") {
     trace = {
@@ -187,21 +350,75 @@ export async function runResolveLoop(
     });
 
     await log(`resolve-attempt ${attempt}/${RESOLVE_MAX_ATTEMPTS} mode=${trace.kind}`);
-    const result = await adapter.runResolveAgent(prompt);
-    const signal = parseResolveSignal(result.stdout);
+    const run = await adapter.runResolveAgent(prompt, attempt);
+    // Captured BEFORE anything is decided about the run, so the file exists
+    // even on the path that throws — an infra failure whose output went
+    // nowhere is the exact hole this issue was filed about.
+    const logPath = deps.onAttempt
+      ? await deps.onAttempt({
+          ...run,
+          attempt,
+          issueId: issue.id,
+          mode: trace.kind,
+        })
+      : null;
+    await log(
+      `resolve-attempt ${attempt} ${describeRunEnd(run)} container=${run.container}` +
+        (logPath ? ` log=${logPath}` : ""),
+    );
+
+    // One journal entry per attempt, filed once the loop knows what it made of
+    // the tree. A closure over this attempt's run so that every `continue` and
+    // every `return` below files exactly one, and none of them has to restate
+    // the eight fields that came out of the invocation.
+    const record = (verdict: ResolveAttemptVerdict): void => {
+      attempts.push({
+        attempt,
+        end: run.end,
+        exitCode: run.exitCode,
+        signal: run.signal,
+        durationMs: run.durationMs,
+        container: run.container,
+        stdoutBytes: run.stdout.length,
+        stderrBytes: run.stderr.length,
+        verdict,
+        logPath,
+      });
+    };
+
+    // Nothing ran. Not an answer, and not this loop's to absorb — see the
+    // header. Thrown rather than returned as an abandon, because an abandon is
+    // a statement about the CODE ("this conflict cannot be resolved") that
+    // parks the issue under `agent-stuck` and takes it off the queue; what
+    // happened here is a statement about the host.
+    if (isInfraFailure(run)) {
+      record("still-conflicted");
+      throw new SandbarError(buildInfraFailureMessage(issue, attempt, run, logPath));
+    }
+
+    const signal = parseResolveSignal(run.stdout);
 
     if (signal.kind === "ABANDON") {
       const inProgress = await adapter.isMergeInProgress();
       await log(
         `resolve-abandon attempt=${attempt} reason=${JSON.stringify(signal.reason)} mergeInProgress=${inProgress}`,
       );
-      return { kind: "abandon", reason: signal.reason, mergeInProgress: inProgress };
+      record("abandon");
+      return {
+        kind: "abandon",
+        reason: signal.reason,
+        mergeInProgress: inProgress,
+        attempts,
+        conflictPaths,
+      };
     }
 
     const stillConflicted = await adapter.isMergeInProgress();
     if (stillConflicted) {
       await log(`resolve-attempt ${attempt} still conflicted; re-prompting`);
+      record("still-conflicted");
       const d = await adapter.conflictDigest();
+      conflictPaths = d.paths;
       trace = { kind: "still-conflicted", digest: formatConflictDigest(d) };
       continue;
     }
@@ -209,6 +426,7 @@ export async function runResolveLoop(
     const install = await adapter.npmInstall();
     if (!install.ok) {
       await log(`resolve-attempt ${attempt} npm install failed`);
+      record("install-failed");
       trace = {
         kind: "gate-red",
         trace:
@@ -231,21 +449,26 @@ export async function runResolveLoop(
           await log(
             `resolve-attempt ${attempt} gate green but HEAD did not advance — silent abandon`,
           );
+          record("silent-noop");
           return {
             kind: "abandon",
             reason:
               "Silent no-op: agent reported COMMITTED and left no merge in progress, but HEAD did not advance from preMergeSha. Likely `git merge --abort` followed by exit without producing a merge commit.",
             mergeInProgress: false,
             silent: true,
+            attempts,
+            conflictPaths,
           };
         }
       }
       await log(`resolve-attempt ${attempt} gate green — resolved`);
+      record("resolved");
       return { kind: "resolved" };
     }
     await log(
       `resolve-attempt ${attempt} gate red failedStep=${gate.failedStep ?? "-"}`,
     );
+    record("gate-red");
     trace = {
       kind: "gate-red",
       trace: withStackLogs(gate, `${gate.stdout}\n${gate.stderr}`),
@@ -258,7 +481,134 @@ export async function runResolveLoop(
     kind: "abandon",
     reason: `Exhausted ${RESOLVE_MAX_ATTEMPTS} resolve attempts.`,
     mergeInProgress: inProgress,
+    attempts,
+    conflictPaths,
   };
+}
+
+// ---------------------------------------------------------------------------
+// What an attempt did — reporting (#67). Pure; the loop, the merger's abandon
+// comment and chunk-land's pull-request comment all read from here, so there
+// is one vocabulary for "the ten-minute timeout" rather than three.
+// ---------------------------------------------------------------------------
+
+const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
+
+const bytes = (n: number): string =>
+  n < 1024 ? `${n}B` : `${(n / 1024).toFixed(1)}kB`;
+
+// The log line's half: dense, greppable, one attempt per line.
+function describeRunEnd(run: ResolveAgentRun): string {
+  return (
+    `ended=${run.end} after=${seconds(run.durationMs)} ` +
+    `exit=${run.exitCode ?? "-"} signal=${run.signal ?? "-"} ` +
+    `stdout=${bytes(run.stdout.length)} stderr=${bytes(run.stderr.length)}`
+  );
+}
+
+// The prose half, for a comment a human reads once and acts on.
+function describeEndForHumans(run: {
+  readonly end: ResolveAgentEnd;
+  readonly exitCode: number | null;
+  readonly signal: string | null;
+  readonly durationMs: number;
+}): string {
+  switch (run.end) {
+    case "timeout":
+      return (
+        `ran for ${seconds(run.durationMs)} and was killed by sandbar's ` +
+        `${RESOLVE_AGENT_TIMEOUT_MS / 60_000}-minute per-attempt timeout`
+      );
+    case "signal":
+      return `was killed by ${run.signal ?? "a signal"} after ${seconds(run.durationMs)}`;
+    case "spawn-error":
+      return `never started (after ${seconds(run.durationMs)})`;
+    default:
+      return `exited with code ${run.exitCode ?? "?"} after ${seconds(run.durationMs)}`;
+  }
+}
+
+const VERDICT_PROSE: Record<ResolveAttemptVerdict, string> = {
+  "still-conflicted": "the tree was still conflicted",
+  "install-failed": "`npm install` against the merged tree failed",
+  "gate-red": "the post-merge gate was still red",
+  resolved: "the gate went green",
+  abandon: "the agent asked to abandon",
+  "silent-noop": "the agent left no merge and no commit",
+};
+
+// An attempt that produced NOTHING did not answer — it failed to run. See the
+// header for why that is thrown rather than re-prompted, and why the timeout
+// is the one end that is exempt: it burned the whole budget in the container,
+// so it is a spent attempt whatever it printed.
+export function isInfraFailure(run: ResolveAgentRun): boolean {
+  if (run.end === "spawn-error") return true;
+  if (run.end === "timeout") return false;
+  return run.stdout.trim() === "";
+}
+
+// How much of stderr rides along in the halt message. The whole of it is on
+// disk; what belongs in a message an operator reads in a terminal is the tail,
+// which is where a container's own complaint ("image not known", "cannot
+// connect to podman socket") lands.
+const INFRA_STDERR_TAIL = 600;
+
+export function buildInfraFailureMessage(
+  issue: IssueRef,
+  attempt: number,
+  run: ResolveAgentRun,
+  logPath: string | null,
+): string {
+  const remaining = RESOLVE_MAX_ATTEMPTS - attempt;
+  const tail = run.stderr.trim().slice(-INFRA_STDERR_TAIL);
+  return (
+    `merger: the resolve agent for #${issue.id} produced no output on attempt ` +
+    `${attempt}/${RESOLVE_MAX_ATTEMPTS}. Container \`${run.container}\` ` +
+    `${describeEndForHumans(run)}` +
+    (run.detail ? ` (${run.detail})` : "") +
+    ". A container that never ran is an infrastructure failure — a missing or " +
+    "unbuildable sandbox image, a refused podman socket, an OOM kill, a bad " +
+    "mount — not an agent declining to answer, so the merge phase halts here " +
+    `rather than spending the remaining ${remaining} resolve attempt` +
+    `${remaining === 1 ? "" : "s"} on it. ` +
+    (logPath
+      ? `Its stdout and stderr are at ${logPath}.`
+      : "Its stdout and stderr were not captured to a file (no attempt sink " +
+        "was wired into this run).") +
+    (tail ? `\n\nstderr (tail):\n${tail}` : "")
+  );
+}
+
+// The attempt-by-attempt block every abandon comment carries. Markdown, since
+// both consumers post it to a forge.
+export function formatResolveAttempts(
+  attempts: readonly ResolveAttemptSummary[],
+): string {
+  if (attempts.length === 0) {
+    return "No resolve attempt was recorded.";
+  }
+  return attempts
+    .map((a) => {
+      const where = a.logPath ? ` Output: \`${a.logPath}\`.` : "";
+      return (
+        `- **Attempt ${a.attempt}** — the agent ${describeEndForHumans(a)}, ` +
+        `writing ${bytes(a.stdoutBytes)} of stdout and ${bytes(a.stderrBytes)} ` +
+        `of stderr; ${VERDICT_PROSE[a.verdict]}.` +
+        ` Container \`${a.container}\`.${where}`
+      );
+    })
+    .join("\n");
+}
+
+// The conflicted-file block. Empty for a gate-red or forge-red abandon, where
+// there were never any — saying "conflicted paths: none" there would read as a
+// clean merge rather than as a question that was never asked.
+export function formatConflictPaths(paths: readonly string[]): string {
+  if (paths.length === 0) return "";
+  return (
+    `**Conflicted path${paths.length === 1 ? "" : "s"} (${paths.length}):**\n` +
+    paths.map((f) => `- \`${f}\``).join("\n")
+  );
 }
 
 function formatConflictDigest(d: {
