@@ -1190,9 +1190,9 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   //
   // A DISPOSABLE (#55) rather than a plain `onCleanup`: a run starts one of
   // these per issue and one for the merger, every cycle. `registerDisposable`
-  // keeps that early-registration window exactly as it is — it is one shared
-  // registry entry, drained reverse-insertion — while letting `stop` forget
-  // itself once it has run.
+  // leaves the window above and this entry's LIFO position exactly as they
+  // were — it is an ordinary registry entry that can be taken back out — while
+  // letting `stop` forget itself once it has run.
   const dispose = registerDisposable(stop);
 
   try {

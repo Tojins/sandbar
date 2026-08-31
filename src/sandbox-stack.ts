@@ -395,7 +395,11 @@ export async function startSandboxStack(
   // — one per container would grow without limit across a run. And a
   // DISPOSABLE (#55) rather than a plain `onCleanup`, because stacks are
   // themselves created in a loop: one per issue, plus one per HARD-ERROR retry.
-  // `registerDisposable`'s own header owns the rest of that argument.
+  // A disposable is an ordinary registry entry that can be withdrawn, so this
+  // one keeps the position it would have had — which is what `stop`'s own
+  // comment above leans on when it says the LIFO drain reaches this stack
+  // before the agent-sandbox teardown. `registerDisposable`'s own header owns
+  // the rest of that argument.
   const dispose = registerDisposable(stop);
 
   const attach: ContainerAttachment = {

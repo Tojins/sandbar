@@ -190,11 +190,11 @@ describe("SIGINT during a run", () => {
 // What a Ctrl-C tears down when the teardowns are DISPOSABLES (#55).
 //
 // Same process boundary as above, and for a sharper version of the same
-// reason: the failure this collapsing can introduce is invisible in-process. A
-// shared registry entry that drops an action, or drains its Set forwards
-// instead of backwards, still returns normally and still leaves the registry
-// looking swept — the only observable is which teardowns actually ran, in
-// which order, in a process that then died on the signal.
+// reason: what a disposable registry can get wrong is invisible in-process. An
+// entry that is dropped, or one that is drained out of position, still returns
+// normally and still leaves the registry looking swept — the only observable is
+// which teardowns actually ran, in which order, in a process that then died on
+// the signal.
 const disposableChildSource = (markerPath: string) => `
 import { appendFileSync } from "node:fs";
 import {
@@ -212,28 +212,35 @@ const slow = (line) => async () => {
 };
 
 installCleanupTraps();
-// A plain entry, registered before any disposable — which is where run.ts
-// registers all four of its own, ahead of the cycle loop that creates the
-// disposables. LIFO therefore puts it LAST, exactly as it was before the
-// collapsing, and that is the property the shared entry must not disturb.
+// A plain entry registered before any disposable — where run.ts registers all
+// four of its own, ahead of the cycle loop that creates the disposables. LIFO
+// puts it last.
 onCleanup(slow("plain-first"));
 
 registerDisposable(slow("d0"));
-registerDisposable(slow("d1"));
-const dropD2 = registerDisposable(slow("d2-MUST-NOT-RUN"));
+const dropD1 = registerDisposable(slow("d1-MUST-NOT-RUN"));
+// The unregister half, and the ordinary shape of it: a teardown that has
+// already run drops itself and must not run again off the registry.
+dropD1();
+// A plain entry registered BETWEEN two disposables. This is agent-sandbox.ts's
+// \`onCleanup(runTeardowns)\` in miniature — registered lazily when the first
+// sandbox container is created, which is inside the cycle loop and after the
+// gate stack's own registration — and it is why these are removable registry
+// entries rather than one shared entry over a Set. Collapsed, every disposable
+// would drain on the far side of this line and the netns anchor would go before
+// its joiners.
+onCleanup(slow("plain-mid"));
+registerDisposable(slow("d2"));
 registerDisposable(async () => {
   await new Promise((r) => setTimeout(r, 100));
   note("d3");
   // The mid-drain window. A signal does not abort an in-flight startStack, it
   // starts the drain alongside it, so an action registered while the drain is
-  // running still has to be picked up — the property \`while (size > 0)\` exists
-  // for, and the one a refactor to \`for (const x of set)\` would delete in
-  // silence.
+  // running still has to be picked up — which is \`runCleanup\`'s own
+  // \`while (actions.length > 0)\` loop, and the property a refactor to a
+  // snapshot would delete in silence.
   registerDisposable(slow("d4-mid-drain"));
 });
-// The unregister half: a teardown that has already run drops itself, and must
-// then not run again off the registry.
-dropD2();
 
 console.log("ready");
 setInterval(() => {}, 1000);
@@ -246,32 +253,33 @@ describe("SIGINT with disposable teardowns", () => {
     run = await sigintChild("disposables", disposableChildSource);
   }, 30_000);
 
-  it("runs every disposable, behind the one shared registry entry", () => {
+  it("runs every disposable that was not withdrawn", () => {
     expect(run.lines).toContain("d0");
-    expect(run.lines).toContain("d1");
+    expect(run.lines).toContain("d2");
     expect(run.lines).toContain("d3");
   });
 
   it("does not run a disposable that was unregistered", () => {
-    expect(run.lines).not.toContain("d2-MUST-NOT-RUN");
+    expect(run.lines).not.toContain("d1-MUST-NOT-RUN");
   });
 
   it("picks up a disposable registered DURING the drain", () => {
     expect(run.lines).toContain("d4-mid-drain");
   });
 
-  it("drains reverse-registration, and after everything registered later", () => {
-    // d3, then d4 (registered mid-drain, so newest by the time the drain looks
-    // again), then d1, d0 — and the plain entry last, because LIFO reaches the
-    // shared entry at the position of the FIRST disposable registration, which
-    // is still ahead of it. Asserted as the whole sequence rather than as
-    // `toContain`s: a Set iterated forwards would run d0 first and tear down
-    // the merger worktree while the merger stack still bind-mounts it, and
-    // every individual membership check above would still pass.
+  it("drains LIFO, with the plain entries in the positions they registered in", () => {
+    // Asserted as the whole sequence rather than as `toContain`s, because every
+    // membership check above passes under both failures this can have: a
+    // disposable drained in the wrong position, and `plain-mid` overtaken by
+    // disposables that were registered before it. d3 first, then d4 (registered
+    // mid-drain, so newest when the drain looks again), then d2, then
+    // `plain-mid` in its own registration position, then d0, then
+    // `plain-first`. d1 withdrew itself and is not here at all.
     expect(run.lines).toEqual([
       "d3",
       "d4-mid-drain",
-      "d1",
+      "d2",
+      "plain-mid",
       "d0",
       "plain-first",
     ]);

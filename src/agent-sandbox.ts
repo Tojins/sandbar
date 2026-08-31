@@ -481,11 +481,15 @@ export const claudeCode = (
 // handler owns the exit and its code. Registered ONCE, lazily: that registry
 // never forgets an action, so an entry per sandbox would grow without limit —
 // ensure-images.ts's build reaper is the same shape for the same reason.
-// `cleanup.ts`'s `registerDisposable` (#55) is that shape given a name, and
-// this Set deliberately does NOT migrate to it: it is drained from
-// `process.on("exit")` too, where nothing can be awaited, which is why these
-// teardowns are synchronous where a disposable's are async. The reason is
-// recorded at `registerDisposable`'s own definition as well.
+// This Set deliberately does NOT migrate to `cleanup.ts`'s `registerDisposable`
+// (#55): it is drained from `process.on("exit")` too, where nothing can be
+// awaited, which is why these teardowns are synchronous where a disposable's
+// are async. The reason is recorded at `registerDisposable`'s own definition as
+// well — along with the other thing this entry decides. Registered lazily, it
+// lands INSIDE the cycle loop and after the gate stack's own registration, so a
+// disposable registry that collapsed its members into one entry at the position
+// of the first of them would drain this one first and remove the netns anchor
+// out from under the sandbox stack's joiners.
 //
 // `process.on("exit")` stays. It is synchronous and last-resort by nature, and
 // it is what covers a bare `process.exit` from elsewhere in the run, which
