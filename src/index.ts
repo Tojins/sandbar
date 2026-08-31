@@ -1,4 +1,4 @@
-export { run } from "./run.js";
+export { run, type RunOptions } from "./run.js";
 // The gate stack on its own (#45), for the same reason `run` is exported: the
 // bin is thin, so anything it can do a host embedding sandbar can do too. The
 // exit codes are exported with it because the number IS the verdict and a host

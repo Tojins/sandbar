@@ -51,6 +51,14 @@
 // and agent output: orchestrator.log at the run root, plan.json + merger.log
 // + issue-<id>/attempt-<m>.log per cycle.
 //
+// Ahead of all of it, on stdout and then again as orchestrator.log's first
+// line, is the DRIVER IDENTITY (#69) — the version, the tree `dist/` was built
+// from, the config file's path, and whether either tree is dirty. It is printed
+// before the lock, before preflight and before the config is even resolved,
+// because those can each end the run and the answer to "what produced this
+// verdict, or this complaint" has to be above them. `driver-identity.ts` owns
+// what it can and cannot claim.
+//
 // Outer-loop termination is governed by exit-conditions.ts: plan-empty →
 // success, repeated-plan-with-zero-DONEs or two consecutive zero-DONE cycles
 // → stuck, issuesAttempted hits maxTotalIssues → budget — and, with
@@ -72,6 +80,10 @@ import {
   fileChunkReviewFollowUps,
   realAdapter as realChunkFollowUpAdapter,
 } from "./chunk-follow-up.js";
+import {
+  formatDriverIdentity,
+  readDriverIdentity,
+} from "./driver-identity.js";
 import {
   type BranchImages,
   checkWorktreeImageUids,
@@ -169,7 +181,31 @@ function reportSweepFailures(result: SweepResult): void {
   );
 }
 
-export async function run(rawConfig: RunConfig): Promise<void> {
+// Everything a run needs that is not configuration (#69). `run(config)` is
+// still the contract — this is a second, optional argument, because a config
+// file's own PATH is not one of its fields: the config is a program that
+// neither knows nor should know where it was imported from, and a `configPath`
+// key inside it would be a second source of truth for something the loader
+// already holds. The bin passes what it resolved; a programmatic host that has
+// no file passes nothing and the identity line says so.
+export type RunOptions = {
+  readonly configPath?: string;
+};
+
+export async function run(
+  rawConfig: RunConfig,
+  options: RunOptions = {},
+): Promise<void> {
+  // Before `resolveConfig`, and before the GH_TOKEN check, the lock and
+  // preflight — every one of which can end the run with a complaint, and every
+  // one of which is a complaint FROM this driver. It needs nothing from the
+  // config but the path the bin already resolved, it cannot throw, and it costs
+  // a handful of local git calls (#69).
+  const driverIdentity = formatDriverIdentity(
+    await readDriverIdentity({ configPath: options.configPath ?? null }),
+  );
+  console.log(driverIdentity);
+
   const config = resolveConfig(rawConfig);
   const env = makeEnvReader(config.env);
   // Every directory the run uses, derived once (#38). `config.cwd` is the
@@ -419,6 +455,12 @@ export async function run(rawConfig: RunConfig): Promise<void> {
     baseDir: layout.logsDir,
   });
   console.log(`Run log tree: ${runLogger.runDir}`);
+  // The same line the banner already printed, now in the tree it belongs to
+  // (#69). It cannot be written when it is computed — the log tree is created
+  // under the lock, after preflight, so that nothing which loses a race litters
+  // `logs/` — and it is the first line after `run-start` because every verdict
+  // below it is a verdict this driver reached.
+  await runLogger.appendOrchestrator(driverIdentity);
   let cleanupReason = "normal-exit";
   onCleanup(() => runLogger.finalize(cleanupReason));
 

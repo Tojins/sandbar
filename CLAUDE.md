@@ -246,6 +246,15 @@ default 50, exit 3).
   keeps only structure. Every git range a prompt renders anchors at the issue
   branch's SEED REF, never a bare branch name (#40, #61) — `src/prompt.ts`.
 - **Logs are append-only and unbuffered** (`src/logs.ts`).
+- **A run opens by naming what is driving it (#69).** One line on stdout and in
+  `orchestrator.log`: version, the tree `dist/` was built from, the config
+  file's path, and whether either tree is dirty — because both are read from the
+  operator's working tree (`npm run sandbar` = pull, build, run) and #66 has not
+  removed that coupling yet. A fact, never a warning, never a refusal, and every
+  field degrades to `unknown`. `src/driver-identity.ts` owns the two-tree
+  argument and the `check-ignore` guard that keeps a driver under `node_modules`
+  from being attributed to the host repo's HEAD; `run(config, { configPath })`
+  is how the bin tells it which file it loaded.
 
 ## This repo runs itself (#39)
 
