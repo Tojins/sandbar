@@ -1044,12 +1044,17 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             .join(", ")}`,
         );
       }
-      const retiredResidue = landedChunks
-        .filter((c) => c.branchDeleted)
-        .flatMap((c) => c.residue);
+      // The chunks that retired AND left something behind — not every chunk
+      // that retired. Two landing cleanly and one leaving a stray label is
+      // "1 chunk … with some bookkeeping left over", and the count a human
+      // reads has to be the count of what the lines below are about.
+      const untidyChunks = landedChunks.filter(
+        (c) => c.branchDeleted && c.residue.length > 0,
+      );
+      const retiredResidue = untidyChunks.flatMap((c) => c.residue);
       if (retiredResidue.length > 0) {
         console.warn(
-          `\nSandbar landed and retired ${landedChunks.length - keptChunks.length} ` +
+          `\nSandbar landed and retired ${untidyChunks.length} ` +
             `chunk(s) on ${config.sourceBranch}, with some bookkeeping left over:\n` +
             retiredResidue.map((r) => `  ${r}`).join("\n") +
             "\nEvery member closed and the chunk branch is gone, so nothing retries " +
