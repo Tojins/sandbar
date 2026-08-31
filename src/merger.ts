@@ -71,6 +71,21 @@
 // is reviewed as one unit against the tree it was cut from, and reconciling it
 // with the source branch is part of landing the chunk, not of growing it.
 //
+// EVERY CHUNK PUSH IS FOLLOWED BY A DRAFT PULL REQUEST (#62), created or
+// updated, chunk → source branch: the branch is where the work is, the PR is
+// where a human reviews it, and the review lane produces nothing anyone can act
+// on without it. After the push and after the `chunkLanded` entries, in that
+// order — a PR is a handle on commits origin has, and a failure to open one
+// must not take a durable landing down with it. What it says is `chunk-pr.ts`;
+// the `gh` create-or-update is `forge-pr.ts`; that it is a DRAFT is the
+// mechanism disabling GitHub's merge button while leaving review intact, and
+// sandbar never un-drafts one a human made ready.
+//
+// A failure to open it HALTS, like every other tracker write in this loop. The
+// landing survives in the partial (those issues are on origin and still owe
+// `in-chunk`), so what the halt costs is the cycle, and what carrying on would
+// cost is a chunk branch growing under a human who was never shown it.
+//
 // After all branches processed, the cycle's merge result is LANDED. Two modes
 // (config.mergeMode, #22):
 //
@@ -136,9 +151,14 @@ import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 
-import type { ChunkTarget } from "./chunks.js";
+import {
+  chunkMembersOnBranch,
+  chunkPullRequestContent,
+} from "./chunk-pr.js";
+import type { ChunkMember, ChunkTarget } from "./chunks.js";
 import { type EnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
+import { type PullRequestRef, ensurePullRequest } from "./forge-pr.js";
 import { dirtyWorktreePaths } from "./git-ops.js";
 import {
   type Clock,
@@ -351,6 +371,16 @@ export type MergerAdapter = ResolveAdapter & {
   // rejected push means the chunk branch moved under us, so this composition
   // is not built on what is there and overwriting it would drop a member.
   pushChunkBranch(chunkBranch: string): Promise<PushResult>;
+  // Create-or-update the chunk's DRAFT pull request against the source branch
+  // (#62) — the review surface the whole review lane exists to produce. Called
+  // once per chunk per cycle, AFTER the push, because a PR is a handle on
+  // commits that are on origin. Title and body come from `chunk-pr.ts`: the
+  // prose is the caller's, the `gh` is the adapter's, as everywhere else here.
+  ensureChunkPullRequest(args: {
+    readonly chunkBranch: string;
+    readonly title: string;
+    readonly body: string;
+  }): Promise<PullRequestRef>;
 };
 
 export type SkipReason =
@@ -447,31 +477,55 @@ export function sortIssuesAsc(issues: readonly IssueRef[]): IssueRef[] {
 
 export type ChunkGroup = {
   readonly target: MergeTarget & { readonly kind: "chunk" };
+  // The chunk's root, which names it and titles its pull request (#62).
+  readonly root: number;
+  // The members that were already on the chunk branch when the plan was built
+  // (#62) — the plan's snapshot, not this cycle's work. Only the PR body reads
+  // it; nothing here decides anything by it, because the authority on what the
+  // branch carries is origin.
+  readonly landed: readonly ChunkMember[];
   // The cycle's DONE branches for this chunk, in the order given.
   readonly members: readonly IssueRef[];
 };
 
 // The chunk-landing work of a cycle, grouped by branch and ordered by chunk
-// root. One group is one checkout and one push, so grouping is what keeps the
-// landing at a single call site per chunk rather than one per issue.
+// root. One group is one checkout, one push and one pull request, so grouping
+// is what keeps the landing at a single call site per chunk rather than one
+// per issue.
 //
 // A group with more than one member is not reachable today — the planner only
 // ever picks a chunk's root, and a chunk has exactly one (see chunks.ts) — but
 // grouping rather than assuming that keeps #61's chained members a change to
 // the planner alone.
+//
+// `root` and `landed` are taken from the FIRST member seen for a branch. Every
+// member of one group carries the same `ChunkTarget`, built once per chunk by
+// the planner, so first-wins and a union of them agree; first-wins says which
+// answer is being trusted rather than papering over a disagreement that would
+// mean the plan contradicted itself.
 export function groupByChunk(issues: readonly IssueRef[]): readonly ChunkGroup[] {
-  const byBranch = new Map<string, { root: number; members: IssueRef[] }>();
+  const byBranch = new Map<
+    string,
+    { root: number; landed: readonly ChunkMember[]; members: IssueRef[] }
+  >();
   for (const issue of issues) {
     const chunk = issue.chunk;
     if (!chunk) continue;
     const existing = byBranch.get(chunk.branch);
     if (existing) existing.members.push(issue);
-    else byBranch.set(chunk.branch, { root: chunk.root, members: [issue] });
+    else
+      byBranch.set(chunk.branch, {
+        root: chunk.root,
+        landed: chunk.landed ?? [],
+        members: [issue],
+      });
   }
   return [...byBranch.entries()]
     .sort((a, b) => a[1].root - b[1].root)
-    .map(([branch, { members }]) => ({
+    .map(([branch, { root, landed, members }]) => ({
       target: { kind: "chunk" as const, branch },
+      root,
+      landed,
       members,
     }));
 }
@@ -805,6 +859,42 @@ export async function runMergerWithAdapter(
     await emit(
       `chunk ${branch}: landed ${landedMembers.map((m) => `#${issueNumberOf(m)}`).join(", ")} and pushed`,
     );
+
+    // The review surface (#62), last and never first: a pull request is a
+    // handle on commits, and one opened before the push would point at a
+    // branch origin does not have. The members are already recorded as landed
+    // above, so a failure here costs the PR and not the landing.
+    const prMembers = chunkMembersOnBranch(
+      group.landed,
+      landedMembers.map((m) => ({
+        number: issueNumberOf(m),
+        title: m.title,
+      })),
+    );
+    const pr = await adapter
+      .ensureChunkPullRequest({
+        chunkBranch: branch,
+        ...chunkPullRequestContent({
+          root: group.root,
+          branch,
+          members: prMembers,
+        }),
+      })
+      .catch(
+        // Loud, like every other tracker write in this loop. The landing is
+        // durable and the partial carries it, so the members still get
+        // `in-chunk`; what is missing is the thing a human reviews, and a run
+        // that carried on would keep landing work onto a branch nobody had
+        // been shown.
+        asHalt(
+          `Chunk branch ${branch} is on origin with ` +
+            `${landedMembers.map((m) => `#${issueNumberOf(m)}`).join(", ")} landed on it, ` +
+            `but its draft pull request could not be opened or updated. Those issues keep ` +
+            `their landing and are labelled in-chunk; open or update the PR by hand (or fix ` +
+            `gh's permissions — the next cycle that lands a member on this chunk retries it)`,
+        ),
+      );
+    await emit(`chunk ${branch}: draft PR ${pr.url || `#${pr.number}`}`);
   }
 
   // Back to where the cycle started, so the source-branch pass below merges
@@ -1479,6 +1569,23 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // exist on origin yet, and git only creates a ref from an unambiguous
       // destination.
       return pushHeadTo(`refs/heads/${chunkBranch}`);
+    },
+    async ensureChunkPullRequest({ chunkBranch, title, body }) {
+      // DRAFT, which is the whole mechanism (#54 Q14): it disables GitHub's
+      // merge button while leaving review fully functional. Only on create —
+      // `ensurePullRequest` re-titles and re-bodies a PR that already exists
+      // and never touches its draft state, so a human who marked this one
+      // ready for review keeps that decision. chunk-pr.ts's header owns the
+      // argument.
+      return ensurePullRequest({
+        cwd,
+        repoFlag: repoSlug(deps.repo),
+        head: chunkBranch,
+        base: deps.sourceBranch,
+        title,
+        body,
+        draft: true,
+      });
     },
   };
 }

@@ -108,7 +108,10 @@ an exit condition fires.
    directly, in both merge modes, because the forge gates what reaches the
    *source* branch and a chunk branch reaches a human. Chunk groups land first
    and the worktree returns to its entry sha, so the source pass and the
-   `landed` argument about what a partial may claim are untouched.
+   `landed` argument about what a partial may claim are untouched. Each pushed
+   chunk then gets its **draft PR** (#62), created-or-updated per cycle:
+   `src/chunk-pr.ts` is the prose, `src/forge-pr.ts` the one `gh pr`
+   create-or-update both PR kinds share.
 
 4. **Finalise** (`src/finalize.ts` + `src/finalize-inputs.ts`) — per-issue
    branch lifecycle, bot comments, label flips (`ready-for-agent` ↔
@@ -206,6 +209,14 @@ default 50, exit 3).
   what makes a branch. **Origin owns the chunk branch** — it is the review
   artifact and the recovery point, so every landing bases on `origin/<chunk>`
   and preflight fetches that namespace to reason about it.
+- **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,
+  created or updated after every landing push, listing everything the branch
+  carries — the members landing now plus `ChunkTarget.landed`, the planner's
+  snapshot of the members already holding `in-chunk` (only the plan has the
+  graph that knows them). Draft is the mechanism (#54 Q14): it disables the
+  merge button and leaves review intact. Sandbar re-titles and re-bodies, and
+  never re-drafts a PR a human made ready — that override is #64's to
+  reconcile. `src/chunk-pr.ts` owns the prose and what it may claim.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One cleanup registry owns signals and the exit (#35).** No module but

@@ -575,11 +575,15 @@ export type RunConfig = {
   // on the issue). `lanes.ts` owns the whole argument.
   //
   // A review-gated issue is worked and lands on its CHUNK's branch (#60) —
-  // `sandbar/chunk-<root>-<slug>`, pushed to origin, closed by nothing until a
-  // human reviews it. Two things a host has to have for that: the `in-chunk`
-  // label must EXIST in the repo (sandbar never creates labels, and this one is
-  // not configurable — see chunks.ts), and whoever reviews those branches has
-  // to know they are theirs to land. Third thing, and it bounds what the lane
+  // `sandbar/chunk-<root>-<slug>`, pushed to origin, and opened as a DRAFT pull
+  // request against the source branch (#62), which is what a human actually
+  // reviews. Nothing closes it until they do. Three things a host has to have
+  // for that: the `in-chunk` label must EXIST in the repo (sandbar never
+  // creates labels, and this one is not configurable — see chunks.ts), the
+  // `gh` credentials must be allowed to open and edit pull requests, and
+  // whoever reviews those branches has to know they are theirs to land — the
+  // draft PR says as much on itself, but nothing notifies them. Fourth thing,
+  // and it bounds what the lane
   // can do rather than what a host must provide: only a chunk's ROOT is worked
   // until #61. A chained member — a review-gated issue blocked by another one —
   // is held out of the plan permanently, not for a cycle or two: its blocker
