@@ -5,6 +5,7 @@ import {
   type ChunkIssue,
   IN_CHUNK_LABEL,
   deriveChunks,
+  landedChunksOf,
 } from "./chunks.js";
 import { type Lane, computeLanes } from "./lanes.js";
 
@@ -309,5 +310,78 @@ describe("deriveChunks — determinism", () => {
 describe("IN_CHUNK_LABEL (#59)", () => {
   it("is spelled `in-chunk`", () => {
     expect(IN_CHUNK_LABEL).toBe("in-chunk");
+  });
+});
+
+// #63 — what a chunk with work on origin looks like to the review scan. `tips`
+// is what the scan is really after: it is what a follow-up issue declares under
+// `## Blocked by`, so it decides both which chunk that issue joins and whether
+// it waits for the work its review is about.
+describe("landedChunksOf (#63)", () => {
+  const chain = allReview([
+    issue(42, [], "First"),
+    issue(43, [42], "Second"),
+    issue(44, [43], "Third"),
+  ]);
+
+  it("omits a chunk with nothing landed", () => {
+    // No branch on origin, no pull request, and nothing to be blocked by.
+    expect(landedChunksOf(chain.chunks, [], new Set())).toEqual([]);
+  });
+
+  it("names the chunk, its branch, and the deepest of what landed", () => {
+    const issues = [issue(42, [], "First"), issue(43, [42], "Second"), issue(44, [43], "Third")];
+    expect(landedChunksOf(chain.chunks, issues, new Set([42, 43]))).toEqual([
+      {
+        root: 42,
+        branch: "sandbar/chunk-42-first",
+        tips: [{ number: 43, title: "Second" }],
+      },
+    ]);
+  });
+
+  it("reports every tip when the branch carries siblings", () => {
+    // A chunk grows one LAYER per cycle, so two members landing together is
+    // the normal case — and a follow-up must sit behind both.
+    const issues = [issue(42, [], "First"), issue(43, [42], "A"), issue(44, [42], "B")];
+    const d = allReview(issues);
+    expect(landedChunksOf(d.chunks, issues, new Set([42, 43, 44]))[0]?.tips).toEqual([
+      { number: 43, title: "A" },
+      { number: 44, title: "B" },
+    ]);
+  });
+
+  it("ignores a blocker that has not landed", () => {
+    // #44 is blocked by #43, which is still queued: nothing of #43 is on the
+    // branch, so #42 is still what the branch ends at. (#44 landing before its
+    // own blocker cannot happen; the fixture only pins the rule.)
+    const issues = [issue(42, [], "First"), issue(43, [42], "Second"), issue(44, [43], "Third")];
+    expect(landedChunksOf(chain.chunks, issues, new Set([42]))[0]?.tips).toEqual([
+      { number: 42, title: "First" },
+    ]);
+  });
+
+  it("names a member the issue list has lost, rather than dropping it", () => {
+    // The number is the part `## Blocked by` acts on; an absent title costs a
+    // line of prose, an absent member would cost the edge.
+    expect(landedChunksOf(chain.chunks, [], new Set([42]))[0]?.tips).toEqual([
+      { number: 42, title: "" },
+    ]);
+  });
+
+  it("never reports an empty tip list", () => {
+    // Unreachable — the edge set is a DAG — and defended anyway: an issue with
+    // an empty `## Blocked by` section is the root of a chunk of its own, on a
+    // branch of its own, answering a review nobody is looking at.
+    const cyclic = [issue(42, [43], "First"), issue(43, [42], "Second")];
+    const chunk = {
+      root: 42,
+      members: [42, 43],
+      branch: "sandbar/chunk-42-first",
+    };
+    expect(landedChunksOf([chunk], cyclic, new Set([42, 43]))[0]?.tips).toEqual([
+      { number: 42, title: "First" },
+      { number: 43, title: "Second" },
+    ]);
   });
 });

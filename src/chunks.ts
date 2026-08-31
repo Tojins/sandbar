@@ -209,6 +209,24 @@ export type Chunk = {
   readonly branch: string;
 };
 
+// A chunk that has WORK ON ORIGIN, and what a consumer of the review surface
+// needs to know about it (#63). Derived after the fact from a `Chunk` and the
+// set of members carrying `IN_CHUNK_LABEL` — see `landedChunksOf`.
+export type LandedChunk = {
+  readonly root: number;
+  readonly branch: string;
+  // The landed members that no OTHER landed member is blocked by — the tips of
+  // what the branch carries, ascending. Non-empty, and the only member list
+  // here: it is what a NEW member of the chunk declares under `## Blocked by`
+  // (#63) — naming the tips is what puts it in THIS chunk (by the derivation
+  // above) and behind everything already on the branch, and naming only them
+  // keeps the section down to the edges the chunk's own graph does not already
+  // imply. The full landed set is derivable from `Chunk.members` and the label
+  // for anything that ever wants it; nothing does, and a field nothing reads is
+  // a contract nothing keeps honest.
+  readonly tips: readonly ChunkMember[];
+};
+
 // Why an issue got no chunk. All three mean "wait", never "give up".
 //
 //   two-chunk-parent  — its blockers sit in two or more different chunks (the
@@ -360,4 +378,62 @@ export function deriveChunks(
   blocked.sort((a, b) => a.issue - b.issue);
 
   return { chunks, chunkOf, blocked };
+}
+
+/**
+ * The chunks whose work is on origin, with the tips of what each carries (#63).
+ *
+ * `landed` is the caller's set of members carrying `IN_CHUNK_LABEL` — a label
+ * applied only once the chunk branch carrying a member's commits has been
+ * pushed, so it means exactly "this member's work is on the branch". `issues`
+ * is the same list `deriveChunks` was given, and is where the titles and the
+ * blocked-by edges come from; a member missing from it contributes an empty
+ * title rather than dropping out, because the number is the part anything acts
+ * on.
+ *
+ * A chunk with nothing landed is omitted: no branch on origin, no pull request,
+ * and nothing for a new member to be blocked by.
+ *
+ * `tips` falls back to the whole landed set if every landed member is blocked
+ * by another one. That is unreachable — the edge set is a DAG, which is what
+ * Kahn's walk above relies on — and it is written down anyway because an EMPTY
+ * tips list is not a harmless degradation: an issue with an empty
+ * `## Blocked by` section has no blockers, so it is parentless, so it is the
+ * root of a chunk of its OWN, on a branch of its own, and the review it was
+ * filed for gets answered somewhere nobody is looking.
+ */
+export function landedChunksOf(
+  chunks: readonly Chunk[],
+  issues: readonly ChunkIssue[],
+  landed: ReadonlySet<number>,
+): readonly LandedChunk[] {
+  const byNumber = new Map(issues.map((i) => [i.number, i] as const));
+  const asMember = (n: number): ChunkMember => ({
+    number: n,
+    title: byNumber.get(n)?.title ?? "",
+  });
+  const out: LandedChunk[] = [];
+  for (const chunk of chunks) {
+    // `chunk.members` is ascending, so both lists below are too.
+    const members = chunk.members.filter((m) => landed.has(m));
+    if (members.length === 0) continue;
+    const onBranch = new Set(members);
+    // Landed members some other landed member is built on top of. A blocker
+    // OUTSIDE the landed set cannot make a member a non-tip: it is either not
+    // in this chunk at all or still queued, and either way nothing of it is on
+    // the branch to be behind.
+    const covered = new Set<number>();
+    for (const m of members) {
+      for (const blocker of byNumber.get(m)?.blockedBy ?? []) {
+        if (blocker !== m && onBranch.has(blocker)) covered.add(blocker);
+      }
+    }
+    const tips = members.filter((m) => !covered.has(m));
+    out.push({
+      root: chunk.root,
+      branch: chunk.branch,
+      tips: (tips.length > 0 ? tips : members).map(asMember),
+    });
+  }
+  return out;
 }

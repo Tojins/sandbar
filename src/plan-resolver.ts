@@ -122,6 +122,16 @@
 // merger sees only DONE branches, so deriving it there would answer a
 // different question.
 //
+// Two things this module hands the CHUNK-REVIEW SCAN (#63). `landedChunks` on
+// the resolution is the derivation's answer to "which chunks have work on
+// origin, and what is at the tip of each" — the scan needs it to know which
+// pull requests to look at and what a follow-up issue declares itself blocked
+// by, and only the whole candidate graph can answer either. `extraCandidates`
+// on `buildPlan` is the way back in: a follow-up filed at the top of a cycle is
+// re-planned WITH it, so it takes its turn in the queue from that cycle rather
+// than the next run — and, in the case that matters, so a cycle cannot file an
+// issue and then exit plan-empty with the review unanswered.
+//
 // `fetchCandidates` NAMES the repository (#34). It used to identify it the way
 // `gh` does by default — from the git remotes of the directory the command runs
 // in — which made the planner's queue a property of a directory: first of
@@ -145,7 +155,14 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { type ChunkTarget, IN_CHUNK_LABEL, deriveChunks } from "./chunks.js";
+import {
+  type ChunkIssue,
+  type ChunkTarget,
+  type LandedChunk,
+  IN_CHUNK_LABEL,
+  deriveChunks,
+  landedChunksOf,
+} from "./chunks.js";
 import {
   DEFAULT_LANE,
   type Lane,
@@ -209,6 +226,18 @@ export type PlanResolution = {
   // about the issue's labels, and a human wants it while the chain is still
   // being queued, not once it reaches the front.
   readonly overrides: readonly LaneOverride[];
+  // The chunks with work ON ORIGIN — those with at least one member carrying
+  // `in-chunk` — and, per chunk, the TIPS of what its branch carries (#63).
+  // Empty for every host on the default lane, and empty before a chunk's
+  // first landing.
+  //
+  // Here for the same reason `PlannedIssue.chunk` is: the derivation needs the
+  // whole candidate graph, and this graph only exists inside this function. It
+  // is what the chunk-review scan (`chunk-follow-up.ts`) reads to find the
+  // pull requests to look at, and to name the tips a follow-up issue declares
+  // itself blocked by — neither of which a phase downstream of the plan could
+  // work out for itself.
+  readonly landedChunks: readonly LandedChunk[];
 };
 
 export function parseBlockedBy(body: string): readonly number[] {
@@ -248,14 +277,12 @@ export function resolvePlan(
   // since #60 it is also the landing target a planned review-gated issue
   // carries. `chunkOf` answers both "same chunk?" and "is this issue its
   // chunk's root?"; `chunks` names the branch.
-  const { chunks, chunkOf } = deriveChunks(
-    candidates.map((c) => ({
-      number: c.number,
-      title: c.title,
-      blockedBy: blockedBy.get(c.number) ?? [],
-    })),
-    lanes,
-  );
+  const chunkIssues: readonly ChunkIssue[] = candidates.map((c) => ({
+    number: c.number,
+    title: c.title,
+    blockedBy: blockedBy.get(c.number) ?? [],
+  }));
+  const { chunks, chunkOf } = deriveChunks(chunkIssues, lanes);
   const chunkByRoot = new Map(chunks.map((c) => [c.root, c] as const));
 
   // `in-chunk` from either source, because neither invents a label and each can
@@ -367,6 +394,14 @@ export function resolvePlan(
     plan,
     heldForReview: heldForReview.sort((a, b) => a - b),
     overrides: laneOverrides(lanes),
+    // Over the SAME `isInChunk` the two clauses above are decided by, so what
+    // the scan is told is on a chunk branch is what the planner treated as
+    // landed — one reading of the label, not two.
+    landedChunks: landedChunksOf(
+      chunks,
+      chunkIssues,
+      new Set(candidates.map((c) => c.number).filter(isInChunk)),
+    ),
   };
 }
 
@@ -496,6 +531,21 @@ export type BuildPlanOptions = {
   readonly excluded?: ReadonlySet<number>;
   readonly k?: number;
   readonly defaultLane?: Lane;
+  // Issues to add to the listing, whatever the tracker's search index says
+  // (#63). Exactly one caller: the chunk-review scan files a follow-up issue
+  // and then re-plans so it is queued from that cycle rather than the next run
+  // — and a
+  // just-created issue is the one candidate the `gh` listing is guaranteed to
+  // be wrong about, because that listing is the lagging search backend and
+  // nothing else in the plan is newer than seconds old.
+  //
+  // Safe because it is additive and authoritative in the same breath: the
+  // caller has the issue's number from the create call, and the strongly
+  // consistent facts batch below covers it like any other candidate — so an
+  // issue closed or relabelled between the create and the plan is still
+  // filtered out on the usual grounds. Deduped against the listing by number,
+  // the listing winning, so an index that HAS caught up decides.
+  readonly extraCandidates?: readonly IssueSummary[];
 };
 
 export async function buildPlan(
@@ -512,6 +562,7 @@ export async function buildPlan(
   const listed = [
     ...(await fetchCandidates(repo)),
     ...(await fetchChunkMembers(repo)),
+    ...(options.extraCandidates ?? []),
   ];
   const byNumber = new Map<number, IssueSummary>();
   for (const issue of listed) {

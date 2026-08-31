@@ -61,9 +61,12 @@ an exit condition fires.
    issues labelled `ready-for-agent`, parses `## Blocked by` sections, selects
    the top-K unblocked issues (default 3) by number. Each candidate also gets a
    **lane** (`src/lanes.ts`, #57) and, when review-gated, a `chunk` target
-   (#61) that tells phase 2 what to seed from and phase 3 where to land. All
-   inert under the default lane, `auto`; the blocker and chunk criteria are the
-   `plan-resolver.ts` and `chunks.ts` headers' to state.
+   (#61) that tells phase 2 what to seed from and phase 3 where to land. Ahead
+   of the plan proper, the **chunk-review scan** (`src/chunk-follow-up.ts`,
+   #63) turns each changes-requested review on a chunk PR into an issue in that
+   chunk and re-plans with it. All inert under the default lane, `auto`; the
+   blocker, chunk and follow-up criteria are the `plan-resolver.ts`,
+   `chunks.ts` and `chunk-follow-up.ts` headers to state.
 
 2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
    planned issue runs in parallel in its own agent sandbox + per-issue gate
@@ -171,6 +174,14 @@ default 50, exit 3).
 - **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,
   created or updated after every landing push; sandbar never re-drafts a PR a
   human made ready. `src/chunk-pr.ts` owns the prose and what it may claim.
+- **A changes-requested review on that PR becomes an ISSUE in the same chunk
+  (#63).** One issue per review, bodied with the review's unresolved threads and
+  `## Blocked by` the chunk's tips — which is what joins it to the chunk (#58),
+  gates it (#57) and holds it behind the code the review is about (#59, #61).
+  The idempotence record is a LEDGER COMMENT on the PR, never the follow-up
+  issue's own state, and sandbar never resolves a thread;
+  `src/chunk-follow-up.ts`'s header owns both arguments and what the planner
+  has to supply the scan.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One cleanup registry owns signals and the exit (#35).** No module but
