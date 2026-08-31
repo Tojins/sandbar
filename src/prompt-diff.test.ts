@@ -41,6 +41,7 @@ const SUBJECT = "commit-on-the-issue-branch";
 const ADDED_LINE = "the-line-only-the-branch-has";
 
 let root: string;
+let origin: string;
 let checkout: string;
 let worktree: string;
 let repoDir: string;
@@ -51,7 +52,7 @@ let originalPath: string | undefined;
 // real cache + a worktree of the issue branch hanging off it.
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "sandbar-prompt-diff-"));
-  const origin = join(root, "origin.git");
+  origin = join(root, "origin.git");
   checkout = join(root, "checkout");
   await exec("git", ["init", "--bare", "-q", "-b", "main", origin]);
   await exec("git", ["clone", "-q", origin, checkout], { cwd: root });
@@ -237,5 +238,99 @@ describe("readGit truncation (#40)", () => {
 
     expect(out).toContain(SUBJECT);
     expect(out).not.toContain("[sandbar] output truncated");
+  });
+});
+
+// #61 — the same guarantee for a chunk member, whose branch is cut from the
+// chunk TIP rather than from `origin/<sourceBranch>`.
+//
+// This is #40's failure re-entered from the other side, and the fixture is what
+// makes it visible: with the anchor re-derived as `origin/main`, every range
+// below still RESOLVES — it just answers with the chunk's earlier work folded
+// in beside the member's own. The implementer reads that as work it did and
+// does not need to do, and the reviewer is asked for a verdict on commits
+// belonging to an issue it was never given. Nothing exits non-zero, so only an
+// assertion about the CONTENT of the slot can see it.
+describe("a chunk member's slots are measured from the chunk tip (#61)", () => {
+  const CHUNK = { root: 6, branch: "sandbar/chunk-6-widget" };
+  const MEMBER_BRANCH = "sandbar/issue-8-member";
+  const MEMBER_ISSUE = { id: "8", title: "member", branch: MEMBER_BRANCH };
+  // The earlier member's contribution: on the chunk branch and nowhere else.
+  const CHUNK_SUBJECT = "commit-that-belongs-to-an-earlier-member";
+  const CHUNK_LINE = "the-line-only-the-chunk-branch-has";
+  const MEMBER_SUBJECT = "commit-this-issue-actually-made";
+  const MEMBER_LINE = "the-line-this-member-added";
+
+  let memberWt: string;
+  let base: Awaited<ReturnType<typeof ensureIssueBranch>>;
+
+  beforeEach(async () => {
+    // What the merge phase leaves on origin once the chunk's root has landed.
+    await writeFile(join(checkout, "chunk.txt"), `${CHUNK_LINE}\n`);
+    await git(checkout, "add", "-A");
+    await git(checkout, "commit", "-qm", CHUNK_SUBJECT);
+    await git(checkout, "push", "-q", "origin", `HEAD:refs/heads/${CHUNK.branch}`);
+    await git(checkout, "reset", "-q", "--hard", "origin/main");
+
+    base = await ensureIssueBranch(repoDir, MEMBER_BRANCH, "main", CHUNK);
+    memberWt = join(root, "member-wt");
+    await git(repoDir, "worktree", "add", "-q", memberWt, MEMBER_BRANCH);
+    await git(memberWt, "config", "user.email", "t@t");
+    await git(memberWt, "config", "user.name", "t");
+    await writeFile(join(memberWt, "member.txt"), `${MEMBER_LINE}\n`);
+    await git(memberWt, "add", "-A");
+    await git(memberWt, "commit", "-qm", MEMBER_SUBJECT);
+  });
+
+  // The premise: the blocker's work really is under the member's feet. If this
+  // ever stops holding, the two assertions below pass for the wrong reason.
+  it("has the earlier member's work in the tree and out of the range", async () => {
+    expect(await git(memberWt, "cat-file", "-e", "HEAD:chunk.txt")).toBeTruthy();
+    expect(base.chunkBranch).toBe(CHUNK.branch);
+  });
+
+  it("shows the implementer its own commits and not the chunk's", async () => {
+    const prompt = await buildPrompt(
+      { ...implementerInputs(base), issue: MEMBER_ISSUE, worktreePath: memberWt },
+      anchorOpts(),
+    );
+
+    expect(prompt).toContain(MEMBER_SUBJECT);
+    expect(prompt).toContain(MEMBER_LINE);
+    expect(prompt).not.toContain(CHUNK_SUBJECT);
+    expect(prompt).not.toContain(CHUNK_LINE);
+    // And it is told why, so an empty-looking tree is not a mystery.
+    expect(prompt).toContain(CHUNK.branch);
+  });
+
+  it("gives the reviewer this issue's changeset and not the chunk's", async () => {
+    const prompt = await buildReviewerPrompt({
+      ...reviewerInputs(base),
+      issue: MEMBER_ISSUE,
+      worktreePath: memberWt,
+    });
+
+    expect(prompt).toContain(MEMBER_SUBJECT);
+    expect(prompt).toContain(MEMBER_LINE);
+    expect(prompt).not.toContain(CHUNK_SUBJECT);
+    expect(prompt).not.toContain(CHUNK_LINE);
+    expect(prompt).toContain(CHUNK.branch);
+  });
+
+  // The counterfactual, stated as a test rather than as a comment: the bug this
+  // whole arrangement avoids is one line — deriving the anchor from the source
+  // branch instead of taking the seed the branch was really cut from.
+  it("would hand the member the whole chunk if the base were re-derived", async () => {
+    const prompt = await buildPrompt(
+      {
+        ...implementerInputs(sourceBranchBase("main")),
+        issue: MEMBER_ISSUE,
+        worktreePath: memberWt,
+      },
+      anchorOpts(),
+    );
+
+    expect(prompt).toContain(CHUNK_SUBJECT);
+    expect(prompt).toContain(CHUNK_LINE);
   });
 });

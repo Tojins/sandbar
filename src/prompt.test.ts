@@ -392,3 +392,86 @@ describe("renderAttemptSlot — the sandbox slot reaches the prompt", () => {
     expect(slot).not.toContain("{{");
   });
 });
+
+// #61 — the chunk-base slots. A chunk member's branch is cut from the chunk
+// TIP, so the diff and commit list above it are its contribution alone; without
+// being told, the implementer goes looking on the source branch for the work it
+// is blocked by and re-implements it, and the reviewer reports that same work
+// as missing. Both slots are the only place either agent hears the word chunk.
+//
+// The placeholder-reaches-the-template half matters as much as the prose: a
+// rename in prompts/implementer.md drops the whole section silently, which is
+// why "no `{{` left" is asserted beside the content.
+describe("the chunk-base slots (#61)", () => {
+  const chunkBase = {
+    ref: "refs/remotes/origin/sandbar/chunk-10-thing",
+    chunkBranch: "sandbar/chunk-10-thing",
+  } as const;
+
+  const implementerSlot = (base: { ref: string; chunkBranch: string | null }) =>
+    renderAttemptSlot({
+      issue: baseInputs.issue,
+      attempt: 1,
+      maxAttempts: 8,
+      worktreePath: "/tmp/wt",
+      lastFailureTrace: "",
+      base,
+      diff: "",
+    });
+
+  const reviewerSlot = (base: { ref: string; chunkBranch: string | null }) =>
+    renderReviewerSlot({
+      ...baseInputs,
+      base,
+      commits: "a1 first",
+      diff: "diff --git a/x b/x\n+hi",
+    });
+
+  it("tells the implementer its branch was cut from the chunk branch", () => {
+    const slot = implementerSlot(chunkBase);
+
+    expect(slot).toContain("## This branch is part of a chunk");
+    expect(slot).toContain(chunkBase.chunkBranch);
+    // The ref, not just the branch name: a range of the agent's own built on
+    // the bare name cannot resolve in a worktree of the bare cache (#40).
+    expect(slot).toContain(chunkBase.ref);
+    expect(slot).not.toContain("{{");
+  });
+
+  // The two failure modes the slot exists to prevent, each named in the prose
+  // rather than left to be inferred from "you are in a chunk".
+  it("tells the implementer not to go looking for its blockers' work elsewhere", () => {
+    const slot = implementerSlot(chunkBase);
+
+    expect(slot).toContain("not re-implement it");
+    expect(slot).toContain("out of scope");
+  });
+
+  it("tells the reviewer the earlier members' work is not its to review", () => {
+    const slot = reviewerSlot(chunkBase);
+
+    expect(slot).toContain("## This branch is part of a chunk");
+    expect(slot).toContain(chunkBase.chunkBranch);
+    expect(slot).toContain("not report the chunk's existing code as missing");
+    expect(slot).not.toContain("{{");
+  });
+
+  // The reviewer prose names the ref it should compare against, and it is the
+  // seed ref — not `origin/<sourceBranch>`, which for a member is a tree its
+  // branch was never cut from.
+  it("points the reviewer's own git commands at the seed ref", () => {
+    expect(reviewerSlot(chunkBase)).toContain(`against \`${chunkBase.ref}\``);
+    expect(reviewerSlot(baseInputs.base)).toContain("against `origin/main`");
+  });
+
+  // Every auto-lane issue and every chunk root. The section must leave no
+  // trace: an issue that is NOT in a chunk being told about chunk branches is
+  // an invitation to go looking for one.
+  it("renders to nothing for a branch seeded from the source branch", () => {
+    for (const slot of [implementerSlot(baseInputs.base), reviewerSlot(baseInputs.base)]) {
+      expect(slot).not.toContain("part of a chunk");
+      expect(slot).not.toContain("chunk");
+      expect(slot).not.toContain("{{");
+    }
+  });
+});

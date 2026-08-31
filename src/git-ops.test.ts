@@ -346,3 +346,149 @@ describe("ensureIssueBranch — operates on repoDir, not process.cwd() (#34)", (
     expect(after.trim()).toBe(before.trim());
   });
 });
+
+// #61 — the second seed. A chunk member chained behind a landed one has to be
+// cut from the chunk branch's TIP, because that is the only place its
+// blocker's commits exist; cut from `origin/<sourceBranch>` it would be
+// developed against a tree missing the very work it declares itself blocked by.
+//
+// Asserted against real repos rather than a scripted git, because every claim
+// here is git's: that the explicit refspec writes a remote-tracking ref in a
+// BARE cache at all (a plain `git fetch origin <branch>` writes only
+// FETCH_HEAD there), that a branch created at that ref really contains the
+// chunk's commits, and that a chunk branch origin does not have makes the
+// fetch FAIL rather than quietly succeed. A fake would preserve none of them.
+describe("ensureIssueBranch — the chunk tip is the other seed (#61)", () => {
+  let root: string;
+  let origin: string;
+  let seed: string;
+  let cache: string;
+
+  const CHUNK = { root: 10, branch: "sandbar/chunk-10-thing" };
+  const MEMBER = "sandbar/issue-11-member";
+  // Distinct content per commit, so "seeded from the right ref" cannot pass on
+  // the branch merely existing.
+  const ON_MAIN = "main.txt";
+  const ON_CHUNK = "chunk-member-1.txt";
+
+  const git = (repo: string, ...args: string[]) => exec("git", args, { cwd: repo });
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-gitops-chunk-"));
+    origin = join(root, "origin.git");
+    seed = join(root, "seed");
+    cache = join(root, "repo.git");
+
+    await exec("git", ["init", "--bare", "-q", "-b", "main", origin]);
+    await exec("git", ["clone", "-q", origin, seed], { cwd: root });
+    await git(seed, "config", "user.email", "t@t");
+    await git(seed, "config", "user.name", "t");
+    await writeFile(join(seed, ON_MAIN), "base\n");
+    await git(seed, "add", "-A");
+    await git(seed, "commit", "-qm", "base");
+    await git(seed, "push", "-q", "origin", "main");
+
+    // The bare object cache, configured exactly as repo-cache.ts leaves it.
+    await exec("git", ["clone", "--bare", "-q", origin, cache], { cwd: root });
+    await git(cache, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*");
+    await git(cache, "fetch", "-q", "origin", "--prune");
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  // What the merge phase leaves behind after the chunk's root lands: a chunk
+  // branch on ORIGIN, one commit ahead of main, and not in the cache yet.
+  const landRootOnChunkBranch = async (): Promise<string> => {
+    await writeFile(join(seed, ON_CHUNK), "root member work\n");
+    await git(seed, "add", "-A");
+    await git(seed, "commit", "-qm", "root member");
+    await git(seed, "push", "-q", "origin", `HEAD:refs/heads/${CHUNK.branch}`);
+    await git(seed, "reset", "-q", "--hard", "origin/main");
+    return (await git(origin, "rev-parse", CHUNK.branch)).stdout.trim();
+  };
+
+  const filesOn = async (branch: string): Promise<string[]> =>
+    (await git(cache, "ls-tree", "--name-only", branch)).stdout.trim().split("\n");
+
+  it("seeds a chained member from the chunk tip and says so", async () => {
+    const tip = await landRootOnChunkBranch();
+
+    const base = await ensureIssueBranch(cache, MEMBER, "main", CHUNK);
+
+    expect(base).toEqual({
+      ref: `refs/remotes/origin/${CHUNK.branch}`,
+      chunkBranch: CHUNK.branch,
+    });
+    const created = (await git(cache, "rev-parse", MEMBER)).stdout.trim();
+    expect(created).toBe(tip);
+    // The point of all of it: the blocker's file is under the member's feet.
+    expect(await filesOn(MEMBER)).toContain(ON_CHUNK);
+  });
+
+  // The refspec, not the fetch. `git fetch origin <branch>` in a bare repo
+  // writes FETCH_HEAD and nothing else, so the `git branch` below would then
+  // fail on an unresolvable base — a failure the caller would see as a
+  // HARD-ERROR rather than as the wrong tree, but a failure all the same.
+  it("leaves the remote-tracking ref in the cache, not just FETCH_HEAD", async () => {
+    const tip = await landRootOnChunkBranch();
+
+    const base = await ensureIssueBranch(cache, MEMBER, "main", CHUNK);
+
+    expect((await git(cache, "rev-parse", "--verify", base.ref)).stdout.trim()).toBe(tip);
+  });
+
+  // The root's case. Origin has no chunk branch yet — the merge phase creates
+  // it, at `origin/<sourceBranch>` — so the two agree by construction.
+  it("falls back to the source branch when origin has no chunk branch yet", async () => {
+    const base = await ensureIssueBranch(cache, "sandbar/issue-10-root", "main", CHUNK);
+
+    expect(base).toEqual({ ref: "origin/main", chunkBranch: null });
+    expect(await filesOn("sandbar/issue-10-root")).toEqual([ON_MAIN]);
+  });
+
+  it("seeds from the source branch when the issue has no chunk at all", async () => {
+    const base = await ensureIssueBranch(cache, "sandbar/issue-9-auto", "main", null);
+
+    expect(base).toEqual({ ref: "origin/main", chunkBranch: null });
+  });
+
+  // The base is computed BEFORE the exists check, so a resumed run gets the
+  // same anchor a fresh one would. Without that, attempt 2 of a chained member
+  // would be handed `origin/main` and shown its ancestors' whole chunk as "the
+  // work done so far" — #61's failure mode, reached by the back door.
+  it("reports the chunk tip for a branch that already exists", async () => {
+    const tip = await landRootOnChunkBranch();
+    const first = await ensureIssueBranch(cache, MEMBER, "main", CHUNK);
+    await git(cache, "worktree", "add", "-q", join(root, "wt"), MEMBER);
+    const wt = join(root, "wt");
+    await exec("git", ["config", "user.email", "t@t"], { cwd: wt });
+    await exec("git", ["config", "user.name", "t"], { cwd: wt });
+    await exec("git", ["commit", "-q", "--allow-empty", "-m", "member work"], { cwd: wt });
+
+    const again = await ensureIssueBranch(cache, MEMBER, "main", CHUNK);
+
+    expect(again).toEqual(first);
+    // And the accumulated commit is still there — the resume did not re-seed.
+    expect((await git(cache, "rev-parse", `${MEMBER}~1`)).stdout.trim()).toBe(tip);
+  });
+
+  // The chunk branch moved on origin between the two attempts, which is what a
+  // sibling landing in the meantime looks like. An existing branch keeps its
+  // own commits, but the ref reported must be the tip as origin has it NOW —
+  // that is the tree the merge phase will land this member onto.
+  it("re-fetches the tip rather than trusting the cache's copy", async () => {
+    await landRootOnChunkBranch();
+    await ensureIssueBranch(cache, MEMBER, "main", CHUNK);
+    await git(seed, "fetch", "-q", "origin", `${CHUNK.branch}:${CHUNK.branch}`);
+    await git(seed, "checkout", "-q", CHUNK.branch);
+    await git(seed, "commit", "-q", "--allow-empty", "-m", "sibling landed");
+    await git(seed, "push", "-q", "origin", CHUNK.branch);
+    const moved = (await git(origin, "rev-parse", CHUNK.branch)).stdout.trim();
+
+    const base = await ensureIssueBranch(cache, MEMBER, "main", CHUNK);
+
+    expect((await git(cache, "rev-parse", base.ref)).stdout.trim()).toBe(moved);
+  });
+});
