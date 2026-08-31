@@ -742,6 +742,136 @@ export type RunMergerOptions = {
   };
 };
 
+// What `attemptMerge` needs of the cycle it is running in. A parameter rather
+// than a closure so the operation lives at module scope: it reads no
+// accumulator and writes none, which is exactly the property that makes it
+// shareable by all three landing paths in the first place.
+type MergeAttemptDeps = {
+  readonly adapter: MergerAdapter;
+  readonly emit: (line: string) => Promise<void>;
+  readonly projectAnchor: string;
+  readonly resolveLog: ResolveLogger;
+  readonly onGateRed?: MergerGateOutputSink | undefined;
+};
+
+// One ref, merged onto whatever the worktree is currently detached at, with
+// the resolve loop and the gate given their say and the repo state already
+// settled when this returns: a non-`merged` outcome has been reverted and the
+// tree is back where it started.
+//
+// What is deliberately NOT here is the tracker. An issue branch that could not
+// land is commented on and stripped of `ready-for-agent`; a chunk that could
+// not land is commented on and stripped of `land` (#64). The repo half of
+// those two is identical and the tracker half shares nothing, so the split is
+// exactly where the two stop agreeing.
+//
+// Shared verbatim by all three landing paths — issue→source, issue→chunk
+// (#60), chunk→source (#64). `target` only ever reaches the prose and the
+// log, because conflict resolution, the gate and the revert are the same
+// operations whichever branch is underneath.
+async function attemptMerge(
+  args: {
+    readonly unit: MergeUnit;
+    readonly target: MergeTarget;
+    // Whose issue bodies the resolve agent gets: the cycle's other issues for
+    // an issue branch, the chunk's members for a chunk.
+    readonly related: readonly IssueRef[];
+    // How this unit is named in the merger log — `#12`, or `chunk #42`.
+    readonly label: string;
+    // The key the gate-red artefact is filed under. An issue id for an issue;
+    // `chunk-<root>` for a chunk, so a chunk and its own root issue landing in
+    // one cycle cannot overwrite each other's trace.
+    readonly gateKey: string;
+  },
+  deps: MergeAttemptDeps,
+): Promise<MergeAttempt> {
+  const { adapter, emit, projectAnchor, resolveLog, onGateRed } = deps;
+  const { unit, target, label } = args;
+  await emit(`merge-attempt ${label} ${unit.branch}`);
+  const preMergeSha = await adapter.getHeadSha();
+  const m = await adapter.mergeNoFf(unit);
+
+  if (!m.ok) {
+    await emit(`conflict ${label} entering resolve-loop`);
+    const outcome = await runResolveLoop(
+      unit,
+      args.related,
+      { kind: "conflict" },
+      adapter,
+      { projectAnchor, preMergeSha, target: describeMergeTarget(target) },
+      resolveLog,
+    );
+    if (outcome.kind === "abandon") {
+      if (outcome.mergeInProgress) {
+        await adapter.abortMerge();
+      } else {
+        await adapter.resetHardSha(preMergeSha);
+      }
+      return {
+        kind: "abandon",
+        mode: "conflict",
+        reason: outcome.reason,
+        silent: outcome.silent === true,
+      };
+    }
+    await emit(`merged ${label} (via resolve-loop)`);
+    return { kind: "merged" };
+  }
+
+  const inst = await adapter.npmInstall();
+  if (!inst.ok) {
+    await adapter.resetHardSha(preMergeSha);
+    return { kind: "install-failed" };
+  }
+
+  const g = await adapter.runGate();
+  if (!g.ok) {
+    if (onGateRed) {
+      await onGateRed(args.gateKey, {
+        stdout: g.stdout,
+        stderr: g.stderr,
+        failedStep: g.failedStep,
+        exitCode: g.exitCode,
+        containerLogs: g.containerLogs,
+      });
+    }
+    await emit(
+      `gate-red ${label} failedStep=${g.failedStep ?? "-"} exitCode=${g.exitCode}; entering resolve-loop`,
+    );
+    const outcome = await runResolveLoop(
+      unit,
+      args.related,
+      {
+        kind: "gate-red",
+        initialOutput: {
+          stdout: g.stdout,
+          stderr: g.stderr,
+          failedStep: g.failedStep,
+          exitCode: g.exitCode,
+          containerLogs: g.containerLogs,
+        },
+      },
+      adapter,
+      { projectAnchor, preMergeSha, target: describeMergeTarget(target) },
+      resolveLog,
+    );
+    if (outcome.kind === "abandon") {
+      await adapter.resetHardSha(preMergeSha);
+      return {
+        kind: "abandon",
+        mode: "gate-red",
+        reason: outcome.reason,
+        silent: outcome.silent === true,
+      };
+    }
+    await emit(`merged ${label} (gate-red recovered via resolve-loop)`);
+    return { kind: "merged" };
+  }
+
+  await emit(`merged ${label}`);
+  return { kind: "merged" };
+}
+
 export async function runMergerWithAdapter(
   issues: readonly IssueRef[],
   adapter: MergerAdapter,
@@ -760,8 +890,8 @@ export async function runMergerWithAdapter(
   // string. The two are only meaningful together — the branch names where the
   // requests are going — and pulling them apart means giving the branch a
   // default for the case where there are no requests, which is an invariant
-  // held by a sentinel rather than stated. Narrowed at each of the three places
-  // it is read instead; each of those is reached only when a request exists.
+  // held by a sentinel rather than stated. Narrowed once, inside
+  // `landRequestedChunks`, which is the only thing that reads it.
   const chunkLanding = opts.chunkLanding;
   const cycle = opts.cycleIssues ?? issues;
   const projectAnchor = opts.projectAnchor ?? "";
@@ -784,6 +914,7 @@ export async function runMergerWithAdapter(
   // as opposed to a designed `SandbarError` — arrives at run.ts's merger-halted
   // branch as a bare message, and that branch is precisely the one that does
   // NOT reach the top-level handler that would have printed a stack.
+
   // The summary of a cycle that landed NOTHING — every halt, every park and
   // every early return below, which is the only thing any of them is entitled
   // to claim. One claim, so one spelling: eight literals of it were eight
@@ -869,119 +1000,15 @@ export async function runMergerWithAdapter(
     ? { ...opts.verified, cycleBaseSha: await adapter.getHeadSha() }
     : null;
 
-  // One ref, merged onto whatever the worktree is currently detached at, with
-  // the resolve loop and the gate given their say and the repo state already
-  // settled when this returns: a non-`merged` outcome has been reverted and the
-  // tree is back where it started.
-  //
-  // What is deliberately NOT here is the tracker. An issue branch that could not
-  // land is commented on and stripped of `ready-for-agent`; a chunk that could
-  // not land is commented on and stripped of `land` (#64). The repo half of
-  // those two is identical and the tracker half shares nothing, so the split is
-  // exactly where the two stop agreeing.
-  //
-  // Shared verbatim by all three landing paths — issue→source, issue→chunk
-  // (#60), chunk→source (#64). `target` only ever reaches the prose and the
-  // log, because conflict resolution, the gate and the revert are the same
-  // operations whichever branch is underneath.
-  const attemptMerge = async (args: {
-    readonly unit: MergeUnit;
-    readonly target: MergeTarget;
-    // Whose issue bodies the resolve agent gets: the cycle's other issues for
-    // an issue branch, the chunk's members for a chunk.
-    readonly related: readonly IssueRef[];
-    // How this unit is named in the merger log — `#12`, or `chunk #42`.
-    readonly label: string;
-    // The key the gate-red artefact is filed under. An issue id for an issue;
-    // `chunk-<root>` for a chunk, so a chunk and its own root issue landing in
-    // one cycle cannot overwrite each other's trace.
-    readonly gateKey: string;
-  }): Promise<MergeAttempt> => {
-    const { unit, target, label } = args;
-    await emit(`merge-attempt ${label} ${unit.branch}`);
-    const preMergeSha = await adapter.getHeadSha();
-    const m = await adapter.mergeNoFf(unit);
-
-    if (!m.ok) {
-      await emit(`conflict ${label} entering resolve-loop`);
-      const outcome = await runResolveLoop(
-        unit,
-        args.related,
-        { kind: "conflict" },
-        adapter,
-        { projectAnchor, preMergeSha, target: describeMergeTarget(target) },
-        resolveLog,
-      );
-      if (outcome.kind === "abandon") {
-        if (outcome.mergeInProgress) {
-          await adapter.abortMerge();
-        } else {
-          await adapter.resetHardSha(preMergeSha);
-        }
-        return {
-          kind: "abandon",
-          mode: "conflict",
-          reason: outcome.reason,
-          silent: outcome.silent === true,
-        };
-      }
-      await emit(`merged ${label} (via resolve-loop)`);
-      return { kind: "merged" };
-    }
-
-    const inst = await adapter.npmInstall();
-    if (!inst.ok) {
-      await adapter.resetHardSha(preMergeSha);
-      return { kind: "install-failed" };
-    }
-
-    const g = await adapter.runGate();
-    if (!g.ok) {
-      if (onGateRed) {
-        await onGateRed(args.gateKey, {
-          stdout: g.stdout,
-          stderr: g.stderr,
-          failedStep: g.failedStep,
-          exitCode: g.exitCode,
-          containerLogs: g.containerLogs,
-        });
-      }
-      await emit(
-        `gate-red ${label} failedStep=${g.failedStep ?? "-"} exitCode=${g.exitCode}; entering resolve-loop`,
-      );
-      const outcome = await runResolveLoop(
-        unit,
-        args.related,
-        {
-          kind: "gate-red",
-          initialOutput: {
-            stdout: g.stdout,
-            stderr: g.stderr,
-            failedStep: g.failedStep,
-            exitCode: g.exitCode,
-            containerLogs: g.containerLogs,
-          },
-        },
-        adapter,
-        { projectAnchor, preMergeSha, target: describeMergeTarget(target) },
-        resolveLog,
-      );
-      if (outcome.kind === "abandon") {
-        await adapter.resetHardSha(preMergeSha);
-        return {
-          kind: "abandon",
-          mode: "gate-red",
-          reason: outcome.reason,
-          silent: outcome.silent === true,
-        };
-      }
-      await emit(`merged ${label} (gate-red recovered via resolve-loop)`);
-      return { kind: "merged" };
-    }
-
-    await emit(`merged ${label}`);
-    return { kind: "merged" };
+  // Everything module-scope `attemptMerge` needs of this cycle, bound once.
+  const mergeDeps: MergeAttemptDeps = {
+    adapter,
+    emit,
+    projectAnchor,
+    resolveLog,
+    onGateRed,
   };
+
 
   // One DONE issue branch. TRUE when a commit for this issue is on HEAD; FALSE
   // when it was skipped and HEAD is back where it was — with the issue told why
@@ -992,13 +1019,16 @@ export async function runMergerWithAdapter(
   ): Promise<boolean> => {
     try {
       const n = issueNumberOf(issue);
-      const outcome = await attemptMerge({
-        unit: issue,
-        target,
-        related: cycle.filter((c) => c.id !== issue.id),
-        label: `#${n}`,
-        gateKey: issue.id,
-      });
+      const outcome = await attemptMerge(
+        {
+          unit: issue,
+          target,
+          related: cycle.filter((c) => c.id !== issue.id),
+          label: `#${n}`,
+          gateKey: issue.id,
+        },
+        mergeDeps,
+      );
       if (outcome.kind === "merged") return true;
 
       if (outcome.kind === "install-failed") {
@@ -1227,21 +1257,24 @@ export async function runMergerWithAdapter(
           continue;
         }
         const unit: MergedChunkUnit = { ...pending, ref };
-        const outcome = await attemptMerge({
-          unit: {
-            id: String(request.root),
-            title: request.title,
-            branch: ref,
-            // Named for the BRANCH, not for an issue: what is being merged is a
-            // whole chunk, and `Merge sandbar/issue-<root>` would claim it was
-            // one issue's work.
-            mergeMessage: `Merge ${request.branch}: ${request.title}`,
+        const outcome = await attemptMerge(
+          {
+            unit: {
+              id: String(request.root),
+              title: request.title,
+              branch: ref,
+              // Named for the BRANCH, not for an issue: what is being merged is
+              // a whole chunk, and `Merge sandbar/issue-<root>` would claim it
+              // was one issue's work.
+              mergeMessage: `Merge ${request.branch}: ${request.title}`,
+            },
+            target: SOURCE_TARGET,
+            related: chunkMemberRefs(unit),
+            label: `chunk #${request.root}`,
+            gateKey: `chunk-${request.root}`,
           },
-          target: SOURCE_TARGET,
-          related: chunkMemberRefs(unit),
-          label: `chunk #${request.root}`,
-          gateKey: `chunk-${request.root}`,
-        });
+          mergeDeps,
+        );
         if (outcome.kind === "merged") {
           onHead.push(unit);
           continue;
