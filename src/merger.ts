@@ -479,8 +479,9 @@ export type MergerAdapter = ResolveAdapter & {
   // seeing this chunk again.
   deleteChunkBranch(chunkBranch: string): Promise<void>;
   commentOnPullRequest(pr: number, body: string): Promise<void>;
-  // Takes `land` back off, which is what stops a failing merge being retried
-  // every cycle. See `chunk-land.ts` on the label as a queue.
+  // Takes `land` back off, which is what stops a request being honoured
+  // again. The wrap-up drops it when a chunk lands; the merge loop drops it on
+  // its own when one is parked. See `chunk-land.ts` on the label as a queue.
   removePullRequestLabel(pr: number, label: string): Promise<void>;
   closePullRequest(pr: number): Promise<void>;
 };
@@ -1641,7 +1642,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     }
   };
   return {
-    // The five writes a chunk wrap-up makes, from the one place they are
+    // The six writes a chunk wrap-up makes, from the one place they are
     // spelled (#64) — `closeIssue` and `removeLabel` among them, which the auto
     // lane has used since long before chunks existed and which are the same two
     // `gh` calls either way. Spread first so anything below can override, and
@@ -1938,29 +1939,6 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // is where a chunk branch is created (#60). One fetch primitive, two
       // readings of the same null — see `fetchChunkRef` above.
       return (await fetchChunkRef(chunkBranch)) ?? `origin/${deps.sourceBranch}`;
-    },
-    async removePullRequestLabel(pr, label) {
-      // The twin of `removeLabel`'s #8 argument, one level up: `land` is the
-      // chunk's queue, so silently failing to drop it retries the same failing
-      // merge every cycle for as long as the run lasts.
-      try {
-        await exec("gh", [
-          "pr",
-          "edit",
-          String(pr),
-          "--repo",
-          repoSlug(deps.repo),
-          "--remove-label",
-          label,
-        ]);
-      } catch (err) {
-        throw new SandbarError(
-          `merger: failed to remove label '${label}' from pull request #${pr}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-          { cause: err },
-        );
-      }
     },
     async checkoutDetached(ref) {
       // Not `--force`: the tree is clean at every call site, and a dirty one

@@ -40,7 +40,14 @@
 // The label is also the QUEUE, exactly as `ready-for-agent` is the queue for
 // issues, and every failure path below is written from that reading:
 //
-//   * landed        — the PR is closed, so it can never be re-triggered.
+//   * landed        — the label comes OFF and the PR is closed, so it can
+//                     never be re-triggered. Both, because either alone can
+//                     fail: a `land` still sitting on a pull request that
+//                     would not close costs the next cycle a whole merger
+//                     worktree and gate-stack bringup to discover the branch
+//                     is gone, and answers with prose about a branch somebody
+//                     deleted — alarming, for the most routine outcome there
+//                     is.
 //   * abandoned     — a conflict or a red gate the resolve loop could not fix.
 //                     A human has to look, so `land` is REMOVED and the PR
 //                     says why: leaving it on would retry the same failing
@@ -77,8 +84,8 @@
 // What the wrap-up does, and the order it does it in
 // ---------------------------------------------------------------------------
 //
-// Close every member explicitly, drop `in-chunk`, close the pull request,
-// delete the chunk branch on origin.
+// Close every member explicitly, drop `in-chunk`, take `land` back off the
+// pull request, close it, delete the chunk branch on origin.
 //
 // "EVERY MEMBER" MEANS EVERY MEMBER ON THE BRANCH, and that is narrower than
 // every member of the chunk. The list arrives already filtered — `NamedChunk`
@@ -120,7 +127,7 @@
 // The wrap-up is adapter-driven, and its two callers sit at opposite ends of a
 // cycle: the merge phase passes itself (`MergerAdapter` is a superset of
 // `ChunkWrapupAdapter`), and the plan-time reconciler has no merger to pass.
-// What they need done is nevertheless the same four `gh` calls and one
+// What they need done is nevertheless the same five `gh` calls and one
 // `git push --delete`, so `chunkForgeWrites` below is the one place that argv
 // is spelled — the same argument `forge-pr.ts` makes one level up (#62).
 // Duplicated argv is argv that drifts, and this argv CLOSES ISSUES.
@@ -201,6 +208,33 @@ function pullRequestsByHead(
   return byHead;
 }
 
+// One branch, whatever is known about it, as a landing target — or null when
+// the branch is not a chunk's at all and neither selector wants it.
+//
+// The two selectors differ only in where their branches come from and in which
+// of `chunk`/`pr` can be missing; what a target IS is this. `root` prefers the
+// derivation's over the branch name's (they agree, but the derivation is the
+// authority on its own chunk), and both fall back the same way, so a branch
+// with neither a chunk nor a pull request still yields a target — which is a
+// case both selectors want and for reasons written on each.
+function targetFor(
+  branch: string,
+  chunk: NamedChunk | undefined,
+  pr: PullRequestSummary | undefined,
+): ChunkLandTarget | null {
+  const root = rootIssueFromChunkBranch(branch);
+  if (root === null) return null;
+  return {
+    root: chunk?.root ?? root,
+    branch,
+    title: chunk?.title ?? pr?.title ?? "",
+    members: chunk?.members ?? [],
+    pullRequest: pr?.number ?? 0,
+  };
+}
+
+const isTarget = (t: ChunkLandTarget | null): t is ChunkLandTarget => t !== null;
+
 /**
  * The chunks a human has asked to land: one per open pull request carrying
  * `land` whose head is a chunk branch.
@@ -221,20 +255,10 @@ export function selectLandRequests(
   chunks: readonly NamedChunk[],
 ): readonly ChunkLandTarget[] {
   const chunkByBranch = new Map(chunks.map((c) => [c.branch, c] as const));
-  const targets: ChunkLandTarget[] = [];
-  for (const pr of pullRequestsByHead(prs).values()) {
-    const root = rootIssueFromChunkBranch(pr.headRefName);
-    if (root === null) continue;
-    const chunk = chunkByBranch.get(pr.headRefName);
-    targets.push({
-      root: chunk?.root ?? root,
-      branch: pr.headRefName,
-      title: chunk?.title ?? pr.title,
-      members: chunk?.members ?? [],
-      pullRequest: pr.number,
-    });
-  }
-  return targets.sort(byRoot);
+  return [...pullRequestsByHead(prs).values()]
+    .map((pr) => targetFor(pr.headRefName, chunkByBranch.get(pr.headRefName), pr))
+    .filter(isTarget)
+    .sort(byRoot);
 }
 
 /**
@@ -260,21 +284,10 @@ export function selectReconciliations(
 ): readonly ChunkLandTarget[] {
   const chunkByBranch = new Map(chunks.map((c) => [c.branch, c] as const));
   const prByHead = pullRequestsByHead(prs);
-  const targets: ChunkLandTarget[] = [];
-  for (const branch of [...new Set(landedBranches)]) {
-    const root = rootIssueFromChunkBranch(branch);
-    if (root === null) continue;
-    const chunk = chunkByBranch.get(branch);
-    const pr = prByHead.get(branch);
-    targets.push({
-      root: chunk?.root ?? root,
-      branch,
-      title: chunk?.title ?? pr?.title ?? "",
-      members: chunk?.members ?? [],
-      pullRequest: pr?.number ?? 0,
-    });
-  }
-  return targets.sort(byRoot);
+  return [...new Set(landedBranches)]
+    .map((branch) => targetFor(branch, chunkByBranch.get(branch), prByHead.get(branch)))
+    .filter(isTarget)
+    .sort(byRoot);
 }
 
 // ---------------------------------------------------------------------------
@@ -463,6 +476,10 @@ export type ChunkWrapupAdapter = {
   closeIssue(issueNum: number, comment: string): Promise<void>;
   removeLabel(issueNum: number, label: string): Promise<void>;
   commentOnPullRequest(pr: number, body: string): Promise<void>;
+  // Takes `land` back off. Used by the wrap-up on the way to closing the pull
+  // request, and by the merge phase on its own to park a chunk that would not
+  // merge — the label is the queue either way.
+  removePullRequestLabel(pr: number, label: string): Promise<void>;
   closePullRequest(pr: number): Promise<void>;
   deleteChunkBranch(chunkBranch: string): Promise<void>;
 };
@@ -522,6 +539,14 @@ export function chunkForgeWrites(deps: {
       gh(
         ["pr", "comment", String(pr), "--repo", slug(), "--body", body],
         `failed to comment on pull request #${pr}`,
+      ),
+    // The twin of `removeLabel`'s #8 argument, one level up: `land` is the
+    // chunk's queue, so silently failing to drop it retries the same request
+    // every cycle.
+    removePullRequestLabel: (pr, label) =>
+      gh(
+        ["pr", "edit", String(pr), "--repo", slug(), "--remove-label", label],
+        `failed to remove label '${label}' from pull request #${pr}`,
       ),
     // Closed, never merged: the commits reached the source branch through
     // sandbar's own push, so there is nothing for GitHub's merge to do — and
@@ -641,6 +666,17 @@ export async function wrapUpLandedChunk(
   const unclosed = target.members.filter((m) => !closed.includes(m.number));
 
   if (target.pullRequest > 0) {
+    // Three writes, and each one guarded on its own rather than as a
+    // transaction, because the middle one must not be skipped by a failure
+    // above it. `land` is the QUEUE: left on an open pull request it is a
+    // landing the next cycle honours, and that cycle spends a whole merger
+    // worktree and gate-stack bringup to discover the branch is gone, then
+    // answers with `CHUNK_BRANCH_MISSING_PR_COMMENT` — prose about a deleted
+    // branch and a clone that might still have it, for the most routine
+    // outcome the review lane has.
+    //
+    // Comment FIRST all the same: it is what explains the other two, and a
+    // label that vanished with no note is worse than a note with no label.
     try {
       await adapter.commentOnPullRequest(
         target.pullRequest,
@@ -652,6 +688,19 @@ export async function wrapUpLandedChunk(
           unclosed,
         }),
       );
+    } catch (err) {
+      residue.push(
+        `the pull request #${target.pullRequest} for ${target.branch} landed but could not be commented on: ${detail(err)}`,
+      );
+    }
+    try {
+      await adapter.removePullRequestLabel(target.pullRequest, LAND_LABEL);
+    } catch (err) {
+      residue.push(
+        `the pull request #${target.pullRequest} for ${target.branch} kept its \`${LAND_LABEL}\` label: ${detail(err)}`,
+      );
+    }
+    try {
       await adapter.closePullRequest(target.pullRequest);
       await log(`chunk ${target.branch}: closed PR #${target.pullRequest}`);
     } catch (err) {

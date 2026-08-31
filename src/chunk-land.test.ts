@@ -178,6 +178,9 @@ function makeWrapupAdapter(
         record("commentOnPullRequest", String(p));
         bodies.push(body);
       },
+      async removePullRequestLabel(p, label) {
+        record("removePullRequestLabel", `${p}:${label}`);
+      },
       async closePullRequest(p) {
         record("closePullRequest", String(p));
       },
@@ -215,6 +218,7 @@ describe("wrapUpLandedChunk (#64)", () => {
       "closeIssue 43",
       `removeLabel 43:${IN_CHUNK_LABEL}`,
       "commentOnPullRequest 9",
+      `removePullRequestLabel 9:${LAND_LABEL}`,
       "closePullRequest 9",
       "deleteChunkBranch sandbar/chunk-42-alpha",
     ]);
@@ -276,6 +280,39 @@ describe("wrapUpLandedChunk (#64)", () => {
     });
     expect(r.branchDeleted).toBe(true);
     expect(r.residue.join("\n")).toContain("pull request #9");
+  });
+
+  it("drops `land` even when the comment above it failed", async () => {
+    // The three pull-request writes are not a transaction, and the label is
+    // the one that matters: left on an OPEN pull request it is a landing the
+    // next cycle honours, spending a merger worktree and a gate stack to find
+    // the branch gone.
+    const { adapter, calls } = makeWrapupAdapter({
+      commentOnPullRequest: "422 from the forge",
+    });
+    const r = await wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+    });
+
+    expect(calls.map((c) => c.op)).toContain("removePullRequestLabel");
+    expect(calls.map((c) => c.op)).toContain("closePullRequest");
+    expect(r.branchDeleted).toBe(true);
+    expect(r.residue.join("\n")).toContain("could not be commented on");
+  });
+
+  it("keeps going, and says so, when the label will not come off", async () => {
+    const { adapter, calls } = makeWrapupAdapter({
+      removePullRequestLabel: "no such label",
+    });
+    const r = await wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+    });
+
+    expect(calls.map((c) => c.op)).toContain("closePullRequest");
+    expect(r.branchDeleted).toBe(true);
+    expect(r.residue.join("\n")).toContain(`kept its \`${LAND_LABEL}\` label`);
   });
 
   it("skips the pull request entirely when there is none", async () => {

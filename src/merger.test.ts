@@ -1858,6 +1858,9 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       { n: 42, label: IN_CHUNK_LABEL },
       { n: 43, label: IN_CHUNK_LABEL },
     ]);
+    // `land` off before the close, so a pull request that would not close is
+    // still not a request the next cycle honours.
+    expect(calls.prLabelRemovals).toEqual([{ pr: 542, label: LAND_LABEL }]);
     expect(calls.prCloses).toEqual([542]);
     expect(calls.chunkBranchDeletes).toEqual(["sandbar/chunk-42-c"]);
     expect(summary.mergedChunks.map((c) => c.closed)).toEqual([[42, 43]]);

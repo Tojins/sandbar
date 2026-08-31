@@ -119,8 +119,8 @@ an exit condition fires.
    makes the next cycle merge `origin/<chunk>` in the SAME source pass, before
    the auto lane's branches, so one gate-2 and one landing cover both; the
    wrap-up then closes every member ON the branch — the `in-chunk` ones, which
-   is why `NamedChunk` is filtered to them — drops `in-chunk`, closes the PR and
-   deletes the branch. `src/chunk-land.ts` owns the label, the selection, the
+   is why `NamedChunk` is filtered to them — drops `in-chunk`, takes `land`
+   back off the PR, closes it and deletes the branch. `src/chunk-land.ts` owns the label, the selection, the
    wrap-up and — as `chunkForgeWrites` — the one spelling of the `gh`/`git`
    writes the wrap-up makes, which the merge phase and the plan-time reconciler
    both build their adapter from.

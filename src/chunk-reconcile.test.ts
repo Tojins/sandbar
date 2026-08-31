@@ -10,7 +10,11 @@ import { promisify } from "node:util";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { ChunkWrapupAdapter, PullRequestSummary } from "./chunk-land.js";
+import {
+  LAND_LABEL,
+  type ChunkWrapupAdapter,
+  type PullRequestSummary,
+} from "./chunk-land.js";
 import { IN_CHUNK_LABEL, type NamedChunk } from "./chunks.js";
 import {
   fetchLandRequestPullRequests,
@@ -58,6 +62,9 @@ function fakeAdapter(
       },
       async commentOnPullRequest(p) {
         record("commentOnPullRequest", String(p));
+      },
+      async removePullRequestLabel(p, label) {
+        record("removePullRequestLabel", `${p}:${label}`);
       },
       async closePullRequest(p) {
         record("closePullRequest", String(p));
@@ -139,6 +146,7 @@ describe("reconcileLandedChunks (#64)", () => {
       "closeIssue 43",
       `removeLabel 43:${IN_CHUNK_LABEL}`,
       "commentOnPullRequest 9",
+      `removePullRequestLabel 9:${LAND_LABEL}`,
       "closePullRequest 9",
       "deleteChunkBranch sandbar/chunk-42-c",
     ]);

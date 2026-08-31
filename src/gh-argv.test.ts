@@ -172,19 +172,6 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       expect(create?.[base + 1]).toBe("main");
     });
 
-    // #64 — parking a chunk, which only the merge phase ever does: the
-    // reconciler has no merge that could fail. The wrong repository here is a
-    // reviewer told nothing on a pull request that stays labelled `land`, so
-    // the same failing merge is retried every cycle.
-    it("drops the land label on the configured repo", async () => {
-      await adapter().removePullRequestLabel(9, "land");
-
-      const [argv] = await calls();
-      expect(argv?.slice(0, 3)).toEqual(["pr", "edit", "9"]);
-      expect(repoFlagOf(argv ?? [])).toBe("acme/app");
-      expect(argv).toContain("--remove-label");
-      expect(argv).toContain("land");
-    });
   });
 
   // #64 — the wrap-up's writes, which the merge phase and the plan-time
@@ -229,6 +216,19 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       expect(repoFlagOf(argv ?? [])).toBe("acme/app");
       expect(argv).toContain("--remove-label");
       expect(argv).toContain("in-chunk");
+    });
+
+    // `land` is the chunk's queue, so the wrong repository here is a request
+    // that is honoured again next cycle — a whole merger worktree and gate
+    // stack spent to discover the branch it names is gone.
+    it("drops the land label in the configured repo", async () => {
+      await adapter().removePullRequestLabel(9, "land");
+
+      const [argv] = await calls();
+      expect(argv?.slice(0, 3)).toEqual(["pr", "edit", "9"]);
+      expect(repoFlagOf(argv ?? [])).toBe("acme/app");
+      expect(argv).toContain("--remove-label");
+      expect(argv).toContain("land");
     });
 
     it("comments on and closes the chunk pull request in the configured repo", async () => {
