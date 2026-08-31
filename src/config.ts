@@ -579,13 +579,18 @@ export type RunConfig = {
   // human reviews it. Two things a host has to have for that: the `in-chunk`
   // label must EXIST in the repo (sandbar never creates labels, and this one is
   // not configurable — see chunks.ts), and whoever reviews those branches has
-  // to know they are theirs to land. Third thing, and it bounds what the lane
-  // can do rather than what a host must provide: only a chunk's ROOT is worked
-  // until #61. A chained member — a review-gated issue blocked by another one —
-  // is held out of the plan permanently, not for a cycle or two: its blocker
-  // keeps `in-chunk` and keeps rooting the chunk, so the member never becomes
-  // the root. Today's review lane therefore lands one issue per chunk and hands
-  // the branch over; a chunk of one works end to end.
+  // to know they are theirs to land. Last thing, and it is about PACING rather
+  // than about what a host must provide: sandbar works a whole chunk, one LAYER
+  // per cycle (#61). Every member whose blockers have all landed on the chunk
+  // branch is planned together — same-cycle members are always siblings, never
+  // a chain — and a member queued behind one of those waits for the cycle after
+  // it, because what unblocks it is an `in-chunk` label finalise applies only
+  // once the chunk branch carrying the commits is on origin. So a chunk N edges
+  // deep takes N cycles to reach the human, and it reaches them whole. The one
+  // review-gated issue sandbar will not work at all is one `chunks.ts` can give
+  // no chunk — blockers straddling two chunks, an issue downstream of that, or
+  // a `## Blocked by` cycle — which stays held, and reported as held, until a
+  // human edits the bodies.
   readonly defaultLane?: Lane;
 };
 

@@ -164,7 +164,7 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
 
     expect(prompt).toContain(SUBJECT);
     expect(prompt).toContain(ADDED_LINE);
-    expect(prompt).not.toContain("(empty — no changes against the source branch)");
+    expect(prompt).not.toContain("(empty — no changes against");
   });
 });
 

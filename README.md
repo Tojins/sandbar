@@ -456,13 +456,25 @@ comment per issue, naming the blocker that carried the gating in. To make such a
 issue auto-land, move the chain it depends on into the auto lane, or drop the
 dependency; relabelling the issue alone will not do it.
 
-> **Today, a review-gated issue is held out of the plan.** The lane says "a
-> human reviews this before it lands", and until the chunk machinery that gives
-> such work somewhere to land exists, sandbar has no way to honour that — so it
-> leaves the issue in the queue, untouched, `ready-for-agent` intact, and
-> reports it as held at the top of each cycle. `defaultLane: "review"` today
-> therefore means "queue this for a human", not "work it and hold it". The queue
-> is picked up as-is the day chunks arrive.
+> **A review-gated issue is worked, and it lands on a chunk branch rather than
+> on your source branch.** A *chunk* is derived, not declared: the connected
+> component of review-gated issues that the `## Blocked by` graph puts together.
+> Its issues are merged onto `sandbar/chunk-<root>-<slug>`, which is pushed to
+> origin for a human to review and land; nothing on it reaches the source branch
+> until they do. A landed member keeps its issue open and carries the `in-chunk`
+> label, which is what takes it out of the queue and unblocks whatever was
+> queued behind it — so a chunk grows one *layer* per cycle, and the members
+> worked in any one cycle are always siblings.
+>
+> Two things this needs from you: the `in-chunk` label has to exist in the repo
+> (sandbar never creates labels), and whoever reviews those branches has to know
+> they are theirs to land.
+>
+> The one review-gated issue sandbar will not work is one that belongs to no
+> chunk — its blockers straddle two different chunks, it sits downstream of an
+> issue in that state, or it is inside a `## Blocked by` cycle. There is nothing
+> for it to land on, so it stays in the queue, `ready-for-agent` intact, and is
+> reported as held at the top of each cycle.
 
 ### `images` — what sandbar builds
 

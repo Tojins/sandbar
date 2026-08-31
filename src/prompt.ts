@@ -556,9 +556,12 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
     ? `## Commits on this branch\n\n\`\`\`\n${commits}\n\`\`\``
     : "";
 
+  // Named ref, not "the source branch" (#61): for a chunk member that is the
+  // chunk tip, and calling it the source branch would tell the reviewer its
+  // emptiness was measured against a tree the branch was never cut from.
   const diffBlock = diff
     ? `## Branch diff\n\n\`\`\`diff\n${diff}\n\`\`\``
-    : "## Branch diff\n\n(empty — no changes against the source branch)";
+    : `## Branch diff\n\n(empty — no changes against \`${base.ref}\`)`;
 
   const projectStandards = codingStandardsPath
     ? render(REVIEWER_PROJECT_STANDARDS_TPL, { codingStandardsPath })

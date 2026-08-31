@@ -252,7 +252,10 @@ describe("renderReviewerSlot", () => {
       commits: "",
       diff: "",
     });
-    expect(slot).toContain("(empty — no changes against the source branch)");
+    // The placeholder names the SEED REF (#61) — `origin/main` here, the chunk
+    // tip for a member — because that is what the emptiness was measured
+    // against.
+    expect(slot).toContain("(empty — no changes against `origin/main`)");
   });
 
   it("includes the issue id and branch in the header", () => {

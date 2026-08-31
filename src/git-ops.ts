@@ -53,11 +53,19 @@ export function sourceBranchBase(sourceBranch: string): IssueBranchBase {
 // one base and merged onto another is exactly the conflict the by-construction
 // property (#54 round-1 Q4) exists to rule out.
 //
-// A fetch that failed for some OTHER reason — network, auth — answers null too,
-// and both callers then fall back to the source branch. That is the safe way
-// for this to be wrong: the member is developed and merged against a base that
-// is missing the chunk's earlier work, so the merge conflicts loudly (or the
-// chunk push is rejected as non-fast-forward) rather than silently dropping it.
+// Null is TWO answers wearing one hat: origin has no such branch, and the fetch
+// failed for some other reason (network, auth). Both callers read it as the
+// first and fall back to the source branch, and the two do not pay the same
+// price for that. For the merger it is genuinely safe — a composition based on
+// the source branch is rejected as non-fast-forward on push rather than
+// overwriting the chunk. For the seeding here it is merely LOUD: a chained
+// member developed on a tree missing its blockers' work is what #61 exists to
+// prevent, and what it costs is an implementer budget spent against the wrong
+// base, ending in a conflicting chunk merge that the resolve loop or a human
+// then untangles. Nothing lands wrongly either way, which is why the two share
+// one function; telling the readings apart (an extra `ls-remote`, or stderr
+// matching) buys a better error message for a case in which `gh` and podman are
+// failing too.
 export async function fetchOriginChunkBranch(
   cwd: string,
   chunkBranch: string,
@@ -106,9 +114,12 @@ export async function fetchOriginChunkBranch(
 //   - A chunk whose branch origin does not have yet → `origin/<sourceBranch>`,
 //     which is exactly where the merge phase creates a chunk branch (#60). That
 //     is the chunk's ROOT, and the two agreeing is what makes its landing
-//     honest. A non-root member cannot reach this case: it plans only once a
-//     blocker of its own carries `in-chunk`, and finalise applies that label
-//     only after the chunk branch carrying the commits is on origin.
+//     honest. A non-root member cannot reach this case where "does not have
+//     yet" is the truth: it plans only once a blocker of its own carries
+//     `in-chunk`, and finalise applies that label only after the chunk branch
+//     carrying the commits is on origin. It CAN reach it on a failed fetch,
+//     which answers the same null — see `fetchOriginChunkBranch` for what that
+//     costs and why it is not told apart.
 //
 // The residual, stated rather than engineered around: a member whose commits
 // are ALREADY on the chunk branch while its issue still reads `ready-for-agent`
