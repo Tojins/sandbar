@@ -59,7 +59,12 @@ an exit condition fires.
 
 1. **Plan** (`src/plan-resolver.ts`) — purely deterministic, no LLM: lists
    issues labelled `ready-for-agent`, parses `## Blocked by` sections, selects
-   the top-K unblocked issues (default 3) by number.
+   the top-K unblocked issues (default 3) by number. Each candidate also gets a
+   **lane** (`src/lanes.ts`, #57): `auto-land` label else `config.defaultLane`,
+   with review-gating inherited downward along the same `## Blocked by` edges,
+   transitively — an `auto-land` contradicted by inheritance loses and sandbar
+   says so on the issue. Holding rule until chunks exist (#54): a review-gated
+   issue is held out of the plan. All inert under the default lane, `auto`.
 
 2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
    planned issue runs in parallel in its own agent sandbox + per-issue gate

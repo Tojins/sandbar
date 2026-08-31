@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 
 import type { SandboxHooks } from "./agent-sandbox.js";
 import { SandbarError } from "./errors.js";
+import { DEFAULT_LANE, type Lane } from "./lanes.js";
 import { BRANCH_PREFIX } from "./naming.js";
 
 // The maximum a readiness probe may poll before its container counts as failed.
@@ -558,6 +559,26 @@ export type RunConfig = {
   // whose non-looping launcher would then stop after the first landing cycle.
   // A flag the host sets is one line and cannot misfire. Default: false.
   readonly relaunchAfterLanding?: boolean;
+
+  // Which landing lane an issue takes when it carries no `auto-land` label
+  // (#57, §1 of #54): "auto" — the gate is the last word, what sandbar has
+  // always done — or "review", where a human looks before the work lands.
+  //
+  // The DEFAULT lane rather than a per-issue setting, because the exception is
+  // what deserves a label: a host states its posture once here and labels the
+  // issues that depart from it. Default "auto", which is the pre-lane
+  // behaviour, so this field changes nothing until a host sets it.
+  //
+  // Review-gating is inherited downward along `## Blocked by` edges, so a
+  // single review-gated issue governs everything queued behind it, and an
+  // `auto-land` label on a descendant is overridden (loudly — sandbar says so
+  // on the issue). `lanes.ts` owns the whole argument.
+  //
+  // Until chunk machinery lands (#54), a review-gated issue is EXCLUDED from
+  // the plan: there is nowhere for it to land yet. So `defaultLane: "review"`
+  // today means "queue this work for a human", not "work it and wait" — see
+  // plan-resolver.ts.
+  readonly defaultLane?: Lane;
 };
 
 // After resolution every defaultable field is concrete. `codingStandardsPath`
@@ -1409,6 +1430,20 @@ function requireRepoPart(field: string, raw: unknown): string {
   return value;
 }
 
+// Validated at runtime even though the field is typed, for the reason every
+// other field here is: `sandbar.config.mjs` is a PROGRAM, and `.mjs` is not
+// type-checked by anything. A misspelt lane ("auto-land", say, borrowing the
+// label's name) would otherwise be silently neither of the two values —
+// compared against "review" it reads as auto, so a host asking for a human's
+// eyes would get none and never be told.
+function requireLane(value: unknown): Lane {
+  if (value === undefined) return DEFAULT_LANE;
+  if (value === "review" || value === "auto") return value;
+  throw new SandbarError(
+    `config.defaultLane must be "review" or "auto" (got ${JSON.stringify(value)}).`,
+  );
+}
+
 export function resolveConfig(config: RunConfig): ResolvedConfig {
   // Trimmed HERE, not just where it is compared. `resolveMergeMode` tests
   // `integrationBranch === sourceBranch.trim()`, so trimming only in the guard
@@ -1482,5 +1517,6 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     gateStack,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
     relaunchAfterLanding: config.relaunchAfterLanding ?? false,
+    defaultLane: requireLane(config.defaultLane),
   };
 }

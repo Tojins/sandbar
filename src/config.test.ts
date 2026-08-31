@@ -2,6 +2,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 import { SandbarError } from "./errors.js";
+import { DEFAULT_LANE } from "./lanes.js";
 import {
   DEFAULT_ADR_DIR,
   DEFAULT_CHECK_POLL_INTERVAL_MS,
@@ -142,6 +143,10 @@ describe("resolveConfig", () => {
     // Off by default (#65): only a host whose launcher loops on
     // EXIT_CODE_RELAUNCH wants a landing cycle to end the process.
     expect(r.relaunchAfterLanding).toBe(false);
+    // The auto lane (#57): the pre-lane behaviour, so a host that never sets
+    // this — and this repo — is routed exactly as it was before lanes existed.
+    expect(r.defaultLane).toBe(DEFAULT_LANE);
+    expect(r.defaultLane).toBe("auto");
     // No conventional value → stays undefined.
     expect(r.codingStandardsPath).toBeUndefined();
   });
@@ -504,5 +509,37 @@ describe("resolveConfig — env is a record, passed through", () => {
     expect(() =>
       resolveConfig({ ...minimal, env: { "GH-TOKEN": "x" } }),
     ).toThrow(/not a usable environment variable name/);
+  });
+});
+
+// #57 — `sandbar.config.mjs` is a program in a file nothing type-checks, so
+// the two-value union is only a union at runtime if this says so. The failure
+// mode a validator buys: a misspelt lane compares unequal to "review" and is
+// therefore read as auto, so a host that asked for a human's eyes gets none —
+// and, being a default rather than a per-issue label, gets none on everything.
+describe("resolveConfig — defaultLane (#57)", () => {
+  it("accepts both lanes", () => {
+    expect(resolveConfig({ ...minimal, defaultLane: "review" }).defaultLane).toBe(
+      "review",
+    );
+    expect(resolveConfig({ ...minimal, defaultLane: "auto" }).defaultLane).toBe(
+      "auto",
+    );
+  });
+
+  it("rejects a value that is neither, naming the field", () => {
+    expect(() =>
+      // The likeliest slip is borrowing the LABEL's name for the lane.
+      resolveConfig({ ...minimal, defaultLane: "auto-land" as never }),
+    ).toThrow(/defaultLane/);
+    expect(() =>
+      resolveConfig({ ...minimal, defaultLane: "auto-land" as never }),
+    ).toThrow(SandbarError);
+  });
+
+  it("rejects a non-string, which a computed config can produce", () => {
+    expect(() =>
+      resolveConfig({ ...minimal, defaultLane: true as never }),
+    ).toThrow(/defaultLane/);
   });
 });
