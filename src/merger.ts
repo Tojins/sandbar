@@ -1455,12 +1455,16 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // diverge, which is exactly what the by-construction no-conflict
       // property forbids.
       //
-      // Null ⇒ origin has no such branch: this is the chunk's first landing,
-      // and `origin/<sourceBranch>` is where a chunk branch is created. A fetch
-      // that failed for some OTHER reason (network, auth) answers null too and
-      // reads as "first landing" — the composition is then based on the source
-      // branch and the push below is rejected as non-fast-forward rather than
-      // silently overwriting the branch, which is the safe way to be wrong.
+      // Null ⇒ the cache can name no such ref at all: this is the chunk's
+      // first landing, and `origin/<sourceBranch>` is where a chunk branch is
+      // created. A fetch that merely FAILED (network, auth, or a sibling's
+      // concurrent fetch winning the ref lock) does not answer null — it
+      // answers with the tip the cache already holds, which is the whole point
+      // of sharing the function with the seeding. And should the cache ever be
+      // wrong about a chunk that does exist, the composition is based on the
+      // source branch and the push below is rejected as non-fast-forward
+      // rather than silently overwriting the branch, which is the safe way to
+      // be wrong.
       return (
         (await fetchOriginChunkBranch(cwd, chunkBranch)) ??
         `origin/${deps.sourceBranch}`

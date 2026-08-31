@@ -492,3 +492,129 @@ describe("ensureIssueBranch — the chunk tip is the other seed (#61)", () => {
     expect((await git(cache, "rev-parse", base.ref)).stdout.trim()).toBe(moved);
   });
 });
+
+// #61 — a failed fetch is not "origin has no such branch". The distinction is
+// invisible from inside `ensureIssueBranch` and load-bearing outside it: read
+// as "no such branch", a fetch that failed for any other reason falls back to
+// `origin/<sourceBranch>` and develops a chained member against a tree missing
+// its blockers' work, which is the one outcome #61 exists to prevent. Nothing
+// downstream rejects that (unlike the merger's fallback, which a
+// non-fast-forward push catches), so it can only be caught here.
+//
+// Real repos again, and necessarily: the losing fetch, its exit status and the
+// state of the ref it failed to write are all git's, and the concurrency case
+// below has nothing to assert if the fetches are faked.
+describe("ensureIssueBranch — a failed fetch falls back to the cached tip (#61)", () => {
+  let root: string;
+  let origin: string;
+  let seed: string;
+  let cache: string;
+
+  const CHUNK = { root: 10, branch: "sandbar/chunk-10-thing" };
+  const ON_CHUNK = "chunk-member-1.txt";
+
+  const git = (repo: string, ...args: string[]) => exec("git", args, { cwd: repo });
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-gitops-fetchfail-"));
+    origin = join(root, "origin.git");
+    seed = join(root, "seed");
+    cache = join(root, "repo.git");
+
+    await exec("git", ["init", "--bare", "-q", "-b", "main", origin]);
+    await exec("git", ["clone", "-q", origin, seed], { cwd: root });
+    await git(seed, "config", "user.email", "t@t");
+    await git(seed, "config", "user.name", "t");
+    await writeFile(join(seed, "main.txt"), "base\n");
+    await git(seed, "add", "-A");
+    await git(seed, "commit", "-qm", "base");
+    await git(seed, "push", "-q", "origin", "main");
+
+    // The chunk's root has landed: a chunk branch on origin, one commit ahead.
+    await writeFile(join(seed, ON_CHUNK), "root member work\n");
+    await git(seed, "add", "-A");
+    await git(seed, "commit", "-qm", "root member");
+    await git(seed, "push", "-q", "origin", `HEAD:refs/heads/${CHUNK.branch}`);
+    await git(seed, "reset", "-q", "--hard", "origin/main");
+
+    await exec("git", ["clone", "--bare", "-q", origin, cache], { cwd: root });
+    await git(cache, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*");
+    // Preflight's fetch of the chunk namespace: the cache knows the tip before
+    // any of this cycle's seeding runs.
+    await git(cache, "fetch", "-q", "origin", "--prune");
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  // Every member of a LAYER is seeded in parallel (run.ts), against the one
+  // bare cache, with the same refspec. When the fetch actually moves the ref,
+  // git fails all but one of them — "cannot lock ref ...: is at X but expected
+  // Y", where X is precisely the value the loser wanted to write. Every member
+  // must still come out seeded from the tip; one of them silently getting
+  // `origin/main` is the bug, and which one loses the race is not decidable, so
+  // the assertion is over all of them.
+  it("seeds every member of a layer from the tip when they race on the ref", async () => {
+    // Move the branch on origin, so the concurrent fetches below have a ref to
+    // WRITE and therefore a lock to contend for. A no-op fetch never races.
+    await git(seed, "fetch", "-q", "origin", `${CHUNK.branch}:${CHUNK.branch}`);
+    await git(seed, "checkout", "-q", CHUNK.branch);
+    await git(seed, "commit", "-q", "--allow-empty", "-m", "another member landed");
+    await git(seed, "push", "-q", "origin", CHUNK.branch);
+    await git(seed, "checkout", "-q", "main");
+    const tip = (await git(origin, "rev-parse", CHUNK.branch)).stdout.trim();
+
+    const members = [11, 12, 13, 14, 15, 16].map((n) => `sandbar/issue-${n}-member`);
+    const bases = await Promise.all(
+      members.map((branch) => ensureIssueBranch(cache, branch, "main", CHUNK)),
+    );
+
+    for (const base of bases) {
+      expect(base).toEqual({
+        ref: `refs/remotes/origin/${CHUNK.branch}`,
+        chunkBranch: CHUNK.branch,
+      });
+    }
+    for (const branch of members) {
+      expect((await git(cache, "rev-parse", branch)).stdout.trim()).toBe(tip);
+      expect(
+        (await git(cache, "ls-tree", "--name-only", branch)).stdout,
+      ).toContain(ON_CHUNK);
+    }
+  });
+
+  // The other reading of a failed fetch: origin is unreachable. The cache still
+  // holds what preflight fetched, and a chunk branch only ever moves forward,
+  // so that tip is at worst an ancestor of origin's — still under the member's
+  // feet, where `origin/main` is not.
+  it("seeds from the cached tip when origin is unreachable", async () => {
+    await git(cache, "remote", "set-url", "origin", join(root, "no-such-origin.git"));
+
+    const base = await ensureIssueBranch(cache, "sandbar/issue-11-member", "main", CHUNK);
+
+    expect(base).toEqual({
+      ref: `refs/remotes/origin/${CHUNK.branch}`,
+      chunkBranch: CHUNK.branch,
+    });
+    expect(
+      (await git(cache, "ls-tree", "--name-only", "sandbar/issue-11-member")).stdout,
+    ).toContain(ON_CHUNK);
+  });
+
+  // And the case the fallback must NOT swallow: no ref to name, which is the
+  // chunk's first landing. Preflight prunes this namespace at the top of every
+  // run, so a branch that is not on origin is not in the cache either — and the
+  // root's seed has to be `origin/main`, where the merge phase creates the
+  // branch.
+  it("still falls back to the source branch when the cache has no such ref", async () => {
+    const other = { root: 20, branch: "sandbar/chunk-20-other" };
+
+    const base = await ensureIssueBranch(cache, "sandbar/issue-20-root", "main", other);
+
+    expect(base).toEqual({ ref: "origin/main", chunkBranch: null });
+    expect(
+      (await git(cache, "ls-tree", "--name-only", "sandbar/issue-20-root")).stdout,
+    ).not.toContain(ON_CHUNK);
+  });
+});

@@ -37,15 +37,15 @@ export function sourceBranchBase(sourceBranch: string): IssueBranchBase {
   return { ref: `origin/${sourceBranch}`, chunkBranch: null };
 }
 
-// Fetch ORIGIN's copy of a chunk branch into `cwd`'s object store and return
-// the remote-tracking ref, or null when origin has no such branch.
+// Bring `cwd`'s copy of origin's chunk branch up to date and return the
+// remote-tracking ref, or null when there is no such ref to name at all.
 //
-// Origin, every time, and never a local ref: a chunk branch outlives the run
-// that created it and nothing in the state directory is authoritative, so a
-// local copy is at best a cache and at worst a stale answer that would seed a
-// member on a base missing an earlier one. The refspec is explicit (and forced)
-// because a plain `git fetch origin <branch>` writes only FETCH_HEAD in a BARE
-// repository, which is what the object cache is.
+// Origin, every time, and never a LOCAL branch: a chunk branch outlives the run
+// that created it and nothing in the state directory is authoritative, so
+// `refs/heads/<chunk>` is at best a cache and at worst a stale answer that
+// would seed a member on a base missing an earlier one. The refspec is explicit
+// (and forced) because a plain `git fetch origin <branch>` writes only
+// FETCH_HEAD in a BARE repository, which is what the object cache is.
 //
 // Shared by the two places that ask (#61): this module, seeding a chunk
 // member's issue branch, and the merger, choosing the base to land that member
@@ -53,19 +53,34 @@ export function sourceBranchBase(sourceBranch: string): IssueBranchBase {
 // one base and merged onto another is exactly the conflict the by-construction
 // property (#54 round-1 Q4) exists to rule out.
 //
-// Null is TWO answers wearing one hat: origin has no such branch, and the fetch
-// failed for some other reason (network, auth). Both callers read it as the
-// first and fall back to the source branch, and the two do not pay the same
-// price for that. For the merger it is genuinely safe — a composition based on
-// the source branch is rejected as non-fast-forward on push rather than
-// overwriting the chunk. For the seeding here it is merely LOUD: a chained
-// member developed on a tree missing its blockers' work is what #61 exists to
-// prevent, and what it costs is an implementer budget spent against the wrong
-// base, ending in a conflicting chunk merge that the resolve loop or a human
-// then untangles. Nothing lands wrongly either way, which is why the two share
-// one function; telling the readings apart (an extra `ls-remote`, or stderr
-// matching) buys a better error message for a case in which `gh` and podman are
-// failing too.
+// A FAILED FETCH IS NOT "NO SUCH BRANCH", and reading it as one was a silent
+// hole. Phase 2 runs a layer's members in parallel (`run.ts`), so every member
+// of one chunk fetches the SAME refspec into the one bare cache at the same
+// instant; when that fetch actually moves the ref, git fails the losers with
+//
+//     error: cannot lock ref '<remote ref>': is at <new> but expected <old>
+//
+// — a failure whose own message says the ref now holds exactly the value the
+// loser wanted to write. Read as "origin has no such branch" that became a
+// fall back to `origin/<sourceBranch>`, i.e. a chained member developed against
+// a tree missing its blockers' work, which is the one outcome #61 exists to
+// prevent — and unlike the merger's fallback nothing downstream rejects it, so
+// the member could merge onto the chunk cleanly while being built on the wrong
+// base. Hence the second look: if the ref is THERE, it is the answer, whatever
+// the fetch thought. That covers the race (the winner just wrote the current
+// tip) and a network or auth failure (the last tip preflight fetched, which a
+// chunk branch only ever moves forward from) with one cheap read, and it adds
+// nothing to the happy path.
+//
+// Null therefore means the cache can name no such ref, which is the chunk's
+// FIRST landing: no branch on origin and none cached, since preflight prunes
+// this namespace at the top of every run. The two callers then base on
+// `origin/<sourceBranch>` — for the merger that is the correct creation point
+// for a new chunk branch, and for the seeding it is the chunk root's correct
+// seed. A branch a human deleted on origin MID-RUN answers null too late to be
+// pruned and so keeps answering with the cached tip for the rest of the run;
+// that costs nothing extra, because a member seeded from that tip carries the
+// old chunk's commits into the landing either way.
 export async function fetchOriginChunkBranch(
   cwd: string,
   chunkBranch: string,
@@ -77,6 +92,12 @@ export async function fetchOriginChunkBranch(
       ["fetch", "origin", `+refs/heads/${chunkBranch}:${remoteRef}`, "--quiet"],
       { cwd },
     );
+    return remoteRef;
+  } catch {
+    // Fall through: what the cache already holds outranks what the fetch said.
+  }
+  try {
+    await exec("git", ["show-ref", "--verify", "--quiet", remoteRef], { cwd });
     return remoteRef;
   } catch {
     return null;
@@ -111,15 +132,18 @@ export async function fetchOriginChunkBranch(
 //     the tip, its commits sit on top of every ancestor's, so the chunk-merge
 //     of it cannot conflict with them (#54 round-1 Q4) — an UNRELATED member of
 //     the same chunk still can, and that stays the resolve loop's job.
-//   - A chunk whose branch origin does not have yet → `origin/<sourceBranch>`,
-//     which is exactly where the merge phase creates a chunk branch (#60). That
-//     is the chunk's ROOT, and the two agreeing is what makes its landing
-//     honest. A non-root member cannot reach this case where "does not have
-//     yet" is the truth: it plans only once a blocker of its own carries
-//     `in-chunk`, and finalise applies that label only after the chunk branch
-//     carrying the commits is on origin. It CAN reach it on a failed fetch,
-//     which answers the same null — see `fetchOriginChunkBranch` for what that
-//     costs and why it is not told apart.
+//   - A chunk the cache can name no branch for → `origin/<sourceBranch>`, which
+//     is exactly where the merge phase creates a chunk branch (#60). That is
+//     the chunk's ROOT, and the two agreeing is what makes its landing honest.
+//     Only a root reaches this case: a non-root member plans only once a
+//     blocker of its own carries `in-chunk`, and finalise applies that label
+//     only after the chunk branch carrying the commits is on origin. (Root is
+//     one issue, not several — a chunk has exactly ONE parentless member,
+//     which is chunks.ts's own argument from the rule that a chunk never grows
+//     to accommodate an issue whose blockers straddle two. Two gated issues
+//     both blocking a third do not make one chunk with two roots; they stay two
+//     chunks and the third is `two-chunk-parent`.) A failed fetch no longer
+//     lands here — see `fetchOriginChunkBranch`.
 //
 // The residual, stated rather than engineered around: a member whose commits
 // are ALREADY on the chunk branch while its issue still reads `ready-for-agent`
