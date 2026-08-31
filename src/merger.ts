@@ -523,6 +523,16 @@ type ChunkLandingUnit = {
   readonly sourceBranch: string;
 };
 
+// The same, once origin's copy of the chunk branch has been fetched and merged.
+// `ref` is what `fetchChunkRef` resolved — `refs/remotes/origin/<chunk>` — and
+// it is the ONLY name for those commits that resolves in the merger worktree:
+// that worktree hangs off the bare cache, whose imported `refs/heads/*` are
+// deleted on import (`repo-cache.ts`), and nothing sandbar does creates a local
+// chunk head afterwards (`preflight.ts` — the merger pushes from a detached
+// HEAD). So every prompt that names these commits has to name this, not
+// `request.branch`.
+type MergedChunkUnit = ChunkLandingUnit & { readonly ref: string };
+
 // A member whose branch is on its chunk's branch AND that branch is on origin
 // (#60). Recorded only after the push, so the label finalise applies from it
 // never claims durability the commits do not have. Not `merged`: nothing of it
@@ -1147,17 +1157,20 @@ export async function runMergerWithAdapter(
   // ---------------------------------------------------------------------
 
   // Everything the resolve agent should be able to read about a chunk: the
-  // member issues, all pointing at the chunk branch, because that is where
-  // their work is. Their own issue branches are long since deleted (finalise
-  // reaps one when its member flips to `in-chunk`), so naming those would send
-  // an agent to a ref that is not there.
+  // member issues, all pointing at where their work actually is. Their own
+  // issue branches are long since deleted (finalise reaps one when its member
+  // flips to `in-chunk`), so naming those would send an agent to a ref that is
+  // not there — and so, for the same reason, would naming the chunk branch:
+  // only `origin/<chunk>` exists here, which is why the caller passes the ref
+  // `fetchChunkRef` resolved rather than `request.branch`. See
+  // `MergedChunkUnit`.
   const chunkMemberRefs = (
-    request: ChunkLandTarget,
+    unit: MergedChunkUnit,
   ): readonly IssueRef[] =>
-    request.members.map((m) => ({
+    unit.request.members.map((m) => ({
       id: String(m.number),
       title: m.title,
-      branch: request.branch,
+      branch: unit.ref,
     }));
 
   // Take `land` back off and say why on the pull request. The chunk itself is
@@ -1177,75 +1190,84 @@ export async function runMergerWithAdapter(
     await emit(`chunk ${request.branch}: not landed (${reason})`);
   };
 
-  // Each request paired with where it is going, which is the one place
-  // `ChunkLandingOptions` is taken apart. Pairing rather than hoisting a
-  // `sourceBranch` local is what keeps the invariant stated: two locals would
-  // need a default branch name for the cycle that has no requests at all, and
-  // an empty string that only ever works because nothing reads it is an
-  // invariant held by luck. Below this line a destination exists because a
-  // request does.
-  const pendingChunks: readonly ChunkLandingUnit[] = chunkLanding
-    ? chunkLanding.requests.map((request) => ({
+  // Every requested chunk, merged onto HEAD or parked, returning the ones whose
+  // commits are now on the composition. Lifted out of the body because it is
+  // one self-contained pass over one input: it reads `adapter`, `attemptMerge`
+  // and `parkChunk` and writes nothing but its own return value and the
+  // `skippedChunks` `parkChunk` appends to.
+  //
+  // The pairing with `sourceBranch` is where `ChunkLandingOptions` is taken
+  // apart, and it happens here rather than as two locals at the top for the
+  // reason the type exists: two locals would need a default branch name for the
+  // cycle that has no requests at all, and an empty string that only ever works
+  // because nothing reads it is an invariant held by luck. Inside this function
+  // a destination exists because a request does.
+  const landRequestedChunks = async (): Promise<MergedChunkUnit[]> => {
+    if (!chunkLanding) return [];
+    const onHead: MergedChunkUnit[] = [];
+    for (const request of chunkLanding.requests) {
+      const pending: ChunkLandingUnit = {
         request,
         sourceBranch: chunkLanding.sourceBranch,
-      }))
-    : [];
-
-  // Those whose merge is on HEAD, awaiting the landing. They become
-  // `mergedChunks` only once the source branch has actually moved — the same
-  // rule `merged` follows, and for the same reason.
-  const chunkMergesOnHead: ChunkLandingUnit[] = [];
-  for (const pending of pendingChunks) {
-    const { request, sourceBranch } = pending;
-    try {
-      const ref = await adapter.fetchChunkRef(request.branch);
-      if (ref === null) {
-        // Origin has no such branch. Either the reconciler already landed this
-        // chunk and deleted it (and the label is stale), or somebody deleted
-        // the branch by hand. Merging the source branch into itself instead
-        // would be a silent no-op that closed every member of a chunk whose
-        // work is nowhere, so this parks rather than lands.
+      };
+      try {
+        const ref = await adapter.fetchChunkRef(request.branch);
+        if (ref === null) {
+          // Origin has no such branch. Either the reconciler already landed
+          // this chunk and deleted it (and the label is stale), or somebody
+          // deleted the branch by hand. Merging the source branch into itself
+          // instead would be a silent no-op that closed every member of a chunk
+          // whose work is nowhere, so this parks rather than lands.
+          await parkChunk(
+            request,
+            CHUNK_BRANCH_MISSING_PR_COMMENT({ chunkBranch: request.branch }),
+            "branch-missing",
+          );
+          continue;
+        }
+        const unit: MergedChunkUnit = { ...pending, ref };
+        const outcome = await attemptMerge({
+          unit: {
+            id: String(request.root),
+            title: request.title,
+            branch: ref,
+            // Named for the BRANCH, not for an issue: what is being merged is a
+            // whole chunk, and `Merge sandbar/issue-<root>` would claim it was
+            // one issue's work.
+            mergeMessage: `Merge ${request.branch}: ${request.title}`,
+          },
+          target: SOURCE_TARGET,
+          related: chunkMemberRefs(unit),
+          label: `chunk #${request.root}`,
+          gateKey: `chunk-${request.root}`,
+        });
+        if (outcome.kind === "merged") {
+          onHead.push(unit);
+          continue;
+        }
         await parkChunk(
           request,
-          CHUNK_BRANCH_MISSING_PR_COMMENT({ chunkBranch: request.branch }),
-          "branch-missing",
+          CHUNK_LAND_ABANDONED_PR_COMMENT({
+            chunkBranch: request.branch,
+            sourceBranch: pending.sourceBranch,
+            mode:
+              outcome.kind === "install-failed" ? "install-failed" : outcome.mode,
+            reason: outcome.kind === "install-failed" ? "" : outcome.reason,
+            attempts: RESOLVE_MAX_ATTEMPTS,
+          }),
+          outcome.kind === "install-failed" ? "install-failed" : outcome.mode,
         );
-        continue;
+      } catch (err) {
+        asHalt(`Chunk landing failed on ${request.branch}`)(err);
       }
-      const outcome = await attemptMerge({
-        unit: {
-          id: String(request.root),
-          title: request.title,
-          branch: ref,
-          // Named for the BRANCH, not for an issue: what is being merged is a
-          // whole chunk, and `Merge sandbar/issue-<root>` would claim it was
-          // one issue's work.
-          mergeMessage: `Merge ${request.branch}: ${request.title}`,
-        },
-        target: SOURCE_TARGET,
-        related: chunkMemberRefs(request),
-        label: `chunk #${request.root}`,
-        gateKey: `chunk-${request.root}`,
-      });
-      if (outcome.kind === "merged") {
-        chunkMergesOnHead.push(pending);
-        continue;
-      }
-      await parkChunk(
-        request,
-        CHUNK_LAND_ABANDONED_PR_COMMENT({
-          chunkBranch: request.branch,
-          sourceBranch,
-          mode: outcome.kind === "install-failed" ? "install-failed" : outcome.mode,
-          reason: outcome.kind === "install-failed" ? "" : outcome.reason,
-          attempts: RESOLVE_MAX_ATTEMPTS,
-        }),
-        outcome.kind === "install-failed" ? "install-failed" : outcome.mode,
-      );
-    } catch (err) {
-      asHalt(`Chunk landing failed on ${request.branch}`)(err);
     }
-  }
+    return onHead;
+  };
+
+  // Merged onto HEAD, awaiting the landing. They become `mergedChunks` only
+  // once the source branch has actually moved — the same rule `merged` follows,
+  // and for the same reason.
+  const chunkMergesOnHead = await landRequestedChunks();
 
   for (const issue of sorted) {
     if (issue.chunk) continue;
@@ -1264,7 +1286,7 @@ export async function runMergerWithAdapter(
   // anchor would be the bottom-most commit in the composition, described to an
   // agent as the top.
   const landingIssues: readonly IssueRef[] = [
-    ...chunkMergesOnHead.flatMap((c) => chunkMemberRefs(c.request)),
+    ...chunkMergesOnHead.flatMap(chunkMemberRefs),
     ...merged,
   ];
 

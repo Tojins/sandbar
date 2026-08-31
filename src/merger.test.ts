@@ -35,6 +35,9 @@ type AgentScript = { stdout: string; leavesConflict?: boolean };
 type Calls = {
   merges: string[];
   agentRuns: string[];
+  // #64: the resolve prompt itself, which is the only place the BRANCH a unit
+  // was described by is observable from out here.
+  agentPrompts: string[];
   isMergeChecks: number;
   conflictDigests: number;
   bodies: string[];
@@ -95,6 +98,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
   const calls: Calls = {
     merges: [],
     agentRuns: [],
+    agentPrompts: [],
     isMergeChecks: 0,
     conflictDigests: 0,
     bodies: [],
@@ -140,10 +144,11 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       if (r === "conflict") merging = true;
       return { ok: r === "ok" };
     },
-    async runResolveAgent(_prompt) {
+    async runResolveAgent(prompt) {
       const entry = script.agents?.[aIdx++];
       if (!entry) throw new Error("runResolveAgent not scripted");
       calls.agentRuns.push("agent");
+      calls.agentPrompts.push(prompt);
       calls.order.push("agent");
       if (entry.stdout.includes("<promise>COMMITTED</promise>")) {
         merging = entry.leavesConflict ?? false;
@@ -1994,6 +1999,33 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     // The comment says the forge judged the whole composition, naming the
     // issues that were in it beside this chunk.
     expect(calls.prComments[0]?.body).toContain("#10");
+  });
+
+  it("names the chunk's members by a ref that resolves, not by the chunk branch", async () => {
+    // The merger worktree hangs off the BARE cache, whose imported
+    // `refs/heads/*` are deleted, and nothing creates a local chunk head
+    // afterwards — so `sandbar/chunk-42-c` resolves nowhere here. The resolve
+    // agent is told to go and read the members' work, and only
+    // `origin/sandbar/chunk-42-c` is somewhere it can go. The same refs anchor
+    // the forge-red prompt one landing mode over.
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+      chunkRefs: originHas(42),
+    });
+    await runMergerWithAdapter(
+      [],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42, [42, 43])),
+    );
+
+    const prompt = calls.agentPrompts[0] ?? "";
+    expect(prompt).toContain("Related issue #43");
+    expect(prompt).toContain("Branch: refs/remotes/origin/sandbar/chunk-42-c");
+    expect(prompt).not.toMatch(/Branch: sandbar\/chunk-42-c/);
   });
 
   it("hands the forge the composition in MERGE order, chunk members underneath", async () => {
