@@ -95,6 +95,20 @@
 // telling a human their commits had landed. Whatever this is handed, it closes;
 // the filtering argument lives with the list, in `chunks.ts`.
 //
+// AN EMPTY LIST IS NOT THE SAME CLAIM as a list that all closed, and the branch
+// delete below cannot tell them apart — "every member closed" is vacuously true
+// of no members. It deletes either way, and that is deliberate: the commits are
+// demonstrably on the source branch by then, so the branch is not a recovery
+// point for anything, and KEEPING it would make the reconciler pick the same
+// chunk up every cycle forever, name nothing again, and never resolve. What it
+// costs is the one case where the emptiness is wrong — a member carrying
+// `in-chunk` that the derivation did not name, from a run that pushed the chunk
+// branch and died before finalise labelled it — where the issue is left OPEN,
+// off the queue, with no branch left for anything to retry from. That is why
+// both the pull request and the orchestrator's console SAY the list was empty
+// rather than reporting a clean landing: it is the only thing that can be done
+// about it here, and a human reading either can close the issue in one click.
+//
 // EXPLICITLY is the load-bearing word on the first one. GitHub closes an issue
 // from a `Closes #N` trailer only when GitHub itself merges the pull request
 // carrying it — sandbar composes the merge locally and pushes the result, so no
@@ -724,7 +738,9 @@ export async function wrapUpLandedChunk(
   // chunk again, and a member left OPEN under `in-chunk` is the one residue
   // worth another attempt. A PR that would not close is cosmetic by
   // comparison, and a branch kept for it would re-run the whole wrap-up every
-  // cycle forever.
+  // cycle forever. `closesComplete` is vacuously true for a chunk that named
+  // no member at all, which deletes the branch too — see the header for why
+  // that is the right answer and what it costs.
   let branchDeleted = false;
   if (closesComplete) {
     try {

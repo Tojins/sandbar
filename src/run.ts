@@ -116,6 +116,7 @@ import {
 } from "./merger-worktree.js";
 import { type Stack, startStack } from "./gate-stack.js";
 import { LAND_LABEL, selectLandRequests } from "./chunk-land.js";
+import { IN_CHUNK_LABEL } from "./chunks.js";
 import {
   fetchLandRequestPullRequests,
   reconcileLandedChunks,
@@ -1015,6 +1016,34 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // cannot happen, since the branch those lines came with is gone.
       const landedChunks = mergerSummary?.mergedChunks ?? [];
       const keptChunks = landedChunks.filter((c) => !c.branchDeleted);
+
+      // A chunk that landed while naming no member to close. Sandbar honours
+      // such a request on purpose — a human labelled a branch that origin has,
+      // and refusing would leave them holding a label nothing reads — and the
+      // usual reason for it is benign: every member was closed by hand already.
+      // But the wrap-up cannot tell that from a member whose `in-chunk` label
+      // the derivation never saw, and it deletes the branch either way (see
+      // `chunk-land.ts`), so nothing will ever look at this chunk again. That
+      // is a warning rather than a halt: the commits are on the source branch
+      // and the only repair left is one a human makes on the tracker.
+      const unnamedChunks = landedChunks.filter(
+        (c) => c.target.members.length === 0,
+      );
+      if (unnamedChunks.length > 0) {
+        console.warn(
+          `\nSandbar landed ${unnamedChunks.length} chunk(s) on ${config.sourceBranch} ` +
+            "for which it knew no member issue, so it closed none:\n" +
+            unnamedChunks.map((c) => `  ${c.target.branch}`).join("\n") +
+            "\nUsually that means they were closed by hand already. If any issue " +
+            `is still open under \`${IN_CHUNK_LABEL}\` for one of these, close it ` +
+            "yourself — the branch is deleted, so no later run will find it.",
+        );
+        await runLogger.appendOrchestrator(
+          `merger: landed with no named member: ${unnamedChunks
+            .map((c) => c.target.branch)
+            .join(", ")}`,
+        );
+      }
       const retiredResidue = landedChunks
         .filter((c) => c.branchDeleted)
         .flatMap((c) => c.residue);
