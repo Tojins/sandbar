@@ -83,6 +83,16 @@ export const READY_FOR_AGENT_LABEL = "ready-for-agent";
 
 export const BOT_COMMENT_PREFIX = "**Sandbar:**";
 
+// A note that applies to every template below, and to the ones in
+// `chunk-land.ts` and `chunk-pr.ts`: these bodies are posted into the HOST
+// repository. `#N` in one of them is not a sandbar issue — GitHub resolves it
+// against the host's numbering, renders it as a link and files a
+// cross-reference event and a notification on whatever issue or pull request
+// happens to hold that number. So the `(#N)` citation this codebase uses
+// everywhere else stays in module headers and comments; the only `#N` a body
+// may carry is one it was HANDED, which is a host issue number by
+// construction.
+
 export const NEEDS_INFO_COMMENT_TEMPLATE = (
   questions: string,
   needsInfoLabel: string,
@@ -348,7 +358,7 @@ export const CHUNK_LANDED_COMMENT_TEMPLATE = (
   `The issue stays OPEN and \`${readyLabel}\` has been replaced with ` +
   `\`${inChunkLabel}\`: it is out of the agent queue (its work is done and on ` +
   `the branch) but not finished. It closes when the chunk lands, which a human ` +
-  `triggers by putting \`${LAND_LABEL}\` on the chunk's pull request (#64) — ` +
+  `triggers by putting \`${LAND_LABEL}\` on the chunk's pull request — ` +
   `sandbar then merges \`${chunkBranch}\` into the source branch and closes every ` +
   `issue on it. The local issue branch was deleted — \`${chunkBranch}\` carries ` +
   `its commits.`;

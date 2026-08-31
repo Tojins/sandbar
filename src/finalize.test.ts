@@ -5,6 +5,7 @@ import { DEFAULT_LABELS, type LabelConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
 import {
   BOT_COMMENT_PREFIX,
+  CHUNK_LANDED_COMMENT_TEMPLATE,
   type FinalizeAdapter,
   type FinalizeInput,
   NEEDS_HUMAN_COMMENT_TEMPLATE,
@@ -216,6 +217,24 @@ describe("comment templates", () => {
     expect(body).toContain("foo not extracted");
     expect(body).toContain("naming is unclear");
     expect(body).toContain(AGENT_STUCK);
+  });
+
+  // A comment body is posted into the HOST repository, where `#64` is not this
+  // repo's issue 64: GitHub autolinks it to whatever the host's issue or pull
+  // request 64 happens to be, renders it as a link, and files a cross-reference
+  // event and a notification on it. Citing the sandbar issue that built a
+  // mechanism belongs in the module header, never in the prose. The only `#N`
+  // any template here may carry is one it was HANDED — a host issue number.
+  it("chunk-landed body cites no sandbar issue number, which would autolink in the host repo", () => {
+    const body = CHUNK_LANDED_COMMENT_TEMPLATE(
+      "sandbar/chunk-42-alpha",
+      IN_CHUNK_LABEL,
+      READY_FOR_AGENT,
+    );
+    expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
+    expect(body).toContain("sandbar/chunk-42-alpha");
+    expect(body).toContain(IN_CHUNK_LABEL);
+    expect(body).not.toMatch(/#\d/);
   });
 });
 
