@@ -176,6 +176,38 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       expect(create?.[base + 1]).toBe("main");
     });
 
+    // #64 — the three pull-request writes that land or park a chunk. The wrong
+    // repository here is a reviewer told nothing on a pull request that stays
+    // labelled `land`, so the same failing merge is retried every cycle.
+    it("comments on the chunk pull request in the configured repo", async () => {
+      await adapter().commentOnPullRequest(9, "landed");
+
+      const [argv] = await calls();
+      expect(argv?.slice(0, 3)).toEqual(["pr", "comment", "9"]);
+      expect(repoFlagOf(argv ?? [])).toBe("acme/app");
+    });
+
+    it("drops the land label on the configured repo", async () => {
+      await adapter().removePullRequestLabel(9, "land");
+
+      const [argv] = await calls();
+      expect(argv?.slice(0, 3)).toEqual(["pr", "edit", "9"]);
+      expect(repoFlagOf(argv ?? [])).toBe("acme/app");
+      expect(argv).toContain("--remove-label");
+      expect(argv).toContain("land");
+    });
+
+    it("closes the chunk pull request in the configured repo, keeping its branch", async () => {
+      await adapter().closePullRequest(9);
+
+      const [argv] = await calls();
+      expect(argv?.slice(0, 3)).toEqual(["pr", "close", "9"]);
+      expect(repoFlagOf(argv ?? [])).toBe("acme/app");
+      // The branch delete is the wrap-up's own last step and is conditional on
+      // every member having closed, which this call cannot know.
+      expect(argv).not.toContain("--delete-branch");
+    });
+
     // The sharpest of the six: closing an issue in the wrong repository is the
     // one write that is not merely noise to whoever receives it.
     it("closes the issue in the configured repo", async () => {

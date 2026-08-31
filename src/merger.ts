@@ -86,6 +86,47 @@
 // `in-chunk`), so what the halt costs is the cycle, and what carrying on would
 // cost is a chunk branch growing under a human who was never shown it.
 //
+// ---------------------------------------------------------------------------
+// The third landing: a reviewed CHUNK onto the source branch (#64)
+// ---------------------------------------------------------------------------
+//
+// A human puts `land` on a chunk's pull request; the next cycle merges
+// `origin/<chunkBranch>` onto the source branch in the SAME pass as the auto
+// lane's DONE branches, before them, and the cycle's one landing carries both.
+// `chunk-land.ts` owns the label, the prose and the wrap-up; this file owns
+// only what the merge loop does with them.
+//
+// Sharing the source pass rather than building a second one is the whole
+// design. The reviewed chunk and this cycle's fresh branches end up in one
+// composition, so gate-2 judges what a human will actually get, verified mode
+// asks the forge about it once, and there is no window in which the chunk is on
+// the source branch and the cycle's issues are not. It is also why
+// `attemptMerge` exists: the merge, the resolve loop, the gate and the revert
+// are identical for an issue branch and a chunk branch, and only the tracker
+// half — `ready-for-agent` on an issue, `land` on a pull request — differs.
+//
+// CHUNKS FIRST inside that pass, because their commits are the older ones: they
+// were cut from a source branch that has since moved, and a review already said
+// yes to them. Fresh work merges on top.
+//
+// The failure classing follows the same rule as everything else here, read
+// through the label-as-queue: a merge the resolve loop could not save is the
+// chunk's own problem, so `land` comes off and the pull request says why (a
+// label left on would retry that same failing merge every cycle forever). A
+// push race, a forge verdict that never arrived, a `gh` that could not be
+// reached — none of those is a fact about the chunk, so the label stays and the
+// next run tries again. Nothing lands and nothing is closed in either case.
+//
+// The WRAP-UP runs only after the source branch has moved: close every member
+// explicitly (no `Closes #N` will ever fire — GitHub honours those on its own
+// merge of that pull request, and sandbar composed this one locally), drop
+// `in-chunk`, close the PR, delete the chunk branch on origin. It cannot throw,
+// by construction: it is entirely inside the post-`landed` window, where a
+// wrapped throw would report `merged: []` against a source branch that moved.
+// What it could not finish comes back as `ChunkMerge.residue`, the chunk branch
+// is kept when it is non-empty, and the next run's reconciler picks up exactly
+// the writes that failed.
+//
 // After all branches processed, the cycle's merge result is LANDED. Two modes
 // (config.mergeMode, #22):
 //
@@ -151,6 +192,15 @@ import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 
+import {
+  CHUNK_BRANCH_MISSING_PR_COMMENT,
+  CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT,
+  CHUNK_LAND_ABANDONED_PR_COMMENT,
+  type ChunkLandTarget,
+  type ChunkWrapupResult,
+  LAND_LABEL,
+  wrapUpLandedChunk,
+} from "./chunk-land.js";
 import {
   chunkMembersOnBranch,
   chunkPullRequestContent,
@@ -340,6 +390,38 @@ export type IssueRef = {
   readonly chunk?: ChunkTarget | null;
 };
 
+// One thing that can be merged onto the worktree's HEAD. `IssueRef` is
+// assignable as-is, which is the point: every issue branch that has ever gone
+// through this loop is one of these, and #64 added the other kind — a whole
+// CHUNK branch, landing on the source branch after its review.
+export type MergeUnit = {
+  readonly id: string;
+  readonly title: string;
+  // What `git merge` is given. An issue branch is local (`sandbar/issue-…`); a
+  // chunk is merged from ORIGIN's copy, so this is a remote-tracking ref.
+  readonly branch: string;
+  // The merge commit's subject. Absent ⇒ the issue shape,
+  // `Merge sandbar/issue-<n>: <title>` — which is wrong for anything that is
+  // not one issue's branch, so a chunk supplies its own.
+  readonly mergeMessage?: string;
+};
+
+// What one `attemptMerge` did to the worktree, with the tracker deliberately
+// untouched. `install-failed` and `abandon` have both already been reverted.
+type MergeAttempt =
+  | { readonly kind: "merged" }
+  | { readonly kind: "install-failed" }
+  | {
+      readonly kind: "abandon";
+      readonly mode: "conflict" | "gate-red";
+      readonly reason: string;
+      // The resolve loop's HEAD-advance invariant tripped: the agent claimed
+      // success and produced no commit. Only an issue branch does anything
+      // different with it (a fresh attempt next cycle); a chunk has no
+      // implementer to re-run, so it parks like any other abandon.
+      readonly silent: boolean;
+    };
+
 export type PushResult =
   | { readonly kind: "ok" }
   | { readonly kind: "race" }
@@ -348,7 +430,7 @@ export type PushResult =
 // Adapter shape. Split into the merger's own primitives and the resolve-loop
 // primitives (which the merger forwards). The real adapter implements both.
 export type MergerAdapter = ResolveAdapter & {
-  mergeNoFf(issue: IssueRef): Promise<{ readonly ok: boolean }>;
+  mergeNoFf(unit: MergeUnit): Promise<{ readonly ok: boolean }>;
   abortMerge(): Promise<void>;
   getHeadSha(): Promise<string>;
   resetHardSha(sha: string): Promise<void>;
@@ -381,6 +463,23 @@ export type MergerAdapter = ResolveAdapter & {
     readonly title: string;
     readonly body: string;
   }): Promise<PullRequestRef>;
+  // --- landing a reviewed chunk on the source branch (#64) ---
+  // ORIGIN's copy of the chunk branch, as a remote-tracking ref, freshly
+  // fetched. Null when origin has no such branch — which is a real answer and
+  // not an error: the review artifact is gone, so there is nothing to land.
+  // Unlike `chunkBase` this does NOT fall back to the source branch; merging
+  // the source branch into itself would be a no-op that closed every member of
+  // a chunk whose work is nowhere.
+  fetchChunkRef(chunkBranch: string): Promise<string | null>;
+  // Delete the chunk branch on origin, once its commits are on the source
+  // branch. The last step of the wrap-up and the one that stops the reconciler
+  // seeing this chunk again.
+  deleteChunkBranch(chunkBranch: string): Promise<void>;
+  commentOnPullRequest(pr: number, body: string): Promise<void>;
+  // Takes `land` back off, which is what stops a failing merge being retried
+  // every cycle. See `chunk-land.ts` on the label as a queue.
+  removePullRequestLabel(pr: number, label: string): Promise<void>;
+  closePullRequest(pr: number): Promise<void>;
 };
 
 export type SkipReason =
@@ -399,6 +498,19 @@ export type SkipReason =
   // the per-issue retry cap) or escalate to human attention.
   | "silent-noop";
 
+// Wired here rather than in `chunk-land.ts` because the merge phase is what
+// consumes it: `chunkLanding` present ⇒ this cycle may land reviewed chunks on
+// the source branch (#64). Absent ⇒ nothing does, which is every host on the
+// default lane and every caller that predates the review lane.
+export type ChunkLandingOptions = {
+  // What a human asked for: one target per open pull request carrying `land`.
+  readonly requests: readonly ChunkLandTarget[];
+  // Named rather than derived, because this is the one thing the merge loop has
+  // never had to know. The prose a member and a pull request are told has to
+  // say where the work went, and `MergeTarget` only ever needed a noun phrase.
+  readonly sourceBranch: string;
+};
+
 // A member whose branch is on its chunk's branch AND that branch is on origin
 // (#60). Recorded only after the push, so the label finalise applies from it
 // never claims durability the commits do not have. Not `merged`: nothing of it
@@ -407,6 +519,32 @@ export type SkipReason =
 export type ChunkLanding = {
   readonly issue: IssueRef;
   readonly chunkBranch: string;
+};
+
+// A chunk landed on the SOURCE branch this cycle, with what its wrap-up could
+// not finish (#64). Distinct from `ChunkLanding` above in the direction it
+// points: that one is an issue arriving ON a chunk branch, this one is the
+// whole chunk leaving it.
+export type ChunkMerge = ChunkWrapupResult & {
+  readonly request: ChunkLandTarget;
+};
+
+// Why a requested chunk did not land. Every one of these has already taken
+// `land` off the pull request and said why on it, so the request is not
+// repeated until a human re-applies the label — see `chunk-land.ts` on the
+// label as a queue, and note what is NOT in this list: a push race, a forge
+// verdict that never arrived and a `gh` that could not be reached all leave
+// the label alone and halt, because nothing about the chunk is wrong.
+export type ChunkLandSkipReason =
+  | "branch-missing"
+  | "conflict"
+  | "gate-red"
+  | "install-failed"
+  | "forge-unverified";
+
+export type SkippedChunkLand = {
+  readonly request: ChunkLandTarget;
+  readonly reason: ChunkLandSkipReason;
 };
 
 export type MergerSummary = {
@@ -428,6 +566,15 @@ export type MergerSummary = {
     readonly issue: IssueRef;
     readonly error: string;
   }[];
+  // Reviewed chunks landed on the source branch this cycle (#64), each with the
+  // residue of its wrap-up. Non-empty residue is operator-actionable and the
+  // orchestrator halts on it — the chunk branch is kept in that case, so the
+  // next run's reconciler retries exactly the writes that failed.
+  readonly mergedChunks: readonly ChunkMerge[];
+  // Requested chunks that did not land and have had `land` removed. Rides a
+  // `MergerError.partial` for the same reason `skipped` does: the pull request
+  // has already been written to.
+  readonly skippedChunks: readonly SkippedChunkLand[];
 };
 
 // The post-push close is a tracker side-effect that runs after the irreversible
@@ -551,6 +698,9 @@ export type RunMergerOptions = {
   // no-op sleep so the backoff doesn't slow the suite.
   readonly closeRetries?: number;
   readonly sleep?: (ms: number) => Promise<void>;
+  // Landing reviewed chunks on the source branch (#64). Absent ⇒ none, which
+  // is the whole of the auto lane.
+  readonly chunkLanding?: ChunkLandingOptions;
   // Verified merge mode (#22). Absent → direct mode (today's push straight to
   // the source branch). Present → the forge gates the landing. The adapter is
   // required *by the type* exactly when the mode is on, so there is no
@@ -579,6 +729,12 @@ export async function runMergerWithAdapter(
   const merged: IssueRef[] = [];
   const chunkLanded: ChunkLanding[] = [];
   const skipped: { issue: IssueRef; reason: SkipReason }[] = [];
+  // #64. `skippedChunks` is written before the landing and so rides a partial;
+  // `mergedChunks` is only ever written after it, so a partial's is always
+  // empty, exactly as `merged`'s is.
+  const skippedChunks: SkippedChunkLand[] = [];
+  const landRequests = opts.chunkLanding?.requests ?? [];
+  const chunkSourceBranch = opts.chunkLanding?.sourceBranch ?? "";
   const cycle = opts.cycleIssues ?? issues;
   const projectAnchor = opts.projectAnchor ?? "";
   const closeRetries = opts.closeRetries ?? CLOSE_MAX_RETRIES;
@@ -615,7 +771,7 @@ export async function runMergerWithAdapter(
       const msg = err instanceof Error ? err.message : String(err);
       throw new MergerError(
         `${context}: ${msg}`,
-        { merged: [], chunkLanded: [...chunkLanded], skipped, pushed: false, unclosed: [] },
+        { merged: [], chunkLanded: [...chunkLanded], skipped, pushed: false, unclosed: [], mergedChunks: [], skippedChunks: [...skippedChunks] },
         { cause: err },
       );
     };
@@ -662,138 +818,169 @@ export async function runMergerWithAdapter(
     ? { ...opts.verified, cycleBaseSha: await adapter.getHeadSha() }
     : null;
 
-  // One branch, merged onto whatever the worktree is currently detached at.
-  // TRUE when a commit for this issue is on that HEAD; FALSE when the issue was
-  // skipped and HEAD is back where it was. Shared verbatim by both landing
-  // targets (#60) — `target` only ever reaches the prose and the log, because
-  // conflict resolution, the gate and the revert are the same operations
-  // whichever branch is underneath.
+  // One ref, merged onto whatever the worktree is currently detached at, with
+  // the resolve loop and the gate given their say and the repo state already
+  // settled when this returns: a non-`merged` outcome has been reverted and the
+  // tree is back where it started.
+  //
+  // What is deliberately NOT here is the tracker. An issue branch that could not
+  // land is commented on and stripped of `ready-for-agent`; a chunk that could
+  // not land is commented on and stripped of `land` (#64). The repo half of
+  // those two is identical and the tracker half shares nothing, so the split is
+  // exactly where the two stop agreeing.
+  //
+  // Shared verbatim by all three landing paths — issue→source, issue→chunk
+  // (#60), chunk→source (#64). `target` only ever reaches the prose and the
+  // log, because conflict resolution, the gate and the revert are the same
+  // operations whichever branch is underneath.
+  const attemptMerge = async (args: {
+    readonly unit: MergeUnit;
+    readonly target: MergeTarget;
+    // Whose issue bodies the resolve agent gets: the cycle's other issues for
+    // an issue branch, the chunk's members for a chunk.
+    readonly related: readonly IssueRef[];
+    // How this unit is named in the merger log — `#12`, or `chunk #42`.
+    readonly label: string;
+    // The key the gate-red artefact is filed under. An issue id for an issue;
+    // `chunk-<root>` for a chunk, so a chunk and its own root issue landing in
+    // one cycle cannot overwrite each other's trace.
+    readonly gateKey: string;
+  }): Promise<MergeAttempt> => {
+    const { unit, target, label } = args;
+    await emit(`merge-attempt ${label} ${unit.branch}`);
+    const preMergeSha = await adapter.getHeadSha();
+    const m = await adapter.mergeNoFf(unit);
+
+    if (!m.ok) {
+      await emit(`conflict ${label} entering resolve-loop`);
+      const outcome = await runResolveLoop(
+        unit,
+        args.related,
+        { kind: "conflict" },
+        adapter,
+        { projectAnchor, preMergeSha, target: describeMergeTarget(target) },
+        resolveLog,
+      );
+      if (outcome.kind === "abandon") {
+        if (outcome.mergeInProgress) {
+          await adapter.abortMerge();
+        } else {
+          await adapter.resetHardSha(preMergeSha);
+        }
+        return {
+          kind: "abandon",
+          mode: "conflict",
+          reason: outcome.reason,
+          silent: outcome.silent === true,
+        };
+      }
+      await emit(`merged ${label} (via resolve-loop)`);
+      return { kind: "merged" };
+    }
+
+    const inst = await adapter.npmInstall();
+    if (!inst.ok) {
+      await adapter.resetHardSha(preMergeSha);
+      return { kind: "install-failed" };
+    }
+
+    const g = await adapter.runGate();
+    if (!g.ok) {
+      if (onGateRed) {
+        await onGateRed(args.gateKey, {
+          stdout: g.stdout,
+          stderr: g.stderr,
+          failedStep: g.failedStep,
+          exitCode: g.exitCode,
+          containerLogs: g.containerLogs,
+        });
+      }
+      await emit(
+        `gate-red ${label} failedStep=${g.failedStep ?? "-"} exitCode=${g.exitCode}; entering resolve-loop`,
+      );
+      const outcome = await runResolveLoop(
+        unit,
+        args.related,
+        {
+          kind: "gate-red",
+          initialOutput: {
+            stdout: g.stdout,
+            stderr: g.stderr,
+            failedStep: g.failedStep,
+            exitCode: g.exitCode,
+            containerLogs: g.containerLogs,
+          },
+        },
+        adapter,
+        { projectAnchor, preMergeSha, target: describeMergeTarget(target) },
+        resolveLog,
+      );
+      if (outcome.kind === "abandon") {
+        await adapter.resetHardSha(preMergeSha);
+        return {
+          kind: "abandon",
+          mode: "gate-red",
+          reason: outcome.reason,
+          silent: outcome.silent === true,
+        };
+      }
+      await emit(`merged ${label} (gate-red recovered via resolve-loop)`);
+      return { kind: "merged" };
+    }
+
+    await emit(`merged ${label}`);
+    return { kind: "merged" };
+  };
+
+  // One DONE issue branch. TRUE when a commit for this issue is on HEAD; FALSE
+  // when it was skipped and HEAD is back where it was — with the issue told why
+  // and taken off the queue.
   const mergeOne = async (
     issue: IssueRef,
     target: MergeTarget,
   ): Promise<boolean> => {
     try {
       const n = issueNumberOf(issue);
-      const relatedIssues = cycle.filter((c) => c.id !== issue.id);
+      const outcome = await attemptMerge({
+        unit: issue,
+        target,
+        related: cycle.filter((c) => c.id !== issue.id),
+        label: `#${n}`,
+        gateKey: issue.id,
+      });
+      if (outcome.kind === "merged") return true;
 
-      await emit(`merge-attempt #${n} ${issue.branch}`);
-      const preMergeSha = await adapter.getHeadSha();
-      const m = await adapter.mergeNoFf(issue);
-
-      if (!m.ok) {
-        await emit(`conflict #${n} entering resolve-loop`);
-        const outcome = await runResolveLoop(
-          issue,
-          relatedIssues,
-          { kind: "conflict" },
-          adapter,
-          { projectAnchor, preMergeSha, target: describeMergeTarget(target) },
-          resolveLog,
-        );
-        if (outcome.kind === "abandon") {
-          if (outcome.mergeInProgress) {
-            await adapter.abortMerge();
-          } else {
-            await adapter.resetHardSha(preMergeSha);
-          }
-          if (outcome.silent) {
-            // Silent abandon: no comment, no label flip. The orchestrator's
-            // finalize will either delete the branch + leave it on the queue
-            // (fresh attempt next cycle) or escalate to human attention, based
-            // on the per-issue retry count it tracks in runState.
-            skipped.push({ issue, reason: "silent-noop" });
-            await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
-            return false;
-          }
-          await adapter.commentOnIssue(
-            n,
-            buildAbandonComment({
-              mode: "conflict",
-              reason: outcome.reason,
-              attempts: RESOLVE_MAX_ATTEMPTS,
-              target,
-            }),
-          );
-          await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
-          skipped.push({ issue, reason: "conflict" });
-          await emit(`skip #${n} reason=conflict resolve-abandon: ${outcome.reason}`);
-          return false;
-        }
-        await emit(`merged #${n} (via resolve-loop)`);
-        return true;
-      }
-
-      const inst = await adapter.npmInstall();
-      if (!inst.ok) {
-        await adapter.resetHardSha(preMergeSha);
+      if (outcome.kind === "install-failed") {
         await adapter.commentOnIssue(n, buildInstallFailedComment(target));
         await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
         skipped.push({ issue, reason: "install-failed" });
         await emit(`skip #${n} reason=install-failed`);
         return false;
       }
-
-      const g = await adapter.runGate();
-      if (!g.ok) {
-        if (onGateRed) {
-          await onGateRed(issue.id, {
-            stdout: g.stdout,
-            stderr: g.stderr,
-            failedStep: g.failedStep,
-            exitCode: g.exitCode,
-            containerLogs: g.containerLogs,
-          });
-        }
-        await emit(
-          `gate-red #${n} failedStep=${g.failedStep ?? "-"} exitCode=${g.exitCode}; entering resolve-loop`,
-        );
-        const outcome = await runResolveLoop(
-          issue,
-          relatedIssues,
-          {
-            kind: "gate-red",
-            initialOutput: {
-              stdout: g.stdout,
-              stderr: g.stderr,
-              failedStep: g.failedStep,
-              exitCode: g.exitCode,
-              containerLogs: g.containerLogs,
-            },
-          },
-          adapter,
-          { projectAnchor, preMergeSha, target: describeMergeTarget(target) },
-          resolveLog,
-        );
-        if (outcome.kind === "abandon") {
-          await adapter.resetHardSha(preMergeSha);
-          if (outcome.silent) {
-            // Same silent-abandon handling as the conflict path — the agent
-            // reverted the merge commit instead of fixing the gate. Treat as a
-            // fresh-attempt candidate.
-            skipped.push({ issue, reason: "silent-noop" });
-            await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
-            return false;
-          }
-          await adapter.commentOnIssue(
-            n,
-            buildAbandonComment({
-              mode: "gate-red",
-              reason: outcome.reason,
-              attempts: RESOLVE_MAX_ATTEMPTS,
-              target,
-            }),
-          );
-          await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
-          skipped.push({ issue, reason: "gate-red" });
-          await emit(`skip #${n} reason=gate-red resolve-abandon: ${outcome.reason}`);
-          return false;
-        }
-        await emit(`merged #${n} (gate-red recovered via resolve-loop)`);
-        return true;
+      if (outcome.silent) {
+        // Silent abandon: no comment, no label flip. The orchestrator's
+        // finalize will either delete the branch + leave it on the queue
+        // (fresh attempt next cycle) or escalate to human attention, based
+        // on the per-issue retry count it tracks in runState.
+        skipped.push({ issue, reason: "silent-noop" });
+        await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
+        return false;
       }
-
-      await emit(`merged #${n}`);
-      return true;
+      await adapter.commentOnIssue(
+        n,
+        buildAbandonComment({
+          mode: outcome.mode,
+          reason: outcome.reason,
+          attempts: RESOLVE_MAX_ATTEMPTS,
+          target,
+        }),
+      );
+      await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+      skipped.push({ issue, reason: outcome.mode });
+      await emit(
+        `skip #${n} reason=${outcome.mode} resolve-abandon: ${outcome.reason}`,
+      );
+      return false;
     } catch (err) {
       // Not a hypothetical throw site: `getIssueBody` throws by design when
       // `gh` fails (see realAdapter below), and `runGate` throws — rather than
@@ -850,7 +1037,7 @@ export async function runMergerWithAdapter(
           `${landedMembers.length} issue(s) merged onto it locally and were NOT landed: ` +
           `${landedMembers.map((m) => `#${issueNumberOf(m)}`).join(", ")}. ` +
           `They keep ready-for-agent and their branches; the composition is discarded with the merger worktree.`,
-        { merged: [], chunkLanded: [...chunkLanded], skipped, pushed: false, unclosed: [] },
+        { merged: [], chunkLanded: [...chunkLanded], skipped, pushed: false, unclosed: [], mergedChunks: [], skippedChunks: [...skippedChunks] },
       );
     }
     for (const member of landedMembers) {
@@ -907,14 +1094,150 @@ export async function runMergerWithAdapter(
   }
 
   // ---------------------------------------------------------------------
-  // Phase B: the source-branch pass — the auto lane, unchanged since #22.
+  // Phase B: the source-branch pass. Reviewed chunks first (#64), then the
+  // auto lane's DONE branches, then ONE landing over what they compose to.
+  //
+  // Chunks go first because they are the older work: their commits were cut
+  // from a `origin/<sourceBranch>` that has since moved, and a review said yes
+  // to them. Putting them down first and merging this cycle's fresh branches
+  // on top means the gate that decides the cycle sees the composition a human
+  // will actually get, and it means the one landing at the end covers both —
+  // there is no second push, no second verified round, and no window in which
+  // a chunk is on the source branch and the cycle's issues are not.
   // ---------------------------------------------------------------------
+
+  // Everything the resolve agent should be able to read about a chunk: the
+  // member issues, all pointing at the chunk branch, because that is where
+  // their work is. Their own issue branches are long since deleted (finalise
+  // reaps one when its member flips to `in-chunk`), so naming those would send
+  // an agent to a ref that is not there.
+  const chunkMemberRefs = (
+    request: ChunkLandTarget,
+  ): readonly IssueRef[] =>
+    request.members.map((m) => ({
+      id: String(m.number),
+      title: m.title,
+      branch: request.branch,
+    }));
+
+  // Take `land` back off and say why on the pull request. The chunk itself is
+  // untouched — branch, members and labels all as they were — so what this
+  // costs a human is re-applying one label once they have dealt with whatever
+  // the comment describes.
+  const parkChunk = async (
+    request: ChunkLandTarget,
+    comment: string,
+    reason: ChunkLandSkipReason,
+  ): Promise<void> => {
+    if (request.pullRequest > 0) {
+      await adapter.commentOnPullRequest(request.pullRequest, comment);
+      await adapter.removePullRequestLabel(request.pullRequest, LAND_LABEL);
+    }
+    skippedChunks.push({ request, reason });
+    await emit(`chunk ${request.branch}: not landed (${reason})`);
+  };
+
+  // Requests whose merge is on HEAD, awaiting the landing. They become
+  // `mergedChunks` only once the source branch has actually moved — the same
+  // rule `merged` follows, and for the same reason.
+  const chunkMergesOnHead: ChunkLandTarget[] = [];
+  for (const request of landRequests) {
+    try {
+      const ref = await adapter.fetchChunkRef(request.branch);
+      if (ref === null) {
+        // Origin has no such branch. Either the reconciler already landed this
+        // chunk and deleted it (and the label is stale), or somebody deleted
+        // the branch by hand. Merging the source branch into itself instead
+        // would be a silent no-op that closed every member of a chunk whose
+        // work is nowhere, so this parks rather than lands.
+        await parkChunk(
+          request,
+          CHUNK_BRANCH_MISSING_PR_COMMENT({ chunkBranch: request.branch }),
+          "branch-missing",
+        );
+        continue;
+      }
+      const outcome = await attemptMerge({
+        unit: {
+          id: String(request.root),
+          title: request.title,
+          branch: ref,
+          // Named for the BRANCH, not for an issue: what is being merged is a
+          // whole chunk, and `Merge sandbar/issue-<root>` would claim it was
+          // one issue's work.
+          mergeMessage: `Merge ${request.branch}: ${request.title}`,
+        },
+        target: SOURCE_TARGET,
+        related: chunkMemberRefs(request),
+        label: `chunk #${request.root}`,
+        gateKey: `chunk-${request.root}`,
+      });
+      if (outcome.kind === "merged") {
+        chunkMergesOnHead.push(request);
+        continue;
+      }
+      await parkChunk(
+        request,
+        CHUNK_LAND_ABANDONED_PR_COMMENT({
+          chunkBranch: request.branch,
+          sourceBranch: chunkSourceBranch,
+          mode: outcome.kind === "install-failed" ? "install-failed" : outcome.mode,
+          reason: outcome.kind === "install-failed" ? "" : outcome.reason,
+          attempts: RESOLVE_MAX_ATTEMPTS,
+        }),
+        outcome.kind === "install-failed" ? "install-failed" : outcome.mode,
+      );
+    } catch (err) {
+      asHalt(`Chunk landing failed on ${request.branch}`)(err);
+    }
+  }
+
   for (const issue of sorted) {
     if (issue.chunk) continue;
     if (await mergeOne(issue, SOURCE_TARGET)) merged.push(issue);
   }
 
-  if (merged.length === 0) {
+  // What the forge is asked to judge, and what the forge-red resolve loop is
+  // given as context (#22). A landed chunk's members belong in both: the
+  // composed result contains their commits, so a red the forge reports may
+  // well be theirs.
+  const landingIssues: readonly IssueRef[] = [
+    ...merged,
+    ...chunkMergesOnHead.flatMap((r) => chunkMemberRefs(r)),
+  ];
+
+  // Everything that has to happen once the source branch has moved, in one
+  // place because both landing modes reach it and neither may skip half of it.
+  // Nothing here throws — `wrapUpLandedChunk` collects residue rather than
+  // raising, and `closeMergedIssues` is fault-tolerant by design — which is
+  // what keeps the post-`landed` window free of the wrapped-throw problem the
+  // whole of `asHalt` exists for.
+  const settleLanding = async (): Promise<MergerSummary> => {
+    const mergedChunks: ChunkMerge[] = [];
+    for (const request of chunkMergesOnHead) {
+      const wrapup = await wrapUpLandedChunk(request, adapter, {
+        sourceBranch: chunkSourceBranch,
+        provenance: "sandbar",
+        log: (line) => emit(line),
+      });
+      mergedChunks.push({ request, ...wrapup });
+    }
+    return {
+      merged,
+      chunkLanded,
+      skipped,
+      pushed: true,
+      unclosed: await closeMergedIssues(merged, adapter, {
+        closeRetries,
+        sleep,
+        emit,
+      }),
+      mergedChunks,
+      skippedChunks,
+    };
+  };
+
+  if (merged.length === 0 && chunkMergesOnHead.length === 0) {
     // Both halves of that sentence are about the SOURCE branch, and a cycle
     // that landed chunks says so rather than reading as "nothing happened".
     await emit(
@@ -922,7 +1245,15 @@ export async function runMergerWithAdapter(
         ? `no merges, no push`
         : `no merges onto the source branch, no push there — ${chunkLanded.length} issue(s) landed on a chunk branch above`,
     );
-    return { merged, chunkLanded, skipped, pushed: false, unclosed: [] };
+    return {
+      merged,
+      chunkLanded,
+      skipped,
+      pushed: false,
+      unclosed: [],
+      mergedChunks: [],
+      skippedChunks,
+    };
   }
 
   if (verified) {
@@ -942,7 +1273,7 @@ export async function runMergerWithAdapter(
     const landing = await runVerifiedLanding(
       {
         ...verified.options,
-        mergedIssues: merged,
+        mergedIssues: landingIssues,
         cycleIssues: cycle,
         projectAnchor,
       },
@@ -979,6 +1310,8 @@ export async function runMergerWithAdapter(
           skipped,
           pushed: false,
           unclosed: [],
+          mergedChunks: [],
+          skippedChunks,
         },
       );
     }
@@ -1018,26 +1351,39 @@ export async function runMergerWithAdapter(
           haltVerified(err);
         }
       }
-      return { merged: [], chunkLanded, skipped, pushed: false, unclosed: [] };
+      // The chunks in the same composed result (#64). Cycle-level like the
+      // issues beside them and parked the same way: `land` comes off and the
+      // pull request says the forge judged the whole composition, not this
+      // chunk. The revert above already took their merges with it.
+      for (const request of chunkMergesOnHead) {
+        try {
+          await parkChunk(
+            request,
+            CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT({
+              chunkBranch: request.branch,
+              sourceBranch: chunkSourceBranch,
+              detail: landing.detail,
+              siblings: merged.map((m) => issueNumberOf(m)),
+            }),
+            "forge-unverified",
+          );
+        } catch (err) {
+          haltVerified(err);
+        }
+      }
+      return { merged: [], chunkLanded, skipped, pushed: false, unclosed: [], mergedChunks: [], skippedChunks };
     }
 
     // Origin has moved. From here `merged: []` would be a lie, so nothing below
     // is wrapped — see `landed`.
     landed = true;
     await emit(
-      `verify landed ${landing.sha} after ${landing.rounds} round(s); closing ${merged.length} issue(s)`,
+      `verify landed ${landing.sha} after ${landing.rounds} round(s); closing ${merged.length} issue(s)` +
+        (chunkMergesOnHead.length > 0
+          ? ` and wrapping up ${chunkMergesOnHead.length} chunk(s)`
+          : ""),
     );
-    return {
-      merged,
-      chunkLanded,
-      skipped,
-      pushed: true,
-      unclosed: await closeMergedIssues(merged, adapter, {
-        closeRetries,
-        sleep,
-        emit,
-      }),
-    };
+    return settleLanding();
   }
 
   await emit(`push attempt 1`);
@@ -1050,7 +1396,7 @@ export async function runMergerWithAdapter(
       throw new MergerError(
         "Push to origin source branch was rejected and `git pull --ff-only` then failed " +
           "(origin source has diverged). Operator must reconcile manually.",
-        { merged: [], chunkLanded, skipped, pushed: false, unclosed: [] },
+        { merged: [], chunkLanded, skipped, pushed: false, unclosed: [], mergedChunks: [], skippedChunks },
       );
     }
     await emit(`push attempt 2`);
@@ -1059,7 +1405,7 @@ export async function runMergerWithAdapter(
       await emit(`push race retry exhausted`);
       throw new MergerError(
         "Push race retry exhausted: still rejected after one fast-forward pull and re-push.",
-        { merged: [], chunkLanded, skipped, pushed: false, unclosed: [] },
+        { merged: [], chunkLanded, skipped, pushed: false, unclosed: [], mergedChunks: [], skippedChunks },
       );
     }
   }
@@ -1071,23 +1417,20 @@ export async function runMergerWithAdapter(
       skipped,
       pushed: false,
       unclosed: [],
+      mergedChunks: [],
+      skippedChunks,
     });
   }
 
   // Origin has moved — see `landed`.
   landed = true;
-  await emit(`push ok; closing ${merged.length} issue(s)`);
-  return {
-    merged,
-    chunkLanded,
-    skipped,
-    pushed: true,
-    unclosed: await closeMergedIssues(merged, adapter, {
-      closeRetries,
-      sleep,
-      emit,
-    }),
-  };
+  await emit(
+    `push ok; closing ${merged.length} issue(s)` +
+      (chunkMergesOnHead.length > 0
+        ? ` and wrapping up ${chunkMergesOnHead.length} chunk(s)`
+        : ""),
+  );
+  return settleLanding();
 }
 
 // Fault-tolerant close: the landing already happened, so one issue's transient
@@ -1156,7 +1499,10 @@ export type RealAdapterDeps = {
   readonly runStackGate: () => Promise<GateResult>;
 };
 
-function mergeMessageFor(issue: IssueRef): string {
+// The default merge subject, and it names an ISSUE — which is why anything
+// that is not one issue's branch (a chunk, #64) carries its own
+// `MergeUnit.mergeMessage` instead of being described as one.
+function mergeMessageFor(issue: MergeUnit): string {
   return `Merge sandbar/issue-${issueNumberOf(issue)}: ${issue.title}`;
 }
 
@@ -1200,8 +1546,38 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       };
     }
   };
+  // ORIGIN's copy of a chunk branch, or null when it has none. A local const
+  // rather than an object method because `chunkBase` is defined in terms of it
+  // (#60's base, #64's landing source) and one `this` away from the adapter
+  // literal is one `this` that can be lost.
+  //
+  // Ask ORIGIN, every time. A chunk branch outlives the run that created it and
+  // `.sandbar` is disposable, so a local ref is at best a cache and at worst a
+  // stale answer. The refspec is explicit (and forced) so the remote-tracking
+  // ref is updated in a BARE cache too, where a plain `git fetch origin
+  // <branch>` writes only FETCH_HEAD.
+  //
+  // A fetch that failed for some OTHER reason (network, auth) is
+  // indistinguishable from "no such branch" here, and both readers are safe
+  // being wrong that way: `chunkBase` falls back to the source branch, whose
+  // push is then rejected as non-fast-forward rather than overwriting a branch,
+  // and the #64 landing parks the request rather than merging the source branch
+  // into itself.
+  const fetchChunkRef = async (chunkBranch: string): Promise<string | null> => {
+    const remoteRef = `refs/remotes/origin/${chunkBranch}`;
+    try {
+      await exec(
+        "git",
+        ["fetch", "origin", `+refs/heads/${chunkBranch}:${remoteRef}`, "--quiet"],
+        { cwd },
+      );
+      return remoteRef;
+    } catch {
+      return null;
+    }
+  };
   return {
-    async mergeNoFf(issue) {
+    async mergeNoFf(unit) {
       try {
         await exec(
           "git",
@@ -1210,10 +1586,10 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
             "--no-ff",
             "--no-edit",
             "-m",
-            mergeMessageFor(issue),
+            unit.mergeMessage ?? mergeMessageFor(unit),
             "-m",
             deps.coauthorTrailer,
-            issue.branch,
+            unit.branch,
           ],
           { cwd, env: gitAuthorEnv(deps) },
         );
@@ -1531,30 +1907,98 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         return { ok: false };
       }
     },
+    fetchChunkRef,
     async chunkBase(chunkBranch) {
-      // Ask ORIGIN, every time. A chunk branch outlives the run that created
-      // it and `.sandbar` is disposable, so a local ref is at best a cache and
-      // at worst a stale answer that would land this cycle's member on a base
-      // missing an earlier one. The refspec is explicit (and forced) so the
-      // remote-tracking ref is updated in a BARE cache too, where a plain
-      // `git fetch origin <branch>` writes only FETCH_HEAD.
-      const remoteRef = `refs/remotes/origin/${chunkBranch}`;
+      // `origin/<sourceBranch>` when origin has no chunk branch, because that
+      // is where a chunk branch is created (#60). One fetch primitive, two
+      // readings of the same null — see `fetchChunkRef` above.
+      return (await fetchChunkRef(chunkBranch)) ?? `origin/${deps.sourceBranch}`;
+    },
+    async deleteChunkBranch(chunkBranch) {
+      // Fully qualified, and not `--force`-anything: `git push --delete` has no
+      // force to give. It is safe on the one precondition every caller
+      // establishes first — the branch's commits are contained in
+      // `origin/<sourceBranch>`, so nothing is lost with the ref.
       try {
         await exec(
           "git",
-          ["fetch", "origin", `+refs/heads/${chunkBranch}:${remoteRef}`, "--quiet"],
+          ["push", "origin", "--delete", `refs/heads/${chunkBranch}`],
           { cwd },
         );
-        return remoteRef;
-      } catch {
-        // Origin has no such branch: this is the chunk's first landing, and
-        // `origin/<sourceBranch>` is where a chunk branch is created. A fetch
-        // that failed for some OTHER reason (network, auth) lands here too and
-        // reads as "first landing" — the composition would then be based on
-        // the source branch and the push below would be rejected as
-        // non-fast-forward rather than silently overwriting the branch, which
-        // is the safe way for this to be wrong.
-        return `origin/${deps.sourceBranch}`;
+      } catch (err) {
+        throw new SandbarError(
+          `merger: failed to delete the landed chunk branch ${chunkBranch} on origin: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          { cause: err },
+        );
+      }
+    },
+    async commentOnPullRequest(pr, body) {
+      try {
+        await exec("gh", [
+          "pr",
+          "comment",
+          String(pr),
+          "--repo",
+          repoSlug(deps.repo),
+          "--body",
+          body,
+        ]);
+      } catch (err) {
+        throw new SandbarError(
+          `merger: failed to comment on pull request #${pr}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          { cause: err },
+        );
+      }
+    },
+    async removePullRequestLabel(pr, label) {
+      // The twin of `removeLabel`'s #8 argument, one level up: `land` is the
+      // chunk's queue, so silently failing to drop it retries the same failing
+      // merge every cycle for as long as the run lasts.
+      try {
+        await exec("gh", [
+          "pr",
+          "edit",
+          String(pr),
+          "--repo",
+          repoSlug(deps.repo),
+          "--remove-label",
+          label,
+        ]);
+      } catch (err) {
+        throw new SandbarError(
+          `merger: failed to remove label '${label}' from pull request #${pr}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          { cause: err },
+        );
+      }
+    },
+    async closePullRequest(pr) {
+      // Closed, never merged: the commits reached the source branch through
+      // sandbar's own push, so there is nothing for GitHub's merge to do — and
+      // the PR is a DRAFT, which has no merge available anyway (#62).
+      // `--delete-branch` is deliberately not passed: the branch delete is the
+      // wrap-up's own last step and it is conditional on the members having
+      // closed, which this call cannot know.
+      try {
+        await exec("gh", [
+          "pr",
+          "close",
+          String(pr),
+          "--repo",
+          repoSlug(deps.repo),
+        ]);
+      } catch (err) {
+        throw new SandbarError(
+          `merger: failed to close pull request #${pr}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          { cause: err },
+        );
       }
     },
     async checkoutDetached(ref) {

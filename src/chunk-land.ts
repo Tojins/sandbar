@@ -332,6 +332,31 @@ export const CHUNK_LAND_ABANDONED_PR_COMMENT = (args: {
   );
 };
 
+// Verified merge mode (#22) rejected the cycle's composed result, and this
+// chunk's commits were in it. Cycle-level, exactly as for an auto-lane issue:
+// the forge judged the whole composition and there is no sound way to blame one
+// part of it, so the comment says so rather than telling a reviewer their
+// approved chunk is broken.
+export const CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT = (args: {
+  readonly chunkBranch: string;
+  readonly sourceBranch: string;
+  readonly detail: string;
+  readonly siblings: readonly number[];
+}): string =>
+  `${BOT_COMMENT_PREFIX} this chunk was NOT landed. \`${args.chunkBranch}\` merged ` +
+  `into \`${args.sourceBranch}\` cleanly and the post-merge gate passed, but the ` +
+  `forge's verification of the cycle's composed result did not — so nothing was ` +
+  `landed on \`${args.sourceBranch}\` and the merge was reverted.\n\n` +
+  `Verification failure: ${args.detail}\n\n` +
+  (args.siblings.length > 0
+    ? `The forge judged this chunk together with ${args.siblings
+        .map((n) => `#${n}`)
+        .join(", ")}, so the failure is not necessarily this chunk's. ` +
+      "Those were reverted and parked too.\n\n"
+    : "") +
+  `The \`${LAND_LABEL}\` label has been removed. Nothing about the chunk changed — ` +
+  `re-apply it once the composition has a reason to pass.`;
+
 export const CHUNK_BRANCH_MISSING_PR_COMMENT = (args: {
   readonly chunkBranch: string;
 }): string =>
