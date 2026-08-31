@@ -72,6 +72,11 @@ type Calls = {
   prComments: { pr: number; body: string }[];
   prLabelRemovals: { pr: number; label: string }[];
   prCloses: number[];
+  // #68: the mechanical version resolution, observed as what it wrote, what it
+  // staged and whether it completed the merge itself.
+  fileWrites: { path: string; contents: string }[];
+  staged: string[];
+  mergeCommits: number;
 };
 
 type Script = {
@@ -100,6 +105,16 @@ type Script = {
       string
     >
   >;
+  // #68: the conflicted worktree a scripted `conflict` merge leaves behind —
+  // path to the file's text, conflict markers and all. Absent ⇒ no version file
+  // is conflicted, which is what every test that predates #68 means.
+  conflictFiles?: Record<string, string>;
+  // Conflicted paths the mechanical resolution never touches. Defaulted to the
+  // one `conflictDigest` has always reported, so a scripted conflict is a
+  // conflict for both readers of the unmerged set.
+  otherConflicts?: string[];
+  // Whether `git commit --no-edit` succeeds, per call. Default true.
+  mergeCommits?: boolean[];
   // Per-issue number of leading close attempts that throw before one succeeds.
   // A value >= total attempts means the close never succeeds. Default 0.
   closeFailsBeforeSuccess?: Record<number, number>;
@@ -134,6 +149,9 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     prComments: [],
     prLabelRemovals: [],
     prCloses: [],
+    fileWrites: [],
+    staged: [],
+    mergeCommits: 0,
   };
   const closeAttemptsByIssue = new Map<number, number>();
   let mIdx = 0;
@@ -145,14 +163,22 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
   let cpIdx = 0;
   let prIdx = 0;
   let headIdx = 0;
+  let mcIdx = 0;
   let merging = false;
+  // #68: the unmerged set the mechanical resolution reads and shrinks.
+  let unmerged = new Map<string, string>();
+  let otherUnmerged: string[] = [];
 
   const adapter: MergerAdapter = {
     async mergeNoFf(i) {
       const r = script.merges[mIdx++];
       calls.merges.push(i.branch);
       calls.order.push("merge");
-      if (r === "conflict") merging = true;
+      if (r === "conflict") {
+        merging = true;
+        unmerged = new Map(Object.entries(script.conflictFiles ?? {}));
+        otherUnmerged = [...(script.otherConflicts ?? ["foo"])];
+      }
       return { ok: r === "ok" };
     },
     async runResolveAgent(prompt) {
@@ -252,6 +278,28 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       if (r === undefined) throw new Error("pull called but not scripted");
       calls.pulls++;
       return { ok: r };
+    },
+    // #68.
+    async unmergedPaths() {
+      return [...unmerged.keys(), ...otherUnmerged];
+    },
+    async readWorktreeFile(path) {
+      return unmerged.get(path) ?? null;
+    },
+    async writeWorktreeFile(path, contents) {
+      calls.fileWrites.push({ path, contents });
+      unmerged.set(path, contents);
+    },
+    async stagePath(path) {
+      calls.staged.push(path);
+      unmerged.delete(path);
+    },
+    async commitMerge() {
+      calls.mergeCommits++;
+      calls.order.push("merge-commit");
+      const ok = script.mergeCommits?.[mcIdx++] ?? true;
+      if (ok) merging = false;
+      return { ok };
     },
     // #60. `chunkBases` scripts what origin has: a branch name mapped to its
     // remote-tracking ref, or nothing for a chunk that has never landed — in

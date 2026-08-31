@@ -259,6 +259,20 @@ default 50, exit 3).
   human reads afterwards — the abandon comment on the issue, or on the parked
   chunk's PR — carries the conflicted paths, the per-attempt outcome and the
   log paths. `src/resolve-loop.ts`'s header owns the argument.
+- **The version collision is settled before the agent is asked (#68).** Every
+  commit here moves `version` in `package.json` and its two mirrors in
+  `package-lock.json` (AGENTS.md), so two branches landing in one cycle conflict
+  there BY CONSTRUCTION. `resolveVersionCollision` in `src/merger.ts` resolves
+  it mechanically ahead of `runResolveLoop`, at `max(ours, theirs)` bumped once
+  — a value neither side carries — and commits the merge itself when nothing
+  else was conflicted, so the clean path's `npmInstall` still owns lockfile
+  consistency. `src/version-conflict.ts` is the pure derivation and its header
+  owns the scope: PER FILE, root `package.json`/`package-lock.json` only, and
+  only when every hunk is a lone version line AND the two reconstructed sides
+  differ at nothing but the paths npm mirrors — the second check is what keeps
+  a dependency's identically-shaped `"version"` line out of it. Anything else
+  reaches the agent untouched, and `prompts/resolve-conflict.md` states the same
+  `max + 1` rule for when it does.
 - **A run opens by naming what is driving it (#69).** One line on stdout and in
   `orchestrator.log`: version, the tree `dist/` was built from, the config
   file's path, and whether either tree is dirty — because both are read from the
