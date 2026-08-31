@@ -649,6 +649,209 @@ describe("runMergerWithAdapter — conflict enters resolve loop", () => {
   });
 });
 
+// The collision AGENTS.md guarantees on every multi-landing cycle (#68). The
+// fixtures are the two files npm actually writes, because the whole safety
+// argument is about what a hunk in them looks like.
+describe("runMergerWithAdapter — the version collision is resolved without an agent", () => {
+  const PKG_CONFLICT = [
+    "{",
+    '  "name": "@offergeist/sandbar",',
+    "<<<<<<< HEAD",
+    '  "version": "0.20.34",',
+    "=======",
+    '  "version": "0.20.35",',
+    ">>>>>>> sandbar/issue-42",
+    '  "type": "module"',
+    "}",
+    "",
+  ].join("\n");
+
+  const LOCK_CONFLICT = [
+    "{",
+    '  "name": "@offergeist/sandbar",',
+    "<<<<<<< HEAD",
+    '  "version": "0.20.34",',
+    "=======",
+    '  "version": "0.20.35",',
+    ">>>>>>> sandbar/issue-42",
+    '  "lockfileVersion": 3,',
+    '  "packages": {',
+    '    "": {',
+    "<<<<<<< HEAD",
+    '      "version": "0.20.34"',
+    "=======",
+    '      "version": "0.20.35"',
+    ">>>>>>> sandbar/issue-42",
+    "    }",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+
+  it("resolves both files, commits the merge, and spends no resolve attempt", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      conflictFiles: {
+        "package.json": PKG_CONFLICT,
+        "package-lock.json": LOCK_CONFLICT,
+      },
+      otherConflicts: [],
+      gates: [{ ok: true }],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    // No agent at all, and the merge went down the SAME path a clean one takes.
+    expect(calls.agentRuns).toEqual([]);
+    expect(calls.order).toEqual(["merge", "merge-commit", "install", "gate"]);
+    expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
+    expect(calls.staged).toEqual(["package.json", "package-lock.json"]);
+  });
+
+  it("writes max(ours, theirs) + 1 — a value neither side carried — into both files", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      conflictFiles: {
+        "package.json": PKG_CONFLICT,
+        "package-lock.json": LOCK_CONFLICT,
+      },
+      otherConflicts: [],
+      gates: [{ ok: true }],
+    });
+    await runMergerWithAdapter([issue(42)], adapter);
+
+    const pkg = calls.fileWrites.find((w) => w.path === "package.json");
+    expect(pkg?.contents).toContain('"version": "0.20.36"');
+    expect(pkg?.contents).not.toContain("0.20.34");
+    expect(pkg?.contents).not.toContain("0.20.35");
+    expect(pkg?.contents).not.toContain("<<<<<<<");
+    // Everything git had already agreed on survives byte for byte.
+    expect(pkg?.contents).toContain('  "name": "@offergeist/sandbar",');
+    expect(pkg?.contents).toContain('  "type": "module"');
+
+    const lock = calls.fileWrites.find((w) => w.path === "package-lock.json");
+    // Both of npm's mirrors, on the same value as package.json.
+    expect(lock?.contents.match(/"version": "0\.20\.36"/g)).toHaveLength(2);
+  });
+
+  it("says what it decided in the merger log", async () => {
+    const { adapter } = makeAdapter({
+      merges: ["conflict"],
+      conflictFiles: { "package.json": PKG_CONFLICT },
+      otherConflicts: [],
+      gates: [{ ok: true }],
+    });
+    const lines: string[] = [];
+    await runMergerWithAdapter([issue(42)], adapter, (line) => {
+      lines.push(line);
+    });
+    expect(lines).toContain(
+      "version-collision #42 package.json 0.20.34 vs 0.20.35 -> 0.20.36",
+    );
+    expect(lines).toContain(
+      "version-collision #42 resolved the whole conflict at 0.20.36; no resolve attempt spent",
+    );
+    expect(lines.some((l) => l.includes("entering resolve-loop"))).toBe(false);
+  });
+
+  it("still calls the agent for the conflicts that need judgement, with the version files already staged", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      conflictFiles: { "package.json": PKG_CONFLICT },
+      otherConflicts: ["src/merger.ts"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+    });
+    const lines: string[] = [];
+    const summary = await runMergerWithAdapter([issue(42)], adapter, (line) => {
+      lines.push(line);
+    });
+
+    expect(calls.staged).toEqual(["package.json"]);
+    expect(calls.mergeCommits).toBe(0);
+    expect(calls.agentRuns).toEqual(["agent"]);
+    expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
+    expect(lines).toContain(
+      "version-collision #42 staged; still conflicted: src/merger.ts",
+    );
+  });
+
+  it("leaves a package-lock.json whose DEPENDENCY versions conflicted entirely alone", async () => {
+    const depConflict = [
+      "{",
+      '  "name": "@offergeist/sandbar",',
+      '  "version": "0.20.34",',
+      '  "packages": {',
+      '    "node_modules/left-pad": {',
+      "<<<<<<< HEAD",
+      '      "version": "1.0.0"',
+      "=======",
+      '      "version": "1.1.0"',
+      ">>>>>>> sandbar/issue-42",
+      "    }",
+      "  }",
+      "}",
+      "",
+    ].join("\n");
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      conflictFiles: { "package-lock.json": depConflict },
+      otherConflicts: [],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+    });
+    const lines: string[] = [];
+    await runMergerWithAdapter([issue(42)], adapter, (line) => {
+      lines.push(line);
+    });
+
+    expect(calls.fileWrites).toEqual([]);
+    expect(calls.staged).toEqual([]);
+    expect(calls.agentRuns).toEqual(["agent"]);
+    expect(lines).toContain(
+      "version-collision #42 package-lock.json left to the resolve agent: " +
+        "the conflict also touches packages.node_modules/left-pad.version",
+    );
+  });
+
+  it("falls into the resolve loop when the merge commit itself fails", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      conflictFiles: { "package.json": PKG_CONFLICT },
+      otherConflicts: [],
+      mergeCommits: [false],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+    });
+    const lines: string[] = [];
+    await runMergerWithAdapter([issue(42)], adapter, (line) => {
+      lines.push(line);
+    });
+
+    expect(calls.mergeCommits).toBe(1);
+    expect(calls.agentRuns).toEqual(["agent"]);
+    expect(lines).toContain(
+      "version-collision #42 resolved every conflict but the merge commit failed",
+    );
+  });
+
+  it("does nothing at all when no version file is conflicted", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      otherConflicts: ["src/merger.ts"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+    });
+    const lines: string[] = [];
+    await runMergerWithAdapter([issue(42)], adapter, (line) => {
+      lines.push(line);
+    });
+
+    expect(calls.fileWrites).toEqual([]);
+    expect(calls.mergeCommits).toBe(0);
+    expect(lines.some((l) => l.startsWith("version-collision"))).toBe(false);
+  });
+});
+
 describe("runMergerWithAdapter — gate-red enters resolve loop", () => {
   it("clean merge + gate red + agent fixes it: keeps merge, pushes, closes", async () => {
     const { adapter, calls } = makeAdapter({

@@ -1000,9 +1000,13 @@ type MergeAttemptDeps = {
 // Every branch of it says so in the merger log, including a version file it
 // looked at and DECLINED: "why did that cost an attempt" is the question this
 // log line exists to answer without anyone opening the tree.
-type VersionCollisionOutcome = "completed" | "partial" | "none";
+export type VersionCollisionOutcome = "completed" | "partial" | "none";
 
-async function resolveVersionCollision(
+// Exported for `merger-git.test.ts`: what "the version files are the only
+// conflict" and "the merge is committed" mean is git's to define, so the whole
+// operation is asserted by running it against a real conflicting merge in the
+// shape production uses, rather than against a fake that agrees with it.
+export async function resolveVersionCollision(
   adapter: MergerAdapter,
   emit: (line: string) => Promise<void>,
   label: string,

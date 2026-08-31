@@ -15,7 +15,7 @@ import { promisify } from "node:util";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { realAdapter } from "./merger.js";
+import { realAdapter, resolveVersionCollision } from "./merger.js";
 
 const exec = promisify(execFile);
 
@@ -302,5 +302,240 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     await adapter().checkoutDetached(entry);
 
     expect(await git(wt, "rev-parse", "HEAD")).toBe(entry);
+  });
+});
+
+// #68 — the version collision, against a real conflicting merge in the shape
+// production runs in. What "the version files are the only thing still
+// unmerged" and "the merge is committed" mean are git's to define, so the whole
+// operation is run rather than described: two branches that each did what
+// AGENTS.md requires, merged, and the result inspected.
+describe("resolveVersionCollision (real conflicting merge in a linked worktree)", () => {
+  let root: string;
+  let repo: string;
+  let wt: string;
+
+  // Exactly the two files `npm version patch` rewrites, with the lockfile
+  // carrying npm's two mirrors of the root version AND a dependency's own
+  // `version` line at the same indentation as the second of them.
+  const pkg = (v: string): string =>
+    [
+      "{",
+      '  "name": "@offergeist/sandbar",',
+      `  "version": "${v}",`,
+      '  "type": "module"',
+      "}",
+      "",
+    ].join("\n");
+
+  const lock = (v: string, dep = "4.1.2"): string =>
+    [
+      "{",
+      '  "name": "@offergeist/sandbar",',
+      `  "version": "${v}",`,
+      '  "lockfileVersion": 3,',
+      '  "packages": {',
+      '    "": {',
+      '      "name": "@offergeist/sandbar",',
+      `      "version": "${v}",`,
+      '      "dependencies": {',
+      '        "proper-lockfile": "^4.1.2"',
+      "      }",
+      "    },",
+      '    "node_modules/proper-lockfile": {',
+      `      "version": "${dep}",`,
+      '      "license": "MIT"',
+      "    }",
+      "  }",
+      "}",
+      "",
+    ].join("\n");
+
+  const bump = async (
+    cwd: string,
+    v: string,
+    extra?: { readonly file: string; readonly body: string },
+    dep?: string,
+  ): Promise<void> => {
+    await writeFile(join(cwd, "package.json"), pkg(v));
+    await writeFile(join(cwd, "package-lock.json"), lock(v, dep));
+    if (extra) await writeFile(join(cwd, extra.file), extra.body);
+    await git(cwd, "add", ".");
+    await git(cwd, "commit", "-m", `chore: ${v}`);
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-vc-"));
+    repo = join(root, "repo");
+    wt = join(root, "wt");
+    await exec("git", ["init", "-b", "main", repo], { env: GIT_ENV });
+    await bump(repo, "0.20.33");
+    await git(repo, "checkout", "-qb", "side");
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const adapterAt = (cwd: string) =>
+    realAdapter({
+      cwd,
+      sourceBranch: "main",
+      botName: "bot",
+      botEmail: "bot@e",
+      coauthorTrailer: "Co-authored-by: Claude <noreply@anthropic.com>",
+      mergerModelId: "opus",
+      ghOwner: "o",
+      ghRepo: "r",
+      sandboxImage: "img",
+    } as unknown as Parameters<typeof realAdapter>[0]);
+
+  // Both branches did what AGENTS.md requires, from the same base.
+  const collide = async (extra?: {
+    readonly ours?: { readonly file: string; readonly body: string };
+    readonly theirs?: { readonly file: string; readonly body: string };
+    readonly ourDep?: string;
+    readonly theirDep?: string;
+  }): Promise<ReturnType<typeof adapterAt>> => {
+    await bump(repo, "0.20.34", extra?.theirs, extra?.theirDep);
+    await git(repo, "checkout", "-q", "main");
+    await bump(repo, "0.20.35", extra?.ours, extra?.ourDep);
+    await git(repo, "worktree", "add", "--detach", wt, "HEAD");
+    const a = adapterAt(wt);
+    expect(await a.mergeNoFf({ id: "42", title: "t", branch: "side" })).toEqual({
+      ok: false,
+    });
+    return a;
+  };
+
+  const lines: string[] = [];
+  const emit = async (l: string): Promise<void> => {
+    lines.push(l);
+  };
+
+  it("resolves the whole conflict, commits the merge, and leaves a clean tree", async () => {
+    const a = await collide();
+    lines.length = 0;
+
+    expect(await resolveVersionCollision(a, emit, "#42")).toBe("completed");
+
+    expect(await git(wt, "status", "--porcelain")).toBe("");
+    expect(await a.unmergedPaths()).toEqual([]);
+    // A real merge commit, not a fast-forward or a plain commit.
+    expect((await git(wt, "rev-list", "--parents", "-n", "1", "HEAD")).split(" ")).toHaveLength(3);
+  });
+
+  it("lands a version greater than BOTH parents', which neither of them carried", async () => {
+    const a = await collide();
+    await resolveVersionCollision(a, emit, "#42");
+
+    const version = (rev: string): Promise<string> =>
+      git(wt, "show", `${rev}:package.json`).then(
+        (s) => (JSON.parse(s) as { version: string }).version,
+      );
+    expect(await version("HEAD^1")).toBe("0.20.35");
+    expect(await version("HEAD^2")).toBe("0.20.34");
+    expect(await version("HEAD")).toBe("0.20.36");
+  });
+
+  it("moves both of npm's lockfile mirrors and no dependency's version", async () => {
+    const a = await collide();
+    await resolveVersionCollision(a, emit, "#42");
+
+    const merged = JSON.parse(
+      await git(wt, "show", "HEAD:package-lock.json"),
+    ) as {
+      version: string;
+      packages: Record<string, { version: string }>;
+    };
+    expect(merged.version).toBe("0.20.36");
+    expect(merged.packages[""]?.version).toBe("0.20.36");
+    expect(merged.packages["node_modules/proper-lockfile"]?.version).toBe("4.1.2");
+  });
+
+  it("keeps the merge subject and the co-author trailer, and drops git's `# Conflicts:` block", async () => {
+    const a = await collide();
+    await resolveVersionCollision(a, emit, "#42");
+
+    const message = await git(wt, "log", "-1", "--format=%B");
+    expect(message).toContain("Merge sandbar/issue-42: t");
+    expect(message).toContain("Co-authored-by: Claude <noreply@anthropic.com>");
+    // `git commit --no-edit` keeps comment lines unless cleanup says otherwise.
+    expect(message).not.toContain("# Conflicts:");
+  });
+
+  it("stages the version files and hands the rest to the agent when a real conflict remains", async () => {
+    const a = await collide({
+      ours: { file: "src.txt", body: "ours\n" },
+      theirs: { file: "src.txt", body: "theirs\n" },
+    });
+    lines.length = 0;
+
+    expect(await resolveVersionCollision(a, emit, "#42")).toBe("partial");
+
+    expect(await a.unmergedPaths()).toEqual(["src.txt"]);
+    expect(await a.isMergeInProgress()).toBe(true);
+    // The version files are resolved and staged, so the agent is only asked
+    // about the file that needs judgement.
+    const staged = await git(wt, "diff", "--name-only", "--cached");
+    expect(staged.split("\n")).toContain("package.json");
+    expect(staged.split("\n")).toContain("package-lock.json");
+    expect(
+      (JSON.parse(await git(wt, "show", ":package.json")) as { version: string })
+        .version,
+    ).toBe("0.20.36");
+  });
+
+  it("decides PER FILE: resolves package.json, leaves a lockfile whose DEPENDENCY version conflicted", async () => {
+    const a = await collide({ ourDep: "4.1.3", theirDep: "4.1.4" });
+    lines.length = 0;
+
+    expect(await resolveVersionCollision(a, emit, "#42")).toBe("partial");
+
+    // package.json was a pure version collision and is resolved and staged;
+    // the lockfile carries a real dependency conflict and is untouched, markers
+    // and all, so the agent sees exactly what git left.
+    expect(await a.unmergedPaths()).toEqual(["package-lock.json"]);
+    expect(await a.readWorktreeFile("package-lock.json")).toContain("<<<<<<<");
+    expect(
+      (JSON.parse(await git(wt, "show", ":package.json")) as { version: string })
+        .version,
+    ).toBe("0.20.36");
+    expect(
+      lines.some((l) =>
+        l.includes(
+          "package-lock.json left to the resolve agent: the conflict also touches",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("resolves nothing when a dependency alone conflicted, and names the file it left", async () => {
+    // Only the dependency moved, on both sides: there is no version collision
+    // here, and the mechanical path must not invent one.
+    await writeFile(join(repo, "package-lock.json"), lock("0.20.33", "4.1.3"));
+    await git(repo, "commit", "-am", "dep on side");
+    await git(repo, "checkout", "-q", "main");
+    await writeFile(join(repo, "package-lock.json"), lock("0.20.33", "4.1.4"));
+    await git(repo, "commit", "-am", "dep on main");
+    await git(repo, "worktree", "add", "--detach", wt, "HEAD");
+    const a = adapterAt(wt);
+    expect(await a.mergeNoFf({ id: "42", title: "t", branch: "side" })).toEqual({
+      ok: false,
+    });
+    lines.length = 0;
+
+    expect(await resolveVersionCollision(a, emit, "#42")).toBe("none");
+
+    expect(await a.unmergedPaths()).toEqual(["package-lock.json"]);
+    expect(await a.readWorktreeFile("package-lock.json")).toContain("<<<<<<<");
+    expect(await a.isMergeInProgress()).toBe(true);
+    // Nothing resolved, nothing committed — and the log still says which file
+    // was looked at and why it was left, which is the question a human reading
+    // a spent resolve attempt is asking.
+    expect(lines).toEqual([
+      "version-collision #42 package-lock.json left to the resolve agent: " +
+        "the conflict also touches packages.node_modules/proper-lockfile.version",
+    ]);
   });
 });
