@@ -620,7 +620,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         // makes the same guarantee structural rather than procedural).
         // Worktree BEFORE stack: the stack's mounts bind-mount fixture files
         // from it (#20). createMergerWorktree and
-        // startStack each register their own teardown with onCleanup; we
+        // startStack each register their own teardown as a disposable (#55); we
         // also tear both down in the finally below. One stack serves gate-2 for
         // every branch in the cycle — its issue-lifecycle containers start once.
         let mergerWorktree: MergerWorktree | null = null;

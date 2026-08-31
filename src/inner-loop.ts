@@ -411,8 +411,8 @@ async function runSandboxCycle(
         : (stackResult as PromiseRejectedResult).reason;
     }
 
-    // startStack already registered stack.stop with onCleanup before it created
-    // any podman resource, so no re-registration is needed here.
+    // startStack already registered stack.stop with the cleanup registry before
+    // it created any podman resource, so no re-registration is needed here.
     const gateStack: Stack = stack;
 
     // No probe tree here on purpose (#34): `buildPrompt` derives it from

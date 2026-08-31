@@ -333,7 +333,7 @@ import { execFile } from "node:child_process";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
 
-import { onCleanup } from "./cleanup.js";
+import { registerDisposable } from "./cleanup.js";
 import type {
   ResolvedGateStack,
   ResolvedStackContainer,
@@ -627,7 +627,7 @@ export type StackOptions = {
 
   // Leave the whole stack up when `stop()` is called, so an operator can poke
   // at a red gate's containers (`GATE_KEEP=true` in the script #45 deletes).
-  // `stop` stays registered with `onCleanup` and stays idempotent; it simply
+  // `stop` stays registered with the cleanup registry and stays idempotent; it simply
   // removes nothing, which is what makes a Ctrl-C mid-gate keep the stack too —
   // the state the operator asked to be able to inspect.
   //
@@ -1073,6 +1073,11 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    // Latched, so this can never do anything again — drop it from the registry
+    // rather than leave a spent closure there for the rest of the run (#55).
+    // Before the `--keep` early return, not after it: a kept stack's teardown
+    // is just as spent as a torn-down one's.
+    dispose();
     // `--keep` (#45). Registered and idempotent exactly as before, so nothing
     // about the cleanup contract changes — this teardown simply has nothing to
     // do. Placed after the `stopped` latch rather than before the registration
@@ -1182,7 +1187,13 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   // bringup window below still sweeps whatever was created. The local catch
   // only fires for JS throws; signal-driven exit does not unwind it. `stop` is
   // idempotent and best-effort, so an early registration is safe.
-  onCleanup(stop);
+  //
+  // A DISPOSABLE (#55) rather than a plain `onCleanup`: a run starts one of
+  // these per issue and one for the merger, every cycle. `registerDisposable`
+  // leaves the window above and this entry's LIFO position exactly as they
+  // were — it is an ordinary registry entry that can be taken back out — while
+  // letting `stop` forget itself once it has run.
+  const dispose = registerDisposable(stop);
 
   try {
     // Is there a stack up that this call may adopt (#45)? Only ever true for a

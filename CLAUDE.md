@@ -170,7 +170,12 @@ default 50, exit 3).
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One cleanup registry owns signals and the exit (#35).** No module but
-  `src/cleanup.ts` may trap a signal or exit on one.
+  `src/cleanup.ts` may trap a signal or exit on one. `onCleanup` never forgets
+  an action — which is what makes registering a teardown *before* its resource
+  exists safe, and what makes a per-resource entry a leak: anything created in
+  a loop (gate stack, sandbox stack, merger worktree, a `sandbar gate` call)
+  registers with `registerDisposable` and withdraws itself when its idempotence
+  latch flips (#55).
 - **Credentials are a value, not a path (#38).** `config.env` is an allowlist
   record (empty value ⇒ inherit from `process.env`); `readEnvFile` is the
   opt-in loader. `src/env.ts`.

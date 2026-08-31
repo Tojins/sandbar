@@ -93,14 +93,20 @@ setInterval(() => {}, 1000);
 
 type ChildRun = { code: number | null; signal: string | null; lines: string[] };
 
-async function sigintChild(): Promise<ChildRun> {
-  const marker = join(dir, "marker.txt");
+// `name` keeps each case's marker and script distinct — they share `dir`, and a
+// second case writing over the first's marker would read back the first's
+// lines and pass on them.
+async function sigintChild(
+  name: string,
+  source: (markerPath: string) => string,
+): Promise<ChildRun> {
+  const marker = join(dir, `${name}-marker.txt`);
   const hook = join(dir, "resolve-hook.mjs");
-  const script = join(dir, "child.mjs");
+  const script = join(dir, `${name}-child.mjs`);
   await writeFile(marker, "");
   await writeFile(hook, RESOLVE_HOOK);
   await writeFile(join(dir, "no-ts-sibling.js"), "module.exports = {};\n");
-  await writeFile(script, childSource(marker));
+  await writeFile(script, source(marker));
 
   const child = spawn(process.execPath, ["--import", hook, script], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -144,7 +150,7 @@ describe("SIGINT during a run", () => {
   let run: ChildRun;
 
   beforeAll(async () => {
-    run = await sigintChild();
+    run = await sigintChild("sandbox", childSource);
   }, 30_000);
 
   // The whole issue: with agent-sandbox's own handler in place this action was
@@ -176,6 +182,110 @@ describe("SIGINT during a run", () => {
   it("exits 130, the code cleanup.ts chose for SIGINT", () => {
     // The old handler's `process.exit(1)` won this race, so the run reported a
     // generic failure rather than an interrupt.
+    expect(run.signal).toBeNull();
+    expect(run.code).toBe(130);
+  });
+});
+
+// What a Ctrl-C tears down when the teardowns are DISPOSABLES (#55).
+//
+// Same process boundary as above, and for a sharper version of the same
+// reason: what a disposable registry can get wrong is invisible in-process. An
+// entry that is dropped, or one that is drained out of position, still returns
+// normally and still leaves the registry looking swept — the only observable is
+// which teardowns actually ran, in which order, in a process that then died on
+// the signal.
+const disposableChildSource = (markerPath: string) => `
+import { appendFileSync } from "node:fs";
+import {
+  installCleanupTraps,
+  onCleanup,
+  registerDisposable,
+} from ${JSON.stringify(join(SRC_DIR, "cleanup.ts"))};
+
+const note = (line) => appendFileSync(${JSON.stringify(markerPath)}, line + "\\n");
+const slow = (line) => async () => {
+  // Async and slow, like every real disposable (stopStack, the merger worktree
+  // removal): a same-tick action cannot show a truncated drain.
+  await new Promise((r) => setTimeout(r, 100));
+  note(line);
+};
+
+installCleanupTraps();
+// A plain entry registered before any disposable — where run.ts registers all
+// four of its own, ahead of the cycle loop that creates the disposables. LIFO
+// puts it last.
+onCleanup(slow("plain-first"));
+
+registerDisposable(slow("d0"));
+const dropD1 = registerDisposable(slow("d1-MUST-NOT-RUN"));
+// The unregister half, and the ordinary shape of it: a teardown that has
+// already run drops itself and must not run again off the registry.
+dropD1();
+// A plain entry registered BETWEEN two disposables. This is agent-sandbox.ts's
+// \`onCleanup(runTeardowns)\` in miniature — registered lazily when the first
+// sandbox container is created, which is inside the cycle loop and after the
+// gate stack's own registration — and it is why these are removable registry
+// entries rather than one shared entry over a Set. Collapsed, every disposable
+// would drain on the far side of this line and the netns anchor would go before
+// its joiners.
+onCleanup(slow("plain-mid"));
+registerDisposable(slow("d2"));
+registerDisposable(async () => {
+  await new Promise((r) => setTimeout(r, 100));
+  note("d3");
+  // The mid-drain window. A signal does not abort an in-flight startStack, it
+  // starts the drain alongside it, so an action registered while the drain is
+  // running still has to be picked up — which is \`runCleanup\`'s own
+  // \`while (actions.length > 0)\` loop, and the property a refactor to a
+  // snapshot would delete in silence.
+  registerDisposable(slow("d4-mid-drain"));
+});
+
+console.log("ready");
+setInterval(() => {}, 1000);
+`;
+
+describe("SIGINT with disposable teardowns", () => {
+  let run: ChildRun;
+
+  beforeAll(async () => {
+    run = await sigintChild("disposables", disposableChildSource);
+  }, 30_000);
+
+  it("runs every disposable that was not withdrawn", () => {
+    expect(run.lines).toContain("d0");
+    expect(run.lines).toContain("d2");
+    expect(run.lines).toContain("d3");
+  });
+
+  it("does not run a disposable that was unregistered", () => {
+    expect(run.lines).not.toContain("d1-MUST-NOT-RUN");
+  });
+
+  it("picks up a disposable registered DURING the drain", () => {
+    expect(run.lines).toContain("d4-mid-drain");
+  });
+
+  it("drains LIFO, with the plain entries in the positions they registered in", () => {
+    // Asserted as the whole sequence rather than as `toContain`s, because every
+    // membership check above passes under both failures this can have: a
+    // disposable drained in the wrong position, and `plain-mid` overtaken by
+    // disposables that were registered before it. d3 first, then d4 (registered
+    // mid-drain, so newest when the drain looks again), then d2, then
+    // `plain-mid` in its own registration position, then d0, then
+    // `plain-first`. d1 withdrew itself and is not here at all.
+    expect(run.lines).toEqual([
+      "d3",
+      "d4-mid-drain",
+      "d2",
+      "plain-mid",
+      "d0",
+      "plain-first",
+    ]);
+  });
+
+  it("exits 130, the code cleanup.ts chose for SIGINT", () => {
     expect(run.signal).toBeNull();
     expect(run.code).toBe(130);
   });
