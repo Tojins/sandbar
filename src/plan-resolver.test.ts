@@ -192,16 +192,13 @@ describe("resolvePlan", () => {
   it("drops a candidate the live tracker reports CLOSED — stale search re-pick (#16)", () => {
     // The candidate surfaced from `gh issue list` (lagging search index) but its
     // authoritative state is CLOSED: it was merged+closed earlier this run.
+    // The guard fails safe in the other direction: a state-fetch MISS keeps the
+    // candidate (treated as open) — exercised by every empty-facts test above.
     const plan = planOf(
       [issue(10, ""), issue(11, "")],
       states({ 10: "CLOSED", 11: "OPEN" }),
     );
     expect(plan.map((p) => p.id)).toEqual(["11"]);
-  });
-
-  it("keeps a candidate whose own state is unknown (state-fetch miss → treat as open)", () => {
-    const plan = planOf([issue(10, "")], new Map());
-    expect(plan.map((p) => p.id)).toEqual(["10"]);
   });
 
   it("emits branch names in the documented format", () => {

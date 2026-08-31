@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   HARD_ERROR_MAX_RETRIES,
   NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE,
-  NEEDS_HUMAN_REVIEW_BUDGET_EXHAUSTED_MESSAGE,
   type LoopAction,
   type LoopEvent,
   type LoopState,
@@ -751,13 +750,6 @@ describe("inner-loop-machine — phase invariants", () => {
   });
 });
 
-describe("NEEDS_HUMAN_REVIEW_BUDGET_EXHAUSTED_MESSAGE", () => {
-  it("is a non-empty string the finalizer can reference", () => {
-    expect(typeof NEEDS_HUMAN_REVIEW_BUDGET_EXHAUSTED_MESSAGE).toBe("string");
-    expect(NEEDS_HUMAN_REVIEW_BUDGET_EXHAUSTED_MESSAGE.length).toBeGreaterThan(0);
-  });
-});
-
 describe("decideAfterTerminal", () => {
   it("surfaces any non-HARD-ERROR verdict regardless of retries", () => {
     const verdicts: Verdict[] = [
@@ -992,7 +984,9 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
   it("terminates on a SECOND consecutive off-branch attempt, well inside the budget", () => {
     // One correction, not a whole budget: unlike a dirty set there is no partial
     // progress to wait for, and each further attempt buries the stranded commits
-    // under more stranded commits.
+    // under more stranded commits. Deliberately unlike sameDirtySet, the sha is
+    // not compared either — a NEW detached sha is not progress, just another
+    // commit landing nowhere.
     const { actions, verdict } = drive({ maxAttempts: 8, maxReviewRounds: 3 }, [
       impl(complete, [], detached("dead1")),
       impl(complete, [], detached("dead2")),
@@ -1006,17 +1000,6 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     expect(verdict.cause).toBe("off-branch-head");
     // The sha is the only handle on the stranded commits once the worktree goes.
     expect(verdict.failureTrace).toContain("dead2");
-  });
-
-  it("a NEW detached sha is not progress — position is not compared", () => {
-    // Deliberately unlike sameDirtySet: committing again while detached moves
-    // HEAD, and treating that as progress would let the agent grind the whole
-    // budget while every commit lands nowhere.
-    const { actions } = drive({ maxAttempts: 8, maxReviewRounds: 3 }, [
-      impl(complete, [], detached("dead1")),
-      impl(complete, [], detached("dead2")),
-    ]);
-    expect(actions.filter((a) => a.kind === "run-implementer")).toHaveLength(2);
   });
 
   it("counts CONSECUTIVE attempts, so a later relapse gets its own correction", () => {

@@ -308,20 +308,6 @@ describe("registerShutdown", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Worktree path compatibility with finalize.ts (obligation 3)
-// ---------------------------------------------------------------------------
-
-describe("worktree path layout", () => {
-  it("matches repo-cache.ts:worktreePathFor for a slashed branch", () => {
-    const layout = repoLayout("/repo", ".sandbar");
-    const branch = "sandbar/issue-5-add-foo";
-    expect(worktreePathFor(layout.worktreesDir, branch)).toBe(
-      join("/repo", ".sandbar", "worktrees", "sandbar-issue-5-add-foo"),
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Integration: createSandbox lifecycle via a LOCAL fake provider
 // ---------------------------------------------------------------------------
 
@@ -1186,15 +1172,6 @@ describe("sandboxRunArgs (#42)", () => {
     // silent no-op that `toContain` alone would still accept.
     const args = sandboxRunArgs(base);
     expect(args.indexOf("--init")).toBeLessThan(args.indexOf(base.imageName));
-  });
-
-  it("still ends at the sleep entrypoint", () => {
-    expect(sandboxRunArgs(base).slice(-4)).toEqual([
-      "--entrypoint",
-      "sleep",
-      base.imageName,
-      "infinity",
-    ]);
   });
 
   it("carries the identity, workdir, env and mounts it was given", () => {

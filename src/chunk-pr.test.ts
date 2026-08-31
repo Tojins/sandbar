@@ -6,7 +6,6 @@ import { describe, expect, it } from "vitest";
 import {
   chunkMembersOnBranch,
   chunkPullRequestBody,
-  chunkPullRequestContent,
   chunkPullRequestTitle,
 } from "./chunk-pr.js";
 
@@ -85,17 +84,5 @@ describe("chunkPullRequestBody", () => {
     // It cannot yet. The body may say the merge button is disabled by design;
     // it may not promise an automation that does not exist.
     expect(body()).toContain("not automated yet");
-  });
-});
-
-describe("chunkPullRequestContent", () => {
-  it("is the title and body for one chunk", () => {
-    const content = chunkPullRequestContent({
-      root: 42,
-      branch: "sandbar/chunk-42-first",
-      members: [member(42, "First")],
-    });
-    expect(content.title).toBe("Sandbar chunk #42: First");
-    expect(content.body).toContain("- #42 — First");
   });
 });

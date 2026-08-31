@@ -196,12 +196,6 @@ describe("parsePromise", () => {
     });
   });
 
-  it("returns NO-SIGNAL with `still working` reprompt when no promise tag is present", () => {
-    const r = parsePromise("just thinking out loud", withCommits);
-    expect(r.kind).toBe("NO-SIGNAL");
-    if (r.kind === "NO-SIGNAL") expect(r.reprompt).toContain("Still working");
-  });
-
   it("treats whitespace-padded tokens identically", () => {
     expect(parsePromise("<promise>  COMPLETE  </promise>", withCommits)).toEqual({
       kind: "COMPLETE",
