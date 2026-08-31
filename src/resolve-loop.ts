@@ -392,7 +392,11 @@ export async function runResolveLoop(
     // parks the issue under `agent-stuck` and takes it off the queue; what
     // happened here is a statement about the host.
     if (isInfraFailure(run)) {
-      record("still-conflicted");
+      // Deliberately NOT recorded in the journal. A journal entry states what
+      // the loop concluded about the tree the attempt left, and this attempt
+      // left the tree untouched — there is no honest verdict to file. Nothing
+      // reads the journal on this path anyway: the throw is the report, and
+      // the file the sink just wrote is the evidence behind it.
       throw new SandbarError(buildInfraFailureMessage(issue, attempt, run, logPath));
     }
 
