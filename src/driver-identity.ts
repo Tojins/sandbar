@@ -12,13 +12,18 @@
 //
 // This module never fixed that coupling — #66 did, for the CODE half: a
 // self-hosted run now installs the release `sandbar.pin` names into
-// `.sandbar/driver/` and runs that, so `built from … clean` at a commit an
-// operator chose is what this line reports, and is how they confirm it. The
-// CONFIG half survives on purpose (the config resolves against the process cwd,
-// `sandbar.env` against its own `import.meta.url`), which is exactly why this
-// line prints two trees rather than one: the config's is the tree still capable
-// of being dirty, and `requiresSandbar` is the guard on the version seam that
-// pinning one and not the other opens.
+// `.sandbar/driver/` and runs that. What identifies the driver on that path is
+// this line's VERSION field read beside the pin, and NOT its tree state: the
+// install sits under `.sandbar/`, which the repo gitignores, so the
+// check-ignore rule below reports it `unknown` rather than attributing the
+// host's HEAD to it. `unknown` is the CORRECT answer for an installed release
+// and the expected one; a commit named there is the signal that somebody is
+// running a hand build out of a dev tree instead. The CONFIG half survives on
+// purpose (the config resolves against the process cwd, `sandbar.env` against
+// its own `import.meta.url`), which is exactly why this line prints two trees
+// rather than one: the config's is the tree still capable of being dirty, and
+// `requiresSandbar` is the guard on the version seam that pinning one and not
+// the other opens.
 //
 // A fact, never a warning. "dirty" does not block a run and is not phrased as
 // though it should — an operator iterating deliberately is a supported case,

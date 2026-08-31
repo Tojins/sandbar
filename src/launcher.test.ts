@@ -38,6 +38,7 @@ import {
   readInstallState,
 } from "../scripts/sandbar-launch.mjs";
 import { EXIT_CODE_RELAUNCH } from "./exit-conditions.js";
+import { compareVersions, parseVersion } from "./requires-sandbar.js";
 
 const PIN = "github:Tojins/sandbar#v0.21.0";
 
@@ -161,13 +162,58 @@ describe("the launcher's relaunch code (#65, #66)", () => {
   });
 });
 
+// This repo's own pin, and the two properties that decide whether the next
+// launch after a landing works at all. The shape alone does not: a
+// well-formed spec naming a tag that does not exist reads as covered while
+// `npm install` fails on every launch and the loop stops until a human moves
+// it by hand — the manual step #65 and #66 exist to delete. Tag existence
+// cannot be asserted here (it is a fact about origin, and the gate has no
+// network and a broken gitlink for a repository), so what is asserted is the
+// offline invariant that implies it.
 describe("sandbar.pin (#66)", () => {
+  const read = (name: string) =>
+    readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
+  const pinned = () => {
+    const spec = parsePin(read(PIN_FILE));
+    const version = parseVersion(spec.slice(spec.indexOf("#v") + 2));
+    expect(version, spec).not.toBeNull();
+    return version!;
+  };
+
   it("names a tagged release the launcher accepts", () => {
-    const content = readFileSync(
-      new URL(`../${PIN_FILE}`, import.meta.url),
-      "utf8",
+    expect(parsePin(read(PIN_FILE))).toMatch(
+      /^github:Tojins\/sandbar#v\d+\.\d+\.\d+$/,
     );
-    expect(parsePin(content)).toMatch(/^github:Tojins\/sandbar#v\d+\.\d+\.\d+$/);
+  });
+
+  // The rule `sandbar.pin`'s header states: the pin LAGS this checkout. The
+  // version in `package.json` is the one being written right now — it has not
+  // landed, so `auto-tag.yml` has not tagged it, so it is not installable; and
+  // even once it lands it only gets a tag if it is the version at the pushed
+  // HEAD, which the merger's whole-source-pass push makes a coin flip. Pinning
+  // it, or anything above it, is pinning something that may never exist.
+  it("is strictly older than the version being written here", () => {
+    const working = parseVersion(
+      JSON.parse(read("package.json")).version as string,
+    );
+    expect(working).not.toBeNull();
+    expect(compareVersions(pinned(), working!)).toBeLessThan(0);
+  });
+
+  // The other half of the pairing, and the one a fallback to an older release
+  // gets wrong: a driver that installs and then refuses the config it was
+  // installed to read. Regex rather than an import because importing the
+  // config runs it, and it throws unless a driver is installed — the literal
+  // is what this repo's config carries, and a computed floor here would want
+  // this assertion rewritten rather than deleted.
+  it("satisfies the floor sandbar.config.mjs declares", () => {
+    const declared = /^\s*requiresSandbar:\s*"([^"]*)"/m.exec(
+      read("sandbar.config.mjs"),
+    );
+    if (declared === null) return; // No floor declared: nothing to satisfy.
+    const floor = parseVersion(declared[1]!);
+    expect(floor, declared[1]).not.toBeNull();
+    expect(compareVersions(pinned(), floor!)).toBeGreaterThanOrEqual(0);
   });
 });
 

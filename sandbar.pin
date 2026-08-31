@@ -6,25 +6,33 @@
 #
 # One npm spec, `github:<owner>/<repo>#v<major>.<minor>.<patch>`. A TAG, as a
 # consumer would pin: an untagged state is not pinnable and a sha is not a
-# substitute for one. The tag for a version is created by `auto-tag.yml` on the
-# push to `main` that lands it, so a pin only becomes installable once its
-# version is on `main`.
+# substitute for one.
 #
-# `auto-tag.yml` tags the version at the PUSHED HEAD, and the merger lands a
-# whole source pass in one push, so a version that is not the last one in a pass
-# never gets a tag. A pin naming such a version is uninstallable for good, and
-# the launcher stops the loop saying exactly that rather than running something
-# else — which is the design, but it makes "the pin names a version that never
-# became a tag" a real state. The fix is one commit, and it is TWO edits when
-# the fallback is an older release: move the line below to a version
-# `git tag --list 'v*'` actually shows, and lower `requiresSandbar` in
-# `sandbar.config.mjs` to something that release satisfies — otherwise the
-# driver installs and then refuses the config it was installed to read. No
-# backfill; an untagged state is simply not pinnable.
+# THE PIN LAGS THIS CHECKOUT, ALWAYS, and that is a rule rather than an
+# accident. `auto-tag.yml` creates `vX.Y.Z` from package.json's version at the
+# PUSHED HEAD, and the merger lands a whole source pass in one push, so a
+# version that is not last in its pass never becomes a tag at all — `git tag
+# --list 'v*'` shows two tags across the whole of 0.20.x. The version being
+# written in this checkout is therefore never installable: it has not landed,
+# and even once it does it may not be the one that gets tagged. Pinning it
+# would leave `npm install` failing on every launch and the loop stopping until
+# a human intervened — the exact manual step #65 and #66 exist to delete.
+# `launcher.test.ts` holds the rule as an assertion: the pinned version must be
+# strictly older than package.json's, and must satisfy the `requiresSandbar`
+# floor `sandbar.config.mjs` declares.
 #
-# Moving it is a one-line commit, made deliberately after watching a version
-# behave — that delay IS the feature. Iterating unlanded orchestrator code stays
-# a `npm run build && node dist/cli.js` away, by hand.
+# So moving the pin is its own later commit, made deliberately once a version
+# has landed, been tagged and been watched — that delay IS the feature, and it
+# is what makes a self-hosted series behave like a consumer's. Iterating
+# unlanded orchestrator code stays a `npm run build && node dist/cli.js` away,
+# by hand.
+#
+# Moving it forward: pick a version `git tag --list 'v*'` actually shows, and
+# raise `requiresSandbar` in `sandbar.config.mjs` in the same commit as anything
+# that file starts asking that newer sandbar for. Falling BACK to an older
+# release is the same edit in reverse and is two edits, not one: lower
+# `requiresSandbar` too, or the driver installs and then refuses the config it
+# was installed to read.
 #
 # Lines starting with `#` are comments; exactly one spec line must remain.
-github:Tojins/sandbar#v0.21.2
+github:Tojins/sandbar#v0.20.33

@@ -267,7 +267,9 @@ export function ensureDriver(root, io = {}) {
   return { spec, cli: paths.cli };
 }
 
-export function repoRoot() {
+// Not exported: `main` is the only caller, and this file lives at a fixed depth
+// under the root it derives.
+function repoRoot() {
   return resolve(dirname(fileURLToPath(import.meta.url)), "..");
 }
 

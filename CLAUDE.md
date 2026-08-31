@@ -296,8 +296,14 @@ run it, and around again only on exit 75.
   matching stamp is skipped, so a relaunch runs a byte-identical driver. The
   price is that an orchestrator or PROMPT change takes effect only when the pin
   moves — which is how every consumer already experiences sandbar; iterate
-  unlanded code with `npm run build && node dist/cli.js` by hand.
-  `scripts/sandbar-launch.mjs`'s header owns the four decisions.
+  unlanded code with `npm run build && node dist/cli.js` by hand. The pin
+  therefore LAGS the checkout always: `auto-tag.yml` tags package.json's version
+  at the pushed head and the merger lands a whole pass in one push, so the
+  version being written here is not installable and may never be tagged at all.
+  Moving it is its own later commit; `launcher.test.ts` asserts the pin is
+  strictly older than package.json's version and satisfies the config's
+  `requiresSandbar`. `scripts/sandbar-launch.mjs`'s header owns the four
+  decisions, `sandbar.pin`'s the lag rule.
 - **What still comes from the checkout is the CONFIG** (and `sandbar.env` beside
   it, and the launcher). It must: the config resolves against the process cwd
   and `sandbar.env` against its own `import.meta.url`. So "driven by a pinned
