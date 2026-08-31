@@ -236,10 +236,40 @@
 // 4 (#33). For a chunk, the label policy of #64 gives the same answer for free:
 // a host that could not run a container has said nothing ABOUT the chunk, so
 // `land` stays on and the next run tries again.
+//
+// ---------------------------------------------------------------------------
+// The conflict the agent is never asked about (#68)
+// ---------------------------------------------------------------------------
+//
+// AGENTS.md makes every commit move `version` in `package.json` and its two
+// mirrors in `package-lock.json`, so two branches landing in one cycle conflict
+// in those files BY CONSTRUCTION — every multi-landing cycle, not occasionally.
+// `resolveVersionCollision` settles it before `runResolveLoop` is called, and
+// only what it could not finish reaches the agent. It is the one conflict in
+// the tree whose answer is not a judgement call, and the answer an agent
+// re-derives from an expensive bounded budget is one neither side carries:
+// `max(ours, theirs)` bumped once.
+//
+// The scope is `version-conflict.ts`'s to state and is deliberately narrow —
+// per file, and only when every hunk in it is a lone version line AND the two
+// reconstructed sides differ at nothing but the paths npm mirrors. Everything
+// else in those files still goes to the agent untouched, which is why
+// `prompts/resolve-conflict.md` states the same `max + 1` rule for the case it
+// still sees.
+//
+// Two things this must not do, both already owned elsewhere. It does not make
+// the lockfile consistent — `npmInstall` against the merged tree does that, on
+// the clean path this merge now falls through to. And it does not decide
+// anything about the merge: when it resolves every conflicted path it commits
+// the merge git already prepared, and the caller carries on into `npm install`
+// + gate, so a mechanically-resolved merge and a clean one are the same code
+// from there on. Everything it did is in the merger log, including a version
+// file it looked at and declined.
 
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 
@@ -289,6 +319,11 @@ import {
   formatResolveAttempts,
   runResolveLoop,
 } from "./resolve-loop.js";
+import {
+  isVersionConflictFile,
+  planVersionCollision,
+  renderVersionResolution,
+} from "./version-conflict.js";
 
 // `failedStep` is a free-form step name since #24 — it comes from the
 // consumer's `gateStack.steps`, or is one of sandbar's own pseudo-steps
@@ -574,6 +609,25 @@ export type MergerAdapter = ResolveAdapter & {
   closeIssue(issueNum: number, comment: string): Promise<void>;
   push(): Promise<PushResult>;
   pullFfOnly(): Promise<{ readonly ok: boolean }>;
+  // --- the version collision (#68) ---
+  // The unmerged set on its own, without the `git status` + `git diff` that
+  // `conflictDigest` runs to build the agent's prompt. Asked twice per
+  // conflicted merge — once to find the version files, once to learn whether
+  // anything is left after they are staged — and the second question is the
+  // whole decision between completing the merge here and calling the agent.
+  unmergedPaths(): Promise<readonly string[]>;
+  // The conflicted file AS GIT LEFT IT, markers and all. Null ⇒ there is no
+  // file to read (a modify/delete conflict), which declines rather than
+  // throwing: an unreadable candidate is the agent's problem, not a halt.
+  readWorktreeFile(path: string): Promise<string | null>;
+  writeWorktreeFile(path: string, contents: string): Promise<void>;
+  // `git add -- <path>`, which is what marks one conflict resolved.
+  stagePath(path: string): Promise<void>;
+  // `git commit --no-edit` on the merge git already prepared, so the subject
+  // and the co-author trailer `mergeNoFf` passed survive. Answers rather than
+  // throws: a merge that cannot be committed still has a resolve loop behind
+  // it, and the staged resolution is visible to the agent as staged.
+  commitMerge(): Promise<{ readonly ok: boolean }>;
   // --- chunk landing (#60) ---
   // The ref a chunk's members are merged onto: `origin/<chunkBranch>` when
   // origin has that branch, else `origin/<sourceBranch>` — which is where a
@@ -922,6 +976,86 @@ type MergeAttemptDeps = {
   readonly resolveSinkFor: (key: string) => ResolveAttemptSink | undefined;
 };
 
+// The version collision, resolved before the agent is asked anything (#68).
+//
+// AGENTS.md makes every commit move `version` in `package.json` and its two
+// mirrors in `package-lock.json`, so two branches landing in one cycle conflict
+// there by construction — every time, not occasionally. Spending an agentic
+// attempt on the one conflict in the tree whose answer is not a judgement call
+// is waste, and the answer it re-derives is one neither side carries:
+// `max(ours, theirs)` bumped once. `version-conflict.ts` owns what qualifies
+// and what the value is; this owns the git and the log line.
+//
+// Three answers, and only one of them keeps the agent out of it:
+//
+//   completed — every conflicted path was a version file this could resolve,
+//               and the merge is now committed. The caller falls through to
+//               `npm install` + gate exactly as it would for a clean merge, so
+//               nothing downstream can tell the difference.
+//   partial   — something was staged but conflicts remain (or the commit
+//               failed). The resolve loop runs, and the agent sees the version
+//               files already resolved and staged.
+//   none      — nothing here to do; the conflict is entirely the agent's.
+//
+// Every branch of it says so in the merger log, including a version file it
+// looked at and DECLINED: "why did that cost an attempt" is the question this
+// log line exists to answer without anyone opening the tree.
+export type VersionCollisionOutcome = "completed" | "partial" | "none";
+
+// Exported for `merger-git.test.ts`: what "the version files are the only
+// conflict" and "the merge is committed" mean is git's to define, so the whole
+// operation is asserted by running it against a real conflicting merge in the
+// shape production uses, rather than against a fake that agrees with it.
+export async function resolveVersionCollision(
+  adapter: MergerAdapter,
+  emit: (line: string) => Promise<void>,
+  label: string,
+): Promise<VersionCollisionOutcome> {
+  const candidates = (await adapter.unmergedPaths()).filter(isVersionConflictFile);
+  if (candidates.length === 0) return "none";
+  const files: { path: string; text: string | null }[] = [];
+  for (const path of candidates) {
+    files.push({ path, text: await adapter.readWorktreeFile(path) });
+  }
+  const plan = planVersionCollision(files);
+  if (plan === null) return "none";
+  for (const d of plan.declined) {
+    await emit(
+      `version-collision ${label} ${d.path} left to the resolve agent: ${d.reason}`,
+    );
+  }
+  if (plan.version === null || plan.resolved.length === 0) return "none";
+  for (const file of plan.resolved) {
+    await adapter.writeWorktreeFile(
+      file.path,
+      renderVersionResolution(file, plan.version),
+    );
+    await adapter.stagePath(file.path);
+    await emit(
+      `version-collision ${label} ${file.path} ` +
+        `${[...new Set(file.versions)].join(" vs ")} -> ${plan.version}`,
+    );
+  }
+  const remaining = await adapter.unmergedPaths();
+  if (remaining.length > 0) {
+    await emit(
+      `version-collision ${label} staged; still conflicted: ${remaining.join(", ")}`,
+    );
+    return "partial";
+  }
+  const committed = await adapter.commitMerge();
+  if (!committed.ok) {
+    await emit(
+      `version-collision ${label} resolved every conflict but the merge commit failed`,
+    );
+    return "partial";
+  }
+  await emit(
+    `version-collision ${label} resolved the whole conflict at ${plan.version}; no resolve attempt spent`,
+  );
+  return "completed";
+}
+
 // One ref, merged onto whatever the worktree is currently detached at, with
 // the resolve loop and the gate given their say and the repo state already
 // settled when this returns: a non-`merged` outcome has been reverted and the
@@ -960,7 +1094,10 @@ async function attemptMerge(
   const preMergeSha = await adapter.getHeadSha();
   const m = await adapter.mergeNoFf(unit);
 
-  if (!m.ok) {
+  // The version collision is settled mechanically first (#68); only what it
+  // could not finish reaches the agent. `completed` falls through to the clean
+  // path below, merge commit and all.
+  if (!m.ok && (await resolveVersionCollision(adapter, emit, label)) !== "completed") {
     await emit(`conflict ${label} entering resolve-loop`);
     const outcome = await runResolveLoop(
       unit,
@@ -2063,6 +2200,25 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       };
     }
   };
+  // The unmerged set. One spelling, shared by the conflict digest the resolve
+  // agent reads (#67) and the mechanical version resolution that runs before it
+  // (#68) — the second asks the same question twice per conflicted merge, and a
+  // second copy of the flags is a chance for the two to come to disagree about
+  // what "still conflicted" means. An empty list on failure is honest for both
+  // readers: the comment renders no section, and the mechanical path declines.
+  const unmergedPaths = async (): Promise<readonly string[]> => {
+    try {
+      const r = await exec("git", ["diff", "--name-only", "--diff-filter=U"], {
+        cwd,
+      });
+      return r.stdout
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
   // ORIGIN's copy of a chunk branch, for the #64 landing — and the one place
   // in this file that asks the question WITHOUT `fetchOriginChunkBranch`
   // (git-ops.ts), which `chunkBase` above and #61's seeding share.
@@ -2265,21 +2421,42 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // hard conflict read like a broken container — the exact confusion the
       // comment exists to end. An empty list on failure is honest: the comment
       // renders no section at all rather than claiming nothing conflicted.
-      let paths: readonly string[] = [];
+      return {
+        status: status.trim(),
+        diff: diff.trim(),
+        paths: await unmergedPaths(),
+      };
+    },
+    unmergedPaths,
+    async readWorktreeFile(path) {
       try {
-        const r = await exec(
-          "git",
-          ["diff", "--name-only", "--diff-filter=U"],
-          { cwd },
-        );
-        paths = r.stdout
-          .split("\n")
-          .map((l) => l.trim())
-          .filter(Boolean);
+        return await readFile(join(cwd, path), "utf8");
       } catch {
-        /* the status text above is what the agent reads; this is for prose */
+        return null;
       }
-      return { status: status.trim(), diff: diff.trim(), paths };
+    },
+    async writeWorktreeFile(path, contents) {
+      await writeFile(join(cwd, path), contents, "utf8");
+    },
+    async stagePath(path) {
+      await exec("git", ["add", "--", path], { cwd });
+    },
+    async commitMerge() {
+      try {
+        // `--cleanup=strip` because git wrote the `# Conflicts:` block into
+        // MERGE_MSG when the merge stopped, and a commit made without an
+        // editor keeps comment lines by default — the merge subject and the
+        // co-author trailer `mergeNoFf` supplied are the whole message this
+        // should carry.
+        await exec(
+          "git",
+          ["commit", "--no-edit", "--no-verify", "--cleanup=strip"],
+          { cwd, env: gitAuthorEnv(deps) },
+        );
+        return { ok: true };
+      } catch {
+        return { ok: false };
+      }
     },
     async getIssueBody(issueId) {
       // Throws (SandbarError) on fetch failure: a resolve agent reasoning
