@@ -764,3 +764,82 @@ describe("resolvePlan chunk PR members (#62)", () => {
     expect(r.plan[0]!.chunk).toBeNull();
   });
 });
+
+// #63 — the two halves of the resolution the chunk-review scan reads. Both
+// exist because only this function has the whole candidate graph: nothing
+// downstream of the plan could name the chunks that have work on origin, and
+// nothing that lists issues could see one filed sixty seconds ago.
+describe("resolvePlan landed chunks (#63)", () => {
+  it("reports a chunk with work on origin, its members and its tips", () => {
+    const r = resolvePlan(
+      [
+        issue(10, "", { title: "Root", labels: [IN_CHUNK_LABEL] }),
+        issue(11, "## Blocked by\n- #10\n", {
+          title: "Second",
+          labels: [IN_CHUNK_LABEL],
+        }),
+        issue(12, "## Blocked by\n- #11\n", { title: "Queued" }),
+      ],
+      facts({
+        10: { labels: [IN_CHUNK_LABEL] },
+        11: { labels: [IN_CHUNK_LABEL] },
+      }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.landedChunks).toEqual([
+      {
+        root: 10,
+        branch: "sandbar/chunk-10-root",
+        landed: [
+          { number: 10, title: "Root" },
+          { number: 11, title: "Second" },
+        ],
+        tips: [{ number: 11, title: "Second" }],
+      },
+    ]);
+  });
+
+  it("reports nothing before a chunk's first landing", () => {
+    // The scan makes no call at all in this state: there is no branch on
+    // origin and so no pull request to have been reviewed.
+    const r = resolvePlan([issue(10, "")], new Map(), new Set(), 3, "review");
+
+    expect(r.landedChunks).toEqual([]);
+  });
+
+  it("reports nothing on the default lane", () => {
+    const r = resolvePlan(
+      [issue(10, "", { labels: [IN_CHUNK_LABEL] })],
+      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      new Set(),
+      3,
+      "auto",
+    );
+
+    expect(r.landedChunks).toEqual([]);
+  });
+
+  it("plans a follow-up issue blocked by the tip it was filed behind", () => {
+    // The end-to-end claim of #63, stated as the planner sees it: a follow-up
+    // declaring the chunk's tip is review-gated by inheritance, lands in that
+    // same chunk, and is eligible in the very cycle it was filed — its blocker
+    // already carries `in-chunk`.
+    const r = resolvePlan(
+      [
+        issue(10, "", { title: "Root", labels: [IN_CHUNK_LABEL] }),
+        issue(50, "## Blocked by\n- #10\n", { title: "Chunk #10: address review feedback" }),
+      ],
+      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.plan.map((p) => p.id)).toEqual(["50"]);
+    expect(r.plan[0]?.chunk?.branch).toBe("sandbar/chunk-10-root");
+    expect(r.heldForReview).toEqual([]);
+  });
+});
