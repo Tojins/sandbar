@@ -117,7 +117,16 @@ export type ResolveLoopDeps = {
   // backwards compatibility with callers that don't track preMergeSha; when
   // absent the invariant is skipped.
   readonly preMergeSha?: string;
+  // What the branch is being merged INTO, as a noun phrase the prompt drops
+  // into a sentence ("a merge of this branch into <target> …"). Optional, and
+  // the default is the only target that existed before chunks (#60): a caller
+  // that has not thought about it — forge-verify's forge-red loop, which is
+  // about the source branch by construction — gets the right answer without
+  // saying so.
+  readonly target?: string;
 };
+
+export const SOURCE_TARGET_PHRASE = "the source branch";
 
 type AttemptTrace =
   | { readonly kind: "still-conflicted"; readonly digest: string }
@@ -179,6 +188,9 @@ export async function runResolveLoop(
   for (let attempt = 1; attempt <= RESOLVE_MAX_ATTEMPTS; attempt++) {
     const prompt = buildResolvePromptBody({
       projectAnchor: deps.projectAnchor,
+      // Passed through undefined and defaulted once, in the builder: two
+      // `?? SOURCE_TARGET_PHRASE` on one value is two places to change it.
+      target: deps.target,
       primaryIssue: issue,
       primaryIssueAnchor,
       relatedIssueAnchors,
@@ -296,6 +308,10 @@ export type ResolvePromptInputs = {
   readonly attempt: number;
   readonly maxAttempts: number;
   readonly mode: AttemptTrace;
+  // The branch the merge lands on, named in prose (#60). Optional for the same
+  // reason it is optional on the deps: every caller that predates chunks means
+  // the source branch.
+  readonly target?: string;
 };
 
 export function buildResolvePromptBody(inputs: ResolvePromptInputs): string {
@@ -327,16 +343,18 @@ export function buildResolvePromptBody(inputs: ResolvePromptInputs): string {
     parts.push(render(RELATED_INTRO_TPL, { blocks }));
   }
 
-  parts.push(`# Task\n\n${renderModeBlock(inputs.mode)}`);
+  parts.push(
+    `# Task\n\n${renderModeBlock(inputs.mode, inputs.target ?? SOURCE_TARGET_PHRASE)}`,
+  );
 
   parts.push(buildDoneSignal(inputs.attempt, inputs.maxAttempts, inputs.mode));
 
   return parts.join("\n\n---\n\n");
 }
 
-function renderModeBlock(mode: AttemptTrace): string {
+function renderModeBlock(mode: AttemptTrace, target: string): string {
   if (mode.kind === "still-conflicted") {
-    return render(CONFLICT_TPL, { digest: mode.digest });
+    return render(CONFLICT_TPL, { digest: mode.digest, target });
   }
   if (mode.kind === "forge-red") {
     return render(FORGE_RED_TPL, {
@@ -344,7 +362,7 @@ function renderModeBlock(mode: AttemptTrace): string {
       failedChecks: mode.failedChecks,
     });
   }
-  return render(GATE_RED_TPL, { trace: mode.trace });
+  return render(GATE_RED_TPL, { trace: mode.trace, target });
 }
 
 function buildDoneSignal(

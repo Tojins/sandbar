@@ -49,22 +49,25 @@
 // `ready-for-agent` OPEN candidate list — every issue in the queue, including
 // the ones this cycle will not pick. A blocker OUTSIDE that set contributes no
 // gating, because there is no lane to read: sandbar has the labels only of the
-// issues it listed. That is sound where it matters. An eligible issue's
-// blockers are all CLOSED by definition (the planner requires it), and a
-// closed blocker is landed work — under the holding rule below a review-gated
-// issue is never worked, so a closed one was closed by a human, who is the
-// review. An unresolvable blocker on an issue that is NOT eligible keeps it
-// out of the plan anyway, so the missing lane changes nothing this cycle.
-// Chunk machinery (#54) will have to revisit this the moment a review-gated
-// issue can close by landing in a chunk rather than by a human's hand.
+// issues it listed. That is sound where it matters, and it stayed sound when
+// chunks arrived. An eligible issue's blockers are each either CLOSED or
+// `in-chunk` in the same chunk (plan-resolver.ts's two clauses). An `in-chunk`
+// blocker is listed back in by `fetchChunkMembers`, so it is IN the set and
+// gates normally. A CLOSED one is landed work on the source branch: for an
+// auto-lane blocker the merger closed it, and for a review-gated one a human
+// did, by reviewing its chunk and landing it — which is the approval this
+// inheritance exists to wait for, so a descendant reading as auto after it is
+// the right answer rather than a gap. An unresolvable blocker on an issue that
+// is NOT eligible keeps it out of the plan anyway, so the missing lane changes
+// nothing this cycle.
 //
 // Cycles in the `## Blocked by` graph are hostile input — two issues can name
 // each other, and a human wrote them. The propagation is a breadth-first walk
 // that visits each issue at most once, so a cycle terminates; a cyclic pair is
 // deadlocked in the planner regardless (neither blocker will ever read CLOSED).
 //
-// The temporary holding rule — a review-gated issue is excluded from the plan,
-// because until chunks exist it has nowhere to land — lives in
+// What a review lane MEANS for the plan — a review-gated issue is worked when
+// it is its chunk's root and held otherwise (#60) — lives in
 // `plan-resolver.ts`, next to the filter that applies it. This module only
 // computes lanes.
 

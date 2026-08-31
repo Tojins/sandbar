@@ -3,9 +3,11 @@
 //   Phase 1 (Plan):            Deterministic resolver picks the unblocked
 //                              `ready-for-agent` issues by parsing each body's
 //                              `## Blocked by` section — and routes each by
-//                              LANE (#57), holding the review-gated ones back
-//                              and saying on the issue where an `auto-land`
-//                              label lost to inherited gating.
+//                              LANE (#57), holding back the review-gated ones
+//                              that have nowhere to land yet (#60: everything
+//                              but a chunk's root) and saying on the issue
+//                              where an `auto-land` label lost to inherited
+//                              gating.
 //   Phase 2 (Inner-loop ralph): Each issue runs in its own sandbox up to
 //                              config.maxImplAttempts times; on gate-1 green
 //                              the (strictly-advisory) reviewer runs in the
@@ -17,6 +19,10 @@
 //                              the source branch and pushes once — directly,
 //                              or (config.mergeMode = verified, #22) only after
 //                              the forge's checks pass on the merge result.
+//                              A review-gated issue lands on its CHUNK's
+//                              branch instead (#60), which is pushed as it
+//                              goes; nothing of it reaches the source branch
+//                              until a human has reviewed the chunk.
 //   Phase 4 (Finalise):        Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels. Runs in TWO passes (#30): 4a
@@ -98,7 +104,7 @@ import {
 } from "./merger-worktree.js";
 import { type Stack, startStack } from "./gate-stack.js";
 import { postLaneOverrideNotices } from "./lanes.js";
-import { buildPlan } from "./plan-resolver.js";
+import { type PlannedIssue, buildPlan } from "./plan-resolver.js";
 import {
   absoluteMountSources,
   PreflightError,
@@ -505,9 +511,11 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         excluded: mergedThisRun,
         defaultLane: config.defaultLane,
       });
-      const issues: { id: string; title: string; branch: string }[] = [
-        ...resolution.plan,
-      ].slice(0, budget);
+      // `PlannedIssue`, not a structural subset of it: a planned review-gated
+      // issue carries the CHUNK it lands on (#60), and a narrower annotation
+      // here would drop that field on the way to phase 3 without an error —
+      // the merger would then land a chunk member on the source branch.
+      const issues: PlannedIssue[] = [...resolution.plan].slice(0, budget);
       const fingerprint = planFingerprint(issues.map((i) => i.id));
       await cycleLogger.writePlan(issues);
       await runLogger.appendOrchestrator(
@@ -521,8 +529,12 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       if (resolution.heldForReview.length > 0) {
         const held = resolution.heldForReview.map((n) => `#${n}`).join(", ");
         console.log(
-          `Held for review (${resolution.heldForReview.length}): ${held} — the ` +
-            "review lane has nowhere to land until chunks exist.",
+          `Held for review (${resolution.heldForReview.length}): ${held} — each ` +
+            "is not its chunk's root: a member chained behind another member, " +
+            "or an issue whose blockers sit in two chunks at once. A chained " +
+            "member is NOT waiting for a cycle — a chunk's root is the only " +
+            "member sandbar can work until #61, so a chain stops there and a " +
+            "human takes it from the chunk branch.",
         );
         await runLogger.appendOrchestrator(
           `plan: held ${resolution.heldForReview.length} review-gated issue(s) — ${held}`,
@@ -733,10 +745,17 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             },
           );
           console.log(
-            `\nMerger: ${mergerSummary.merged.length} merged, ${mergerSummary.skipped.length} skipped, pushed=${mergerSummary.pushed}.`,
+            `\nMerger: ${mergerSummary.merged.length} merged, ` +
+              `${mergerSummary.chunkLanded.length} landed on a chunk branch, ` +
+              `${mergerSummary.skipped.length} skipped, pushed=${mergerSummary.pushed}.`,
           );
           for (const m of mergerSummary.merged) {
             console.log(`  ✓ #${issueNumberOf(m)} ${m.title}`);
+          }
+          for (const c of mergerSummary.chunkLanded) {
+            console.log(
+              `  ⧉ #${issueNumberOf(c.issue)} ${c.issue.title} → ${c.chunkBranch}`,
+            );
           }
           for (const s of mergerSummary.skipped) {
             console.log(
@@ -744,7 +763,9 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             );
           }
           await runLogger.appendOrchestrator(
-            `merger: merged=${mergerSummary.merged.length} skipped=${mergerSummary.skipped.length} pushed=${mergerSummary.pushed}`,
+            `merger: merged=${mergerSummary.merged.length} ` +
+              `chunk-landed=${mergerSummary.chunkLanded.length} ` +
+              `skipped=${mergerSummary.skipped.length} pushed=${mergerSummary.pushed}`,
           );
         } catch (err) {
           if (err instanceof MergerError) {
@@ -769,8 +790,11 @@ export async function run(rawConfig: RunConfig): Promise<void> {
             // merger already commented on and stripped `ready-for-agent` from.
             // Those need their handoff label applied before we stop, or they
             // sit on no queue at all — invisible to the planner and to a human
-            // filtering on `agent-stuck`. Nothing here lands code: `merged` is
-            // always empty on this path.
+            // filtering on `agent-stuck`. Nothing here lands code ON THE SOURCE
+            // BRANCH: `merged` is always empty on this path. `chunkLanded`
+            // (#60) may not be, and that is not a contradiction — those commits
+            // are on origin's chunk branch and the issues owe their `in-chunk`
+            // label whether the cycle went on to halt or not.
             haltPartial = err.partial;
             if (haltPartial && haltPartial.merged.length > 0) {
               throw new Error(
@@ -803,6 +827,12 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         for (const [issueId, attempts] of bumpedSilentNoop) {
           runState.silentNoopAttemptsByIssue.set(issueId, attempts);
         }
+        // Merged-and-closed only. A chunk landing (#60) is deliberately NOT
+        // added: `excluded` means "this run already merged it to the source
+        // branch", and what de-queues a chunk member is its `in-chunk` label,
+        // which the planner reads from the strongly-consistent facts batch and
+        // from `fetchChunkMembers` — so the lag this set exists to paper over
+        // cannot reach it.
         for (const m of mergerOutcome.merged) {
           mergedThisRun.add(issueNumberOf(m));
         }

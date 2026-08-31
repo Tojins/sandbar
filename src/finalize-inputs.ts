@@ -138,7 +138,10 @@ export type MergeFinalizeInputs = {
  *
  * `summary` is either the merger's own result or, after a MergerError halt, the
  * partial tracker state it had already applied — the shapes are identical and
- * the halt path's `merged` is empty by construction.
+ * the halt path's `merged` is empty by construction. `chunkLanded` (#60) is
+ * NOT empty on that path and must not be: those commits are on origin's chunk
+ * branch whether the cycle went on to halt or not, and the label flip they earn
+ * is what stops the next cycle re-planning work that is already landed.
  */
 export function mergeFinalizeInputs(
   summary: MergerSummary,
@@ -161,6 +164,31 @@ export function mergeFinalizeInputs(
       continue;
     }
     inputs.push({ kind: finalizeKindForSkip(s.reason), issue: s.issue });
+  }
+  // #60, and LAST — not beside `merged`, which is where a success would
+  // naturally go. `chunk-landed` is the only input here whose arm can THROW:
+  // its label flip is the de-queue, so it is required rather than best-effort
+  // the way `merged`'s flip deliberately is. `finalizeAll` is fail-fast, so the
+  // first throw abandons every input after it, and the two ways that can go
+  // wrong are not symmetric:
+  //   - a `chunk-landed` input that never runs is self-healing. The issue keeps
+  //     `ready-for-agent` and its branch, the next cycle re-plans it, the
+  //     re-merge onto the chunk branch is a no-op, and the flip is retried.
+  //   - a handoff input that never runs is NOT recoverable. The merger has
+  //     already commented on a skipped issue and stripped `ready-for-agent`
+  //     from it, and only finalise applies the parking label — so the issue
+  //     ends up OPEN on no queue at all, invisible to the planner and to a
+  //     human filtering on `agent-stuck`. That is the #8/#33 failure mode this
+  //     module exists to prevent.
+  // The input that can throw therefore goes after the ones that cannot afford
+  // it. The first run on a review-lane host without an `in-chunk` label is not
+  // a hypothetical: it is the expected way this throws.
+  for (const c of summary.chunkLanded) {
+    inputs.push({
+      kind: "chunk-landed",
+      issue: c.issue,
+      chunkBranch: c.chunkBranch,
+    });
   }
   return { inputs, bumpedSilentNoop };
 }

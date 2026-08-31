@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { IN_CHUNK_LABEL } from "./chunks.js";
 import { DEFAULT_LABELS, type LabelConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
 import {
@@ -263,6 +264,89 @@ describe("finalizeOne", () => {
     }
     expect(calls.deletes).toEqual([i.branch]);
     expect(calls.forceDeletes).toEqual([i.branch]);
+  });
+
+  // #60 — the third success shape. Everything here is deliberately NOT what
+  // `merged` does: the issue is not closed, it is not left carrying the queue
+  // label, and it gets a comment.
+  it("chunk-landed: swaps ready-for-agent for in-chunk, comments the branch, deletes the local branch", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      { kind: "chunk-landed", issue: i, chunkBranch: "sandbar/chunk-45-x" },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "deleted-local" });
+    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [IN_CHUNK_LABEL] },
+    ]);
+    expect(calls.deletes).toEqual([i.branch]);
+    // The branch is on origin under the chunk's name, so it is never pushed
+    // under its own — a chunk member's issue branch is not a review artifact.
+    expect(calls.pushes).toEqual([]);
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.comments[0]!.body).toContain("sandbar/chunk-45-x");
+    expect(calls.comments[0]!.body).toContain(IN_CHUNK_LABEL);
+  });
+
+  it("chunk-landed with -d refusal: escalates to -D, on the merger's certainty", async () => {
+    // The member's commits differ from the chunk branch's tree (the resolve
+    // loop composed it), so `-d` refuses — and the work is on origin.
+    const { adapter, calls } = makeAdapter({
+      deleteOk: false,
+      deleteError: "branch X not fully merged",
+    });
+    const action = await finalizeOne(
+      { kind: "chunk-landed", issue: issue(45), chunkBranch: "sandbar/chunk-45-x" },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "deleted-local" });
+    expect(calls.forceDeletes).toEqual(["sandbar/issue-45-t-45"]);
+  });
+
+  it("chunk-landed with a failing label flip: throws, and has NOT deleted the branch", async () => {
+    // The flip is the de-queue. A branch deleted under an issue still carrying
+    // `ready-for-agent` is work the next cycle would write a second time, so
+    // the run stops with the branch intact instead.
+    const { adapter, calls } = makeAdapter({
+      labelEditOk: false,
+      labelEditError: "label not found",
+    });
+    await expect(
+      finalizeOne(
+        { kind: "chunk-landed", issue: issue(45), chunkBranch: "sandbar/chunk-45-x" },
+        adapter,
+        LABELS,
+      ),
+    ).rejects.toThrow(SandbarError);
+    expect(calls.deletes).toEqual([]);
+    expect(calls.forceDeletes).toEqual([]);
+    // And no comment: this arm's comment asserts the flip ("`ready-for-agent`
+    // has been replaced with `in-chunk`"), so posting it on a failed flip would
+    // contradict the issue's own labels — and the self-heal that re-plans this
+    // issue would post the same untrue comment again next cycle.
+    expect(calls.comments).toEqual([]);
+  });
+
+  it("chunk-landed on an issue a human closed mid-run: still flips and deletes", async () => {
+    // Not a handoff, so not guarded on issue state (#16): the comment is a
+    // statement of fact that stays true, and the label flip keeps the chunk
+    // graph honest whatever the issue's state.
+    const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
+    const action = await finalizeOne(
+      { kind: "chunk-landed", issue: issue(45), chunkBranch: "sandbar/chunk-45-x" },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "deleted-local" });
+    expect(calls.stateChecks).toEqual([]);
+    expect(calls.labelEdits).toHaveLength(1);
   });
 
   it("merge-conflict: removes worktree, pushes branch + adds ready-for-human (merger already commented + dropped ready-for-agent)", async () => {

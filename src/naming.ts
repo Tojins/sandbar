@@ -237,6 +237,9 @@ export function sandboxContainerNameFor(
 // reserved-namespace check on `config.mergeMode.integrationBranch`.
 // `SANDBAR_BRANCH_REFGLOBS` is that enumeration, stated once, so a third shape
 // is one array entry instead of an archaeology exercise across three modules.
+// `ORIGIN_CHUNK_BRANCH_*` is the remote-tracking half of it, which only the
+// chunk shape needs (#60): an issue branch is answered for by the source
+// branch, a chunk branch by origin's copy of itself.
 //
 // The globs are the full cross product of prefixes and infixes, which includes
 // `sandcastle/chunk-*` — a branch that cannot exist, since chunks postdate the
@@ -257,6 +260,23 @@ export const ALL_BRANCH_INFIXES: readonly string[] = [
 export const SANDBAR_BRANCH_REFGLOBS: readonly string[] =
   ALL_BRANCH_PREFIXES.flatMap((prefix) =>
     ALL_BRANCH_INFIXES.map((infix) => `refs/heads/${prefix}${infix}*`),
+  );
+
+// The same chunk-branch namespace, on the REMOTE side (#60). A chunk branch
+// lives on origin — it is the review artifact and the recovery point, and
+// nothing in the state directory is authoritative — so the refs that answer
+// "what has this chunk already got on it?" are remote-tracking ones. Two
+// lists rather than one because git wants different syntax for the two jobs:
+// a refspec to fetch with, a glob to enumerate with.
+export const ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS: readonly string[] =
+  ALL_BRANCH_PREFIXES.map(
+    (prefix) =>
+      `+refs/heads/${prefix}${CHUNK_BRANCH_INFIX}*:refs/remotes/origin/${prefix}${CHUNK_BRANCH_INFIX}*`,
+  );
+
+export const ORIGIN_CHUNK_BRANCH_REFGLOBS: readonly string[] =
+  ALL_BRANCH_PREFIXES.map(
+    (prefix) => `refs/remotes/origin/${prefix}${CHUNK_BRANCH_INFIX}*`,
   );
 
 // The slug half of both shapes. It lives here rather than in the planner that

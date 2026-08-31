@@ -77,26 +77,47 @@
 // label is the de-queue, and it de-queues here as explicitly as it does through
 // the query.
 //
-// All of this is inert until something APPLIES `in-chunk` (#60), and doubly
-// inert under `defaultLane: "auto"`, where no issue is review-gated, no chunk
-// is derived, and the second clause can never be reached.
+// All of this is doubly inert under `defaultLane: "auto"`, where no issue is
+// review-gated, no chunk is derived, and the second clause can never be
+// reached.
 //
-// TEMPORARY HOLDING RULE, and it is temporary on purpose: a review-gated issue
-// is excluded from the plan. Chunk machinery (#54) is what will give one
-// somewhere to land — a branch a human reviews before it reaches the source
-// branch — and until that exists, working the issue could only end in
-// auto-landing it, which is the one thing its lane says not to do. So it is
-// left in the queue, untouched, keeping `ready-for-agent`: nothing is
-// destroyed, and the day chunks exist the same queue is picked up as-is. The
-// rule is inert under `defaultLane: "auto"` with no `auto-land` labels in play,
-// which is every host that has not opted in, since nothing is review-gated
-// there at all.
+// ---------------------------------------------------------------------------
+// What the holding rule still covers (#60, and what #57 wrote it for)
+// ---------------------------------------------------------------------------
 //
-// `resolvePlan` therefore returns a RESOLUTION rather than a bare plan: the
-// issues it held for review, and the `auto-land` labels inheritance overrode,
-// are things the run has to report — held work that vanished from the plan
-// without a word reads as an empty queue, and an overridden label read as
-// honoured is a human believing an issue auto-lands when it never will.
+// #57 held EVERY review-gated issue out of the plan, because working one could
+// only have ended in auto-landing it — there was nowhere else for it to go.
+// There is now: phase 3 merges a DONE review-gated issue onto its chunk's
+// branch (#60). So the rule narrows to the issues that still have nowhere to
+// land, and it narrows on exactly one axis — whether the issue is its chunk's
+// ROOT.
+//
+// A root has no review-gated blocker, so nothing of its chunk's is under it.
+// Its issue branch seeds from `origin/<sourceBranch>` (git-ops.ts) and its
+// chunk branch is created at `origin/<sourceBranch>` when absent, so the tree
+// it is developed against and the tree it lands on are the same one, and the
+// merge is honest. A NON-ROOT member is built on a blocker whose commits sit
+// on the chunk branch and nowhere else: seeded from origin it would be
+// developed against a tree missing the very work it declares itself blocked
+// by. Giving those members a branch seeded from the chunk is #61; until then
+// they are held, exactly as #57 held them and for the same reason — no landing
+// that is not a lie. An issue `chunks.ts` gave no chunk at all (a two-chunk
+// parent, a cycle) is held on the same ground: `chunkOf` has no entry, so it
+// is not any chunk's root.
+//
+// A chunk therefore admits at most ONE planned issue per cycle, since a chunk
+// has exactly one root — which is also what keeps the merge phase's per-chunk
+// grouping free of intra-chunk ordering questions.
+//
+// `resolvePlan` returns a RESOLUTION rather than a bare plan: the issues it
+// held for review, and the `auto-land` labels inheritance overrode, are things
+// the run has to report — held work that vanished from the plan without a word
+// reads as an empty queue, and an overridden label read as honoured is a human
+// believing an issue auto-lands when it never will. Each planned issue also
+// carries its CHUNK (`PlannedIssue.chunk`), which is how the landing target
+// reaches phase 3: the derivation needs the whole candidate graph and the
+// merger sees only DONE branches, so deriving it there would answer a
+// different question.
 //
 // `fetchCandidates` NAMES the repository (#34). It used to identify it the way
 // `gh` does by default — from the git remotes of the directory the command runs
@@ -121,7 +142,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { IN_CHUNK_LABEL, deriveChunks } from "./chunks.js";
+import { type ChunkTarget, IN_CHUNK_LABEL, deriveChunks } from "./chunks.js";
 import {
   DEFAULT_LANE,
   type Lane,
@@ -161,6 +182,12 @@ export type PlannedIssue = {
   readonly id: string;
   readonly title: string;
   readonly branch: string;
+  // Where this issue's branch lands (#60). Null in the auto lane — the source
+  // branch, as always. Non-null only for a review-gated issue, and then it is
+  // its chunk's root and branch, computed here rather than re-derived in the
+  // merge phase: the derivation needs the whole candidate graph, and phase 3
+  // sees only the DONE branches.
+  readonly chunk: ChunkTarget | null;
 };
 
 export type Plan = readonly PlannedIssue[];
@@ -169,7 +196,10 @@ export type PlanResolution = {
   readonly plan: Plan;
   // Issues that cleared every other filter and were held out of the plan by
   // the review lane's holding rule, in issue order. Empty for every host on
-  // the default lane.
+  // the default lane. Since #60 these are the review-gated issues that are not
+  // their chunk's root (a chained member, waiting for #61) plus the ones
+  // `chunks.ts` could give no chunk at all — never a chunk root, which now
+  // plans.
   readonly heldForReview: readonly number[];
   // `auto-land` labels that inherited review-gating anyway (#57). Reported for
   // every candidate, not just the eligible ones: the contradiction is a fact
@@ -211,10 +241,11 @@ export function resolvePlan(
     defaultLane,
   );
   // The same graph again, one layer up: chunk assignment is what makes the
-  // in-chunk clause of `blockerSatisfied` a statement about ONE branch. Only
-  // `chunkOf` is read here — naming a chunk's branch, reporting the issues it
-  // held back, and working one are all later issues under #54.
-  const { chunkOf } = deriveChunks(
+  // in-chunk clause of `blockerSatisfied` a statement about ONE branch, and
+  // since #60 it is also the landing target a planned review-gated issue
+  // carries. `chunkOf` answers both "same chunk?" and "is this issue its
+  // chunk's root?"; `chunks` names the branch.
+  const { chunks, chunkOf } = deriveChunks(
     candidates.map((c) => ({
       number: c.number,
       title: c.title,
@@ -222,6 +253,18 @@ export function resolvePlan(
     })),
     lanes,
   );
+  const chunkByRoot = new Map(chunks.map((c) => [c.root, c] as const));
+
+  // The chunk an issue lands on, or null when it lands on the source branch.
+  // Null covers both an auto-lane issue and a review-gated one `deriveChunks`
+  // held back — the second can never reach the plan (see the lane filter
+  // below), so a null here is always the auto lane by the time it is read.
+  const chunkTargetOf = (n: number): ChunkTarget | null => {
+    const root = chunkOf.get(n);
+    if (root === undefined) return null;
+    const chunk = chunkByRoot.get(root);
+    return chunk ? { root: chunk.root, branch: chunk.branch } : null;
+  };
 
   // `in-chunk` from either source, because neither invents a label and each can
   // be missing one the other has: the authoritative batch may have skipped the
@@ -274,7 +317,11 @@ export function resolvePlan(
     // closed or already merged is not being "held" by its lane; it was already
     // out on some other filter, and reporting it as held would make the
     // holding rule look like it costs more than it does.
-    if (lanes.get(c.number)?.lane === "review") {
+    //
+    // What is still held (#60): a review-gated issue that is not its chunk's
+    // ROOT, and one `deriveChunks` gave no chunk at all. Everything else has
+    // somewhere to land — see "What the holding rule still covers" above.
+    if (lanes.get(c.number)?.lane === "review" && chunkOf.get(c.number) !== c.number) {
       heldForReview.push(c.number);
       return false;
     }
@@ -285,6 +332,7 @@ export function resolvePlan(
     id: String(c.number),
     title: c.title,
     branch: issueBranchName(c.number, c.title),
+    chunk: chunkTargetOf(c.number),
   }));
   return {
     plan,

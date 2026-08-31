@@ -4,10 +4,12 @@ import { SandbarError } from "./errors.js";
 import type { PushOutcome, VerifyAdapter } from "./forge-verify.js";
 import type { MergerGateOutput } from "./merger.js";
 import {
-  INSTALL_FAILED_COMMENT,
+  SOURCE_TARGET,
+  buildInstallFailedComment,
   buildForgeUnverifiedComment,
   MergerError,
   READY_FOR_AGENT_LABEL,
+  groupByChunk,
   type IssueRef,
   type MergerAdapter,
   type PushResult,
@@ -45,6 +47,10 @@ type Calls = {
   closeAttempts: { n: number }[];
   pushes: number;
   pulls: number;
+  chunkBases: string[];
+  checkouts: string[];
+  chunkPushes: string[];
+  headReads: number;
 };
 
 type Script = {
@@ -55,6 +61,10 @@ type Script = {
   pushes?: PushResult[];
   pulls?: boolean[];
   heads?: string[];
+  // #60: what origin has for a chunk branch, by branch name. A missing entry
+  // means origin has no such branch and the base is the source branch.
+  chunkBases?: Record<string, string>;
+  chunkPushes?: PushResult[];
   // Per-issue number of leading close attempts that throw before one succeeds.
   // A value >= total attempts means the close never succeeds. Default 0.
   closeFailsBeforeSuccess?: Record<number, number>;
@@ -78,6 +88,10 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     closeAttempts: [],
     pushes: 0,
     pulls: 0,
+    chunkBases: [],
+    checkouts: [],
+    chunkPushes: [],
+    headReads: 0,
   };
   const closeAttemptsByIssue = new Map<number, number>();
   let mIdx = 0;
@@ -86,6 +100,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
   let gIdx = 0;
   let pIdx = 0;
   let plIdx = 0;
+  let cpIdx = 0;
   let headIdx = 0;
   let merging = false;
 
@@ -125,6 +140,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       return `body-${id}`;
     },
     async getHeadSha() {
+      calls.headReads++;
       const idx = headIdx++;
       return script.heads?.[idx] ?? `sha-${idx}`;
     },
@@ -180,6 +196,25 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       if (r === undefined) throw new Error("pull called but not scripted");
       calls.pulls++;
       return { ok: r };
+    },
+    // #60. `chunkBases` scripts what origin has: a branch name mapped to its
+    // remote-tracking ref, or nothing for a chunk that has never landed — in
+    // which case the real adapter falls back to the source branch, so this
+    // does too.
+    async chunkBase(branch) {
+      calls.chunkBases.push(branch);
+      return script.chunkBases?.[branch] ?? "origin/main";
+    },
+    async checkoutDetached(ref) {
+      calls.checkouts.push(ref);
+      calls.order.push("checkout");
+      return undefined;
+    },
+    async pushChunkBranch(branch) {
+      const r = script.chunkPushes?.[cpIdx++] ?? { kind: "ok" as const };
+      calls.chunkPushes.push(branch);
+      calls.order.push("chunk-push");
+      return r;
     },
   };
   return { adapter, calls };
@@ -253,7 +288,9 @@ describe("runMergerWithAdapter — clean-merge happy paths", () => {
     expect(summary.pushed).toBe(false);
     expect(calls.resets).toEqual([{ sha: "pre-sha" }]);
     expect(calls.gates).toBe(0);
-    expect(calls.comments).toEqual([{ n: 42, msg: INSTALL_FAILED_COMMENT }]);
+    expect(calls.comments).toEqual([
+      { n: 42, msg: buildInstallFailedComment(SOURCE_TARGET) },
+    ]);
     expect(calls.removedLabels).toEqual([
       { n: 42, label: READY_FOR_AGENT_LABEL },
     ]);
@@ -1355,5 +1392,197 @@ describe("buildForgeUnverifiedComment", () => {
     });
     expect(msg).not.toMatch(/on commit/);
     expect(msg).toContain("sandbar/integration");
+  });
+});
+
+// #60 — the second landing target. What these pin is the SHAPE of the phase:
+// which base each group is composed on, that the worktree comes back to where
+// the cycle started, that a member is recorded only after the push, and that
+// the source-branch pass is untouched by any of it.
+describe("runMergerWithAdapter — chunk landing (#60)", () => {
+  const chunkIssue = (n: number, root = n): IssueRef => ({
+    ...issue(n),
+    chunk: { root, branch: `sandbar/chunk-${root}-c` },
+  });
+
+  it("bases a first landing on origin/<sourceBranch>, merges, gates, pushes the chunk branch", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+    });
+    const summary = await runMergerWithAdapter([chunkIssue(42)], adapter);
+
+    // Origin has no such branch, so the chunk branch is created where every
+    // issue branch is seeded from — which is what makes the merge honest.
+    expect(calls.chunkBases).toEqual(["sandbar/chunk-42-c"]);
+    expect(calls.checkouts[0]).toBe("origin/main");
+    expect(calls.order).toEqual([
+      "checkout",
+      "merge",
+      "install",
+      "gate",
+      "chunk-push",
+      "checkout",
+    ]);
+    expect(calls.chunkPushes).toEqual(["sandbar/chunk-42-c"]);
+    expect(summary.chunkLanded).toEqual([
+      { issue: chunkIssue(42), chunkBranch: "sandbar/chunk-42-c" },
+    ]);
+    // Nothing reached the source branch: no merge, no push, no close.
+    expect(summary.merged).toEqual([]);
+    expect(summary.pushed).toBe(false);
+    expect(calls.pushes).toBe(0);
+    expect(calls.closes).toEqual([]);
+  });
+
+  it("bases a later landing on origin's copy of the chunk branch", async () => {
+    // The recovery point is on origin, so a member landing after the first
+    // composes on what is there rather than on a local ref or on the source.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkBases: {
+        "sandbar/chunk-42-c": "refs/remotes/origin/sandbar/chunk-42-c",
+      },
+    });
+    await runMergerWithAdapter([chunkIssue(43, 42)], adapter);
+
+    expect(calls.checkouts[0]).toBe("refs/remotes/origin/sandbar/chunk-42-c");
+  });
+
+  it("lands the chunks first, then returns the worktree to the sha the cycle started on", async () => {
+    // The source-branch pass must merge onto origin/<sourceBranch> and not
+    // onto whatever chunk was landed last.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      heads: ["entry-sha"],
+    });
+    const summary = await runMergerWithAdapter(
+      [issue(10), chunkIssue(42)],
+      adapter,
+    );
+
+    expect(calls.checkouts).toEqual(["origin/main", "entry-sha"]);
+    expect(calls.merges).toEqual([
+      "sandbar/issue-42-t-42",
+      "sandbar/issue-10-t-10",
+    ]);
+    expect(summary.chunkLanded.map((c) => c.issue.id)).toEqual(["42"]);
+    expect(summary.merged.map((i) => i.id)).toEqual(["10"]);
+    expect(summary.pushed).toBe(true);
+    expect(calls.closes).toEqual([{ n: 10, comment: "Completed by Sandbar" }]);
+  });
+
+  it("gives each chunk its own base, composition and push, in root order", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+    });
+    const summary = await runMergerWithAdapter(
+      [chunkIssue(44), chunkIssue(42)],
+      adapter,
+    );
+
+    expect(calls.chunkBases).toEqual([
+      "sandbar/chunk-42-c",
+      "sandbar/chunk-44-c",
+    ]);
+    expect(calls.chunkPushes).toEqual([
+      "sandbar/chunk-42-c",
+      "sandbar/chunk-44-c",
+    ]);
+    expect(summary.chunkLanded.map((c) => c.chunkBranch)).toEqual([
+      "sandbar/chunk-42-c",
+      "sandbar/chunk-44-c",
+    ]);
+  });
+
+  it("pushes nothing when the chunk's only member is skipped, and names the chunk in the comment", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      installs: [false],
+      heads: ["entry-sha", "pre-sha"],
+    });
+    const summary = await runMergerWithAdapter([chunkIssue(42)], adapter);
+
+    expect(calls.chunkPushes).toEqual([]);
+    expect(summary.chunkLanded).toEqual([]);
+    expect(summary.skipped.map((s) => s.reason)).toEqual(["install-failed"]);
+    expect(calls.resets).toEqual([{ sha: "pre-sha" }]);
+    // The prose must not claim the source branch: nothing of this was ever
+    // heading there.
+    expect(calls.comments[0]!.msg).toContain("sandbar/chunk-42-c");
+    expect(calls.comments[0]!.msg).not.toContain("into the source branch");
+  });
+
+  it("halts on a rejected chunk push, carrying the chunks that DID land in the partial", async () => {
+    // The rejection means the branch moved under this cycle, so the
+    // composition is not built on it — never force-pushed, never retried. The
+    // earlier chunk's members are on origin and still owe their `in-chunk`
+    // label, which is what the partial carries to Phase 4.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      chunkPushes: [{ kind: "ok" }, { kind: "race" }],
+    });
+    const err = await runMergerWithAdapter(
+      [chunkIssue(42), chunkIssue(44)],
+      adapter,
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(MergerError);
+    const partial = (err as MergerError).partial;
+    expect(partial?.merged).toEqual([]);
+    expect(partial?.chunkLanded?.map((c) => c.issue.id)).toEqual(["42"]);
+    expect((err as MergerError).message).toContain("sandbar/chunk-44-c");
+    expect((err as MergerError).message).toContain("#44");
+    // The failed group's members keep their branches and their queue label.
+    expect(calls.removedLabels).toEqual([]);
+  });
+
+  it("reads no head sha and checks out nothing when no issue carries a chunk", async () => {
+    // The auto lane pays nothing for this: same calls as before #60.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      heads: ["pre-sha"],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(calls.checkouts).toEqual([]);
+    expect(calls.chunkBases).toEqual([]);
+    expect(calls.chunkPushes).toEqual([]);
+    expect(summary.chunkLanded).toEqual([]);
+    // One getHeadSha, the per-issue preMergeSha: the entry read that exists to
+    // get back FROM a chunk is not paid for when there is no chunk.
+    expect(calls.headReads).toBe(1);
+  });
+});
+
+describe("groupByChunk (#60)", () => {
+  const withChunk = (n: number, root: number): IssueRef => ({
+    ...issue(n),
+    chunk: { root, branch: `sandbar/chunk-${root}-c` },
+  });
+
+  it("groups by branch and orders by chunk root", () => {
+    const groups = groupByChunk([
+      withChunk(50, 44),
+      issue(10),
+      withChunk(45, 42),
+      withChunk(43, 42),
+    ]);
+
+    expect(groups.map((g) => g.target.branch)).toEqual([
+      "sandbar/chunk-42-c",
+      "sandbar/chunk-44-c",
+    ]);
+    expect(groups[0]!.members.map((m) => m.id)).toEqual(["45", "43"]);
+    expect(groups[1]!.members.map((m) => m.id)).toEqual(["50"]);
+  });
+
+  it("is empty when nothing carries a chunk", () => {
+    expect(groupByChunk([issue(1), { ...issue(2), chunk: null }])).toEqual([]);
   });
 });

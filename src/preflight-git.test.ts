@@ -169,6 +169,92 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       ]);
       expect(await hasBranch(target, "sandbar/chunk-5-review-series")).toBe(false);
     });
+
+    // #60 — the second ground for deleting an issue branch, and the crash
+    // window it exists for: a run that died between the chunk push and the
+    // label flip, or a flip whose delete failed, leaves a member's issue branch
+    // behind. Nothing will ever pick it up again (the planner drops `in-chunk`
+    // issues), so left alone it is one dead ref per member a chunk ever landed.
+    //
+    // The set-up is what the merger produces: a member's commits on a branch
+    // that is NOT on main, and origin's chunk branch carrying them.
+    const landMemberOnChunk = async (): Promise<void> => {
+      await git(target, "checkout", "-q", "-b", "sandbar/issue-7-member");
+      await git(target, "commit", "-q", "--allow-empty", "-m", "member work");
+      const { stdout } = await git(target, "rev-parse", "HEAD");
+      await git(target, "checkout", "-q", "main");
+      await git(
+        target,
+        "update-ref",
+        "refs/remotes/origin/sandbar/chunk-7-c",
+        stdout.trim(),
+      );
+    };
+
+    it("deletes an `in-chunk` member's branch once origin's chunk branch carries it", async () => {
+      await landMemberOnChunk();
+
+      const deleted = await deleteMergedSandbarBranches({
+        ...cfg(layoutAt(target)),
+        inChunkIssues: new Set([7]),
+      });
+
+      expect([...deleted].sort()).toEqual([
+        "sandbar/issue-1-merged",
+        "sandbar/issue-7-member",
+      ]);
+    });
+
+    it("keeps it when the issue is not `in-chunk`, whatever origin carries", async () => {
+      // The label is the claim that the landing happened; without it this is
+      // an ordinary in-flight branch and deleting it would discard live work.
+      await landMemberOnChunk();
+
+      const deleted = await deleteMergedSandbarBranches(cfg(layoutAt(target)));
+
+      expect(deleted).toEqual(["sandbar/issue-1-merged"]);
+      expect(await hasBranch(target, "sandbar/issue-7-member")).toBe(true);
+    });
+
+    it("keeps it when no chunk branch on origin actually carries the commits", async () => {
+      // The label alone is a previous run's word for it. Ancestry is this
+      // run's verification, and without it nothing is force-deleted.
+      await git(target, "checkout", "-q", "-b", "sandbar/issue-7-member");
+      await git(target, "commit", "-q", "--allow-empty", "-m", "member work");
+      await git(target, "checkout", "-q", "main");
+
+      const deleted = await deleteMergedSandbarBranches({
+        ...cfg(layoutAt(target)),
+        inChunkIssues: new Set([7]),
+      });
+
+      expect(deleted).toEqual(["sandbar/issue-1-merged"]);
+      expect(await hasBranch(target, "sandbar/issue-7-member")).toBe(true);
+    });
+
+    it("never reaps a chunk branch on that ground — every one contains itself", async () => {
+      // `sandbar/chunk-7-c` is trivially reachable from origin's copy of
+      // itself, so a containment check that did not insist on the ISSUE shape
+      // would delete the review artifact the moment its first member landed.
+      await git(target, "checkout", "-q", "-b", "sandbar/chunk-7-c");
+      await git(target, "commit", "-q", "--allow-empty", "-m", "chunk work");
+      const { stdout } = await git(target, "rev-parse", "HEAD");
+      await git(target, "checkout", "-q", "main");
+      await git(
+        target,
+        "update-ref",
+        "refs/remotes/origin/sandbar/chunk-7-c",
+        stdout.trim(),
+      );
+
+      const deleted = await deleteMergedSandbarBranches({
+        ...cfg(layoutAt(target)),
+        inChunkIssues: new Set([7]),
+      });
+
+      expect(deleted).toEqual(["sandbar/issue-1-merged"]);
+      expect(await hasBranch(target, "sandbar/chunk-7-c")).toBe(true);
+    });
   });
 
   // #38 item 3, stated as the thing it protects rather than as a path. `cwd`
@@ -245,6 +331,42 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     it("takes none of the three classifications for a chunk branch", async () => {
       await git(target, "checkout", "-q", "-b", "sandbar/chunk-5-review-series");
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
+      await git(target, "checkout", "-q", "main");
+
+      const state = await gatherState(cfg(layoutAt(target)));
+
+      expect(state.unmergedIssueBranches).toEqual([]);
+      expect(state.discardedIssueBranches).toEqual([]);
+      expect(state.resumableIssueBranches).toEqual([]);
+    });
+
+    // #60 — the member side of the same argument. A leftover issue branch for
+    // an issue that has landed on a chunk branch is neither: not `unmerged`
+    // (its commits are published under the chunk's name, so refusing the run
+    // over it would refuse over nothing) and not `resumable` (the planner
+    // drops `in-chunk` issues by label, so no inner loop will ever continue
+    // it). It exists only when a run died between the chunk push and the label
+    // flip, and the delete pass reaps it as soon as it can verify containment.
+    it("takes none of the three for the issue branch of an `in-chunk` member", async () => {
+      // A `gh` that answers the planner's two list queries by label, so
+      // `fetchChunkMembers` really returns #7 — the shim the other cases use
+      // fails every call, which is the "no chunks anywhere" default.
+      await writeFile(
+        join(shimBin, "gh"),
+        [
+          "#!/bin/sh",
+          'label=""; prev=""',
+          'for a in "$@"; do if [ "$prev" = "--label" ]; then label="$a"; fi; prev="$a"; done',
+          'if [ "$label" = "in-chunk" ]; then',
+          '  echo \'[{"number":7,"title":"t","body":"","labels":[{"name":"in-chunk"}]}]\'',
+          "else",
+          "  echo '[]'",
+          "fi",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      await git(target, "checkout", "-q", "-b", "sandbar/issue-7-member");
+      await git(target, "commit", "-q", "--allow-empty", "-m", "member work");
       await git(target, "checkout", "-q", "main");
 
       const state = await gatherState(cfg(layoutAt(target)));

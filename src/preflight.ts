@@ -93,8 +93,25 @@
 // `sandbar/chunk-*` branches (#58) are listed by the same globs — one shape
 // each of `SANDBAR_BRANCH_REFGLOBS` — but take none of those three: see
 // `classifySandbarBranches`. They are still DELETED once merged, which is the
-// one thing that is true of a chunk branch independently of the lifecycle #54
-// has yet to give it.
+// one thing that is true of a chunk branch whatever else its lifecycle does.
+//
+// CHUNKS, both sides of the wire (#60). Now that chunk branches are real, this
+// module has to be right about them in two ref spaces and it treats each as its
+// own question:
+//   - LOCAL `refs/heads/sandbar/chunk-*` — recognized and passed over, as
+//     above. A chunk branch is unmerged for as long as its review takes, which
+//     is the entire point of the review lane, so neither `unmerged` nor
+//     `resumable` is anything but noise. Nothing sandbar does creates one of
+//     these (the merger pushes from a detached HEAD), but a human or an older
+//     run can, and being wrong about it would refuse the run.
+//   - ORIGIN `refs/remotes/origin/sandbar/chunk-*` — fetched at the top of
+//     `runPreflight` and read for one purpose: to verify that a leftover issue
+//     branch belonging to an `in-chunk` member is a duplicate of work already
+//     published on a chunk branch, and can therefore be deleted. Origin is
+//     where a chunk branch actually lives; the local remote-tracking ref is a
+//     cache of it and is treated as one.
+// The member's own issue branch is the third piece and is neither of the three
+// classifications either — see `classifySandbarBranches`.
 
 import { execFile, execFileSync } from "node:child_process";
 import { stat } from "node:fs/promises";
@@ -104,13 +121,15 @@ import { promisify } from "node:util";
 import type { ResolvedStackContainer } from "./config.js";
 import type { EnvReader } from "./env.js";
 import {
+  ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+  ORIGIN_CHUNK_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
   issueNumberFromBranch,
   rootIssueFromChunkBranch,
 } from "./naming.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import { RUNTIME } from "./runtime.js";
-import { fetchCandidates } from "./plan-resolver.js";
+import { fetchCandidates, fetchChunkMembers } from "./plan-resolver.js";
 import {
   parseRepoFromRemoteUrl,
   type RepoRef,
@@ -451,7 +470,13 @@ async function captureOk(
   }
 }
 
-export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
+export async function gatherState(
+  cfg: PreflightConfig,
+  // Issues carrying `in-chunk` (#60). Optional so a caller that has one already
+  // — `runPreflight`, which needs the same set for the delete pass — pays for
+  // the query once instead of twice; omitted, it is fetched here.
+  knownInChunkIssues?: ReadonlySet<number>,
+): Promise<RepoState> {
   const repoDir = cfg.layout.repoDir;
   const env = cfg.env;
   const hasGit = which("git");
@@ -486,9 +511,12 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
   const originUrl = await readOriginUrl(repoDir);
   const parsedOrigin = originUrl === null ? null : parseRepoFromRemoteUrl(originUrl);
   const openReadyIssues = await fetchOpenReadyIssueNumbers(cfg.repo);
+  const inChunkIssues =
+    knownInChunkIssues ?? (await fetchInChunkIssueNumbers(cfg.repo));
   const { unmerged, discarded, resumable } = await classifySandbarBranches(
     repoDir,
     openReadyIssues,
+    inChunkIssues,
   );
 
   return {
@@ -576,6 +604,22 @@ async function fetchOpenReadyIssueNumbers(
   }
 }
 
+// The issues already landed on a chunk branch (#60), through the planner's own
+// query for the same reason as above. Fail-closed the same way, and the failure
+// costs the same nothing: a leftover member branch is then classified as it
+// would have been before chunks existed — a hard `unmerged` error — rather than
+// silently reaped on a query that did not answer.
+async function fetchInChunkIssueNumbers(
+  repo: RepoRef,
+): Promise<ReadonlySet<number>> {
+  try {
+    const members = await fetchChunkMembers(repo);
+    return new Set(members.map((c) => c.number));
+  } catch {
+    return new Set();
+  }
+}
+
 async function checkSandboxGhToken(
   cwd: string,
   env: EnvReader,
@@ -629,6 +673,42 @@ async function isBranchMerged(
   ]);
 }
 
+// Origin's chunk branches, as remote-tracking refs (#60). Fetched by
+// `runPreflight` before anything reads them — a chunk branch is authoritative
+// on origin and merely cached here, so a cache that has never seen one answers
+// "no" and nothing is reaped on the strength of it.
+async function listOriginChunkBranches(cwd: string): Promise<readonly string[]> {
+  const { ok, stdout } = await captureOk(cwd, "git", [
+    "for-each-ref",
+    "--format=%(refname)",
+    ...ORIGIN_CHUNK_BRANCH_REFGLOBS,
+  ]);
+  if (!ok) return [];
+  return stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+}
+
+// True for an ISSUE branch whose issue has landed on a chunk branch and whose
+// commits are demonstrably on one of origin's (#60). Both halves are load-
+// bearing: the label says which branches to even consider, the ancestry says
+// the work survives the delete. A chunk branch itself never qualifies —
+// `issueNumberFromBranch` returns null for the other shape — which is what
+// stops this reaping the very branch it checks containment against.
+async function isChunkMemberBranchLanded(
+  cwd: string,
+  branch: string,
+  inChunkIssues: ReadonlySet<number>,
+  originChunkRefs: readonly string[],
+): Promise<boolean> {
+  const issueNum = issueNumberFromBranch(branch);
+  if (issueNum === null || !inChunkIssues.has(issueNum)) return false;
+  for (const ref of originChunkRefs) {
+    if (await runOk(cwd, "git", ["merge-base", "--is-ancestor", branch, ref])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function branchUpstreamTracks(
   cwd: string,
 ): Promise<ReadonlyMap<string, string>> {
@@ -652,6 +732,7 @@ async function branchUpstreamTracks(
 async function classifySandbarBranches(
   cwd: string,
   openReadyIssues: ReadonlySet<number>,
+  inChunkIssues: ReadonlySet<number>,
 ): Promise<{
   unmerged: readonly string[];
   discarded: readonly string[];
@@ -684,11 +765,22 @@ async function classifySandbarBranches(
       discarded.push(branch);
       continue;
     }
+    const issueNum = issueNumberFromBranch(branch);
+    // The issue branch of a LANDED chunk member (#60), and it is none of the
+    // three either. `in-chunk` is applied only after the chunk branch carrying
+    // these commits reached origin, so this branch is a duplicate of published
+    // work: calling it `unmerged` would refuse the run over a branch that has
+    // nothing left to lose, and it is the opposite of `resumable` — the planner
+    // drops an `in-chunk` issue by label, so nothing will ever pick it up
+    // again. The delete pass reaps it once it can VERIFY the containment the
+    // label asserts; until then it is simply not the operator's problem. It
+    // only exists at all if a run died between the chunk push and the label
+    // flip, or if that delete failed.
+    if (issueNum !== null && inChunkIssues.has(issueNum)) continue;
     // Stranded work from an interrupted run: the branch belongs to an issue the
     // planner is still queued to work. Resume it rather than refusing to start
     // (#13) — the next cycle re-picks the issue and the inner loop continues
     // from this branch's accumulated commits.
-    const issueNum = issueNumberFromBranch(branch);
     if (issueNum !== null && openReadyIssues.has(issueNum)) {
       resumable.push(branch);
     } else {
@@ -707,14 +799,42 @@ async function classifySandbarBranches(
 // Both branch shapes (#58), and that needs no lifecycle argument either way: a
 // branch whose commits are reachable from the source branch has said everything
 // it had to say, whether one issue wrote it or a whole chunk did.
+//
+// SECOND ground, for issue branches only (#60): the issue carries `in-chunk`
+// and the branch tip is reachable from one of ORIGIN's chunk branches. Such a
+// branch is published work under a different name, and nothing will ever pick
+// it up again — the planner drops `in-chunk` issues by label — so left alone it
+// accumulates one dead ref per member a chunk ever landed. The label is a
+// previous run's claim and the reachability check is this run's verification of
+// it; both are required, because `-D` on a guess is the one thing this file
+// must never do. Chunk branches are excluded from that ground by construction:
+// every one of them is trivially reachable from itself.
 export async function deleteMergedSandbarBranches(
-  cfg: { layout: RepoLayout; sourceBranch: string },
+  cfg: {
+    layout: RepoLayout;
+    sourceBranch: string;
+    // Issues carrying `in-chunk`. Absent ⇒ empty ⇒ the second ground never
+    // fires, which is exactly the pre-#60 behaviour: a caller that does not
+    // know about chunks reaps one branch fewer, never one branch more.
+    inChunkIssues?: ReadonlySet<number>;
+  },
 ): Promise<readonly string[]> {
   const repoDir = cfg.layout.repoDir;
   const all = await listSandbarBranches(repoDir);
+  const inChunkIssues = cfg.inChunkIssues ?? new Set<number>();
+  const originChunkRefs =
+    inChunkIssues.size > 0 ? await listOriginChunkBranches(repoDir) : [];
   const deleted: string[] = [];
   for (const branch of all) {
-    if (!(await isBranchMerged(repoDir, branch, cfg.sourceBranch))) continue;
+    const landedInChunk = await isChunkMemberBranchLanded(
+      repoDir,
+      branch,
+      inChunkIssues,
+      originChunkRefs,
+    );
+    if (!landedInChunk && !(await isBranchMerged(repoDir, branch, cfg.sourceBranch))) {
+      continue;
+    }
     // A leftover worktree (from a crash or a non-merged terminal whose
     // finalize ran before the corresponding fix landed) holds the branch and
     // makes `git branch -D` fail. Remove it best-effort first.
@@ -754,15 +874,36 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
     cfg.sourceBranch,
     "--quiet",
   ]);
+  // And origin's chunk branches (#60), which answer a different question: a
+  // chunk branch lives on origin and is only cached here, so it is what says
+  // whether a leftover member's issue branch is a duplicate of published work
+  // or the last copy of it. Wildcard refspecs, so a repo that has never had a
+  // chunk fetches nothing and succeeds; `--prune` scoped to those same
+  // destinations, so a chunk branch deleted on origin stops answering for one
+  // here rather than lingering as a cached yes.
+  await runOk(cfg.layout.repoDir, "git", [
+    "fetch",
+    "origin",
+    "--prune",
+    ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+    "--quiet",
+  ]);
+
+  // One query, two readers (#60): the delete pass uses it to decide which
+  // leftover branches are duplicates of published work, and `gatherState` uses
+  // it to decide which are none of its three classifications. Asking twice
+  // would also let the two disagree if a label moved in between.
+  const inChunkIssues = await fetchInChunkIssueNumbers(cfg.repo);
 
   const deleted = await deleteMergedSandbarBranches({
     layout: cfg.layout,
     sourceBranch: cfg.sourceBranch,
+    inChunkIssues,
   });
   if (deleted.length > 0) {
     console.log(`Cleaned up merged issue branches: ${deleted.join(", ")}`);
   }
-  const state = await gatherState(cfg);
+  const state = await gatherState(cfg, inChunkIssues);
   if (state.resumableIssueBranches.length > 0) {
     console.log(
       `Resuming ${state.resumableIssueBranches.length} stranded issue ` +

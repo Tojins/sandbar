@@ -229,6 +229,15 @@ describe("resolvePlan", () => {
 
 // #57 — the holding rule and what the resolution reports about it. Lane
 // COMPUTATION is lanes.test.ts's job; these are about the planner's use of it.
+//
+// #60 narrowed the rule: a review-gated issue that is its chunk's ROOT now
+// plans (it has somewhere to land), and only the members behind one — plus the
+// issues chunks.ts could give no chunk at all — are still held. Two shapes
+// below produce a held issue, and they are the only two there are:
+//   - a non-root member, i.e. an issue blocked by another gated issue in the
+//     same chunk (the `#59` describe builds these with `in-chunk`);
+//   - a straddler, blocked by members of two different chunks, which
+//     chunks.ts refuses to give a chunk to at all.
 describe("resolvePlan lanes (#57)", () => {
   it("is inert on the default lane: everything plans, nothing is held", () => {
     const r = resolvePlan([issue(10, ""), issue(11, "")], new Map());
@@ -251,14 +260,23 @@ describe("resolvePlan lanes (#57)", () => {
     expect(r.heldForReview).toEqual([]);
   });
 
-  it("holds every issue back under `defaultLane: review`", () => {
+  it("plans review-gated issues that are their own chunk's root (#60)", () => {
+    // Two unrelated review-gated issues are two chunks of one, each its own
+    // root, and each lands on a branch of its own. Under #57 both were held.
     const r = resolvePlan([issue(10, ""), issue(11, "")], new Map(), new Set(), 3, "review");
 
-    expect(r.plan).toEqual([]);
-    expect(r.heldForReview).toEqual([10, 11]);
+    expect(r.plan.map((p) => p.id)).toEqual(["10", "11"]);
+    expect(r.plan.map((p) => p.chunk)).toEqual([
+      { root: 10, branch: "sandbar/chunk-10-issue-10" },
+      { root: 11, branch: "sandbar/chunk-11-issue-11" },
+    ]);
+    expect(r.heldForReview).toEqual([]);
   });
 
-  it("plans the `auto-land` issues and holds the rest, under `review`", () => {
+  it("gives an auto-lane issue no chunk, and a review-gated one its own (#60)", () => {
+    // The lane is the whole difference in what the plan carries: an auto-land
+    // issue lands on the source branch and names no chunk; the review-gated
+    // one beside it names the branch phase 3 will merge it onto.
     const r = resolvePlan(
       [issue(10, "", { labels: ["auto-land"] }), issue(11, "")],
       new Map(),
@@ -267,8 +285,27 @@ describe("resolvePlan lanes (#57)", () => {
       "review",
     );
 
-    expect(r.plan.map((p) => p.id)).toEqual(["10"]);
-    expect(r.heldForReview).toEqual([11]);
+    expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
+      ["10", null],
+      ["11", { root: 11, branch: "sandbar/chunk-11-issue-11" }],
+    ]);
+    expect(r.heldForReview).toEqual([]);
+  });
+
+  it("holds a review-gated issue whose blockers sit in two different chunks", () => {
+    // #1 and #2 are two chunks; #30 straddles them, so `deriveChunks` gives it
+    // none and it is nobody's root. Its blockers are closed, so nothing else
+    // is keeping it out of the plan — the holding rule is.
+    const r = resolvePlan(
+      [issue(1, ""), issue(2, ""), issue(30, "## Blocked by\n- #1\n- #2\n")],
+      states({ 1: "CLOSED", 2: "CLOSED" }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.plan).toEqual([]);
+    expect(r.heldForReview).toEqual([30]);
   });
 
   it("holds an `auto-land` issue whose blocker chain is review-gated, and reports the override", () => {
@@ -321,21 +358,32 @@ describe("resolvePlan lanes (#57)", () => {
     );
 
     expect(r.overrides).toEqual([{ issue: 13, gatedBy: 12 }]);
-    // #12 is held (open, unblocked, review-gated). #13 is not: it fails the
-    // dependency gate, so its lane never got to be the reason it was dropped.
-    expect(r.heldForReview).toEqual([12]);
+    // #12 is the root of the chunk the two of them form, so it plans (#60).
+    // #13 is neither planned nor held: it fails the dependency gate, so its
+    // lane never got to be the reason it was dropped.
+    expect(r.plan.map((p) => p.id)).toEqual(["12"]);
+    expect(r.heldForReview).toEqual([]);
   });
 
   it("does not count a closed or already-merged issue as held", () => {
+    // Three straddlers over the same two chunks, so all three are shapes the
+    // holding rule still covers — and only the one that is neither closed nor
+    // already merged is reported as held.
     const r = resolvePlan(
-      [issue(10, ""), issue(11, ""), issue(12, "")],
-      states({ 11: "CLOSED" }),
-      new Set([12]),
+      [
+        issue(1, ""),
+        issue(2, ""),
+        issue(30, "## Blocked by\n- #1\n- #2\n"),
+        issue(31, "## Blocked by\n- #1\n- #2\n"),
+        issue(32, "## Blocked by\n- #1\n- #2\n"),
+      ],
+      states({ 1: "CLOSED", 2: "CLOSED", 31: "CLOSED" }),
+      new Set([32]),
       3,
       "review",
     );
 
-    expect(r.heldForReview).toEqual([10]);
+    expect(r.heldForReview).toEqual([30]);
   });
 
   it("does not count a `waiting` issue as held", () => {
@@ -351,17 +399,21 @@ describe("resolvePlan lanes (#57)", () => {
   });
 
   it("holds review-gated issues without shrinking K for the auto ones", () => {
-    // The hold happens before the slice, so a review-gated issue does not
-    // silently consume one of the cycle's three slots.
+    // The hold happens before the slice, so a held issue does not silently
+    // consume one of the cycle's three slots. #6 and #7 are two closed chunks
+    // and #2 and #4 straddle both, which is what makes them held rather than
+    // merely blocked.
     const r = resolvePlan(
       [
         issue(1, "", { labels: ["auto-land"] }),
-        issue(2, ""),
+        issue(2, "## Blocked by\n- #6\n- #7\n"),
         issue(3, "", { labels: ["auto-land"] }),
-        issue(4, ""),
+        issue(4, "## Blocked by\n- #6\n- #7\n"),
         issue(5, "", { labels: ["auto-land"] }),
+        issue(6, ""),
+        issue(7, ""),
       ],
-      new Map(),
+      states({ 6: "CLOSED", 7: "CLOSED" }),
       new Set(),
       3,
       "review",
@@ -376,12 +428,15 @@ describe("resolvePlan lanes (#57)", () => {
 // necessary. Chunk DERIVATION is chunks.test.ts's job; these are about the
 // planner's use of it.
 //
-// Note what the observable is. The holding rule still keeps every review-gated
-// issue out of the plan, so a chunk member that clears the dependency gate does
-// not get planned — it gets HELD, and `heldForReview` is documented to count
-// only issues that were otherwise eligible. So "the blocker was satisfied" and
-// "the issue appears in heldForReview" are the same statement today, and become
-// "it appears in the plan" when a later issue lifts the hold.
+// Note what the observable is, and that #60 gave it two shapes. A satisfied
+// blocker means the dependent reaches the LANE filter, and what happens there
+// depends on whether it is its chunk's root: a root is PLANNED, a chained
+// member is HELD. Either way it is visible, and an unsatisfied blocker is
+// neither — it drops out at the dependency gate, before `heldForReview` is
+// touched. So the assertions below read `plan` or `heldForReview` according to
+// the shape each case builds, and "in neither" is what "not satisfied" looks
+// like. The `in-chunk` cases are all chained members by construction (their
+// blocker is the landed root), so they are held.
 describe("resolvePlan in-chunk blockers (#59)", () => {
   const inChunk = { labels: [IN_CHUNK_LABEL] };
 
@@ -401,7 +456,9 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
 
   it("does not satisfy a blocker that is merely OPEN", () => {
     // The same graph with the label taken away: #10 is open, unlanded, and
-    // still blocking. Only #10 itself is held.
+    // still blocking. #10 is the chunk's root, so it plans (#60); #11 is
+    // neither planned nor held, which is what "not satisfied" looks like —
+    // a satisfied #11 would be held, as the case above shows.
     const r = resolvePlan(
       [issue(10, ""), issue(11, "## Blocked by\n- #10\n")],
       facts({ 10: {} }),
@@ -410,7 +467,8 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
       "review",
     );
 
-    expect(r.heldForReview).toEqual([10]);
+    expect(r.plan.map((p) => p.id)).toEqual(["10"]);
+    expect(r.heldForReview).toEqual([]);
   });
 
   it("keeps cross-chunk dependencies strict: two `in-chunk` parents, two chunks", () => {
@@ -450,6 +508,8 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
   });
 
   it("still satisfies a CLOSED blocker, label or no label", () => {
+    // #10 is not in the listing, so it is in no chunk and #11 has no gated
+    // blocker: #11 roots a chunk of its own and plans (#60).
     const r = resolvePlan(
       [issue(11, "## Blocked by\n- #10\n")],
       facts({ 10: { state: "CLOSED" } }),
@@ -458,7 +518,8 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
       "review",
     );
 
-    expect(r.heldForReview).toEqual([11]);
+    expect(r.plan.map((p) => p.id)).toEqual(["11"]);
+    expect(r.heldForReview).toEqual([]);
   });
 
   it("propagates one member at a time along a chain", () => {
@@ -557,7 +618,10 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
       3,
       "review",
     );
-    expect(review.plan).toEqual([]);
-    expect(review.heldForReview).toEqual([10, 12]);
+    // #10 and #12 root chunks of their own and plan; #11 is blocked by an open,
+    // unlanded #10 and is neither planned nor held. Nothing about that answer
+    // came from the label — there isn't one anywhere in the graph.
+    expect(review.plan.map((p) => p.id)).toEqual(["10", "12"]);
+    expect(review.heldForReview).toEqual([]);
   });
 });
