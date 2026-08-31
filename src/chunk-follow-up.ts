@@ -387,9 +387,9 @@ export type ChunkFollowUpAdapter = {
 // too, at 100 comments, which is the one cap with a real failure mode: past it
 // the scan would stop seeing older ledger entries and re-file. It is far past
 // anything a chunk PR accumulates, and it is the number to raise first.
-const REVIEW_QUERY = `query($owner:String!,$repo:String!,$head:String!){
+const REVIEW_QUERY = `query($owner:String!,$repo:String!,$head:String!,$base:String!){
   repository(owner:$owner,name:$repo){
-    pullRequests(headRefName:$head,states:OPEN,first:10,orderBy:{field:CREATED_AT,direction:DESC}){
+    pullRequests(headRefName:$head,baseRefName:$base,states:OPEN,first:10,orderBy:{field:CREATED_AT,direction:DESC}){
       nodes{
         number
         url
@@ -454,7 +454,17 @@ function parseReviewState(stdout: string): ChunkPullRequestState | null {
   };
 }
 
-export function realAdapter(repo: RepoRef): ChunkFollowUpAdapter {
+export function realAdapter(args: {
+  readonly repo: RepoRef;
+  // The base every chunk PR is opened against — `config.sourceBranch`. Part of
+  // the lookup rather than decoration: `ensurePullRequest` finds the PR it
+  // re-titles by the head-to-base PAIR, so a scan asking by head alone could
+  // read a pull request the merger does not maintain — one a human retargeted
+  // at another base — and post the ledger comment where the next scan will not
+  // look for it.
+  readonly sourceBranch: string;
+}): ChunkFollowUpAdapter {
+  const { repo } = args;
   const slug = repoSlug(repo);
   return {
     async reviewState(chunkBranch) {
@@ -470,6 +480,8 @@ export function realAdapter(repo: RepoRef): ChunkFollowUpAdapter {
         `repo=${repo.name}`,
         "-f",
         `head=${chunkBranch}`,
+        "-f",
+        `base=${args.sourceBranch}`,
         "-f",
         `query=${REVIEW_QUERY}`,
       ]);

@@ -165,7 +165,10 @@ describe("the chunk-review scan's gh calls (#63)", () => {
   });
 
   const scan = (chunks: readonly LandedChunk[] = [CHUNK]) =>
-    fileChunkReviewFollowUps({ chunks, adapter: realAdapter(REPO) });
+    fileChunkReviewFollowUps({
+      chunks,
+      adapter: realAdapter({ repo: REPO, sourceBranch: "main" }),
+    });
 
   it("reads the reviews for the chunk branch, naming the repository", async () => {
     await scan();
@@ -179,6 +182,9 @@ describe("the chunk-review scan's gh calls (#63)", () => {
     expect(params).toContain("owner=acme");
     expect(params).toContain("repo=app");
     expect(params).toContain(`head=${CHUNK.branch}`);
+    // The head-to-base PAIR, which is how `ensurePullRequest` finds the PR it
+    // maintains: asking by head alone can read a different one.
+    expect(params).toContain("base=main");
   });
 
   it("files the issue in the named repository, on the queue label", async () => {
