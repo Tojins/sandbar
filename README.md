@@ -411,7 +411,7 @@ the file's whole point to buy a check the file can just state.
 
 ### `relaunchAfterLanding` — self-hosted runs that stay current
 
-If the repo sandbar operates on is the repo sandbar's own inputs come from —
+If the repo sandbar operates on is also where sandbar's own inputs come from —
 sandbar itself is the motivating case, but any repo whose landings change how
 its own runs behave qualifies — a run that keeps cycling goes stale mid-series:
 sandbar pushes merges to origin, but the process keeps driving with the config

@@ -52,11 +52,21 @@
 //     ships no build, `dist/` comes out of its `prepare` script, and npm is
 //     moving install scripts behind per-project approval.
 //
+// A consequence worth naming, since the config imports the driver: the hand
+// path `npm run build && node dist/cli.js` runs orchestrator code out of the
+// `dist/` just built, but a config that takes `readEnvFile` from
+// `.sandbar/driver/`. That is one function and harmless in the ordinary case —
+// but someone iterating `env.ts` is not exercising their change until they
+// move the pin or point the config's import at `./dist/` for the duration.
+//
 // Plain `.mjs` under `scripts/`, outside `files` and outside `src/`: it is not
 // part of the package, no consumer runs it, and it must run before anything is
-// built. `launcher.test.ts` covers its decisions, which is why they are
-// exported pure functions and why `main()` runs only when this file IS the
-// program.
+// built. `launcher.test.ts` covers all four decisions, which is why each is a
+// separately exported function, and why the one that shells out takes a process
+// seam (`io.spawn`) instead of reaching for `spawnSync` directly: decisions 3
+// and 4 ARE the safety property of #66, and a safety property nothing exercises
+// is a claim. `main()` runs only when this file IS the program, so importing it
+// cannot start a series.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -119,7 +129,6 @@ export function driverPaths(root) {
   const pkg = join(dir, "node_modules", "@offergeist", "sandbar");
   return {
     dir,
-    pkg,
     // The bin, run directly rather than through `node_modules/.bin/sandbar`:
     // the symlink is one more thing that can be absent on a half-install, and
     // the file it points at is the thing that has to exist.
@@ -157,7 +166,24 @@ function say(message) {
   console.log(`sandbar launcher: ${message}`);
 }
 
-function installDriver(paths, spec) {
+// The one process seam in this file, and the reason it exists is decision 4:
+// "a failed install stops the loop" is the safety property of #66 and cannot be
+// asserted against a real `npm install` — it would need a network, a tag and a
+// way to make npm fail on demand. Production passes nothing; a test passes a
+// fake `spawn` and reads back what happened to the STAMP, which is the fact
+// that decides whether the next launch reinstalls or runs what is on disk.
+// `log` is seamed for the ordinary reason: this file talks to an operator, and
+// a test suite is not one.
+function seams(io) {
+  return { spawn: io.spawn ?? spawnSync, log: io.log ?? say };
+}
+
+// Throws LaunchError on every outcome that is not "there is a driver at
+// `paths.cli` and it is `spec`". The stamp is the record the next launch
+// reads, so it is removed FIRST and written LAST: every throw below leaves the
+// directory in a state `installNeeded` answers `true` for.
+export function installDriver(paths, spec, io = {}) {
+  const { spawn, log } = seams(io);
   mkdirSync(paths.dir, { recursive: true });
   // Only when it is absent, and that is not an optimisation. npm is moving
   // install scripts behind per-project approval, and `npm approve-scripts`
@@ -184,8 +210,8 @@ function installDriver(paths, spec) {
     );
   }
   rmSync(paths.stamp, { force: true });
-  say(`installing ${spec} into ${paths.dir}`);
-  const result = spawnSync("npm", installArgv(paths.dir, spec), {
+  log(`installing ${spec} into ${paths.dir}`);
+  const result = spawn("npm", installArgv(paths.dir, spec), {
     stdio: "inherit",
   });
   if (result.error) {
@@ -221,7 +247,7 @@ function installDriver(paths, spec) {
 }
 
 // Reads the pin, brings the driver into line with it, and answers where it is.
-export function ensureDriver(root) {
+export function ensureDriver(root, io = {}) {
   const pinPath = join(root, PIN_FILE);
   let content;
   try {
@@ -234,9 +260,9 @@ export function ensureDriver(root) {
   const spec = parsePin(content);
   const paths = driverPaths(root);
   if (installNeeded(readInstallState(paths), spec)) {
-    installDriver(paths, spec);
+    installDriver(paths, spec, io);
   } else {
-    say(`driver ${spec} already installed at ${paths.dir}`);
+    seams(io).log(`driver ${spec} already installed at ${paths.dir}`);
   }
   return { spec, cli: paths.cli };
 }

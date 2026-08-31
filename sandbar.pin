@@ -15,13 +15,16 @@
 # never gets a tag. A pin naming such a version is uninstallable for good, and
 # the launcher stops the loop saying exactly that rather than running something
 # else — which is the design, but it makes "the pin names a version that never
-# became a tag" a real state. The fix is one commit: move the line below to a
-# version `git tag --list 'v*'` actually shows. No backfill; an untagged state
-# is simply not pinnable.
+# became a tag" a real state. The fix is one commit, and it is TWO edits when
+# the fallback is an older release: move the line below to a version
+# `git tag --list 'v*'` actually shows, and lower `requiresSandbar` in
+# `sandbar.config.mjs` to something that release satisfies — otherwise the
+# driver installs and then refuses the config it was installed to read. No
+# backfill; an untagged state is simply not pinnable.
 #
 # Moving it is a one-line commit, made deliberately after watching a version
 # behave — that delay IS the feature. Iterating unlanded orchestrator code stays
 # a `npm run build && node dist/cli.js` away, by hand.
 #
 # Lines starting with `#` are comments; exactly one spec line must remain.
-github:Tojins/sandbar#v0.21.1
+github:Tojins/sandbar#v0.21.2

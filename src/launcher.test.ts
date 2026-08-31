@@ -3,9 +3,13 @@
 // `scripts/sandbar-launch.mjs` is not part of the package — it runs before the
 // package exists — so this file reaches across to it by path. What is tested is
 // exactly what is decidable without a network: which spec a pin file names,
-// when an install is required, and the argv that performs it. The install
-// itself is `npm install` doing what npm defines, and the loop is `spawnSync`
-// doing what it defines; neither is faked here.
+// when an install is required, the argv that performs it, and — through the
+// launcher's one process seam — what an install that FAILS leaves behind. That
+// last one is the safety property #66 is for ("never continue on whichever
+// driver is on disk"), so it is asserted on the artefact the next launch
+// actually reads: the stamp. What npm does with that argv, and what the loop
+// does with a real child process, are npm's and `spawnSync`'s to define and are
+// not faked here.
 //
 // It lives under `src/` with every other test, and `files` ships `src/` — so
 // the published tarball carries this one file whose import points outside it.
@@ -15,17 +19,23 @@
 // runs, and moving the test out of `src/` would put the suite in two places to
 // buy a dangling import in a file nobody executes.
 
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   EXIT_CODE_RELAUNCH as LAUNCHER_RELAUNCH_CODE,
   LaunchError,
   PIN_FILE,
   driverPaths,
+  ensureDriver,
   installArgv,
+  installDriver,
   installNeeded,
   parsePin,
+  readInstallState,
 } from "../scripts/sandbar-launch.mjs";
 import { EXIT_CODE_RELAUNCH } from "./exit-conditions.js";
 
@@ -158,5 +168,239 @@ describe("sandbar.pin (#66)", () => {
       "utf8",
     );
     expect(parsePin(content)).toMatch(/^github:Tojins\/sandbar#v\d+\.\d+\.\d+$/);
+  });
+});
+
+// Decisions 3 and 4 of the launcher's header — "install only when the pin
+// moves" and "a failed install stops the loop" — which between them are what
+// keeps a series from being driven by something nobody chose. Both are
+// decisions about the STAMP, since that is the only thing a later launch reads
+// to tell "the pin is installed" from "an install did not finish": every
+// assertion below is therefore about whether the stamp exists afterwards, not
+// merely about the throw. A fake `spawn` stands in for npm — the failures
+// being tested (a tag that does not exist, an install whose scripts did not
+// run) cannot be produced on demand from a real one.
+describe("installDriver (#66)", () => {
+  let root: string;
+  let paths: ReturnType<typeof driverPaths>;
+  const logged: string[] = [];
+  const io = (spawn: (...args: never[]) => unknown) => ({
+    spawn: spawn as never,
+    log: (m: string) => void logged.push(m),
+  });
+
+  // What a successful npm install leaves behind: the package, built.
+  const writeCli = () => {
+    mkdirSync(dirname(paths.cli), { recursive: true });
+    writeFileSync(paths.cli, "#!/usr/bin/env node\n");
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-launcher-"));
+    paths = driverPaths(root);
+    logged.length = 0;
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("stamps the spec after an install that produced a bin", () => {
+    installDriver(
+      paths,
+      PIN,
+      io(() => {
+        writeCli();
+        return { status: 0 };
+      }),
+    );
+
+    expect(readFileSync(paths.stamp, "utf8").trim()).toBe(PIN);
+    expect(readInstallState(paths)).toEqual({
+      cliPresent: true,
+      installedSpec: PIN,
+    });
+    expect(installNeeded(readInstallState(paths), PIN)).toBe(false);
+  });
+
+  it("runs npm with the install argv, in the driver prefix", () => {
+    const calls: unknown[][] = [];
+    installDriver(
+      paths,
+      PIN,
+      io(((...args: unknown[]) => {
+        calls.push(args);
+        writeCli();
+        return { status: 0 };
+      }) as never),
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]).toBe("npm");
+    expect(calls[0]?.[1]).toEqual(installArgv(paths.dir, PIN));
+  });
+
+  // The tag does not exist yet, or the host cannot reach GitHub. The loop must
+  // stop, and must not record an install that did not happen.
+  it("throws and leaves no stamp when npm exits non-zero", () => {
+    expect(() =>
+      installDriver(
+        paths,
+        PIN,
+        io(() => ({ status: 1 })),
+      ),
+    ).toThrow(LaunchError);
+
+    expect(existsSync(paths.stamp)).toBe(false);
+    expect(installNeeded(readInstallState(paths), PIN)).toBe(true);
+  });
+
+  // Exit 0 with no build behind it — an install whose `prepare` script did not
+  // run. Stamping this would run the next launch as `node <missing>`.
+  it("throws and leaves no stamp when the install produced no bin", () => {
+    expect(() =>
+      installDriver(
+        paths,
+        PIN,
+        io(() => ({ status: 0 })),
+      ),
+    ).toThrow(/reported success, but .*cli\.js is missing/s);
+
+    expect(existsSync(paths.stamp)).toBe(false);
+  });
+
+  it("throws and leaves no stamp when npm cannot be run at all", () => {
+    expect(() =>
+      installDriver(
+        paths,
+        PIN,
+        io(() => ({ error: new Error("spawn npm ENOENT") })),
+      ),
+    ).toThrow(/could not run npm/);
+
+    expect(existsSync(paths.stamp)).toBe(false);
+  });
+
+  // The half-install that would otherwise be indistinguishable from a whole
+  // one: a stamp from the previous pin survives a failed attempt at the new
+  // one, and the next launch reads it as "installed".
+  it("clears a previous stamp before installing, not after", () => {
+    mkdirSync(paths.dir, { recursive: true });
+    writeFileSync(paths.stamp, "github:Tojins/sandbar#v0.20.33\n");
+    writeCli();
+
+    expect(() =>
+      installDriver(
+        paths,
+        PIN,
+        io(() => ({ status: 1 })),
+      ),
+    ).toThrow(LaunchError);
+
+    expect(existsSync(paths.stamp)).toBe(false);
+    expect(installNeeded(readInstallState(paths), PIN)).toBe(true);
+  });
+
+  // The manifest carries `npm approve-scripts`' `allowScripts` entry, which is
+  // what lets the next install build `dist/` at all — rewriting it every time
+  // would erase the approval every time.
+  it("writes the install root's manifest once, and never overwrites it", () => {
+    mkdirSync(paths.dir, { recursive: true });
+    const approved = JSON.stringify({
+      name: "sandbar-driver",
+      private: true,
+      allowScripts: { "@offergeist/sandbar": true },
+    });
+    writeFileSync(paths.manifest, approved);
+
+    installDriver(
+      paths,
+      PIN,
+      io(() => {
+        writeCli();
+        return { status: 0 };
+      }),
+    );
+
+    expect(readFileSync(paths.manifest, "utf8")).toBe(approved);
+  });
+
+  it("creates the manifest when there is none, as a private named root", () => {
+    installDriver(
+      paths,
+      PIN,
+      io(() => {
+        writeCli();
+        return { status: 0 };
+      }),
+    );
+
+    expect(JSON.parse(readFileSync(paths.manifest, "utf8"))).toMatchObject({
+      name: "sandbar-driver",
+      private: true,
+    });
+  });
+});
+
+describe("ensureDriver (#66)", () => {
+  let root: string;
+  let paths: ReturnType<typeof driverPaths>;
+  const io = (spawn: (...args: never[]) => unknown) => ({
+    spawn: spawn as never,
+    log: () => {},
+  });
+  const refuse = io(() => ({ status: 1 }));
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-launcher-"));
+    paths = driverPaths(root);
+    writeFileSync(join(root, PIN_FILE), `# the pin\n${PIN}\n`);
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  // The whole loop's safety property, at the level that decides it: a launch
+  // whose install failed must leave the next launch reinstalling rather than
+  // running whatever is on disk.
+  it("stops on a failed install, and the next launch retries it", () => {
+    expect(() => ensureDriver(root, refuse)).toThrow(LaunchError);
+    expect(existsSync(paths.stamp)).toBe(false);
+
+    // Second launch: the fake refuses again, so what is asserted is that it was
+    // ASKED — a launch that read the failed attempt as installed would have
+    // returned instead.
+    expect(() => ensureDriver(root, refuse)).toThrow(LaunchError);
+  });
+
+  // What makes a relaunch byte-identical and free: an install already stamped
+  // is not re-run, so nothing about the driver can change under the loop.
+  it("does not install again when the stamp already matches", () => {
+    mkdirSync(dirname(paths.cli), { recursive: true });
+    writeFileSync(paths.cli, "#!/usr/bin/env node\n");
+    writeFileSync(paths.stamp, `${PIN}\n`);
+    let spawned = 0;
+
+    const result = ensureDriver(
+      root,
+      io(() => {
+        spawned += 1;
+        return { status: 0 };
+      }),
+    );
+
+    expect(spawned).toBe(0);
+    expect(result).toEqual({ spec: PIN, cli: paths.cli });
+  });
+
+  it("refuses a pin file that names nothing installable", () => {
+    writeFileSync(join(root, PIN_FILE), "github:Tojins/sandbar#main\n");
+    expect(() => ensureDriver(root, refuse)).toThrow(/tagged release/);
+  });
+
+  it("refuses a root with no pin file at all", async () => {
+    await rm(join(root, PIN_FILE));
+    expect(() => ensureDriver(root, refuse)).toThrow(/cannot read .*sandbar\.pin/);
   });
 });

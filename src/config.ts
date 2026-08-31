@@ -1557,20 +1557,17 @@ function requireLane(value: unknown): Lane {
   );
 }
 
-// `driverVersion` is a parameter with a default rather than a read inside,
-// for the reason every I/O seam in this codebase is one: the check is a pure
-// decision about two strings and is table-tested as such. Nothing but a test
-// ever passes it.
-export function resolveConfig(
-  config: RunConfig,
-  driverVersion: string = sandbarVersion(),
-): ResolvedConfig {
+export function resolveConfig(config: RunConfig): ResolvedConfig {
   // FIRST, ahead of every other field (#66). Everything below reads the config
   // as the driver understands it, so a config written for a newer sandbar has
   // to be refused before any of it is interpreted — otherwise the first thing
   // the operator sees is a complaint about a `gateStack` this driver simply
   // cannot read, which sends them to look at the wrong file.
-  checkRequiresSandbar(config.requiresSandbar, driverVersion);
+  // The driver's own version is READ here rather than passed in: the decision
+  // is two strings and is table-tested as such in `requires-sandbar.test.ts`,
+  // so a parameter would widen a production signature to buy a test seam the
+  // decision already has.
+  checkRequiresSandbar(config.requiresSandbar, sandbarVersion());
   // Trimmed HERE, not just where it is compared. `resolveMergeMode` tests
   // `integrationBranch === sourceBranch.trim()`, so trimming only in the guard
   // made the guard describe a value that never existed: `" main "` would pass
