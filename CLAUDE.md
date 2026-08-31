@@ -57,9 +57,10 @@ not a factory. Rationale in `src/cli.ts` and `src/config.ts` headers.
 The orchestrator (`src/run.ts`) cycles plan → execute → merge → finalise until
 an exit condition fires.
 
-1. **Plan** (`src/plan-resolver.ts` + `src/chunk-reconcile.ts`) — purely deterministic, no LLM: lists
-   issues labelled `ready-for-agent`, parses `## Blocked by` sections, selects
-   the top-K unblocked issues (default 3) by number. Each candidate also gets a
+1. **Plan** (`src/plan-resolver.ts` + `src/chunk-reconcile.ts`) — purely
+   deterministic, no LLM: lists issues labelled `ready-for-agent`, parses
+   `## Blocked by` sections, selects the top-K unblocked issues (default 3) by
+   number. Each candidate also gets a
    **lane** (`src/lanes.ts`, #57): `auto-land` label else `config.defaultLane`,
    with review-gating inherited downward along the same `## Blocked by` edges,
    transitively — an `auto-land` contradicted by inheritance loses and sandbar
@@ -97,8 +98,9 @@ an exit condition fires.
    NEEDS-HUMAN-REVIEW | HARD-ERROR`.
 
 3. **Merge** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
-   + `src/forge-verify.ts` + `src/chunk-land.ts`) — procedural, in a dedicated ephemeral worktree
-   detached at `origin/<sourceBranch>` (never the operator's checkout, #10).
+   + `src/forge-verify.ts` + `src/chunk-land.ts`) — procedural, in a dedicated
+   ephemeral worktree detached at `origin/<sourceBranch>` (never the operator's
+   checkout, #10).
    Per DONE branch in issue order: `git merge --no-ff`, and on conflict or
    post-merge-gate-red, the agentic resolve loop (which sees all sibling issue
    bodies). `config.mergeMode` (#22): `direct` (default) pushes at the end;
@@ -120,10 +122,10 @@ an exit condition fires.
    the auto lane's branches, so one gate-2 and one landing cover both; the
    wrap-up then closes every member ON the branch — the `in-chunk` ones, which
    is why `NamedChunk` is filtered to them — drops `in-chunk`, takes `land`
-   back off the PR, closes it and deletes the branch. `src/chunk-land.ts` owns the label, the selection, the
-   wrap-up and — as `chunkForgeWrites` — the one spelling of the `gh`/`git`
-   writes the wrap-up makes, which the merge phase and the plan-time reconciler
-   both build their adapter from.
+   back off the PR, closes it and deletes the branch. `src/chunk-land.ts` owns
+   the label, the selection, the wrap-up and — as `chunkForgeWrites` — the one
+   spelling of the `gh`/`git` writes the wrap-up makes, which the merge phase
+   and the plan-time reconciler both build their adapter from.
 
 4. **Finalise** (`src/finalize.ts` + `src/finalize-inputs.ts`) — per-issue
    branch lifecycle, bot comments, label flips (`ready-for-agent` ↔
@@ -247,9 +249,13 @@ default 50, exit 3).
   the merge locally), and the chunk branch is deleted only once every close
   worked — a kept branch is what makes `src/chunk-reconcile.ts` retry the
   remainder next run, and therefore what `run.ts` halts on: residue left by a
-  chunk that DID retire is cosmetic, and nothing would retry it anyway. That reconciler is also the answer to a hand-merged PR:
-  it runs at plan time, tests containment in `origin/<sourceBranch>` rather
-  than intent, and does the identical wrap-up without the merge.
+  chunk that DID retire is cosmetic, and nothing would retry it anyway. The
+  label comes off beside the PR close, not instead of it — either write can
+  fail, and a `land` on a pull request that stayed open is a request the next
+  cycle spends a merger worktree and a gate stack honouring. The reconciler is
+  also the answer to a hand-merged PR: it runs at plan time, tests containment
+  in `origin/<sourceBranch>` rather than intent, and does the identical wrap-up
+  without the merge.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One cleanup registry owns signals and the exit (#35).** No module but
