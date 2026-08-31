@@ -306,6 +306,19 @@ run it, and around again only on exit 75.
   opening line is what shows a dirty one. `npm run driver` installs the pin
   without starting a series — which the hand paths need, since the config
   imports `readEnvFile` from the driver rather than from `./dist/`.
+- **Nothing refreshes that checkout, and that is the price of #66.** The
+  launcher's `git pull` is gone — which is what lets a series run while the
+  operator holds local commits — so a landed `gateStack` change starts judging
+  branches when a human pulls it, NOT one relaunch later; `relaunchAfterLanding`
+  survives for the images, not for the config (`exit-conditions.ts`,
+  `config.ts`). Unreported that is silent for an unbounded number of relaunches,
+  so preflight's `staleConfigWarning` counts the commits the checkout is behind
+  `origin/<sourceBranch>` that touch the config FILE — narrower than "behind" on
+  purpose, since after every landing a checkout is behind and a warning that
+  always fires is one nobody reads. Counted in the CACHE, whose origin refs
+  preflight has just fetched: an operator who has not pulled has not fetched
+  either, so their own `origin/<sourceBranch>` would answer for the run before
+  the landing. `preflight.ts`'s header owns both halves.
 
 - **One image, both roles** (agent sandbox and gate pod member): it defines an
   `agent` user at uid 1000 and keeps default `USER` root — `checkWorktreeImageUids`

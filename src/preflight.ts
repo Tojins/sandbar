@@ -35,12 +35,28 @@
 // answers this" question; it could not make the two answers agree, so
 // `checkInvariants` refuses a run where they don't.
 //
-// ONE check deliberately still reads the operator's checkout: the soft warning
-// that local `<sourceBranch>` is ahead of `origin/<sourceBranch>`. It was
-// nearly useless while `cwd` was a machine-managed clone that is never ahead.
-// Against the human's repo it is exactly what it was written for — per-issue
-// worktrees seed from origin, so unpushed local work is invisible to every
-// agent, and that is both likely and silent.
+// TWO checks deliberately still read the operator's checkout, both soft
+// warnings, and they are the same comparison run in opposite directions.
+//
+// AHEAD of `origin/<sourceBranch>`: nearly useless while `cwd` was a
+// machine-managed clone that is never ahead. Against the human's repo it is
+// exactly what it was written for — per-issue worktrees seed from origin, so
+// unpushed local work is invisible to every agent, and that is both likely and
+// silent.
+//
+// BEHIND it, in the commits that touch the CONFIG FILE (#66). The config is the
+// one input a run still takes from the checkout — it resolves against the
+// process cwd, and `gateStack` is inside it — and since #66 pinned the driver
+// there is no longer a `git pull` anywhere in the launcher to refresh it. So a
+// gate-stack change that landed on origin reaches a series when the operator
+// pulls it and at no other moment, and untreated that is silent for as many
+// relaunches as the series runs. Two things make the check answer rather than
+// merely look like it does, and `readConfigStaleness` owns both: it counts in
+// the CACHE, which the fetch above has just made current, because the operator
+// who has not pulled has not fetched either and their own `origin/<branch>` is
+// a ref from before the landing; and it counts only the commits touching the
+// config file, because "the checkout is behind" is true after every landing a
+// series makes and a warning that always fires is one nobody reads.
 //
 // Two layers:
 //   - checkInvariants(state)  — pure function over a captured RepoState.
@@ -115,7 +131,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { stat } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { isAbsolute, relative } from "node:path";
 import { promisify } from "node:util";
 
 import type { ResolvedStackContainer } from "./config.js";
@@ -161,6 +177,11 @@ export type PreflightConfig = {
   // `run.ts` calls it rather than deriving the list itself, so the rule about
   // which paths are checkable lives beside the check that depends on it.
   readonly mountSources: readonly DeclaredMount[];
+  // The file this run's config was imported from, as the bin resolved it
+  // (#69's `RunOptions.configPath`), or `null` for a programmatic host that
+  // passed an object and no file. Read for one soft warning and nothing else —
+  // see `staleConfigWarning` (#66).
+  readonly configPath: string | null;
 };
 
 // A gate-stack mount source, carrying the container that declared it. A stack
@@ -944,17 +965,17 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   const failures = results.flatMap((r) => (r.ok ? [] : [r.message]));
   if (failures.length > 0) throw new PreflightError(failures);
 
-  // The one check that reads the OPERATOR'S checkout, on purpose (#38 item 10).
-  // Per-issue worktrees seed off origin/<sourceBranch>, so commits sitting
-  // unpushed in the human's repo are invisible to every agent in the run. While
-  // `cwd` was a machine-managed operating clone this could essentially never
-  // fire; against a real working checkout it is both likely and silent, which
-  // is what a soft warning is for. Fails quiet in both directions — a checkout
-  // with no local `<sourceBranch>` at all just reports 0.
-  const ahead = await countCommitsAhead(
+  // The FIRST of the two soft checks that read the OPERATOR'S checkout, on
+  // purpose (#38 item 10). Per-issue worktrees seed off origin/<sourceBranch>,
+  // so commits sitting unpushed in the human's repo are invisible to every
+  // agent in the run. While `cwd` was a machine-managed operating clone this
+  // could essentially never fire; against a real working checkout it is both
+  // likely and silent, which is what a soft warning is for. Fails quiet in both
+  // directions — a checkout with no local `<sourceBranch>` at all reports 0.
+  const ahead = await countCommits(
     cfg.layout.hostCwd,
-    cfg.sourceBranch,
     `origin/${cfg.sourceBranch}`,
+    cfg.sourceBranch,
   );
   if (ahead > 0) {
     console.warn(
@@ -964,17 +985,122 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
         "those commits matter for the work sandbar is about to do.",
     );
   }
+
+  // The second, which is the same read run the other way (#66).
+  const staleConfig = staleConfigWarning(
+    await readConfigStaleness({
+      layout: cfg.layout,
+      sourceBranch: cfg.sourceBranch,
+      configPath: cfg.configPath,
+    }),
+  );
+  if (staleConfig !== null) console.warn(staleConfig);
 }
 
-async function countCommitsAhead(
+// What the checkout's copy of the config file is missing, against origin (#66).
+export type ConfigStaleness = {
+  // Absolute, as the bin resolved it; `null` for a programmatic host that
+  // passed a config object and no file, where there is nothing to name and
+  // nothing to pull.
+  readonly configPath: string | null;
+  readonly sourceBranch: string;
+  readonly hostCwd: string;
+  // Commits in `<the checkout's sourceBranch>..origin/<sourceBranch>`, and the
+  // subset of those that touch `configPath`. Both 0 whenever git will not
+  // answer — see `readConfigStaleness` for every way that happens.
+  readonly behind: number;
+  readonly touchingConfig: number;
+};
+
+// The checkout supplies the COMMIT, the cache supplies ORIGIN, and that split
+// is the whole reason this is not two lines (#66). The operator's own
+// `origin/<sourceBranch>` is as old as their last fetch, and the operator this
+// check exists for is precisely the one who has not fetched — reading their
+// remote-tracking ref would answer "0 behind" in exactly the case the warning
+// is about. Preflight has just fetched the bare cache, so the cache is asked
+// instead, about the sha the checkout's branch actually points at.
+//
+// Every failure answers 0 rather than throwing, and each is a real state: a
+// `--config` outside the repository has no path in this history to ask about; a
+// checkout with no local `<sourceBranch>` has no commit to compare; and a local
+// sha the cache has never seen is an UNPUSHED commit, which is the
+// ahead-warning's business above and not this one's.
+export async function readConfigStaleness(args: {
+  readonly layout: RepoLayout;
+  readonly sourceBranch: string;
+  readonly configPath: string | null;
+}): Promise<ConfigStaleness> {
+  const { hostCwd, repoDir } = args.layout;
+  const nothing: ConfigStaleness = {
+    configPath: args.configPath,
+    sourceBranch: args.sourceBranch,
+    hostCwd,
+    behind: 0,
+    touchingConfig: 0,
+  };
+  if (args.configPath === null) return nothing;
+  // Against the WORK TREE ROOT, not against `hostCwd`: the pathspec is spent in
+  // the cache, where paths are repo-relative, and `config.cwd` is only usually
+  // the repository's root — a host whose config sits one directory down would
+  // otherwise be asked about a path no commit has ever contained, and be told
+  // nothing forever.
+  const top = await captureOk(hostCwd, "git", ["rev-parse", "--show-toplevel"]);
+  if (!top.ok) return nothing;
+  const rel = relative(top.stdout.trim(), args.configPath);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return nothing;
+
+  const local = await captureOk(hostCwd, "git", [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    `${args.sourceBranch}^{commit}`,
+  ]);
+  if (!local.ok) return nothing;
+  const base = local.stdout.trim();
+  const tip = `origin/${args.sourceBranch}`;
+  const behind = await countCommits(repoDir, base, tip);
+  return {
+    ...nothing,
+    behind,
+    touchingConfig:
+      behind === 0 ? 0 : await countCommits(repoDir, base, tip, rel),
+  };
+}
+
+// Pure, and it warns about the CONFIG being behind rather than about the
+// checkout being behind (#66). Since the self-hosted launcher stopped pulling,
+// a checkout is behind origin after every landing its own series makes, so
+// warning on that alone would fire on nearly every relaunch and be tuned out by
+// the second day. What the checkout still supplies to a run is one file, so the
+// question worth asking the operator is whether the commits they are missing
+// touch THAT file.
+export function staleConfigWarning(s: ConfigStaleness): string | null {
+  if (s.configPath === null || s.touchingConfig === 0) return null;
+  return (
+    `WARNING: local ${s.sourceBranch} in ${s.hostCwd} is ${s.behind} ` +
+    `commit(s) behind origin/${s.sourceBranch}, and ${s.touchingConfig} of ` +
+    `them change ${s.configPath}. Sandbar imported that file from this ` +
+    "checkout and nothing in a run refreshes it, so this run's gate stack — " +
+    "the thing that judges every branch — is the version saved here, not the " +
+    "one on origin. Pull, then relaunch, if the landed change was meant to " +
+    "apply to this series."
+  );
+}
+
+// Commits in `base..tip`, optionally narrowed to one path. 0 for anything git
+// will not answer — an unknown ref, a pathspec outside the repository — which
+// is what keeps both callers soft.
+async function countCommits(
   cwd: string,
-  local: string,
-  remote: string,
+  base: string,
+  tip: string,
+  path?: string,
 ): Promise<number> {
   const { ok, stdout } = await captureOk(cwd, "git", [
     "rev-list",
     "--count",
-    `${remote}..${local}`,
+    `${base}..${tip}`,
+    ...(path === undefined ? [] : ["--", path]),
   ]);
   if (!ok) return 0;
   const n = parseInt(stdout.trim(), 10);

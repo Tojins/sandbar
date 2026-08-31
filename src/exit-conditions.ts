@@ -35,12 +35,24 @@ export const EXIT_CODE_BUDGET = 3;
 // cycle that lands orchestrator commits leaves the running process driving on
 // what it resolved at launch, where judge and judged come from different eras.
 //
-// What that covers narrowed with #66 and the flag survives it, which is worth
-// keeping straight: `dist/` no longer moves at all — the driver is an installed
-// release the repo pins, so a landing does not become the driver until a human
-// moves the pin — while the CONFIG (the gate stack!) is `import()`ed once at
-// launch and `ensureImages` runs once per run, so a landed change to either
-// still reaches a series only through the relaunch.
+// What that covers narrowed with #66, in two different ways, and the flag
+// survives both — worth keeping straight, because the three objects it used to
+// refresh now behave differently from each other:
+//
+//   - `dist/` no longer moves at all. The driver is an installed release the
+//     repo pins, so a landing does not become the driver until a human moves
+//     the pin.
+//   - IMAGES are still the reason this flag exists. `ensureImages` runs once
+//     per run against a source worktree reset to `origin/<sourceBranch>`, so a
+//     landed `Containerfile` reaches a series through the relaunch and through
+//     nothing else.
+//   - the CONFIG is `import()`ed once at launch (cli.ts), so a relaunch does
+//     re-read it — but from the operator's CHECKOUT, which nothing refreshes
+//     now that the launcher has stopped pulling. A landed `gateStack` change
+//     therefore arrives when a human pulls it and not when the run relaunches.
+//     That is the deliberate price of #66 (the checkout is the operator's, and
+//     a run that moved their refs would be the worse bargain); preflight's
+//     `staleConfigWarning` is what keeps it from being silent.
 //
 // 75 is sysexits' EX_TEMPFAIL ("temporary failure; retry"), which is the
 // meaning, and it is clear of the run's own 0/1/2/3 and of the shell's reserved

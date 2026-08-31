@@ -569,19 +569,23 @@ export type RunConfig = {
   // different eras is the #37 genus of silent false verdict, arriving through
   // the launcher.
   //
-  // #66 removed ONE of the three things that used to go stale that way, and it
-  // is worth naming which: `dist/`. The driver is now an installed release
-  // pinned by the repo, so it is byte-identical across a relaunch by
-  // construction and a landed orchestrator commit does not become the driver
-  // until a human moves the pin. The other two are untouched and are why this
-  // flag survives #66 rather than being deleted with the old launcher:
+  // #66 changed what a relaunch is worth, and the three objects it used to
+  // refresh no longer behave alike. `dist/` stopped moving: a self-hosted
+  // driver is an installed release the repo pins, byte-identical across a
+  // relaunch by construction. IMAGES are why this flag survives — `ensureImages`
+  // runs once per run (run.ts) against a source worktree at
+  // `origin/<sourceBranch>`, so a landed `Containerfile` reaches a series
+  // through the relaunch and through nothing else.
   //
-  //   - the CONFIG is `import()`ed once, at launch (cli.ts), so a landed change
-  //     to `gateStack` — the thing that judges every branch — reaches a running
-  //     series only through a relaunch;
-  //   - `ensureImages` runs once per run (run.ts), against a source worktree at
-  //     `origin/<sourceBranch>`, so a landed `Containerfile` is picked up at the
-  //     next launch and not before.
+  // The CONFIG is the one to state carefully, because the obvious reading is
+  // wrong. It is `import()`ed once at launch (cli.ts), so a relaunch does
+  // re-read it — but out of the operator's CHECKOUT, and sandbar never pulls
+  // into that. A landed `gateStack` change therefore takes effect when a human
+  // pulls it, not when the run relaunches. Deliberate: the checkout is theirs
+  // to move, and #66 removed the launcher's `git pull` precisely so a series
+  // could run while they hold local commits. Preflight warns when the commits
+  // the checkout is missing touch the config file, so the gap is reported
+  // rather than silent.
   //
   // EXPLICIT config, not detection, and that is a decision: deriving
   // self-hostedness (is the driver inside the operated repo?) false-positives

@@ -6,12 +6,21 @@
 // when an install is required, and the argv that performs it. The install
 // itself is `npm install` doing what npm defines, and the loop is `spawnSync`
 // doing what it defines; neither is faked here.
+//
+// It lives under `src/` with every other test, and `files` ships `src/` — so
+// the published tarball carries this one file whose import points outside it.
+// Left that way on purpose: nothing runs vitest from an install (`devDependencies`
+// are not installed, and no consumer has a reason to), and the two alternatives
+// are worse — shipping `scripts/` would publish self-hosting tooling no consumer
+// runs, and moving the test out of `src/` would put the suite in two places to
+// buy a dangling import in a file nobody executes.
 
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
   EXIT_CODE_RELAUNCH as LAUNCHER_RELAUNCH_CODE,
+  LaunchError,
   PIN_FILE,
   driverPaths,
   installArgv,
@@ -36,6 +45,13 @@ describe("parsePin (#66)", () => {
 
   it("refuses a file naming no driver", () => {
     expect(() => parsePin("# only comments\n\n")).toThrow(/names no driver/);
+  });
+
+  // The class is what the entrypoint's catch discriminates on: a LaunchError is
+  // addressed to an operator and prints as its message alone, while anything
+  // else is a bug in the launcher and keeps its stack.
+  it("throws LaunchError, the class the entrypoint prints bare", () => {
+    expect(() => parsePin("")).toThrow(LaunchError);
   });
 
   it("refuses a file naming two, rather than picking one", () => {

@@ -445,6 +445,15 @@ The semantics hold because:
 - Cost: one extra launch at series end (the relaunch that finds the plan empty
   and exits 0).
 
+What a relaunch re-reads is **your checkout, not origin**. Images are re-resolved
+from `origin/<sourceBranch>`, so a landed `Containerfile` change is picked up on
+its own; the config file is imported again from wherever you keep it, so a landed
+*config* change is picked up only once that file is in your checkout. Sandbar
+never pulls into your working tree — it is yours, and a run that moved your refs
+would be a worse bargain than a stale gate stack. Preflight makes the gap visible
+instead: when the commits your checkout is missing include ones that touch the
+config file, the run opens with a warning naming the file and both counts.
+
 What the relaunch does **not** buy you is a newer driver. If your launcher also
 upgrades sandbar in that loop — `git pull && npm run build`, or an unpinned
 install — then the code producing your verdicts is whatever was on disk at that

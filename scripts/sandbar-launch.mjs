@@ -76,6 +76,10 @@ export const PIN_FILE = "sandbar.pin";
 // remove.
 const PIN_PATTERN = /^github:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+#v\d+\.\d+\.\d+$/;
 
+// A launch that cannot proceed, as opposed to a bug in this file. The
+// distinction is spent at the one catch site at the bottom: a LaunchError
+// prints as its message and exits 1, because it is addressed to an operator and
+// there is nothing in a stack trace for them; anything else keeps its stack.
 export class LaunchError extends Error {}
 
 // Comments are lines whose FIRST character is `#`; the spec's own `#` is what
@@ -291,9 +295,13 @@ if (isEntrypoint()) {
       process.exitCode = code;
     })
     .catch((err) => {
-      console.error(
-        `sandbar launcher: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      // `LaunchError` is the class of failure an operator ACTS on — a pin that
+      // names nothing, an install that could not fetch it — and its message is
+      // written to be read alone. Anything else reaching here is a bug in this
+      // file, and a bug printed as one tidy line is a bug with its stack thrown
+      // away, so it is rethrown instead.
+      if (!(err instanceof LaunchError)) throw err;
+      console.error(`sandbar launcher: ${err.message}`);
       process.exit(1);
     });
 }

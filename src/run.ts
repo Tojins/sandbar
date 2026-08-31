@@ -306,6 +306,9 @@ export async function run(
       // surface (#51), and a source podman cannot resolve is host state that
       // would otherwise redden the gate against the branch.
       mountSources: absoluteMountSources(config.gateStack.containers),
+      // For the one warning that is about the config FILE rather than its
+      // contents: nothing refreshes the checkout it was imported from (#66).
+      configPath: options.configPath ?? null,
     });
   } catch (err) {
     if (err instanceof PreflightError || err instanceof SandbarError) {

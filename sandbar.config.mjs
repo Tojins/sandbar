@@ -7,18 +7,24 @@
 // node dist/cli.js` in a loop, which meant the orchestrator AND the gate stack
 // were whatever a human had saved; the loop now re-reads the pin and loops on
 // EXIT_CODE_RELAUNCH (75) alone, which `relaunchAfterLanding` below is what
-// produces. Why the relaunch survives the pin — the config and the Containerfile
-// are still resolved once per run, only `dist/` stopped moving — is RunConfig's
-// to state.
+// produces. Why the relaunch survives the pin — the Containerfile is still
+// resolved once per run — is RunConfig's to state.
 //
 // THIS FILE is the residual, and it is deliberate rather than overlooked: the
 // config resolves against the process cwd and `sandbar.env` against this file's
 // own `import.meta.url`, so both stay in the operator's checkout and a run's
-// gate stack is still whatever is saved here. `requiresSandbar` below is the
-// guard on the seam that opens as a result — a driver older than the field says
-// refuses the run by name instead of silently ignoring what it cannot read —
-// and #69's opening line names this path and whether its tree is dirty. What is
-// gone is the ORCHESTRATOR and its prompts being a function of the same tree.
+// gate stack is still whatever is saved here. Two things follow, and the second
+// is a real cost rather than a footnote. `requiresSandbar` below is the guard on
+// the version seam — a driver older than the field says refuses the run by name
+// instead of silently ignoring what it cannot read — while #69's opening line
+// names this path and whether its tree is dirty. And nothing updates this file
+// any more: the launcher's `git pull` went with #66, so a gate-stack change that
+// lands on main judges nothing until a human pulls it here, however many
+// relaunches the series makes in between. That is the deliberate trade — a
+// series can run while the operator holds local commits — and preflight warns
+// when the commits this checkout is missing include ones that touch this file,
+// so it is reported rather than silent. What is gone is the ORCHESTRATOR and its
+// prompts being a function of the same tree.
 //
 // The import is from the installed driver rather than `./dist/`, for that same
 // reason: there is no build in this checkout during a series, and `readEnvFile`
@@ -260,12 +266,18 @@ export default {
 
   // Exit 75 after any cycle that lands merges, so `scripts/sandbar-launch.mjs`
   // re-reads the pin and relaunches (#65). Explicit rather than detected — see
-  // RunConfig — and still set here after #66: the pin means a landed
-  // orchestrator commit is NOT the next cycle's driver, but this file and the
-  // Containerfile are both resolved once per run, and a landed change to either
-  // reaches a series only through a relaunch. Budgets and stuck counters are
-  // per-run and reset across runs by design, so the relaunch resets them
-  // exactly as a human re-launch would.
+  // RunConfig — and still set here after #66, for the Containerfile: images are
+  // resolved once per run from a worktree at origin/main, so a landed image
+  // change reaches a series through the relaunch and through nothing else.
+  //
+  // What it does NOT buy is a fresh copy of THIS FILE. The relaunch re-imports
+  // it, but out of this checkout, and nothing pulls into a checkout any more —
+  // that was the launcher's `git pull`, deleted by #66 so a series can run while
+  // the operator holds local commits. So a gate-stack change that lands on main
+  // starts judging branches when a human pulls it here, not one relaunch later;
+  // preflight says so when the commits this checkout is missing touch this file.
+  // Budgets and stuck counters are per-run and reset across runs by design, so
+  // the relaunch resets them exactly as a human re-launch would.
   relaunchAfterLanding: true,
 
   // No `mergeMode`: the default `{ kind: "direct" }` is what this repo wants,
