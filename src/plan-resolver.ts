@@ -325,7 +325,17 @@ export function resolvePlan(
     // chunk at all. Every member of a chunk — its root, and since #61 the
     // members chained behind one — has somewhere to land and a tip to seed
     // from. See "What the holding rule still covers" above.
-    if (lanes.get(c.number)?.lane === "review" && chunkOf.get(c.number) === undefined) {
+    //
+    // Guarded on `chunkTargetOf`, the very value the plan below attaches, and
+    // not on `chunkOf` — which is one of the two maps that value is composed
+    // from. They agree today because `deriveChunks` pushes a `Chunk` for every
+    // root it writes into `chunkOf`, but that is its invariant to keep, not
+    // this filter's to assume: were the two ever to disagree, asking `chunkOf`
+    // would clear a review-gated issue for a plan that then carried
+    // `chunk: null`, and phase 3 would land unreviewed work on the source
+    // branch — the one outcome the lane exists to prevent. Asking the same
+    // question the answer is built from costs nothing and cannot drift.
+    if (lanes.get(c.number)?.lane === "review" && chunkTargetOf(c.number) === null) {
       heldForReview.push(c.number);
       return false;
     }
