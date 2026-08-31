@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { SandbarError } from "./errors.js";
 import type { PushOutcome, VerifyAdapter } from "./forge-verify.js";
-import type { MergerGateOutput } from "./merger.js";
+import type { ChunkRefLookup, MergerGateOutput } from "./merger.js";
+import { LAND_LABEL, type ChunkLandTarget } from "./chunk-land.js";
+import { IN_CHUNK_LABEL } from "./chunks.js";
 import {
   SOURCE_TARGET,
   buildInstallFailedComment,
@@ -33,6 +35,9 @@ type AgentScript = { stdout: string; leavesConflict?: boolean };
 type Calls = {
   merges: string[];
   agentRuns: string[];
+  // #64: the resolve prompt itself, which is the only place the BRANCH a unit
+  // was described by is observable from out here.
+  agentPrompts: string[];
   isMergeChecks: number;
   conflictDigests: number;
   bodies: string[];
@@ -52,6 +57,12 @@ type Calls = {
   chunkPushes: string[];
   chunkPrs: { chunkBranch: string; title: string; body: string }[];
   headReads: number;
+  // #64
+  chunkRefFetches: string[];
+  chunkBranchDeletes: string[];
+  prComments: { pr: number; body: string }[];
+  prLabelRemovals: { pr: number; label: string }[];
+  prCloses: number[];
 };
 
 type Script = {
@@ -68,6 +79,18 @@ type Script = {
   chunkPushes?: PushResult[];
   // #62: how the forge answers `ensureChunkPullRequest`. An Error is thrown.
   chunkPrs?: ({ number: number; url: string } | Error)[];
+  // #64: what origin answers about a chunk branch being LANDED, by branch
+  // name. A missing entry is `absent` — origin was reached and has no such
+  // branch — which is a different script from an `unreadable` entry, and the
+  // whole point of the three states.
+  chunkRefs?: Record<string, ChunkRefLookup>;
+  // #64: gh/git calls that throw, by operation name.
+  wrapupFails?: Partial<
+    Record<
+      "deleteChunkBranch" | "commentOnPullRequest" | "removePullRequestLabel" | "closePullRequest",
+      string
+    >
+  >;
   // Per-issue number of leading close attempts that throw before one succeeds.
   // A value >= total attempts means the close never succeeds. Default 0.
   closeFailsBeforeSuccess?: Record<number, number>;
@@ -77,6 +100,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
   const calls: Calls = {
     merges: [],
     agentRuns: [],
+    agentPrompts: [],
     isMergeChecks: 0,
     conflictDigests: 0,
     bodies: [],
@@ -96,6 +120,11 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     chunkPushes: [],
     chunkPrs: [],
     headReads: 0,
+    chunkRefFetches: [],
+    chunkBranchDeletes: [],
+    prComments: [],
+    prLabelRemovals: [],
+    prCloses: [],
   };
   const closeAttemptsByIssue = new Map<number, number>();
   let mIdx = 0;
@@ -117,10 +146,11 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       if (r === "conflict") merging = true;
       return { ok: r === "ok" };
     },
-    async runResolveAgent(_prompt) {
+    async runResolveAgent(prompt) {
       const entry = script.agents?.[aIdx++];
       if (!entry) throw new Error("runResolveAgent not scripted");
       calls.agentRuns.push("agent");
+      calls.agentPrompts.push(prompt);
       calls.order.push("agent");
       if (entry.stdout.includes("<promise>COMMITTED</promise>")) {
         merging = entry.leavesConflict ?? false;
@@ -209,6 +239,37 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     async chunkBase(branch) {
       calls.chunkBases.push(branch);
       return script.chunkBases?.[branch] ?? "origin/main";
+    },
+    // #64. Unlike `chunkBase` there is no fallback: a chunk branch origin does
+    // not have cannot be landed, and one origin could not be asked about is not
+    // known to be either.
+    async fetchChunkRef(branch) {
+      calls.chunkRefFetches.push(branch);
+      return script.chunkRefs?.[branch] ?? { kind: "absent" };
+    },
+    async deleteChunkBranch(branch) {
+      calls.chunkBranchDeletes.push(branch);
+      calls.order.push("chunk-branch-delete");
+      const e = script.wrapupFails?.deleteChunkBranch;
+      if (e) throw new SandbarError(e);
+    },
+    async commentOnPullRequest(pr, body) {
+      calls.prComments.push({ pr, body });
+      calls.order.push("pr-comment");
+      const e = script.wrapupFails?.commentOnPullRequest;
+      if (e) throw new SandbarError(e);
+    },
+    async removePullRequestLabel(pr, label) {
+      calls.prLabelRemovals.push({ pr, label });
+      calls.order.push("pr-unlabel");
+      const e = script.wrapupFails?.removePullRequestLabel;
+      if (e) throw new SandbarError(e);
+    },
+    async closePullRequest(pr) {
+      calls.prCloses.push(pr);
+      calls.order.push("pr-close");
+      const e = script.wrapupFails?.closePullRequest;
+      if (e) throw new SandbarError(e);
     },
     async checkoutDetached(ref) {
       calls.checkouts.push(ref);
@@ -1044,7 +1105,14 @@ function makeVerifyFake(opts: {
   // does. These escape runVerifiedLanding as plain Errors, not MergerErrors.
   listThrows?: Error;
 } = {}): VerifyFake {
-  const vCalls = { integrationPushes: [] as string[], fastForwards: [] as string[], prs: 0 };
+  const vCalls = {
+    integrationPushes: [] as string[],
+    fastForwards: [] as string[],
+    prs: 0,
+    // #64: the PR body lists `mergedIssues` in the order it is given, which is
+    // the only place that order is observable from out here.
+    prBodies: [] as string[],
+  };
   const verify: VerifyAdapter = {
     async pushIntegration(branch) {
       vCalls.integrationPushes.push(branch);
@@ -1076,8 +1144,9 @@ function makeVerifyFake(opts: {
     async syncWithSource() {
       return { ok: true, reason: "" };
     },
-    async ensurePullRequest() {
+    async ensurePullRequest(args: { body: string }) {
       vCalls.prs += 1;
+      vCalls.prBodies.push(args.body);
       return { number: 5, url: "u" };
     },
     async closePullRequest() {},
@@ -1728,5 +1797,394 @@ describe("groupByChunk (#60)", () => {
     // `landed` is optional on `ChunkTarget` for the same reason `chunk` is
     // optional on `IssueRef`: hand-built targets have nothing to say about it.
     expect(groupByChunk([withChunk(43, 42)])[0]!.landed).toEqual([]);
+  });
+});
+
+// #64 — the third landing: a reviewed chunk onto the source branch. What these
+// pin is that it shares the source pass (one gate, one push, one verified
+// round), that a failure takes `land` off rather than retrying forever, and
+// that the wrap-up runs only after the source branch has actually moved.
+describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
+  const request = (
+    root: number,
+    members: readonly number[] = [root],
+  ): ChunkLandTarget => ({
+    root,
+    branch: `sandbar/chunk-${root}-c`,
+    title: `chunk ${root}`,
+    members: members.map((n) => ({ number: n, title: `t-${n}` })),
+    // A chain, so the deepest member closes first and the root last — the
+    // wrap-up acts on this list and `chunk-land.test.ts` owns why.
+    closeOrder: [...members]
+      .reverse()
+      .map((n) => ({ number: n, title: `t-${n}` })),
+    pullRequest: 500 + root,
+  });
+
+  const landing = (
+    ...requests: readonly ChunkLandTarget[]
+  ): { chunkLanding: { requests: readonly ChunkLandTarget[]; sourceBranch: string } } => ({
+    chunkLanding: { requests, sourceBranch: "main" },
+  });
+
+  const originHas = (
+    ...roots: readonly number[]
+  ): Record<string, ChunkRefLookup> =>
+    Object.fromEntries(
+      roots.map((r) => [
+        `sandbar/chunk-${r}-c`,
+        {
+          kind: "present",
+          ref: `refs/remotes/origin/sandbar/chunk-${r}-c`,
+        } as const,
+      ]),
+    );
+
+  it("defers a request for a chunk this cycle grew, keeping `land` on", async () => {
+    // #61 plans a layer of a chunk per cycle, so Phase A can put a member on
+    // the very branch a human labelled before Phase B reads the request. What
+    // is on origin now is not what they said yes to, and the plan's member
+    // list — read before phase 2 — does not name the new member, so landing
+    // would put unreviewed commits on the source branch and delete the branch
+    // the unclosed member lives on. Nothing merges and the label stays.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkPushes: [{ kind: "ok" }],
+      chunkPrs: [{ number: 7, url: "u" }],
+      chunkRefs: originHas(42),
+    });
+    const summary = await runMergerWithAdapter(
+      [{ ...issue(43), chunk: { root: 42, branch: "sandbar/chunk-42-c" } }],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42)),
+    );
+
+    // Phase A's merge onto the chunk branch, and nothing else.
+    expect(calls.merges).toEqual(["sandbar/issue-43-t-43"]);
+    expect(calls.chunkRefFetches).toEqual([]);
+    expect(summary.deferredChunks).toEqual([
+      { target: request(42), landedNow: [{ number: 43, title: "t-43" }] },
+    ]);
+    expect(summary.skippedChunks).toEqual([]);
+    expect(summary.mergedChunks).toEqual([]);
+    expect(calls.prLabelRemovals).toEqual([]);
+    expect(calls.prComments[0]?.pr).toBe(542);
+    expect(calls.prComments[0]?.body).toContain("#43 — t-43");
+    // The chunk landing itself is untouched: #43 is on the branch and owed its
+    // `in-chunk` label.
+    expect(summary.chunkLanded.map((c) => c.issue.id)).toEqual(["43"]);
+  });
+
+  it("lands a chunk whose branch this cycle did not touch, beside one it did", async () => {
+    // The deferral is per BRANCH, not per cycle: a chunk nothing landed on is
+    // exactly as reviewed as it was when the label went on.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      chunkPushes: [{ kind: "ok" }],
+      chunkPrs: [{ number: 7, url: "u" }],
+      chunkRefs: originHas(42, 99),
+    });
+    const summary = await runMergerWithAdapter(
+      [{ ...issue(43), chunk: { root: 42, branch: "sandbar/chunk-42-c" } }],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42), request(99)),
+    );
+
+    expect(summary.deferredChunks.map((d) => d.target.root)).toEqual([42]);
+    expect(summary.mergedChunks.map((m) => m.target.root)).toEqual([99]);
+    expect(calls.chunkRefFetches).toEqual(["sandbar/chunk-99-c"]);
+  });
+
+  it("merges origin's chunk branch, lands it with the cycle, then wraps it up", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkRefs: originHas(42),
+    });
+    const summary = await runMergerWithAdapter(
+      [],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42, [42, 43])),
+    );
+
+    // The merge source is ORIGIN's copy: the chunk branch outlives the run and
+    // nothing in the state directory is authoritative.
+    expect(calls.chunkRefFetches).toEqual(["sandbar/chunk-42-c"]);
+    expect(calls.merges).toEqual(["refs/remotes/origin/sandbar/chunk-42-c"]);
+    // One gate over the composition, one push — the source pass's own.
+    expect(calls.gates).toBe(1);
+    expect(calls.pushes).toBe(1);
+    expect(summary.pushed).toBe(true);
+    // …and only then the wrap-up: every member closed — deepest first, the
+    // root last — `in-chunk` dropped, the pull request closed, the branch
+    // deleted.
+    expect(calls.closes.map((c) => c.n)).toEqual([43, 42]);
+    expect(calls.removedLabels).toEqual([
+      { n: 43, label: IN_CHUNK_LABEL },
+      { n: 42, label: IN_CHUNK_LABEL },
+    ]);
+    // `land` off before the close, so a pull request that would not close is
+    // still not a request the next cycle honours.
+    expect(calls.prLabelRemovals).toEqual([{ pr: 542, label: LAND_LABEL }]);
+    expect(calls.prCloses).toEqual([542]);
+    expect(calls.chunkBranchDeletes).toEqual(["sandbar/chunk-42-c"]);
+    expect(summary.mergedChunks.map((c) => c.closed)).toEqual([[42, 43]]);
+    expect(summary.mergedChunks[0]?.residue).toEqual([]);
+    expect(summary.skippedChunks).toEqual([]);
+  });
+
+  it("merges the chunk before the cycle's own branches, into one landing", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      chunkRefs: originHas(42),
+    });
+    const summary = await runMergerWithAdapter(
+      [issue(10)],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42)),
+    );
+
+    expect(calls.merges).toEqual([
+      "refs/remotes/origin/sandbar/chunk-42-c",
+      "sandbar/issue-10-t-10",
+    ]);
+    expect(calls.pushes).toBe(1);
+    expect(summary.merged.map((m) => m.id)).toEqual(["10"]);
+    expect(summary.mergedChunks).toHaveLength(1);
+  });
+
+  it("nothing is closed or deleted when the push fails", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkRefs: originHas(42),
+      pushes: [{ kind: "fatal", reason: "no such remote" }],
+    });
+    await expect(
+      runMergerWithAdapter([], adapter, undefined, undefined, landing(request(42))),
+    ).rejects.toBeInstanceOf(MergerError);
+
+    expect(calls.closes).toEqual([]);
+    expect(calls.chunkBranchDeletes).toEqual([]);
+    expect(calls.prCloses).toEqual([]);
+    // `land` is untouched: a failed push says nothing about the chunk, so the
+    // next run tries again.
+    expect(calls.prLabelRemovals).toEqual([]);
+  });
+
+  it("parks the chunk and drops `land` when the resolve loop abandons the merge", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>ABANDON</promise><reason>irreconcilable</reason>" }],
+      chunkRefs: originHas(42),
+    });
+    const summary = await runMergerWithAdapter(
+      [],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42)),
+    );
+
+    expect(summary.skippedChunks).toEqual([
+      { target: request(42), reason: "conflict" },
+    ]);
+    expect(calls.prLabelRemovals).toEqual([{ pr: 542, label: LAND_LABEL }]);
+    expect(calls.prComments[0]?.body).toContain("irreconcilable");
+    // Reverted, nothing landed, nothing closed.
+    expect(summary.pushed).toBe(false);
+    expect(calls.pushes).toBe(0);
+    expect(calls.closes).toEqual([]);
+  });
+
+  it("halts, keeping `land`, when origin could not be asked about the branch", async () => {
+    // The one that must NOT be read as `branch-missing`: nothing is known
+    // about this chunk, so the human's request stands and the next run tries
+    // again. Parking here would drop their label and tell them their branch
+    // was deleted because a proxy dropped a connection.
+    const { adapter, calls } = makeAdapter({
+      chunkRefs: {
+        "sandbar/chunk-42-c": { kind: "unreadable", detail: "could not read" },
+      },
+    });
+    const err = await runMergerWithAdapter(
+      [issue(10)],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42)),
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(MergerError);
+    expect((err as MergerError).message).toContain("could not read");
+    expect((err as MergerError).partial?.skippedChunks).toEqual([]);
+    expect(calls.merges).toEqual([]);
+    expect(calls.prComments).toEqual([]);
+    expect(calls.prLabelRemovals).toEqual([]);
+    expect(calls.pushes).toBe(0);
+  });
+
+  it("parks the chunk when origin no longer has its branch, and never merges", async () => {
+    const { adapter, calls } = makeAdapter({ chunkRefs: {} });
+    const summary = await runMergerWithAdapter(
+      [],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42)),
+    );
+
+    expect(calls.merges).toEqual([]);
+    expect(summary.skippedChunks.map((s) => s.reason)).toEqual(["branch-missing"]);
+    expect(calls.prLabelRemovals).toEqual([{ pr: 542, label: LAND_LABEL }]);
+  });
+
+  it("keeps the branch, and the root open, when a member will not close", async () => {
+    // #43 is first in the close order and it fails, so #42 — the root the
+    // branch is NAMED after — is never asked. That is what the kept branch is
+    // for: the next cycle re-derives the same chunk, under the same root, and
+    // retries. `chunk-land.ts` owns the argument; this pins that the merge
+    // phase's own landing runs it.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkRefs: originHas(42),
+      closeFailsBeforeSuccess: { 43: 99 },
+    });
+    const summary = await runMergerWithAdapter(
+      [],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42, [42, 43])),
+    );
+
+    expect(summary.pushed).toBe(true);
+    expect(summary.mergedChunks[0]?.closed).toEqual([]);
+    expect(calls.closeAttempts.map((c) => c.n)).toEqual([43]);
+    expect(summary.mergedChunks[0]?.branchDeleted).toBe(false);
+    expect(calls.chunkBranchDeletes).toEqual([]);
+    expect(summary.mergedChunks[0]?.residue.join("\n")).toContain("#43");
+  });
+
+  it("parks the chunk with the issues when the forge rejects the composition", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      chunkRefs: originHas(42),
+      heads: ["cycle-base", "p1", "p2", "verified"],
+    });
+    const summary = await runMergerWithAdapter(
+      [issue(10)],
+      adapter,
+      undefined,
+      undefined,
+      {
+        ...landing(request(42)),
+        verified: {
+          adapter: makeVerifyFake({ checkConclusion: "failure" }).verify,
+          options: { ...VERIFIED_OPTIONS, maxRounds: 0 },
+        },
+      },
+    );
+
+    expect(summary.merged).toEqual([]);
+    expect(summary.pushed).toBe(false);
+    expect(summary.skippedChunks.map((s) => s.reason)).toEqual([
+      "forge-unverified",
+    ]);
+    expect(calls.prLabelRemovals).toEqual([{ pr: 542, label: LAND_LABEL }]);
+    // The comment says the forge judged the whole composition, naming the
+    // issues that were in it beside this chunk.
+    expect(calls.prComments[0]?.body).toContain("#10");
+  });
+
+  it("names the chunk's members by a ref that resolves, not by the chunk branch", async () => {
+    // The merger worktree hangs off the BARE cache, whose imported
+    // `refs/heads/*` are deleted, and nothing creates a local chunk head
+    // afterwards — so `sandbar/chunk-42-c` resolves nowhere here. The resolve
+    // agent is told to go and read the members' work, and only
+    // `origin/sandbar/chunk-42-c` is somewhere it can go. The same refs anchor
+    // the forge-red prompt one landing mode over.
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+      chunkRefs: originHas(42),
+    });
+    await runMergerWithAdapter(
+      [],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42, [42, 43])),
+    );
+
+    const prompt = calls.agentPrompts[0] ?? "";
+    expect(prompt).toContain("Related issue #43");
+    expect(prompt).toContain("Branch: refs/remotes/origin/sandbar/chunk-42-c");
+    expect(prompt).not.toMatch(/Branch: sandbar\/chunk-42-c/);
+  });
+
+  it("hands the forge the composition in MERGE order, chunk members underneath", async () => {
+    // `runVerifiedLanding` anchors its forge-red resolve prompt on the LAST
+    // entry and documents it as the topmost merge. Chunks are merged first and
+    // this cycle's branches on top, so the chunk's members have to come first
+    // here — the other way round, the agent would be pointed at the bottom-most
+    // commit in the composition and told it was the top.
+    const { adapter } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      chunkRefs: originHas(42),
+      heads: ["cycle-base", "p1", "p2", "verified"],
+    });
+    const { verify, vCalls } = makeVerifyFake();
+    await runMergerWithAdapter([issue(10)], adapter, undefined, undefined, {
+      ...landing(request(42, [42, 43])),
+      verified: {
+        adapter: verify,
+        options: { ...VERIFIED_OPTIONS, openPullRequest: true },
+      },
+    });
+
+    const body = vCalls.prBodies[0] ?? "";
+    expect(body).toContain("- #42 — t-42");
+    expect(body).toContain("- #10 — t-10");
+    expect(body.indexOf("- #43 —")).toBeLessThan(body.indexOf("- #10 —"));
+  });
+
+  it("carries parked chunks on a MergerError partial", async () => {
+    // The pull request has already been written to by the time a later issue
+    // in the same cycle blows the loop up, so that write has to reach Phase 4.
+    const { adapter } = makeAdapter({
+      merges: ["conflict", "ok"],
+      agents: [{ stdout: "<promise>ABANDON</promise><reason>nope</reason>" }],
+      gates: [],
+      chunkRefs: originHas(42),
+    });
+    const err = await runMergerWithAdapter(
+      [issue(10)],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42)),
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(MergerError);
+    expect((err as MergerError).partial?.skippedChunks.map((s) => s.reason)).toEqual([
+      "conflict",
+    ]);
+    expect((err as MergerError).partial?.mergedChunks).toEqual([]);
   });
 });

@@ -762,12 +762,13 @@ describe("resolvePlan chunk PR members (#62)", () => {
   });
 });
 
-// #63 — the two halves of the resolution the chunk-review scan reads. Both
-// exist because only this function has the whole candidate graph: nothing
-// downstream of the plan could name the chunks that have work on origin, and
-// nothing that lists issues could see one filed sixty seconds ago.
-describe("resolvePlan landed chunks (#63)", () => {
-  it("reports a chunk with work on origin, and the tips of its branch", () => {
+// #63, #64 — the derivation the plan carries for the two phases that act on a
+// chunk as a whole. Both exist because only this function has the candidate
+// graph: nothing downstream of the plan could name the chunks with work on
+// origin, what each branch carries or what is at its tip, and nothing that
+// lists issues could see one filed sixty seconds ago.
+describe("resolvePlan landed chunks (#63, #64)", () => {
+  it("reports a chunk with work on origin: what its branch carries, and the tips", () => {
     const r = resolvePlan(
       [
         issue(10, "", { title: "Root", labels: [IN_CHUNK_LABEL] }),
@@ -790,14 +791,44 @@ describe("resolvePlan landed chunks (#63)", () => {
       {
         root: 10,
         branch: "sandbar/chunk-10-root",
+        title: "Root",
+        members: [
+          { number: 10, title: "Root" },
+          { number: 11, title: "Second" },
+        ],
+        closeOrder: [
+          { number: 11, title: "Second" },
+          { number: 10, title: "Root" },
+        ],
         tips: [{ number: 11, title: "Second" }],
       },
     ]);
   });
 
+  it("leaves a member that has never landed off the list a landing CLOSES", () => {
+    // #64's whole correctness: #12 above is in the chunk's COMPONENT and is
+    // planned this very cycle, but no commit of it is anywhere. Closing it
+    // when the chunk lands would destroy queued work and tell a human it had
+    // landed, so `members` is the `in-chunk` set and never `Chunk.members`.
+    const r = resolvePlan(
+      [
+        issue(10, "", { title: "Root", labels: [IN_CHUNK_LABEL] }),
+        issue(11, "## Blocked by\n- #10\n", { title: "Queued" }),
+      ],
+      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.plan.map((p) => p.id)).toEqual(["11"]);
+    expect(r.landedChunks[0]?.members).toEqual([{ number: 10, title: "Root" }]);
+  });
+
   it("reports nothing before a chunk's first landing", () => {
     // The scan makes no call at all in this state: there is no branch on
-    // origin and so no pull request to have been reviewed.
+    // origin and so no pull request to have been reviewed, and there is
+    // nothing a `land` label could be asking for.
     const r = resolvePlan([issue(10, "")], new Map(), new Set(), 3, "review");
 
     expect(r.landedChunks).toEqual([]);

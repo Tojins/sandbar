@@ -313,11 +313,13 @@ describe("IN_CHUNK_LABEL (#59)", () => {
   });
 });
 
-// #63 — what a chunk with work on origin looks like to the review scan. `tips`
-// is what the scan is really after: it is what a follow-up issue declares under
-// `## Blocked by`, so it decides both which chunk that issue joins and whether
-// it waits for the work its review is about.
-describe("landedChunksOf (#63)", () => {
+// #63, #64 — what a chunk with work on origin looks like to the two phases
+// that act on the whole chunk. `tips` is what the review scan is after: it is
+// what a follow-up issue declares under `## Blocked by`, so it decides both
+// which chunk that issue joins and whether it waits for the work its review is
+// about. `members` is what a LANDING is after, and it is the sharper of the
+// two — that list is CLOSED when the chunk lands.
+describe("landedChunksOf (#63, #64)", () => {
   const chain = allReview([
     issue(42, [], "First"),
     issue(43, [42], "Second"),
@@ -329,15 +331,37 @@ describe("landedChunksOf (#63)", () => {
     expect(landedChunksOf(chain.chunks, [], new Set())).toEqual([]);
   });
 
-  it("names the chunk, its branch, and the deepest of what landed", () => {
+  it("names the chunk, its branch, what it carries, and the deepest of that", () => {
+    // #44 is a member of the chunk and has landed nothing, so it is in neither
+    // list: what a landing closes (#64) is what is ON the branch, never the
+    // whole component.
     const issues = [issue(42, [], "First"), issue(43, [42], "Second"), issue(44, [43], "Third")];
     expect(landedChunksOf(chain.chunks, issues, new Set([42, 43]))).toEqual([
       {
         root: 42,
         branch: "sandbar/chunk-42-first",
+        title: "First",
+        members: [
+          { number: 42, title: "First" },
+          { number: 43, title: "Second" },
+        ],
+        closeOrder: [
+          { number: 43, title: "Second" },
+          { number: 42, title: "First" },
+        ],
         tips: [{ number: 43, title: "Second" }],
       },
     ]);
+  });
+
+  it("names the chunk after its ROOT even when the root has not landed", () => {
+    // The branch is `chunkBranchName(root, title)` whatever has landed on it,
+    // and the landing's merge commit and prose have to name the same chunk the
+    // branch does.
+    const issues = [issue(42, [], "First"), issue(43, [42], "Second")];
+    const landed = landedChunksOf(allReview(issues).chunks, issues, new Set([43]));
+    expect(landed[0]?.title).toBe("First");
+    expect(landed[0]?.members).toEqual([{ number: 43, title: "Second" }]);
   });
 
   it("reports every tip when the branch carries siblings", () => {
@@ -366,6 +390,65 @@ describe("landedChunksOf (#63)", () => {
     // line of prose, an absent member would cost the edge.
     expect(landedChunksOf(chain.chunks, [], new Set([42]))[0]?.tips).toEqual([
       { number: 42, title: "" },
+    ]);
+  });
+
+  // #64 — the order a LANDING may close these in, which is the same graph read
+  // the other way. It exists because a close that fails keeps the branch, and
+  // the next cycle finds that branch only if the chunk still derives to the
+  // same NAME — which it does only while the root is open.
+  it("orders the closes dependents-first, so the root is last", () => {
+    const issues = [issue(42, [], "First"), issue(43, [42], "Second"), issue(44, [43], "Third")];
+    expect(
+      landedChunksOf(chain.chunks, issues, new Set([42, 43, 44]))[0]?.closeOrder,
+    ).toEqual([
+      { number: 44, title: "Third" },
+      { number: 43, title: "Second" },
+      { number: 42, title: "First" },
+    ]);
+  });
+
+  it("orders siblings among themselves, ascending, and still ends at the root", () => {
+    // A layer of two (#61 plans a whole layer): neither is behind the other,
+    // so only their place BEFORE the root is fixed.
+    const issues = [issue(42, [], "First"), issue(44, [42], "B"), issue(43, [42], "A")];
+    expect(
+      landedChunksOf(allReview(issues).chunks, issues, new Set([42, 43, 44]))[0]
+        ?.closeOrder,
+    ).toEqual([
+      { number: 44, title: "B" },
+      { number: 43, title: "A" },
+      { number: 42, title: "First" },
+    ]);
+  });
+
+  it("ignores an edge to a member that has not landed", () => {
+    // #43 is queued, so nothing of it is on the branch: #44 is behind #42 as
+    // far as this branch is concerned, whatever its body says.
+    const issues = [issue(42, [], "First"), issue(43, [42], "Second"), issue(44, [43], "Third")];
+    expect(
+      landedChunksOf(chain.chunks, issues, new Set([42, 44]))[0]?.closeOrder,
+    ).toEqual([
+      { number: 44, title: "Third" },
+      { number: 42, title: "First" },
+    ]);
+  });
+
+  it("never drops a member from the close order, cycle or not", () => {
+    // Unreachable for the same reason the tips fallback is — a cyclic issue is
+    // `blocked` and never a chunk member — and total anyway: a member missing
+    // from this list is a member the wrap-up never closes at all.
+    const cyclic = [issue(42, [43], "First"), issue(43, [42], "Second")];
+    const chunk = {
+      root: 42,
+      members: [42, 43],
+      branch: "sandbar/chunk-42-first",
+    };
+    expect(
+      landedChunksOf([chunk], cyclic, new Set([42, 43]))[0]?.closeOrder,
+    ).toEqual([
+      { number: 42, title: "First" },
+      { number: 43, title: "Second" },
     ]);
   });
 

@@ -17,18 +17,18 @@
 // retires. Draft state makes the accident hard and leaves the deliberate act
 // available: a human can mark the PR ready and merge it by hand in two steps.
 // That override is TOLERATED, not fought — `forge-pr.ts` re-titles and
-// re-bodies an existing PR and never touches its draft state, and reconciling a
-// chunk landed that way is #64.
+// re-bodies an existing PR and never touches its draft state, and #64's
+// reconciler finishes off a chunk landed that way on the next cycle.
 //
-// WHAT THE BODY MAY CLAIM. #62 sketches the draft line as "review here; apply
-// the `land` label to land; the merge button is disabled by design", and the
-// middle clause is not written below, deliberately: there is no `land` label
-// today and nothing that would read one. A PR body that invites a human to
-// apply a label no code watches is a review surface that lies on its first
-// sentence. So the prose says what is true now — the merge button is off by
-// design, landing a reviewed chunk is not automated yet, and the issues stay
-// open and labelled until it is — and the sentence that invites the label
-// belongs to the issue that builds it.
+// WHAT THE BODY MAY CLAIM, and #64 is where the last clause of it became true.
+// #62 sketched the draft line as "review here; apply the `land` label to land;
+// the merge button is disabled by design", and wrote the body WITHOUT the
+// middle clause on purpose: there was no `land` label then and nothing that
+// would read one, and a PR body that invites a human to apply a label no code
+// watches is a review surface that lies on its first sentence. There is one
+// now (`chunk-land.ts`), the merge phase reads it, so the invitation is
+// written — and it is the only instruction on the page, because a reviewer
+// who has just read the diff should have exactly one thing to do next.
 //
 // PURE, and separate from the merger for the reason every other piece of
 // sandbar prose is: the templates are the part a human reads, so they are the
@@ -41,7 +41,7 @@
 // snapshot of the members carrying `in-chunk`) is the other half, and
 // `chunkMembersOnBranch` is where the two are put together.
 
-import { type ChunkMember, IN_CHUNK_LABEL } from "./chunks.js";
+import { type ChunkMember, LAND_LABEL } from "./chunks.js";
 
 export type ChunkPullRequestContent = {
   readonly title: string;
@@ -103,15 +103,19 @@ export function chunkPullRequestBody(args: {
   }
   lines.push(
     "",
+    "**To land it, put the `" + LAND_LABEL + "` label on this pull request.** The",
+    "next sandbar run merges `" + args.branch + "` into the base branch, gates the",
+    "composition, pushes it, closes every issue above, deletes the branch and",
+    "closes this pull request. Approving is not the trigger, deliberately — you",
+    "can approve now and land later, and nothing moves until the label is on.",
+    "",
     "Review here: everything a review needs works in a draft — the diff, the",
     "commits, comments and threads. What draft state disables is the merge",
     "button, and that is the point. Sandbar composed this branch and lands it",
-    "itself, so a merge from this page is a landing the orchestrator never sees:",
-    "the issues above would stay open, keep their `" + IN_CHUNK_LABEL + "` label",
-    "and stay out of the queue.",
-    "",
-    "Landing a reviewed chunk is not automated yet — until it is, a human lands",
-    "it and reconciles those issues by hand.",
+    "itself, so a merge from this page is a landing the orchestrator never sees.",
+    "It recovers from one — a run that finds this branch already contained in",
+    "the base branch closes the issues above and deletes it — but the label is",
+    "the path that does it in one step instead of two.",
     "",
     "Sandbar rewrites this title and description every time a member lands on",
     "`" + args.branch + "`, so the list above is what the branch carries. It",

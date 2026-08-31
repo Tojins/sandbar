@@ -57,16 +57,21 @@ not a factory. Rationale in `src/cli.ts` and `src/config.ts` headers.
 The orchestrator (`src/run.ts`) cycles plan → execute → merge → finalise until
 an exit condition fires.
 
-1. **Plan** (`src/plan-resolver.ts`) — purely deterministic, no LLM: lists
-   issues labelled `ready-for-agent`, parses `## Blocked by` sections, selects
-   the top-K unblocked issues (default 3) by number. Each candidate also gets a
-   **lane** (`src/lanes.ts`, #57) and, when review-gated, a `chunk` target
-   (#61) that tells phase 2 what to seed from and phase 3 where to land. Ahead
-   of the plan proper, the **chunk-review scan** (`src/chunk-follow-up.ts`,
-   #63) turns each changes-requested review on a chunk PR into an issue in that
-   chunk and re-plans with it. All inert under the default lane, `auto`; the
-   blocker, chunk and follow-up criteria are the `plan-resolver.ts`,
-   `chunks.ts` and `chunk-follow-up.ts` headers to state.
+1. **Plan** (`src/plan-resolver.ts` + `src/chunk-reconcile.ts`) — purely
+   deterministic, no LLM: lists issues labelled `ready-for-agent`, parses
+   `## Blocked by` sections, selects the top-K unblocked issues (default 3) by
+   number. Each candidate also gets a **lane** (`src/lanes.ts`, #57) and, when
+   review-gated, a `chunk` target (#61) that tells phase 2 what to seed from
+   and phase 3 where to land. Ahead of the plan proper two passes make the
+   tracker agree with the forge and with git: the **chunk-review scan**
+   (`src/chunk-follow-up.ts`, #63) turns each changes-requested review on a
+   chunk PR into an issue in that chunk, and the **reconciler**
+   (`src/chunk-reconcile.ts`, #64) finishes off any chunk branch already
+   contained in `origin/<sourceBranch>` — hand-merged, or landed by a run that
+   died before closing the members. The plan is rebuilt after either acts. All
+   inert under the default lane, `auto`; the blocker, chunk, follow-up and
+   wrap-up criteria are the `plan-resolver.ts`, `chunks.ts`,
+   `chunk-follow-up.ts` and `chunk-land.ts` headers to state.
 
 2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
    planned issue runs in parallel in its own agent sandbox + per-issue gate
@@ -80,21 +85,30 @@ an exit condition fires.
    (infra-only).
 
 3. **Merge** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
-   + `src/forge-verify.ts`) — procedural, in a dedicated ephemeral worktree
-   detached at `origin/<sourceBranch>` (never the operator's checkout, #10).
-   Per DONE branch in issue order: `git merge --no-ff`, with the agentic
-   resolve loop on conflict or post-merge-gate-red. `config.mergeMode` (#22):
-   `direct` (default) or `verified` (CI gets the last word); the check-reading
-   safety argument — its invariant: no unknown verdict ever lands — is in the
-   `src/forge-verify.ts` and `src/merger.ts` headers. An issue carrying a
-   `chunk` lands on its chunk branch instead (#60) and each pushed chunk gets
-   a **draft PR** per cycle (#62): `src/chunk-pr.ts` is the prose,
-   `src/forge-pr.ts` the `gh pr` create-or-update both PR kinds share.
+   + `src/forge-verify.ts` + `src/chunk-land.ts`) — procedural, in a dedicated
+   ephemeral worktree detached at `origin/<sourceBranch>` (never the operator's
+   checkout, #10). Per DONE branch in issue order: `git merge --no-ff`, with
+   the agentic resolve loop on conflict or post-merge-gate-red.
+   `config.mergeMode` (#22): `direct` (default) or `verified` (CI gets the last
+   word); the check-reading safety argument — its invariant: no unknown verdict
+   ever lands — is in the `src/forge-verify.ts` and `src/merger.ts` headers. An
+   issue carrying a `chunk` lands on its chunk branch instead (#60) and each
+   pushed chunk gets a **draft PR** per cycle (#62): `src/chunk-pr.ts` is the
+   prose, `src/forge-pr.ts` the `gh pr` create-or-update both PR kinds share. A
+   **`land` label on that PR** (#64) makes the next cycle merge
+   `origin/<chunk>` in the SAME source pass, ahead of the auto lane's branches,
+   so one gate-2 and one landing cover both; the wrap-up then closes the
+   members on the branch, drops `in-chunk`, takes `land` back off the PR,
+   closes it and deletes the branch. `src/chunk-land.ts` owns the label, the
+   selection, the wrap-up and — as `chunkForgeWrites` — the one spelling of the
+   `gh`/`git` writes it makes, which the merge phase and the plan-time
+   reconciler both build their adapter from.
 
 4. **Finalise** (`src/finalize.ts` + `src/finalize-inputs.ts`) — per-issue
    branch lifecycle, bot comments, label flips (`ready-for-agent` ↔
    `labels.needsInfo`/`labels.agentStuck`, plus `in-chunk` for a chunk-landed
-   member, are the only labels sandbar applies).
+   member, are the only labels sandbar applies — `land` (#64) it only ever
+   REMOVES, from a pull request a human labelled).
    Runs in **two passes straddling the merge** (#30): Phase-2 terminals are
    finalised before Phase 3 so a merge-phase throw cannot discard them.
 
@@ -168,9 +182,16 @@ default 50, exit 3).
   component of the *review-gated* issues under the `## Blocked by` graph,
   rooted at its parentless member; an issue straddling two chunks is blocked,
   never a reason to merge them. `src/chunks.ts` is the pure derivation and its
-  header owns the argument; `IN_CHUNK_LABEL` (#59) lives there too. **Origin
-  owns the chunk branch** — every landing bases on `origin/<chunk>` and
-  preflight fetches that namespace to reason about it.
+  header owns the argument; `IN_CHUNK_LABEL` and `LAND_LABEL` (#59, #64) live
+  there too. **Origin owns the chunk branch** — every landing bases on
+  `origin/<chunk>`, preflight fetches that namespace to reason about it, and
+  the branch is deleted THERE when the chunk lands. What a chunk branch
+  carries is `PlanResolution.landedChunks`, the only answer the whole
+  candidate graph can give: the `in-chunk` members, which is the set a landing
+  closes (#64) and whose tips a follow-up is blocked by (#63) — never the whole
+  component, since a member that has never been worked has no commits
+  anywhere. It also carries the ORDER those closes must go in, for the reason
+  the `land` bullet below states.
 - **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,
   created or updated after every landing push; sandbar never re-drafts a PR a
   human made ready. `src/chunk-pr.ts` owns the prose and what it may claim.
@@ -182,6 +203,31 @@ default 50, exit 3).
   issue's own state, and sandbar never resolves a thread;
   `src/chunk-follow-up.ts`'s header owns both arguments and what the planner
   has to supply the scan.
+- **`land` on the chunk PR is what lands it (#64).** A label rather than an
+  approval, so approve-now-land-later stays available, and on the PR because
+  that is where the reviewer is standing. It is a QUEUE: a merge the resolve
+  loop could not save takes the label off and says why, while anything that
+  says nothing ABOUT the chunk — a push race, an unreachable forge, an origin
+  that could not be asked — leaves it on for the next run. That last one is why
+  `fetchChunkRef` answers in three states (`ChunkRefLookup`), buying "origin
+  has no such branch" apart from "origin could not be asked" with an
+  `ls-remote` probe. A request for a chunk PHASE A JUST GREW is DEFERRED rather
+  than honoured or parked (#61 plans a layer per cycle): landing it would put
+  commits a review never covered on the source branch, so the label stays and
+  the next quiet cycle lands it. Members are closed EXPLICITLY (a `Closes #N` trailer only
+  fires on GitHub's own merge of that PR, and sandbar composes the merge
+  locally), in `LandedChunk.closeOrder` — dependents first, ROOT LAST — and the
+  loop stops at the first failure: the reconciler finds a kept branch by its
+  NAME, which is re-derived from the open issues every cycle, so a closed root
+  re-roots the chunk and leaves that branch matching nothing. The chunk branch
+  is deleted only once every close worked — a kept branch is what makes
+  `src/chunk-reconcile.ts` retry the remainder next cycle, and therefore what
+  `run.ts` halts on (`chunkResidue` splits a wrap-up's leftovers on exactly
+  that question, `unnamed` included; only the merge-phase report halts, since
+  the reconciler IS the retry). The reconciler is also the answer to a
+  hand-merged PR: it runs at plan time, tests containment in
+  `origin/<sourceBranch>` rather than intent, and does the identical wrap-up
+  without the merge. `src/chunk-land.ts`'s header owns the rest.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One cleanup registry owns signals and the exit (#35).** No module but

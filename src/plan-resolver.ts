@@ -227,16 +227,19 @@ export type PlanResolution = {
   // being queued, not once it reaches the front.
   readonly overrides: readonly LaneOverride[];
   // The chunks with work ON ORIGIN — those with at least one member carrying
-  // `in-chunk` — and, per chunk, the TIPS of what its branch carries (#63).
-  // Empty for every host on the default lane, and empty before a chunk's
-  // first landing.
+  // `in-chunk` — with everything each branch carries and the TIPS of it
+  // (#63, #64). Empty for every host on the default lane, and empty before a
+  // chunk's first landing.
   //
   // Here for the same reason `PlannedIssue.chunk` is: the derivation needs the
-  // whole candidate graph, and this graph only exists inside this function. It
-  // is what the chunk-review scan (`chunk-follow-up.ts`) reads to find the
-  // pull requests to look at, and to name the tips a follow-up issue declares
-  // itself blocked by — neither of which a phase downstream of the plan could
-  // work out for itself.
+  // whole candidate graph, and this graph only exists inside this function.
+  // Two phases downstream read it and neither could work it out for itself.
+  // The chunk-review scan (`chunk-follow-up.ts`) reads the pull requests to
+  // look at, and names the tips a follow-up issue declares itself blocked by
+  // (#63). The landing (`chunk-land.ts`, #64) reads which issues a `land`
+  // label is asking it to CLOSE — the merge phase sees the cycle's DONE
+  // branches and nothing else — and which ones a reconciled chunk owes a
+  // close to.
   readonly landedChunks: readonly LandedChunk[];
 };
 
@@ -395,8 +398,8 @@ export function resolvePlan(
     heldForReview: heldForReview.sort((a, b) => a - b),
     overrides: laneOverrides(lanes),
     // Over the SAME `isInChunk` the two clauses above are decided by, so what
-    // the scan is told is on a chunk branch is what the planner treated as
-    // landed — one reading of the label, not two.
+    // the scan and the landing are told is on a chunk branch is what the
+    // planner treated as landed — one reading of the label, not three.
     landedChunks: landedChunksOf(
       chunks,
       chunkIssues,

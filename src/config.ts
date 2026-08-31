@@ -577,23 +577,31 @@ export type RunConfig = {
   // A review-gated issue is worked and lands on its CHUNK's branch (#60) —
   // `sandbar/chunk-<root>-<slug>`, pushed to origin, and opened as a DRAFT pull
   // request against the source branch (#62), which is what a human actually
-  // reviews. Nothing closes it until they do. Three things a host has to have
-  // for that: the `in-chunk` label must EXIST in the repo (sandbar never
-  // creates labels, and this one is not configurable — see chunks.ts), the
-  // `gh` credentials must be allowed to open and edit pull requests, and
-  // whoever reviews those branches has to know they are theirs to land — the
-  // draft PR says as much on itself, but nothing notifies them. Fourth thing,
-  // and it is about PACING rather than about what a host must provide: sandbar
-  // works a whole chunk, one LAYER per cycle (#61). Every member whose blockers
-  // have all landed on the chunk branch is planned together — same-cycle
-  // members are always siblings, never a chain — and a member queued behind one
-  // of those waits for the cycle after it, because what unblocks it is an
-  // `in-chunk` label finalise applies only once the chunk branch carrying the
-  // commits is on origin. So a chunk N edges deep takes N cycles to reach the
-  // human, and it reaches them whole. The one review-gated issue sandbar will
-  // not work at all is one `chunks.ts` can give no chunk — blockers straddling
-  // two chunks, an issue downstream of that, or a `## Blocked by` cycle — which
-  // stays held, and reported as held, until a human edits the bodies.
+  // reviews. Nothing closes it until they say so, and they say so by putting
+  // `land` on that pull request (#64): the next cycle merges the chunk branch
+  // into the source branch, gates the composition, pushes it, closes every
+  // member on the branch, deletes the branch and closes the pull request.
+  // Approval is deliberately not the trigger — see `chunk-land.ts`.
+  //
+  // Three things a host has to have for that: the `in-chunk` and `land` labels
+  // must EXIST in the repo (sandbar never creates labels, and neither is
+  // configurable — see chunks.ts), the `gh` credentials must be allowed to
+  // open, edit, comment on and close pull requests AND to delete branches on
+  // origin, and whoever reviews those branches has to know they are theirs to
+  // land — the draft PR says as much on itself, but nothing notifies them.
+  //
+  // Fourth thing, and it is about PACING rather than about what a host must
+  // provide: sandbar works a whole chunk, one LAYER per cycle (#61). Every
+  // member whose blockers have all landed on the chunk branch is planned
+  // together — same-cycle members are always siblings, never a chain — and a
+  // member queued behind one of those waits for the cycle after it, because
+  // what unblocks it is an `in-chunk` label finalise applies only once the
+  // chunk branch carrying the commits is on origin. So a chunk N edges deep
+  // takes N cycles to reach the human, and it reaches them whole. The one
+  // review-gated issue sandbar will not work at all is one `chunks.ts` can
+  // give no chunk — blockers straddling two chunks, an issue downstream of
+  // that, or a `## Blocked by` cycle — which stays held, and reported as held,
+  // until a human edits the bodies.
   //
   // And one thing a host must NOT do, because it is the one way a chunk in
   // flight can be broken from outside: do not CLOSE one member of a chunk that

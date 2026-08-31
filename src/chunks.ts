@@ -152,6 +152,21 @@ import { chunkBranchName } from "./naming.js";
 // read as "these commits are somewhere durable".
 export const IN_CHUNK_LABEL = "in-chunk";
 
+// The label a HUMAN puts on a chunk's pull request to land it (#64). The other
+// end of the same lifecycle: `in-chunk` says the work is on the branch,
+// `land` says a reviewer is done with it and the next run should merge the
+// branch into the source branch and close every member on it.
+//
+// Here rather than in `chunk-land.ts`, which owns everything ABOUT it — why it
+// is a label and not an approval, why it sits on the pull request, and how it
+// behaves as a queue. What lives here is the SPELLING, beside the other chunk
+// protocol label, so the module that writes the invitation into the PR body,
+// the module that reads it off the forge and the module that takes it back off
+// again cannot come to disagree about the string. Hardcoded for the reason
+// above and the one `lanes.ts` gives for `auto-land`: it is protocol a human
+// uses to address sandbar, not a host's handoff vocabulary.
+export const LAND_LABEL = "land";
+
 // An issue named as part of a chunk, in the one form the review surface needs
 // it: a number and the title a human reads next to it (#62).
 export type ChunkMember = {
@@ -209,21 +224,65 @@ export type Chunk = {
   readonly branch: string;
 };
 
-// A chunk that has WORK ON ORIGIN, and what a consumer of the review surface
-// needs to know about it (#63). Derived after the fact from a `Chunk` and the
-// set of members carrying `IN_CHUNK_LABEL` — see `landedChunksOf`.
+// A chunk that has WORK ON ORIGIN, and what the consumers of the review
+// surface need to know about it (#63, #64). Derived after the fact from a
+// `Chunk` and the set of members carrying `IN_CHUNK_LABEL` — see
+// `landedChunksOf`. Only the PLAN can build one: the titles come from the
+// candidate listing and the membership from the graph that listing carries.
 export type LandedChunk = {
   readonly root: number;
   readonly branch: string;
+  // The ROOT issue's title — the same string `chunkBranchName` slugged. Names
+  // the chunk in the merge commit a landing writes and in the prose it posts
+  // (#64), and it comes from the root whether or not the root is among
+  // `members`, because the branch is named after it either way.
+  readonly title: string;
+  // Every LANDED member, ascending: the issues whose commits are on the branch.
+  //
+  // This is the list a landing CLOSES (#64), which is the whole reason it is
+  // the `in-chunk` members rather than `Chunk.members`. A component holds
+  // members that have never been worked — a chained member waits for its
+  // blockers to land — and closing one of those would destroy a queued issue
+  // while telling a human its commits were on the source branch, and would
+  // cancel the re-rooting the design turns on: a member left OPEN has its
+  // blocker satisfied by CLOSED and becomes its own chunk's root, while a
+  // closed one never does. It is the same set the chunk's pull request lists
+  // (#62), so a landing closes exactly what that PR said it carried.
+  readonly members: readonly ChunkMember[];
+  // The same members, in the one order a landing may CLOSE them in: every
+  // member before every member it is blocked by, so the ROOT is last.
+  //
+  // A permutation of `members` rather than a re-ordering of it because the two
+  // answer different questions — `members` is what the branch carries, which a
+  // human reads ascending, and this is a fact about the blocked-by graph that
+  // only the derivation can compute. It is here for one reason, and the reason
+  // is what happens when a close FAILS. The wrap-up stops there and keeps the
+  // branch so the next cycle's reconciler retries it, and that retry finds the
+  // chunk again only if the chunk still derives to the same BRANCH NAME — that
+  // is, only if its root is still open, since a closed root leaves the graph
+  // and re-roots the chunk under a survivor and a different name.
+  //
+  // Closing in this order and stopping at the first failure is what makes that
+  // true, and nothing weaker does. The members left open are then every
+  // ancestor of the one that failed plus everything not yet attempted: the
+  // root is among them (it is last), every one of them reaches the root
+  // through members that are also still open (its own blockers are all later
+  // in this order), and no other member of the set is parentless. So the next
+  // cycle derives the same root, the same branch and exactly these members —
+  // which is the promise the landing's own prose makes to a human.
+  //
+  // Stopping matters as much as the order: close #43 and fail on #44 with the
+  // root #42 left for last, and #44's blocker is gone, so #44 re-roots into a
+  // chunk of its own on a branch origin has never had, while the branch it
+  // really is on matches nothing and is deleted out from under it.
+  readonly closeOrder: readonly ChunkMember[];
   // The landed members that no OTHER landed member is blocked by — the tips of
-  // what the branch carries, ascending. Non-empty, and the only member list
-  // here: it is what a NEW member of the chunk declares under `## Blocked by`
+  // what the branch carries, ascending. Non-empty, and a subset of `members`:
+  // it is what a NEW member of the chunk declares under `## Blocked by`
   // (#63) — naming the tips is what puts it in THIS chunk (by the derivation
   // above) and behind everything already on the branch, and naming only them
   // keeps the section down to the edges the chunk's own graph does not already
-  // imply. The full landed set is derivable from `Chunk.members` and the label
-  // for anything that ever wants it; nothing does, and a field nothing reads is
-  // a contract nothing keeps honest.
+  // imply.
   readonly tips: readonly ChunkMember[];
 };
 
@@ -381,7 +440,7 @@ export function deriveChunks(
 }
 
 /**
- * The chunks whose work is on origin, with the tips of what each carries (#63).
+ * The chunks whose work is on origin: what each carries, and the tips of it.
  *
  * `landed` is the caller's set of members carrying `IN_CHUNK_LABEL` — a label
  * applied only once the chunk branch carrying a member's commits has been
@@ -418,22 +477,85 @@ export function landedChunksOf(
     const members = chunk.members.filter((m) => landed.has(m));
     if (members.length === 0) continue;
     const onBranch = new Set(members);
-    // Landed members some other landed member is built on top of. A blocker
-    // OUTSIDE the landed set cannot make a member a non-tip: it is either not
-    // in this chunk at all or still queued, and either way nothing of it is on
-    // the branch to be behind.
+    // The branch's own edge set: each landed member's blockers that are also
+    // on the branch. A blocker OUTSIDE the landed set contributes nothing to
+    // either answer below — it is not in this chunk at all, or still queued,
+    // and either way nothing of it is on the branch to be behind.
+    const blockersOf = new Map<number, readonly number[]>();
     const covered = new Set<number>();
     for (const m of members) {
-      for (const blocker of byNumber.get(m)?.blockedBy ?? []) {
-        if (blocker !== m && onBranch.has(blocker)) covered.add(blocker);
-      }
+      const blockers = [...new Set(byNumber.get(m)?.blockedBy ?? [])].filter(
+        (b) => b !== m && onBranch.has(b),
+      );
+      blockersOf.set(m, blockers);
+      // Landed members some other landed member is built on top of.
+      for (const blocker of blockers) covered.add(blocker);
     }
     const tips = members.filter((m) => !covered.has(m));
     out.push({
       root: chunk.root,
       branch: chunk.branch,
+      title: byNumber.get(chunk.root)?.title ?? "",
+      members: members.map(asMember),
+      closeOrder: closeOrderOf(members, blockersOf).map(asMember),
       tips: (tips.length > 0 ? tips : members).map(asMember),
     });
   }
   return out;
+}
+
+/**
+ * `LandedChunk.closeOrder`, as numbers: dependents before blockers, root last.
+ *
+ * Kahn's again, over the branch's own edge set in the blockers-first direction
+ * — smallest number first among the ready set, purely so the answer is
+ * deterministic — and then reversed. The walk is the same one `deriveChunks`
+ * runs over the whole review-gated graph, and it is run again here rather than
+ * remembered because this is a different graph: the landed members only, whose
+ * edges are the subset that is actually on the branch.
+ *
+ * TOTAL. Anything the walk never reaches goes FIRST, ascending, rather than
+ * being dropped — the caller closes what it is given, so a missing member is a
+ * member that never closes at all, and putting them first keeps the root last
+ * where the walk did reach it. That can only happen for a `## Blocked by`
+ * cycle, which `deriveChunks` never puts in a chunk in the first place (a
+ * cyclic issue comes out `blocked`), so this is a fallback with no caller.
+ */
+function closeOrderOf(
+  members: readonly number[],
+  blockersOf: ReadonlyMap<number, readonly number[]>,
+): readonly number[] {
+  const indegree = new Map<number, number>(
+    members.map((m) => [m, (blockersOf.get(m) ?? []).length] as const),
+  );
+  const dependents = new Map<number, number[]>();
+  for (const m of members) {
+    for (const blocker of blockersOf.get(m) ?? []) {
+      const existing = dependents.get(blocker);
+      if (existing) existing.push(m);
+      else dependents.set(blocker, [m]);
+    }
+  }
+
+  const ready = members.filter((m) => indegree.get(m) === 0).sort(ascending);
+  const blockersFirst: number[] = [];
+  while (ready.length > 0) {
+    const number = ready.shift();
+    if (number === undefined) break;
+    blockersFirst.push(number);
+    for (const dependent of dependents.get(number) ?? []) {
+      const left = (indegree.get(dependent) ?? 0) - 1;
+      indegree.set(dependent, left);
+      if (left === 0) {
+        ready.push(dependent);
+        ready.sort(ascending);
+      }
+    }
+  }
+
+  const reached = new Set(blockersFirst);
+  return [
+    ...members.filter((m) => !reached.has(m)),
+    ...blockersFirst.reverse(),
+  ];
 }
