@@ -326,6 +326,11 @@ describe("finalizeOne", () => {
     ).rejects.toThrow(SandbarError);
     expect(calls.deletes).toEqual([]);
     expect(calls.forceDeletes).toEqual([]);
+    // And no comment: this arm's comment asserts the flip ("`ready-for-agent`
+    // has been replaced with `in-chunk`"), so posting it on a failed flip would
+    // contradict the issue's own labels — and the self-heal that re-plans this
+    // issue would post the same untrue comment again next cycle.
+    expect(calls.comments).toEqual([]);
   });
 
   it("chunk-landed on an issue a human closed mid-run: still flips and deletes", async () => {

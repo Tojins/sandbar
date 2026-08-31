@@ -579,9 +579,13 @@ export type RunConfig = {
   // human reviews it. Two things a host has to have for that: the `in-chunk`
   // label must EXIST in the repo (sandbar never creates labels, and this one is
   // not configurable — see chunks.ts), and whoever reviews those branches has
-  // to know they are theirs to land. Chained members — a review-gated issue
-  // blocked by another one — are still held out of the plan until #61, so a
-  // chain progresses one issue per cycle.
+  // to know they are theirs to land. Third thing, and it bounds what the lane
+  // can do rather than what a host must provide: only a chunk's ROOT is worked
+  // until #61. A chained member — a review-gated issue blocked by another one —
+  // is held out of the plan permanently, not for a cycle or two: its blocker
+  // keeps `in-chunk` and keeps rooting the chunk, so the member never becomes
+  // the root. Today's review lane therefore lands one issue per chunk and hands
+  // the branch over; a chunk of one works end to end.
   readonly defaultLane?: Lane;
 };
 

@@ -530,9 +530,11 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         const held = resolution.heldForReview.map((n) => `#${n}`).join(", ");
         console.log(
           `Held for review (${resolution.heldForReview.length}): ${held} — each ` +
-            "is not its chunk's root: a member chained behind another member " +
-            "(landed or not — a chunk still advances one issue per cycle, " +
-            "until #61), or an issue whose blockers sit in two chunks at once.",
+            "is not its chunk's root: a member chained behind another member, " +
+            "or an issue whose blockers sit in two chunks at once. A chained " +
+            "member is NOT waiting for a cycle — a chunk's root is the only " +
+            "member sandbar can work until #61, so a chain stops there and a " +
+            "human takes it from the chunk branch.",
         );
         await runLogger.appendOrchestrator(
           `plan: held ${resolution.heldForReview.length} review-gated issue(s) — ${held}`,

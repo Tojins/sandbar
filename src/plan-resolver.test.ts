@@ -428,12 +428,15 @@ describe("resolvePlan lanes (#57)", () => {
 // necessary. Chunk DERIVATION is chunks.test.ts's job; these are about the
 // planner's use of it.
 //
-// Note what the observable is. The holding rule still keeps every review-gated
-// issue out of the plan, so a chunk member that clears the dependency gate does
-// not get planned — it gets HELD, and `heldForReview` is documented to count
-// only issues that were otherwise eligible. So "the blocker was satisfied" and
-// "the issue appears in heldForReview" are the same statement today, and become
-// "it appears in the plan" when a later issue lifts the hold.
+// Note what the observable is, and that #60 gave it two shapes. A satisfied
+// blocker means the dependent reaches the LANE filter, and what happens there
+// depends on whether it is its chunk's root: a root is PLANNED, a chained
+// member is HELD. Either way it is visible, and an unsatisfied blocker is
+// neither — it drops out at the dependency gate, before `heldForReview` is
+// touched. So the assertions below read `plan` or `heldForReview` according to
+// the shape each case builds, and "in neither" is what "not satisfied" looks
+// like. The `in-chunk` cases are all chained members by construction (their
+// blocker is the landed root), so they are held.
 describe("resolvePlan in-chunk blockers (#59)", () => {
   const inChunk = { labels: [IN_CHUNK_LABEL] };
 

@@ -44,7 +44,8 @@
 // cosmetic: `in-chunk` is sandbar's own protocol label — hardcoded, like
 // `ready-for-agent`, for the reason chunks.ts gives — and applying it is what
 // takes a landed chunk member out of the queue while leaving it OPEN. Its arm
-// says why the ordering around it is load-bearing.
+// says why both orderings around it are load-bearing — the flip before the
+// branch delete, and the comment after the flip rather than before it.
 //
 // Required side-effects fail loud, they don't swallow (#8). The original bug was
 // `editLabels` catching a "label doesn't exist" error, logging it, and returning
@@ -634,8 +635,27 @@ export async function finalizeOne(
       // only success arm that can abandon the rest of a fail-fast batch, and
       // its own failure is the only one in that batch the next cycle repairs
       // by itself.
+      //
+      // The COMMENT goes after the flip, which is the other way round from
+      // every arm above. Those comment first because their label edit is the
+      // handoff and a comment lost after it would leave a parked issue with no
+      // stated reason (#8). Here the comment ASSERTS the flip — it tells the
+      // author `ready-for-agent` has been replaced — so posting it first means
+      // the one failure this arm is written for (a repo with no `in-chunk`
+      // label, which is how a review-lane host's first chunk landing goes)
+      // leaves the issue carrying `ready-for-agent` under a comment saying it
+      // does not, and the self-heal posts the same comment again next cycle.
+      // Posting after inverts both: a comment that fails lands on an issue
+      // already de-queued onto the visible `in-chunk` queue, which is the
+      // strictly better half to lose.
       const n = issueNumberOf(input.issue);
       await adapter.removeWorktreeFor(input.issue.branch);
+      const r = await adapter.editLabels(
+        n,
+        [READY_FOR_AGENT_LABEL],
+        [IN_CHUNK_LABEL],
+      );
+      requireChunkFlip(r, n);
       await adapter.postComment(
         n,
         CHUNK_LANDED_COMMENT_TEMPLATE(
@@ -644,12 +664,6 @@ export async function finalizeOne(
           READY_FOR_AGENT_LABEL,
         ),
       );
-      const r = await adapter.editLabels(
-        n,
-        [READY_FOR_AGENT_LABEL],
-        [IN_CHUNK_LABEL],
-      );
-      requireChunkFlip(r, n);
       return deleteBranchForcing(adapter, input.issue.branch);
     }
     case "merge-conflict": {
