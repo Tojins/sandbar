@@ -128,8 +128,9 @@
 // pull requests to look at and what a follow-up issue declares itself blocked
 // by, and only the whole candidate graph can answer either. `extraCandidates`
 // on `buildPlan` is the way back in: a follow-up filed at the top of a cycle is
-// re-planned WITH it, so the cycle that files an issue also works it, rather
-// than filing one and then exiting plan-empty with the review unanswered.
+// re-planned WITH it, so it takes its turn in the queue from that cycle rather
+// than the next run — and, in the case that matters, so a cycle cannot file an
+// issue and then exit plan-empty with the review unanswered.
 //
 // `fetchCandidates` NAMES the repository (#34). It used to identify it the way
 // `gh` does by default — from the git remotes of the directory the command runs

@@ -248,7 +248,8 @@ default 50, exit 3).
   loudest — it is the only failure that compounds. Sandbar never resolves a
   thread. The planner supplies the two things the scan cannot derive
   (`PlanResolution.landedChunks`, `buildPlan`'s `extraCandidates`, which is what
-  makes the cycle that files an issue the cycle that works it).
+  puts a just-filed issue in the queue of the cycle that filed it rather than of
+  the next run).
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One cleanup registry owns signals and the exit (#35).** No module but

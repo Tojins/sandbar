@@ -479,8 +479,10 @@ dependency; relabelling the issue alone will not do it.
 > per changes-requested review: `ready-for-agent`, blocked by the chunk's tip
 > members, bodied with your unresolved threads. It joins the chunk by the same
 > derivation as everything else, so it is worked from the chunk's tip and its
-> commits land back on the same branch, under the same pull request. The cycle
-> that files it also works it.
+> commits land back on the same branch, under the same pull request. It is
+> eligible the moment it is filed — sandbar re-plans with it there and then, so
+> it takes its turn in the queue like any other issue rather than waiting for
+> the next run.
 >
 > Two things follow from that, and both are deliberate. Sandbar **never resolves
 > your threads** — resolving one is still how you say you are satisfied, and
