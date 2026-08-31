@@ -593,14 +593,29 @@ export type RunConfig = {
   // human edits the bodies.
   //
   // And one thing a host must NOT do, because it is the one way a chunk in
-  // flight can be broken from outside: do not CLOSE a member of a chunk that
+  // flight can be broken from outside: do not CLOSE one member of a chunk that
   // still has issues queued behind it. A chunk's branch name is derived from
-  // its root, and sandbar only ever sees open issues, so closing the root
-  // re-derives the chunk under the next member and therefore under a branch
-  // name nobody has pushed. Sandbar refuses to work the remaining members
-  // rather than build them on the wrong tree (`ChunkBaseMissingError`, #61), so
-  // the failure is loud and per-issue — but it is a failure. Land the chunk
-  // branch and close the members together, or reopen the one that was closed.
+  // its root, and sandbar only ever sees open issues (both of the planner's
+  // listings are `--state open`), so closing a member re-derives the chunk
+  // under whichever member is left at the front — and therefore under a branch
+  // name nobody has pushed, while the commits sit on the old one.
+  //
+  // Only ONE of the two things that follow is loud, and the boundary is exactly
+  // where `ensureIssueBranch`'s guard sits:
+  //
+  //   - A member queued BEHIND the new front one is a non-root with no chunk
+  //     branch, so it throws `ChunkBaseMissingError` (#61) rather than being
+  //     built on a tree missing its blockers' work. Loud, per-issue, recoverable.
+  //   - The new FRONT member is a root as far as every derivation can tell, and
+  //     a root with no chunk branch is the ordinary first-landing case. So it is
+  //     seeded from the source branch and lands on a fresh chunk branch, leaving
+  //     the closed member's commits stranded on the old one. Nothing reports
+  //     this, because nothing about it is distinguishable from a new chunk: the
+  //     signal that would tell them apart (an origin chunk branch whose root
+  //     issue is closed) is not one the seeding path is given.
+  //
+  // Land the chunk branch and close its members together. Reopening the closed
+  // issue restores the original root, and with it the branch name.
   readonly defaultLane?: Lane;
 };
 

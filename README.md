@@ -468,13 +468,24 @@ dependency; relabelling the issue alone will not do it.
 >
 > Two things this needs from you: the `in-chunk` label has to exist in the repo
 > (sandbar never creates labels), and whoever reviews those branches has to know
-> they are theirs to land. And one thing to avoid: **don't close a chunk member
-> while issues are still queued behind it.** The branch name comes from the
-> chunk's root and sandbar only ever sees open issues, so closing the root moves
-> the chunk to a branch name nobody has pushed. Sandbar then refuses to work the
-> remaining members — loudly, one issue at a time, rather than building them on
-> a tree missing the work they depend on. Land the chunk branch and close its
-> issues together, or reopen the one that was closed.
+> they are theirs to land. And one thing to avoid: **don't close a chunk's
+> issues one at a time while others are still queued behind them.** The branch
+> name is derived from the chunk's root and sandbar only ever sees open issues,
+> so closing a member re-derives the chunk under whichever member is left at the
+> front, and therefore under a branch name nobody has pushed. What sandbar does
+> then depends on which member you are looking at, and only one of the two cases
+> is loud:
+>
+> - A member queued *behind* that new front one is refused, one issue at a time,
+>   rather than built on a tree missing the work it depends on.
+> - The new front member itself is indistinguishable, to sandbar, from the root
+>   of a brand-new chunk — so it is worked from your source branch and lands on
+>   a fresh chunk branch, while the closed member's commits stay behind on the
+>   old one. Nothing reports this, because nothing about it looks wrong.
+>
+> So: land a chunk branch and close all of its issues together. If you have
+> already closed one, reopen it — that restores the chunk's original root and
+> its branch name along with it.
 >
 > The one review-gated issue sandbar will not work is one that belongs to no
 > chunk — its blockers straddle two different chunks, it sits downstream of an

@@ -725,10 +725,28 @@ describe("ensureIssueBranch — a non-root member with no chunk branch refuses (
 
   // The chunk's own root is what the fallback is FOR, and it still gets it —
   // the guard must not turn a first landing into a halt.
-  it("still gives the chunk's root the source branch", async () => {
+  //
+  // And this fixture is the LIMIT of the guard, pinned rather than left to the
+  // prose: #11 is not a first landing at all, it is the RE-ROOTED root of the
+  // chunk #10 already landed on. `chunk.root` says 11 and the branch says 11,
+  // so seeding cannot tell it from a new chunk — it takes the source branch and
+  // #10's work stays stranded on `sandbar/chunk-10-thing`. Asserted because it
+  // is the one case the host-facing docs have to describe as silent
+  // (`config.ts`, `defaultLane`); were it ever to become detectable here, this
+  // is the test that should fail and send someone to those docs.
+  it("gives a re-rooted chunk's new root the source branch, stranding the old work", async () => {
     const base = await ensureIssueBranch(cache, "sandbar/issue-11-mid", "main", REROOTED);
 
     expect(base).toEqual({ ref: "origin/main", chunkBranch: null });
+    // The stranding itself: the landed chunk's file is on the old branch and
+    // NOT under the new root's feet.
+    expect(
+      (await git(cache, "ls-tree", "--name-only", "refs/remotes/origin/sandbar/chunk-10-thing"))
+        .stdout,
+    ).toContain("chunk.txt");
+    expect(
+      (await git(cache, "ls-tree", "--name-only", "sandbar/issue-11-mid")).stdout,
+    ).not.toContain("chunk.txt");
   });
 
   // A branch name the parser cannot read is not a root either. It cannot be

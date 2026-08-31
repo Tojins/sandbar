@@ -2,6 +2,12 @@
 // that make a gate verdict a statement about a commit ON THE ISSUE BRANCH —
 // `dirtyWorktreePaths` (tree ≡ HEAD, #24 D1) and `headMismatch` (HEAD ≡
 // refs/heads/<branch>, #27). Neither is optional and neither implies the other.
+//
+// One export serves a second caller: `fetchOriginChunkBranch` answers "what is
+// this chunk's tip" for the seeding below AND for the merge phase's choice of
+// base (`merger.ts`, `chunkBase`). Deliberately one function — the tree a chunk
+// member is developed against and the tree it is merged onto have to be the
+// same, and two spellings of that question are two chances for them to drift.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -170,6 +176,24 @@ export async function fetchOriginChunkBranch(
 //     Two gated issues both blocking a third do not make one chunk with two
 //     roots; they stay two chunks and the third is `two-chunk-parent`.) A
 //     failed fetch does not land here — see `fetchOriginChunkBranch`.
+//
+//     What this arm CANNOT tell apart, and the limit of the guard below: a
+//     genuine first landing, and a chunk that RE-ROOTED onto this very issue.
+//     Close the root of {#10 → #11} once #10 has landed and #11 becomes
+//     parentless, so `chunk.branch` is `sandbar/chunk-11-…` — a name nobody has
+//     pushed — while #10's commits sit on `sandbar/chunk-10-…`. #11 IS the root
+//     of the chunk as derived, the two agree, and it is seeded from the source
+//     branch and lands on a fresh chunk branch with #10's work stranded on the
+//     old one. Nothing here can see it: `ChunkTarget` carries the root and the
+//     branch, and both say "new chunk". The signal that would separate the two
+//     — an origin chunk branch whose root issue is now closed — lives in the
+//     namespace preflight fetches, not in anything this function is handed, so
+//     closing it means threading that namespace into the planner rather than
+//     tightening a comparison here. Documented for the host instead, where the
+//     lane is chosen (`config.ts`, `defaultLane`, and the README's lane
+//     blockquote): don't close one member of a chunk with issues still queued
+//     behind it. The guard below covers the members BEHIND the new root, which
+//     is the case that has a fact to check.
 //   - A chunk the cache can name no branch for, and this issue is NOT its root
 //     → `ChunkBaseMissingError`. The ordinary argument says this cannot happen:
 //     a non-root member plans only once a blocker of its own carries

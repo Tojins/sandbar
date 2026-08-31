@@ -200,7 +200,10 @@ default 50, exit 3).
   non-root member that can find no chunk branch throws `ChunkBaseMissingError`
   (a per-issue HARD-ERROR, not a SandbarError) rather than being developed
   against a tree missing its blockers' work. The way that happens is a chunk
-  RE-ROOTING — close a root and the survivors re-derive under a new name.
+  RE-ROOTING — close a root and the survivors re-derive under a new name — and
+  the guard covers the members BEHIND the new root, not the new root itself,
+  which is indistinguishable from a fresh chunk with the facts seeding is given.
+  A host-facing hazard, so `config.ts` (`defaultLane`) and the README own it.
 - **A chunk is derived, never declared (#54 §2, #58).** `src/chunks.ts` is a
   pure function: a chunk is a connected component of the *review-gated* issues
   under the `## Blocked by` graph, rooted at its parentless member. Chunks are
