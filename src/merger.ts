@@ -820,7 +820,13 @@ export async function runMergerWithAdapter(
   }
 
   if (merged.length === 0) {
-    await emit(`no merges, no push`);
+    // Both halves of that sentence are about the SOURCE branch, and a cycle
+    // that landed chunks says so rather than reading as "nothing happened".
+    await emit(
+      chunkLanded.length === 0
+        ? `no merges, no push`
+        : `no merges onto the source branch, no push there — ${chunkLanded.length} issue(s) landed on a chunk branch above`,
+    );
     return { merged, chunkLanded, skipped, pushed: false, unclosed: [] };
   }
 

@@ -871,10 +871,13 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   // chunk branch lives on origin and is only cached here, so it is what says
   // whether a leftover member's issue branch is a duplicate of published work
   // or the last copy of it. Wildcard refspecs, so a repo that has never had a
-  // chunk fetches nothing and succeeds.
+  // chunk fetches nothing and succeeds; `--prune` scoped to those same
+  // destinations, so a chunk branch deleted on origin stops answering for one
+  // here rather than lingering as a cached yes.
   await runOk(cfg.layout.repoDir, "git", [
     "fetch",
     "origin",
+    "--prune",
     ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
     "--quiet",
   ]);
