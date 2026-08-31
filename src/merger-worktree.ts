@@ -14,8 +14,9 @@
 // merger), registered in the bare cache since #38, so the existing
 // `git worktree prune` + orphan sweep at the next cycle's sandbox bring-up
 // reclaims any leftover after a crash. We still remove
-// it explicitly in run.ts's finally, and register removal with onCleanup before
-// creating it so a signal mid-bringup tears it down.
+// it explicitly in run.ts's finally, and register removal with the cleanup
+// registry before creating it so a signal mid-bringup tears it down — as a
+// disposable (#55), since run.ts creates one of these per CYCLE.
 //
 // The merge result is pushed with `git push origin HEAD:<sourceBranch>`; the
 // operator's local branch is never touched. It catches up on the next
@@ -27,7 +28,7 @@ import { readFile, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { onCleanup } from "./cleanup.js";
+import { registerDisposable } from "./cleanup.js";
 import { SandbarError } from "./errors.js";
 import type { RepoLayout } from "./repo-cache.js";
 
@@ -139,10 +140,9 @@ export async function createMergerWorktree(opts: {
   const cwd = layout.repoDir;
   const path = mergerWorktreePathFor(layout.worktreesDir);
 
-  let removed = false;
-  const remove = async (): Promise<void> => {
-    if (removed) return;
-    removed = true;
+  // The removal itself, unlatched — this runs twice on the ordinary path, once
+  // to clear a prior crashed run's leftover and once as the teardown.
+  const sweep = async (): Promise<void> => {
     try {
       await exec("git", ["worktree", "remove", "--force", path], { cwd });
     } catch {
@@ -159,12 +159,25 @@ export async function createMergerWorktree(opts: {
       /* best-effort */
     }
   };
-  // Register before creating, so a signal during fetch/add still tears down.
-  onCleanup(remove);
 
-  // Clear any leftover from a prior crashed run before re-creating.
-  await remove();
-  removed = false;
+  let removed = false;
+  const remove = async (): Promise<void> => {
+    if (removed) return;
+    removed = true;
+    // Latched, so this can never do anything again — drop it from the registry
+    // rather than leave a spent closure there for the rest of the run (#55).
+    dispose();
+    await sweep();
+  };
+  // Register before creating, so a signal during fetch/add still tears down.
+  const dispose = registerDisposable(remove);
+
+  // Clear any leftover from a prior crashed run before re-creating. `sweep`
+  // rather than `remove`: the pre-clear is not this worktree's teardown and
+  // must not spend its latch — going through `remove` and resetting `removed`
+  // afterwards would leave the flag re-armed but the registration already
+  // disposed, so a signal during the fetch/add below would sweep nothing.
+  await sweep();
 
   try {
     await exec("git", ["fetch", "origin", sourceBranch, "--quiet"], { cwd });

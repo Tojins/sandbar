@@ -158,7 +158,10 @@ const UNKNOWN_PROVENANCE = "unrecorded";
 // Builds currently running, so a signal can reap them. ONE cleanup entry for
 // the whole process rather than one per build: `onCleanup` never forgets an
 // action, and gate-stack.ts declines to register its log followers there for
-// exactly that reason.
+// exactly that reason. This is the *correct* use of never-forgets — one entry
+// over a Set that never needs an unregister — rather than an instance of #55,
+// so it stays as it is; `registerDisposable` is for the callers that also have
+// to withdraw.
 const liveBuilds = new Set<ChildProcess>();
 let buildReaperInstalled = false;
 

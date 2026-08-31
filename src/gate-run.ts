@@ -100,7 +100,7 @@ import { realpathSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
-import { installCleanupTraps, onCleanup } from "./cleanup.js";
+import { installCleanupTraps, registerDisposable } from "./cleanup.js";
 import {
   type BuiltImage,
   type ResolvedConfig,
@@ -299,20 +299,26 @@ export async function runGateCommand(
   const err = opts.err ?? ((t: string) => process.stderr.write(t));
 
   installCleanupTraps();
-  // The teardown is called DIRECTLY on the way out, and registered with
-  // `onCleanup` only so a signal still reaches it. `runCleanup()` would have
-  // been shorter and is wrong here: that registry is drained once per PROCESS
-  // (#35's own `running` latch never resets), which is right for `run()`, which
-  // exits immediately after — and a silent leak for a command that returns a
-  // number to a caller who may call it again. So the actions are idempotent and
-  // this owns the order; the registry is the signal path, not the normal one.
+  // The teardown is called DIRECTLY on the way out, and registered with the
+  // cleanup registry only so a signal still reaches it. `runCleanup()` would
+  // have been shorter and is wrong here: that registry is drained once per
+  // PROCESS (#35's own `running` latch never resets), which is right for
+  // `run()`, which exits immediately after — and a silent leak for a command
+  // that returns a number to a caller who may call it again. So the actions are
+  // idempotent and this owns the order; the registry is the signal path, not
+  // the normal one.
+  //
+  // And a DISPOSABLE (#55) for that same reason, more sharply than anywhere
+  // else: a host that calls this in a loop is the case the paragraph above
+  // exists to serve, and a plain `onCleanup` would hand it one spent teardown
+  // closure per invocation with no way to get rid of them.
   const progress: GateProgress = {
     bringupStarted: false,
     stack: null,
     builtTags: null,
   };
-  const teardown = teardownFor(opts, err, progress);
-  onCleanup(teardown);
+  const teardown = teardownFor(opts, err, progress, () => dispose());
+  const dispose = registerDisposable(teardown);
   try {
     const config = resolveConfig(rawConfig);
     const requested = resolve(process.cwd(), opts.worktree);
@@ -430,11 +436,18 @@ function teardownFor(
   opts: GateCommandOptions,
   err: (text: string) => void,
   progress: GateProgress,
+  // Drops this teardown from the cleanup registry (#55). Taken as a parameter
+  // because the registration cannot exist until the closure it registers does.
+  dispose: () => void,
 ): () => Promise<void> {
   let done = false;
   return async () => {
     if (done) return;
     done = true;
+    // Latched, so this can never do anything again — and this command RETURNS
+    // to a host who may call it again, so leaving a spent closure behind is the
+    // one site where the accumulation is the embedding host's, not a run's.
+    dispose();
     // A teardown failure is reported, never thrown: this runs in a `finally`
     // and from a signal handler, and replacing the verdict — or the error
     // being unwound — with a `pod rm` complaint loses the thing the operator

@@ -214,7 +214,7 @@ import { createWriteStream, type WriteStream } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
-import { onCleanup } from "./cleanup.js";
+import { registerDisposable } from "./cleanup.js";
 import type { ResolvedGateStack, ResolvedStackContainer } from "./config.js";
 import { SandbarError } from "./errors.js";
 import {
@@ -355,6 +355,9 @@ export async function startSandboxStack(
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    // Latched, so this can never do anything again — drop it from the registry
+    // rather than leave a spent closure there for the rest of the run (#55).
+    dispose();
     for (const f of followers) f.stop();
     // Reverse creation order, and JOINERS BEFORE THE ANCHOR is the invariant
     // that matters — the anchor is removed by `sandbox.close()`, which the
@@ -389,9 +392,11 @@ export async function startSandboxStack(
   };
   // Registered before the first container exists, so a signal anywhere in the
   // bringup below still sweeps what was created. ONE entry for the whole stack
-  // — that registry never forgets an action, so one per container would grow
-  // without limit across a run.
-  onCleanup(stop);
+  // — one per container would grow without limit across a run. And a
+  // DISPOSABLE (#55) rather than a plain `onCleanup`, because stacks are
+  // themselves created in a loop: one per issue, plus one per HARD-ERROR retry.
+  // `registerDisposable`'s own header owns the rest of that argument.
+  const dispose = registerDisposable(stop);
 
   const attach: ContainerAttachment = {
     kind: "netns",

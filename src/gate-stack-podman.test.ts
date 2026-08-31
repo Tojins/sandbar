@@ -1920,8 +1920,8 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       expect(seeded).not.toBe("");
 
       // `stop()` under `keepAlive` removes nothing. It is still called, still
-      // idempotent, and still the thing `onCleanup` holds — it simply has
-      // nothing to do, which is what makes a Ctrl-C keep the stack too.
+      // idempotent, and still the thing the cleanup registry holds — it simply
+      // has nothing to do, which is what makes a Ctrl-C keep the stack too.
       await first.stop();
       expect(await idOf("db")).toBe(dbId);
 
