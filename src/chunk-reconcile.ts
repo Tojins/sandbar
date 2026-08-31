@@ -103,12 +103,21 @@ async function captureOk(
  * destinations is what stops a branch somebody deleted on origin answering
  * "yes, still there" out of a stale cache — which would send the wrap-up to
  * close issues on the strength of a ref that no longer exists.
+ *
+ * That makes the fetch LOAD-BEARING rather than an optimisation, so a fetch
+ * that failed answers "nothing has landed". A cache can be stale in both
+ * directions — a branch origin no longer has, and a source branch that has not
+ * caught up — and both readings are wrong in a way that writes to the tracker.
+ * `gh` reaching the forge over HTTPS while git's transport is down (an expired
+ * key, a proxy) is enough to produce exactly that, so it is not hypothetical.
+ * Returning empty is the same fail-soft the rest of discovery here uses: the
+ * state is still there next cycle.
  */
 export async function findLandedChunkBranches(
   repoDir: string,
   sourceBranch: string,
 ): Promise<readonly string[]> {
-  await captureOk(repoDir, "git", [
+  const fetched = await captureOk(repoDir, "git", [
     "fetch",
     "origin",
     "--prune",
@@ -116,6 +125,7 @@ export async function findLandedChunkBranches(
     ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
     "--quiet",
   ]);
+  if (!fetched.ok) return [];
   const listed = await captureOk(repoDir, "git", [
     "for-each-ref",
     "--format=%(refname)",

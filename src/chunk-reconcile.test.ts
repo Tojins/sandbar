@@ -251,9 +251,28 @@ describe("findLandedChunkBranches (real git)", () => {
   it("says nothing has landed when the repository has no chunk branch at all", async () => {
     await git(cache, "push", "origin", "--delete", "refs/heads/sandbar/chunk-42-landed");
     await git(cache, "push", "origin", "--delete", "refs/heads/sandbar/chunk-77-open");
+    // Not vacuous: the fetch has to SUCCEED for this to be the empty answer
+    // rather than the fail-soft one below, and a wildcard refspec that matches
+    // nothing is not a git error.
     expect(await findLandedChunkBranches(cache, "main")).toEqual([]);
   });
 
+  it("says nothing has landed when the fetch itself failed, however fresh the cache looks", async () => {
+    // The reviewer's scenario, and the reason the fetch's exit status is read
+    // rather than discarded: `gh` reaches the forge over HTTPS while git's
+    // transport is down (an expired key, a proxy). The cache still holds a
+    // chunk ref that IS contained in its `origin/main`, so every local question
+    // answers "landed" — and acting on that closes issues, deletes a branch and
+    // comments on a pull request for a chunk somebody may have already
+    // reconciled. Only the failed prune knows the cache cannot be trusted.
+    await git(cache, "remote", "set-url", "origin", join(root, "gone.git"));
+    expect(await findLandedChunkBranches(cache, "main")).toEqual([]);
+    // And the stale ref really is still there, so the guard is what produced
+    // the empty answer.
+    expect(
+      await git(cache, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/sandbar/*"),
+    ).toContain("sandbar/chunk-42-landed");
+  });
 });
 
 // ---------------------------------------------------------------------------
