@@ -1008,7 +1008,6 @@ export async function runMergerWithAdapter(
     onGateRed,
   };
 
-
   // One DONE issue branch. TRUE when a commit for this issue is on HEAD; FALSE
   // when it was skipped and HEAD is back where it was — with the issue told why
   // and taken off the queue.
@@ -1069,7 +1068,9 @@ export async function runMergerWithAdapter(
       // was commented on and de-labelled.
       return asHalt(`Merge loop failed on issue #${issue.id}`)(err);
     }
-  };  // ---------------------------------------------------------------------
+  };
+
+  // ---------------------------------------------------------------------
   // Phase A: the chunk landings (#60), before the source-branch pass — see
   // the header for why that order and not the other one.
   // ---------------------------------------------------------------------

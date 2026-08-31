@@ -176,7 +176,6 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       const base = (create ?? []).indexOf("--base");
       expect(create?.[base + 1]).toBe("main");
     });
-
   });
 
   // #64 — the wrap-up's writes, which the merge phase and the plan-time
@@ -294,6 +293,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
   });
 });
 
+// Discovery FAILS SOFT, and this is the half of that claim a fake adapter can
 // never show: what the readers do with a `gh` that answered something they
 // cannot read. These run at PLAN time, before anything else in the cycle, so a
 // throw out of one is not a degraded reconciliation — it is a run that does not
