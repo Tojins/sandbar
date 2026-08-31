@@ -767,20 +767,43 @@ export async function runMergerWithAdapter(
   // rather than absorbed: the run still halts loud and the message still names
   // the underlying failure, but the tracker state reaches Phase 4 first (#33).
   //
-  // `merged` is `[]` on every one of these, never the local array — see
-  // `landed` for the exact reason that is a fact rather than a hope, and for
-  // the one window where it stops being one.
-  //
-  // `chunkLanded` is the opposite: it is carried VERBATIM, because those
-  // commits really are on origin (the entry is written after the push) and the
-  // issues really do need their `in-chunk` label. Landing a chunk does not move
-  // the source branch, so it takes nothing away from the `merged: []` claim
-  // beside it — the two answer different questions.
+  // What such a partial may claim is `nothingLanded()` below, in one place.
   //
   // The original error rides along as `cause`. Without it an unexpected bug —
   // as opposed to a designed `SandbarError` — arrives at run.ts's merger-halted
   // branch as a bare message, and that branch is precisely the one that does
   // NOT reach the top-level handler that would have printed a stack.
+  // The summary of a cycle that landed NOTHING — every halt, every park and
+  // every early return below, which is the only thing any of them is entitled
+  // to claim. One claim, so one spelling: eight literals of it were eight
+  // chances for the next field added to `MergerSummary` to reach seven of them.
+  //
+  // `merged` is `[]` here and never the local array — see `landed` for why
+  // that is a fact rather than a hope, and for the one window where it stops
+  // being one. `mergedChunks` and `unclosed` are `[]` for the same reason one
+  // level down: both are written only inside `settleLanding`, past that window.
+  //
+  // `chunkLanded` is the opposite and is carried VERBATIM: those commits really
+  // are on origin (the entry is written after the push) and the issues really
+  // do need their `in-chunk` label. Landing a chunk does not move the source
+  // branch, so it takes nothing away from the `merged: []` claim beside it —
+  // the two answer different questions. `skipped` and `skippedChunks` are the
+  // same: a tracker write already made, which is the whole reason a partial
+  // exists (#33).
+  //
+  // COPIED, not aliased. A `MergerError.partial` outlives this function, and
+  // an array a later iteration could still push to is a partial that changes
+  // after it was reported.
+  const nothingLanded = (): MergerSummary => ({
+    merged: [],
+    chunkLanded: [...chunkLanded],
+    skipped: [...skipped],
+    pushed: false,
+    unclosed: [],
+    mergedChunks: [],
+    skippedChunks: [...skippedChunks],
+  });
+
   const asHalt =
     (context: string) =>
     (err: unknown): never => {
@@ -788,7 +811,7 @@ export async function runMergerWithAdapter(
       const msg = err instanceof Error ? err.message : String(err);
       throw new MergerError(
         `${context}: ${msg}`,
-        { merged: [], chunkLanded: [...chunkLanded], skipped, pushed: false, unclosed: [], mergedChunks: [], skippedChunks: [...skippedChunks] },
+        nothingLanded(),
         { cause: err },
       );
     };
@@ -1054,7 +1077,7 @@ export async function runMergerWithAdapter(
           `${landedMembers.length} issue(s) merged onto it locally and were NOT landed: ` +
           `${landedMembers.map((m) => `#${issueNumberOf(m)}`).join(", ")}. ` +
           `They keep ready-for-agent and their branches; the composition is discarded with the merger worktree.`,
-        { merged: [], chunkLanded: [...chunkLanded], skipped, pushed: false, unclosed: [], mergedChunks: [], skippedChunks: [...skippedChunks] },
+        nothingLanded(),
       );
     }
     for (const member of landedMembers) {
@@ -1285,15 +1308,7 @@ export async function runMergerWithAdapter(
         ? `no merges, no push`
         : `no merges onto the source branch, no push there — ${chunkLanded.length} issue(s) landed on a chunk branch above`,
     );
-    return {
-      merged,
-      chunkLanded,
-      skipped,
-      pushed: false,
-      unclosed: [],
-      mergedChunks: [],
-      skippedChunks,
-    };
+    return nothingLanded();
   }
 
   if (verified) {
@@ -1344,15 +1359,7 @@ export async function runMergerWithAdapter(
               `They keep ready-for-agent and their branches; the merge result itself is discarded ` +
               `with the ephemeral merger worktree.`
             : ""),
-        {
-          merged: [],
-          chunkLanded,
-          skipped,
-          pushed: false,
-          unclosed: [],
-          mergedChunks: [],
-          skippedChunks,
-        },
+        nothingLanded(),
       );
     }
 
@@ -1411,7 +1418,7 @@ export async function runMergerWithAdapter(
           haltVerified(err);
         }
       }
-      return { merged: [], chunkLanded, skipped, pushed: false, unclosed: [], mergedChunks: [], skippedChunks };
+      return nothingLanded();
     }
 
     // Origin has moved. From here `merged: []` would be a lie, so nothing below
@@ -1436,7 +1443,7 @@ export async function runMergerWithAdapter(
       throw new MergerError(
         "Push to origin source branch was rejected and `git pull --ff-only` then failed " +
           "(origin source has diverged). Operator must reconcile manually.",
-        { merged: [], chunkLanded, skipped, pushed: false, unclosed: [], mergedChunks: [], skippedChunks },
+        nothingLanded(),
       );
     }
     await emit(`push attempt 2`);
@@ -1445,21 +1452,16 @@ export async function runMergerWithAdapter(
       await emit(`push race retry exhausted`);
       throw new MergerError(
         "Push race retry exhausted: still rejected after one fast-forward pull and re-push.",
-        { merged: [], chunkLanded, skipped, pushed: false, unclosed: [], mergedChunks: [], skippedChunks },
+        nothingLanded(),
       );
     }
   }
   if (push.kind === "fatal") {
     await emit(`push fatal: ${push.reason}`);
-    throw new MergerError(`Push to origin source branch failed: ${push.reason}`, {
-      merged: [],
-      chunkLanded,
-      skipped,
-      pushed: false,
-      unclosed: [],
-      mergedChunks: [],
-      skippedChunks,
-    });
+    throw new MergerError(
+      `Push to origin source branch failed: ${push.reason}`,
+      nothingLanded(),
+    );
   }
 
   // Origin has moved — see `landed`.
