@@ -223,11 +223,16 @@ export function resolvePlan(
     lanes,
   );
 
-  // `in-chunk` from either source, because neither invents a label and both can
-  // be missing one: the authoritative batch may have skipped the issue, and the
-  // lagging listing may predate the flip. Both readings of the label — the
-  // de-queue below and the satisfaction clause — want the same fail-safe answer
-  // out of a disagreement, since each errs toward NOT working an issue.
+  // `in-chunk` from either source, because neither invents a label and each can
+  // be missing one the other has: the authoritative batch may have skipped the
+  // issue entirely, and the lagging search index may predate the flip. For the
+  // de-queue below the union is the fail-safe reading outright — an issue named
+  // by either source stays out of the plan. For the satisfaction clause it is
+  // the permissive direction, and the case it could get wrong does not arise:
+  // the only way to disagree that way round is a label the tracker has since
+  // lost, and a member keeps `in-chunk` for as long as its commits sit on the
+  // chunk branch — it loses the label when the chunk lands and the issue
+  // closes, at which point the CLOSED clause above answers first anyway.
   const listedLabels = new Map(
     candidates.map((c) => [c.number, c.labels] as const),
   );
