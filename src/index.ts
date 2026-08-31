@@ -43,3 +43,10 @@ export type { SandboxHooks } from "./agent-sandbox.js";
 // string IS the protocol, and a host spelling `"auto-land"` by hand in a
 // labelling script has restated it.
 export { AUTO_LAND_LABEL, type Lane } from "./lanes.js";
+// The label sandbar puts on a review-gated issue once its work is on its
+// chunk's branch (#60), exported on the same grounds as `AUTO_LAND_LABEL` and
+// with one more: sandbar never creates labels, so a host on the review lane has
+// to create this one before its first chunk lands, and the run that discovers
+// otherwise stops mid-finalise. A host's setup script should spell it from
+// here rather than by hand.
+export { IN_CHUNK_LABEL } from "./chunks.js";
