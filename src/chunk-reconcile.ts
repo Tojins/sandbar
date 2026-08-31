@@ -29,9 +29,9 @@
 // EVERY COMMAND NAMES ITS REPOSITORY (#34), and every git command runs in the
 // BARE CACHE — which is the only thing this module needs that the merge phase
 // does not have, and therefore the only argument its writes are its own. They
-// are not: `realReconcileAdapter` is `chunkForgeWrites` with that one cwd
-// supplied, so the argv that closes a member is written once (`chunk-land.ts`)
-// and read here. Nothing here writes to a worktree, and the one destructive
+// are not: the adapter is `chunkForgeWrites` with that one cwd supplied, so
+// the argv that closes a member is written once (`chunk-land.ts`) and read
+// here. Nothing here writes to a worktree, and the one destructive
 // operation, `git push origin --delete`, is aimed at origin rather than at any
 // local ref, so the "cannot reach the operator's checkout" property holds for
 // the same structural reason the rest of the startup path's does.
@@ -234,25 +234,6 @@ function parsePullRequests(stdout: string): readonly PullRequestSummary[] {
   return out;
 }
 
-/**
- * The wrap-up's writes, at plan time.
- *
- * The same primitive the merge phase uses (`chunkForgeWrites`), differing in
- * the one thing that actually differs: `git push --delete` runs in the BARE
- * CACHE here, because at plan time the merger worktree does not exist yet and
- * may never. Nothing else about a reconciliation's writes is its own.
- */
-export function realReconcileAdapter(deps: {
-  readonly repoDir: string;
-  readonly repo: RepoRef;
-}): ChunkWrapupAdapter {
-  return chunkForgeWrites({
-    repo: deps.repo,
-    gitCwd: deps.repoDir,
-    errPrefix: "reconcile",
-  });
-}
-
 export type ChunkReconciliation = ChunkWrapupResult & {
   readonly target: ChunkLandTarget;
 };
@@ -298,7 +279,18 @@ export async function reconcileLandedChunks(cfg: {
   ) => Promise<readonly PullRequestSummary[]>;
 }): Promise<ReconcileResult> {
   const repoDir = cfg.repoDir;
-  const log = cfg.log ?? ((): void => undefined);
+  // Swallowed, exactly as `wrapUpLandedChunk` swallows the sink handed to it,
+  // and for a sharper version of the same reason: a throw out of here between
+  // two targets discards the first one's result — issues already closed, branch
+  // already deleted — and takes the run down with no report of either. A run
+  // log that could not be written is not worth that.
+  const log = async (line: string): Promise<void> => {
+    try {
+      await cfg.log?.(line);
+    } catch {
+      /* the returned result is the record that matters */
+    }
+  };
   const landed = await (cfg.findLanded ?? findLandedChunkBranches)(
     repoDir,
     cfg.sourceBranch,
@@ -311,8 +303,18 @@ export async function reconcileLandedChunks(cfg: {
     landed,
   );
   const targets = selectReconciliations(landed, cfg.chunks, prs);
+  // The merge phase's writes, with the one thing that actually differs
+  // supplied: `git push --delete` runs in the BARE CACHE here, because at plan
+  // time the merger worktree does not exist yet and may never. Nothing else
+  // about a reconciliation's writes is its own, so there is no wrapper around
+  // this to name.
   const adapter =
-    cfg.adapter ?? realReconcileAdapter({ repoDir, repo: cfg.repo });
+    cfg.adapter ??
+    chunkForgeWrites({
+      repo: cfg.repo,
+      gitCwd: repoDir,
+      errPrefix: "reconcile",
+    });
 
   const reconciled: ChunkReconciliation[] = [];
   const closedIssues: number[] = [];

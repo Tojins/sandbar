@@ -8,6 +8,11 @@
 // repository" being wrong here is not a degraded prompt, it is a comment nobody
 // reads and an issue closed in the wrong place.
 //
+// One suite at the bottom uses the same shim the other way round — to make
+// `gh` FAIL, or answer something unparseable — because the reads that decide
+// which chunks are acted on (#64) promise to fail soft, and no fake adapter
+// sits low enough to break that promise.
+//
 // Asserted through a `gh` shim on PATH that records its own argv, driving the
 // REAL adapters. The shim resolves nothing from the working directory: the
 // point is only that `--repo <owner>/<name>` is present and correct, which is
@@ -17,10 +22,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { chunkForgeWrites } from "./chunk-land.js";
 import {
   fetchLandRequestPullRequests,
   fetchPullRequestsForBranches,
-  realReconcileAdapter,
 } from "./chunk-reconcile.js";
 import { realAdapter as realFinalizeAdapter } from "./finalize.js";
 import { realAdapter as realMergerAdapter } from "./merger.js";
@@ -191,8 +196,15 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         } as unknown as Parameters<typeof realMergerAdapter>[0]),
     ],
     [
+      // Built exactly as `reconcileLandedChunks` builds it — the reconciler has
+      // no adapter of its own to name, only these three arguments.
       "reconciler",
-      () => realReconcileAdapter({ repoDir: "/nonexistent-bare-cache", repo: REPO }),
+      () =>
+        chunkForgeWrites({
+          repo: REPO,
+          gitCwd: "/nonexistent-bare-cache",
+          errPrefix: "reconcile",
+        }),
     ],
   ])("the chunk wrap-up's writes, via the %s adapter", (_name, adapter) => {
     // The sharpest of them: closing an issue in the wrong repository is the one
@@ -279,5 +291,76 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         expect(repoFlagOf(argv)).toBe("acme/app");
       }
     });
+  });
+});
+
+// never show: what the readers do with a `gh` that answered something they
+// cannot read. These run at PLAN time, before anything else in the cycle, so a
+// throw out of one is not a degraded reconciliation — it is a run that does not
+// start, over a repair that was never urgent.
+describe("the forge readers fail soft (#64)", () => {
+  let shimBin: string;
+  let originalPath: string | undefined;
+  const REPO_REF = { owner: "acme", name: "app" };
+
+  // A `gh` that exits 0 and prints `body`, or exits 1 when `body` is null.
+  const shimAnswering = async (body: string | null): Promise<void> => {
+    await writeFile(
+      join(shimBin, "gh"),
+      body === null
+        ? "#!/bin/sh\nexit 1\n"
+        : `#!/bin/sh\ncat <<'SANDBAR_EOF'\n${body}\nSANDBAR_EOF\n`,
+      { mode: 0o755 },
+    );
+  };
+
+  beforeEach(async () => {
+    shimBin = await mkdtemp(join(tmpdir(), "sandbar-ghsoft-"));
+    originalPath = process.env["PATH"];
+    process.env["PATH"] = `${shimBin}:${originalPath ?? ""}`;
+  });
+
+  afterEach(async () => {
+    if (originalPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = originalPath;
+    await rm(shimBin, { recursive: true, force: true });
+  });
+
+  it("answers 'no requests' when gh cannot be run at all", async () => {
+    await shimAnswering(null);
+    expect(await fetchLandRequestPullRequests(REPO_REF, "land")).toEqual([]);
+    expect(
+      await fetchPullRequestsForBranches(REPO_REF, ["sandbar/chunk-42-c"]),
+    ).toEqual([]);
+  });
+
+  it("answers 'no requests' on output that is not JSON at all", async () => {
+    await shimAnswering("gh: could not resolve to a Repository");
+    expect(await fetchLandRequestPullRequests(REPO_REF, "land")).toEqual([]);
+  });
+
+  it("drops the unreadable entries and keeps the rest", async () => {
+    // One good, one missing `number`, one whose `headRefName` is the wrong
+    // type. The good one must survive: dropping a whole list over one bad
+    // element would strand a chunk a human labelled.
+    await shimAnswering(
+      JSON.stringify([
+        { number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42" },
+        { headRefName: "sandbar/chunk-77-c", title: "no number" },
+        { number: 11, headRefName: 404, title: "wrong type" },
+      ]),
+    );
+    expect(await fetchLandRequestPullRequests(REPO_REF, "land")).toEqual([
+      { number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42" },
+    ]);
+  });
+
+  it("tolerates a missing title, which is only ever prose", async () => {
+    await shimAnswering(
+      JSON.stringify([{ number: 9, headRefName: "sandbar/chunk-42-c" }]),
+    );
+    expect(await fetchLandRequestPullRequests(REPO_REF, "land")).toEqual([
+      { number: 9, headRefName: "sandbar/chunk-42-c", title: "" },
+    ]);
   });
 });
