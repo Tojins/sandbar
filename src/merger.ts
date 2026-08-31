@@ -1384,22 +1384,6 @@ export async function runMergerWithAdapter(
     if (await mergeOne(issue, SOURCE_TARGET)) merged.push(issue);
   }
 
-  // What the forge is asked to judge, and what the forge-red resolve loop is
-  // given as context (#22). A landed chunk's members belong in both: the
-  // composed result contains their commits, so a red the forge reports may
-  // well be theirs.
-  //
-  // In MERGE ORDER, chunks first, because `runVerifiedLanding` anchors its
-  // resolve prompt on the LAST entry and documents that as the topmost merge.
-  // Chunks go down first and this cycle's fresh branches on top, so ascending
-  // merge order is the chunks and then `merged` — the other way round the
-  // anchor would be the bottom-most commit in the composition, described to an
-  // agent as the top.
-  const landingIssues: readonly IssueRef[] = [
-    ...chunkMergesOnHead.flatMap(chunkMemberRefs),
-    ...merged,
-  ];
-
   // Everything that has to happen once the source branch has moved, in one
   // place because both landing modes reach it and neither may skip half of it.
   // Nothing here throws — `wrapUpLandedChunk` collects residue rather than
@@ -1456,6 +1440,23 @@ export async function runMergerWithAdapter(
     // three consecutive polls, an unreadable response, a `gh` without the right
     // scope).
     const haltVerified = asHalt("Verified merge failed");
+
+    // What the forge is asked to judge, and what the forge-red resolve loop is
+    // given as context (#22) — declared here because verified mode is the only
+    // thing that reads it, and the merge order below matters to nothing else.
+    // A landed chunk's members belong in both: the composed result contains
+    // their commits, so a red the forge reports may well be theirs.
+    //
+    // In MERGE ORDER, chunks first, because `runVerifiedLanding` anchors its
+    // resolve prompt on the LAST entry and documents that as the topmost merge.
+    // Chunks go down first and this cycle's fresh branches on top, so ascending
+    // merge order is the chunks and then `merged` — the other way round the
+    // anchor would be the bottom-most commit in the composition, described to
+    // an agent as the top.
+    const landingIssues: readonly IssueRef[] = [
+      ...chunkMergesOnHead.flatMap(chunkMemberRefs),
+      ...merged,
+    ];
 
     const landing = await runVerifiedLanding(
       {
