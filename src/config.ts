@@ -583,13 +583,13 @@ export type RunConfig = {
   // `gh` credentials must be allowed to open and edit pull requests, and
   // whoever reviews those branches has to know they are theirs to land — the
   // draft PR says as much on itself, but nothing notifies them. Fourth thing,
-  // and it bounds what the lane
-  // can do rather than what a host must provide: only a chunk's ROOT is worked
-  // until #61. A chained member — a review-gated issue blocked by another one —
-  // is held out of the plan permanently, not for a cycle or two: its blocker
-  // keeps `in-chunk` and keeps rooting the chunk, so the member never becomes
-  // the root. Today's review lane therefore lands one issue per chunk and hands
-  // the branch over; a chunk of one works end to end.
+  // and it bounds what the lane can do rather than what a host must provide:
+  // only a chunk's ROOT is worked until #61. A chained member — a review-gated
+  // issue blocked by another one — is held out of the plan permanently, not for
+  // a cycle or two: its blocker keeps `in-chunk` and keeps rooting the chunk, so
+  // the member never becomes the root. Today's review lane therefore lands one
+  // issue per chunk and hands the branch and its draft PR over; a chunk of one
+  // works end to end.
   readonly defaultLane?: Lane;
 };
 
