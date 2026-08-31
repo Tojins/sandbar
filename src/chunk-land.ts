@@ -422,7 +422,18 @@ export async function wrapUpLandedChunk(
     readonly log?: (line: string) => void | Promise<void>;
   },
 ): Promise<ChunkWrapupResult> {
-  const log = opts.log ?? ((): void => undefined);
+  // Swallowed, unlike everything else here. The caller in the merge phase logs
+  // through a sink that THROWS once the source branch has moved (`merger.ts`
+  // deliberately stops wrapping errors past that point), and a run log that
+  // could not be written is not worth abandoning a member's close for — which
+  // is exactly what an escaping throw would do, silently, halfway through.
+  const log = async (line: string): Promise<void> => {
+    try {
+      await opts.log?.(line);
+    } catch {
+      /* the wrap-up's result is the record that matters */
+    }
+  };
   const residue: string[] = [];
   const closed: number[] = [];
 

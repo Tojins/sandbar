@@ -321,3 +321,24 @@ describe("the prose (#64)", () => {
     expect(body).toContain(`\`${LAND_LABEL}\` label has been removed`);
   });
 });
+
+describe("wrapUpLandedChunk never throws (#64)", () => {
+  it("finishes the wrap-up when the log sink throws", async () => {
+    // The merge phase hands it a sink that throws once the source branch has
+    // moved — `merger.ts` stops wrapping errors past that point on purpose. A
+    // failed log write must not abandon a member's close halfway through.
+    const { adapter, calls } = makeWrapupAdapter();
+    const r = await wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+      log: () => {
+        throw new Error("ENOSPC");
+      },
+    });
+
+    expect(r.closed).toEqual([42, 43]);
+    expect(r.branchDeleted).toBe(true);
+    expect(r.residue).toEqual([]);
+    expect(calls.at(-1)?.op).toBe("deleteChunkBranch");
+  });
+});
