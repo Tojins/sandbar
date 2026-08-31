@@ -80,6 +80,14 @@
 // Close every member explicitly, drop `in-chunk`, close the pull request,
 // delete the chunk branch on origin.
 //
+// "EVERY MEMBER" MEANS EVERY MEMBER ON THE BRANCH, and that is narrower than
+// every member of the chunk. The list arrives already filtered — `NamedChunk`
+// carries the `in-chunk` members and nothing else — because a chunk of three
+// with only its root worked is the normal shape of the review lane until #61,
+// and closing the two issues still queued behind it would destroy them while
+// telling a human their commits had landed. Whatever this is handed, it closes;
+// the filtering argument lives with the list, in `chunks.ts`.
+//
 // EXPLICITLY is the load-bearing word on the first one. GitHub closes an issue
 // from a `Closes #N` trailer only when GitHub itself merges the pull request
 // carrying it — sandbar composes the merge locally and pushes the result, so no
@@ -155,8 +163,11 @@ export type ChunkLandTarget = {
   // The root issue's title where a member list is known, else the pull
   // request's own title. Names the chunk in the merge commit and in prose.
   readonly title: string;
-  // Every member on the branch, ascending. EMPTY is a real answer, not a
-  // failure: see `selectLandRequests`.
+  // The members whose work is ON the branch, ascending — the `in-chunk` ones,
+  // which is what `NamedChunk` carries and why it is filtered there. This list
+  // is what the wrap-up CLOSES, so a component member that has never been
+  // worked must not be in it. EMPTY is a real answer, not a failure: see
+  // `selectLandRequests`.
   readonly members: readonly ChunkMember[];
   // The pull request carrying the chunk. 0 when there is none to act on —
   // a reconciled chunk whose PR a human already closed.
@@ -196,10 +207,11 @@ function pullRequestsByHead(
  *
  * `chunks` is the plan's derivation, and it is how a request learns its
  * members — the PR names a branch and nothing else, and only the graph knows
- * which issues are on it. A request whose branch matches no derived chunk is
- * still returned, with NO members: the branch exists on origin and a human has
- * asked for it, so refusing would leave them holding a label nothing reads. It
- * lands and its PR closes; what it cannot do is close issues nobody named.
+ * which issues are on it, and which of those have actually landed on it. A
+ * request whose branch matches no derived chunk is still returned, with NO
+ * members: the branch exists on origin and a human has asked for it, so
+ * refusing would leave them holding a label nothing reads. It lands and its PR
+ * closes; what it cannot do is close issues nobody named.
  *
  * A `land` label on a pull request whose head is not a chunk branch is not
  * sandbar's business at all, and is dropped without comment.
@@ -274,6 +286,12 @@ export function selectReconciliations(
 // chunk they merged themselves would be a plain lie.
 export type LandingProvenance = "sandbar" | "reconciled";
 
+// Written inside the member loop, so it knows less than anything else here:
+// the closes after this one have not been attempted and the branch delete is
+// gated on all of them. It therefore says what will be true of the branch
+// EVENTUALLY ("retired once every issue on it has closed") rather than claiming
+// a delete it cannot see — the reviewer's own copy of that sentence lives on
+// the pull request, where the answer is known.
 export const CHUNK_MEMBER_CLOSED_COMMENT = (args: {
   readonly chunkBranch: string;
   readonly sourceBranch: string;
@@ -299,17 +317,33 @@ export const CHUNK_MEMBER_CLOSED_COMMENT = (args: {
     (others.length > 0
       ? `: ${others.map((m) => `#${m.number}`).join(", ")}`
       : "") +
-    `. Its \`${IN_CHUNK_LABEL}\` label is dropped and the chunk branch is deleted ` +
-    `— the commits live on \`${args.sourceBranch}\` from here.`
+    `. Its \`${IN_CHUNK_LABEL}\` label is dropped — the commits live on ` +
+    `\`${args.sourceBranch}\` from here, and the chunk branch is retired once every ` +
+    `issue on it has closed.`
   );
 };
 
+// Written AFTER the member loop and BEFORE the branch delete, which is what
+// bounds what it may say. The closes have happened, so it reports them rather
+// than reciting the target's member list — a comment that said "#42, #43 closed"
+// while #43 was still open would be the exact class of claim #60 had to go back
+// and unpick. The delete has NOT happened, and cannot be moved earlier: GitHub
+// closes a pull request when its head branch is deleted, so deleting first
+// would race this comment onto a PR that closed itself and make the `gh pr
+// close` below an error. So the branch is described as what is about to be
+// done, and only when the closes that gate it all worked.
 export const CHUNK_LANDED_PR_COMMENT = (args: {
   readonly chunkBranch: string;
   readonly sourceBranch: string;
   readonly provenance: LandingProvenance;
-  readonly members: readonly ChunkMember[];
+  // The members that actually closed, and the ones that did not. Together they
+  // are the target's member list; apart, they are the only two things this
+  // comment is entitled to say about it.
+  readonly closed: readonly ChunkMember[];
+  readonly unclosed: readonly ChunkMember[];
 }): string => {
+  const list = (ms: readonly ChunkMember[]): string[] =>
+    ms.map((m) => `- #${m.number} — ${m.title}`);
   const lines = [
     args.provenance === "sandbar"
       ? `${BOT_COMMENT_PREFIX} landed. \`${args.chunkBranch}\` was merged into ` +
@@ -321,21 +355,36 @@ export const CHUNK_LANDED_PR_COMMENT = (args: {
         `bookkeeping.`,
     "",
   ];
-  if (args.members.length > 0) {
-    lines.push("Issues closed:", "");
-    for (const m of args.members) lines.push(`- #${m.number} — ${m.title}`);
-  } else {
+  if (args.closed.length > 0) {
+    lines.push("Issues closed:", "", ...list(args.closed));
+  } else if (args.unclosed.length === 0) {
     lines.push(
       "No open chunk members were found for this branch, so no issue was closed " +
         "here. If any are still open, close them by hand.",
     );
   }
+  if (args.unclosed.length > 0) {
+    // The one thing a reviewer standing here can act on immediately, so it is
+    // named issue by issue rather than summarised.
+    lines.push(
+      "",
+      "Still OPEN — sandbar could not close these, and they keep their " +
+        `\`${IN_CHUNK_LABEL}\` label so they stay off the agent queue:`,
+      "",
+      ...list(args.unclosed),
+      "",
+      `\`${args.chunkBranch}\` is KEPT on origin because of them: the next run finds ` +
+        `it already contained in \`${args.sourceBranch}\` and retries exactly these ` +
+        `closes. Closing them by hand is just as good.`,
+    );
+  } else {
+    lines.push("", "The chunk branch is being deleted.");
+  }
   lines.push(
     "",
     `This pull request is closed rather than merged: its commits reached ` +
       `\`${args.sourceBranch}\` through sandbar's own merge, not through GitHub's ` +
-      `merge button, so there is nothing left for it to do. The chunk branch is ` +
-      `deleted.`,
+      `merge button, so there is nothing left for it to do.`,
   );
   return lines.join("\n");
 };
@@ -585,6 +634,12 @@ export async function wrapUpLandedChunk(
     `chunk ${target.branch}: closed ${closed.length}/${target.members.length} member(s)`,
   );
 
+  // Known before the pull request is written to, and read by both the comment
+  // and the delete below: a comment that recited `target.members` would tell a
+  // reviewer an issue closed that is sitting open two lines above it.
+  const closesComplete = closed.length === target.members.length;
+  const unclosed = target.members.filter((m) => !closed.includes(m.number));
+
   if (target.pullRequest > 0) {
     try {
       await adapter.commentOnPullRequest(
@@ -593,7 +648,8 @@ export async function wrapUpLandedChunk(
           chunkBranch: target.branch,
           sourceBranch: opts.sourceBranch,
           provenance: opts.provenance,
-          members: target.members,
+          closed: target.members.filter((m) => closed.includes(m.number)),
+          unclosed,
         }),
       );
       await adapter.closePullRequest(target.pullRequest);
@@ -611,7 +667,6 @@ export async function wrapUpLandedChunk(
   // worth another attempt. A PR that would not close is cosmetic by
   // comparison, and a branch kept for it would re-run the whole wrap-up every
   // cycle forever.
-  const closesComplete = closed.length === target.members.length;
   let branchDeleted = false;
   if (closesComplete) {
     try {

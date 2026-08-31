@@ -118,7 +118,8 @@ an exit condition fires.
    create-or-update both PR kinds share. A **`land` label on that PR** (#64)
    makes the next cycle merge `origin/<chunk>` in the SAME source pass, before
    the auto lane's branches, so one gate-2 and one landing cover both; the
-   wrap-up then closes every member, drops `in-chunk`, closes the PR and
+   wrap-up then closes every member ON the branch — the `in-chunk` ones, which
+   is why `NamedChunk` is filtered to them — drops `in-chunk`, closes the PR and
    deletes the branch. `src/chunk-land.ts` owns the label, the selection, the
    wrap-up and — as `chunkForgeWrites` — the one spelling of the `gh`/`git`
    writes the wrap-up makes, which the merge phase and the plan-time reconciler
@@ -222,8 +223,11 @@ default 50, exit 3).
   artifact and the recovery point, so every landing bases on `origin/<chunk>`,
   preflight fetches that namespace to reason about it, and the branch is
   deleted there (not locally) when the chunk lands (#64). `PlanResolution.chunks`
-  is the derivation with its members NAMED, because only the candidate graph
-  knows which issues a chunk branch carries.
+  is the derivation with the members ON the branch named, because only the
+  candidate graph knows which issues a chunk branch carries — the `in-chunk`
+  ones, the same set the chunk's PR lists, and NOT the whole component: a
+  chained member that has never been worked has no commits anywhere, and the
+  landing closes what this names.
 - **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,
   created or updated after every landing push, listing everything the branch
   carries — the members landing now plus `ChunkTarget.landed`, the planner's
@@ -242,7 +246,8 @@ default 50, exit 3).
   trailer only fires on GitHub's own merge of that PR, and sandbar composes
   the merge locally), and the chunk branch is deleted only once every close
   worked — a kept branch is what makes `src/chunk-reconcile.ts` retry the
-  remainder next run. That reconciler is also the answer to a hand-merged PR:
+  remainder next run, and therefore what `run.ts` halts on: residue left by a
+  chunk that DID retire is cosmetic, and nothing would retry it anyway. That reconciler is also the answer to a hand-merged PR:
   it runs at plan time, tests containment in `origin/<sourceBranch>` rather
   than intent, and does the identical wrap-up without the merge.
 - **Single-instance lock per workdir**, taken *before* preflight, with a

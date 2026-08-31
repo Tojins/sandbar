@@ -152,7 +152,7 @@ export const IN_CHUNK_LABEL = "in-chunk";
 // The label a HUMAN puts on a chunk's pull request to land it (#64). The other
 // end of the same lifecycle: `in-chunk` says the work is on the branch,
 // `land` says a reviewer is done with it and the next run should merge the
-// branch into the source branch and close every member.
+// branch into the source branch and close every member on it.
 //
 // Here rather than in `chunk-land.ts`, which owns everything ABOUT it — why it
 // is a label and not an approval, why it sits on the pull request, and how it
@@ -374,10 +374,11 @@ export function deriveChunks(
   return { chunks, chunkOf, blocked };
 }
 
-// A chunk with its members NAMED, which is what landing one needs (#64).
+// A chunk with the members that are ON ITS BRANCH named, which is what landing
+// one needs (#64).
 //
 // `Chunk` carries member numbers, because that is all the derivation itself has
-// to say. Landing a chunk on the source branch has to close every member and
+// to say. Landing a chunk on the source branch has to close those members and
 // say so in prose a human reads — on the issue, and on the pull request — so it
 // needs the titles too, and it needs the root's title to name the chunk when no
 // member list survives. Only the PLAN can build one of these: the titles come
@@ -386,8 +387,26 @@ export function deriveChunks(
 export type NamedChunk = {
   readonly root: number;
   readonly branch: string;
-  // The root issue's title — the same string `chunkBranchName` slugged.
+  // The root issue's title — the same string `chunkBranchName` slugged. Taken
+  // from the ROOT even when the root is not in `members`, because the branch is
+  // named after it and a chunk has to be nameable before any of it has landed.
   readonly title: string;
-  // Every member, ascending, root included.
+  // The members whose work is ON the chunk branch, ascending — which is exactly
+  // the members carrying `in-chunk`, and NOT every member of the component.
+  //
+  // That distinction is the whole correctness of the wrap-up, because this list
+  // is what gets CLOSED when the chunk lands. A component contains members that
+  // have never been worked: the review lane plans only a chunk's ROOT (#60) and
+  // holds the chain behind it, so a chunk of three can sit for weeks with one
+  // member's commits on the branch and two issues still queued. Closing those
+  // two would destroy queued work while telling a human their commits are on
+  // the source branch, and it would cancel the re-rooting the design turns on —
+  // a member left OPEN has its blocker satisfied by CLOSED and becomes its own
+  // chunk's root next cycle, while a closed one never does.
+  //
+  // `in-chunk` is exactly the right predicate: finalise applies that label only
+  // once the chunk branch carrying the member's commits is on origin (#60),
+  // which is the same fact the chunk PR's own member list is built from (#62) —
+  // so the issues this closes are the issues that PR said it carried.
   readonly members: readonly ChunkMember[];
 };

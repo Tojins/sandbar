@@ -146,8 +146,16 @@ type Recorded = { readonly op: string; readonly arg: string };
 
 function makeWrapupAdapter(
   fail: Partial<Record<string, string>> = {},
-): { adapter: ChunkWrapupAdapter; calls: Recorded[] } {
+): {
+  adapter: ChunkWrapupAdapter;
+  calls: Recorded[];
+  // The bodies the wrap-up wrote, which is where the "what may this claim?"
+  // assertions live: the templates are pure and tested directly, so what is
+  // worth pinning here is which of them the wrap-up chose to send.
+  bodies: string[];
+} {
   const calls: Recorded[] = [];
+  const bodies: string[] = [];
   const record = (op: string, arg: string): void => {
     calls.push({ op, arg });
     const err = fail[`${op}:${arg}`] ?? fail[op];
@@ -155,15 +163,20 @@ function makeWrapupAdapter(
   };
   return {
     calls,
+    bodies,
     adapter: {
-      async closeIssue(n) {
+      async closeIssue(n, comment) {
+        // After `record`, which is what throws: a close that failed posted no
+        // comment, so it must not leave one here either.
         record("closeIssue", String(n));
+        bodies.push(comment);
       },
       async removeLabel(n, label) {
         record("removeLabel", `${n}:${label}`);
       },
-      async commentOnPullRequest(p) {
+      async commentOnPullRequest(p, body) {
         record("commentOnPullRequest", String(p));
+        bodies.push(body);
       },
       async closePullRequest(p) {
         record("closePullRequest", String(p));
@@ -223,6 +236,24 @@ describe("wrapUpLandedChunk (#64)", () => {
     ]);
     expect(r.residue.join("\n")).toContain("#43 could not be closed");
     expect(r.residue.join("\n")).toContain("kept on origin");
+  });
+
+  it("tells the pull request what actually closed, not what was asked for", async () => {
+    // The wrap-up knows the answer by the time it writes here — the member loop
+    // is above it — so a comment reciting the target's member list would be
+    // claiming a close that failed two calls earlier.
+    const { adapter, bodies } = makeWrapupAdapter({ "closeIssue:43": "gh boom" });
+    await wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+    });
+
+    const prBody = bodies.at(-1) ?? "";
+    expect(prBody).toContain("- #42 — alpha");
+    expect(prBody).toContain("Still OPEN");
+    expect(prBody).toContain("- #43 — beta");
+    expect(prBody).toContain("is KEPT on origin");
+    expect(prBody).not.toMatch(/branch is being deleted/);
   });
 
   it("treats a failed label drop as benign residue and still deletes the branch", async () => {
@@ -296,15 +327,48 @@ describe("the prose (#64)", () => {
     expect(body).not.toContain("sandbar merged");
   });
 
-  it("says the PR is closed rather than merged, and lists what closed", () => {
+  it("does not promise a delete the member comment cannot have seen", () => {
+    // It is written inside the member loop: the closes the delete is gated on
+    // have not all been attempted yet, so it may say what becomes of the branch
+    // but not that it is already gone.
+    const body = CHUNK_MEMBER_CLOSED_COMMENT({
+      chunkBranch: "sandbar/chunk-42-alpha",
+      sourceBranch: "main",
+      provenance: "sandbar",
+      others: [],
+    });
+    expect(body).not.toMatch(/branch is deleted/);
+    expect(body).toContain("retired once every issue on it has closed");
+  });
+
+  it("says the PR is closed rather than merged, and lists what actually closed", () => {
     const body = CHUNK_LANDED_PR_COMMENT({
       chunkBranch: "sandbar/chunk-42-alpha",
       sourceBranch: "main",
       provenance: "sandbar",
-      members: [{ number: 42, title: "alpha" }],
+      closed: [{ number: 42, title: "alpha" }],
+      unclosed: [],
     });
     expect(body).toContain("- #42 — alpha");
     expect(body).toContain("closed rather than merged");
+    expect(body).toContain("The chunk branch is being deleted.");
+  });
+
+  it("names the members it could NOT close, and does not claim the branch went", () => {
+    // The claim #60 had to go back and unpick, one level up: a comment that
+    // listed #43 under "Issues closed" while #43 is open two lines above it.
+    const body = CHUNK_LANDED_PR_COMMENT({
+      chunkBranch: "sandbar/chunk-42-alpha",
+      sourceBranch: "main",
+      provenance: "sandbar",
+      closed: [{ number: 42, title: "alpha" }],
+      unclosed: [{ number: 43, title: "beta" }],
+    });
+    expect(body).toContain("- #42 — alpha");
+    expect(body).toContain("Still OPEN");
+    expect(body).toContain("- #43 — beta");
+    expect(body).toContain("is KEPT on origin");
+    expect(body).not.toMatch(/branch is being deleted/);
   });
 
   it("says the land label was removed when the merge was abandoned", () => {

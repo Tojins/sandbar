@@ -672,11 +672,12 @@ describe("resolvePlan chunk PR members (#62)", () => {
   });
 });
 
-// #64 — the resolution also carries the DERIVATION, members named. Landing a
-// reviewed chunk has to close its members, and only this graph knows who they
-// are: the merge phase sees the cycle's DONE branches and nothing else.
+// #64 — the resolution also carries the DERIVATION, with the members that are
+// ON each chunk's branch named. Landing a reviewed chunk CLOSES that list, and
+// only this graph knows who is on it: the merge phase sees the cycle's DONE
+// branches and nothing else.
 describe("resolvePlan chunks (#64)", () => {
-  it("names every member of every chunk, root title included", () => {
+  it("names every chunk, rooted and branched, even before anything has landed", () => {
     const r = resolvePlan(
       [
         issue(10, "", { title: "Root work" }),
@@ -689,29 +690,49 @@ describe("resolvePlan chunks (#64)", () => {
       "review",
     );
 
+    // Both chunks are named and branched — the branch is created from the ROOT
+    // whether or not a member has landed — and neither carries a member yet,
+    // because no commits are anywhere.
     expect(r.chunks).toEqual([
       {
         root: 10,
         branch: "sandbar/chunk-10-root-work",
         title: "Root work",
-        members: [
-          { number: 10, title: "Root work" },
-          { number: 11, title: "Chained work" },
-        ],
+        members: [],
       },
       {
         root: 20,
         branch: "sandbar/chunk-20-other-root",
         title: "Other root",
-        members: [{ number: 20, title: "Other root" }],
+        members: [],
       },
     ]);
   });
 
-  it("carries a member that has already landed, which is the whole point", () => {
+  it("carries the member that has landed, which is the whole point", () => {
     // #10 is `in-chunk` — landed on the branch, out of the queue, and listed
     // back in by `fetchChunkMembers`. A chunk that forgot it could not close
     // it when the chunk lands.
+    const r = resolvePlan(
+      [
+        issue(10, "", { title: "Root work", labels: [IN_CHUNK_LABEL] }),
+        issue(20, "", { title: "Other root" }),
+      ],
+      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.chunks[0]?.members).toEqual([{ number: 10, title: "Root work" }]);
+  });
+
+  it("does NOT carry a chained member that has never been worked", () => {
+    // The shape the review lane sits in for as long as a review takes: #10's
+    // work is on the branch, #11 is queued behind it and held (#60) because
+    // only a chunk's root plans. #11 has no commits anywhere — landing the
+    // chunk must not close it, or a queued issue is destroyed, told it landed,
+    // and stopped from ever re-rooting as its own chunk.
     const r = resolvePlan(
       [
         issue(10, "", { title: "Root work", labels: [IN_CHUNK_LABEL] }),
@@ -723,9 +744,10 @@ describe("resolvePlan chunks (#64)", () => {
       "review",
     );
 
-    expect(r.chunks.map((c) => c.members.map((m) => m.number))).toEqual([
-      [10, 11],
-    ]);
+    // #11 is in the chunk's COMPONENT — it is what makes the chunk more than
+    // one issue — and it is held for review rather than planned.
+    expect(r.heldForReview).toEqual([11]);
+    expect(r.chunks.map((c) => c.members.map((m) => m.number))).toEqual([[10]]);
   });
 
   it("is empty on the default lane, where no chunk exists", () => {

@@ -118,9 +118,11 @@
 // next run tries again. Nothing lands and nothing is closed in either case.
 //
 // The WRAP-UP runs only after the source branch has moved: close every member
-// explicitly (no `Closes #N` will ever fire — GitHub honours those on its own
-// merge of that pull request, and sandbar composed this one locally), drop
-// `in-chunk`, close the PR, delete the chunk branch on origin. It cannot throw,
+// ON THE BRANCH explicitly (the `in-chunk` ones — a component member that was
+// never worked has no commits here and must not be closed; and no `Closes #N`
+// will ever fire, since GitHub honours those on its own merge of that pull
+// request and sandbar composed this one locally), drop `in-chunk`, close the
+// PR, delete the chunk branch on origin. It cannot throw,
 // by construction: it is entirely inside the post-`landed` window, where a
 // wrapped throw would report `merged: []` against a source branch that moved.
 // What it could not finish comes back as `ChunkMerge.residue`, the chunk branch

@@ -978,33 +978,64 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         await runFinalize("merge outcomes", inputs);
       }
 
-      // Two reports about DURABLE work with tracker state left wrong, and both
-      // are printed before either stops the run. Neither may gate on the other
-      // having stayed quiet: they share a cause — a `gh` that is having a bad
-      // minute — so a cycle that hits one hits the other more often than a
-      // cycle picked at random does, and the report that lost would be the
-      // operator's only notice that some issue is closed-in-name-only.
+      // Reports about DURABLE work with tracker state left wrong, all printed
+      // before any of them stops the run. None may gate on another having
+      // stayed quiet: they share a cause — a `gh` that is having a bad minute —
+      // so a cycle that hits one hits the others more often than a cycle picked
+      // at random does, and the report that lost would be the operator's only
+      // notice that some issue is closed-in-name-only.
       const haltReasons: string[] = [];
 
-      // #64 — a landed chunk whose wrap-up could not finish. Unlike a parked
-      // chunk (already fully reported on its own pull request), the chunk is on
-      // the source branch and some member is still open or some branch is still
-      // there. The next run's reconciler retries it — the branch is kept
-      // precisely so it can — but a run that carried on silently would keep
-      // landing work past a repair nobody had been told about.
-      const chunkResidue = (mergerSummary?.mergedChunks ?? []).flatMap(
-        (c) => c.residue,
-      );
-      if (chunkResidue.length > 0) {
-        console.error(
-          `\nSandbar landed ${mergerSummary?.mergedChunks.length} chunk(s) on ` +
-            `${config.sourceBranch} but could not finish reconciling them:\n` +
-            chunkResidue.map((r) => `  ${r}`).join("\n") +
-            "\nThe work is durable. The next run reconciles what is left; fix it " +
-            "by hand if it is urgent.",
+      // #64 — a landed chunk whose wrap-up did not entirely finish. That comes
+      // in two shapes, and only one of them is worth stopping a run over.
+      //
+      // WHAT HALTS is a chunk still on origin: some member would not close, or
+      // the branch delete itself failed. The work is on the source branch and
+      // the tracker does not agree with it, and carrying on would keep landing
+      // work past a repair nobody had been told about. The branch is kept
+      // precisely so the next run's reconciler retries it, which is also what
+      // makes `branchDeleted` the right test — it is exactly "will anything
+      // retry this?", where the residue list is only "did every write work?".
+      //
+      // WHAT DOES NOT HALT is a chunk that retired cleanly and left a cosmetic
+      // line behind: a `in-chunk` label that would not come off a CLOSED issue
+      // (the wrap-up calls that harmless itself, and the planner lists open
+      // issues only), or a pull request that would not close. Neither leaves an
+      // issue on no queue, and halting on one would abandon the rest of the
+      // run's budget over a label — while promising a next-run repair that
+      // cannot happen, since the branch those lines came with is gone.
+      const landedChunks = mergerSummary?.mergedChunks ?? [];
+      const keptChunks = landedChunks.filter((c) => !c.branchDeleted);
+      const retiredResidue = landedChunks
+        .filter((c) => c.branchDeleted)
+        .flatMap((c) => c.residue);
+      if (retiredResidue.length > 0) {
+        console.warn(
+          `\nSandbar landed and retired ${landedChunks.length - keptChunks.length} ` +
+            `chunk(s) on ${config.sourceBranch}, with some bookkeeping left over:\n` +
+            retiredResidue.map((r) => `  ${r}`).join("\n") +
+            "\nEvery member closed and the chunk branch is gone, so nothing retries " +
+            "these — they are cosmetic, and yours to tidy if you care to.",
         );
         await runLogger.appendOrchestrator(
-          `merger: chunk wrap-up residue: ${chunkResidue.join("; ")}`,
+          `merger: retired chunk residue: ${retiredResidue.join("; ")}`,
+        );
+      }
+      if (keptChunks.length > 0) {
+        console.error(
+          `\nSandbar landed ${keptChunks.length} chunk(s) on ${config.sourceBranch} ` +
+            "but could not finish reconciling them:\n" +
+            keptChunks
+              .flatMap((c) => c.residue)
+              .map((r) => `  ${r}`)
+              .join("\n") +
+            "\nThe work is durable and the chunk branch(es) were KEPT on origin, so " +
+            "the next run reconciles what is left; fix it by hand if it is urgent.",
+        );
+        await runLogger.appendOrchestrator(
+          `merger: chunk wrap-up incomplete: ${keptChunks
+            .flatMap((c) => c.residue)
+            .join("; ")}`,
         );
         haltReasons.push("chunk-wrapup-incomplete");
       }

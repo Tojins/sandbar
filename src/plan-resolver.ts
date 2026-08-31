@@ -211,13 +211,17 @@ export type PlanResolution = {
   // about the issue's labels, and a human wants it while the chain is still
   // being queued, not once it reaches the front.
   readonly overrides: readonly LaneOverride[];
-  // Every chunk this candidate graph derives, members NAMED, by root (#64).
+  // Every chunk this candidate graph derives, by root, with the members that
+  // are on its branch NAMED (#64).
   //
   // Not a plan and not a landing decision: it is the answer to "which issues
   // are on `sandbar/chunk-<root>-<slug>`?", and nothing but this graph can give
-  // it. Landing a reviewed chunk has to close its members and name them on the
+  // it. Landing a reviewed chunk has to close those members and name them on the
   // pull request, while the merge phase sees only the cycle's DONE branches —
   // the same argument that puts `ChunkTarget.landed` here (#62), one level up.
+  // Which is also why the two agree: both are the `in-chunk` members, so what a
+  // landing closes is what the chunk's pull request said it carried, and a
+  // component member that has never been worked is in neither.
   // Empty for every host on the default lane.
   readonly chunks: readonly NamedChunk[];
 };
@@ -356,17 +360,34 @@ export function resolvePlan(
     }
     return true;
   });
-  // The derivation itself, members named, for the two consumers that need a
-  // whole chunk rather than one issue's landing target (#64): the reader of the
-  // `land` label and the reconciler. Every member has a title here for the same
-  // reason `ChunkTarget.landed` does — `fetchChunkMembers` lists the landed
-  // members back in, so the candidate listing carries every member of every
-  // chunk by construction.
+  // The derivation itself, named, for the two consumers that need a whole chunk
+  // rather than one issue's landing target (#64): the reader of the `land`
+  // label and the reconciler. Every member has a title here for the same reason
+  // `ChunkTarget.landed` does — `fetchChunkMembers` lists the landed members
+  // back in, so the candidate listing carries every member of every chunk by
+  // construction.
+  //
+  // FILTERED TO `in-chunk`, which is the difference between "the issues in this
+  // component" and "the issues on this branch". Landing the chunk CLOSES this
+  // list, and a component member that has never been worked — every chained
+  // member, since only a root plans until #61 — has no commits anywhere: closing
+  // it would destroy a queued issue, tell a human it had landed, and stop it
+  // ever re-rooting as its own chunk. It is the same predicate `chunkTargetOf`
+  // builds `landed` from, so the wrap-up closes exactly the issues the chunk's
+  // pull request said it carried (#62).
+  //
+  // The one member such a list could miss is one landing on the chunk branch in
+  // the very cycle the chunk lands. It cannot happen today — the only member
+  // that plans is the root, and by the time a pull request exists for a human to
+  // label, the root has carried `in-chunk` since the cycle before — but #61 is
+  // what makes chained members plannable, and it inherits this as a question.
   const namedChunks: NamedChunk[] = chunks.map((c) => ({
     root: c.root,
     branch: c.branch,
     title: titleOf.get(c.root) ?? "",
-    members: c.members.map((m) => ({ number: m, title: titleOf.get(m) ?? "" })),
+    members: c.members
+      .filter(isInChunk)
+      .map((m) => ({ number: m, title: titleOf.get(m) ?? "" })),
   }));
 
   const sorted = [...eligible].sort((a, b) => a.number - b.number);
