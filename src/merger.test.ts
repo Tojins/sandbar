@@ -1925,7 +1925,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     );
 
     expect(summary.skippedChunks).toEqual([
-      { request: request(42), reason: "conflict" },
+      { target: request(42), reason: "conflict" },
     ]);
     expect(calls.prLabelRemovals).toEqual([{ pr: 542, label: LAND_LABEL }]);
     expect(calls.prComments[0]?.body).toContain("irreconcilable");

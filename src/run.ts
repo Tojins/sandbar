@@ -880,15 +880,12 @@ export async function run(rawConfig: RunConfig): Promise<void> {
           // one line names a branch and the issues it took with it.
           for (const c of mergerSummary.mergedChunks) {
             console.log(
-              `  ⇥ ${c.request.branch} → ${config.sourceBranch}, closing ` +
+              `  ⇥ ${c.target.branch} → ${config.sourceBranch}, closing ` +
                 `${c.closed.map((n) => `#${n}`).join(", ") || "no issue"}`,
             );
           }
-          for (const c of mergerSummary.skippedChunks) {
-            console.log(
-              `  ⊘ ${c.request.branch} not landed (${c.reason}); \`${LAND_LABEL}\` removed`,
-            );
-          }
+          // Parked chunks are NOT printed here — see Phase 4b, which prints
+          // them off `mergerOutcome` so the halt path reports them too.
           await runLogger.appendOrchestrator(
             `merger: merged=${mergerSummary.merged.length} ` +
               `chunk-landed=${mergerSummary.chunkLanded.length} ` +
@@ -974,6 +971,18 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         // after the source branch has moved.
         for (const c of mergerOutcome.mergedChunks) {
           for (const n of c.closed) mergedThisRun.add(n);
+        }
+        // A parked chunk (#64) is reported from HERE rather than beside the
+        // merge summary above, and that is the whole difference `mergerOutcome`
+        // makes: parking is a tracker write already applied — the pull request
+        // was commented on and a human's `land` label taken off it — so it
+        // rides `MergerError.partial` exactly as `skipped` does, and a halt one
+        // issue later must not be the reason a reviewer never learns their
+        // label is gone.
+        for (const c of mergerOutcome.skippedChunks) {
+          console.log(
+            `  ⊘ ${c.target.branch} not landed (${c.reason}); \`${LAND_LABEL}\` removed`,
+          );
         }
         await runFinalize("merge outcomes", inputs);
       }

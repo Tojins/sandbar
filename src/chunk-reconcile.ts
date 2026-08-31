@@ -47,9 +47,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import {
-  type ChunkLandTarget,
+  type ChunkWrapup,
   type ChunkWrapupAdapter,
-  type ChunkWrapupResult,
   type PullRequestSummary,
   chunkForgeWrites,
   selectReconciliations,
@@ -66,27 +65,22 @@ const exec = promisify(execFile);
 
 const ORIGIN_REF_PREFIX = "refs/remotes/origin/";
 
-// A `gh` read. No `cwd`, on purpose and by the precedent `plan-resolver.ts`
-// states outright: with `--repo` given, gh never looks at git remotes, so
-// there is no directory left for one to be wrong (#34).
-async function captureGh(
-  args: readonly string[],
-): Promise<{ ok: boolean; stdout: string }> {
-  try {
-    const { stdout } = await exec("gh", [...args]);
-    return { ok: true, stdout };
-  } catch {
-    return { ok: false, stdout: "" };
-  }
-}
-
-async function captureOk(
-  cwd: string,
+// One read that answers rather than throws — the shape every discovery call
+// here takes, since a failure to work out WHAT to reconcile is "nothing to
+// reconcile" (see the header).
+//
+// `cwd` is where the difference between the two kinds of read lives, and it is
+// the only one: a `git` read runs in the bare cache, and a `gh` read runs
+// nowhere in particular, on purpose and by the precedent `plan-resolver.ts`
+// states outright — with `--repo` given, gh never looks at a git remote, so
+// there is no directory left for one to be wrong about (#34).
+async function capture(
   file: string,
   args: readonly string[],
+  cwd?: string,
 ): Promise<{ ok: boolean; stdout: string }> {
   try {
-    const { stdout } = await exec(file, [...args], { cwd });
+    const { stdout } = await exec(file, [...args], cwd === undefined ? {} : { cwd });
     return { ok: true, stdout };
   } catch {
     return { ok: false, stdout: "" };
@@ -117,30 +111,33 @@ export async function findLandedChunkBranches(
   repoDir: string,
   sourceBranch: string,
 ): Promise<readonly string[]> {
-  const fetched = await captureOk(repoDir, "git", [
-    "fetch",
-    "origin",
-    "--prune",
-    sourceBranch,
-    ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
-    "--quiet",
-  ]);
+  const fetched = await capture(
+    "git",
+    [
+      "fetch",
+      "origin",
+      "--prune",
+      sourceBranch,
+      ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+      "--quiet",
+    ],
+    repoDir,
+  );
   if (!fetched.ok) return [];
-  const listed = await captureOk(repoDir, "git", [
-    "for-each-ref",
-    "--format=%(refname)",
-    ...ORIGIN_CHUNK_BRANCH_REFGLOBS,
-  ]);
+  const listed = await capture(
+    "git",
+    ["for-each-ref", "--format=%(refname)", ...ORIGIN_CHUNK_BRANCH_REFGLOBS],
+    repoDir,
+  );
   if (!listed.ok) return [];
   const landed: string[] = [];
   for (const ref of listed.stdout.split("\n").map((s) => s.trim())) {
     if (!ref.startsWith(ORIGIN_REF_PREFIX)) continue;
-    const contained = await captureOk(repoDir, "git", [
-      "merge-base",
-      "--is-ancestor",
-      ref,
-      `${ORIGIN_REF_PREFIX}${sourceBranch}`,
-    ]);
+    const contained = await capture(
+      "git",
+      ["merge-base", "--is-ancestor", ref, `${ORIGIN_REF_PREFIX}${sourceBranch}`],
+      repoDir,
+    );
     if (contained.ok) landed.push(ref.slice(ORIGIN_REF_PREFIX.length));
   }
   return landed;
@@ -159,7 +156,7 @@ export async function fetchPullRequestsForBranches(
 ): Promise<readonly PullRequestSummary[]> {
   const found: PullRequestSummary[] = [];
   for (const branch of branches) {
-    const r = await captureGh([
+    const r = await capture("gh", [
       "pr",
       "list",
       "--repo",
@@ -189,7 +186,7 @@ export async function fetchLandRequestPullRequests(
   repo: RepoRef,
   label: string,
 ): Promise<readonly PullRequestSummary[]> {
-  const r = await captureGh([
+  const r = await capture("gh", [
     "pr",
     "list",
     "--repo",
@@ -234,14 +231,10 @@ function parsePullRequests(stdout: string): readonly PullRequestSummary[] {
   return out;
 }
 
-export type ChunkReconciliation = ChunkWrapupResult & {
-  readonly target: ChunkLandTarget;
-};
-
 export type ReconcileResult = {
   // One entry per chunk branch found already on the source branch, in root
   // order. Empty is the overwhelmingly common answer.
-  readonly reconciled: readonly ChunkReconciliation[];
+  readonly reconciled: readonly ChunkWrapup[];
   // Every issue closed across all of them, which is what the caller adds to its
   // "already merged this run" exclusion set.
   readonly closedIssues: readonly number[];
@@ -316,7 +309,7 @@ export async function reconcileLandedChunks(cfg: {
       errPrefix: "reconcile",
     });
 
-  const reconciled: ChunkReconciliation[] = [];
+  const reconciled: ChunkWrapup[] = [];
   const closedIssues: number[] = [];
   const residue: string[] = [];
   for (const target of targets) {

@@ -125,7 +125,7 @@
 // PR, delete the chunk branch on origin. It cannot throw,
 // by construction: it is entirely inside the post-`landed` window, where a
 // wrapped throw would report `merged: []` against a source branch that moved.
-// What it could not finish comes back as `ChunkMerge.residue`, the chunk branch
+// What it could not finish comes back as `ChunkWrapup.residue`, the chunk branch
 // is kept when it is non-empty, and the next run's reconciler picks up exactly
 // the writes that failed.
 //
@@ -199,7 +199,7 @@ import {
   CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT,
   CHUNK_LAND_ABANDONED_PR_COMMENT,
   type ChunkLandTarget,
-  type ChunkWrapupResult,
+  type ChunkWrapup,
   LAND_LABEL,
   chunkForgeWrites,
   wrapUpLandedChunk,
@@ -518,9 +518,9 @@ export type ChunkLandingOptions = {
 // One request with its destination attached — the form the merge loop carries a
 // chunk landing in, so that the two halves of `ChunkLandingOptions` never have
 // to be reunited by a defaulted local. Internal: what leaves this module is
-// `ChunkMerge`, which names the request alone.
+// `ChunkWrapup`, which names the target alone.
 type ChunkLandingUnit = {
-  readonly request: ChunkLandTarget;
+  readonly target: ChunkLandTarget;
   readonly sourceBranch: string;
 };
 
@@ -544,13 +544,12 @@ export type ChunkLanding = {
   readonly chunkBranch: string;
 };
 
-// A chunk landed on the SOURCE branch this cycle, with what its wrap-up could
-// not finish (#64). Distinct from `ChunkLanding` above in the direction it
-// points: that one is an issue arriving ON a chunk branch, this one is the
-// whole chunk leaving it.
-export type ChunkMerge = ChunkWrapupResult & {
-  readonly request: ChunkLandTarget;
-};
+// A chunk landed on the SOURCE branch this cycle is a `ChunkWrapup` (#64) —
+// the one `chunk-reconcile.ts` reports too, since what a landing and a
+// reconciliation leave behind is the same object and one `run.ts` report reads
+// both. Do not confuse it with `ChunkLanding` above, which points the other
+// way: that one is an issue arriving ON a chunk branch, this one is the whole
+// chunk leaving it.
 
 // Why a requested chunk did not land. Every one of these has already taken
 // `land` off the pull request and said why on it, so the request is not
@@ -566,7 +565,7 @@ export type ChunkLandSkipReason =
   | "forge-unverified";
 
 export type SkippedChunkLand = {
-  readonly request: ChunkLandTarget;
+  readonly target: ChunkLandTarget;
   readonly reason: ChunkLandSkipReason;
 };
 
@@ -593,7 +592,7 @@ export type MergerSummary = {
   // residue of its wrap-up. Non-empty residue is operator-actionable and the
   // orchestrator halts on it — the chunk branch is kept in that case, so the
   // next run's reconciler retries exactly the writes that failed.
-  readonly mergedChunks: readonly ChunkMerge[];
+  readonly mergedChunks: readonly ChunkWrapup[];
   // Requested chunks that did not land and have had `land` removed. Rides a
   // `MergerError.partial` for the same reason `skipped` does: the pull request
   // has already been written to.
@@ -1198,7 +1197,7 @@ export async function runMergerWithAdapter(
   const chunkMemberRefs = (
     unit: MergedChunkUnit,
   ): readonly IssueRef[] =>
-    unit.request.members.map((m) => ({
+    unit.target.members.map((m) => ({
       id: String(m.number),
       title: m.title,
       branch: unit.ref,
@@ -1217,7 +1216,7 @@ export async function runMergerWithAdapter(
       await adapter.commentOnPullRequest(request.pullRequest, comment);
       await adapter.removePullRequestLabel(request.pullRequest, LAND_LABEL);
     }
-    skippedChunks.push({ request, reason });
+    skippedChunks.push({ target: request, reason });
     await emit(`chunk ${request.branch}: not landed (${reason})`);
   };
 
@@ -1238,7 +1237,7 @@ export async function runMergerWithAdapter(
     const onHead: MergedChunkUnit[] = [];
     for (const request of chunkLanding.requests) {
       const pending: ChunkLandingUnit = {
-        request,
+        target: request,
         sourceBranch: chunkLanding.sourceBranch,
       };
       try {
@@ -1332,14 +1331,14 @@ export async function runMergerWithAdapter(
   // That is what keeps the post-`landed` window free of the wrapped-throw
   // problem the whole of `asHalt` exists for.
   const settleLanding = async (): Promise<MergerSummary> => {
-    const mergedChunks: ChunkMerge[] = [];
-    for (const { request, sourceBranch } of chunkMergesOnHead) {
-      const wrapup = await wrapUpLandedChunk(request, adapter, {
+    const mergedChunks: ChunkWrapup[] = [];
+    for (const { target, sourceBranch } of chunkMergesOnHead) {
+      const wrapup = await wrapUpLandedChunk(target, adapter, {
         sourceBranch,
         provenance: "sandbar",
         log: (line) => emit(line),
       });
-      mergedChunks.push({ request, ...wrapup });
+      mergedChunks.push({ target, ...wrapup });
     }
     return {
       merged,
@@ -1458,12 +1457,12 @@ export async function runMergerWithAdapter(
       // issues beside them and parked the same way: `land` comes off and the
       // pull request says the forge judged the whole composition, not this
       // chunk. The revert above already took their merges with it.
-      for (const { request, sourceBranch } of chunkMergesOnHead) {
+      for (const { target, sourceBranch } of chunkMergesOnHead) {
         try {
           await parkChunk(
-            request,
+            target,
             CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT({
-              chunkBranch: request.branch,
+              chunkBranch: target.branch,
               sourceBranch,
               detail: landing.detail,
               siblings: merged.map((m) => issueNumberOf(m)),

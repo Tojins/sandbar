@@ -591,6 +591,15 @@ export type ChunkWrapupResult = {
   readonly residue: readonly string[];
 };
 
+// One chunk that has been through the wrap-up, named. The result alone says
+// what happened and not to what, and both callers had to attach the target
+// back — under two different field names, for one object that reaches one
+// reporting path in `run.ts`. It is spelled here instead, beside the wrap-up
+// that produces the result half.
+export type ChunkWrapup = ChunkWrapupResult & {
+  readonly target: ChunkLandTarget;
+};
+
 const detail = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
 
