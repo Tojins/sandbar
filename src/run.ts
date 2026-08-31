@@ -21,8 +21,10 @@
 //                              the forge's checks pass on the merge result.
 //                              A review-gated issue lands on its CHUNK's
 //                              branch instead (#60), which is pushed as it
-//                              goes; nothing of it reaches the source branch
-//                              until a human has reviewed the chunk.
+//                              goes and carries a DRAFT pull request opened or
+//                              updated per cycle (#62); nothing of it reaches
+//                              the source branch until a human has reviewed
+//                              the chunk.
 //   Phase 4 (Finalise):        Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels. Runs in TWO passes (#30): 4a

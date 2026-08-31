@@ -61,6 +61,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         "done",
         'printf "]\\n" >> "$log"',
         'case "$*" in',
+        '  "pr list"*) printf "[]" ;;',
         '  *--json*state*) printf \'{"state":"OPEN"}\' ;;',
         "esac",
         "exit 0",
@@ -145,6 +146,34 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       expect(argv?.slice(0, 3)).toEqual(["issue", "edit", "7"]);
       expect(repoFlagOf(argv ?? [])).toBe("acme/app");
       expect(argv).toContain("--remove-label");
+    });
+
+    // #62 — the chunk PR is a WRITE too, and the wrong repo here is a review
+    // surface opened where nobody is looking while the branch grows elsewhere.
+    it("opens the chunk PR as a draft, in the configured repo, against the source branch", async () => {
+      // A real cwd, unlike the three above: this call runs `gh` FROM the
+      // merger worktree (as forge-verify's PR calls do), so a directory that
+      // does not exist fails the spawn before any argv is recorded.
+      await realMergerAdapter({
+        cwd: shimBin,
+        repo: REPO,
+        sourceBranch: "main",
+      } as unknown as Parameters<typeof realMergerAdapter>[0]).ensureChunkPullRequest({
+        chunkBranch: "sandbar/chunk-42-c",
+        title: "Sandbar chunk #42: x",
+        body: "members",
+      });
+
+      const [list, create] = await calls();
+      expect(list?.slice(0, 2)).toEqual(["pr", "list"]);
+      expect(repoFlagOf(list ?? [])).toBe("acme/app");
+      expect(create?.slice(0, 2)).toEqual(["pr", "create"]);
+      expect(repoFlagOf(create ?? [])).toBe("acme/app");
+      expect(create).toContain("--draft");
+      const head = (create ?? []).indexOf("--head");
+      expect(create?.[head + 1]).toBe("sandbar/chunk-42-c");
+      const base = (create ?? []).indexOf("--base");
+      expect(create?.[base + 1]).toBe("main");
     });
 
     // The sharpest of the six: closing an issue in the wrong repository is the

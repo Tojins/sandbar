@@ -50,6 +50,7 @@ type Calls = {
   chunkBases: string[];
   checkouts: string[];
   chunkPushes: string[];
+  chunkPrs: { chunkBranch: string; title: string; body: string }[];
   headReads: number;
 };
 
@@ -65,6 +66,8 @@ type Script = {
   // means origin has no such branch and the base is the source branch.
   chunkBases?: Record<string, string>;
   chunkPushes?: PushResult[];
+  // #62: how the forge answers `ensureChunkPullRequest`. An Error is thrown.
+  chunkPrs?: ({ number: number; url: string } | Error)[];
   // Per-issue number of leading close attempts that throw before one succeeds.
   // A value >= total attempts means the close never succeeds. Default 0.
   closeFailsBeforeSuccess?: Record<number, number>;
@@ -91,6 +94,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     chunkBases: [],
     checkouts: [],
     chunkPushes: [],
+    chunkPrs: [],
     headReads: 0,
   };
   const closeAttemptsByIssue = new Map<number, number>();
@@ -101,6 +105,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
   let pIdx = 0;
   let plIdx = 0;
   let cpIdx = 0;
+  let prIdx = 0;
   let headIdx = 0;
   let merging = false;
 
@@ -214,6 +219,13 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       const r = script.chunkPushes?.[cpIdx++] ?? { kind: "ok" as const };
       calls.chunkPushes.push(branch);
       calls.order.push("chunk-push");
+      return r;
+    },
+    async ensureChunkPullRequest({ chunkBranch, title, body }) {
+      calls.chunkPrs.push({ chunkBranch, title, body });
+      calls.order.push("chunk-pr");
+      const r = script.chunkPrs?.[prIdx++] ?? { number: 7, url: "u7" };
+      if (r instanceof Error) throw r;
       return r;
     },
   };
@@ -1422,6 +1434,8 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
       "install",
       "gate",
       "chunk-push",
+      // The review surface comes after the push, never before it (#62).
+      "chunk-pr",
       "checkout",
     ]);
     expect(calls.chunkPushes).toEqual(["sandbar/chunk-42-c"]);
@@ -1560,6 +1574,118 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
   });
 });
 
+// #62 — the review surface. The chunk branch is where the work is; this is
+// what makes it something a human can be handed. What these pin is that it
+// happens once per chunk, after the push, describing everything the branch
+// carries — and that failing to open it is loud rather than silent.
+describe("runMergerWithAdapter — the chunk PR (#62)", () => {
+  const chunkIssue = (n: number, root = n, landed?: readonly { number: number; title: string }[]): IssueRef => ({
+    ...issue(n),
+    chunk: {
+      root,
+      branch: `sandbar/chunk-${root}-c`,
+      ...(landed ? { landed } : {}),
+    },
+  });
+
+  it("opens one PR per chunk, after the push, naming the branch and its members", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+    });
+    await runMergerWithAdapter([chunkIssue(42)], adapter);
+
+    expect(calls.chunkPrs).toHaveLength(1);
+    const pr = calls.chunkPrs[0]!;
+    expect(pr.chunkBranch).toBe("sandbar/chunk-42-c");
+    expect(pr.title).toBe("Sandbar chunk #42: t-42");
+    expect(pr.body).toContain("- #42 — t-42");
+    expect(pr.body).toContain("sandbar/chunk-42-c");
+  });
+
+  it("describes the members already on the branch as well as the ones landing now", async () => {
+    // The failure this prevents: a chunk growing a member per cycle whose PR
+    // describes the newest member alone, dropping the ones under review above
+    // it. The plan carries the earlier ones (#62); the merge phase adds its own.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+    });
+    await runMergerWithAdapter(
+      [chunkIssue(43, 42, [{ number: 42, title: "The root" }])],
+      adapter,
+    );
+
+    const pr = calls.chunkPrs[0]!;
+    expect(pr.body).toContain("- #42 — The root");
+    expect(pr.body).toContain("- #43 — t-43");
+    // The root titles the PR even when it landed in an earlier cycle.
+    expect(pr.title).toBe("Sandbar chunk #42: The root");
+  });
+
+  it("gives each chunk its own PR, in root order", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+    });
+    await runMergerWithAdapter([chunkIssue(44), chunkIssue(42)], adapter);
+
+    expect(calls.chunkPrs.map((p) => p.chunkBranch)).toEqual([
+      "sandbar/chunk-42-c",
+      "sandbar/chunk-44-c",
+    ]);
+  });
+
+  it("opens nothing for a chunk whose members all skipped", async () => {
+    // Nothing was pushed, so there is nothing to review — and a PR opened here
+    // would describe a branch this cycle never touched.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      installs: [false],
+      heads: ["entry-sha", "pre-sha"],
+    });
+    await runMergerWithAdapter([chunkIssue(42)], adapter);
+
+    expect(calls.chunkPrs).toEqual([]);
+  });
+
+  it("opens nothing when no issue carries a chunk", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+    });
+    await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(calls.chunkPrs).toEqual([]);
+  });
+
+  it("halts when the PR cannot be opened, keeping the landing in the partial", async () => {
+    // The push already happened: those commits are on origin and their issues
+    // still owe `in-chunk`, so the partial has to carry them. What is lost is
+    // the cycle, not the work.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkPrs: [new Error("gh: HTTP 403")],
+    });
+    const err = await runMergerWithAdapter([chunkIssue(42)], adapter).catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(MergerError);
+    const merr = err as MergerError;
+    expect(merr.message).toContain("sandbar/chunk-42-c");
+    expect(merr.message).toContain("#42");
+    expect(merr.message).toContain("gh: HTTP 403");
+    expect(merr.partial?.chunkLanded?.map((c) => c.issue.id)).toEqual(["42"]);
+    expect(merr.partial?.merged).toEqual([]);
+    // Not a skip: the issue landed, and telling it otherwise would ask for the
+    // work again.
+    expect(merr.partial?.skipped).toEqual([]);
+    expect(calls.chunkPushes).toEqual(["sandbar/chunk-42-c"]);
+  });
+});
+
 describe("groupByChunk (#60)", () => {
   const withChunk = (n: number, root: number): IssueRef => ({
     ...issue(n),
@@ -1584,5 +1710,23 @@ describe("groupByChunk (#60)", () => {
 
   it("is empty when nothing carries a chunk", () => {
     expect(groupByChunk([issue(1), { ...issue(2), chunk: null }])).toEqual([]);
+  });
+
+  // #62 — the group also carries what the pull request needs: the root that
+  // titles it, and the members the plan says are already on the branch.
+  it("carries the root and the plan's already-landed members", () => {
+    const landed = [{ number: 41, title: "Landed earlier" }];
+    const groups = groupByChunk([
+      { ...issue(43), chunk: { root: 42, branch: "sandbar/chunk-42-c", landed } },
+    ]);
+
+    expect(groups[0]!.root).toBe(42);
+    expect(groups[0]!.landed).toEqual(landed);
+  });
+
+  it("reads no landed members as none, not as a missing answer", () => {
+    // `landed` is optional on `ChunkTarget` for the same reason `chunk` is
+    // optional on `IssueRef`: hand-built targets have nothing to say about it.
+    expect(groupByChunk([withChunk(43, 42)])[0]!.landed).toEqual([]);
   });
 });

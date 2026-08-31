@@ -267,8 +267,8 @@ describe("resolvePlan lanes (#57)", () => {
 
     expect(r.plan.map((p) => p.id)).toEqual(["10", "11"]);
     expect(r.plan.map((p) => p.chunk)).toEqual([
-      { root: 10, branch: "sandbar/chunk-10-issue-10" },
-      { root: 11, branch: "sandbar/chunk-11-issue-11" },
+      { root: 10, branch: "sandbar/chunk-10-issue-10", landed: [] },
+      { root: 11, branch: "sandbar/chunk-11-issue-11", landed: [] },
     ]);
     expect(r.heldForReview).toEqual([]);
   });
@@ -287,7 +287,7 @@ describe("resolvePlan lanes (#57)", () => {
 
     expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
       ["10", null],
-      ["11", { root: 11, branch: "sandbar/chunk-11-issue-11" }],
+      ["11", { root: 11, branch: "sandbar/chunk-11-issue-11", landed: [] }],
     ]);
     expect(r.heldForReview).toEqual([]);
   });
@@ -623,5 +623,51 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
     // came from the label — there isn't one anywhere in the graph.
     expect(review.plan.map((p) => p.id)).toEqual(["10", "12"]);
     expect(review.heldForReview).toEqual([]);
+  });
+});
+
+// #62 — the chunk PR's member list. The planner is the only place that knows
+// which members are ALREADY on a chunk branch: it has the whole candidate
+// graph, and phase 3 has this cycle's DONE branches and nothing else.
+//
+// Today the list is empty in every ordinary run, and that is a fact about the
+// holding rule rather than about this code: a chunk's root is the only member
+// sandbar plans (#60), and a root that has landed carries `in-chunk` and is
+// dropped from the plan — so no planned issue has a landed sibling until #61
+// lets a chained member be worked. The graph below is what one looks like, and
+// is reachable today only by a hand-applied label.
+describe("resolvePlan chunk PR members (#62)", () => {
+  it("carries the chunk's already-landed members, with their titles", () => {
+    const r = resolvePlan(
+      [
+        issue(10, "", { title: "Root" }),
+        issue(11, "## Blocked by\n- #10\n", {
+          title: "Landed member",
+          labels: [IN_CHUNK_LABEL],
+        }),
+      ],
+      facts({ 11: { labels: [IN_CHUNK_LABEL] } }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.plan.map((p) => p.chunk?.landed)).toEqual([
+      [{ number: 11, title: "Landed member" }],
+    ]);
+  });
+
+  it("never lists the issue that is on its way there", () => {
+    // The planned issue's own work is not on the branch yet — the merge phase
+    // is what puts it there, and it adds itself to the list afterwards.
+    const r = resolvePlan([issue(10, "")], new Map(), new Set(), 3, "review");
+
+    expect(r.plan[0]!.chunk?.landed).toEqual([]);
+  });
+
+  it("gives an auto-lane issue no chunk to carry a list on", () => {
+    const r = resolvePlan([issue(10, "")], new Map(), new Set(), 3, "auto");
+
+    expect(r.plan[0]!.chunk).toBeNull();
   });
 });
