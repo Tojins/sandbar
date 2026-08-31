@@ -187,6 +187,25 @@ describe("the chunk-review scan's gh calls (#63)", () => {
     expect(params).toContain("base=main");
   });
 
+  it("asks for the NEWEST page of the ledger, the reviews and the threads", async () => {
+    // GitHub orders these connections ASCENDING by creation, so `first:` reads
+    // the oldest page of each. On the ledger that is the difference between one
+    // follow-up issue and one per cycle forever: entries are appended, so the
+    // newest comments are the ones that say a review has already been
+    // converted. On the other two it is a silent DROP — a review or a thread
+    // too new to be inside the window is never filed and so never ledgered.
+    await scan();
+    const [read] = await callsTo("api", "graphql");
+    const query = (read ?? []).find((a) => a.startsWith("query=")) ?? "";
+    expect(query).toContain("comments(last:100)");
+    expect(query).toContain("reviews(states:[CHANGES_REQUESTED],last:50)");
+    expect(query).toContain("reviewThreads(last:100)");
+    // The one exception, and it is the other way round on purpose: a thread
+    // opens with the point being made, so its first comments are the prefix
+    // worth quoting.
+    expect(query).toContain("comments(first:50)");
+  });
+
   it("files the issue in the named repository, on the queue label", async () => {
     await scan();
     const [create] = await callsTo("issue", "create");

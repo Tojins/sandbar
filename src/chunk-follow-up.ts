@@ -380,22 +380,45 @@ export type ChunkFollowUpAdapter = {
 // Chunks are counted in ones, and the call happens only for chunks that have
 // landed something.
 //
-// The caps are stated rather than paginated. A pull request with more than 100
-// review threads, or a thread with more than 50 comments, is one where the
-// scan quotes a prefix of the review — the issue is still filed, and the
-// pull request it links is the record either way. The ledger read is capped
-// too, at 100 comments, which is the one cap with a real failure mode: past it
-// the scan would stop seeing older ledger entries and re-file. It is far past
-// anything a chunk PR accumulates, and it is the number to raise first.
+// The caps are stated rather than paginated, and every one of them is `last:`
+// — the NEWEST page. That is not a preference: GitHub's connections default to
+// ASCENDING creation order, so `first:` would hand back the OLDEST page of
+// each, which is the wrong end of all three.
+//
+//   * `comments(last:100)` is the ledger read, and it is the one cap with a
+//     real failure mode. Ledger entries are appended, so the newest comments
+//     are where a just-converted review is recorded; reading the oldest
+//     hundred of a busy pull request would stop seeing them at all and re-file
+//     every review every cycle, forever, one issue and one comment at a time
+//     with nothing reporting it. Read from the new end, a comment falling out
+//     of the window costs at most ONE duplicate and then settles, because the
+//     ledger entry that duplicate writes is by construction the newest comment
+//     on the page.
+//   * `reviews(...,last:50)` is the newest fifty changes-requested reviews. A
+//     review old enough to fall out of that was converted long ago; a review
+//     too NEW to be seen would never be filed at all, which is a silent drop
+//     rather than a truncation.
+//   * `reviewThreads(last:100)` is the newest hundred threads, which is where
+//     a review submitted minutes ago put its own. Losing the oldest costs a
+//     quoted thread on an issue that links the pull request beside it; losing
+//     the newest would make a body-empty review look like it had nothing left
+//     to ask for, so `pendingFollowUps` would skip it — and nothing skipped is
+//     ever ledgered, so it would be skipped again every cycle after.
+//
+// The one `first:` is the INNER `comments(first:50)` on a thread, and it is
+// deliberate rather than an oversight in its neighbours' company: a thread
+// opens with the point being made, so the start of that conversation is the
+// defensible prefix. Every other cap here is a window on an append-only list
+// where the prefix is the part already dealt with.
 const REVIEW_QUERY = `query($owner:String!,$repo:String!,$head:String!,$base:String!){
   repository(owner:$owner,name:$repo){
     pullRequests(headRefName:$head,baseRefName:$base,states:OPEN,first:10,orderBy:{field:CREATED_AT,direction:DESC}){
       nodes{
         number
         url
-        comments(first:100){nodes{body}}
-        reviews(states:[CHANGES_REQUESTED],first:50){nodes{id url body author{login}}}
-        reviewThreads(first:100){nodes{
+        comments(last:100){nodes{body}}
+        reviews(states:[CHANGES_REQUESTED],last:50){nodes{id url body author{login}}}
+        reviewThreads(last:100){nodes{
           isResolved
           path
           comments(first:50){nodes{body url author{login} pullRequestReview{id}}}
