@@ -22,7 +22,9 @@
 
 import { createHash } from "node:crypto";
 
-// Branch prefix for per-issue work branches: `sandbar/issue-<n>-<slug>`.
+// Branch prefix for every branch sandbar creates — `sandbar/issue-<n>-<slug>`
+// and `sandbar/chunk-<root>-<slug>`. The two shapes are built and parsed in the
+// "Branch names" section below.
 export const BRANCH_PREFIX = "sandbar/";
 
 // Old branch prefix, recognized (not created) during the transition window.
@@ -214,19 +216,101 @@ export function sandboxContainerNameFor(
   return `${scopedResourcePrefix(scope)}sbx-${issueId}-${name}`;
 }
 
-// Reverse of the branch-naming convention: pull the issue number out of a
-// per-issue branch name (`<prefix>issue-<n>-<slug>`), recognizing every
-// current + legacy prefix. Returns null for anything that doesn't match the
-// load-bearing shape — preflight's resume path treats those as unrecognized
-// (a hard error), never as resumable. A bare `<prefix>issue-<n>` with no slug
-// is still matched so the parser doesn't hinge on slug presence.
-export function issueNumberFromBranch(branch: string): number | null {
+// ---------------------------------------------------------------------------
+// Branch names (#58)
+//
+// Sandbar owns two branch SHAPES, and both live under the same prefix:
+//
+//   sandbar/issue-<n>-<slug>     one issue's work, landed by the merger
+//   sandbar/chunk-<root>-<slug>  one review-gated CHUNK (#54 §2), landed only
+//                                after a human has reviewed it
+//
+// A chunk is a connected component of review-gated issues under the
+// `## Blocked by` graph (`chunks.ts`), and `<root>` is that component's
+// parentless member — so the number in a chunk branch is an issue number too,
+// just not the only issue whose commits are on the branch.
+//
+// A prefix plus an INFIX rather than two independent prefixes, because
+// everything that enumerates sandbar's branch namespace has to enumerate both
+// shapes or mistake one for a foreign ref: preflight's merged-branch delete
+// and its unmerged/discarded/resumable classification, and the
+// reserved-namespace check on `config.mergeMode.integrationBranch`.
+// `SANDBAR_BRANCH_REFGLOBS` is that enumeration, stated once, so a third shape
+// is one array entry instead of an archaeology exercise across three modules.
+//
+// The globs are the full cross product of prefixes and infixes, which includes
+// `sandcastle/chunk-*` — a branch that cannot exist, since chunks postdate the
+// rename by every commit. One dead refglob is cheaper than a second prefix
+// list shaped differently from the first.
+// ---------------------------------------------------------------------------
+
+export const ISSUE_BRANCH_INFIX = "issue-";
+export const CHUNK_BRANCH_INFIX = "chunk-";
+
+export const ALL_BRANCH_INFIXES: readonly string[] = [
+  ISSUE_BRANCH_INFIX,
+  CHUNK_BRANCH_INFIX,
+];
+
+// Every ref pattern that can name a branch sandbar created. Callers hand these
+// straight to `git for-each-ref`.
+export const SANDBAR_BRANCH_REFGLOBS: readonly string[] =
+  ALL_BRANCH_PREFIXES.flatMap((prefix) =>
+    ALL_BRANCH_INFIXES.map((infix) => `refs/heads/${prefix}${infix}*`),
+  );
+
+// The slug half of both shapes. It lives here rather than in the planner that
+// used to own it because it is half of a load-bearing identifier, and the two
+// builders below should be its only callers: a branch name assembled by
+// concatenation somewhere else is a branch the globs above may or may not
+// match.
+//
+// Lossy on purpose — the slug is a human-readable tail, never parsed back.
+// Every parser here reads the NUMBER and stops at the slug boundary.
+export function kebabSlug(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export function issueBranchName(issue: number, title: string): string {
+  return `${BRANCH_PREFIX}${ISSUE_BRANCH_INFIX}${issue}-${kebabSlug(title)}`;
+}
+
+export function chunkBranchName(rootIssue: number, title: string): string {
+  return `${BRANCH_PREFIX}${CHUNK_BRANCH_INFIX}${rootIssue}-${kebabSlug(title)}`;
+}
+
+// Reverse of the branch-naming convention: pull the number out of a branch of
+// ONE shape, recognizing every current + legacy prefix. Returns null for
+// anything that doesn't match the load-bearing shape — preflight's resume path
+// treats those as unrecognized (a hard error), never as resumable. A bare
+// `<prefix><infix><n>` with no slug is still matched so the parser doesn't
+// hinge on slug presence, and a branch of the OTHER shape reads as null rather
+// than as a number of the wrong kind.
+function numberFromBranch(branch: string, infix: string): number | null {
   for (const prefix of ALL_BRANCH_PREFIXES) {
     if (!branch.startsWith(prefix)) continue;
-    const m = branch.slice(prefix.length).match(/^issue-(\d+)(?:-|$)/);
+    const rest = branch.slice(prefix.length);
+    if (!rest.startsWith(infix)) return null;
+    const m = rest.slice(infix.length).match(/^(\d+)(?:-|$)/);
     return m ? Number(m[1]) : null;
   }
   return null;
+}
+
+// `<prefix>issue-<n>-<slug>` -> n.
+export function issueNumberFromBranch(branch: string): number | null {
+  return numberFromBranch(branch, ISSUE_BRANCH_INFIX);
+}
+
+// `<prefix>chunk-<root>-<slug>` -> root. Null for an issue branch, which is
+// what lets a caller tell the two shapes apart by asking both.
+export function rootIssueFromChunkBranch(branch: string): number | null {
+  return numberFromBranch(branch, CHUNK_BRANCH_INFIX);
 }
 
 // ---------------------------------------------------------------------------

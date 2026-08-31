@@ -305,6 +305,9 @@ describe("resolveMergeMode (#22)", () => {
     { label: "whitespace-padded onto the source branch", branch: " main " },
     { label: "a full ref", branch: "refs/heads/ci" },
     { label: "inside the reaped issue-branch namespace", branch: "sandbar/issue-x" },
+    // #58's second shape is reaped by the same preflight glob, so it is
+    // reserved on the same grounds.
+    { label: "inside the reaped chunk-branch namespace", branch: "sandbar/chunk-x" },
   ])("refuses an integration branch that is $label", ({ branch }) => {
     expect(() =>
       resolveConfig({

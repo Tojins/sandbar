@@ -1,0 +1,279 @@
+// Chunk derivation — which review-gated issues land together, on one branch a
+// human reviews once (#58, and §2 of the design in #54).
+//
+// A chunk is DERIVED, never declared. Nobody labels an issue "chunk 3"; the
+// chunk falls out of two things sandbar already knows: the lane of each issue
+// (`lanes.ts`) and the `## Blocked by` edges the planner already parses. A
+// chunk is a connected component of the REVIEW-GATED issues under those edges,
+// and a review-gated issue with no review-gated neighbours is a chunk of one.
+//
+// That is the only definition that can be right, because it is the only one
+// that matches what a human reviewing the branch is actually looking at. Two
+// review-gated issues joined by a blocked-by edge cannot be reviewed apart: the
+// dependent's diff is written on top of the blocker's commits, so a review of
+// the dependent alone is a review of a tree that includes unreviewed code, and
+// a review of the blocker alone approves something the series then changes.
+// Conversely, two review-gated issues with no path between them share nothing —
+// putting them on one branch would only make a human's review bigger and couple
+// two landings that have no reason to be coupled.
+//
+// The lane is the input, not a second opinion about it. Everything here reads
+// `lanes.get(n).lane === "review"`, which already carries #57's downward
+// inheritance, so a descendant of a review-gated issue is review-gated and
+// therefore in its ancestor's chunk by construction. An issue in the AUTO lane
+// is not in any chunk and never appears in this module's output: it lands
+// through the merger, one branch per issue, exactly as before.
+//
+// DERIVATION ONLY. This module creates nothing, writes nothing and changes no
+// planning outcome. `plan-resolver.ts`'s holding rule still keeps every
+// review-gated issue out of the plan; giving a chunk a branch, working it, and
+// landing it are later issues under #54. What exists now is the pure function
+// they will all agree on, plus the branch NAME they will create.
+//
+// ---------------------------------------------------------------------------
+// The two-chunk-parent rule
+// ---------------------------------------------------------------------------
+//
+// An issue blocked by members of two DIFFERENT chunks is blocked — held out of
+// every chunk — until its blockers are on the source branch or all in one
+// chunk. Chunks are never merged to accommodate it.
+//
+// The alternative is the whole reason the rule is written down: plain connected
+// components WOULD merge them, since that issue is a path between the two. So
+// an issue somebody files across two unrelated review series silently fuses
+// both into one branch, and the human who was reviewing a three-issue chunk is
+// now handed nine issues they never agreed to look at together. Worse, it is
+// retroactive — the merge happens the moment the new issue is filed, to work
+// that may already be underway. Refusing to grow a chunk that way keeps the
+// unit of review a thing a human chose, and the cost falls on the one issue
+// that straddles: it waits, which it would have had to do anyway, since both
+// its blockers must land before it can be built on them.
+//
+// "Blocked" here is a fact about chunk assignment, not a label or a comment.
+// Reporting it to a human is a later issue's job; this module names it so
+// there is something to report.
+//
+// ---------------------------------------------------------------------------
+// Why the walk is topological, and not a union-find over the edge set
+// ---------------------------------------------------------------------------
+//
+// The two-chunk rule makes the answer depend on the order issues are decided
+// in, and only one order is defensible. Take A and B unrelated, X blocked by
+// both, and Y also blocked by both. Union-find in issue order unions X with A,
+// then X with B — the merge the rule forbids. Deciding each issue by looking at
+// the components of the graph WITHOUT it is no better: with X removed, Y joins
+// A and B into one component, so X sees one chunk and joins; by symmetry so
+// does Y; both join and the chunks are merged after all.
+//
+// Deciding an issue only once every one of its blockers is decided removes the
+// ambiguity entirely: X and Y each see A and B already settled as two chunks,
+// and each is blocked. That order is a topological order of the blocked-by
+// edges, so the walk here is Kahn's algorithm over the review-gated subgraph,
+// smallest issue number first among the ready set purely so the output is
+// deterministic.
+//
+// A consequence worth stating, because it is what makes `root` well defined: a
+// chunk only ever grows by attaching an issue whose blockers are all in that
+// one chunk, and it is seeded by an issue with no review-gated blockers at all.
+// So a chunk has exactly ONE parentless member, its seed. `chunkRoot` still
+// takes the lowest-numbered parentless member as #58 specifies it — a total
+// rule that does not depend on the reader trusting that argument.
+//
+// CYCLES are hostile input: two issues can name each other under `## Blocked
+// by`, and a human wrote them. Kahn's simply never reaches those nodes, nor
+// anything downstream of them, and they come out `blocked` with reason
+// `cycle`. That is the honest answer rather than a diagnostic failure — a cycle
+// has no parentless member, so it has no root, so it cannot be named; and the
+// planner deadlocks on a cyclic pair regardless, since neither blocker will
+// ever read CLOSED.
+//
+// ---------------------------------------------------------------------------
+// What is NOT an edge
+// ---------------------------------------------------------------------------
+//
+// Only blockers that are themselves review-gated members of the input set
+// contribute. A blocker in the auto lane lands on the source branch through the
+// merger, so by the time the dependent is worked it is "on main" and there is
+// nothing to share a branch with. A blocker OUTSIDE the input set contributes
+// nothing either, for the reason `lanes.ts` gives at length: sandbar has the
+// labels only of the issues it listed, so there is no lane to read — and an
+// issue with an unresolvable blocker is out of the plan on that ground anyway.
+// A self-edge (`#10` inside #10's own `## Blocked by`) is dropped, exactly as
+// in `lanes.ts`: an issue is not its own blocker, and keeping it would give
+// every self-referencing issue an in-degree Kahn's could never retire.
+
+import type { Lane } from "./lanes.js";
+import { chunkBranchName } from "./naming.js";
+
+// The minimum a chunk decision needs. `title` is here and not in `LaneIssue`
+// because a chunk, unlike a lane, has a NAME: the branch is slugged from the
+// root issue's title.
+export type ChunkIssue = {
+  readonly number: number;
+  readonly title: string;
+  readonly blockedBy: readonly number[];
+};
+
+export type Chunk = {
+  // The lowest-numbered member with no blocker inside the chunk. It names the
+  // branch and identifies the chunk everywhere else.
+  readonly root: number;
+  // Every issue that lands on this chunk's branch, ascending, root included.
+  readonly members: readonly number[];
+  // `sandbar/chunk-<root>-<slug>`. Derived, not created — no branch of this
+  // name exists yet.
+  readonly branch: string;
+};
+
+// Why an issue got no chunk. All three mean "wait", never "give up".
+//
+//   two-chunk-parent  — its blockers sit in two or more different chunks (the
+//                       rule above). Resolves when those chunks land.
+//   unchunked-blocker — a blocker of its own has no chunk, so neither can it.
+//                       The transitive shadow of the other two reasons.
+//   cycle             — it is inside a `## Blocked by` cycle, or downstream of
+//                       one. Resolves only when a human edits the bodies.
+export type ChunkBlockReason =
+  | "two-chunk-parent"
+  | "unchunked-blocker"
+  | "cycle";
+
+export type ChunkBlock = {
+  readonly issue: number;
+  readonly reason: ChunkBlockReason;
+  // The review-gated blockers that account for the reason, ascending: ALL of
+  // them for `two-chunk-parent` (it is the set of chunks they land in that
+  // conflicts, so no subset states it) and for `cycle` (which edge closes the
+  // loop is not decided here), and only the ones with no chunk of their own for
+  // `unchunked-blocker`. Resolve them through `chunkOf` to name the chunks.
+  readonly blockers: readonly number[];
+};
+
+export type ChunkDerivation = {
+  // By root, ascending.
+  readonly chunks: readonly Chunk[];
+  // Member issue -> its chunk's root. Every issue in `chunks[].members` and
+  // nothing else — an auto-lane issue and a blocked one are both absent.
+  readonly chunkOf: ReadonlyMap<number, number>;
+  // Review-gated issues that landed in no chunk, in issue order.
+  readonly blocked: readonly ChunkBlock[];
+};
+
+const ascending = (a: number, b: number): number => a - b;
+
+// `lanes` is typed to the one field it reads rather than to `LaneDecision`, so
+// the table tests can state a lane instead of building a decision around it.
+// A `computeLanes` result is assignable as-is.
+export function deriveChunks(
+  issues: readonly ChunkIssue[],
+  lanes: ReadonlyMap<number, { readonly lane: Lane }>,
+): ChunkDerivation {
+  const gated = new Map<number, ChunkIssue>();
+  for (const issue of issues) {
+    if (lanes.get(issue.number)?.lane === "review") gated.set(issue.number, issue);
+  }
+
+  // Parents = the review-gated blockers inside the set, deduped and ascending;
+  // children is the same edge set reversed, which is the direction Kahn's walks.
+  const parents = new Map<number, readonly number[]>();
+  const children = new Map<number, number[]>();
+  for (const [number, issue] of gated) {
+    const blockers = [...new Set(issue.blockedBy)]
+      .filter((b) => b !== number && gated.has(b))
+      .sort(ascending);
+    parents.set(number, blockers);
+    for (const blocker of blockers) {
+      const existing = children.get(blocker);
+      if (existing) existing.push(number);
+      else children.set(blocker, [number]);
+    }
+  }
+
+  const indegree = new Map<number, number>();
+  for (const [number, blockers] of parents) indegree.set(number, blockers.length);
+
+  // Components keyed by their seed. The seed is provisional — the root each
+  // chunk reports is recomputed from the members below, by #58's rule.
+  const seedOf = new Map<number, number>();
+  const componentMembers = new Map<number, number[]>();
+  const blocked: ChunkBlock[] = [];
+
+  const ready = [...gated.keys()].filter((n) => indegree.get(n) === 0);
+  ready.sort(ascending);
+  while (ready.length > 0) {
+    const number = ready.shift();
+    if (number === undefined) break;
+    const blockers = parents.get(number) ?? [];
+
+    // Every blocker is decided by now, so an undecided one can only be a
+    // blocker that was itself blocked.
+    const unchunked = blockers.filter((b) => !seedOf.has(b));
+    if (unchunked.length > 0) {
+      blocked.push({ issue: number, reason: "unchunked-blocker", blockers: unchunked });
+    } else {
+      const seeds = new Set(
+        blockers
+          .map((b) => seedOf.get(b))
+          .filter((s): s is number => s !== undefined),
+      );
+      if (seeds.size > 1) {
+        blocked.push({ issue: number, reason: "two-chunk-parent", blockers });
+      } else {
+        // No blockers at all ⇒ this issue seeds a chunk of its own.
+        const seed = [...seeds][0] ?? number;
+        seedOf.set(number, seed);
+        const members = componentMembers.get(seed);
+        if (members) members.push(number);
+        else componentMembers.set(seed, [number]);
+      }
+    }
+
+    // Retire the edge whether this issue got a chunk or not: a dependent of a
+    // blocked issue still has to be DECIDED (as `unchunked-blocker`), and
+    // leaving its in-degree standing would silently reclassify it as a cycle.
+    for (const child of children.get(number) ?? []) {
+      const left = (indegree.get(child) ?? 0) - 1;
+      indegree.set(child, left);
+      if (left === 0) {
+        ready.push(child);
+        ready.sort(ascending);
+      }
+    }
+  }
+
+  const chunks: Chunk[] = [];
+  const chunkOf = new Map<number, number>();
+  for (const rawMembers of componentMembers.values()) {
+    const members = [...rawMembers].sort(ascending);
+    const inChunk = new Set(members);
+    // Parentless WITHIN the chunk: blockers outside it are on the source
+    // branch (or in the auto lane and heading there), which is exactly the
+    // state the two-chunk rule says an issue is waiting for.
+    const parentless = members.filter(
+      (m) => !(parents.get(m) ?? []).some((p) => inChunk.has(p)),
+    );
+    // `members` is non-empty and ascending, and the seed is always parentless,
+    // so both fallbacks are unreachable; they are here because an index and a
+    // `Map.get` are typed `T | undefined`.
+    const root = parentless[0] ?? members[0] ?? 0;
+    const title = gated.get(root)?.title ?? "";
+    chunks.push({ root, members, branch: chunkBranchName(root, title) });
+    for (const member of members) chunkOf.set(member, root);
+  }
+  chunks.sort((a, b) => a.root - b.root);
+
+  // Whatever Kahn's never reached is in a `## Blocked by` cycle or downstream
+  // of one: those are the only nodes whose in-degree never reaches zero.
+  for (const number of [...gated.keys()].sort(ascending)) {
+    if (seedOf.has(number)) continue;
+    if (blocked.some((b) => b.issue === number)) continue;
+    blocked.push({
+      issue: number,
+      reason: "cycle",
+      blockers: parents.get(number) ?? [],
+    });
+  }
+  blocked.sort((a, b) => a.issue - b.issue);
+
+  return { chunks, chunkOf, blocked };
+}

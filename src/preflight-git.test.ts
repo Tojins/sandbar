@@ -18,7 +18,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { makeEnvReader } from "./env.js";
 import {
   type DeclaredMount,
-  deleteMergedIssueBranches,
+  deleteMergedSandbarBranches,
   gatherState,
 } from "./preflight.js";
 import { type RepoLayout, ensureRepoCache, repoLayout } from "./repo-cache.js";
@@ -106,7 +106,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
   // delete under the single-instance lock, and the lock is taken on
   // `config.cwd` — so a delete running in `process.cwd()` was under *a* lock,
   // just not the one covering the repo whose branches it destroyed.
-  describe("deleteMergedIssueBranches", () => {
+  describe("deleteMergedSandbarBranches", () => {
     beforeEach(async () => {
       for (const repo of [launchedFrom, target]) {
         await git(repo, "branch", "sandbar/issue-1-merged");
@@ -114,14 +114,14 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("deletes the merged branch in the named repo", async () => {
-      const deleted = await deleteMergedIssueBranches(cfg(layoutAt(target)));
+      const deleted = await deleteMergedSandbarBranches(cfg(layoutAt(target)));
 
       expect(deleted).toEqual(["sandbar/issue-1-merged"]);
       expect(await hasBranch(target, "sandbar/issue-1-merged")).toBe(false);
     });
 
     it("does not touch the identically-named branch in the launch directory", async () => {
-      await deleteMergedIssueBranches(cfg(layoutAt(target)));
+      await deleteMergedSandbarBranches(cfg(layoutAt(target)));
 
       expect(await hasBranch(launchedFrom, "sandbar/issue-1-merged")).toBe(true);
     });
@@ -135,7 +135,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     it("deletes in whichever repo it is pointed at", async () => {
       process.chdir(target);
 
-      await deleteMergedIssueBranches(cfg(layoutAt(launchedFrom)));
+      await deleteMergedSandbarBranches(cfg(layoutAt(launchedFrom)));
 
       expect(await hasBranch(launchedFrom, "sandbar/issue-1-merged")).toBe(false);
       expect(await hasBranch(target, "sandbar/issue-1-merged")).toBe(true);
@@ -148,10 +148,26 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const deleted = await deleteMergedIssueBranches(cfg(layoutAt(target)));
+      const deleted = await deleteMergedSandbarBranches(cfg(layoutAt(target)));
 
       expect(deleted).toEqual(["sandbar/issue-1-merged"]);
       expect(await hasBranch(target, "sandbar/issue-2-unmerged")).toBe(true);
+    });
+
+    // #58's second branch shape, and the one thing about a chunk branch that
+    // does not wait on the lifecycle #54 still owes it: commits reachable from
+    // the source branch have said everything they had to say, whether one issue
+    // wrote them or a whole chunk did.
+    it("deletes a merged chunk branch too", async () => {
+      await git(target, "branch", "sandbar/chunk-5-review-series");
+
+      const deleted = await deleteMergedSandbarBranches(cfg(layoutAt(target)));
+
+      expect([...deleted].sort()).toEqual([
+        "sandbar/chunk-5-review-series",
+        "sandbar/issue-1-merged",
+      ]);
+      expect(await hasBranch(target, "sandbar/chunk-5-review-series")).toBe(false);
     });
   });
 
@@ -191,7 +207,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         "refs/remotes/origin/main",
       );
 
-      const deleted = await deleteMergedIssueBranches({
+      const deleted = await deleteMergedSandbarBranches({
         layout,
         sourceBranch: "main",
       });
@@ -218,6 +234,24 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const state = await gatherState(cfg(layoutAt(target)));
 
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
+    });
+
+    // A chunk branch (#58) is unmerged for exactly as long as the human
+    // reviewing it takes, which is the point of the review lane. Classifying it
+    // `unmerged` would turn every open review into a hard refusal to start —
+    // the loop stopping because it is waiting for the review it was told to
+    // wait for. It is not `resumable` either: the number in it is a chunk ROOT,
+    // not one issue whose inner loop could pick the branch up.
+    it("takes none of the three classifications for a chunk branch", async () => {
+      await git(target, "checkout", "-q", "-b", "sandbar/chunk-5-review-series");
+      await git(target, "commit", "-q", "--allow-empty", "-m", "work");
+      await git(target, "checkout", "-q", "main");
+
+      const state = await gatherState(cfg(layoutAt(target)));
+
+      expect(state.unmergedIssueBranches).toEqual([]);
+      expect(state.discardedIssueBranches).toEqual([]);
+      expect(state.resumableIssueBranches).toEqual([]);
     });
 
     // #34 — the tracker is `ghOwner`/`ghRepo` and the push target is the

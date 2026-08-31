@@ -1,7 +1,7 @@
 // Pre-flight invariants for sandbar runs.
 //
 // Runs UNDER the single-instance lock (#32), and must keep doing so. This
-// module is not read-only: it fetches, and `deleteMergedIssueBranches` runs
+// module is not read-only: it fetches, and `deleteMergedSandbarBranches` runs
 // `git branch -D` over every `sandbar/issue-*` branch it finds merged. It used
 // to run before the lock was taken, which made the one destructive step in
 // startup the one step the lock did not cover — two launches on the same
@@ -90,6 +90,11 @@
 //                 while local is behind). Local commits would be orphaned.
 //   - unmerged  — everything else: maps to a closed/unknown issue, or an open
 //                 issue no longer queued. Stays a hard error as before.
+// `sandbar/chunk-*` branches (#58) are listed by the same globs — one shape
+// each of `SANDBAR_BRANCH_REFGLOBS` — but take none of those three: see
+// `classifySandbarBranches`. They are still DELETED once merged, which is the
+// one thing that is true of a chunk branch independently of the lifecycle #54
+// has yet to give it.
 
 import { execFile, execFileSync } from "node:child_process";
 import { stat } from "node:fs/promises";
@@ -98,7 +103,11 @@ import { promisify } from "node:util";
 
 import type { ResolvedStackContainer } from "./config.js";
 import type { EnvReader } from "./env.js";
-import { ALL_BRANCH_PREFIXES, issueNumberFromBranch } from "./naming.js";
+import {
+  SANDBAR_BRANCH_REFGLOBS,
+  issueNumberFromBranch,
+  rootIssueFromChunkBranch,
+} from "./naming.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import { RUNTIME } from "./runtime.js";
 import { fetchCandidates } from "./plan-resolver.js";
@@ -477,7 +486,7 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
   const originUrl = await readOriginUrl(repoDir);
   const parsedOrigin = originUrl === null ? null : parseRepoFromRemoteUrl(originUrl);
   const openReadyIssues = await fetchOpenReadyIssueNumbers(cfg.repo);
-  const { unmerged, discarded, resumable } = await classifyIssueBranches(
+  const { unmerged, discarded, resumable } = await classifySandbarBranches(
     repoDir,
     openReadyIssues,
   );
@@ -584,16 +593,14 @@ async function checkSandboxGhToken(
   }
 }
 
-// Glob patterns for every recognized issue-branch prefix (current + legacy).
-const ISSUE_BRANCH_REFGLOBS = ALL_BRANCH_PREFIXES.map(
-  (p) => `refs/heads/${p}issue-*`,
-);
-
-async function listIssueBranches(cwd: string): Promise<readonly string[]> {
+// Every branch sandbar can have created, both shapes and every recognized
+// prefix (current + legacy). The globs live in `naming.ts` (#58) so this
+// module cannot come to know about one shape and not the other.
+async function listSandbarBranches(cwd: string): Promise<readonly string[]> {
   const { ok, stdout } = await captureOk(cwd, "git", [
     "for-each-ref",
     "--format=%(refname:short)",
-    ...ISSUE_BRANCH_REFGLOBS,
+    ...SANDBAR_BRANCH_REFGLOBS,
   ]);
   if (!ok) return [];
   return stdout.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -628,7 +635,7 @@ async function branchUpstreamTracks(
   const { ok, stdout } = await captureOk(cwd, "git", [
     "for-each-ref",
     "--format=%(refname:short)\t%(upstream:track)",
-    ...ISSUE_BRANCH_REFGLOBS,
+    ...SANDBAR_BRANCH_REFGLOBS,
   ]);
   const out = new Map<string, string>();
   if (!ok) return out;
@@ -642,7 +649,7 @@ async function branchUpstreamTracks(
   return out;
 }
 
-async function classifyIssueBranches(
+async function classifySandbarBranches(
   cwd: string,
   openReadyIssues: ReadonlySet<number>,
 ): Promise<{
@@ -650,12 +657,23 @@ async function classifyIssueBranches(
   discarded: readonly string[];
   resumable: readonly string[];
 }> {
-  const all = await listIssueBranches(cwd);
+  const all = await listSandbarBranches(cwd);
   const tracks = await branchUpstreamTracks(cwd);
   const unmerged: string[] = [];
   const discarded: string[] = [];
   const resumable: string[] = [];
   for (const branch of all) {
+    // A CHUNK branch (#58) is none of the three. It is unmerged for as long as
+    // the human reviewing it takes, which is the entire point of the review
+    // lane — classifying it `unmerged` would turn every open review into a
+    // hard refusal to start, i.e. the loop stopping precisely because it is
+    // waiting for the review it was told to wait for. It is not `resumable`
+    // either: the issue number in it is a chunk ROOT, and resuming means
+    // handing a branch to one issue's inner loop, which is not what a chunk
+    // branch holds. So it is recognized and left alone here; the only thing
+    // preflight does to one is delete it once merged, below. Chunk lifecycle
+    // is a later issue under #54 and this is where it plugs in.
+    if (rootIssueFromChunkBranch(branch) !== null) continue;
     // `[gone]` = the branch had an upstream and the remote deleted it (PR
     // closed/merged-and-deleted). If the work isn't on the source branch
     // either, the local commits are about to be orphaned — surface them
@@ -685,11 +703,15 @@ async function classifyIssueBranches(
 // `layout.repoDir`. Against the operator's own checkout that would be a
 // sandbar bug that destroys a human's branches; against a bare cache holding
 // only sandbar's own refs it cannot be.
-export async function deleteMergedIssueBranches(
+//
+// Both branch shapes (#58), and that needs no lifecycle argument either way: a
+// branch whose commits are reachable from the source branch has said everything
+// it had to say, whether one issue wrote it or a whole chunk did.
+export async function deleteMergedSandbarBranches(
   cfg: { layout: RepoLayout; sourceBranch: string },
 ): Promise<readonly string[]> {
   const repoDir = cfg.layout.repoDir;
-  const all = await listIssueBranches(repoDir);
+  const all = await listSandbarBranches(repoDir);
   const deleted: string[] = [];
   for (const branch of all) {
     if (!(await isBranchMerged(repoDir, branch, cfg.sourceBranch))) continue;
@@ -733,7 +755,7 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
     "--quiet",
   ]);
 
-  const deleted = await deleteMergedIssueBranches({
+  const deleted = await deleteMergedSandbarBranches({
     layout: cfg.layout,
     sourceBranch: cfg.sourceBranch,
   });

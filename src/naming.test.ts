@@ -21,7 +21,12 @@ import {
   LEGACY_BRANCH_PREFIXES,
   LEGACY_RESOURCE_PREFIXES,
   RESOURCE_PREFIX,
+  SANDBAR_BRANCH_REFGLOBS,
+  chunkBranchName,
+  issueBranchName,
   issueNumberFromBranch,
+  kebabSlug,
+  rootIssueFromChunkBranch,
 } from "./naming.js";
 
 describe("naming transition contract", () => {
@@ -74,6 +79,87 @@ describe("issueNumberFromBranch", () => {
     // `issue-12x-...` is malformed; the `(?:-|$)` boundary rejects it rather
     // than silently parsing 12.
     expect(issueNumberFromBranch("sandbar/issue-12x-foo")).toBeNull();
+  });
+});
+
+describe("kebabSlug", () => {
+  it("lowercases ASCII", () => {
+    expect(kebabSlug("Foo Bar")).toBe("foo-bar");
+  });
+
+  it("hyphenates non-alphanumeric runs", () => {
+    expect(kebabSlug("Foo: bar's & baz!")).toBe("foo-bar-s-baz");
+  });
+
+  it("strips diacritics", () => {
+    expect(kebabSlug("Café Münchën")).toBe("cafe-munchen");
+  });
+
+  it("trims leading/trailing hyphens", () => {
+    expect(kebabSlug("  --foo--bar  ")).toBe("foo-bar");
+  });
+
+  it("collapses non-ASCII to a single hyphen", () => {
+    expect(kebabSlug("foo→bar")).toBe("foo-bar");
+  });
+});
+
+// #58 gave sandbar a SECOND branch shape. The globs, the builders and the two
+// parsers have to agree about both, because preflight's cleanup and the
+// reserved-namespace check on `integrationBranch` are the same statement made
+// three times if they don't.
+describe("branch names (#58)", () => {
+  it("builds the issue shape exactly as the planner always spelled it", () => {
+    expect(issueBranchName(296, "Keyword escape")).toBe(
+      "sandbar/issue-296-keyword-escape",
+    );
+  });
+
+  it("builds the chunk shape from the ROOT issue", () => {
+    expect(chunkBranchName(58, "Chunk derivation")).toBe(
+      "sandbar/chunk-58-chunk-derivation",
+    );
+  });
+
+  it("round-trips each shape through its own parser", () => {
+    expect(issueNumberFromBranch(issueBranchName(7, "Foo bar"))).toBe(7);
+    expect(rootIssueFromChunkBranch(chunkBranchName(7, "Foo bar"))).toBe(7);
+  });
+
+  // The load-bearing half: a chunk branch read as an issue branch would send a
+  // chunk's root number into preflight's resume path as if it named one issue's
+  // stranded work.
+  it("does not read one shape as the other", () => {
+    expect(issueNumberFromBranch("sandbar/chunk-58-derivation")).toBeNull();
+    expect(rootIssueFromChunkBranch("sandbar/issue-58-derivation")).toBeNull();
+  });
+
+  it("applies the same shape rules to chunk branches as to issue ones", () => {
+    expect(rootIssueFromChunkBranch("sandbar/chunk-7")).toBe(7);
+    expect(rootIssueFromChunkBranch("feature/chunk-7-foo")).toBeNull();
+    expect(rootIssueFromChunkBranch("sandbar/chunk-foo")).toBeNull();
+    expect(rootIssueFromChunkBranch("sandbar/chunk-12x-foo")).toBeNull();
+  });
+
+  it("globs every prefix × shape, so no branch sandbar made is missed", () => {
+    expect([...SANDBAR_BRANCH_REFGLOBS].sort()).toEqual(
+      [
+        "refs/heads/sandbar/issue-*",
+        "refs/heads/sandbar/chunk-*",
+        "refs/heads/sandcastle/issue-*",
+        "refs/heads/sandcastle/chunk-*",
+      ].sort(),
+    );
+  });
+
+  it("globs match what the builders produce", () => {
+    const matches = (branch: string): boolean =>
+      SANDBAR_BRANCH_REFGLOBS.some((glob) =>
+        `refs/heads/${branch}`.startsWith(glob.slice(0, -1)),
+      );
+    expect(matches(issueBranchName(1, "a"))).toBe(true);
+    expect(matches(chunkBranchName(1, "a"))).toBe(true);
+    expect(matches("sandbar/something-else")).toBe(false);
   });
 });
 

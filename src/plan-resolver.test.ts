@@ -3,7 +3,6 @@ import {
   type IssueState,
   type IssueSummary,
   type Plan,
-  kebabSlug,
   parseBlockedBy,
   resolvePlan,
 } from "./plan-resolver.js";
@@ -80,28 +79,6 @@ describe("parseBlockedBy", () => {
 
   it("ignores malformed `## Blocked by` lines without #N refs", () => {
     expect(parseBlockedBy("## Blocked by\n- some text\n")).toEqual([]);
-  });
-});
-
-describe("kebabSlug", () => {
-  it("lowercases ASCII", () => {
-    expect(kebabSlug("Foo Bar")).toBe("foo-bar");
-  });
-
-  it("hyphenates non-alphanumeric runs", () => {
-    expect(kebabSlug("Foo: bar's & baz!")).toBe("foo-bar-s-baz");
-  });
-
-  it("strips diacritics", () => {
-    expect(kebabSlug("Café Münchën")).toBe("cafe-munchen");
-  });
-
-  it("trims leading/trailing hyphens", () => {
-    expect(kebabSlug("  --foo--bar  ")).toBe("foo-bar");
-  });
-
-  it("collapses non-ASCII to a single hyphen", () => {
-    expect(kebabSlug("foo→bar")).toBe("foo-bar");
   });
 });
 
