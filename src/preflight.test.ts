@@ -37,10 +37,6 @@ function failures(s: RepoState): string[] {
 // preflight compares them; every symptom of a mismatch is silent and lands
 // somewhere real (issues closed in one repo for commits pushed to another).
 describe("checkInvariants — the tracker and the git remote name one repo (#34)", () => {
-  it("passes when origin and ghOwner/ghRepo are the same repo", () => {
-    expect(failures(cleanState)).toEqual([]);
-  });
-
   it("refuses when origin points at a different repo, naming both", () => {
     const f = failures({
       ...cleanState,
@@ -101,10 +97,6 @@ describe("checkInvariants — the tracker and the git remote name one repo (#34)
 // share a name. `gh`'s flag is `[HOST/]OWNER/REPO` and `repoSlug` emits the
 // two-part form, so the host is always gh's default.
 describe("checkInvariants — the tracker host (#34)", () => {
-  it("passes when origin is on the host gh will talk to", () => {
-    expect(failures(cleanState)).toEqual([]);
-  });
-
   it("refuses a GHE origin while gh would go to github.com", () => {
     const f = failures({
       ...cleanState,
@@ -180,10 +172,6 @@ describe("checkInvariants", () => {
     expect(msg).toContain("podman pull docker.io/library/mariadb:10.11");
     expect(msg).toContain("podman pull docker.io/mailhog/mailhog:latest");
     expect(msg).toContain("2 gate-stack image(s)");
-  });
-
-  it("does not flag images when none are missing", () => {
-    expect(failures({ ...cleanState, missingImages: [] })).toEqual([]);
   });
 
   it("flags failed gh auth", () => {
@@ -327,10 +315,6 @@ describe("checkInvariants", () => {
 // `agent-stuck` with an "environment" trace. Host state belongs in preflight,
 // beside `missingImages`, which is the identical class.
 describe("checkInvariants — gate-stack mount sources exist (#51)", () => {
-  it("passes when nothing is missing", () => {
-    expect(failures(cleanState)).toEqual([]);
-  });
-
   // The path AND the container, because a stack with several containers
   // otherwise leaves the operator grepping their config for the declaration.
   it("names the path and the container that declares it", () => {

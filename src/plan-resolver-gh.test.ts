@@ -29,7 +29,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { IN_CHUNK_LABEL } from "./chunks.js";
-import { fetchCandidates, fetchChunkMembers } from "./plan-resolver.js";
+import {
+  buildPlan,
+  fetchCandidates,
+  fetchChunkMembers,
+} from "./plan-resolver.js";
 
 const CONFIGURED = { owner: "acme", name: "app" };
 
@@ -144,5 +148,69 @@ describe("fetchCandidates names the configured repo (#34)", () => {
     // And the chunk-member listing names the configured repo too — it is a
     // second `gh issue list`, and #34 applies to it identically.
     expect(members[0]?.title).toBe("acme/app");
+  });
+});
+
+// #63 — a follow-up issue filed at the top of a cycle has to be planned in that
+// same cycle, or the cycle that filed it exits plan-empty with the review
+// unanswered. The listing cannot deliver it (`gh issue list` is the lagging
+// search backend, and nothing in the queue is younger), so the scan hands the
+// issue back in. Through the shim rather than a fake, because what is being
+// asserted is that the union reaches the real listing path at all.
+describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
+  let shimBin: string;
+  let originalPath: string | undefined;
+
+  const FILED = {
+    number: 50,
+    title: "Chunk #10: address alice's review feedback",
+    body: "## Blocked by\n- #10\n",
+    labels: ["ready-for-agent"],
+  };
+
+  beforeEach(async () => {
+    shimBin = await mkdtemp(join(tmpdir(), "sandbar-extra-"));
+    // An EMPTY queue and an empty chunk-member listing — the state a
+    // just-filed issue is invisible in — with authoritative facts that know
+    // both it and its blocker, which is how the real GraphQL batch answers.
+    await writeFile(
+      join(shimBin, "gh"),
+      [
+        "#!/bin/sh",
+        'case "$1 $2" in',
+        '  "issue list") printf "[]" ;;',
+        '  "api graphql")',
+        '    printf \'{"data":{"repository":{"i50":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]}},"i10":{"state":"CLOSED","labels":{"nodes":[]}}}}}\' ;;',
+        "esac",
+        "exit 0",
+      ].join("\n") + "\n",
+      { mode: 0o755 },
+    );
+    originalPath = process.env["PATH"];
+    process.env["PATH"] = `${shimBin}:${originalPath ?? ""}`;
+  });
+
+  afterEach(async () => {
+    if (originalPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = originalPath;
+    await rm(shimBin, { recursive: true, force: true });
+  });
+
+  it("plans an issue the listing has not caught up with", async () => {
+    const r = await buildPlan(CONFIGURED, { extraCandidates: [FILED] });
+    expect(r.plan.map((p) => p.id)).toEqual(["50"]);
+  });
+
+  it("still filters it on the authoritative facts", async () => {
+    // Additive, not authoritative: an issue closed between the create and the
+    // plan is dropped like any other candidate. Modelled by asking for #10,
+    // which the batch above reports CLOSED.
+    const closed = { ...FILED, number: 10, body: "" };
+    const r = await buildPlan(CONFIGURED, { extraCandidates: [closed] });
+    expect(r.plan).toEqual([]);
+  });
+
+  it("plans nothing when nothing is handed in", async () => {
+    expect((await buildPlan(CONFIGURED)).plan).toEqual([]);
   });
 });

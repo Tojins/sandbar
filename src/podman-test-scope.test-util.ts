@@ -129,6 +129,11 @@
 // host-only facts out to gate-stack-hostpodman.test.ts, and #43 deleted the
 // `log` follower's tests, handed one of those three back — an in-container port
 // probe needs no local client — and added the `healthcheck run` layer).
+// Those figures describe the file before it was sharded for wall-clock
+// parallelism (slice map in gate-stack-podman.test-util.ts); the name above
+// now denotes the core shard, which still brings stacks up under the
+// hardcoded ids and so still discriminates — as, indeed, does every shard,
+// which is precisely what the per-process scope licenses.
 //
 // The same pair over `ensure-images-podman.test.ts` proves nothing on its own
 // and must not be recorded as evidence: it passes pre-#47 too, 0 failures in 6

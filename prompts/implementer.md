@@ -3,7 +3,7 @@
 Fix issue #{{issueId}}: {{issueTitle}}
 Branch: {{branch}}
 
-{{workDone}}{{sandboxStack}}{{gateFailure}}{{reviewerFeedback}}{{orchestratorNote}}{{escalation}}## UI impact check — do this first
+{{chunkBase}}{{workDone}}{{sandboxStack}}{{gateFailure}}{{reviewerFeedback}}{{orchestratorNote}}{{escalation}}## UI impact check — do this first
 
 Before writing any code, decide whether this issue has **non-trivial UI impact**:
 would the change add, remove, or rearrange visible UI, or alter a user-facing

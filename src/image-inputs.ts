@@ -1,70 +1,28 @@
 // What a built image is a FUNCTION OF, reduced to one hash (#37).
 //
-// ---------------------------------------------------------------------------
-// The bug this exists to close
-// ---------------------------------------------------------------------------
-// `ensureImages` skips any entry whose TAG already exists, and the tag was the
-// only cache key — nothing about the Containerfile's bytes, or about the files
-// it COPYs, entered it. The build context is the host checkout, because no
-// issue worktree exists yet when the builds run.
+// The consumer declares what an image is a function of (`rebuildOn`); this
+// module is the comparison half: it turns (a root directory, an image entry)
+// into a hex fingerprint, and equality of fingerprints is the whole decision
+// procedure. `ensure-images.ts` owns what to do about it.
 //
-// So for any gate image that bakes dependencies from a lockfile — the shape #24
-// was built to serve, an image carrying `node_modules` or a browser so a gate
-// attempt installs nothing — an issue branch that changes that lockfile was
-// gated against dependencies built from the SOURCE branch. Both directions are
-// silent and both are false verdicts: a branch that adds a dependency reds with
-// a module-not-found its author cannot reproduce and can burn the whole attempt
-// budget onto `agent-stuck` for a config artefact, and a branch that removes or
-// downgrades one greens against a dependency it deleted. Under
-// `mergeMode: "verified"` the disagreement surfaces later, as a mysterious red
-// on the integration branch after the local gate went green — CI having built
-// the same images from the branch under test.
+// Three things go into the hash — the DECLARED PATHS, the CONTAINERFILE's own
+// bytes (an image is also a function of its recipe), and the BUILD ARGS (an
+// operator who changes `AGENT_UID` would otherwise keep the old image).
+// Nothing else in the context is hashed (Rejected: "hash the whole build
+// context" — multi-GB tars, and `COPY . .`-style recipes would invalidate on
+// every branch).
 //
-// ---------------------------------------------------------------------------
-// The shape of the fix
-// ---------------------------------------------------------------------------
-// The consumer declares what the image is a function of (`rebuildOn`), sandbar
-// owns the comparison and the lifecycle — the same split as `mounts` and
-// `readiness`. This module is the comparison half: it turns (a root directory,
-// an image entry) into a hex fingerprint, and equality of fingerprints is the
-// whole decision procedure. `ensure-images.ts` owns what to do about it.
+// A fingerprint that two different trees can share is a false verdict wearing
+// a hash, so the byte stream is unambiguous rather than merely convenient:
+// declared paths are SORTED (a property of the set, not the written order);
+// every record carries its own length; a directory is walked in sorted order
+// with every entry contributing its relative path (moving a file between two
+// hashed directories changes the hash); a SYMLINK contributes its target
+// string, not the bytes it points at; an ABSENT path contributes an absence
+// marker, so deleting a declared lockfile is a change and not a no-op.
 //
-// Three things go into the hash, and each was a real way to gate the wrong
-// bytes:
-//   - the DECLARED PATHS, which is the point;
-//   - the CONTAINERFILE's own bytes, because an image is also a function of its
-//     recipe and a branch that edits the recipe is exactly as entitled to its
-//     own image as one that edits a lockfile;
-//   - the BUILD ARGS, which are config rather than branch, but which the
-//     tag-only cache also ignored — an operator who changes `AGENT_UID` and
-//     re-runs would otherwise keep the image built for the old one.
-//
-// It deliberately does NOT hash anything else in the context. "Hash the whole
-// build context" is the sledgehammer the issue rejects: outdoor's images are
-// ~6GB and several minutes, `COPY . .`-style recipes would invalidate on every
-// branch, and the tar alone is the cost the baked images were built to avoid.
-//
-// ---------------------------------------------------------------------------
-// Why the encoding is fussy
-// ---------------------------------------------------------------------------
-// A fingerprint that two different trees can share is a false verdict wearing a
-// hash, so the byte stream is unambiguous rather than merely convenient:
-//   - declared paths are SORTED, so the fingerprint is a property of the set,
-//     not of the order someone wrote it in;
-//   - every record carries its own length, so file content cannot be confused
-//     with the separators or the path that precedes it;
-//   - a directory is walked in sorted order and every entry contributes its
-//     relative path, so moving a file between two hashed directories changes
-//     the hash;
-//   - a SYMLINK contributes its target string, not the bytes it points at. The
-//     link is what the build context contains, and following it would hash the
-//     same file twice under two names — or leave the root entirely;
-//   - an ABSENT path contributes an absence marker rather than nothing, so
-//     deleting a declared lockfile is a change and not a no-op.
-//
-// Files are streamed rather than read whole: a declared input is normally a
-// lockfile, but `rebuildOn` accepts a directory and nothing stops a consumer
-// pointing it at a large one.
+// Files are streamed rather than read whole: `rebuildOn` accepts a directory
+// and nothing stops a consumer pointing it at a large one.
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";

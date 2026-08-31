@@ -11,6 +11,7 @@ import {
   type ChunkWrapup,
   chunkResidue,
   CHUNK_LAND_ABANDONED_PR_COMMENT,
+  CHUNK_LAND_DEFERRED_PR_COMMENT,
   CHUNK_MEMBER_CLOSED_COMMENT,
   type ChunkWrapupAdapter,
   LAND_LABEL,
@@ -19,18 +20,21 @@ import {
   selectReconciliations,
   wrapUpLandedChunk,
 } from "./chunk-land.js";
-import { IN_CHUNK_LABEL, type NamedChunk } from "./chunks.js";
+import { IN_CHUNK_LABEL, type LandedChunk } from "./chunks.js";
 
 const chunk = (
   root: number,
   branch: string,
   members: readonly [number, string][],
   title = "root title",
-): NamedChunk => ({
+): LandedChunk => ({
   root,
   branch,
   title,
   members: members.map(([number, t]) => ({ number, title: t })),
+  // The selectors read the members, never the tips — that half of a
+  // `LandedChunk` belongs to the review scan (#63).
+  tips: [],
 });
 
 const pr = (
@@ -410,6 +414,20 @@ describe("the prose (#64)", () => {
     expect(body).toContain("- #43 — beta");
     expect(body).toContain("is KEPT on origin");
     expect(body).not.toMatch(/branch is being deleted/);
+  });
+
+  it("says the label was KEPT when the chunk grew under the request", () => {
+    // The one comment here that reports a non-event, so it has to say both
+    // what arrived and that nothing was spent: a reviewer who saw the label
+    // stay and nothing happen would otherwise assume sandbar is broken.
+    const body = CHUNK_LAND_DEFERRED_PR_COMMENT({
+      chunkBranch: "sandbar/chunk-42-alpha",
+      sourceBranch: "main",
+      landedNow: [{ number: 43, title: "beta" }],
+    });
+    expect(body).toContain("#43 — beta");
+    expect(body).toContain(`\`${LAND_LABEL}\` label is untouched`);
+    expect(body).not.toMatch(/has been removed/);
   });
 
   it("says the land label was removed when the merge was abandoned", () => {

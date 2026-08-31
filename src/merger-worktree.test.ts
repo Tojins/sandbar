@@ -17,12 +17,6 @@ import { type RepoLayout, ensureRepoCache, repoLayout } from "./repo-cache.js";
 const exec = promisify(execFile);
 
 describe("mergerWorktreePathFor", () => {
-  it("lives beside the per-issue worktrees", () => {
-    expect(mergerWorktreePathFor("/repo/.sandbar/worktrees")).toBe(
-      "/repo/.sandbar/worktrees/merger",
-    );
-  });
-
   // #38: beside the cache, never inside it. Composing the path from the repo
   // directory instead would bury every merge in `repo.git/`, where the orphan
   // sweep and `git worktree prune` would still find it but a human never would.

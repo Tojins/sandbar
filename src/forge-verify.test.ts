@@ -1140,23 +1140,9 @@ describe("realVerifyAdapter push primitives", () => {
 });
 
 describe("realVerifyAdapter pull request handling", () => {
-  it("re-titles a reused PR instead of leaving it describing another cycle", async () => {
-    const { exec, calls } = fakeExec((c) =>
-      c.args[1] === "list"
-        ? { stdout: JSON.stringify([{ number: 42, url: "u42" }]) }
-        : {},
-    );
-    const out = await adapterWith(exec).ensurePullRequest({
-      head: "sandbar/integration",
-      title: "T2",
-      body: "B2",
-    });
-    expect(out).toEqual({ number: 42, url: "u42" });
-    expect(calls[1]!.args.slice(0, 3)).toEqual(["pr", "edit", "42"]);
-    expect(calls[1]!.args).toContain("T2");
-    expect(calls[1]!.args).toContain("B2");
-  });
-
+  // Reuse/re-title of a surviving PR is the shared ensurePullRequest's job
+  // (#62), asserted at full strength in forge-pr.test.ts; only the wiring
+  // this adapter adds (head, base from sourceBranch) is asserted here.
   it("creates a PR against the integration head and parses its number", async () => {
     const { exec, calls } = fakeExec((c) =>
       c.args[1] === "list"

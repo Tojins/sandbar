@@ -12,7 +12,7 @@
 //      perfectly all look identical from here, and all three want the same
 //      thing done to them.
 //   2. Which issues are on each of those branches? The plan's derivation
-//      answers that, and nothing else can: `NamedChunk` is built from the
+//      answers that, and nothing else can: `LandedChunk` is built from the
 //      candidate graph, which lists `in-chunk` members back in precisely so
 //      this question has an answer.
 //   3. Is there an open pull request for it? Asked per branch rather than by
@@ -67,7 +67,7 @@ import {
   selectReconciliations,
   wrapUpLandedChunk,
 } from "./chunk-land.js";
-import type { NamedChunk } from "./chunks.js";
+import type { LandedChunk } from "./chunks.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
@@ -276,7 +276,7 @@ export async function reconcileLandedChunks(cfg: {
   readonly repo: RepoRef;
   readonly sourceBranch: string;
   // The plan's derivation: how a branch learns which issues are on it.
-  readonly chunks: readonly NamedChunk[];
+  readonly chunks: readonly LandedChunk[];
   readonly log?: (line: string) => void | Promise<void>;
   // Test seam. The real one talks to `gh` and to origin.
   readonly adapter?: ChunkWrapupAdapter;

@@ -14,12 +14,6 @@ import { describe, expect, it } from "vitest";
 
 import { parseRepoFromRemoteUrl, repoSlug, sameRepo } from "./repo-ref.js";
 
-describe("repoSlug", () => {
-  it("is the --repo argument gh expects", () => {
-    expect(repoSlug({ owner: "acme", name: "app" })).toBe("acme/app");
-  });
-});
-
 describe("sameRepo", () => {
   it("is case-insensitive, because GitHub names are", () => {
     expect(

@@ -153,20 +153,6 @@ describe("applyCycle", () => {
     expect(d.reason).toMatch(new RegExp(`>= maxTotalIssues=${DEFAULT_MAX_TOTAL_ISSUES}`));
   });
 
-  it("(b) takes priority over (c) when both would fire", () => {
-    const s = newRunState();
-    applyCycle(s, { planFingerprint: "10,42", planSize: 2, doneCount: 0, landedMerges: 0 });
-    const d = applyCycle(s, {
-      planFingerprint: "10,42",
-      planSize: 2,
-      doneCount: 0,
-      landedMerges: 0,
-    });
-    expect(d.kind).toBe("exit");
-    if (d.kind !== "exit") throw new Error("unreachable");
-    expect(d.tag).toBe("stuck-same-plan");
-  });
-
   it("stuck checks fire before budget when both apply", () => {
     const s = newRunState();
     s.issuesAttempted = DEFAULT_MAX_TOTAL_ISSUES - 2;

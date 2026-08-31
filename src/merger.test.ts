@@ -1835,6 +1835,67 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       ]),
     );
 
+  it("defers a request for a chunk this cycle grew, keeping `land` on", async () => {
+    // #61 plans a layer of a chunk per cycle, so Phase A can put a member on
+    // the very branch a human labelled before Phase B reads the request. What
+    // is on origin now is not what they said yes to, and the plan's member
+    // list — read before phase 2 — does not name the new member, so landing
+    // would put unreviewed commits on the source branch and delete the branch
+    // the unclosed member lives on. Nothing merges and the label stays.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkPushes: [{ kind: "ok" }],
+      chunkPrs: [{ number: 7, url: "u" }],
+      chunkRefs: originHas(42),
+    });
+    const summary = await runMergerWithAdapter(
+      [{ ...issue(43), chunk: { root: 42, branch: "sandbar/chunk-42-c" } }],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42)),
+    );
+
+    // Phase A's merge onto the chunk branch, and nothing else.
+    expect(calls.merges).toEqual(["sandbar/issue-43-t-43"]);
+    expect(calls.chunkRefFetches).toEqual([]);
+    expect(summary.deferredChunks).toEqual([
+      { target: request(42), landedNow: [{ number: 43, title: "t-43" }] },
+    ]);
+    expect(summary.skippedChunks).toEqual([]);
+    expect(summary.mergedChunks).toEqual([]);
+    expect(calls.prLabelRemovals).toEqual([]);
+    expect(calls.prComments[0]?.pr).toBe(542);
+    expect(calls.prComments[0]?.body).toContain("#43 — t-43");
+    // The chunk landing itself is untouched: #43 is on the branch and owed its
+    // `in-chunk` label.
+    expect(summary.chunkLanded.map((c) => c.issue.id)).toEqual(["43"]);
+  });
+
+  it("lands a chunk whose branch this cycle did not touch, beside one it did", async () => {
+    // The deferral is per BRANCH, not per cycle: a chunk nothing landed on is
+    // exactly as reviewed as it was when the label went on.
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      chunkPushes: [{ kind: "ok" }],
+      chunkPrs: [{ number: 7, url: "u" }],
+      chunkRefs: originHas(42, 99),
+    });
+    const summary = await runMergerWithAdapter(
+      [{ ...issue(43), chunk: { root: 42, branch: "sandbar/chunk-42-c" } }],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42), request(99)),
+    );
+
+    expect(summary.deferredChunks.map((d) => d.target.root)).toEqual([42]);
+    expect(summary.mergedChunks.map((m) => m.target.root)).toEqual([99]);
+    expect(calls.chunkRefFetches).toEqual(["sandbar/chunk-99-c"]);
+  });
+
   it("merges origin's chunk branch, lands it with the cycle, then wraps it up", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],

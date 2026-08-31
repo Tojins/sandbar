@@ -1,80 +1,43 @@
 // Image builds, and the one image property the gate stack cannot discover at
 // run time without breaking.
 //
-// Builds are skipped when the tag already exists, so warm runs pay one
-// `image exists` per entry. We shell out to `podman build` directly rather than
-// via a sandbox-provider helper, to keep the build context scoped (the upstream
-// CLI set context = cwd when given a custom Dockerfile path, which would tar the
-// whole repo).
+// Builds are skipped when the tag already exists. We shell out to
+// `podman build` directly rather than via a sandbox-provider helper, to keep
+// the build context scoped (the upstream CLI set context = cwd for a custom
+// Dockerfile path, which would tar the whole repo). `stdinContext` builds with
+// NO context at all (`podman build -t <tag> - < file`).
 //
-// `stdinContext` builds with NO context at all (`podman build -t <tag> - < file`).
-// A Containerfile that only pulls from a registry and installs packages needs no
-// context, and tarring one up is pure latency.
+// Images that are a function of the BRANCH (#37): an entry declaring what it
+// is a function of (`rebuildOn`) gets a real cache key beyond the tag
+// (image-inputs.ts owns the failure in full), in two places — `ensureImages`
+// records the host checkout's fingerprint as an image LABEL and rebuilds on
+// mismatch; `createBranchImages` fingerprints each GATED WORKTREE before
+// every gate run, and a worktree whose inputs differ gets its own
+// content-addressed tag built from that worktree. Since #46 the AGENT SANDBOX
+// resolves through the same second path — see `resolveSandboxImage`, the same
+// question asked for a container that produces no verdict, and therefore with
+// a different answer to a build that fails.
 //
-// ---------------------------------------------------------------------------
-// Images that are a function of the BRANCH (#37)
-// ---------------------------------------------------------------------------
-// "The tag already exists" is the whole cache policy only for an image nothing
-// in the repo can change. An image that bakes dependencies from a lockfile is a
-// function of the branch, and pinning it to the host checkout for the whole run
-// makes the gate answer a question about the wrong tree — see image-inputs.ts
-// for the failure in full. An entry that says what it is a function of
-// (`rebuildOn`) gets a real cache key instead, in two places:
+// `resolve` takes the declared tags its caller will actually RUN — required,
+// never defaulting to "every participating entry": the gate and the sandbox
+// share one resolver but not one question, and a gate run that also resolved
+// the sandbox's entry would pay a multi-GB build, and red the gate on its
+// failure, over an image no container in that stack runs.
 //
-//   - `ensureImages` records the fingerprint of the host checkout as an image
-//     LABEL and rebuilds when the label no longer matches, so a tag left over
-//     from a run before the operator pulled new dependencies is rebuilt rather
-//     than reused because its NAME exists;
-//   - `createBranchImages` fingerprints each GATED WORKTREE before every gate
-//     run. A worktree whose inputs match the base image uses the base image; one
-//     that differs gets its own tag, built from that worktree, and gate-stack.ts
-//     recreates the stack's containers from it.
+// A build can fail because of the branch (a lockfile that does not install),
+// so `buildImage` reports an `ImageBuildError` carrying the captured output,
+// and gate-stack.ts turns one into a RED GATE: an unbuildable image is a
+// verdict about the branch, not an infrastructure fault to route to
+// HARD-ERROR.
 //
-// Since #46 the AGENT SANDBOX resolves through that same second path — see
-// `resolveSandboxImage` at the bottom of this file, which is the same question
-// asked for a container that produces no verdict, and therefore has a different
-// answer to a build that fails.
-//
-// `resolve` takes the declared tags its caller will actually RUN, and that
-// parameter is required rather than defaulting to "every participating entry".
-// The gate and the sandbox share one resolver (they must: a consumer may give
-// one image both roles, and the content-addressed tag is then the same build)
-// but they do not share a question. A gate run that also resolved the sandbox's
-// entry would pay a multi-GB build for an image no container in that stack
-// runs, and an `ImageBuildError` from it would red the gate over an image the
-// gate never touches.
-//
-// The per-branch tag is content-addressed (`naming.ts`), so the ordinary
-// tag-exists skip is what makes the common cases free: a gate run that changed
-// nothing rebuilds nothing, two issues that make the same lockfile change share
-// one build, and a rebuild that IS needed still hits podman's layer cache for
-// everything above the changed COPY — which is exactly the work CI does.
-//
-// A build launched from here can fail because of the branch (a lockfile that
-// does not install), so `buildImage` can capture its output instead of
-// inheriting the console, and reports failure as an `ImageBuildError` carrying
-// that output. gate-stack.ts turns one into a red gate: an unbuildable image is
-// a verdict about the branch, not an infrastructure fault, and routing it to
-// HARD-ERROR would spend two fresh-stack retries reproducing it and then park
-// the issue with an "environment" trace.
-//
-// ---------------------------------------------------------------------------
-// The uid check (#24 D3)
-// ---------------------------------------------------------------------------
-// A container in a pod cannot use `--userns=keep-id` (podman refuses to combine
-// it with `--pod`) and cannot be given `--user 1000:1000` meaningfully either:
-// inside the pod's default userns that uid maps to a SUBUID, not to the
-// invoking user, so its writes to the bind-mounted worktree fail with EACCES.
-// Two effective uids work: 0, which rootless podman maps to the invoking user,
-// and the host uid itself.
-//
-// So every image behind a container that declares `mountWorktree` is checked
-// before the run starts. The check RUNS the image
-// (`podman run --rm --entrypoint id <img> -u`) rather than reading `.Config.User`, because the directive is frequently
-// non-numeric (`USER agent`) and an inspect-based check has to either resolve
-// /etc/passwd itself or skip — and skipping is precisely the case that then
-// fails as a silent EACCES twenty minutes into a gate. One throwaway container
-// per image answers it exactly, and preflight already pays comparable costs.
+// The uid check (#24 D3): a container in a pod cannot use `--userns=keep-id`,
+// and `--user 1000:1000` maps to a SUBUID whose worktree writes fail EACCES;
+// only uid 0 (mapped to the invoking user) or the host uid works. Every image
+// behind a `mountWorktree` container is checked before the run starts, by
+// RUNNING it (`podman run --rm --entrypoint id <img> -u`) rather than reading
+// `.Config.User` — the directive is frequently non-numeric (`USER agent`),
+// and the skip an inspect-based check needs is precisely the case that fails
+// as a silent EACCES mid-gate.
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { dirname, isAbsolute, join } from "node:path";

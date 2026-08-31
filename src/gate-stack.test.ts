@@ -1715,7 +1715,7 @@ describe("containerState", () => {
 // client or an exit code with no meaning on demand, and those are precisely the
 // answers whose misreading is the HARD-ERROR storm this feature must not
 // introduce. What only a real podman can produce — a container that is running
-// and genuinely unhealthy — is pinned in gate-stack-podman.test.ts.
+// and genuinely unhealthy — is pinned in gate-stack-health-podman.test.ts.
 // ---------------------------------------------------------------------------
 
 const probed = (over: Partial<ResolvedStackContainer> = {}) =>

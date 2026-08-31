@@ -11,7 +11,7 @@ import {
   type ChunkWrapupAdapter,
   type PullRequestSummary,
 } from "./chunk-land.js";
-import { IN_CHUNK_LABEL, type NamedChunk } from "./chunks.js";
+import { IN_CHUNK_LABEL, type LandedChunk } from "./chunks.js";
 import { reconcileLandedChunks } from "./chunk-reconcile.js";
 
 type Recorded = { readonly op: string; readonly arg: string };
@@ -58,16 +58,18 @@ const REPO = { owner: "acme", name: "app" };
 const chunk = (
   root: number,
   members: readonly number[],
-): NamedChunk => ({
+): LandedChunk => ({
   root,
   branch: `sandbar/chunk-${root}-c`,
   title: `t-${root}`,
   members: members.map((n) => ({ number: n, title: `t-${n}` })),
+  // Unread here: the tips are the review scan's half of a `LandedChunk` (#63).
+  tips: [],
 });
 
 const run = (
   landed: readonly string[],
-  chunks: readonly NamedChunk[],
+  chunks: readonly LandedChunk[],
   prs: readonly PullRequestSummary[],
   adapter: ChunkWrapupAdapter,
 ): ReturnType<typeof reconcileLandedChunks> =>

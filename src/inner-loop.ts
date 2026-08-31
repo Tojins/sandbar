@@ -1,41 +1,28 @@
-// Inner-loop runner — I/O glue around the pure state machine.
+// Inner-loop runner — I/O glue around the pure state machine
+// (inner-loop-machine.ts). All branching decisions live in the SM; this file
+// executes its actions, feeds results back as events, and translates the
+// verdict to a Terminal. On HARD-ERROR, decideAfterTerminal may dispose the
+// sandbox and restart from attempt 1 with a fresh one (up to
+// HARD_ERROR_MAX_RETRIES times).
 //
-// Per issue:
-//   1. Prepare the issue worktree, then set up an agent sandbox + the gate
-//      stack in parallel. The worktree comes FIRST (not in the parallel pair,
-//      #20): stack mounts bind-mount fixture files from it, and mount sources
-//      are read at container start — only the expensive container bringups
-//      overlap. That ordering is also what makes the sandbox's own image
-//      resolvable against the BRANCH (#46): the files a `rebuildOn` entry
-//      hashes are on disk before `createSandbox` is called. If the consumer
-//      marked any container `inSandbox`, the SANDBOX stack (#44) — the same
-//      containers again, in the agent container's own network namespace, so the
-//      agent can run the application before the gate does — is brought up
-//      INSIDE that first entry, through `beforeSandboxReady`: the siblings
-//      attach to the agent container, so it has to exist first, and a
-//      consumer's `onSandboxReady` hook is where the migration that wants them
-//      runs, so they have to be up before it. Not a third parallel entry for
-//      the same reason, and no serialisation against the gate stack either —
-//      it is still the same promise.
-//   2. Drive the state machine (inner-loop-machine.ts) to a verdict by
-//      executing the action it emits and feeding the result back as an event.
-//   3. Translate the verdict to a Terminal.
-//   4. If the verdict is HARD-ERROR, the outer loop here asks
-//      decideAfterTerminal whether to dispose the sandbox and restart from
-//      attempt 1 with a fresh one (up to HARD_ERROR_MAX_RETRIES times).
+// Setup ordering is load-bearing: the issue worktree comes FIRST, then agent
+// sandbox + gate stack in parallel (#20 — mount sources are read at container
+// start; #46 — the files a `rebuildOn` entry hashes must be on disk before
+// `createSandbox`). Containers marked `inSandbox` (#44) come up INSIDE the
+// sandbox entry via `beforeSandboxReady`: they attach to the agent
+// container's netns, so it must exist first, and they must be up before a
+// consumer's `onSandboxReady` hook runs.
 //
-// Reviewer is strictly advisory and never commits — there is no gate-2 and
-// no revert-after-reviewer logic. All branching decisions live in the state
-// machine. This file only does I/O.
+// One deliberate exception to "all branching lives in the SM": the promise
+// nudge in runImplementer. An implementer that ends with no `<promise>` tag
+// at all gets one `--continue` follow-up before the NO-SIGNAL reaches the SM
+// — the SM never sees the nudge, only the re-parsed result. The full argument
+// is at the call site.
 //
-// Which includes the one judgment this file used to make silently: what a
-// FAILED reviewer run means (#41). It caught the error, wrote the message into
-// `reviewerStdout`, and let the verdict parser turn it into CHANGES-REQUESTED —
-// so a harness fault arrived at the state machine wearing a verdict's clothes
-// and was charged a review round. The policy now lives in reviewer-run.ts and
-// its outcome is two distinct events; this file's remaining job is to adapt
-// `sandbox.run`'s throw into the shape that policy classifies, which is why the
-// try/catch below returns a value instead of substituting prose.
+// What a FAILED reviewer run means is reviewer-run.ts's policy (#41); this
+// file only adapts `sandbox.run`'s throw into the shape that policy
+// classifies, which is why the try/catch below returns a value instead of
+// substituting prose.
 
 import { join } from "node:path";
 
@@ -43,6 +30,7 @@ import * as agentSandbox from "./agent-sandbox.js";
 import { agentPartialOutput, podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
+import type { ChunkTarget } from "./chunks.js";
 import type { ResolvedGateStack } from "./config.js";
 import { type BranchImages, resolveSandboxImage } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
@@ -50,6 +38,7 @@ import { summarizeGateFailure } from "./gate.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
 import {
   type HeadMismatch,
+  type IssueBranchBase,
   dirtyWorktreePaths,
   ensureIssueBranch,
   headMismatch,
@@ -68,6 +57,7 @@ import {
 import type { AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { parsePromise } from "./promise-parser.js";
+import { loadTemplate } from "./prompts.js";
 import {
   type SandboxContainerStatus,
   type SandboxStack,
@@ -91,10 +81,23 @@ import { parseVerdict } from "./verdict-parser.js";
 
 export const FAILURE_TAIL_LINES = 200;
 
+// The promise nudge (see runImplementer). Loaded at import time like every
+// other template; no placeholders.
+const PROMISE_NUDGE_TPL = loadTemplate("implementer-promise-nudge");
+
 export type IssueRef = {
   readonly id: string;
   readonly title: string;
   readonly branch: string;
+  // The chunk this issue belongs to, as the planner derived it (#60). Null (or
+  // absent) ⇒ the auto lane. Phase 2 reads it for one thing and one thing only:
+  // where the issue branch is SEEDED from (#61). A member chained behind an
+  // already-landed one is cut from the chunk's tip rather than from
+  // `origin/<sourceBranch>`, because that is where its blocker's commits are.
+  // Optional for the same reason merger.ts's `IssueRef` makes it optional — the
+  // shape is built by hand in places that have nothing to do with landing — and
+  // the one caller whose answer matters (the plan) always sets it.
+  readonly chunk?: ChunkTarget | null;
 };
 
 export type Terminal =
@@ -266,9 +269,38 @@ async function runSandboxCycle(
   const accumulated: { sha: string }[] = [];
 
   try {
-    // Seed the issue branch off origin/<sourceBranch> (not the host's local)
-    // so the sandbox never inherits cwd's in-progress state. Idempotent.
-    await ensureIssueBranch(config.layout.repoDir, issue.branch, config.sourceBranch);
+    // Seed the issue branch off origin — never the host's local refs, so the
+    // sandbox cannot inherit cwd's in-progress state. Idempotent. Off
+    // `origin/<sourceBranch>` for an ordinary issue, off the CHUNK TIP for a
+    // member chained behind one that has already landed (#61); which of the two
+    // is git-ops.ts's decision, made from `issue.chunk` and what origin
+    // actually carries.
+    //
+    // The return value is the whole reason this is one call and not two: it is
+    // the ref the branch was really cut from, and every range the prompts below
+    // render is anchored at it. Re-deriving `origin/<sourceBranch>` in the
+    // prompt layer would hand a chunk member its ancestors' entire chunk as
+    // "the work done so far" (#40's failure, re-entered from the other side).
+    const base: IssueBranchBase = await ensureIssueBranch(
+      config.layout.repoDir,
+      issue.branch,
+      config.sourceBranch,
+      issue.chunk ?? null,
+    );
+    // Logged for a chunk member either way. The second line is now true by
+    // construction rather than by assumption — `ensureIssueBranch` gives the
+    // source branch to a chunk member only when that member IS the root, and
+    // throws otherwise — so what the log records is which of the two seeds a
+    // member got, not a guess about why.
+    if (issue.chunk && opts.onOrchestratorLog) {
+      await opts.onOrchestratorLog(
+        base.chunkBranch
+          ? `issue=${issue.id} seeded from chunk tip ${base.ref} (${base.chunkBranch})`
+          : `issue=${issue.id} roots chunk ${issue.chunk.branch} and seeded from ` +
+            `${base.ref} — origin carries no such chunk branch yet, which is where ` +
+            "the merge phase will create it",
+      );
+    }
 
     // Worktree first (fast git ops), then container bringups in parallel: the
     // stack's mounts resolve against this worktree and must see its files on
@@ -442,6 +474,7 @@ async function runSandboxCycle(
         opts,
         config,
         anchorOpts,
+        base,
         gateStack,
         worktreePath,
         accumulated,
@@ -529,6 +562,10 @@ type ExecuteActionCtx = {
   readonly opts: InnerLoopOptions;
   readonly config: InnerLoopConfig;
   readonly anchorOpts: ProjectAnchorOptions;
+  // What `ensureIssueBranch` seeded the branch from, threaded to both prompt
+  // builders so the implementer's diff and the reviewer's changeset are the
+  // same range (#61).
+  readonly base: IssueBranchBase;
   readonly gateStack: Stack;
   // The issue worktree. Same tree the sandbox edits, the stack mounts and the
   // clean-assert reads — one tree, which is the whole point of D1.
@@ -567,7 +604,7 @@ async function runImplementer(
       maxAttempts: config.maxImplAttempts,
       worktreePath: sandbox.worktreePath,
       lastFailureTrace: action.failureTrace,
-      sourceBranch: config.sourceBranch,
+      base: ctx.base,
       ...(action.extraReprompt !== null ? { extraReprompt: action.extraReprompt } : {}),
       ...(action.latestReviewerProse !== null
         ? { latestReviewerProse: action.latestReviewerProse }
@@ -588,9 +625,63 @@ async function runImplementer(
   }
   accumulated.push(...run.commits);
 
-  const signal = parsePromise(run.stdout, {
+  let signal = parsePromise(run.stdout, {
     commitsAccumulated: accumulated.length,
   });
+
+  // The promise nudge: output with NO tag at all gets one same-conversation
+  // follow-up before it is allowed to cost an attempt. The observed failure is
+  // a finished agent forgetting the tag at the end of a long session, and the
+  // full-attempt answer to that is disproportionate — a fresh conversation
+  // that has to re-orient from the diff, ~minutes and an attempt slot for a
+  // two-second omission. `--continue` asks the SAME agent, so the tag stays
+  // the agent's own claim: nothing here infers COMPLETE from a clean tree,
+  // and a premature claim is gated exactly like any other (the orchestrator
+  // gates between attempts; agents never decide "green").
+  //
+  // Guarded on `missingTag`, not on NO-SIGNAL: a tag that failed its parse
+  // guard (COMPLETE with zero commits, an escalation missing its block) means
+  // the agent remembered the contract and got the substance wrong — the
+  // guard's specific re-prompt on a fresh attempt is the right correction, and
+  // a nudge would invite it to restate the same broken claim.
+  //
+  // One nudge, inline, never a loop. The reply is parsed over the COMBINED
+  // output so a bare `NEEDS-INFO` answer pairs with a `<questions>` block from
+  // the original message (last-wins semantics already handle concatenation),
+  // and the parse guards keep their authority over the result — a nudged
+  // zero-commit COMPLETE still downgrades. If the nudge run itself throws,
+  // that propagates like any other sandbox failure (HARD-ERROR, fresh
+  // sandbox): a container that cannot run a one-line follow-up cannot run the
+  // next attempt either, and swallowing it would hide the infra fault.
+  if (signal.kind === "NO-SIGNAL" && signal.missingTag) {
+    const nudge = await sandbox.run({
+      name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
+      maxIterations: 1,
+      agent: agentSandbox.claudeCode(config.implementerModelId, {
+        continueSession: true,
+      }),
+      prompt: PROMISE_NUDGE_TPL,
+      // Any of the three tags ends the wait, not just COMPLETE.
+      completionSignal: "</promise>",
+    });
+    accumulated.push(...nudge.commits);
+    const combined = `${run.stdout}\n${nudge.stdout}`;
+    signal = parsePromise(combined, {
+      commitsAccumulated: accumulated.length,
+    });
+    if (opts.attemptLogger) {
+      await opts.attemptLogger.writeAttempt(
+        issue.id,
+        action.attempt,
+        `${run.stdout}\n\n--- promise nudge ---\n\n${nudge.stdout}`,
+      );
+    }
+    if (opts.onOrchestratorLog) {
+      await opts.onOrchestratorLog(
+        `issue=${issue.id} attempt=${action.attempt} promise-nudge signal=${signal.kind}`,
+      );
+    }
+  }
   // Read here, not in the gate: a COMPLETE claim over a dirty tree should never
   // cost a stack bringup, and the state machine wants the paths to re-prompt
   // with (#24 D1). Read on every signal so the SM stays the only place that
@@ -644,6 +735,7 @@ async function runReviewer(
     repoDir: config.layout.repoDir,
     worktreePath: sandbox.worktreePath,
     sourceBranch: config.sourceBranch,
+    base: ctx.base,
     codingStandardsPath: config.codingStandardsPath,
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,

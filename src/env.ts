@@ -1,21 +1,13 @@
 // The two readers of `config.env`, and the one place its semantics live.
 //
 // `config.env` is a `Record<string, string>` — a VALUE in the config, not a
-// path to a file (#38). Sandbar used to name `.env` at the host repo root and
-// parse it twice, once here for preflight's credential check and once in
-// `agent-sandbox.ts` for the container. Two problems, both closed by the
-// change: sandbar had an opinion about the most contested filename in a repo
-// root (compose auto-reads `./.env` for interpolation, as do Vite, Next and
-// Laravel), and "both readers see the same file" was an invariant two module
-// headers had to keep restating. One record is structurally one answer, and a
-// host with no file at all — CI, passing `{ GH_TOKEN: "" }` — needs no parser.
+// path to a file (#38): sandbar names no file, and one record is structurally
+// one answer for preflight and the container.
 //
-// The SEMANTICS are unchanged, and they are an allowlist. Only keys the config
-// DECLARES cross into a container; the host's environment never leaks
-// wholesale. A declared key with an empty value means "inherit this one from
-// the host", which is exactly what a bare `GH_TOKEN=` line in a dotenv file
-// meant. `readEnvFile` (env-file.ts) turns such a file into this record for
-// hosts that want to keep one.
+// The semantics are an allowlist. Only keys the config DECLARES cross into a
+// container; the host's environment never leaks wholesale. A declared key with
+// an empty value means "inherit this one from the host". `readEnvFile`
+// (env-file.ts) turns a dotenv file into this record for hosts that want one.
 
 export type EnvReader = (key: string) => string | undefined;
 

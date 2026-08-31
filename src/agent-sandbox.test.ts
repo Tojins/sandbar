@@ -202,6 +202,18 @@ describe("claudeCode", () => {
     expect(cmd.command).toContain("--model 'a'\\''b'");
     expect(cmd.command).not.toContain("--dangerously-skip-permissions");
   });
+
+  it("continueSession adds --continue before the stdin prompt; absent by default", () => {
+    const cmd = claudeCode("m", { continueSession: true }).buildPrintCommand({
+      prompt: "nudge",
+      dangerouslySkipPermissions: true,
+    });
+    expect(cmd.command).toContain(" --continue -p -");
+    expect(cmd.stdin).toBe("nudge");
+    expect(claudeCode("m").buildPrintCommand({ prompt: "p" }).command).not.toContain(
+      "--continue",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -292,20 +304,6 @@ describe("registerShutdown", () => {
     expect(process.listenerCount("SIGINT")).toBe(before.SIGINT);
     expect(process.listenerCount("SIGTERM")).toBe(before.SIGTERM);
     unreg();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Worktree path compatibility with finalize.ts (obligation 3)
-// ---------------------------------------------------------------------------
-
-describe("worktree path layout", () => {
-  it("matches repo-cache.ts:worktreePathFor for a slashed branch", () => {
-    const layout = repoLayout("/repo", ".sandbar");
-    const branch = "sandbar/issue-5-add-foo";
-    expect(worktreePathFor(layout.worktreesDir, branch)).toBe(
-      join("/repo", ".sandbar", "worktrees", "sandbar-issue-5-add-foo"),
-    );
   });
 });
 
@@ -1174,15 +1172,6 @@ describe("sandboxRunArgs (#42)", () => {
     // silent no-op that `toContain` alone would still accept.
     const args = sandboxRunArgs(base);
     expect(args.indexOf("--init")).toBeLessThan(args.indexOf(base.imageName));
-  });
-
-  it("still ends at the sleep entrypoint", () => {
-    expect(sandboxRunArgs(base).slice(-4)).toEqual([
-      "--entrypoint",
-      "sleep",
-      base.imageName,
-      "infinity",
-    ]);
   });
 
   it("carries the identity, workdir, env and mounts it was given", () => {

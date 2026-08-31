@@ -2,332 +2,80 @@
 // ordered list of steps that run in them, producing one verdict about one
 // commit.
 //
-// This replaces the single DB sidecar of #20. The shape a real repo needs is
-// not "a database plus two npm scripts" — it is a database, a mail catcher, an
-// application server, a frontend dev server and five steps spread across them,
-// some of which only exist because the branch under test builds them.
+// Topology: every container joins one podman POD sharing a netns (addresses
+// itself as `127.0.0.1`, publishes nothing, so parallel gates and the
+// operator's dev stack cannot collide). The sandbox stack (#44) runs the same
+// containers on the OTHER topology — a `--network container:` chain — because
+// `--pod` and `--userns=keep-id` are refused together; see sandbox-stack.ts,
+// and `ContainerAttachment` below for where the two meet. Inside a pod,
+// `--user 1000:1000` maps to a SUBUID and gets EACCES on the mounted worktree,
+// so a worktree-mounting container must run as root or the host uid (D3,
+// checked up front by ensure-images.ts). The per-issue `--disable-dns` network
+// (#18) stays underneath the pod; the pod carries explicit public `--dns`.
 //
-// ---------------------------------------------------------------------------
-// The pod
-// ---------------------------------------------------------------------------
-// Every container joins one podman POD, so the whole stack shares a network
-// namespace and addresses itself as `127.0.0.1`. Nothing is published for the
-// stack's own use, so a gate run cannot collide with the operator's dev stack
-// or with another issue's gate running in parallel.
+// No anonymous volumes (#50): every container gets `--image-volume=ignore`.
+// Podman's default provisions an anonymous volume per builtin `VOLUME`
+// directive, and each one permanently consumes a lock from the host-wide SHM
+// pool (`num_locks`, default 2048) — leaked volumes walk the whole HOST to a
+// wall where every podman object creation fails, sandbar's or not. `-v` on
+// removal (`CONTAINER_RM_ARGS`) is a backstop for pre-upgrade debris only, and
+// reaches ONLY the anonymous volume podman created for the container — never a
+// named volume (sandbar declares none) or a bind mount. Already-leaked volumes
+// are the operator's to clear (they carry no label); the recovery command is in
+// containers.ts's header.
 //
-// A pod, not the `--network container:<anchor>` chain a docker-based launcher
-// has to use. The anchor mechanism exists only because docker has no pods, and
-// it costs two real constraints: the anchor owns the namespace (so the `--dns`
-// flags must go on it, and every joiner inherits whatever it was created with),
-// and REMOVING the anchor destroys the namespace — so the anchor can never be a
-// container that is recreated per attempt. `RUNTIME` is podman, so sandbar owes
-// none of that: the pod is created first, holds the resolver config, and
-// survives every container's removal. There is no `anchor` in sandbar's config.
+// Whose failure is a failed bringup: `lifecycle` decides (D5). An `issue`
+// container depends only on image + env, so its failure is infra — it throws,
+// the runner wraps it as HARD-ERROR, fresh-stack retry. An `attempt` container
+// mounts the worktree and runs branch code, so its failure is a gate RED with
+// the container's log as the trace. Two checks keep that mapping true for the
+// stack's whole life: probe-less containers are asserted alive after a grace
+// interval (`podman run -d` exits 0 for an entrypoint that dies immediately),
+// and `issue` containers are re-checked before EVERY gate run — liveness AND
+// health (#36, #49). The health side polls rather than deciding on one shot,
+// and a container still unhealthy at the deadline is recreated in place before
+// anything is thrown; `pollUntilHealthy` and `assertIssueContainerHealthy`
+// carry that argument.
 //
-// SANDBAR NOW RUNS BOTH TOPOLOGIES, and the paragraph above is why the second
-// one is not a contradiction (#44). The sandbox stack — the same containers,
-// beside the AGENT rather than beside the steps — uses the anchor chain, and
-// every objection just made is an objection to the anchor being a FOREIGN
-// container. There the anchor is the agent's own sandbox: created first,
-// outliving every sibling, never recreated per attempt, and the natural owner
-// of any namespace-wide flag — of which, since #43 moved every readiness probe
-// inside the container, there are none left to want. What forces the choice is
-// that a pod cannot host it at all — `--pod` and `--userns=keep-id` are
-// refused together, and the agent needs keep-id (uid 1000, `HOME=/home/agent`,
-// and a `--dangerously-skip-permissions` that refuses to run as root). So:
-// pods where a pod is possible, the chain where it is not. See
-// sandbox-stack.ts, and `ContainerAttachment` below for the one place the two
-// meet in this module.
-//
-// What the pod costs: `--userns=keep-id` and `--pod` cannot be combined
-// (podman refuses outright), and `--user 1000:1000` inside a pod maps to a
-// SUBUID, not to the invoking user — a container that writes to the mounted
-// worktree that way gets EACCES. Container ROOT under rootless podman maps to
-// the invoking user, so a worktree-mounting container must run as root or as
-// the host uid, which is checked empirically before the run starts
-// (ensure-images.ts) rather than discovered as a mysterious mid-gate failure.
-//
-// The per-issue network stays underneath the pod. The pod isolates the
-// namespace, but two pods on one shared bridge could still reach each other,
-// and `--disable-dns` (#18) is a property of the network: on WSL2 the
-// aardvark-dns resolver dies with the systemd user bus across suspend/resume
-// and leaves every in-bridge lookup a black hole. The pod carries explicit
-// public `--dns` servers so external resolution still works, and every
-// container in it inherits them.
-//
-// ---------------------------------------------------------------------------
-// No anonymous volumes (#50)
-// ---------------------------------------------------------------------------
-// Every container is created with `--image-volume=ignore`, and without it a
-// gate walks the whole HOST into a wall it cannot get out of.
-//
-// Podman's default is `--image-volume=bind`, which provisions one ANONYMOUS
-// volume per container per builtin `VOLUME` directive in the image — and
-// `mariadb`, `postgres`, `redis` and most other service images declare one.
-// Podman allocates a lock from a single SHM pool (`num_locks`, default 2048)
-// for every container, pod AND volume, so each of those volumes is a
-// permanently consumed lock: sandbar's removals did not pass `-v`, so the
-// volume outlived its container, and 2000 volumes + 47 containers + 1 pod =
-// 2048 was measured on a real host — at which point EVERY podman object
-// creation fails host-wide, including in projects that have nothing to do with
-// sandbar. Nothing degrades on the way up: the 2047th object works and the
-// 2048th does not.
-//
-// The decisive point is that the volume is pure waste, always, which is what
-// makes this a one-flag change rather than a removal-hygiene campaign. An
-// anonymous volume is by definition never reused, and an `attempt` container is
-// recreated on every gate run by design (D5 below), so each recreate got a
-// fresh, empty one: provisioned, written to once, read by nothing, abandoned.
-// It bought no persistence, no reuse and no correctness.
-//
-// `ignore` over `tmpfs` (the third value the flag takes): both create no
-// volume, but tmpfs is RAM-backed and unbounded by default, and three issues
-// gate in parallel each with a database — that trades a leak bounded by a known
-// number for an OOM bounded by nothing. `ignore` puts the `VOLUME` path in the
-// container's own writable layer: disk-backed, same lifetime as the container,
-// which is exactly sandbar's model. The historical reason images declare
-// `VOLUME` — overlayfs being poor for database writes — is much weaker on the
-// kernel `overlay` driver than on fuse-overlayfs, and mariadb was measured
-// coming up healthy under all three values.
-//
-// No config knob. Nothing a consumer can want from the default is reachable
-// through an ANONYMOUS volume, so an `imageVolume` escape hatch would exist for
-// a preference nobody has expressed. Add one when someone measures a slow gate
-// and can state the case.
-//
-// `-v` ON REMOVAL IS A BACKSTOP, NOT THE FIX, and the distinction decides which
-// site needs it and which merely carries it. Past the flag, every container
-// sandbar creates holds no anonymous volume, so `-v` can only ever fire against
-// one a PRE-UPGRADE sandbar left behind. That population is real and this
-// module reaches it from exactly one site: `bringUpContainers`' pre-create
-// removal of a stale namesake. `reapKilledStep` removes a container this run
-// created, so `-v` can never fire there and is carried for consistency — a flag
-// present at some removals and absent at others invites the next reader to
-// conclude the absence is meaningful. Both go through `CONTAINER_RM_ARGS`.
-//
-// `-v` REACHES ONLY THE ANONYMOUS VOLUME PODMAN CREATED FOR THE CONTAINER, so
-// it is far less dangerous than "add `-v` to a force-remove" reads: it cannot
-// touch a NAMED volume, and sandbar declares none — every mount this module
-// builds is a host bind mount (`mountSpec`, `mountWorktree`), which `-v` does
-// not touch either.
-//
-// Three measured negatives, recorded so they are not re-derived:
-//   - `podman pod rm` has NO `-v` at all (4.9.3: `-a -f -i -l --pod-id-file
-//     -t`), so `POD_RM_ARGS` cannot carry one and the stale-pod recycle in
-//     `startStack` cannot reclaim a pre-upgrade member's volume. `stop()`
-//     deliberately does not enumerate and remove the members first to get round
-//     that: under the flag every member it removes was created by THIS run and
-//     carries no volume, so it would buy nothing.
-//   - `podman run --rm` already reaps its own anonymous volume (measured: 95
-//     volumes -> 95 across `run --rm --entrypoint id mariadb`), so
-//     ensure-images.ts's uid probe is not a leak site, despite looking like one
-//     to an "add `-v` everywhere" audit.
-//   - `[engine] num_locks` in `containers.conf` is raisable (plus `podman
-//     system renumber`), but it is host configuration sandbar does not own, and
-//     without the flag it only moves the wall. No config surface, no preflight
-//     probe.
-//
-// Already-leaked volumes are the OPERATOR's to clear and nothing in sandbar may
-// do it for them — an anonymous volume carries no label, and nothing
-// distinguishes sandbar's from another project's, which is the argument
-// `findUnattributableResources` already makes for pre-scope debris. The
-// recovery command lives in containers.ts's header, beside the sweep an
-// operator arrives at from this symptom.
-//
-// ---------------------------------------------------------------------------
-// Whose failure is a failed bringup
-// ---------------------------------------------------------------------------
-// `lifecycle` decides, and it is the most consequential field in the config.
-// An `issue` container (a database, a mail catcher) depends only on its image
-// and its env — never on the branch — so its failure is infra: it throws, the
-// runner wraps it as HARD-ERROR, and the issue retries with a fresh stack. An
-// `attempt` container mounts the worktree and runs the branch's code, so its
-// failure is the branch's fault like any red test: gate red, with the
-// container's log as the trace, and the implementer gets another attempt.
-//
-// Getting that backwards is not a style question. An agent that breaks the
-// service bootstrap produces a readiness timeout; under a blanket
-// "container failure = infra" rule that becomes two fresh-stack retries
-// reproducing the identical failure and then NEEDS-HUMAN with an
-// "environment" trace — for a bug the implementer could have fixed on the next
-// attempt if it had been shown the log.
-//
-// The mapping has to hold for the whole life of the stack, not just its first
-// second, and two liveness checks are what make it. A container with no
-// `readiness` declared is still asserted alive after a grace interval —
-// `podman run -d` exits 0 for an entrypoint that dies immediately, so without
-// that check a dead mail catcher passes bringup and is then blamed on the
-// branch by every step that talks to it. And the `issue` containers are
-// re-checked before EVERY gate run: a database OOM-killed at attempt 4 is still
-// infrastructure, so it throws rather than reddening, and the fresh-stack retry
-// does what it exists to do instead of burning the rest of the budget against a
-// corpse.
-//
-// SINCE #49 THAT PRE-GATE CHECK ASKS A SECOND QUESTION: not only "is the
-// process still there" but "does it still work". `.State.Running` is `true` for
-// a database that accepts connections and never answers, a service wedged on a
-// lock, a process that survived an OOM with its worker pool dead — so the check
-// passed, every step that talked to the container failed, and the gate reddened
-// against a branch that never touched it. That is the same misblame #36 closed,
-// arriving through the other half of the question, and #43 is what makes it
-// cheap to close: the stack already carries a consumer-authored predicate for
-// "this service is working", and the check was not using it.
-//
-// The state question decides first and the health question is asked only of a
-// container that is RUNNING, because `podman healthcheck run` cannot classify
-// death (stopped, removed and an unwell podman are all 125 with different
-// prose). A healthcheck is also not a liveness check — it can be transiently
-// false — so it polls rather than deciding on one shot, an unanswerable probe
-// abandons rather than escalating, and a container still unhealthy at the
-// deadline is recreated in place before anything is thrown. See
-// `pollUntilHealthy` and `assertIssueContainerHealthy`, which carry the whole
-// argument; the short version is that every one of those three would otherwise
-// turn a service that is unhealthy for ten seconds into a retry storm that
-// exhausts HARD_ERROR_MAX_RETRIES and parks the issue with an "environment"
-// trace — D5 running backwards, introduced by the check meant to prevent it.
-//
-// ---------------------------------------------------------------------------
-// Nothing here may hang
-// ---------------------------------------------------------------------------
-// This module holds the run's single-instance lock while it works, and node's
-// execFile has NO default timeout, so an unbounded exec is not a slow gate —
-// it is a run that never ends and never tears down. EVERY podman call in this
-// module goes through `boundedPodman`, which does its OWN timing rather than
-// passing node's `timeout:` option — see that function, and note that the
-// option it replaces did not merely fail to bound a `podman exec`, it reported
-// the hung call as a SUCCESS. Steps are bounded by `step.timeoutMs` (#26, per
-// step because a lint step and a browser suite do not want the same ceiling);
-// readiness probes and postReadyCommands by the container's own readiness
-// budget; the calls sandbar makes ABOUT a container rather than through it
-// (`logs`, `inspect`, `container exists`) by LOG_READ_TIMEOUT_MS; and
-// everything that creates or destroys a pod, network or container by
-// CONTROL_TIMEOUT_MS. Podman's own `--health-timeout` is NOT one of these and
-// is not passed: it does not kill, it retro-labels (see Readiness below). The
-// one thing a gate run still shells out to unbounded is not podman:
+// Nothing here may hang: this module holds the run's single-instance lock, and
+// node's execFile has NO default timeout. Every podman call goes through
+// `boundedPodman`, which does its OWN timing — node's `timeout:` option is a
+// green-on-red trap: it reported a hung `podman exec` as SUCCESS (#26). Steps
+// are bounded per-step by `step.timeoutMs`; probes by the readiness budget,
+// bounded individually because the poll loop only tests its deadline BETWEEN
+// probes. There is deliberately no bound on the gate as a whole (it stops at
+// the first red). The one unbounded shell-out left is not podman:
 // `dirtyWorktreePaths`' `git status` (git-ops.ts).
-// Note that `readinessTimeoutMs` alone does not do this: the poll loop only
-// tests its deadline BETWEEN probes, so one probe that never returns hangs
-// forever inside a perfectly valid budget.
 //
-// A step that exceeds its bound is a gate RED, not a HARD-ERROR — the same
-// argument as D5. A suite that hangs is nearly always the branch's own code (a
-// test awaiting a promise that never resolves, a reporter that never exits),
-// not the environment, so the implementer gets another attempt with a trace
-// naming the step and the bound; a hang that IS environmental recurs, exhausts
-// the attempt budget and lands on NEEDS-HUMAN carrying that same trace.
+// A step that exceeds its bound is a gate RED, not a HARD-ERROR — same
+// argument as D5. Killing the `podman exec` CLIENT does not touch the process
+// inside the container, so `reapKilledStep` removes the container itself
+// (`attempt`: recreated next gate run anyway; `issue`: recreated on the spot —
+// and a recreate that fails wins over the red: HARD-ERROR). Same reap on a
+// maxBuffer kill.
 //
-// There is deliberately no bound on the gate as a WHOLE. A gate run stops at
-// the first red, so one hung step costs exactly one step's bound; a second
-// number would only add a way to kill a legitimately slow run without being
-// able to say which step it killed. The residual is that a stack of N slow but
-// PASSING steps can run for the sum of their bounds — finite, and computable by
-// the operator from the config in front of them.
+// Readiness (#43): podman owns the probe, sandbar owns the schedule. The
+// container is created with `--health-cmd` + `--health-interval=disable` and
+// every poll calls `podman healthcheck run` — the probe runs INSIDE the
+// container. Sandbar polls; podman must not schedule: podman's own intervals
+// are transient systemd timers named by container id, outside the scope's
+// sweep, so a SIGKILLed run would leak a firing timer (#28 cannot reach the
+// systemd unit namespace). `--health-timeout` is deliberately NOT passed or
+// exposed: it does not kill, it retro-labels after the probe returns — #26's
+// green-on-red in podman's colours. `readinessTimeoutMs` is the single real
+// bound, enforced here.
 //
-// Killing the step is not the end of it: killing the `podman exec` CLIENT does
-// not touch the process inside the container (also pinned against real podman),
-// so a timed-out step leaves its work running, burning CPU beside the next
-// attempt and skewing whatever the next gate run measures. The only handle
-// podman offers that is total, and that needs no tools in an image sandbar does
-// not control, is the container itself: `reapKilledStep` removes it. For an
-// `attempt` container that is free — the next gate run recreates it anyway —
-// and an `issue` one is recreated on the spot. That recreate used to be the
-// only thing between this reap and a verdict misblamed on the branch, because
-// `assertIssueContainersAlive` could not see a REMOVED container at all; since
-// #36 it can, so the recreate is now an optimisation — read that function for
-// what it saves and what it costs. The same reap runs on a maxBuffer kill,
-// which strands a process for exactly the same reason.
+// Health-log gotchas for probe debugging: exit codes are NORMALISED (a probe
+// exiting 3 is recorded as `ExitCode: 1`), and `lastErr` must come from the
+// health log's `Output`, not the client (whose stdout is just `unhealthy`) —
+// EXCEPT a probe sandbar killed at the deadline, which records no entry at
+// all, so `probeOnce` carries `timedOut` out beside the detail and
+// `lastProbeText` leads with it. The health block is added to
+// `ContainerBringupError` beside the D9 log tail, not instead of it.
 //
-// A recreate that fails is the one case where a killed step does not produce a
-// gate red: the bringup error wins and the run takes a HARD-ERROR instead.
-//
-// Every podman call this module makes is now a bounded `execFile`. The one
-// long-lived `spawn` it used to hold — the `podman logs -f` follower behind
-// `log` readiness — went with that kind in #43, and with it the whole
-// signal-coverage caveat that followed: there is no longer any child here that
-// can outlive its parent on SIGKILL or an untrapped SIGHUP. sandbox-stack.ts
-// spawns one deliberately — a `podman logs -f` per sibling, producing an
-// artefact rather than deciding readiness — and states that caveat itself.
-//
-// ---------------------------------------------------------------------------
-// Readiness: podman owns the probe, sandbar owns the schedule (#43)
-// ---------------------------------------------------------------------------
-// One kind. The container is created with `--health-cmd '<json argv>'` and
-// `--health-interval=disable`, and every poll calls `podman healthcheck run`.
-// The probe therefore runs INSIDE the container, which is what retires the
-// three hand-rolled kinds this replaced — `tcp` (a host-side connect through a
-// published port), `log` (a followed `podman logs -f` scanned for a substring)
-// and `exec` (a bare `podman exec`) — along with roughly 250 lines that existed
-// only to make the first two work.
-//
-// SANDBAR POLLS; PODMAN DOES NOT SCHEDULE, and that inverts the obvious
-// implementation on purpose. `--health-interval=Ns` plus one
-// `podman wait --condition=healthy --condition=unhealthy` looks like less code
-// and is worse on three counts, each measured against podman 4.9.3:
-//
-//   - podman schedules healthchecks with TRANSIENT SYSTEMD TIMERS, so a real
-//     interval needs a systemd user session (a rootless podman inside a CI
-//     container may have none) and creates a unit named by CONTAINER ID —
-//     outside the `sandbar-<scope>-*` namespace `cleanupOrphanContainers`
-//     sweeps, so a SIGKILLed run leaks a timer nothing reaps that keeps firing
-//     against a container that is gone. #28's scope has no reach into the
-//     systemd unit namespace. With `--health-cmd` AND `disable`, podman creates
-//     no unit at all: the dependency is designed out rather than probed for.
-//   - `podman wait` buys no verdict. It accepts both conditions and then prints
-//     `-1` and EXITS 0 for either outcome, so the `inspect` happens anyway.
-//   - `--health-timeout` DOES NOT KILL. A 2s timeout against a 30s probe
-//     returns after 30.3s and then labels the result `exceeded timeout of 2s`,
-//     recorded as `ExitCode: -1`. Under `wait` that means blocking on a probe
-//     podman has declined to kill — "nothing here may hang" reintroduced
-//     through its own fix. So the flag is deliberately NOT passed and not
-//     exposed in config: a number that looks like a per-probe bound but only
-//     retro-labels is #26's green-on-red wearing podman's colours.
-//     `readinessTimeoutMs` remains the single real bound, enforced here.
-//
-// What the poll keeps unchanged: `readinessTimeoutMs`, the `remainingMs`
-// arithmetic, `throwIfDead` between probes, `READY_POLL_INTERVAL_MS`.
-//
-// TWO THINGS ABOUT THE HEALTH LOG MISLEAD SILENTLY, so read them before
-// debugging a probe:
-//
-//   - EXIT CODES ARE NORMALISED. A probe that exits 3 is recorded as
-//     `ExitCode: 1`; a podman-timeout is recorded as `-1`. The number in the
-//     log is not the number the probe returned.
-//   - `lastErr` MUST COME FROM THE HEALTH LOG, NOT FROM THE CLIENT — WITH ONE
-//     EXCEPTION THAT IS NOT OPTIONAL. `podman healthcheck run`'s own stdout on
-//     failure is the single word `unhealthy`, so a "last probe: unhealthy"
-//     built from the client's output says less than the probe it replaced. The
-//     last entry's `Output` is the useful text, so the timeout reads it — once,
-//     at the deadline, where it also collects the most recent entries for the
-//     trace, sliced to HEALTH_LOG_ENTRIES.
-//     The exception is a probe SANDBAR KILLED at the deadline: it records no
-//     entry at all, because the client died before podman could write one. The
-//     newest entry is then some earlier, faster failure, and rendering it
-//     reports "exit 1: connect failed" for a probe that in fact stopped
-//     returning — nothing else in the message, health block or log tail
-//     included, would mention the kill. So `probeOnce` carries `timedOut` out
-//     beside the detail and `lastProbeText` leads with it. Since our deadline is
-//     the only bound there is (`--health-timeout` does not kill, above), that
-//     kill is the single most useful thing the error can say.
-//
-// The health block is ADDED TO `ContainerBringupError`, not swapped for the
-// container log tail. The health log says what the probe saw; D9's argument
-// runs the other way too — WHY a probe failed is usually in the container's own
-// log — so the error carries both, health above tail.
-//
-// Residual, stated: killing the `podman healthcheck run` client leaves the
-// probe process running inside the container. That is what the `exec` kind
-// already did and what this module's header already documents for steps — no
-// regression and no new reap. #49 gives the pre-gate check a second poll over
-// the same probe, so the ceiling is now (probed issue containers × attempts)
-// rather than (probed containers × 1); it is only reached on the path where a
-// probe outlives its budget, and the recreate that path can end in is also what
-// clears them. It matters at all because a held `issue` container has `sleep
-// infinity` as pid 1 and reaps nothing.
-//
-// Known limitation: a `scratch` image with no shell and no probe binary can no
-// longer declare readiness, where `tcp` could, since there is nothing in it to
-// run. No stack has such a container; the escape hatches are a static probe
-// binary in the image, or `hold: true` plus a `postReadyCommand`.
+// Known limitation: a `scratch` image with no shell cannot declare readiness;
+// escape hatches are a static probe binary or `hold: true` + a
+// `postReadyCommand`.
 
 import { execFile } from "node:child_process";
 import { isAbsolute, resolve as resolvePath } from "node:path";
@@ -370,7 +118,8 @@ const MAX_BUFFER = 50 * 1024 * 1024;
 // hung postReadyCommand would report a seeded database. All three were live —
 // the readiness probe and the postReadyCommands have carried `timeout:` since
 // #24 and neither has ever been able to fail. Pinned in
-// gate-stack-podman.test.ts, because it is a fact about podman, not about node.
+// gate-stack-timeout-podman.test.ts, because it is a fact about podman, not
+// about node.
 //
 // So the deadline is ours, the signal is SIGKILL (which podman cannot exit 0
 // from, and which cannot be ignored — a client that swallowed SIGTERM would
@@ -1846,7 +1595,7 @@ export type HealthVerdict = "healthy" | "unhealthy" | "abandoned";
 // this feature, and a real podman will not produce a timed-out `healthcheck
 // run` or a SIGKILLed client on demand — the same argument `containerState`
 // makes for `PodmanProbe`. What only a real podman can produce, an actually
-// unhealthy container, is pinned in gate-stack-podman.test.ts.
+// unhealthy container, is pinned in gate-stack-health-podman.test.ts.
 export async function pollUntilHealthy(
   containerName: string,
   c: ResolvedStackContainer,
@@ -1916,7 +1665,8 @@ export type ContainerState = "running" | "stopped" | "gone" | "unknown";
 // job is to classify what podman answers, and the answers that matter most are
 // the ones a real podman will not produce on demand — a timed-out inspect, a
 // kill, an exit code `exists` does not document. Every other podman call in
-// this module is exercised against a live podman in gate-stack-podman.test.ts;
+// this module is exercised against a live podman in the gate-stack podman
+// shards (slice map in gate-stack-podman.test-util.ts's header);
 // this one branch cannot be, and it is the branch whose misfire is a
 // HARD-ERROR storm, so it gets an injectable probe instead (the same argument
 // `realVerifyAdapter`'s `exec` and `checkWorktreeImageUids`' `UidProbe` make).
@@ -2508,8 +2258,8 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
 //
 // The `podman exec` client is dead by the time this runs, and that is all the
 // kill accomplished: the process it started keeps running in the container
-// (pinned in gate-stack-podman.test.ts, for both the timer's SIGKILL and the
-// SIGTERM node sends on a maxBuffer overflow). Leaving it there means a wedged
+// (pinned in gate-stack-timeout-podman.test.ts, for both the timer's SIGKILL
+// and the SIGTERM node sends on a maxBuffer overflow). Leaving it there means a wedged
 // suite burning CPU beside the next attempt's gate and, for anything stateful,
 // skewing what that gate measures — the failure the timeout was supposed to
 // END, made quieter rather than fixed.

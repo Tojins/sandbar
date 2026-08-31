@@ -82,32 +82,35 @@
 // reached.
 //
 // ---------------------------------------------------------------------------
-// What the holding rule still covers (#60, and what #57 wrote it for)
+// What the holding rule still covers (#61, and what #57 wrote it for)
 // ---------------------------------------------------------------------------
 //
 // #57 held EVERY review-gated issue out of the plan, because working one could
 // only have ended in auto-landing it — there was nowhere else for it to go.
 // There is now: phase 3 merges a DONE review-gated issue onto its chunk's
-// branch (#60). So the rule narrows to the issues that still have nowhere to
-// land, and it narrows on exactly one axis — whether the issue is its chunk's
-// ROOT.
+// branch (#60). #60 lifted the rule for a chunk's ROOT only, because the root
+// was the only member whose issue branch — seeded from `origin/<sourceBranch>`
+// — agreed with the base its chunk branch is created at; a chained member would
+// have been developed against a tree missing the very work it declares itself
+// blocked by. #61 removes that constraint by seeding a chunk member's branch
+// from the CHUNK TIP (`ensureIssueBranch`), so the rule reduces to its last
+// irreducible clause:
 //
-// A root has no review-gated blocker, so nothing of its chunk's is under it.
-// Its issue branch seeds from `origin/<sourceBranch>` (git-ops.ts) and its
-// chunk branch is created at `origin/<sourceBranch>` when absent, so the tree
-// it is developed against and the tree it lands on are the same one, and the
-// merge is honest. A NON-ROOT member is built on a blocker whose commits sit
-// on the chunk branch and nowhere else: seeded from origin it would be
-// developed against a tree missing the very work it declares itself blocked
-// by. Giving those members a branch seeded from the chunk is #61; until then
-// they are held, exactly as #57 held them and for the same reason — no landing
-// that is not a lie. An issue `chunks.ts` gave no chunk at all (a two-chunk
-// parent, a cycle) is held on the same ground: `chunkOf` has no entry, so it
-// is not any chunk's root.
+//   a review-gated issue is held iff it has NO CHUNK AT ALL.
 //
-// A chunk therefore admits at most ONE planned issue per cycle, since a chunk
-// has exactly one root — which is also what keeps the merge phase's per-chunk
-// grouping free of intra-chunk ordering questions.
+// That is `chunks.ts`'s own refusal read back: a two-chunk parent, an issue
+// downstream of one, or an issue inside a `## Blocked by` cycle. Each has no
+// landing target — no `chunk.branch` for the merge phase to point at and no tip
+// for its branch to seed from — so working it could still only end in
+// auto-landing unreviewed code onto the source branch. All three mean "wait",
+// and all three resolve without sandbar's help (the blocking chunks land, or a
+// human edits the bodies).
+//
+// Everything else plans. A chunk can now admit SEVERAL issues in one cycle —
+// every member whose blockers have landed — though never a chain: a member is
+// unblocked only by a blocker already carrying `in-chunk`, which no issue
+// planned in the same cycle does. So same-cycle members of one chunk are always
+// siblings, which is what the merge phase's per-chunk grouping relies on.
 //
 // `resolvePlan` returns a RESOLUTION rather than a bare plan: the issues it
 // held for review, and the `auto-land` labels inheritance overrode, are things
@@ -118,6 +121,16 @@
 // reaches phase 3: the derivation needs the whole candidate graph and the
 // merger sees only DONE branches, so deriving it there would answer a
 // different question.
+//
+// Two things this module hands the CHUNK-REVIEW SCAN (#63). `landedChunks` on
+// the resolution is the derivation's answer to "which chunks have work on
+// origin, and what is at the tip of each" — the scan needs it to know which
+// pull requests to look at and what a follow-up issue declares itself blocked
+// by, and only the whole candidate graph can answer either. `extraCandidates`
+// on `buildPlan` is the way back in: a follow-up filed at the top of a cycle is
+// re-planned WITH it, so it takes its turn in the queue from that cycle rather
+// than the next run — and, in the case that matters, so a cycle cannot file an
+// issue and then exit plan-empty with the review unanswered.
 //
 // `fetchCandidates` NAMES the repository (#34). It used to identify it the way
 // `gh` does by default — from the git remotes of the directory the command runs
@@ -143,10 +156,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import {
+  type ChunkIssue,
   type ChunkTarget,
+  type LandedChunk,
   IN_CHUNK_LABEL,
-  type NamedChunk,
   deriveChunks,
+  landedChunksOf,
 } from "./chunks.js";
 import {
   DEFAULT_LANE,
@@ -201,29 +216,31 @@ export type PlanResolution = {
   readonly plan: Plan;
   // Issues that cleared every other filter and were held out of the plan by
   // the review lane's holding rule, in issue order. Empty for every host on
-  // the default lane. Since #60 these are the review-gated issues that are not
-  // their chunk's root (a chained member, waiting for #61) plus the ones
-  // `chunks.ts` could give no chunk at all — never a chunk root, which now
-  // plans.
+  // the default lane. Since #61 these are exactly the review-gated issues
+  // `chunks.ts` could give no chunk at all — a two-chunk parent, something
+  // downstream of one, or a `## Blocked by` cycle. Chunk members, root or
+  // chained, all plan.
   readonly heldForReview: readonly number[];
   // `auto-land` labels that inherited review-gating anyway (#57). Reported for
   // every candidate, not just the eligible ones: the contradiction is a fact
   // about the issue's labels, and a human wants it while the chain is still
   // being queued, not once it reaches the front.
   readonly overrides: readonly LaneOverride[];
-  // Every chunk this candidate graph derives, by root, with the members that
-  // are on its branch NAMED (#64).
+  // The chunks with work ON ORIGIN — those with at least one member carrying
+  // `in-chunk` — with everything each branch carries and the TIPS of it
+  // (#63, #64). Empty for every host on the default lane, and empty before a
+  // chunk's first landing.
   //
-  // Not a plan and not a landing decision: it is the answer to "which issues
-  // are on `sandbar/chunk-<root>-<slug>`?", and nothing but this graph can give
-  // it. Landing a reviewed chunk has to close those members and name them on the
-  // pull request, while the merge phase sees only the cycle's DONE branches —
-  // the same argument that puts `ChunkTarget.landed` here (#62), one level up.
-  // Which is also why the two agree: both are the `in-chunk` members, so what a
-  // landing closes is what the chunk's pull request said it carried, and a
-  // component member that has never been worked is in neither.
-  // Empty for every host on the default lane.
-  readonly chunks: readonly NamedChunk[];
+  // Here for the same reason `PlannedIssue.chunk` is: the derivation needs the
+  // whole candidate graph, and this graph only exists inside this function.
+  // Two phases downstream read it and neither could work it out for itself.
+  // The chunk-review scan (`chunk-follow-up.ts`) reads the pull requests to
+  // look at, and names the tips a follow-up issue declares itself blocked by
+  // (#63). The landing (`chunk-land.ts`, #64) reads which issues a `land`
+  // label is asking it to CLOSE — the merge phase sees the cycle's DONE
+  // branches and nothing else — and which ones a reconciled chunk owes a
+  // close to.
+  readonly landedChunks: readonly LandedChunk[];
 };
 
 export function parseBlockedBy(body: string): readonly number[] {
@@ -263,14 +280,12 @@ export function resolvePlan(
   // since #60 it is also the landing target a planned review-gated issue
   // carries. `chunkOf` answers both "same chunk?" and "is this issue its
   // chunk's root?"; `chunks` names the branch.
-  const { chunks, chunkOf } = deriveChunks(
-    candidates.map((c) => ({
-      number: c.number,
-      title: c.title,
-      blockedBy: blockedBy.get(c.number) ?? [],
-    })),
-    lanes,
-  );
+  const chunkIssues: readonly ChunkIssue[] = candidates.map((c) => ({
+    number: c.number,
+    title: c.title,
+    blockedBy: blockedBy.get(c.number) ?? [],
+  }));
+  const { chunks, chunkOf } = deriveChunks(chunkIssues, lanes);
   const chunkByRoot = new Map(chunks.map((c) => [c.root, c] as const));
 
   // `in-chunk` from either source, because neither invents a label and each can
@@ -351,45 +366,26 @@ export function resolvePlan(
     // out on some other filter, and reporting it as held would make the
     // holding rule look like it costs more than it does.
     //
-    // What is still held (#60): a review-gated issue that is not its chunk's
-    // ROOT, and one `deriveChunks` gave no chunk at all. Everything else has
-    // somewhere to land — see "What the holding rule still covers" above.
-    if (lanes.get(c.number)?.lane === "review" && chunkOf.get(c.number) !== c.number) {
+    // What is still held (#61): a review-gated issue `deriveChunks` gave no
+    // chunk at all. Every member of a chunk — its root, and since #61 the
+    // members chained behind one — has somewhere to land and a tip to seed
+    // from. See "What the holding rule still covers" above.
+    //
+    // Guarded on `chunkTargetOf`, the very value the plan below attaches, and
+    // not on `chunkOf` — which is one of the two maps that value is composed
+    // from. They agree today because `deriveChunks` pushes a `Chunk` for every
+    // root it writes into `chunkOf`, but that is its invariant to keep, not
+    // this filter's to assume: were the two ever to disagree, asking `chunkOf`
+    // would clear a review-gated issue for a plan that then carried
+    // `chunk: null`, and phase 3 would land unreviewed work on the source
+    // branch — the one outcome the lane exists to prevent. Asking the same
+    // question the answer is built from costs nothing and cannot drift.
+    if (lanes.get(c.number)?.lane === "review" && chunkTargetOf(c.number) === null) {
       heldForReview.push(c.number);
       return false;
     }
     return true;
   });
-  // The derivation itself, named, for the two consumers that need a whole chunk
-  // rather than one issue's landing target (#64): the reader of the `land`
-  // label and the reconciler. Every member has a title here for the same reason
-  // `ChunkTarget.landed` does — `fetchChunkMembers` lists the landed members
-  // back in, so the candidate listing carries every member of every chunk by
-  // construction.
-  //
-  // FILTERED TO `in-chunk`, which is the difference between "the issues in this
-  // component" and "the issues on this branch". Landing the chunk CLOSES this
-  // list, and a component member that has never been worked — every chained
-  // member, since only a root plans until #61 — has no commits anywhere: closing
-  // it would destroy a queued issue, tell a human it had landed, and stop it
-  // ever re-rooting as its own chunk. It is the same predicate `chunkTargetOf`
-  // builds `landed` from, so the wrap-up closes exactly the issues the chunk's
-  // pull request said it carried (#62).
-  //
-  // The one member such a list could miss is one landing on the chunk branch in
-  // the very cycle the chunk lands. It cannot happen today — the only member
-  // that plans is the root, and by the time a pull request exists for a human to
-  // label, the root has carried `in-chunk` since the cycle before — but #61 is
-  // what makes chained members plannable, and it inherits this as a question.
-  const namedChunks: NamedChunk[] = chunks.map((c) => ({
-    root: c.root,
-    branch: c.branch,
-    title: titleOf.get(c.root) ?? "",
-    members: c.members
-      .filter(isInChunk)
-      .map((m) => ({ number: m, title: titleOf.get(m) ?? "" })),
-  }));
-
   const sorted = [...eligible].sort((a, b) => a.number - b.number);
   const plan = sorted.slice(0, k).map((c) => ({
     id: String(c.number),
@@ -401,7 +397,14 @@ export function resolvePlan(
     plan,
     heldForReview: heldForReview.sort((a, b) => a - b),
     overrides: laneOverrides(lanes),
-    chunks: namedChunks,
+    // Over the SAME `isInChunk` the two clauses above are decided by, so what
+    // the scan and the landing are told is on a chunk branch is what the
+    // planner treated as landed — one reading of the label, not three.
+    landedChunks: landedChunksOf(
+      chunks,
+      chunkIssues,
+      new Set(candidates.map((c) => c.number).filter(isInChunk)),
+    ),
   };
 }
 
@@ -531,6 +534,21 @@ export type BuildPlanOptions = {
   readonly excluded?: ReadonlySet<number>;
   readonly k?: number;
   readonly defaultLane?: Lane;
+  // Issues to add to the listing, whatever the tracker's search index says
+  // (#63). Exactly one caller: the chunk-review scan files a follow-up issue
+  // and then re-plans so it is queued from that cycle rather than the next run
+  // — and a
+  // just-created issue is the one candidate the `gh` listing is guaranteed to
+  // be wrong about, because that listing is the lagging search backend and
+  // nothing else in the plan is newer than seconds old.
+  //
+  // Safe because it is additive and authoritative in the same breath: the
+  // caller has the issue's number from the create call, and the strongly
+  // consistent facts batch below covers it like any other candidate — so an
+  // issue closed or relabelled between the create and the plan is still
+  // filtered out on the usual grounds. Deduped against the listing by number,
+  // the listing winning, so an index that HAS caught up decides.
+  readonly extraCandidates?: readonly IssueSummary[];
 };
 
 export async function buildPlan(
@@ -547,6 +565,7 @@ export async function buildPlan(
   const listed = [
     ...(await fetchCandidates(repo)),
     ...(await fetchChunkMembers(repo)),
+    ...(options.extraCandidates ?? []),
   ];
   const byNumber = new Map<number, IssueSummary>();
   for (const issue of listed) {

@@ -4,25 +4,14 @@
 // file for stale-PID takeover: if the lock dir is left behind by a crashed
 // prior run whose PID is no longer alive, we remove it and acquire fresh.
 //
-// The takeover removes proper-lockfile's lock DIRECTORY itself rather than
-// calling `lockfile.unlock`, and that is the whole of it working. `unlock`
-// resolves the path against a module-level registry of locks THIS process
-// holds and returns ENOTACQUIRED for anything else, so against the only holder
-// a takeover can ever face — a dead *other* process — it is a guaranteed no-op.
-// It succeeds in exactly one arrangement: the same process locking twice, where
-// the recorded pid is our own and therefore alive, so the takeover is never
-// reached. Recovery from a crashed run was left entirely to proper-lockfile's
-// own 10s mtime staleness — i.e. to the timer this sidecar exists to skip.
-//
-// Removing the dir directly is safe because it is gated on positive evidence
-// the holder is dead (`process.kill(pid, 0)` → ESRCH). Two launches can race
-// into it, but the acquire that follows is an atomic mkdir, so exactly one
-// wins. The path is derived the way proper-lockfile derives it — `realpath` of
-// the lock file plus `.lock` (`lockfile.js:11-23`, `realpath: true` is its
-// default). That is alignment, not a fix for an observed break: a symlink on a
-// directory component resolves transparently, so the naive path would find the
-// same directory. Mirroring the library is still the right default for a path
-// we compute only because it does not expose it.
+// The takeover removes proper-lockfile's lock DIRECTORY itself, never
+// `lockfile.unlock` — unlock resolves against a registry of locks THIS process
+// holds, so against a dead *other* process it is a guaranteed no-op. Removing
+// the dir directly is safe because it is gated on positive evidence the holder
+// is dead (`process.kill(pid, 0)` → ESRCH); two launches can race into it, but
+// the acquire that follows is an atomic mkdir, so exactly one wins. The path
+// is derived the way proper-lockfile derives it — `realpath` of the lock file
+// plus `.lock`.
 
 import {
   existsSync,

@@ -20,7 +20,6 @@ import {
   issueNumberOf,
 } from "./finalize.js";
 import type { IssueRef } from "./merger.js";
-import { repoLayout, worktreePathFor } from "./repo-cache.js";
 
 const LABELS: LabelConfig = DEFAULT_LABELS;
 const { needsInfo: NEEDS_INFO, agentStuck: AGENT_STUCK } = DEFAULT_LABELS;
@@ -124,23 +123,6 @@ describe("issueNumberOf", () => {
     expect(() => issueNumberOf({ id: "0", title: "x", branch: "y" })).toThrow();
     expect(() => issueNumberOf({ id: "-3", title: "x", branch: "y" })).toThrow();
     expect(() => issueNumberOf({ id: "abc", title: "x", branch: "y" })).toThrow();
-  });
-});
-
-describe("worktreePathFor", () => {
-  it("composes from the worktrees dir + branch (slashes replaced)", () => {
-    expect(
-      worktreePathFor("/repo/.sandbar/worktrees", "sandbar/issue-45-foo"),
-    ).toBe("/repo/.sandbar/worktrees/sandbar-issue-45-foo");
-  });
-
-  it("works with a different workDir", () => {
-    expect(
-      worktreePathFor(
-        repoLayout("/repo", ".custom-wd").worktreesDir,
-        "sandbar/issue-45-foo",
-      ),
-    ).toBe("/repo/.custom-wd/worktrees/sandbar-issue-45-foo");
   });
 });
 

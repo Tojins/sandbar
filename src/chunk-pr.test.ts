@@ -8,7 +8,6 @@ import { LAND_LABEL } from "./chunk-land.js";
 import {
   chunkMembersOnBranch,
   chunkPullRequestBody,
-  chunkPullRequestContent,
   chunkPullRequestTitle,
 } from "./chunk-pr.js";
 
@@ -95,17 +94,5 @@ describe("chunkPullRequestBody", () => {
     // The draft state makes the accident hard; the reconciler is what makes it
     // survivable, and a reviewer who did it anyway needs to know that.
     expect(body()).toMatch(/already contained in/);
-  });
-});
-
-describe("chunkPullRequestContent", () => {
-  it("is the title and body for one chunk", () => {
-    const content = chunkPullRequestContent({
-      root: 42,
-      branch: "sandbar/chunk-42-first",
-      members: [member(42, "First")],
-    });
-    expect(content.title).toBe("Sandbar chunk #42: First");
-    expect(content.body).toContain("- #42 — First");
   });
 });

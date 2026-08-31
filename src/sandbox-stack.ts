@@ -1,213 +1,60 @@
-// The sandbox stack (#44): the application, running beside the AGENT.
+// The sandbox stack (#44): the application, running beside the AGENT. A
+// container marked `inSandbox: true` in `config.gateStack.containers` gets a
+// second copy next to the agent — one description, two stacks.
 //
-// An implementer that cannot run the application before the gate does writes a
-// test it has never watched fail and a fix it has never watched pass. Until now
-// the only way to give it one was to rebuild the whole stack as PROCESSES
-// inside the sandbox image — a consumer of this package really did apt-install
-// mariadb, download a libc-matched mailhog binary because the official image is
-// musl, hand-write a my.cnf to match the gate container's `--sql-mode`, and
-// then 163 lines of `pgrep`/`mysqladmin ping`/`curl -sf`/`setsid`/`pkill` to
-// supervise it. That is a FOURTH environment (prod, dev, gate, sandbox) whose
-// only defence against drift is being built `FROM` the gate's images, and every
-// bug in it is a bug podman does not have.
+// Topology: siblings join the agent container's netns with
+// `--network container:<anchor>` — the chain gate-stack.ts refuses for the
+// gate, fine here because the anchor IS the per-issue sandbox: created first,
+// outliving every sibling, never recreated. A pod is unavailable, not merely
+// unattractive: `--pod` and `--userns=keep-id` are refused together, a pod
+// member's uid maps to a subuid (EACCES on the worktree, the gate's D3 rule
+// from the other side), and `claude --dangerously-skip-permissions` refuses to
+// run as root. The isolation is structural: this is a DIFFERENT namespace from
+// the gate's pod, so the agent cannot reach the stack its verdict is formed in.
 //
-// The description of what it takes to run the app already exists: it is
-// `config.gateStack.containers`. So a container marks itself `inSandbox: true`
-// and sandbar runs a second copy of it next to the agent. One description, two
-// stacks.
+// Ordering. Up: worktree → `onWorktreeReady` → anchor → siblings →
+// `onSandboxReady` — siblings BEFORE the sandbox-ready hooks, because those
+// hooks are where a consumer runs the migration or seed that wants the
+// database. Down: JOINERS BEFORE THE ANCHOR — removing the anchor destroys the
+// namespace, and podman refuses it while a joiner is attached, so getting this
+// backwards leaks the whole chain. Siblings are created once per SANDBOX, not
+// per gate run: this stack forms no verdict, and recreating would discard what
+// the agent accumulated. A HARD-ERROR retry gets a fresh set.
 //
-// ---------------------------------------------------------------------------
-// The topology, and why it is not a pod
-// ---------------------------------------------------------------------------
-// The siblings join the AGENT CONTAINER'S network namespace with
-// `--network container:<anchor>`. That is the docker pattern gate-stack.ts
-// refuses, and reading that refusal is how you see why this is not a
-// contradiction: every objection there is to the anchor being a FOREIGN
-// container — it owns the namespace-wide flags, and removing it destroys the
-// namespace, so it can never be a per-attempt container. Here the anchor IS the
-// per-issue sandbox: created first, outliving every sibling, never recreated.
+// Whose failure a failed bringup is — D5's question, rotated onto a stack with
+// no verdict to redden: `issue` lifecycle throws (wrapped as HARD-ERROR, fresh
+// sandbox); `attempt` lifecycle brings the sandbox up DEGRADED and the agent
+// is told in its prompt, with that container's log tail — no new event or
+// terminal. Attempt containers come up ONE AT A TIME (issue ones as a group)
+// because `bringUpContainers` abandons the rest on first failure and
+// "degraded" has to mean the other siblings still came up.
 //
-// A pod is not merely unattractive here, it is unavailable, and the chain of
-// podman facts is short:
+// Logs: each sibling's `podman logs -f` is followed into a host file
+// bind-mounted READ-ONLY into the agent at `/sandbar/logs/<name>.log`. Every
+// sibling is followed, including one whose bringup failed — that is the case
+// that most needs a live log. The statuses returned are a snapshot of BRINGUP,
+// not a live readout. Restart is deliberately not provided: a sibling that
+// reads configuration at boot stays stale once the agent edits it.
 //
-//   1. `--pod` and `--userns=keep-id` cannot be combined — podman refuses.
-//   2. Inside a pod, `--user 1000:1000` maps to a SUBUID, so a member that
-//      writes to the bind-mounted worktree gets EACCES; only container root
-//      maps back to the invoking user. That is the gate's D3 rule, and it is
-//      why the gate's images run as root.
-//   3. `podman pod create --userns=keep-id` exists and is a trap: every member
-//      then runs as uid 1000, so `mariadb` dies within a second on its own
-//      datadir, and an explicit `--user 0` inside such a pod maps to subuid
-//      100000 and fails on the worktree from the other side. Dead both ways —
-//      it cannot host the gate's own container definitions, which is the point.
-//   4. `claude --print --dangerously-skip-permissions` REFUSES to run as root,
-//      and sandbar passes that flag on every agent invocation.
+// The follower is the one long-lived `spawn` sandbar holds (the gate's went in
+// #43), so the signal caveat lives here: `stop` covers SIGINT/SIGTERM via the
+// cleanup registry, but SIGKILL or an untrapped SIGHUP can orphan a follower —
+// it holds no lock and no podman resource, so what leaks is a stray process.
+// The log file is UNCAPPED (truncation would remove exactly the tail the
+// prompt points the agent at) and per ISSUE, not per sandbox — every write is
+// an APPEND, or a HARD-ERROR retry would take the previous sandbox's log.
 //
-// So "put the sandbox in a pod" is "make the agent run as root and bet the
-// whole loop on an undocumented `IS_SANDBOX=1` escape hatch". The chain costs
-// ONE mechanical item instead — teardown must remove joiners BEFORE the anchor
-// — and nothing about the agent's own environment moves.
+// Images: siblings run the image their config NAMES, resolved once — never a
+// `rebuildOn` variant (#37 does not extend here; #46 covers the agent's own
+// image). Accepted confusion mode: the agent's suite may pass against baked
+// dependencies while the rebuilding gate reds — THE GATE IS AUTHORITATIVE, and
+// the prompt says so.
 //
-// It cost two until #43. A `tcp` readiness was probed from the host through a
-// published port, and podman refuses `-p` on a `--network container:` joiner,
-// so the subset's ports had to be computed and handed to the anchor before it
-// was created. That whole half went with the kind: the probe is now
-// `podman healthcheck run` INSIDE the container, so the chain publishes exactly
-// what the gate's pod does, which is nothing.
-//
-// The gate's other anchor-owned flag was never one of them either, and the
-// symmetry is close enough to be worth writing down: the pod carries `--dns`
-// because #18 puts it on a `--disable-dns` network, while the agent container
-// sits on podman's default network with its resolver intact — it has always had
-// to reach the API through it. Nothing here changes that, and the joiners
-// inherit the anchor's resolv.conf. Give the sandbox a `--disable-dns` network
-// one day and the `--dns` would have to go on the anchor, since podman refuses
-// one on a `--network container:` joiner.
-//
-// The isolation the issue asks for comes from this being a DIFFERENT namespace
-// from the gate's pod, not from the absence of a runtime inside the sandbox.
-// The agent must not be able to reach the stack its verdict is formed in, and
-// that is now a structural property rather than a matter of which socket
-// happened to be mounted.
-//
-// ---------------------------------------------------------------------------
-// Ordering
-// ---------------------------------------------------------------------------
-// Up: the issue worktree, then `hooks.host.onWorktreeReady` (a consumer's
-// `npm ci` — the siblings may need `node_modules` to exist before they boot),
-// then the ANCHOR, then the siblings, then `hooks.*.onSandboxReady`. That last
-// position is the one worth stating: the siblings are up BEFORE the
-// sandbox-ready hooks, because those hooks are exactly where a consumer runs
-// the migration or the seed that wants the database. Ordered the other way,
-// the one hook that most wants the stack is the one hook that cannot see it.
-// `createSandbox`'s `beforeSandboxReady` is what buys it.
-//
-// Down: JOINERS BEFORE THE ANCHOR, since removing the anchor destroys the
-// namespace under them — and podman refuses to do it at all while one is
-// attached, so getting this backwards leaks the whole chain rather than half.
-//
-// Siblings are created once per SANDBOX and disposed with it. The gate's
-// "recreate `attempt` containers every gate run" rule does not carry over: it
-// exists so a verdict is never formed against stale code, and this stack forms
-// no verdict, while recreating would throw away whatever the agent had
-// accumulated. A HARD-ERROR retry gets a whole fresh set, exactly as it gets a
-// fresh agent container.
-//
-// ---------------------------------------------------------------------------
-// Whose failure a failed bringup is
-// ---------------------------------------------------------------------------
-// D5's question, rotated onto a stack that has no verdict to redden:
-//
-//   `issue` lifecycle (a database, a mail catcher — depends only on image and
-//   env): throws. The runner wraps it as HARD-ERROR and the issue retries with
-//   a fresh sandbox. Unchanged reasoning.
-//
-//   `attempt` lifecycle (mounts the worktree, runs branch code): the sandbox
-//   comes up DEGRADED and the agent is told, in its prompt, with that
-//   container's log tail. The agent is the one entity in the system that can
-//   fix its own app's bootstrap; spending two fresh-sandbox retries to
-//   reproduce an error it could have read is exactly what D5 was written to
-//   stop. The loop gains no event and no terminal from this — only the prompt
-//   gains a slot.
-//
-// Which is also why the attempt containers are brought up ONE AT A TIME while
-// the issue ones go up as a group: `bringUpContainers` abandons the rest on the
-// first failure, and "degraded" has to mean the other siblings still came up.
-// The cost is serialized readiness waits across the attempt subset, which is
-// bounded by how many of them a consumer declares (the motivating one declares
-// exactly one).
-//
-// ---------------------------------------------------------------------------
-// Logs, and the one place this is worse than the script it deletes
-// ---------------------------------------------------------------------------
-// `sandbox-stack-up.sh` gave its agent log files under `~/.sandbox` and
-// `pkill -f` restart. A netns sibling with no runtime inside the sandbox gives
-// neither for free, and logs are not negotiable — an agent debugging a 500 with
-// no log is a regression against the script. So sandbar follows each sibling's
-// `podman logs -f` into a file on the host and bind-mounts that directory
-// READ-ONLY into the agent container at `/sandbar/logs/<name>.log`. Side
-// benefit: those files are an offline artefact in the run log tree.
-//
-// EVERY sibling is followed, including one that did not come up, and the
-// degraded case is the one that needs it rather than the exception to it: the
-// commonest shape of a failed bringup is a container that started and then
-// missed its readiness probe or a postReadyCommand, so it keeps running and
-// keeps logging for the rest of the issue — exactly when the agent has been
-// told, in the same prompt, that its log says why. A file frozen at the bringup
-// tail makes that sentence false. A container that never started at all costs
-// nothing here: `podman logs -f` fails, its complaint lands in the same file,
-// and the follower notes its exit. The bringup error is written in ahead of it
-// either way, because the path is quoted to an agent that will follow it and an
-// ENOENT reads as sandbar having lost the log.
-//
-// The statuses this returns are a snapshot of BRINGUP, not a live readout, and
-// nothing re-reads them: a sibling OOM-killed at attempt 4 still renders as
-// running in every later prompt. The gate re-checks its `issue` containers
-// before every gate run because a corpse there produces a wrong VERDICT (D5);
-// here the cost is an agent chasing a connection refused, so the prompt is told
-// what the list is instead — a per-attempt liveness sweep would be the fix if
-// that ever proves worse than it sounds.
-//
-// RESTART IS DELIBERATELY NOT HERE, and it is stated as a limit rather than
-// assumed away: a sibling that reads configuration at BOOT is stale for the
-// rest of the issue once the agent edits it, and nothing in this design
-// restarts it. Mounted interpreted code under a server, and any service the
-// agent only ever talks to, are unaffected — which covers the motivating
-// consumer, but that is a claim about one consumer. The follow-on, if it bites,
-// is a control channel: a shim in the sandbox over a bind-mounted unix socket
-// offering `restart <name>` / `logs <name>`, with sandbar making the podman
-// call host-side so the agent still never gets a runtime. Its own issue.
-//
-// The follower is a real long-lived `spawn`, and it is the only one sandbar
-// still holds now that #43 retired the gate's — so the signal caveat that used
-// to live in gate-stack.ts's header lives here instead. `stop` kills it and
-// runs on every path out of this stack, including the cleanup registry's, so
-// SIGINT and SIGTERM are covered; SIGKILL, an untrapped SIGHUP and a teardown
-// that throws before it reaches the followers can each orphan one, blocked in
-// read on a quiet container. It holds no lock and no podman resource, so what
-// leaks is a stray process rather than anything that blocks the next run.
-//
-// The file is UNCAPPED, and the two consequences are worth stating rather than
-// discovering. A service that logs every query writes for as long as the issue
-// lasts, into the state directory — which is disposable by construction, so the
-// cost is disk rather than correctness, and the alternative is worse: a rotated
-// or truncated file removes exactly the tail the prompt is telling the agent to
-// read. And the path is per ISSUE, not per sandbox, so a HARD-ERROR retry's
-// containers append to the same file; every write here is therefore an append,
-// including the placeholder for a container that never came up, or the retry
-// would silently take the previous sandbox's log with it.
-//
-// ---------------------------------------------------------------------------
-// Images, and the confusion mode that buys
-// ---------------------------------------------------------------------------
-// Siblings run the image their config NAMES, resolved once — never a
-// `rebuildOn` variant. #37 does not extend here: the gate re-resolves before
-// every gate run because an image that bakes a lockfile is a function of the
-// branch and a stale one is a WRONG VERDICT; a sibling is part of a workspace
-// rather than of a verdict, so a stale layer costs the agent a command
-// (`npm ci` into its own container) rather than an answer. Note where the line
-// now falls: #46 makes the AGENT container's own image a function of the
-// branch, resolved once per sandbox for this same reason (a workspace wants a
-// fresh-enough image, not a per-attempt one) — its siblings are still not.
-//
-// The confusion mode that accepts, stated because it is real: the agent's suite
-// may pass against baked dependencies the branch has since changed while the
-// gate, which rebuilds, reds. THE GATE IS AUTHORITATIVE, and the prompt says so.
-//
-// ---------------------------------------------------------------------------
-// Two stacks, one worktree
-// ---------------------------------------------------------------------------
-// The two stacks are separate namespaces, so nothing collides on ports — but
-// they bind-mount the SAME worktree, and the sandbox's app keeps writing while
-// gate-1 forms a verdict. Not paused and not stopped: pausing is a fourth state
-// to reason about for a hazard the consumer already handles for the gate, and a
-// paused database holding live connections buys a new class of flake. So
-// CLAUDE.md's D1 corollary — a gate step must write only into gitignored paths,
-// or its own exhaust is reported as uncommitted work every attempt until the
-// budget dies — now extends to sandbox siblings, which write continuously
-// rather than only during a step. A compiled-cache race between two identical
-// applications over one directory is real and is the consumer's to resolve with
-// per-environment cache paths.
+// Two stacks, one worktree: separate namespaces, but the SAME bind-mounted
+// worktree, and the sandbox's app keeps writing while gate-1 forms a verdict.
+// D1's corollary (write only into gitignored paths) extends to sandbox
+// siblings, which write continuously; a compiled-cache race over one directory
+// is the consumer's to resolve with per-environment cache paths.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, type WriteStream } from "node:fs";

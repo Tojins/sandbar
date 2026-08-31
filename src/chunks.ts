@@ -30,15 +30,18 @@
 // is merged onto `chunk.branch` instead of onto the source branch, and finalise
 // then puts `IN_CHUNK_LABEL` on it.
 //
-// Only part of a chunk is WORKED, though. `plan-resolver.ts` lifts its holding
-// rule for a chunk's ROOT and for nothing else (#60): a root has no
-// review-gated blocker, so its issue branch seeds from `origin/<sourceBranch>`
-// — which is exactly where its chunk branch is created when absent — and the
-// two agree. A non-root member is built on a blocker whose commits are on the
-// chunk branch and NOT on the source branch, so working it needs the issue
-// branch to seed from the chunk branch instead. That is #61; until it lands,
-// those members stay held. So a chunk of one works end to end today, and a
-// chain grows by one member per issue after it.
+// A whole chunk is WORKED, one layer at a time. `plan-resolver.ts` plans any
+// member whose blockers are satisfied, root or not (#61): the root seeds from
+// `origin/<sourceBranch>` — exactly where its chunk branch is created when
+// absent, so the two agree — and every member behind it seeds from the chunk's
+// TIP, which is where its blockers' commits actually are. A chunk therefore
+// grows one LAYER per cycle rather than one member: a member is unblocked by a
+// blocker carrying `in-chunk`, and that label is applied in the cycle AFTER the
+// one that landed it, so every member planned together is a set of siblings.
+//
+// The one thing still held is a review-gated issue with NO chunk — the output
+// of `blocked` below. There is no branch to name and no tip to seed from, so
+// working it could only end in auto-landing unreviewed code.
 //
 // ---------------------------------------------------------------------------
 // `in-chunk`, the label a landed member carries (#59, §3 of #54)
@@ -221,6 +224,41 @@ export type Chunk = {
   readonly branch: string;
 };
 
+// A chunk that has WORK ON ORIGIN, and what the consumers of the review
+// surface need to know about it (#63, #64). Derived after the fact from a
+// `Chunk` and the set of members carrying `IN_CHUNK_LABEL` — see
+// `landedChunksOf`. Only the PLAN can build one: the titles come from the
+// candidate listing and the membership from the graph that listing carries.
+export type LandedChunk = {
+  readonly root: number;
+  readonly branch: string;
+  // The ROOT issue's title — the same string `chunkBranchName` slugged. Names
+  // the chunk in the merge commit a landing writes and in the prose it posts
+  // (#64), and it comes from the root whether or not the root is among
+  // `members`, because the branch is named after it either way.
+  readonly title: string;
+  // Every LANDED member, ascending: the issues whose commits are on the branch.
+  //
+  // This is the list a landing CLOSES (#64), which is the whole reason it is
+  // the `in-chunk` members rather than `Chunk.members`. A component holds
+  // members that have never been worked — a chained member waits for its
+  // blockers to land — and closing one of those would destroy a queued issue
+  // while telling a human its commits were on the source branch, and would
+  // cancel the re-rooting the design turns on: a member left OPEN has its
+  // blocker satisfied by CLOSED and becomes its own chunk's root, while a
+  // closed one never does. It is the same set the chunk's pull request lists
+  // (#62), so a landing closes exactly what that PR said it carried.
+  readonly members: readonly ChunkMember[];
+  // The landed members that no OTHER landed member is blocked by — the tips of
+  // what the branch carries, ascending. Non-empty, and a subset of `members`:
+  // it is what a NEW member of the chunk declares under `## Blocked by`
+  // (#63) — naming the tips is what puts it in THIS chunk (by the derivation
+  // above) and behind everything already on the branch, and naming only them
+  // keeps the section down to the edges the chunk's own graph does not already
+  // imply.
+  readonly tips: readonly ChunkMember[];
+};
+
 // Why an issue got no chunk. All three mean "wait", never "give up".
 //
 //   two-chunk-parent  — its blockers sit in two or more different chunks (the
@@ -374,39 +412,62 @@ export function deriveChunks(
   return { chunks, chunkOf, blocked };
 }
 
-// A chunk with the members that are ON ITS BRANCH named, which is what landing
-// one needs (#64).
-//
-// `Chunk` carries member numbers, because that is all the derivation itself has
-// to say. Landing a chunk on the source branch has to close those members and
-// say so in prose a human reads — on the issue, and on the pull request — so it
-// needs the titles too, and it needs the root's title to name the chunk when no
-// member list survives. Only the PLAN can build one of these: the titles come
-// from the candidate listing, and the membership from the graph that listing
-// carries (`plan-resolver.ts`). Phase 3 and the reconciler consume it.
-export type NamedChunk = {
-  readonly root: number;
-  readonly branch: string;
-  // The root issue's title — the same string `chunkBranchName` slugged. Taken
-  // from the ROOT even when the root is not in `members`, because the branch is
-  // named after it and a chunk has to be nameable before any of it has landed.
-  readonly title: string;
-  // The members whose work is ON the chunk branch, ascending — which is exactly
-  // the members carrying `in-chunk`, and NOT every member of the component.
-  //
-  // That distinction is the whole correctness of the wrap-up, because this list
-  // is what gets CLOSED when the chunk lands. A component contains members that
-  // have never been worked: the review lane plans only a chunk's ROOT (#60) and
-  // holds the chain behind it, so a chunk of three can sit for weeks with one
-  // member's commits on the branch and two issues still queued. Closing those
-  // two would destroy queued work while telling a human their commits are on
-  // the source branch, and it would cancel the re-rooting the design turns on —
-  // a member left OPEN has its blocker satisfied by CLOSED and becomes its own
-  // chunk's root next cycle, while a closed one never does.
-  //
-  // `in-chunk` is exactly the right predicate: finalise applies that label only
-  // once the chunk branch carrying the member's commits is on origin (#60),
-  // which is the same fact the chunk PR's own member list is built from (#62) —
-  // so the issues this closes are the issues that PR said it carried.
-  readonly members: readonly ChunkMember[];
-};
+/**
+ * The chunks whose work is on origin: what each carries, and the tips of it.
+ *
+ * `landed` is the caller's set of members carrying `IN_CHUNK_LABEL` — a label
+ * applied only once the chunk branch carrying a member's commits has been
+ * pushed, so it means exactly "this member's work is on the branch". `issues`
+ * is the same list `deriveChunks` was given, and is where the titles and the
+ * blocked-by edges come from; a member missing from it contributes an empty
+ * title rather than dropping out, because the number is the part anything acts
+ * on.
+ *
+ * A chunk with nothing landed is omitted: no branch on origin, no pull request,
+ * and nothing for a new member to be blocked by.
+ *
+ * `tips` falls back to the whole landed set if every landed member is blocked
+ * by another one. That is unreachable — the edge set is a DAG, which is what
+ * Kahn's walk above relies on — and it is written down anyway because an EMPTY
+ * tips list is not a harmless degradation: an issue with an empty
+ * `## Blocked by` section has no blockers, so it is parentless, so it is the
+ * root of a chunk of its OWN, on a branch of its own, and the review it was
+ * filed for gets answered somewhere nobody is looking.
+ */
+export function landedChunksOf(
+  chunks: readonly Chunk[],
+  issues: readonly ChunkIssue[],
+  landed: ReadonlySet<number>,
+): readonly LandedChunk[] {
+  const byNumber = new Map(issues.map((i) => [i.number, i] as const));
+  const asMember = (n: number): ChunkMember => ({
+    number: n,
+    title: byNumber.get(n)?.title ?? "",
+  });
+  const out: LandedChunk[] = [];
+  for (const chunk of chunks) {
+    // `chunk.members` is ascending, so both lists below are too.
+    const members = chunk.members.filter((m) => landed.has(m));
+    if (members.length === 0) continue;
+    const onBranch = new Set(members);
+    // Landed members some other landed member is built on top of. A blocker
+    // OUTSIDE the landed set cannot make a member a non-tip: it is either not
+    // in this chunk at all or still queued, and either way nothing of it is on
+    // the branch to be behind.
+    const covered = new Set<number>();
+    for (const m of members) {
+      for (const blocker of byNumber.get(m)?.blockedBy ?? []) {
+        if (blocker !== m && onBranch.has(blocker)) covered.add(blocker);
+      }
+    }
+    const tips = members.filter((m) => !covered.has(m));
+    out.push({
+      root: chunk.root,
+      branch: chunk.branch,
+      title: byNumber.get(chunk.root)?.title ?? "",
+      members: members.map(asMember),
+      tips: (tips.length > 0 ? tips : members).map(asMember),
+    });
+  }
+  return out;
+}

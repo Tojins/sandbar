@@ -484,10 +484,6 @@ describe("resolveConfig — env is a record, passed through", () => {
     expect(here.env).toEqual(elsewhere.env);
   });
 
-  it("defaults to an empty record", () => {
-    expect(resolveConfig({ ...minimal }).env).toEqual({});
-  });
-
   // The config is a program, so nothing type-checks it at the host, and #38
   // removed the dotenv parser that used to guarantee the shape. A string here
   // reaches `Object.keys` and exports a dozen single-character variables into

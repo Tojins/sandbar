@@ -1,26 +1,33 @@
 // Promise-token parser.
 //
-// The agent signals state with a single `<promise>TOKEN</promise>` tag.
-// Three tokens are valid: `COMPLETE` (claims the work is done), `NEEDS-INFO`
-// (asks the human for help, paired with a `<questions>` block) and
-// `NEEDS-UI-PROTOTYPE` (#21 — the issue implies non-trivial user-visible UI and
-// carries no prototype, paired with a `<ui-impact>` block). Anything else is a
-// no-signal — the inner loop keeps going, optionally with a re-prompt hint
-// payload that the next attempt's prompt should include.
+// The agent signals state with a single `<promise>TOKEN</promise>` tag:
+// `COMPLETE`, `NEEDS-INFO` (paired with a `<questions>` block) or
+// `NEEDS-UI-PROTOTYPE` (#21, paired with a `<ui-impact>` block). Anything else
+// is a no-signal — the inner loop keeps going, optionally with a re-prompt
+// hint payload that the next attempt's prompt should include.
 //
-// NEEDS-UI-PROTOTYPE is deliberately NOT guarded on `commitsAccumulated === 0`
-// (the mirror image of the COMPLETE guard). The prompt asks for the assessment
-// before any code is written, but an agent often only realises it is inventing
-// UI a few files in — and that is exactly when we most want it to stop.
-// Rejecting a late escalation would punish it for noticing, so "no commits
-// exist when this fires" stays a prompt-level expectation, never an invariant
-// downstream code relies on (finalize handles both cases).
+// `missingTag` marks the one NO-SIGNAL flavour where NO tag was emitted at
+// all, as opposed to a tag that failed its guard. The distinction is the inner
+// loop's licence for the promise nudge: no tag is overwhelmingly a finished
+// agent that forgot the contract, worth one cheap same-conversation follow-up
+// before it costs a full attempt; a failed guard means the agent got the
+// substance wrong, and the guard's specific re-prompt is the correction.
+//
+// NEEDS-UI-PROTOTYPE is deliberately NOT guarded on `commitsAccumulated === 0`:
+// an agent often only realises it is inventing UI a few files in, and rejecting
+// a late escalation would punish it for noticing. "No commits exist when this
+// fires" stays a prompt-level expectation, never an invariant downstream code
+// relies on (finalize handles both cases).
 
 export type ParseSignal =
   | { readonly kind: "COMPLETE" }
   | { readonly kind: "NEEDS-INFO"; readonly questions: string }
   | { readonly kind: "NEEDS-UI-PROTOTYPE"; readonly uiImpact: string }
-  | { readonly kind: "NO-SIGNAL"; readonly reprompt?: string };
+  | {
+      readonly kind: "NO-SIGNAL";
+      readonly reprompt?: string;
+      readonly missingTag?: true;
+    };
 
 export type ParseContext = {
   readonly commitsAccumulated: number;
@@ -67,7 +74,7 @@ export function parsePromise(
 ): ParseSignal {
   const matches = [...stdout.matchAll(/<promise>([\s\S]*?)<\/promise>/g)];
   if (matches.length === 0) {
-    return { kind: "NO-SIGNAL", reprompt: STILL_WORKING };
+    return { kind: "NO-SIGNAL", reprompt: STILL_WORKING, missingTag: true };
   }
 
   const last = matches[matches.length - 1]!;

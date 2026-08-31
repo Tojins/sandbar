@@ -148,10 +148,52 @@ describe("parsePromise", () => {
     }
   });
 
-  it("returns NO-SIGNAL with `still working` reprompt when no promise tag is present", () => {
-    const r = parsePromise("just thinking out loud", withCommits);
-    expect(r.kind).toBe("NO-SIGNAL");
-    if (r.kind === "NO-SIGNAL") expect(r.reprompt).toContain("Still working");
+  // `missingTag` is the promise nudge's licence (inner-loop.ts): only output
+  // with NO tag at all qualifies for the same-conversation follow-up. A tag
+  // that failed its guard means the agent remembered the contract and got the
+  // substance wrong — the guard's own re-prompt is the correction, so those
+  // must not carry the flag.
+  describe("missingTag", () => {
+    it("is set when no promise tag appears at all", () => {
+      const r = parsePromise("finished everything, see the commits", withCommits);
+      expect(r.kind).toBe("NO-SIGNAL");
+      if (r.kind === "NO-SIGNAL") expect(r.missingTag).toBe(true);
+    });
+
+    it("is absent for an unknown token", () => {
+      const r = parsePromise("<promise>FOOBAR</promise>", withCommits);
+      expect(r.kind).toBe("NO-SIGNAL");
+      if (r.kind === "NO-SIGNAL") expect(r.missingTag).toBeUndefined();
+    });
+
+    it("is absent for a zero-commit COMPLETE", () => {
+      const r = parsePromise("<promise>COMPLETE</promise>", noCommits);
+      expect(r.kind).toBe("NO-SIGNAL");
+      if (r.kind === "NO-SIGNAL") expect(r.missingTag).toBeUndefined();
+    });
+
+    it("is absent for NEEDS-INFO without a questions block", () => {
+      const r = parsePromise("<promise>NEEDS-INFO</promise>", withCommits);
+      expect(r.kind).toBe("NO-SIGNAL");
+      if (r.kind === "NO-SIGNAL") expect(r.missingTag).toBeUndefined();
+    });
+
+    it("a nudge reply concatenated after the original output parses last-wins", () => {
+      const original = "long summary of the work, tag forgotten";
+      const nudgeReply = "<promise>COMPLETE</promise>";
+      expect(parsePromise(`${original}\n${nudgeReply}`, withCommits)).toEqual({
+        kind: "COMPLETE",
+      });
+    });
+
+    it("a bare NEEDS-INFO nudge reply pairs with the original's questions block", () => {
+      const original = "<questions>\n- which flag wins?\n</questions>\nno tag here";
+      const nudgeReply = "<promise>NEEDS-INFO</promise>";
+      expect(parsePromise(`${original}\n${nudgeReply}`, withCommits)).toEqual({
+        kind: "NEEDS-INFO",
+        questions: "- which flag wins?",
+      });
+    });
   });
 
   it("treats whitespace-padded tokens identically", () => {

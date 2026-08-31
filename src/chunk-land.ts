@@ -62,6 +62,17 @@
 //                     the difference with a second question rather than
 //                     guessing (`ChunkRefLookup`), because guessing wrong
 //                     spends a label a human applied.
+//   * deferred      — the same cycle put ANOTHER member's work on the chunk
+//                     branch (#61 plans a whole layer at a time, so a chunk
+//                     grows while a request is outstanding). Landing then
+//                     would put commits on the source branch that the pull
+//                     request did not carry when a human labelled it — the
+//                     one thing the review lane exists to prevent — and would
+//                     close nothing for them, since the plan's member list was
+//                     read before the layer landed and the branch delete would
+//                     take their recovery point with it. So `land` STAYS, the
+//                     PR says what arrived, and the cycle that adds nothing
+//                     new lands the chunk as reviewed.
 //
 // ---------------------------------------------------------------------------
 // Reconciliation — the same wrap-up, without the merge
@@ -94,12 +105,13 @@
 // pull request, close it, delete the chunk branch on origin.
 //
 // "EVERY MEMBER" MEANS EVERY MEMBER ON THE BRANCH, and that is narrower than
-// every member of the chunk. The list arrives already filtered — `NamedChunk`
-// carries the `in-chunk` members and nothing else — because a chunk of three
-// with only its root worked is the normal shape of the review lane until #61,
-// and closing the two issues still queued behind it would destroy them while
-// telling a human their commits had landed. Whatever this is handed, it closes;
-// the filtering argument lives with the list, in `chunks.ts`.
+// every member of the chunk. The list arrives already filtered —
+// `LandedChunk.members` is the `in-chunk` members and nothing else — because a
+// chunk grows one LAYER per cycle (#61), so a chunk of three sitting under
+// review with one layer landed and the rest still queued is its ordinary
+// shape, and closing the queued issues would destroy them while telling a
+// human their commits had landed. Whatever this is handed, it closes; the
+// filtering argument lives with the list, in `chunks.ts`.
 //
 // AN EMPTY LIST IS NOT THE SAME CLAIM as a list that all closed, and the branch
 // delete below cannot tell them apart — "every member closed" is vacuously true
@@ -168,7 +180,7 @@ import {
   type ChunkMember,
   IN_CHUNK_LABEL,
   LAND_LABEL,
-  type NamedChunk,
+  type LandedChunk,
 } from "./chunks.js";
 import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
@@ -193,7 +205,8 @@ export type ChunkLandTarget = {
   // request's own title. Names the chunk in the merge commit and in prose.
   readonly title: string;
   // The members whose work is ON the branch, ascending — the `in-chunk` ones,
-  // which is what `NamedChunk` carries and why it is filtered there. This list
+  // which is what `LandedChunk.members` carries and why it is filtered there.
+  // This list
   // is what the wrap-up CLOSES, so a component member that has never been
   // worked must not be in it. EMPTY is a real answer, not a failure: see
   // `selectLandRequests`.
@@ -241,7 +254,7 @@ function pullRequestsByHead(
 // case both selectors want and for reasons written on each.
 function targetFor(
   branch: string,
-  chunk: NamedChunk | undefined,
+  chunk: LandedChunk | undefined,
   pr: PullRequestSummary | undefined,
 ): ChunkLandTarget | null {
   const root = rootIssueFromChunkBranch(branch);
@@ -274,7 +287,7 @@ const isTarget = (t: ChunkLandTarget | null): t is ChunkLandTarget => t !== null
  */
 export function selectLandRequests(
   prs: readonly PullRequestSummary[],
-  chunks: readonly NamedChunk[],
+  chunks: readonly LandedChunk[],
 ): readonly ChunkLandTarget[] {
   const chunkByBranch = new Map(chunks.map((c) => [c.branch, c] as const));
   return [...pullRequestsByHead(prs).values()]
@@ -301,7 +314,7 @@ export function selectLandRequests(
  */
 export function selectReconciliations(
   landedBranches: readonly string[],
-  chunks: readonly NamedChunk[],
+  chunks: readonly LandedChunk[],
   prs: readonly PullRequestSummary[],
 ): readonly ChunkLandTarget[] {
   const chunkByBranch = new Map(chunks.map((c) => [c.branch, c] as const));
@@ -477,6 +490,26 @@ export const CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT = (args: {
     : "") +
   `The \`${LAND_LABEL}\` label has been removed. Nothing about the chunk changed — ` +
   `re-apply it once the composition has a reason to pass.`;
+
+// The chunk grew in the very cycle it was asked to land (#61 + #64). Nothing
+// was merged and the label is untouched — this comment exists because a human
+// asked for something and did not get it, and the pull request is where they
+// asked.
+export const CHUNK_LAND_DEFERRED_PR_COMMENT = (args: {
+  readonly chunkBranch: string;
+  readonly sourceBranch: string;
+  // What this cycle put on the branch after the request was read.
+  readonly landedNow: readonly ChunkMember[];
+}): string =>
+  `${BOT_COMMENT_PREFIX} this chunk is labelled \`${LAND_LABEL}\`, and it was NOT ` +
+  `landed this cycle: sandbar had just put more of it on \`${args.chunkBranch}\` — ` +
+  args.landedNow.map((m) => `#${m.number} — ${m.title}`).join(", ") +
+  `.\n\nMerging now would move commits onto \`${args.sourceBranch}\` that this pull ` +
+  `request did not carry when you labelled it, which is the one thing the review ` +
+  `lane exists to prevent. Nothing was merged and the \`${LAND_LABEL}\` label is ` +
+  `untouched: the description above now lists the new work, and the next cycle ` +
+  `that adds nothing further lands the chunk. Take the label off if you would ` +
+  `rather look again first.`;
 
 export const CHUNK_BRANCH_MISSING_PR_COMMENT = (args: {
   readonly chunkBranch: string;

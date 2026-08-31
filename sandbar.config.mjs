@@ -167,7 +167,15 @@ export default {
           "npm",
           "test",
           "--",
+          // The five gate-stack shards are ONE suite split for wall-clock
+          // parallelism — vitest runs a file's tests sequentially, and unsplit
+          // they bounded the whole run. The slice map is
+          // `gate-stack-podman.test-util.ts`'s header.
           "src/gate-stack-podman.test.ts",
+          "src/gate-stack-health-podman.test.ts",
+          "src/gate-stack-timeout-podman.test.ts",
+          "src/gate-stack-images-podman.test.ts",
+          "src/gate-stack-standalone-podman.test.ts",
           "src/ensure-images-podman.test.ts",
           "src/agent-sandbox-podman.test.ts",
           "src/gate-run-podman.test.ts",

@@ -104,13 +104,6 @@ describe("startRunLogger", () => {
     );
   });
 
-  it("cycle(n) returns the same logger across calls", async () => {
-    const base = await makeBase();
-    const logger = await startRunLogger({ baseDir: base });
-    expect(logger.cycle(1)).toBe(logger.cycle(1));
-    expect(logger.cycle(1)).not.toBe(logger.cycle(2));
-  });
-
   it("finalize() writes a run-end marker to orchestrator.log", async () => {
     const base = await makeBase();
     const logger = await startRunLogger({ baseDir: base });

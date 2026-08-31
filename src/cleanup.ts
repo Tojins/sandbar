@@ -5,26 +5,17 @@
 // failures are logged but never block the next action — partial cleanup is
 // always better than none.
 //
-// That "on SIGINT / SIGTERM" is a claim about the whole registry, and it holds
-// only while this handler OWNS THE EXIT (#35). `runCleanup()` is async and
-// returns to the signal handler at its first await, node runs signal listeners
-// in registration order, and a `process.exit` from any later listener kills the
-// registry mid-flight — everything after the action it was awaiting is simply
-// skipped. agent-sandbox.ts installed exactly such a handler until #35, so
-// every Ctrl-C lost the per-issue pods and networks, the merger worktree, the
-// run log's terminal write and the lock release, while the containers that
-// handler owned were torn down neatly enough to make it look like cleanup had
-// run. So: register teardowns HERE. Nothing else in the process may install a
-// SIGINT/SIGTERM handler, and nothing else may call `process.exit` on a signal.
+// That holds only while this handler OWNS THE EXIT (#35): `runCleanup()` is
+// async, and a `process.exit` from any later signal listener kills the
+// registry mid-flight. So: register teardowns HERE. Nothing else in the
+// process may install a SIGINT/SIGTERM handler, and nothing else may call
+// `process.exit` on a signal.
 //
-// `onCleanup` NEVER FORGETS AN ACTION, and that is load-bearing rather than
-// incidental: it is what lets a stack register its teardown *before* the first
-// pod exists, so a signal anywhere in the bringup window still sweeps whatever
-// got created. The cost is that a caller inside a loop — one per issue, per
-// cycle, per retry — grows the registry without limit. That is what
-// `registerDisposable` below is for (#55): the same registration window and the
-// same LIFO position, over a resource that ends, plus the one thing `onCleanup`
-// itself must not offer — a way to take the entry back out.
+// `onCleanup` NEVER FORGETS AN ACTION — that is what lets a stack register its
+// teardown *before* the first pod exists, so a signal in the bringup window
+// still sweeps whatever got created. The cost is that a caller inside a loop
+// grows the registry without limit; that is what `registerDisposable` below is
+// for (#55).
 
 type CleanupAction = () => Promise<void> | void;
 

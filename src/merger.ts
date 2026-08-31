@@ -124,6 +124,16 @@
 // would take a human's `land` label off and tell them their branch had been
 // deleted because a proxy dropped a connection.
 //
+// And one request is honoured by NOT acting on it: a chunk PHASE A JUST GREW.
+// Since #61 a whole layer of a chunk plans per cycle, so a member can reach
+// the chunk branch minutes after the label was read — and the label was a
+// human's yes to the pull request as it stood. Landing then would put commits
+// on the source branch that no review covered, and close only the members the
+// plan knew about while deleting the branch the rest live on. So the request is
+// DEFERRED: nothing merges, `land` stays, the PR says what arrived, and the
+// next cycle that adds nothing new lands the chunk. `deferredChunks` reports
+// it; it is neither a landing nor a park.
+//
 // The WRAP-UP runs only after the source branch has moved: close every member
 // ON THE BRANCH explicitly (the `in-chunk` ones — a component member that was
 // never worked has no commits here and must not be closed; and no `Closes #N`
@@ -203,6 +213,7 @@ import { promisify } from "node:util";
 
 import {
   CHUNK_BRANCH_MISSING_PR_COMMENT,
+  CHUNK_LAND_DEFERRED_PR_COMMENT,
   CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT,
   CHUNK_LAND_ABANDONED_PR_COMMENT,
   type ChunkLandTarget,
@@ -219,7 +230,7 @@ import type { ChunkMember, ChunkTarget } from "./chunks.js";
 import { type EnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
 import { type PullRequestRef, ensurePullRequest } from "./forge-pr.js";
-import { dirtyWorktreePaths } from "./git-ops.js";
+import { dirtyWorktreePaths, fetchOriginChunkBranch } from "./git-ops.js";
 import {
   type Clock,
   type VerifiedFailureReason,
@@ -467,13 +478,16 @@ export type PushResult =
 //                  the credentials or the proxy, and about nothing else.
 //
 // The distinction is bought with a second question — see `realAdapter` — and
-// it is bought because the two readers spend it differently. `chunkBase` (#60)
-// collapses the last two into "create the branch at the source branch", which
-// is safe wrong either way: a base built on a stale premise is rejected as a
-// non-fast-forward push. The #64 landing cannot: it PARKS on `absent`, which
-// takes a human's `land` label off and tells them their branch is gone. Being
-// wrong there costs a tracker write and a false claim, so `unreadable` halts
-// instead and the label survives to the next run.
+// it is bought because the LANDING is the one reader that cannot afford the
+// cheaper answers. Everything else that asks origin for a chunk branch wants a
+// BASE, and a base may be answered with the tip the cache already holds
+// (`fetchOriginChunkBranch`, #61): being one run behind composes a branch whose
+// push origin then rejects as a non-fast-forward, so it costs a cycle and never
+// a ref. A landing merges the answer and then DELETES the branch, so a stale
+// tip is commits lost — and `absent` spends a human's `land` label and tells
+// them their branch is gone. Being wrong either way is durable, so the
+// landing takes neither guess: `unreadable` halts and the label survives to
+// the next run.
 export type ChunkRefLookup =
   | { readonly kind: "present"; readonly ref: string }
   | { readonly kind: "absent" }
@@ -618,6 +632,18 @@ export type SkippedChunkLand = {
   readonly reason: ChunkLandSkipReason;
 };
 
+// A requested chunk that this cycle GREW before it could land it (#61 plans a
+// whole layer at a time, so a member can reach the chunk branch while a `land`
+// label is outstanding). Not a park and not a failure: the label stays on, the
+// pull request is told what arrived, and the next cycle that adds nothing new
+// lands the chunk. See `chunk-land.ts` on why landing it anyway is the one
+// thing the review lane forbids.
+export type DeferredChunkLand = {
+  readonly target: ChunkLandTarget;
+  // The members this cycle put on the branch, in landing order.
+  readonly landedNow: readonly ChunkMember[];
+};
+
 export type MergerSummary = {
   readonly merged: readonly IssueRef[];
   // Review-gated issues landed on their chunk's branch this cycle, in the order
@@ -642,6 +668,9 @@ export type MergerSummary = {
   // orchestrator halts on it — the chunk branch is kept in that case, so the
   // next run's reconciler retries exactly the writes that failed.
   readonly mergedChunks: readonly ChunkWrapup[];
+  // Requested chunks this cycle grew before it could land them (#61 + #64).
+  // The label is untouched, so these are a report and never a queue change.
+  readonly deferredChunks: readonly DeferredChunkLand[];
   // Requested chunks that did not land and have had `land` removed. Rides a
   // `MergerError.partial` for the same reason `skipped` does: the pull request
   // has already been written to.
@@ -711,10 +740,15 @@ export type ChunkGroup = {
 // is what keeps the landing at a single call site per chunk rather than one
 // per issue.
 //
-// A group with more than one member is not reachable today — the planner only
-// ever picks a chunk's root, and a chunk has exactly one (see chunks.ts) — but
-// grouping rather than assuming that keeps #61's chained members a change to
-// the planner alone.
+// Groups of more than one member are reachable since #61: a chunk whose root
+// has landed can hand this cycle every member blocked on it at once. Those
+// members are necessarily SIBLINGS rather than a chain — a member plans only
+// once its own blockers carry `in-chunk`, which no issue planned in the same
+// cycle does — so the order within a group is not a dependency order and
+// ascending issue number (what `sortIssuesAsc` already gave) is simply
+// deterministic. Being siblings is also why they can conflict with each other
+// where a member and its ancestors provably cannot (#54 round-1 Q4): the
+// resolve loop handles them exactly as it handles two auto-lane branches.
 //
 // `root` and `landed` are taken from the FIRST member seen for a branch. Every
 // member of one group carries the same `ChunkTarget`, built once per chunk by
@@ -934,6 +968,10 @@ export async function runMergerWithAdapter(
   // `mergedChunks` is only ever written after it, so a partial's is always
   // empty, exactly as `merged`'s is.
   const skippedChunks: SkippedChunkLand[] = [];
+  // #64 + #61: requests this cycle grew before it could land them. Carried on a
+  // partial like `skippedChunks`, and for the same reason — the pull request
+  // has already been commented on by the time anything below can throw.
+  const deferredChunks: DeferredChunkLand[] = [];
   // Kept whole rather than split into a request list and a source-branch
   // string. The two are only meaningful together — the branch names where the
   // requests are going — and pulling them apart means giving the branch a
@@ -992,6 +1030,7 @@ export async function runMergerWithAdapter(
     unclosed: [],
     mergedChunks: [],
     skippedChunks: [...skippedChunks],
+    deferredChunks: [...deferredChunks],
   });
 
   const asHalt =
@@ -1283,11 +1322,38 @@ export async function runMergerWithAdapter(
     await emit(`chunk ${request.branch}: not landed (${reason})`);
   };
 
-  // Every requested chunk, merged onto HEAD or parked, returning the ones whose
-  // commits are now on the composition. Lifted out of the body because it is
-  // one self-contained pass over one input: it reads `adapter`, `attemptMerge`
-  // and `parkChunk` and writes nothing but its own return value and the
-  // `skippedChunks` `parkChunk` appends to.
+  // Say on the pull request that the chunk grew, and leave the label where it
+  // is. The one outcome here that is neither a landing nor a park: nothing
+  // about the request is wrong and nothing about the chunk is either, so the
+  // queue is untouched and the next cycle honours it — see `chunk-land.ts` on
+  // why the landing may not simply take the new commits with it.
+  const deferChunk = async (
+    request: ChunkLandTarget,
+    landedNow: readonly ChunkMember[],
+    sourceBranch: string,
+  ): Promise<void> => {
+    if (request.pullRequest > 0) {
+      await adapter.commentOnPullRequest(
+        request.pullRequest,
+        CHUNK_LAND_DEFERRED_PR_COMMENT({
+          chunkBranch: request.branch,
+          sourceBranch,
+          landedNow,
+        }),
+      );
+    }
+    deferredChunks.push({ target: request, landedNow });
+    await emit(
+      `chunk ${request.branch}: not landed (grew this cycle: ` +
+        `${landedNow.map((m) => `#${m.number}`).join(", ")}); \`${LAND_LABEL}\` kept`,
+    );
+  };
+
+  // Every requested chunk — merged onto HEAD, parked, or deferred — returning
+  // the ones whose commits are now on the composition. Lifted out of the body
+  // because it is one self-contained pass over one input: it reads `adapter`,
+  // `attemptMerge`, `parkChunk` and `deferChunk`, and writes nothing but its
+  // own return value and the two lists those last two append to.
   //
   // The pairing with `sourceBranch` is where `ChunkLandingOptions` is taken
   // apart, and it happens here rather than as two locals at the top for the
@@ -1297,6 +1363,19 @@ export async function runMergerWithAdapter(
   // a destination exists because a request does.
   const landRequestedChunks = async (): Promise<MergedChunkUnit[]> => {
     if (!chunkLanding) return [];
+    // What Phase A put on each chunk branch a moment ago, by branch. Read from
+    // `chunkLanded` rather than from the plan because that list is the record
+    // of what actually reached ORIGIN — a member whose push failed is not on
+    // the branch and is no reason to defer anything.
+    const grewThisCycle = new Map<string, ChunkMember[]>();
+    for (const landing of chunkLanded) {
+      const members = grewThisCycle.get(landing.chunkBranch) ?? [];
+      members.push({
+        number: issueNumberOf(landing.issue),
+        title: landing.issue.title,
+      });
+      grewThisCycle.set(landing.chunkBranch, members);
+    }
     const onHead: MergedChunkUnit[] = [];
     for (const request of chunkLanding.requests) {
       const pending: ChunkLandingUnit = {
@@ -1304,6 +1383,17 @@ export async function runMergerWithAdapter(
         sourceBranch: chunkLanding.sourceBranch,
       };
       try {
+        // Grew under the request, in this very cycle (#61's layer landing, one
+        // phase up). The plan read this chunk's members BEFORE phase 2, so the
+        // wrap-up would close what was on the branch then and delete the branch
+        // that carries the rest — while putting commits on the source branch
+        // that the pull request did not carry when a human labelled it.
+        // Nothing is merged and the label is left alone.
+        const landedNow = grewThisCycle.get(request.branch);
+        if (landedNow) {
+          await deferChunk(request, landedNow, pending.sourceBranch);
+          continue;
+        }
         const found = await adapter.fetchChunkRef(request.branch);
         if (found.kind === "unreadable") {
           // Origin could not be asked, so nothing is known about this chunk —
@@ -1413,6 +1503,7 @@ export async function runMergerWithAdapter(
       }),
       mergedChunks,
       skippedChunks,
+      deferredChunks,
     };
   };
 
@@ -1721,29 +1812,32 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       };
     }
   };
-  // ORIGIN's copy of a chunk branch, or null when it has none. A local const
-  // rather than an object method because `chunkBase` is defined in terms of it
-  // (#60's base, #64's landing source) and one `this` away from the adapter
-  // literal is one `this` that can be lost.
+  // ORIGIN's copy of a chunk branch, for the #64 landing — and the one place
+  // in this file that asks the question WITHOUT `fetchOriginChunkBranch`
+  // (git-ops.ts), which `chunkBase` above and #61's seeding share.
   //
-  // Ask ORIGIN, every time. A chunk branch outlives the run that created it and
-  // `.sandbar` is disposable, so a local ref is at best a cache and at worst a
-  // stale answer. The refspec is explicit (and forced) so the remote-tracking
-  // ref is updated in a BARE cache too, where a plain `git fetch origin
-  // <branch>` writes only FETCH_HEAD.
+  // The refspec is the same one, and so is the reason for it: ask origin every
+  // time, because a chunk branch outlives the run that created it and
+  // `.sandbar` is disposable, and spell the refspec explicitly (and forced) so
+  // the remote-tracking ref is updated in a BARE cache too, where a plain
+  // `git fetch origin <branch>` writes only FETCH_HEAD.
   //
-  // A FAILED FETCH IS TWO DIFFERENT FACTS, and the fetch cannot tell them
-  // apart: "origin has no such branch" and "origin could not be reached" are
-  // one non-zero exit. So a failure asks a second question — `ls-remote
-  // --exit-code`, which answers 2 for "reached it, no matching ref" and
-  // anything else non-zero for "could not ask" — and the answer is reported as
-  // `absent` or `unreadable` rather than collapsed. `chunkBase` collapses them
-  // anyway and is right to; the #64 landing must not, because its `absent` is
-  // a tracker write. See `ChunkRefLookup`.
+  // What differs is WHAT A FAILED FETCH MAY BE ANSWERED WITH, and the two
+  // policies are opposite because being wrong costs each caller something
+  // different. A base may fall back to the tip the cache already holds (#61):
+  // it is at worst one run behind, and a composition built on a stale base is
+  // rejected as a non-fast-forward push. A LANDING may not. Merging a stale tip
+  // lands less than the branch carries and then DELETES that branch on origin,
+  // so being one fetch behind is commits gone — and answering the same failure
+  // with "origin has no such branch" spends a human's `land` label and tells
+  // them their branch was deleted.
   //
-  // A probe that SUCCEEDS is `unreadable` too: origin has the branch and the
-  // fetch still failed, which is the transport being unreliable rather than
-  // the chunk being gone.
+  // Hence three answers, and a second question to tell two of them apart:
+  // `ls-remote --exit-code` exits 2 for "reached origin, no matching ref" and
+  // something else non-zero for "could not ask". A probe that SUCCEEDS is
+  // `unreadable` too — origin has the branch and the fetch still failed, which
+  // is the transport being unreliable rather than the chunk being gone. See
+  // `ChunkRefLookup`.
   const fetchChunkRef = async (
     chunkBranch: string,
   ): Promise<ChunkRefLookup> => {
@@ -2062,16 +2156,28 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     },
     fetchChunkRef,
     async chunkBase(chunkBranch) {
-      // `origin/<sourceBranch>` when origin has no chunk branch, because that
-      // is where a chunk branch is created (#60) — and equally when origin
-      // could not be asked, which is the collapse `fetchChunkRef` refuses to
-      // make for its other reader and which is still right here: a base built
-      // on the wrong premise composes a branch whose push origin then rejects
-      // as a non-fast-forward, so being wrong costs a cycle and never a ref.
-      const found = await fetchChunkRef(chunkBranch);
-      return found.kind === "present"
-        ? found.ref
-        : `origin/${deps.sourceBranch}`;
+      // Ask ORIGIN, every time — `fetchOriginChunkBranch` owns that argument
+      // and the refspec it rests on. Shared with the issue-branch seeding in
+      // git-ops.ts since #61, because a chained member is DEVELOPED against
+      // this same base: two copies of the question are two chances for the
+      // tree a member was written on and the tree it is merged onto to
+      // diverge, which is exactly what the by-construction no-conflict
+      // property forbids.
+      //
+      // Null ⇒ the cache can name no such ref at all: this is the chunk's
+      // first landing, and `origin/<sourceBranch>` is where a chunk branch is
+      // created. A fetch that merely FAILED (network, auth, or a sibling's
+      // concurrent fetch winning the ref lock) does not answer null — it
+      // answers with the tip the cache already holds, which is the whole point
+      // of sharing the function with the seeding. And should the cache ever be
+      // wrong about a chunk that does exist, the composition is based on the
+      // source branch and the push below is rejected as non-fast-forward
+      // rather than silently overwriting the branch, which is the safe way to
+      // be wrong.
+      return (
+        (await fetchOriginChunkBranch(cwd, chunkBranch)) ??
+        `origin/${deps.sourceBranch}`
+      );
     },
     async checkoutDetached(ref) {
       // Not `--force`: the tree is clean at every call site, and a dirty one

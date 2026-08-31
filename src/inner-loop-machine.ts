@@ -1,78 +1,37 @@
-// Pure inner-loop state machine.
+// Pure inner-loop state machine — no I/O. The runner calls step(state, event)
+// and executes the returned action; `terminate` ends the loop. Every decision
+// (promise routing, gate-red re-prompt, reviewer routing, budget exhaustion)
+// lives here and is table-driven tested in inner-loop-machine.test.ts.
 //
-// Drives an issue-attempts loop without any I/O. After every observation the
-// runner calls step(state, event) and executes the returned action; when the
-// action is `terminate` the loop is done and the verdict is the runner's
-// outcome. Every decision — COMPLETE/NEEDS-INFO/NO-SIGNAL routing, gate-1
-// red re-prompt, reviewer APPROVED/CHANGES-REQUESTED routing, attempt and
-// review-round budget exhaustion — lives here and is table-driven tested in
-// inner-loop-machine.test.ts.
+// Impl-attempt exhaustion carries a `cause` so the human-handoff names the
+// real blocker (#17): `gate-red` vs `reviewer-blocked`. Each advanceAttempt
+// caller supplies the exhaustion verdict because only it knows which case
+// it's in.
 //
-// Impl-attempt exhaustion carries a `cause` so the human-handoff message names
-// the real blocker (#17): `gate-red` (last gate failing / no green gate) vs.
-// `reviewer-blocked` (gate green, reviewer's last verdict CHANGES-REQUESTED).
-// Each advanceAttempt caller supplies the exhaustion verdict because only it
-// knows which case it's in.
-//
-// A COMPLETE claim is routed on THREE inputs, not one: the promise token,
-// whether the worktree is clean (#24 D1), and whether HEAD is still the issue
-// branch (#27).
-//
-// The gate bind-mounts the worktree, so a verdict over a dirty tree is not a
-// verdict about any commit — and the merger only ever sees commits. COMPLETE +
-// dirty therefore spends an attempt on a re-prompt to commit rather than
-// dispatching the gate.
-//
-// The branch check (#27) is the same argument one level up, and it is checked
-// FIRST because it subsumes the other: commits on a detached HEAD leave a CLEAN
-// tree, so the dirty check passes and the gate goes green on a tree the branch
-// does not contain. What DONE then lands is whatever the branch happens to hold
-// — in the ordinary review round-trip, attempt 1's work without attempt 2's fix
-// (git-ops.ts spells out why that, and not "nothing at all", is the reachable
-// shape). It is applied to
-// NO-SIGNAL as well as COMPLETE — every attempt spent off the branch produces
-// work the merger can never see, so the sooner the agent is told, the fewer
-// commits are stranded. The two hand-to-human terminals (NEEDS-INFO,
-// NEEDS-UI-PROTOTYPE) are deliberately exempt: they land nothing by
-// construction, the issue is parked for a human either way, and re-prompting
-// would risk burning the budget on a question the agent had already formed.
-//
-// NEEDS-UI-PROTOTYPE (#21) is the second short-circuit terminal alongside
-// NEEDS-INFO: the implementer judged the issue to imply non-trivial
-// user-visible UI with no prototype to work from, so the loop stops before the
-// gate rather than let an invented design reach the merger.
+// A COMPLETE claim is routed on THREE inputs, not one: the promise token, a
+// clean worktree (#24 D1), and HEAD still being the issue branch (#27). The
+// branch check runs FIRST because it subsumes the other: commits on a
+// detached HEAD leave a CLEAN tree, so the gate would go green on a tree the
+// branch does not contain (git-ops.ts spells out the reachable shape).
+// COMPLETE + dirty spends an attempt on a re-prompt to commit rather than
+// dispatching the gate. The branch check also applies to NO-SIGNAL; the
+// hand-to-human terminals NEEDS-INFO and NEEDS-UI-PROTOTYPE (#21, stops
+// before the gate) are exempt — they land nothing by construction.
 //
 // Reviewer is strictly advisory: it never commits and the SM never asks the
-// runner to revert anything. Convergence comes from the bar being sharp
-// enough for the reviewer to issue a deterministic verdict, not from
-// commit-and-revert round-trips.
+// runner to revert anything.
 //
-// A reviewer that produced NO review is not a verdict and is not charged like
-// one (#41). Whether an invocation reviewed anything is reviewer-run.ts's
-// judgment; what arrives here is `reviewer-harness-failed`, and it differs from
-// CHANGES-REQUESTED on every axis that costs the issue something: no review
-// round is consumed (the budget bounds how many times the reviewer may reject
-// this branch, and it rejected nothing), `latestReviewerProse` is left exactly
-// as it was (a harness message quoted back as review prose is the fabrication
-// the issue is named for, and that string is what finalize shows a human), and
-// exhaustion names `reviewer-harness-failed` rather than `reviewer-blocked`,
-// which would send its reader to look for a report nobody wrote — #17's
-// mistake, one terminal along. The next implementer attempt is dispatched
-// anyway, because gate-1 is green and unreviewed work must not read as DONE —
-// but it gets an orchestrator note saying the harness failed, not a finding.
+// A reviewer that produced NO review is not a verdict (#41); that judgment is
+// reviewer-run.ts's. `reviewer-harness-failed` consumes no review round,
+// leaves `latestReviewerProse` untouched, and names itself in exhaustion
+// rather than `reviewer-blocked`. The next implementer attempt is dispatched
+// anyway — unreviewed work must not read as DONE — with an orchestrator note,
+// not a finding. A SECOND consecutive harness failure terminates instead: an
+// implementer attempt sat between the two, so the branch is not what changed.
 //
-// A SECOND consecutive harness failure terminates instead. The argument is
-// `uncommittable-worktree`'s: an implementer attempt sits between the two, so
-// the branch is not what changed, and "the reviewer emits nothing" is not a
-// claim about code that another attempt could answer. Left to run, a wedged
-// reviewer costs the full attempt budget — each attempt an implementer run, a
-// gate, and two idle timeouts — to arrive at the same report it could give now.
-//
-// Sandbox lifecycle (setup, HARD-ERROR retry-with-fresh-sandbox) sits one
-// layer above this machine: decideAfterTerminal answers "retry or surface?"
-// for the runner's outer loop. HARD-ERROR is not a verdict the SM ever emits
-// itself — it's how the runner wraps unhandled exceptions (setup failures,
-// container errors, etc.) so the outer loop can decide whether to retry.
+// HARD-ERROR is not a verdict the SM ever emits — it's how the runner wraps
+// unhandled exceptions; decideAfterTerminal answers "retry with a fresh
+// sandbox or surface?" for the runner's outer loop.
 
 import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";

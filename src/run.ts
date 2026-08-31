@@ -4,17 +4,19 @@
 //                              `ready-for-agent` issues by parsing each body's
 //                              `## Blocked by` section — and routes each by
 //                              LANE (#57), holding back the review-gated ones
-//                              that have nowhere to land yet (#60: everything
-//                              but a chunk's root) and saying on the issue
-//                              where an `auto-land` label lost to inherited
-//                              gating. Then the RECONCILER (#64) finishes off
-//                              any chunk branch already contained in
-//                              origin/<sourceBranch> — hand-merged, or landed
-//                              by a run that died before it could close the
-//                              members — and the plan is rebuilt when it did,
-//                              because closing a member unblocks its
-//                              dependents and the plan-empty exit is one line
-//                              below.
+//                              that have nowhere to land at all (#61: the ones
+//                              `chunks.ts` could give no chunk) and saying on
+//                              the issue where an `auto-land` label lost to
+//                              inherited gating. A changes-requested review on
+//                              a chunk's pull request is filed as a follow-up
+//                              issue in that chunk first (#63), and the
+//                              RECONCILER (#64) finishes off any chunk branch
+//                              already contained in origin/<sourceBranch> —
+//                              hand-merged, or landed by a run that died
+//                              before it could close the members. The plan is
+//                              rebuilt after either, so a follow-up filed now
+//                              is queued now and a member closed now stops
+//                              blocking its dependents.
 //   Phase 2 (Inner-loop ralph): Each issue runs in its own sandbox up to
 //                              config.maxImplAttempts times; on gate-1 green
 //                              the (strictly-advisory) reviewer runs in the
@@ -66,6 +68,10 @@ import {
   findUnattributableResources,
 } from "./containers.js";
 import { installCleanupTraps, onCleanup, runCleanup } from "./cleanup.js";
+import {
+  fileChunkReviewFollowUps,
+  realAdapter as realChunkFollowUpAdapter,
+} from "./chunk-follow-up.js";
 import {
   type BranchImages,
   checkWorktreeImageUids,
@@ -472,6 +478,13 @@ export async function run(rawConfig: RunConfig): Promise<void> {
   // buildPlan as a hard exclusion alongside its live-state CLOSED check.
   const mergedThisRun = new Set<number>();
 
+  // One adapter for the whole run, like `repo` itself: the chunk-review scan
+  // (#63) reads and writes the same repository every cycle.
+  const followUpAdapter = realChunkFollowUpAdapter({
+    repo,
+    sourceBranch: config.sourceBranch,
+  });
+
   const innerLoopCfg = {
     layout,
     repo,
@@ -531,10 +544,41 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // ---------------------------------------------------------------------
       // Phase 1: Plan
       // ---------------------------------------------------------------------
-      let resolution = await buildPlan(repo, {
+      const planOptions = {
         excluded: mergedThisRun,
         defaultLane: config.defaultLane,
+      };
+      let resolution = await buildPlan(repo, planOptions);
+
+      // The chunk-review scan (#63). Every chunk with work on origin is asked
+      // whether a human has requested changes on its pull request, and each
+      // review that has not already been converted becomes an issue in that
+      // chunk. Inert on the default lane and until a chunk's first landing:
+      // `landedChunks` is empty, and the scan makes no call at all.
+      //
+      // RE-PLANNED when it files anything, because the follow-up is blocked
+      // only by members already carrying `in-chunk` — it is eligible in this
+      // very cycle, and a cycle that filed the issue and then found the plan
+      // empty would exit with a review nobody had answered. The created issues
+      // are handed back in rather than re-listed: `gh issue list` is the
+      // lagging search backend, and nothing in the queue is younger than these.
+      const followUps = await fileChunkReviewFollowUps({
+        chunks: resolution.landedChunks,
+        adapter: followUpAdapter,
+        log: (line) => runLogger.appendOrchestrator(line),
       });
+      if (followUps.length > 0) {
+        const filed = followUps.map((f) => `#${f.number}`).join(", ");
+        console.log(
+          `Filed ${followUps.length} chunk review follow-up issue(s): ${filed} ` +
+            "— a human requested changes on a chunk's pull request, and each " +
+            "review is now an issue in that chunk.",
+        );
+        resolution = await buildPlan(repo, {
+          ...planOptions,
+          extraCandidates: followUps,
+        });
+      }
 
       // ---------------------------------------------------------------------
       // Reconcile chunks that reached the source branch without us (#64)
@@ -557,7 +601,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         repoDir: layout.repoDir,
         repo,
         sourceBranch: config.sourceBranch,
-        chunks: resolution.chunks,
+        chunks: resolution.landedChunks,
         log: (line) => runLogger.appendOrchestrator(line),
       });
       if (reconciliation.reconciled.length > 0) {
@@ -571,9 +615,13 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         // backend the planner lists through lags a close by seconds, so an
         // issue closed one line ago can still come back as a candidate.
         for (const n of reconciliation.closedIssues) mergedThisRun.add(n);
+        // Carrying `followUps` again: one filed a block above is younger than
+        // anything the search backend can see, so a re-plan without it would
+        // drop the issue this cycle just created. `planOptions.excluded` is
+        // `mergedThisRun` itself, so the numbers just added are already in it.
         resolution = await buildPlan(repo, {
-          excluded: mergedThisRun,
-          defaultLane: config.defaultLane,
+          ...planOptions,
+          extraCandidates: followUps,
         });
       }
       // What the reconciler could not finish, in the two shapes it comes in
@@ -625,7 +673,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // asking in this order means it never gets there).
       const landRequests = selectLandRequests(
         await fetchLandRequestPullRequests(repo, LAND_LABEL),
-        resolution.chunks,
+        resolution.landedChunks,
       );
       if (landRequests.length > 0) {
         const named = landRequests
@@ -656,11 +704,12 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         const held = resolution.heldForReview.map((n) => `#${n}`).join(", ");
         console.log(
           `Held for review (${resolution.heldForReview.length}): ${held} — each ` +
-            "is not its chunk's root: a member chained behind another member, " +
-            "or an issue whose blockers sit in two chunks at once. A chained " +
-            "member is NOT waiting for a cycle — a chunk's root is the only " +
-            "member sandbar can work until #61, so a chain stops there and a " +
-            "human takes it from the chunk branch.",
+            "is review-gated and belongs to no chunk, so there is nothing for " +
+            "it to land on: its blockers sit in two different chunks at once, " +
+            "it is downstream of an issue in that state, or it is inside a " +
+            "`## Blocked by` cycle. None of these is waiting for a cycle of " +
+            "sandbar's — they clear when the blocking chunks land, or when a " +
+            "human edits the bodies.",
         );
         await runLogger.appendOrchestrator(
           `plan: held ${resolution.heldForReview.length} review-gated issue(s) — ${held}`,
@@ -927,6 +976,7 @@ export async function run(rawConfig: RunConfig): Promise<void> {
               `chunk-landed=${mergerSummary.chunkLanded.length} ` +
               `chunks-landed-on-source=${mergerSummary.mergedChunks.length} ` +
               `chunks-parked=${mergerSummary.skippedChunks.length} ` +
+              `chunks-deferred=${mergerSummary.deferredChunks.length} ` +
               `skipped=${mergerSummary.skipped.length} pushed=${mergerSummary.pushed}`,
           );
         } catch (err) {
@@ -1018,6 +1068,16 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         for (const c of mergerOutcome.skippedChunks) {
           console.log(
             `  ⊘ ${c.target.branch} not landed (${c.reason}); \`${LAND_LABEL}\` removed`,
+          );
+        }
+        // Deferred, not parked (#61 + #64): the chunk grew this cycle, so the
+        // label is still on and the next cycle lands it. Printed from here for
+        // the same reason — the pull request has been commented on already.
+        for (const c of mergerOutcome.deferredChunks) {
+          console.log(
+            `  ⏸ ${c.target.branch} not landed — it grew this cycle ` +
+              `(${c.landedNow.map((m) => `#${m.number}`).join(", ")}); ` +
+              `\`${LAND_LABEL}\` kept for the next one`,
           );
         }
         await runFinalize("merge outcomes", inputs);

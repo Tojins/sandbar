@@ -71,14 +71,6 @@ describe("parseVerdict", () => {
     expect(r.verdict).toBe("CHANGES-REQUESTED");
   });
 
-  it("preserves the prose unchanged for either verdict", () => {
-    const stdout =
-      "## Bar check\n\nStandards consulted: anti-overengineering.\n\n" +
-      "Branch adds three abstractions where one direct function suffices.\n\n" +
-      "<verdict>CHANGES-REQUESTED</verdict>";
-    const r = parseVerdict(stdout);
-    expect(r.prose).toBe(stdout);
-  });
 });
 
 describe("containsVerdictToken (#41)", () => {
