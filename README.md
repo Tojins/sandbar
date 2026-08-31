@@ -468,7 +468,13 @@ dependency; relabelling the issue alone will not do it.
 >
 > Two things this needs from you: the `in-chunk` label has to exist in the repo
 > (sandbar never creates labels), and whoever reviews those branches has to know
-> they are theirs to land.
+> they are theirs to land. And one thing to avoid: **don't close a chunk member
+> while issues are still queued behind it.** The branch name comes from the
+> chunk's root and sandbar only ever sees open issues, so closing the root moves
+> the chunk to a branch name nobody has pushed. Sandbar then refuses to work the
+> remaining members — loudly, one issue at a time, rather than building them on
+> a tree missing the work they depend on. Land the chunk branch and close its
+> issues together, or reopen the one that was closed.
 >
 > The one review-gated issue sandbar will not work is one that belongs to no
 > chunk — its blockers straddle two different chunks, it sits downstream of an

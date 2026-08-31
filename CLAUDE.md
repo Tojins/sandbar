@@ -196,6 +196,11 @@ default 50, exit 3).
   `ensureIssueBranch` returns the base it used (`IssueBranchBase`) and the inner
   loop hands that same value to both prompt builders, so the tree an agent's
   diff is measured against is by construction the tree its branch was cut from.
+  The source-branch fallback is the chunk ROOT's seed and is guarded as such: a
+  non-root member that can find no chunk branch throws `ChunkBaseMissingError`
+  (a per-issue HARD-ERROR, not a SandbarError) rather than being developed
+  against a tree missing its blockers' work. The way that happens is a chunk
+  RE-ROOTING — close a root and the survivors re-derive under a new name.
 - **A chunk is derived, never declared (#54 §2, #58).** `src/chunks.ts` is a
   pure function: a chunk is a connected component of the *review-gated* issues
   under the `## Blocked by` graph, rooted at its parentless member. Chunks are

@@ -94,10 +94,13 @@ function truncationNote(limit: number): string {
 // Every git read behind a prompt slot goes through here, and the two ways it can
 // fail are deliberately NOT the same answer (#40).
 //
-// git BLOWING UP is a fault. The ranges below are built on a ref preflight has
-// already verified exists in the cache, read in a worktree sandbar created
-// itself, so there is no working configuration in which they fail. Mapping that
-// onto the empty string — which is what all three call sites did — makes it
+// git BLOWING UP is a fault. The ranges below are built on the ref the issue
+// branch was seeded from and read in a worktree sandbar created itself, so
+// there is no working configuration in which they fail: the seed is either
+// `origin/<sourceBranch>`, which preflight verifies exists in the cache, or a
+// chunk tip (#61), which `ensureIssueBranch` fetched and then cut this very
+// branch from a moment earlier. Mapping that onto the empty string — which is
+// what all three call sites did — makes it
 // indistinguishable from "there is genuinely nothing here yet", which is the
 // legitimate reading on attempt 1. That is the whole reason #40 stayed
 // invisible for a run: git exited 128 on every call, and the prompt said "No
@@ -132,9 +135,11 @@ export async function readGit(
     }
     throw new SandbarError(
       `could not read ${what}: \`git ${args.join(" ")}\` failed in ${cwd}. ` +
-        `Prompt ranges are based on \`origin/<sourceBranch>\`, which preflight verifies ` +
-        `exists in sandbar's object cache; had this been swallowed the slot would have ` +
-        `rendered as if the branch held no work at all (#40). ` +
+        `Prompt ranges are anchored at the ref the issue branch was SEEDED from — ` +
+        `\`origin/<sourceBranch>\`, or a chunk branch's tip for a chunk member (#61), ` +
+        `named in \`${what}\` above — and that ref resolves in sandbar's object cache ` +
+        `by construction; had this been swallowed the slot would have rendered as if ` +
+        `the branch held no work at all (#40). ` +
         (err instanceof Error ? err.message : String(err)),
       { cause: err },
     );
@@ -355,7 +360,7 @@ async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
   const diff = await readGit(
     ["log", "-p", "--reverse", `${base.ref}..HEAD`],
     worktreePath,
-    `the work done so far on ${inputs.issue.branch}`,
+    `the work done so far on ${inputs.issue.branch}, anchored at ${base.ref}`,
   );
 
   return renderAttemptSlot({ ...inputs, diff });
@@ -485,7 +490,7 @@ async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> 
     await readGit(
       ["log", `${base}..HEAD`, "--oneline"],
       worktreePath,
-      `the commit list for ${inputs.issue.branch}`,
+      `the commit list for ${inputs.issue.branch}, anchored at ${base}`,
     )
   ).trim();
 
@@ -512,7 +517,7 @@ async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> 
     await readGit(
       ["diff", `${base}...HEAD`],
       worktreePath,
-      `the branch diff for ${inputs.issue.branch}`,
+      `the branch diff for ${inputs.issue.branch}, anchored at ${base}`,
     )
   ).trim();
 

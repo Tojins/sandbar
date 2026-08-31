@@ -295,17 +295,18 @@ async function runSandboxCycle(
       config.sourceBranch,
       issue.chunk ?? null,
     );
-    // Logged for a chunk member either way, because the interesting line is the
-    // one where an issue that HAS a chunk was seeded from the source branch
-    // anyway. That is correct and expected for a chunk's root, and for anything
-    // else it is the single fact that explains a later conflicting chunk merge
-    // — so it belongs in the run log rather than being inferred from silence.
+    // Logged for a chunk member either way. The second line is now true by
+    // construction rather than by assumption — `ensureIssueBranch` gives the
+    // source branch to a chunk member only when that member IS the root, and
+    // throws otherwise — so what the log records is which of the two seeds a
+    // member got, not a guess about why.
     if (issue.chunk && opts.onOrchestratorLog) {
       await opts.onOrchestratorLog(
         base.chunkBranch
           ? `issue=${issue.id} seeded from chunk tip ${base.ref} (${base.chunkBranch})`
-          : `issue=${issue.id} in chunk ${issue.chunk.branch} seeded from ${base.ref} ` +
-            "— origin carries no such chunk branch yet (expected for the chunk's root)",
+          : `issue=${issue.id} roots chunk ${issue.chunk.branch} and seeded from ` +
+            `${base.ref} — origin carries no such chunk branch yet, which is where ` +
+            "the merge phase will create it",
       );
     }
 

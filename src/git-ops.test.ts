@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { dirtyWorktreePaths, ensureIssueBranch, headMismatch } from "./git-ops.js";
+import { SandbarError } from "./errors.js";
+import {
+  ChunkBaseMissingError,
+  dirtyWorktreePaths,
+  ensureIssueBranch,
+  headMismatch,
+} from "./git-ops.js";
 
 const exec = promisify(execFile);
 
@@ -616,5 +622,120 @@ describe("ensureIssueBranch — a failed fetch falls back to the cached tip (#61
     expect(
       (await git(cache, "ls-tree", "--name-only", "sandbar/issue-20-root")).stdout,
     ).not.toContain(ON_CHUNK);
+  });
+});
+
+// #61 — the source-branch fallback belongs to a chunk's ROOT, and this is the
+// case that proves it is guarded rather than merely argued for.
+//
+// The argument said a non-root member can never find its chunk branch missing:
+// it plans only once a blocker carries `in-chunk`, which finalise applies only
+// after the chunk branch is on origin. What that argument leaves out is that
+// `chunk.branch` is DERIVED per cycle from the chunk's current root, and a
+// chunk RE-ROOTS when its root leaves the graph. Close the root issue and both
+// of the planner's listings drop it (`fetchCandidates` and `fetchChunkMembers`
+// are open-only), so the survivors re-derive under a new root and a branch name
+// nobody has ever pushed — while their commits sit on the old one.
+//
+// Falling back there is the exact outcome #61 exists to prevent, and it is the
+// silent kind: the merge phase CREATES the chunk branch it cannot find, so
+// there is no non-fast-forward push to reject it the way the merger's identical
+// fallback is rejected.
+describe("ensureIssueBranch — a non-root member with no chunk branch refuses (#61)", () => {
+  let root: string;
+  let origin: string;
+  let seed: string;
+  let cache: string;
+
+  const git = (repo: string, ...args: string[]) => exec("git", args, { cwd: repo });
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-gitops-reroot-"));
+    origin = join(root, "origin.git");
+    seed = join(root, "seed");
+    cache = join(root, "repo.git");
+
+    await exec("git", ["init", "--bare", "-q", "-b", "main", origin]);
+    await exec("git", ["clone", "-q", origin, seed], { cwd: root });
+    await git(seed, "config", "user.email", "t@t");
+    await git(seed, "config", "user.name", "t");
+    await writeFile(join(seed, "main.txt"), "base\n");
+    await git(seed, "add", "-A");
+    await git(seed, "commit", "-qm", "base");
+    await git(seed, "push", "-q", "origin", "main");
+
+    // The chunk really did land, under its ORIGINAL root #10.
+    await writeFile(join(seed, "chunk.txt"), "members 10 and 11\n");
+    await git(seed, "add", "-A");
+    await git(seed, "commit", "-qm", "the chunk so far");
+    await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/chunk-10-thing");
+    await git(seed, "reset", "-q", "--hard", "origin/main");
+
+    await exec("git", ["clone", "--bare", "-q", origin, cache], { cwd: root });
+    await git(cache, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*");
+    await git(cache, "fetch", "-q", "origin", "--prune");
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  // #10 was closed by a human, so `deriveChunks` re-rooted the chunk at #11 and
+  // the planner handed #12 a target of `sandbar/chunk-11-mid` — a branch that
+  // has never existed. Before the guard, #12 was seeded from `origin/main`,
+  // missing both #10's and #11's work, and nothing said so.
+  const REROOTED = { root: 11, branch: "sandbar/chunk-11-mid" };
+
+  it("throws instead of seeding a chained member from the source branch", async () => {
+    const attempt = ensureIssueBranch(cache, "sandbar/issue-12-leaf", "main", REROOTED);
+
+    await expect(attempt).rejects.toBeInstanceOf(ChunkBaseMissingError);
+    await expect(attempt).rejects.toThrow(/sandbar\/chunk-11-mid/);
+    // Named so an operator can act on it rather than reading it as an infra blip.
+    await expect(attempt).rejects.toThrow(/re-rooting/i);
+  });
+
+  // And it refuses BEFORE writing anything: a branch created at the wrong base
+  // is kept verbatim by the next attempt, so a throw that left one behind would
+  // hand the retry the very tree it refused to seed.
+  it("creates no branch when it refuses", async () => {
+    await expect(
+      ensureIssueBranch(cache, "sandbar/issue-12-leaf", "main", REROOTED),
+    ).rejects.toBeInstanceOf(ChunkBaseMissingError);
+
+    await expect(
+      git(cache, "show-ref", "--verify", "refs/heads/sandbar/issue-12-leaf"),
+    ).rejects.toBeTruthy();
+  });
+
+  // Not a SandbarError, deliberately: that class means "stop the whole run",
+  // and one issue whose premise broke is the inner loop's HARD-ERROR → a
+  // per-issue human handoff, with the rest of the cycle unaffected.
+  it("is not a SandbarError, so the run does not stop for it", async () => {
+    const err = await ensureIssueBranch(
+      cache,
+      "sandbar/issue-12-leaf",
+      "main",
+      REROOTED,
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(SandbarError);
+  });
+
+  // The chunk's own root is what the fallback is FOR, and it still gets it —
+  // the guard must not turn a first landing into a halt.
+  it("still gives the chunk's root the source branch", async () => {
+    const base = await ensureIssueBranch(cache, "sandbar/issue-11-mid", "main", REROOTED);
+
+    expect(base).toEqual({ ref: "origin/main", chunkBranch: null });
+  });
+
+  // A branch name the parser cannot read is not a root either. It cannot be
+  // shown to be one, and the cost of guessing wrong is the silent bug above.
+  it("refuses a branch whose number cannot be parsed", async () => {
+    await expect(
+      ensureIssueBranch(cache, "not-a-sandbar-branch", "main", REROOTED),
+    ).rejects.toBeInstanceOf(ChunkBaseMissingError);
   });
 });

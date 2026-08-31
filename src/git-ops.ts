@@ -6,7 +6,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import type { ChunkTarget } from "./chunks.js";
+import { type ChunkTarget, IN_CHUNK_LABEL } from "./chunks.js";
+import { issueNumberFromBranch } from "./naming.js";
 
 const exec = promisify(execFile);
 
@@ -35,6 +36,34 @@ export type IssueBranchBase = {
 
 export function sourceBranchBase(sourceBranch: string): IssueBranchBase {
   return { ref: `origin/${sourceBranch}`, chunkBranch: null };
+}
+
+// A chunk member that is not its chunk's root, whose chunk branch the cache can
+// name no ref for. Deliberately NOT a `SandbarError`: this is not sandbar's own
+// machinery malfunctioning and it is not the run's problem, it is ONE issue
+// whose premise no longer holds. The inner loop wraps a plain throw out of
+// setup as HARD-ERROR, which costs two futile retries (seeding is the first
+// thing a sandbox cycle does, so they are nearly free) and then hands this
+// issue to a human while every other issue in the cycle carries on.
+export class ChunkBaseMissingError extends Error {
+  constructor(
+    readonly branch: string,
+    readonly chunk: ChunkTarget,
+  ) {
+    super(
+      `${branch} is a chunk member behind #${chunk.root}, but neither origin nor ` +
+        `sandbar's object cache has \`${chunk.branch}\` — the branch its blockers' ` +
+        `commits are supposed to be on. Seeding it from the source branch would ` +
+        `develop it against a tree missing that work (#61), and nothing downstream ` +
+        `would reject the result. The usual cause is the chunk RE-ROOTING: close ` +
+        `a chunk's root issue and the surviving members re-derive under a new root ` +
+        `and so a new branch name, while their commits stay on the old one. Look for ` +
+        `a recently closed issue carrying \`${IN_CHUNK_LABEL}\` and reopen it, or ` +
+        `land the chunk's real branch and close every member on it — either way the ` +
+        `chunk stops being half-visible to sandbar.`,
+    );
+    this.name = "ChunkBaseMissingError";
+  }
 }
 
 // Bring `cwd`'s copy of origin's chunk branch up to date and return the
@@ -132,18 +161,31 @@ export async function fetchOriginChunkBranch(
 //     the tip, its commits sit on top of every ancestor's, so the chunk-merge
 //     of it cannot conflict with them (#54 round-1 Q4) — an UNRELATED member of
 //     the same chunk still can, and that stays the resolve loop's job.
-//   - A chunk the cache can name no branch for → `origin/<sourceBranch>`, which
-//     is exactly where the merge phase creates a chunk branch (#60). That is
-//     the chunk's ROOT, and the two agreeing is what makes its landing honest.
-//     Only a root reaches this case: a non-root member plans only once a
-//     blocker of its own carries `in-chunk`, and finalise applies that label
-//     only after the chunk branch carrying the commits is on origin. (Root is
-//     one issue, not several — a chunk has exactly ONE parentless member,
-//     which is chunks.ts's own argument from the rule that a chunk never grows
-//     to accommodate an issue whose blockers straddle two. Two gated issues
-//     both blocking a third do not make one chunk with two roots; they stay two
-//     chunks and the third is `two-chunk-parent`.) A failed fetch no longer
-//     lands here — see `fetchOriginChunkBranch`.
+//   - A chunk the cache can name no branch for, AND this issue is that chunk's
+//     root → `origin/<sourceBranch>`, which is exactly where the merge phase
+//     creates a chunk branch (#60). The two agreeing is what makes the root's
+//     landing honest. (Root is one issue, not several — a chunk has exactly ONE
+//     parentless member, which is chunks.ts's own argument from the rule that a
+//     chunk never grows to accommodate an issue whose blockers straddle two.
+//     Two gated issues both blocking a third do not make one chunk with two
+//     roots; they stay two chunks and the third is `two-chunk-parent`.) A
+//     failed fetch does not land here — see `fetchOriginChunkBranch`.
+//   - A chunk the cache can name no branch for, and this issue is NOT its root
+//     → `ChunkBaseMissingError`. The ordinary argument says this cannot happen:
+//     a non-root member plans only once a blocker of its own carries
+//     `in-chunk`, and finalise applies that label only after the chunk branch
+//     carrying the commits is on origin. But the branch NAME is derived per
+//     cycle from the chunk's current root, and a chunk RE-ROOTS when that root
+//     leaves the graph — close it and the planner's two open-only listings
+//     (`fetchCandidates`, `fetchChunkMembers`) both drop it, so the survivors
+//     re-derive under a new root and `chunk.branch` names a branch nobody has
+//     ever pushed. Falling back there is the one outcome #61 exists to prevent,
+//     and unlike the merger's identical fallback nothing downstream catches it:
+//     the landing CREATES the branch, so there is no non-fast-forward push to
+//     be rejected, and the member merges cleanly onto a base its ancestors'
+//     commits are absent from. So the fallback is guarded by the very condition
+//     that justifies it rather than by a paragraph asserting the condition
+//     holds, and one issue with a broken premise goes to a human.
 //
 // The residual, stated rather than engineered around: a member whose commits
 // are ALREADY on the chunk branch while its issue still reads `ready-for-agent`
@@ -160,7 +202,7 @@ export async function ensureIssueBranch(
   chunk?: ChunkTarget | null,
 ): Promise<IssueBranchBase> {
   const base = chunk
-    ? await chunkOrSourceBase(repoDir, chunk, sourceBranch)
+    ? await chunkOrSourceBase(repoDir, branch, chunk, sourceBranch)
     : sourceBranchBase(sourceBranch);
   try {
     await exec(
@@ -182,13 +224,22 @@ export async function ensureIssueBranch(
 
 async function chunkOrSourceBase(
   repoDir: string,
+  branch: string,
   chunk: ChunkTarget,
   sourceBranch: string,
 ): Promise<IssueBranchBase> {
   const ref = await fetchOriginChunkBranch(repoDir, chunk.branch);
-  return ref === null
-    ? sourceBranchBase(sourceBranch)
-    : { ref, chunkBranch: chunk.branch };
+  if (ref !== null) return { ref, chunkBranch: chunk.branch };
+  // The source-branch fallback is the ROOT'S seed, and this is where that stops
+  // being an assumption. `issueNumberFromBranch` reads the number back out of
+  // the branch sandbar built from it (naming.ts owns both directions), so the
+  // comparison is against the same `chunk.root` the merge phase will land on.
+  // An unparseable branch name lands here too, and refuses for the same reason:
+  // what cannot be shown to be the root must not be given the root's seed.
+  if (issueNumberFromBranch(branch) !== chunk.root) {
+    throw new ChunkBaseMissingError(branch, chunk);
+  }
+  return sourceBranchBase(sourceBranch);
 }
 
 // The paths `git status --porcelain` reports in a worktree — tracked

@@ -591,6 +591,16 @@ export type RunConfig = {
   // no chunk — blockers straddling two chunks, an issue downstream of that, or
   // a `## Blocked by` cycle — which stays held, and reported as held, until a
   // human edits the bodies.
+  //
+  // And one thing a host must NOT do, because it is the one way a chunk in
+  // flight can be broken from outside: do not CLOSE a member of a chunk that
+  // still has issues queued behind it. A chunk's branch name is derived from
+  // its root, and sandbar only ever sees open issues, so closing the root
+  // re-derives the chunk under the next member and therefore under a branch
+  // name nobody has pushed. Sandbar refuses to work the remaining members
+  // rather than build them on the wrong tree (`ChunkBaseMissingError`, #61), so
+  // the failure is loud and per-issue — but it is a failure. Land the chunk
+  // branch and close the members together, or reopen the one that was closed.
   readonly defaultLane?: Lane;
 };
 
