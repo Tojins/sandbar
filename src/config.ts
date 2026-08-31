@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import type { SandboxHooks } from "./agent-sandbox.js";
 import { SandbarError } from "./errors.js";
 import { DEFAULT_LANE, type Lane } from "./lanes.js";
-import { BRANCH_PREFIX } from "./naming.js";
+import { ALL_BRANCH_INFIXES, BRANCH_PREFIX } from "./naming.js";
 
 // The maximum a readiness probe may poll before its container counts as failed.
 export const DEFAULT_READINESS_TIMEOUT_MS = 60_000;
@@ -701,8 +701,10 @@ export function resolveMergeMode(
   }
   // An empty or refs/-prefixed value produces a ref nothing triggers CI for, and
   // the symptom (a whole cycle's work parked, or now a fatal) would arrive long
-  // after the typo. `sandbar/issue-*` is reserved: the preflight cleanup deletes
-  // branches matching it.
+  // after the typo. Both of sandbar's own branch shapes are reserved
+  // (`sandbar/issue-*` and `sandbar/chunk-*`, #58): the preflight cleanup
+  // deletes branches matching either as soon as they are merged, and this ref
+  // is merged constantly.
   if (integrationBranch === "") {
     throw new SandbarError(
       `config.mergeMode: integrationBranch must not be empty.`,
@@ -715,11 +717,12 @@ export function resolveMergeMode(
         `refs/heads/<name>.`,
     );
   }
-  if (integrationBranch.startsWith(`${BRANCH_PREFIX}issue-`)) {
+  for (const infix of ALL_BRANCH_INFIXES) {
+    if (!integrationBranch.startsWith(`${BRANCH_PREFIX}${infix}`)) continue;
     throw new SandbarError(
-      `config.mergeMode: integrationBranch must not match '${BRANCH_PREFIX}issue-*' ` +
-        `(got '${integrationBranch}') — sandbar's preflight cleanup deletes ` +
-        `branches under that prefix.`,
+      `config.mergeMode: integrationBranch must not match ` +
+        `'${BRANCH_PREFIX}${infix}*' (got '${integrationBranch}') — sandbar's ` +
+        `preflight cleanup deletes branches under that prefix.`,
     );
   }
   // Confined to sandbar's own namespace, because this ref is FORCE-PUSHED every

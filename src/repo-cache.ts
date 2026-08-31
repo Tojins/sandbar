@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 // Sandbar used to operate ON the directory `config.cwd` names: it created the
 // issue branches there, added the worktrees there, ran `gh` there, and — via
-// preflight's `deleteMergedIssueBranches` — ran `git branch -D` there. That
+// preflight's `deleteMergedSandbarBranches` — ran `git branch -D` there. That
 // forced every consumer to hand sandbar a checkout it did not otherwise want:
 // a second clone, machine-managed, that a human must not stand in. Two
 // symptoms followed. You had to launch from it (before #34, git and `gh`

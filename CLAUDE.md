@@ -169,9 +169,19 @@ default 50, exit 3).
   suspend D1. Corollary for consumers: gate steps and sandbox siblings must
   write only into gitignored paths. `src/git-ops.ts`,
   `src/inner-loop-machine.ts`.
-- **Branch naming is load-bearing.** `sandbar/issue-<n>-<kebab-slug>`
-  (`src/naming.ts`) — preflight cleanup, orphan sweep and worktree paths all
-  key off it. Issue branches seed from `origin/<sourceBranch>`, never local.
+- **Branch naming is load-bearing.** Two shapes under one prefix,
+  `sandbar/issue-<n>-<kebab-slug>` and `sandbar/chunk-<root>-<kebab-slug>`
+  (#58) — preflight cleanup, orphan sweep and worktree paths all key off them,
+  so `src/naming.ts` owns both builders, both parsers and the one refglob list
+  every enumeration uses. Issue branches seed from `origin/<sourceBranch>`,
+  never local.
+- **A chunk is derived, never declared (#54 §2, #58).** `src/chunks.ts` is a
+  pure function: a chunk is a connected component of the *review-gated* issues
+  under the `## Blocked by` graph, rooted at its parentless member. Chunks are
+  never merged to accommodate an issue that straddles two — that issue is
+  blocked instead. The walk is topological because the two-chunk rule makes the
+  answer order-dependent; the header owns that argument. Derivation only so
+  far: nothing creates the branch and no planning outcome moved.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One cleanup registry owns signals and the exit (#35).** No module but

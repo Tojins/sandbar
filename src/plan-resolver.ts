@@ -12,9 +12,12 @@
 // whose authoritative state (fetched per-candidate alongside blocker states via
 // strongly-consistent GraphQL) reads CLOSED.
 //
-// All ranking logic lives in pure functions (parseBlockedBy, kebabSlug,
-// resolvePlan) so it can be table-driven tested. The I/O wrappers
-// (fetchCandidates, fetchIssueStates) are thin adapters over `gh`.
+// All ranking logic lives in pure functions (parseBlockedBy, resolvePlan) so it
+// can be table-driven tested. The I/O wrappers (fetchCandidates,
+// fetchIssueStates) are thin adapters over `gh`. The branch name a plan carries
+// is built by `naming.ts`, which owns both of sandbar's branch shapes (#58) —
+// the planner used to spell `sandbar/issue-<n>-<slug>` inline, which made the
+// one thing preflight's globs key on a string in two modules.
 //
 // Lanes (#57). Every candidate also gets a LANE — `auto` (the gate is the last
 // word) or `review` (a human looks first) — computed in `lanes.ts` from the
@@ -71,7 +74,7 @@ import {
   computeLanes,
   laneOverrides,
 } from "./lanes.js";
-import { BRANCH_PREFIX } from "./naming.js";
+import { issueBranchName } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
 const exec = promisify(execFile);
@@ -117,15 +120,6 @@ export function parseBlockedBy(body: string): readonly number[] {
   if (!m || !m[1]) return [];
   const refs = [...m[1].matchAll(/#(\d+)\b/g)].map((r) => Number(r[1]));
   return [...new Set(refs)];
-}
-
-export function kebabSlug(s: string): string {
-  return s
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
 }
 
 export function resolvePlan(
@@ -177,7 +171,7 @@ export function resolvePlan(
   const plan = sorted.slice(0, k).map((c) => ({
     id: String(c.number),
     title: c.title,
-    branch: `${BRANCH_PREFIX}issue-${c.number}-${kebabSlug(c.title)}`,
+    branch: issueBranchName(c.number, c.title),
   }));
   return {
     plan,
