@@ -5,6 +5,7 @@ import {
   NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE,
   NO_PROTOTYPE_NEEDED_PHRASE,
 } from "./finalize.js";
+import { sourceBranchBase } from "./git-ops.js";
 import {
   renderAttemptSlot,
   renderReviewerSlot,
@@ -16,6 +17,10 @@ const baseInputs = {
   issue: { id: "42", title: "do the thing", branch: "sandbar/issue-42-do-the-thing" },
   worktreePath: "/tmp/wt",
   sourceBranch: "main",
+  // The default shape since #61: a branch seeded from the source branch, which
+  // is every auto-lane issue and every chunk ROOT. `chunkBranch: null` is what
+  // makes the chunk-base slots render to nothing.
+  base: sourceBranchBase("main"),
   codingStandardsPath: "docs/CODING_STANDARDS.md",
   claudeMdPath: "CLAUDE.md",
 } as const;
@@ -31,7 +36,7 @@ describe("renderAttemptSlot — UI-prototype escalation contract", () => {
     maxAttempts: 8,
     worktreePath: "/tmp/wt",
     lastFailureTrace: "",
-    sourceBranch: "main",
+    base: sourceBranchBase("main"),
     diff: "",
   });
 
@@ -83,7 +88,7 @@ describe("renderAttemptSlot — commit-on-the-issue-branch rule (#27)", () => {
     maxAttempts: 8,
     worktreePath: "/tmp/wt",
     lastFailureTrace: "",
-    sourceBranch: "main",
+    base: sourceBranchBase("main"),
     diff: "",
   });
 
@@ -363,7 +368,7 @@ describe("renderAttemptSlot — the sandbox slot reaches the prompt", () => {
       maxAttempts: 8,
       worktreePath: "/tmp/wt",
       lastFailureTrace: "",
-      sourceBranch: "main",
+      base: sourceBranchBase("main"),
       diff: "",
       sandboxStack,
     });

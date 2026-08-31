@@ -21,7 +21,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { SandbarError } from "./errors.js";
-import { ensureIssueBranch } from "./git-ops.js";
+import { ensureIssueBranch, sourceBranchBase } from "./git-ops.js";
 import { buildPrompt, buildReviewerPrompt, readGit } from "./prompt.js";
 import { repoLayout, worktreePathFor } from "./repo-cache.js";
 import { ensureRepoCache } from "./repo-cache.js";
@@ -103,21 +103,25 @@ const anchorOpts = (sourceBranch = "main") => ({
   sourceBranch,
 });
 
-const implementerInputs = (sourceBranch = "main") => ({
+// The base is threaded, not derived (#61): these builders take whatever
+// `ensureIssueBranch` returned, so a test can hand them a chunk tip exactly as
+// the inner loop does. `sourceBranchBase` is the ordinary case.
+const implementerInputs = (base = sourceBranchBase("main")) => ({
   issue: ISSUE,
   attempt: 2,
   maxAttempts: 8,
   worktreePath: worktree,
   lastFailureTrace: "",
-  sourceBranch,
+  base,
 });
 
-const reviewerInputs = (sourceBranch = "main") => ({
+const reviewerInputs = (base = sourceBranchBase("main"), sourceBranch = "main") => ({
   issue: ISSUE,
   repo: REPO,
   repoDir,
   worktreePath: worktree,
   sourceBranch,
+  base,
   claudeMdPath: "CLAUDE.md",
 });
 
@@ -170,7 +174,7 @@ describe("a failed read is never rendered as an empty slot (#40)", () => {
     await commitOnBranch();
 
     const built = buildPrompt(
-      implementerInputs("no-such-branch"),
+      implementerInputs(sourceBranchBase("no-such-branch")),
       anchorOpts("no-such-branch"),
     );
 
@@ -184,7 +188,9 @@ describe("a failed read is never rendered as an empty slot (#40)", () => {
   it("throws out of the reviewer slot instead of asking for a verdict on nothing", async () => {
     await commitOnBranch();
 
-    const built = buildReviewerPrompt(reviewerInputs("no-such-branch"));
+    const built = buildReviewerPrompt(
+      reviewerInputs(sourceBranchBase("no-such-branch"), "no-such-branch"),
+    );
 
     await expect(built).rejects.toBeInstanceOf(SandbarError);
     await expect(built).rejects.toThrow(/could not read the commit list/);

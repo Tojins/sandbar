@@ -230,14 +230,13 @@ describe("resolvePlan", () => {
 // #57 — the holding rule and what the resolution reports about it. Lane
 // COMPUTATION is lanes.test.ts's job; these are about the planner's use of it.
 //
-// #60 narrowed the rule: a review-gated issue that is its chunk's ROOT now
-// plans (it has somewhere to land), and only the members behind one — plus the
-// issues chunks.ts could give no chunk at all — are still held. Two shapes
-// below produce a held issue, and they are the only two there are:
-//   - a non-root member, i.e. an issue blocked by another gated issue in the
-//     same chunk (the `#59` describe builds these with `in-chunk`);
-//   - a straddler, blocked by members of two different chunks, which
-//     chunks.ts refuses to give a chunk to at all.
+// #60 narrowed the rule to "not this chunk's root"; #61 narrows it to its last
+// clause, "no chunk at all". Every member of a chunk plans — the root seeded
+// from the source branch, a chained member from the chunk tip — so the ONE
+// shape below that still produces a held issue is a straddler: an issue blocked
+// by members of two different chunks, which chunks.ts refuses to give a chunk
+// to at all. (Its transitive shadow and a `## Blocked by` cycle are the other
+// two ways to have no chunk; chunks.test.ts owns the derivation.)
 describe("resolvePlan lanes (#57)", () => {
   it("is inert on the default lane: everything plans, nothing is held", () => {
     const r = resolvePlan([issue(10, ""), issue(11, "")], new Map());
@@ -308,19 +307,24 @@ describe("resolvePlan lanes (#57)", () => {
     expect(r.heldForReview).toEqual([30]);
   });
 
-  it("holds an `auto-land` issue whose blocker chain is review-gated, and reports the override", () => {
-    // #12 is review-gated (no label, `review` default) and closed, so #11 is
-    // eligible — and #11's own `auto-land` loses to what it is built on.
+  it("plans an `auto-land` issue onto the chunk it inherited, and reports the override", () => {
+    // #12 is review-gated (no label, `review` default) and has landed on its
+    // chunk's branch, so #11's blocker is satisfied (#59) — and #11's own
+    // `auto-land` loses to what it is built on. Since #61 losing means landing
+    // on #12's chunk rather than being held: the override is not a refusal to
+    // work the issue, it is a redirection of where the work goes.
     const r = resolvePlan(
-      [issue(11, "## Blocked by\n- #12\n", { labels: ["auto-land"] }), issue(12, "")],
-      states({ 12: "CLOSED" }),
+      [issue(11, "## Blocked by\n- #12\n", { labels: ["auto-land"] }), issue(12, "", { labels: [IN_CHUNK_LABEL] })],
+      facts({ 12: { labels: [IN_CHUNK_LABEL] } }),
       new Set(),
       3,
       "review",
     );
 
-    expect(r.plan).toEqual([]);
-    expect(r.heldForReview).toEqual([11]);
+    expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
+      ["11", { root: 12, branch: "sandbar/chunk-12-issue-12" }],
+    ]);
+    expect(r.heldForReview).toEqual([]);
     expect(r.overrides).toEqual([{ issue: 11, gatedBy: 12 }]);
   });
 
@@ -339,7 +343,14 @@ describe("resolvePlan lanes (#57)", () => {
       "review",
     );
 
-    expect(r.plan).toEqual([]);
+    // #13 plans, and the CHUNK it carries is the proof the gating landed: an
+    // auto-lane issue is in no chunk at all, so a `chunk` here can only have
+    // come from #12 staying in the graph. (The chunk is rooted at a closed
+    // issue only because a CLOSED candidate is a stale-search artefact by
+    // construction — #16 — and it clears as soon as the index catches up.)
+    expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
+      ["13", { root: 12, branch: "sandbar/chunk-12-issue-12" }],
+    ]);
     expect(r.overrides).toEqual([{ issue: 13, gatedBy: 12 }]);
   });
 
@@ -428,21 +439,25 @@ describe("resolvePlan lanes (#57)", () => {
 // necessary. Chunk DERIVATION is chunks.test.ts's job; these are about the
 // planner's use of it.
 //
-// Note what the observable is, and that #60 gave it two shapes. A satisfied
-// blocker means the dependent reaches the LANE filter, and what happens there
-// depends on whether it is its chunk's root: a root is PLANNED, a chained
-// member is HELD. Either way it is visible, and an unsatisfied blocker is
-// neither — it drops out at the dependency gate, before `heldForReview` is
-// touched. So the assertions below read `plan` or `heldForReview` according to
-// the shape each case builds, and "in neither" is what "not satisfied" looks
-// like. The `in-chunk` cases are all chained members by construction (their
-// blocker is the landed root), so they are held.
+// Note what the observable is, and that #61 collapsed it back to one shape. A
+// satisfied blocker means the dependent reaches the LANE filter, and since #61
+// every member of a chunk clears it, so a satisfied dependent is simply
+// PLANNED — carrying the chunk it will land on and be seeded from. An
+// UNSATISFIED one is in neither `plan` nor `heldForReview`: it drops out at the
+// dependency gate, before the lane filter is reached at all. So "absent from
+// both" is what "not satisfied" looks like here, and the `chunk` a planned
+// dependent carries is the second half of the assertion — it is what tells
+// phase 2 to seed from the chunk tip where the blocker's commits actually are
+// (#61), so a member planned with `chunk: null` would be developed against a
+// tree missing its blocker's work.
 describe("resolvePlan in-chunk blockers (#59)", () => {
   const inChunk = { labels: [IN_CHUNK_LABEL] };
 
   it("satisfies a blocker that is `in-chunk` in the SAME chunk", () => {
     // #10 landed on the chunk branch; #11 is built on it and is in that same
-    // chunk by construction, so #10's commits are already under its feet.
+    // chunk by construction, so #10's commits are already under its feet. The
+    // chunk #11 carries is #10's, which is what makes that true: phase 2 seeds
+    // #11's branch from that branch's tip (#61).
     const r = resolvePlan(
       [issue(10, "", inChunk), issue(11, "## Blocked by\n- #10\n")],
       facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
@@ -451,14 +466,17 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
       "review",
     );
 
-    expect(r.heldForReview).toEqual([11]);
+    expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
+      ["11", { root: 10, branch: "sandbar/chunk-10-issue-10" }],
+    ]);
+    expect(r.heldForReview).toEqual([]);
   });
 
   it("does not satisfy a blocker that is merely OPEN", () => {
     // The same graph with the label taken away: #10 is open, unlanded, and
     // still blocking. #10 is the chunk's root, so it plans (#60); #11 is
     // neither planned nor held, which is what "not satisfied" looks like —
-    // a satisfied #11 would be held, as the case above shows.
+    // a satisfied #11 would be planned beside it, as the case above shows.
     const r = resolvePlan(
       [issue(10, ""), issue(11, "## Blocked by\n- #10\n")],
       facts({ 10: {} }),
@@ -522,9 +540,13 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
     expect(r.heldForReview).toEqual([]);
   });
 
-  it("propagates one member at a time along a chain", () => {
+  it("propagates one LAYER at a time along a chain", () => {
     // #10 landed, #11 can be worked, #12 cannot yet: its own blocker #11 is
-    // open and has not landed on the chunk branch.
+    // open and has not landed on the chunk branch. This is what bounds a chunk
+    // to one layer per cycle and is why same-cycle members are always siblings
+    // — #12 waits for the cycle AFTER the one that lands #11 and flips it to
+    // `in-chunk`, so it can never be planned alongside the very branch it
+    // would have to be seeded from.
     const r = resolvePlan(
       [
         issue(10, "", inChunk),
@@ -537,7 +559,32 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
       "review",
     );
 
-    expect(r.heldForReview).toEqual([11]);
+    expect(r.plan.map((p) => p.id)).toEqual(["11"]);
+    expect(r.heldForReview).toEqual([]);
+  });
+
+  // The other half of "one layer": several members whose blockers have all
+  // landed go together, and they are siblings, not a chain. The merge phase
+  // groups them into one chunk landing and their order within it carries no
+  // dependency (merger.ts, `groupByChunk`).
+  it("plans every member whose blockers have landed, as one layer", () => {
+    const r = resolvePlan(
+      [
+        issue(10, "", inChunk),
+        issue(11, "## Blocked by\n- #10\n"),
+        issue(12, "## Blocked by\n- #10\n"),
+      ],
+      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
+      ["11", { root: 10, branch: "sandbar/chunk-10-issue-10" }],
+      ["12", { root: 10, branch: "sandbar/chunk-10-issue-10" }],
+    ]);
+    expect(r.heldForReview).toEqual([]);
   });
 
   it("drops an `in-chunk` candidate from the plan — the label is the de-queue", () => {
@@ -582,8 +629,10 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
       "review",
     );
 
-    expect(r.plan).toEqual([]);
-    expect(r.heldForReview).toEqual([11]);
+    expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
+      ["11", { root: 10, branch: "sandbar/chunk-10-issue-10" }],
+    ]);
+    expect(r.heldForReview).toEqual([]);
   });
 
   it("reads the label from the listing when the facts batch missed the issue", () => {
@@ -597,8 +646,10 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
       "review",
     );
 
-    expect(r.plan).toEqual([]);
-    expect(r.heldForReview).toEqual([11]);
+    expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
+      ["11", { root: 10, branch: "sandbar/chunk-10-issue-10" }],
+    ]);
+    expect(r.heldForReview).toEqual([]);
   });
 
   it("is inert with no `in-chunk` label anywhere, on either lane", () => {
