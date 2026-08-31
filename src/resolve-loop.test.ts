@@ -508,6 +508,61 @@ describe("runResolveLoop — multi-issue context", () => {
   });
 });
 
+// #60 — the merge has two possible targets now, and the prompt has to name the
+// one this merge is actually into. The agent reads "into X" and then reasons
+// about what is on X.
+describe("runResolveLoop — landing target in the prompt", () => {
+  it("says the source branch when the caller says nothing", async () => {
+    const { adapter, calls } = makeAdapter({
+      initiallyConflicted: true,
+      agentRuns: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+    });
+    await runResolveLoop(issue(42), [], conflictMode, adapter, {
+      projectAnchor,
+    });
+    expect(calls.prompts[0]).toContain("into the source branch");
+  });
+
+  it("names the chunk branch when the merge is onto one", async () => {
+    const { adapter, calls } = makeAdapter({
+      initiallyConflicted: true,
+      agentRuns: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+    });
+    await runResolveLoop(issue(42), [], conflictMode, adapter, {
+      projectAnchor,
+      target: "its chunk's branch `sandbar/chunk-42-c`",
+    });
+    expect(calls.prompts[0]).toContain("sandbar/chunk-42-c");
+    expect(calls.prompts[0]).not.toContain("into the source branch");
+  });
+
+  it("names it in gate-red mode too", async () => {
+    const { adapter, calls } = makeAdapter({
+      agentRuns: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+    });
+    await runResolveLoop(
+      issue(42),
+      [],
+      {
+        kind: "gate-red",
+        initialOutput: {
+          stdout: "boom",
+          stderr: "",
+          failedStep: "test",
+          exitCode: 1,
+          containerLogs: "",
+        },
+      },
+      adapter,
+      { projectAnchor, target: "its chunk's branch `sandbar/chunk-42-c`" },
+    );
+    expect(calls.prompts[0]).toContain("merged cleanly into its chunk's branch");
+  });
+});
+
 describe("runResolveLoop — logging", () => {
   it("emits a log line per attempt and per outcome", async () => {
     const { adapter } = makeAdapter({

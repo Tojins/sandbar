@@ -21,6 +21,8 @@ import {
   LEGACY_BRANCH_PREFIXES,
   LEGACY_RESOURCE_PREFIXES,
   RESOURCE_PREFIX,
+  ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+  ORIGIN_CHUNK_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
   chunkBranchName,
   issueBranchName,
@@ -150,6 +152,38 @@ describe("branch names (#58)", () => {
         "refs/heads/sandcastle/chunk-*",
       ].sort(),
     );
+  });
+
+  // #60 — the remote side of the same namespace. A chunk branch lives on
+  // origin, so "what is already on this chunk?" is a question about
+  // remote-tracking refs, and the refspec that fetches them and the glob that
+  // enumerates them have to describe the same set.
+  it("names origin's chunk branches for both fetching and enumerating", () => {
+    expect([...ORIGIN_CHUNK_BRANCH_REFGLOBS].sort()).toEqual(
+      [
+        "refs/remotes/origin/sandbar/chunk-*",
+        "refs/remotes/origin/sandcastle/chunk-*",
+      ].sort(),
+    );
+    expect([...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS].sort()).toEqual(
+      [
+        "+refs/heads/sandbar/chunk-*:refs/remotes/origin/sandbar/chunk-*",
+        "+refs/heads/sandcastle/chunk-*:refs/remotes/origin/sandcastle/chunk-*",
+      ].sort(),
+    );
+    // Every refspec's destination is one of the globs — the pair cannot drift
+    // into fetching one namespace and reading another.
+    for (const spec of ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS) {
+      expect(ORIGIN_CHUNK_BRANCH_REFGLOBS).toContain(spec.split(":")[1]);
+    }
+  });
+
+  it("keeps origin's chunk refs out of the local branch globs", () => {
+    // `listSandbarBranches` hands SANDBAR_BRANCH_REFGLOBS to `for-each-ref` and
+    // treats every hit as a local branch it may delete.
+    for (const glob of SANDBAR_BRANCH_REFGLOBS) {
+      expect(glob.startsWith("refs/heads/")).toBe(true);
+    }
   });
 
   it("globs match what the builders produce", () => {
