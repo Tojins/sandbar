@@ -102,6 +102,30 @@ describe("realAdapter.isMergeInProgress (real linked worktree)", () => {
     await expect(git(repo, "merge", "--no-ff", "side")).rejects.toThrow();
     expect(await adapterAt(repo).isMergeInProgress()).toBe(true);
   });
+
+  // #67 — the abandon comment lists the conflicted files, so what "conflicted"
+  // means has to be git's answer and not a parse of the porcelain beside it.
+  // Asserted by running a real conflicting merge, in a linked worktree, for the
+  // same reason isMergeInProgress is.
+  it("names the unmerged paths, and only those, while a merge is conflicted", async () => {
+    // A second file that merges cleanly, so a digest that simply listed every
+    // changed path would be caught.
+    await git(repo, "checkout", "-q", "side");
+    await commit(repo, "clean.txt", "from side\n");
+    await git(repo, "checkout", "-q", "main");
+    await git(repo, "worktree", "remove", "--force", wt);
+    await git(repo, "worktree", "add", "--detach", wt, "HEAD");
+
+    await expect(git(wt, "merge", "--no-ff", "side")).rejects.toThrow();
+
+    const digest = await adapterAt(wt).conflictDigest();
+    expect(digest.paths).toEqual(["a.txt"]);
+    expect(digest.status).toContain("a.txt");
+  });
+
+  it("names no path at all on a clean tree", async () => {
+    expect((await adapterAt(wt).conflictDigest()).paths).toEqual([]);
+  });
 });
 
 // #60 — the three git primitives the chunk landing rests on, against real

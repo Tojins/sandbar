@@ -605,13 +605,21 @@ function makeVerify(script: VerifyScript): {
       // A resolve attempt means the current round's verdict is spent; the next
       // listCheckRuns belongs to the next round.
       round += 1;
-      return { stdout: script.agents?.[agents++] ?? "<promise>COMMITTED</promise>" };
+      return {
+        stdout: script.agents?.[agents++] ?? "<promise>COMMITTED</promise>",
+        stderr: "",
+        end: "exit",
+        exitCode: 0,
+        signal: null,
+        durationMs: 42,
+        container: "sandbar-wdeadbeef-resolve-1-uuid",
+      };
     },
     async isMergeInProgress() {
       return false;
     },
     async conflictDigest() {
-      return { status: "", diff: "" };
+      return { status: "", diff: "", paths: [] };
     },
     async npmInstall() {
       return { ok: true };
@@ -715,6 +723,36 @@ describe("runVerifiedLanding", () => {
     // Cross-branch context: both cycle issues reach the agent.
     expect(calls.agentPrompts[0]).toContain("body of #7");
     expect(calls.agentPrompts[0]).toContain("body of #9");
+  });
+
+  // #67 — the capture key is a function of the ROUND. Each round runs a fresh
+  // resolve loop whose attempts start again at 1, so one key for the whole
+  // landing would have round 2 overwrite round 1 attempt for attempt.
+  it("keys each round's resolve capture by the round", async () => {
+    const failing = run({ name: "browser", conclusion: "failure" });
+    const seen: string[] = [];
+    await land(
+      {
+        checks: [
+          { kind: "red", failed: [failing] },
+          { kind: "red", failed: [failing] },
+          { kind: "green", names: [] },
+        ],
+        heads: ["sha-A", "sha-B", "sha-B", "sha-C", "sha-C"],
+      },
+      {
+        maxRounds: 3,
+        onResolveAttempt: (round) => async (record) => {
+          const path = `/logs/resolve-verify-round-${round}-attempt-${record.attempt}.log`;
+          seen.push(path);
+          return path;
+        },
+      },
+    );
+    expect(seen).toEqual([
+      "/logs/resolve-verify-round-1-attempt-1.log",
+      "/logs/resolve-verify-round-2-attempt-1.log",
+    ]);
   });
 
   it("caps how many failing jobs' logs it fetches, and says how many it left out", async () => {

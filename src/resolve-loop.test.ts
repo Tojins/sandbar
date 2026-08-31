@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import type { MergerGateOutput } from "./merger.js";
+import { SandbarError } from "./errors.js";
 import {
   RESOLVE_MAX_ATTEMPTS,
   type IssueRef,
   type ResolveAdapter,
+  type ResolveAgentRun,
+  type ResolveAttemptRecord,
   type ResolveMode,
+  formatConflictPaths,
+  formatResolveAttempts,
+  isInfraFailure,
   parseResolveSignal,
   runResolveLoop,
 } from "./resolve-loop.js";
@@ -24,13 +30,35 @@ function gateOut(): MergerGateOutput {
   };
 }
 
-type AgentResult = { stdout: string };
+// The one-field shape every scripted run is written in; `agentRun` fills in
+// the eight the adapter really answers with (#67).
+type AgentResult = ResolveAgentRun;
+
+// A scripted invocation that ran, printed and exited 0 — the shape almost every
+// test in this file wants, so that only the tests ABOUT the invocation have to
+// spell out an exit code or a signal.
+function agentRun(over: Partial<ResolveAgentRun> = {}): ResolveAgentRun {
+  return {
+    stdout: "",
+    stderr: "",
+    end: "exit",
+    exitCode: 0,
+    signal: null,
+    durationMs: 1234,
+    container: "sandbar-wdeadbeef-resolve-1-uuid",
+    ...over,
+  };
+}
 type GateResp =
   | { ok: true }
   | ({ ok: false } & MergerGateOutput);
 
 type Script = {
-  agentRuns: { stdout: string; leavesConflict?: boolean }[];
+  agentRuns: {
+    stdout: string;
+    leavesConflict?: boolean;
+    run?: Partial<ResolveAgentRun>;
+  }[];
   initiallyConflicted: boolean;
   installs?: boolean[];
   gates?: GateResp[];
@@ -68,6 +96,8 @@ function makeAdapter(script: Script): { adapter: ResolveAdapter; calls: Calls } 
 
   const adapter: ResolveAdapter = {
     async runResolveAgent(prompt: string): Promise<AgentResult> {
+      // The `attempt` arg is ignored here; the tests that care about it assert
+      // on the record the sink receives.
       const entry = script.agentRuns[aIdx++];
       if (!entry) throw new Error("agent run not scripted");
       calls.agentRuns++;
@@ -78,7 +108,7 @@ function makeAdapter(script: Script): { adapter: ResolveAdapter; calls: Calls } 
       } else if (signal.kind === "ABANDON") {
         if (entry.leavesConflict !== undefined) merging = entry.leavesConflict;
       }
-      return { stdout: entry.stdout };
+      return agentRun({ stdout: entry.stdout, ...entry.run });
     },
     async isMergeInProgress() {
       calls.isMergeInProgressCalls++;
@@ -86,7 +116,11 @@ function makeAdapter(script: Script): { adapter: ResolveAdapter; calls: Calls } 
     },
     async conflictDigest() {
       calls.conflictDigestCalls++;
-      return { status: "UU foo.ts\nUU bar.ts", diff: "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>>" };
+      return {
+        status: "UU foo.ts\nUU bar.ts",
+        diff: "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>>",
+        paths: ["foo.ts", "bar.ts"],
+      };
     },
     async npmInstall() {
       const r = script.installs?.[iIdx++] ?? true;
@@ -190,7 +224,7 @@ describe("runResolveLoop — conflict mode", () => {
       adapter,
       { projectAnchor },
     );
-    expect(out).toEqual({
+    expect(out).toMatchObject({
       kind: "abandon",
       reason: "#42 supersedes #40; let #40 lose",
       mergeInProgress: true,
@@ -392,7 +426,7 @@ describe("runResolveLoop — gate-red mode", () => {
       adapter,
       { projectAnchor },
     );
-    expect(out).toEqual({
+    expect(out).toMatchObject({
       kind: "abandon",
       reason: "tests collide with #44; revert this one",
       mergeInProgress: false,
@@ -583,5 +617,310 @@ describe("runResolveLoop — logging", () => {
     );
     expect(lines.some((l) => l.startsWith("resolve-attempt 1/"))).toBe(true);
     expect(lines.some((l) => l.includes("gate green"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #67 — what an attempt leaves behind, and what happens when nothing ran.
+// ---------------------------------------------------------------------------
+
+// A sink that records what it was handed and answers with a path, exactly as
+// the cycle logger does.
+function makeSink(): {
+  sink: (r: ResolveAttemptRecord) => Promise<string | null>;
+  records: ResolveAttemptRecord[];
+} {
+  const records: ResolveAttemptRecord[] = [];
+  return {
+    records,
+    sink: async (r) => {
+      records.push(r);
+      return `/logs/cycle-1/resolve-${r.issueId}-attempt-${r.attempt}.log`;
+    },
+  };
+}
+
+describe("isInfraFailure (#67)", () => {
+  it("is true for output-less exits, whatever the exit code says", () => {
+    expect(isInfraFailure(agentRun({ stdout: "", exitCode: 0 }))).toBe(true);
+    expect(isInfraFailure(agentRun({ stdout: "", exitCode: 1 }))).toBe(true);
+    // Whitespace is not output: an agent that printed a newline said nothing.
+    expect(isInfraFailure(agentRun({ stdout: "  \n " }))).toBe(true);
+  });
+
+  it("is true for a runtime that never produced a process, output or not", () => {
+    expect(
+      isInfraFailure(agentRun({ end: "spawn-error", detail: "ENOENT" })),
+    ).toBe(true);
+  });
+
+  it("is FALSE for a timeout — it ran the whole budget in the container", () => {
+    expect(
+      isInfraFailure(
+        agentRun({ stdout: "", end: "timeout", exitCode: null, signal: "SIGTERM" }),
+      ),
+    ).toBe(false);
+  });
+
+  it("is false whenever the agent actually said something", () => {
+    expect(isInfraFailure(agentRun({ stdout: "thinking...", exitCode: 1 }))).toBe(
+      false,
+    );
+  });
+});
+
+describe("runResolveLoop — an attempt that never ran (#67)", () => {
+  it("throws instead of re-prompting, and does not spend the rest of the budget", async () => {
+    const { adapter, calls } = makeAdapter({
+      initiallyConflicted: true,
+      // Four scripted runs available; only one may be spent.
+      agentRuns: [
+        { stdout: "", run: { exitCode: 1, stderr: "Error: image not known" } },
+        { stdout: "<promise>COMMITTED</promise>" },
+        { stdout: "<promise>COMMITTED</promise>" },
+        { stdout: "<promise>COMMITTED</promise>" },
+      ],
+      gates: [{ ok: true }],
+    });
+    await expect(
+      runResolveLoop(issue(64), [], conflictMode, adapter, { projectAnchor }),
+    ).rejects.toBeInstanceOf(SandbarError);
+    expect(calls.agentRuns).toBe(1);
+  });
+
+  it("names the container, how it ended, and where its output went", async () => {
+    const { adapter } = makeAdapter({
+      initiallyConflicted: true,
+      agentRuns: [
+        {
+          stdout: "",
+          run: {
+            exitCode: 125,
+            container: "sandbar-wdeadbeef-resolve-1-abc",
+            stderr: "Error: cannot connect to podman socket",
+          },
+        },
+      ],
+    });
+    const { sink } = makeSink();
+    const err = await runResolveLoop(
+      issue(64),
+      [],
+      conflictMode,
+      adapter,
+      { projectAnchor, onAttempt: sink },
+    ).catch((e: unknown) => e as Error);
+    expect(err.message).toContain("sandbar-wdeadbeef-resolve-1-abc");
+    expect(err.message).toContain("exited with code 125");
+    expect(err.message).toContain("resolve-64-attempt-1.log");
+    // The three attempts it did NOT spend are the point of halting here.
+    expect(err.message).toContain("remaining 3 resolve attempts");
+    // stderr was piped to nobody before this issue; it is the whole diagnosis.
+    expect(err.message).toContain("cannot connect to podman socket");
+  });
+
+  it("says so plainly when no sink was wired, rather than naming a file", async () => {
+    const { adapter } = makeAdapter({
+      initiallyConflicted: true,
+      agentRuns: [{ stdout: "" }],
+    });
+    const err = await runResolveLoop(issue(64), [], conflictMode, adapter, {
+      projectAnchor,
+    }).catch((e: unknown) => e as Error);
+    expect(err.message).toContain("not captured to a file");
+  });
+
+  it("captures the attempt BEFORE it throws — the halt is what the file explains", async () => {
+    const { adapter } = makeAdapter({
+      initiallyConflicted: true,
+      agentRuns: [{ stdout: "", run: { stderr: "boom" } }],
+    });
+    const { sink, records } = makeSink();
+    await runResolveLoop(issue(64), [], conflictMode, adapter, {
+      projectAnchor,
+      onAttempt: sink,
+    }).catch(() => undefined);
+    expect(records).toHaveLength(1);
+    expect(records[0]?.stderr).toBe("boom");
+  });
+});
+
+describe("runResolveLoop — the timeout is a spent attempt (#67)", () => {
+  const timedOut = {
+    stdout: "",
+    run: {
+      end: "timeout" as const,
+      exitCode: null,
+      signal: "SIGTERM",
+      durationMs: 600_777,
+    },
+  };
+
+  it("re-prompts rather than halting, and names the timeout in the log", async () => {
+    const { adapter, calls } = makeAdapter({
+      initiallyConflicted: true,
+      agentRuns: [timedOut, { stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+    });
+    const lines: string[] = [];
+    const out = await runResolveLoop(
+      issue(64),
+      [],
+      conflictMode,
+      adapter,
+      { projectAnchor },
+      (l) => {
+        lines.push(l);
+      },
+    );
+    expect(out).toEqual({ kind: "resolved" });
+    expect(calls.agentRuns).toBe(2);
+    expect(lines.some((l) => l.includes("ended=timeout after=600.8s"))).toBe(true);
+  });
+
+  it("names it in the comment's journal too", async () => {
+    const { adapter } = makeAdapter({
+      initiallyConflicted: true,
+      agentRuns: [timedOut, timedOut, timedOut, timedOut],
+    });
+    const out = await runResolveLoop(issue(64), [], conflictMode, adapter, {
+      projectAnchor,
+    });
+    if (out.kind !== "abandon") throw new Error("expected abandon");
+    expect(out.attempts).toHaveLength(RESOLVE_MAX_ATTEMPTS);
+    expect(formatResolveAttempts(out.attempts)).toContain(
+      "10-minute per-attempt timeout",
+    );
+  });
+});
+
+describe("runResolveLoop — the journal an abandon carries (#67)", () => {
+  it("records every attempt with its end, its sizes and its log path", async () => {
+    const { adapter } = makeAdapter({
+      initiallyConflicted: true,
+      agentRuns: [
+        { stdout: "<promise>COMMITTED</promise>", leavesConflict: true },
+        { stdout: "<promise>COMMITTED</promise>", leavesConflict: true },
+        { stdout: "<promise>COMMITTED</promise>", leavesConflict: true },
+        { stdout: "<promise>COMMITTED</promise>", leavesConflict: true },
+      ],
+    });
+    const { sink } = makeSink();
+    const out = await runResolveLoop(issue(64), [], conflictMode, adapter, {
+      projectAnchor,
+      onAttempt: sink,
+    });
+    if (out.kind !== "abandon") throw new Error("expected abandon");
+    expect(out.attempts.map((a) => a.attempt)).toEqual([1, 2, 3, 4]);
+    expect(out.attempts.every((a) => a.verdict === "still-conflicted")).toBe(true);
+    expect(out.attempts[0]?.logPath).toBe(
+      "/logs/cycle-1/resolve-64-attempt-1.log",
+    );
+    expect(out.attempts[0]?.stdoutBytes).toBeGreaterThan(0);
+    // The conflicted paths ride along, because the comment lists them and the
+    // loop is the only thing that ever asked git for them.
+    expect(out.conflictPaths).toEqual(["foo.ts", "bar.ts"]);
+  });
+
+  it("carries no conflicted paths out of a gate-red run, which never had any", async () => {
+    const { adapter } = makeAdapter({
+      initiallyConflicted: false,
+      agentRuns: [
+        {
+          stdout:
+            "<reason>not fixable here</reason>\n<promise>ABANDON</promise>",
+        },
+      ],
+    });
+    const out = await runResolveLoop(issue(64), [], gateRedMode, adapter, {
+      projectAnchor,
+    });
+    if (out.kind !== "abandon") throw new Error("expected abandon");
+    expect(out.conflictPaths).toEqual([]);
+    expect(out.attempts.map((a) => a.verdict)).toEqual(["abandon"]);
+  });
+
+  it("hands the sink the mode the attempt was answering", async () => {
+    const { adapter } = makeAdapter({
+      initiallyConflicted: true,
+      agentRuns: [
+        { stdout: "<promise>COMMITTED</promise>" },
+        { stdout: "<promise>COMMITTED</promise>" },
+      ],
+      installs: [true, true],
+      gates: [{ ok: false, ...gateOut() }, { ok: true }],
+    });
+    const { sink, records } = makeSink();
+    await runResolveLoop(issue(64), [], conflictMode, adapter, {
+      projectAnchor,
+      preMergeSha: "before",
+      onAttempt: sink,
+    });
+    expect(records.map((r) => r.mode)).toEqual(["still-conflicted", "gate-red"]);
+    expect(records.map((r) => r.issueId)).toEqual(["64", "64"]);
+  });
+});
+
+describe("the attempt-by-attempt prose (#67)", () => {
+  it("tells a timeout apart from a container that exited in seconds", () => {
+    const text = formatResolveAttempts([
+      {
+        attempt: 1,
+        end: "timeout",
+        exitCode: null,
+        signal: "SIGTERM",
+        durationMs: 600_777,
+        container: "c-1",
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        verdict: "still-conflicted",
+        logPath: "/logs/a1.log",
+      },
+      {
+        attempt: 2,
+        end: "exit",
+        exitCode: 1,
+        signal: null,
+        durationMs: 2_500,
+        container: "c-2",
+        stdoutBytes: 0,
+        stderrBytes: 40,
+        verdict: "still-conflicted",
+        logPath: "/logs/a2.log",
+      },
+    ]);
+    expect(text).toContain("**Attempt 1**");
+    expect(text).toContain("600.8s");
+    expect(text).toContain("10-minute per-attempt timeout");
+    expect(text).toContain("**Attempt 2**");
+    expect(text).toContain("exited with code 1 after 2.5s");
+    expect(text).toContain("/logs/a2.log");
+  });
+
+  it("says outright when an attempt's output went nowhere", () => {
+    const text = formatResolveAttempts([
+      {
+        attempt: 1,
+        end: "signal",
+        exitCode: null,
+        signal: "SIGKILL",
+        durationMs: 9_000,
+        container: "c-1",
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        verdict: "still-conflicted",
+        logPath: null,
+      },
+    ]);
+    expect(text).toContain("killed by SIGKILL");
+    expect(text).not.toContain("Output:");
+  });
+
+  it("renders nothing at all for an empty conflicted-path list", () => {
+    // A gate-red abandon has none, and "conflicted paths: none" would read as a
+    // clean merge rather than as a question that was never asked.
+    expect(formatConflictPaths([])).toBe("");
+    expect(formatConflictPaths(["a.ts"])).toContain("`a.ts`");
+    expect(formatConflictPaths(["a.ts", "b.ts"])).toContain("(2)");
   });
 });

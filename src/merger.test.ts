@@ -30,7 +30,16 @@ function issue(n: number, title = `t-${n}`): IssueRef {
 
 type GateResp = { ok: true } | ({ ok: false } & MergerGateOutput);
 
-type AgentScript = { stdout: string; leavesConflict?: boolean };
+// The invocation's own outcome (#67) defaults to a clean exit: only the tests
+// about a container that died or timed out say otherwise.
+type AgentScript = {
+  stdout: string;
+  leavesConflict?: boolean;
+  stderr?: string;
+  end?: "exit" | "timeout" | "signal" | "spawn-error";
+  exitCode?: number | null;
+  signal?: string | null;
+};
 
 type Calls = {
   merges: string[];
@@ -160,7 +169,15 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       ) {
         merging = entry.leavesConflict;
       }
-      return { stdout: entry.stdout };
+      return {
+        stdout: entry.stdout,
+        stderr: entry.stderr ?? "",
+        end: entry.end ?? "exit",
+        exitCode: entry.exitCode ?? 0,
+        signal: entry.signal ?? null,
+        durationMs: 5_000,
+        container: `sandbar-wdeadbeef-resolve-${aIdx}-uuid`,
+      };
     },
     async isMergeInProgress() {
       calls.isMergeChecks++;
@@ -168,7 +185,11 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     },
     async conflictDigest() {
       calls.conflictDigests++;
-      return { status: "UU foo", diff: "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>>" };
+      return {
+        status: "UU foo",
+        diff: "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>>",
+        paths: ["foo"],
+      };
     },
     async getIssueBody(id) {
       calls.bodies.push(id);
@@ -414,6 +435,97 @@ describe("runMergerWithAdapter — conflict enters resolve loop", () => {
     expect(calls.removedLabels).toEqual([
       { n: 42, label: READY_FOR_AGENT_LABEL },
     ]);
+  });
+
+  // #67 — this comment is the only artefact a human reads when they find a
+  // stuck issue in the morning, and it used to name no conflicted file, no
+  // timing, no output and no log path.
+  it("the abandon comment carries the conflicted paths, each attempt's outcome and the log paths", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [
+        // Attempt 1: the ten-minute timeout. Attempts 2 and 3: the agent
+        // committed nothing and left the tree conflicted. Attempt 4 gives up.
+        { stdout: "", end: "timeout", exitCode: null, signal: "SIGTERM", leavesConflict: true },
+        { stdout: "<promise>COMMITTED</promise>", leavesConflict: true },
+        { stdout: "<promise>COMMITTED</promise>", leavesConflict: true },
+        {
+          stdout: "<reason>unresolvable</reason>\n<promise>ABANDON</promise>",
+          leavesConflict: true,
+        },
+      ],
+    });
+    const written: string[] = [];
+    await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, {
+      onResolveAttempt: async (key, record) => {
+        const path = `/logs/cycle-1/resolve-${key}-attempt-${record.attempt}.log`;
+        written.push(path);
+        return path;
+      },
+    });
+
+    // One file per attempt, keyed like the gate artefact beside it.
+    expect(written).toEqual([
+      "/logs/cycle-1/resolve-42-attempt-1.log",
+      "/logs/cycle-1/resolve-42-attempt-2.log",
+      "/logs/cycle-1/resolve-42-attempt-3.log",
+      "/logs/cycle-1/resolve-42-attempt-4.log",
+    ]);
+
+    const msg = calls.comments[0]!.msg;
+    // What conflicted — the fake's digest reports `foo`.
+    expect(msg).toContain("Conflicted path");
+    expect(msg).toContain("`foo`");
+    // What each attempt did, and the timeout named as such.
+    expect(msg).toContain("**Attempt 1**");
+    expect(msg).toContain("10-minute per-attempt timeout");
+    expect(msg).toContain("**Attempt 4**");
+    // Where to read the output.
+    expect(msg).toContain("/logs/cycle-1/resolve-42-attempt-1.log");
+  });
+
+  // The count in the lede is the journal's length, not the budget: the loop can
+  // now leave early, and "4 attempts" describing one would be the same lie #67
+  // was filed about.
+  it("the abandon comment counts the attempts that actually ran", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [
+        {
+          stdout: "<reason>nope</reason>\n<promise>ABANDON</promise>",
+          leavesConflict: true,
+        },
+      ],
+    });
+    await runMergerWithAdapter([issue(42)], adapter);
+    expect(calls.comments[0]!.msg).toContain("bailed after 1 attempt.");
+  });
+
+  // The case from the run in #67: three sub-three-second containers that never
+  // ran, laundered into "the agent tried and failed". They must halt instead,
+  // and the halt is a MergerError so run.ts still finalises what was already
+  // written to the tracker (#33).
+  it("an attempt that produced no output halts rather than spending the budget", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [
+        { stdout: "", exitCode: 1, stderr: "Error: image not known" },
+        { stdout: "<promise>COMMITTED</promise>" },
+        { stdout: "<promise>COMMITTED</promise>" },
+        { stdout: "<promise>COMMITTED</promise>" },
+      ],
+    });
+    const err = await runMergerWithAdapter([issue(42)], adapter).catch(
+      (e: unknown) => e as MergerError,
+    );
+    expect(err).toBeInstanceOf(MergerError);
+    expect(err.message).toContain("produced no output");
+    expect(err.message).toContain("image not known");
+    expect(calls.agentRuns).toHaveLength(1);
+    // Nothing was said to the issue and nothing was de-queued: the failure is
+    // about the host, so #42 keeps its place in the queue for the next run.
+    expect(calls.comments).toEqual([]);
+    expect(calls.removedLabels).toEqual([]);
   });
 
   it("abandon path + removeLabel fails: halts loud, naming the underlying failure (#33)", async () => {
@@ -2006,6 +2118,37 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     expect(summary.pushed).toBe(false);
     expect(calls.pushes).toBe(0);
     expect(calls.closes).toEqual([]);
+  });
+
+  // #67 — a chunk's resolve attempts are filed under `chunk-<root>`, so a
+  // chunk and its own root issue resolving in one cycle cannot overwrite each
+  // other's capture; and the pull request carries the same diagnostics the auto
+  // lane's issue comment does.
+  it("files a chunk's resolve attempts under its own key and reports them on the PR", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [
+        {
+          stdout: "<promise>ABANDON</promise><reason>irreconcilable</reason>",
+          exitCode: 1,
+        },
+      ],
+      chunkRefs: originHas(42),
+    });
+    const keys: string[] = [];
+    await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...landing(request(42)),
+      onResolveAttempt: async (key, record) => {
+        keys.push(key);
+        return `/logs/cycle-1/resolve-${key}-attempt-${record.attempt}.log`;
+      },
+    });
+
+    expect(keys).toEqual(["chunk-42"]);
+    const body = calls.prComments[0]?.body ?? "";
+    expect(body).toContain("**Attempt 1**");
+    expect(body).toContain("/logs/cycle-1/resolve-chunk-42-attempt-1.log");
+    expect(body).toContain("Conflicted path");
   });
 
   it("halts, keeping `land`, when origin could not be asked about the branch", async () => {

@@ -123,6 +123,7 @@ import { lastNLines, stripAnsi, summarizeGateFailure } from "./gate.js";
 import {
   type IssueRef,
   type ResolveAdapter,
+  type ResolveAttemptSink,
   type ResolveLogger,
   runResolveLoop,
 } from "./resolve-loop.js";
@@ -721,6 +722,12 @@ export type VerifiedLandingOptions = {
   readonly cycleIssues: readonly IssueRef[];
   readonly projectAnchor: string;
   readonly maxRounds?: number;
+  // Where a forge-red round's resolve attempts are captured (#67). A FUNCTION
+  // OF THE ROUND: every round runs a fresh resolve loop whose attempts start
+  // again at 1, so a sink bound once would have round 2 overwrite round 1's
+  // capture attempt for attempt. Absent ⇒ nothing is captured, and the prose
+  // says so rather than naming a file that is not there.
+  readonly onResolveAttempt?: (round: number) => ResolveAttemptSink | undefined;
 };
 
 /**
@@ -1021,13 +1028,18 @@ export async function runVerifiedLanding(
     }
     const related = opts.cycleIssues.filter((c) => c.id !== primary.id);
 
+    const attemptSink = opts.onResolveAttempt?.(round);
     await log(`verify: forge red (${failedNames}); entering resolve-loop`);
     const resolved = await runResolveLoop(
       primary,
       related,
       { kind: "forge-red", initialTrace: trace, failedChecks: failedNames },
       deps.resolve,
-      { projectAnchor: opts.projectAnchor, preMergeSha: sha },
+      {
+        projectAnchor: opts.projectAnchor,
+        preMergeSha: sha,
+        ...(attemptSink ? { onAttempt: attemptSink } : {}),
+      },
       log,
     );
     if (resolved.kind === "abandon") {
