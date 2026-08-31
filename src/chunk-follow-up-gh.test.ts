@@ -256,10 +256,18 @@ describe("the chunk-review scan's gh calls (#63)", () => {
     expect(await calls()).toEqual([]);
   });
 
-  it("fails loud, and says nothing was written, when the issue cannot be filed", async () => {
+  it("fails loud, and covers both ways a create can fail", async () => {
+    // A rejected create wrote nothing and the next cycle re-files it. But a
+    // create that succeeded and lost only its RESPONSE lands here too, and that
+    // one leaves an unledgered issue — so the message has to carry the manual
+    // fix as well as the reassurance.
     set({ SANDBAR_TEST_CREATE_FAIL: "1" });
     await expect(scan()).rejects.toBeInstanceOf(SandbarError);
     await expect(scan()).rejects.toThrow(/next cycle files it/);
+    await expect(scan()).rejects.toThrow(/If it WAS created/);
+    await expect(scan()).rejects.toThrow(
+      new RegExp(followUpMarker("PRR_kwabc").replace(/[-!]/g, "\\$&")),
+    );
     expect(await callsTo("pr", "comment")).toEqual([]);
   });
 

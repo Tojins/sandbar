@@ -63,6 +63,13 @@
 // with no issue behind it is a review nothing will ever answer, and nothing
 // would ever say so.
 //
+// A CREATE that fails is the same shape one step earlier, and its message says
+// so rather than promising more than it knows. A rejected create wrote nothing
+// and the next cycle re-files it; a create whose issue was made and whose
+// RESPONSE was lost (a timeout, a reset connection) is indistinguishable from
+// here, and leaves exactly the unledgered issue the paragraph above is about.
+// So both readings are in the text, with the manual fix attached to the second.
+//
 // WHAT IS NOT DONE, deliberately: sandbar does not resolve the review threads.
 // A thread is resolved when the human who opened it is satisfied, and a bot
 // that resolves threads on its own behalf is a bot that closes the loop it was
@@ -135,6 +142,14 @@ import type { IssueSummary } from "./plan-resolver.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
 const exec = promisify(execFile);
+
+// The GraphQL read below is the largest `gh` read in this codebase — a hundred
+// threads of fifty comments each, plus a hundred issue-comment bodies and fifty
+// review bodies, all of them human prose. Node's default ceiling is 1 MB, and
+// an overflow here does not degrade: it REJECTS the call, which `reviewState`
+// turns into a `SandbarError` that stops the run. Same ceiling `forge-pr` and
+// `forge-verify` give their own gh reads.
+const MAX_BUFFER = 50 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // The snapshot the decisions are made over
@@ -494,20 +509,24 @@ export function realAdapter(args: {
       // `-f`, not `-F`: every one of these is a string, and `-F` types its
       // value, so a repository or a branch that looks like a number would
       // reach GraphQL as one and fail the query's `String!`.
-      const { stdout } = await exec("gh", [
-        "api",
-        "graphql",
-        "-f",
-        `owner=${repo.owner}`,
-        "-f",
-        `repo=${repo.name}`,
-        "-f",
-        `head=${chunkBranch}`,
-        "-f",
-        `base=${args.sourceBranch}`,
-        "-f",
-        `query=${REVIEW_QUERY}`,
-      ]);
+      const { stdout } = await exec(
+        "gh",
+        [
+          "api",
+          "graphql",
+          "-f",
+          `owner=${repo.owner}`,
+          "-f",
+          `repo=${repo.name}`,
+          "-f",
+          `head=${chunkBranch}`,
+          "-f",
+          `base=${args.sourceBranch}`,
+          "-f",
+          `query=${REVIEW_QUERY}`,
+        ],
+        { maxBuffer: MAX_BUFFER },
+      );
       return parseReviewState(stdout);
     },
     async createIssue(content) {
@@ -611,7 +630,12 @@ export async function fileChunkReviewFollowUps(args: {
           `Could not file the follow-up issue for the review requesting ` +
             `changes on chunk ${chunk.branch} (${pending.review.url}, on ` +
             `${state.url}). ` +
-            `Nothing was written, so the next cycle files it: ` +
+            `The issue was most likely not created, in which case the next ` +
+            `cycle files it and there is nothing to do. If it WAS created and ` +
+            `only the response was lost, it is unledgered, so the next cycle ` +
+            `files a second one — check the tracker, and either close the ` +
+            `duplicate or record it by hand with a comment containing ` +
+            `${followUpMarker(pending.review.id)}: ` +
             `${err instanceof Error ? err.message : String(err)}`,
           { cause: err },
         );
