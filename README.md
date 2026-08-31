@@ -456,13 +456,47 @@ comment per issue, naming the blocker that carried the gating in. To make such a
 issue auto-land, move the chain it depends on into the auto lane, or drop the
 dependency; relabelling the issue alone will not do it.
 
-> **Today, a review-gated issue is held out of the plan.** The lane says "a
-> human reviews this before it lands", and until the chunk machinery that gives
-> such work somewhere to land exists, sandbar has no way to honour that — so it
-> leaves the issue in the queue, untouched, `ready-for-agent` intact, and
-> reports it as held at the top of each cycle. `defaultLane: "review"` today
-> therefore means "queue this for a human", not "work it and hold it". The queue
-> is picked up as-is the day chunks arrive.
+> **A review-gated issue is worked, and it lands on a chunk branch rather than
+> on your source branch.** A *chunk* is derived, not declared: the connected
+> component of review-gated issues that the `## Blocked by` graph puts together.
+> Its issues are merged onto `sandbar/chunk-<root>-<slug>`, which is pushed to
+> origin and opened as a **draft pull request** against your source branch —
+> that PR is what a human reviews, and nothing on the branch reaches the source
+> branch until they land it. A landed member keeps its issue open and carries
+> the `in-chunk` label, which is what takes it out of the queue and unblocks
+> whatever was queued behind it — so a chunk grows one *layer* per cycle, and
+> the members worked in any one cycle are always siblings.
+>
+> Three things this needs from you: the `in-chunk` label has to exist in the
+> repo (sandbar never creates labels), the `gh` credentials have to be allowed
+> to open and edit pull requests, and whoever reviews those branches has to know
+> they are theirs to land — the draft PR says as much on itself, but nothing
+> notifies them.
+>
+> And one thing to avoid: **don't close a chunk's issues one at a time while
+> others are still queued behind them.** The branch name is derived from the
+> chunk's root and sandbar only ever sees open issues, so closing a member
+> re-derives the chunk under whichever member is left at the front, and
+> therefore under a branch name nobody has pushed. What sandbar does then
+> depends on which member you are looking at, and only one of the two cases is
+> loud:
+>
+> - A member queued *behind* that new front one is refused, one issue at a time,
+>   rather than built on a tree missing the work it depends on.
+> - The new front member itself is indistinguishable, to sandbar, from the root
+>   of a brand-new chunk — so it is worked from your source branch and lands on
+>   a fresh chunk branch, while the closed member's commits stay behind on the
+>   old one. Nothing reports this, because nothing about it looks wrong.
+>
+> So: land a chunk branch and close all of its issues together. If you have
+> already closed one, reopen it — that restores the chunk's original root and
+> its branch name along with it.
+>
+> The one review-gated issue sandbar will not work is one that belongs to no
+> chunk — its blockers straddle two different chunks, it sits downstream of an
+> issue in that state, or it is inside a `## Blocked by` cycle. There is nothing
+> for it to land on, so it stays in the queue, `ready-for-agent` intact, and is
+> reported as held at the top of each cycle.
 
 ### `images` — what sandbar builds
 

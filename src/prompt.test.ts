@@ -5,6 +5,7 @@ import {
   NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE,
   NO_PROTOTYPE_NEEDED_PHRASE,
 } from "./finalize.js";
+import { sourceBranchBase } from "./git-ops.js";
 import {
   renderAttemptSlot,
   renderReviewerSlot,
@@ -16,6 +17,10 @@ const baseInputs = {
   issue: { id: "42", title: "do the thing", branch: "sandbar/issue-42-do-the-thing" },
   worktreePath: "/tmp/wt",
   sourceBranch: "main",
+  // The default shape since #61: a branch seeded from the source branch, which
+  // is every auto-lane issue and every chunk ROOT. `chunkBranch: null` is what
+  // makes the chunk-base slots render to nothing.
+  base: sourceBranchBase("main"),
   codingStandardsPath: "docs/CODING_STANDARDS.md",
   claudeMdPath: "CLAUDE.md",
 } as const;
@@ -31,7 +36,7 @@ describe("renderAttemptSlot — UI-prototype escalation contract", () => {
     maxAttempts: 8,
     worktreePath: "/tmp/wt",
     lastFailureTrace: "",
-    sourceBranch: "main",
+    base: sourceBranchBase("main"),
     diff: "",
   });
 
@@ -83,7 +88,7 @@ describe("renderAttemptSlot — commit-on-the-issue-branch rule (#27)", () => {
     maxAttempts: 8,
     worktreePath: "/tmp/wt",
     lastFailureTrace: "",
-    sourceBranch: "main",
+    base: sourceBranchBase("main"),
     diff: "",
   });
 
@@ -247,7 +252,10 @@ describe("renderReviewerSlot", () => {
       commits: "",
       diff: "",
     });
-    expect(slot).toContain("(empty — no changes against the source branch)");
+    // The placeholder names the SEED REF (#61) — `origin/main` here, the chunk
+    // tip for a member — because that is what the emptiness was measured
+    // against.
+    expect(slot).toContain("(empty — no changes against `origin/main`)");
   });
 
   it("includes the issue id and branch in the header", () => {
@@ -363,7 +371,7 @@ describe("renderAttemptSlot — the sandbox slot reaches the prompt", () => {
       maxAttempts: 8,
       worktreePath: "/tmp/wt",
       lastFailureTrace: "",
-      sourceBranch: "main",
+      base: sourceBranchBase("main"),
       diff: "",
       sandboxStack,
     });
@@ -385,5 +393,112 @@ describe("renderAttemptSlot — the sandbox slot reaches the prompt", () => {
     const slot = slotWith([]);
     expect(slot).not.toContain("sandbox stack");
     expect(slot).not.toContain("{{");
+  });
+});
+
+// #61 — the chunk-base slots. A chunk member's branch is cut from the chunk
+// TIP, so the diff and commit list above it are its contribution alone; without
+// being told, the implementer goes looking on the source branch for the work it
+// is blocked by and re-implements it, and the reviewer reports that same work
+// as missing. Both slots are the only place either agent hears the word chunk.
+//
+// The placeholder-reaches-the-template half matters as much as the prose: a
+// rename in prompts/implementer.md drops the whole section silently, which is
+// why "no `{{` left" is asserted beside the content.
+describe("the chunk-base slots (#61)", () => {
+  const chunkBase = {
+    ref: "refs/remotes/origin/sandbar/chunk-10-thing",
+    chunkBranch: "sandbar/chunk-10-thing",
+  } as const;
+
+  const implementerSlot = (base: { ref: string; chunkBranch: string | null }) =>
+    renderAttemptSlot({
+      issue: baseInputs.issue,
+      attempt: 1,
+      maxAttempts: 8,
+      worktreePath: "/tmp/wt",
+      lastFailureTrace: "",
+      base,
+      diff: "",
+    });
+
+  const reviewerSlot = (base: { ref: string; chunkBranch: string | null }) =>
+    renderReviewerSlot({
+      ...baseInputs,
+      base,
+      commits: "a1 first",
+      diff: "diff --git a/x b/x\n+hi",
+    });
+
+  it("tells the implementer its branch was cut from the chunk branch", () => {
+    const slot = implementerSlot(chunkBase);
+
+    expect(slot).toContain("## This branch is part of a chunk");
+    expect(slot).toContain(chunkBase.chunkBranch);
+    // The ref, not just the branch name: a range of the agent's own built on
+    // the bare name cannot resolve in a worktree of the bare cache (#40).
+    expect(slot).toContain(chunkBase.ref);
+    expect(slot).not.toContain("{{");
+  });
+
+  // The two failure modes the slot exists to prevent, each named in the prose
+  // rather than left to be inferred from "you are in a chunk".
+  it("tells the implementer not to go looking for its blockers' work elsewhere", () => {
+    const slot = implementerSlot(chunkBase);
+
+    expect(slot).toContain("not re-implement it");
+    expect(slot).toContain("out of scope");
+  });
+
+  it("tells the reviewer the earlier members' work is not its to review", () => {
+    const slot = reviewerSlot(chunkBase);
+
+    expect(slot).toContain("## This branch is part of a chunk");
+    expect(slot).toContain(chunkBase.chunkBranch);
+    expect(slot).toContain("not report the chunk's existing code as missing");
+    expect(slot).not.toContain("{{");
+  });
+
+  // The reviewer prose names the ref it should compare against, and it is the
+  // seed ref — not `origin/<sourceBranch>`, which for a member is a tree its
+  // branch was never cut from.
+  it("points the reviewer's own git commands at the seed ref", () => {
+    expect(reviewerSlot(chunkBase)).toContain(`against \`${chunkBase.ref}\``);
+    expect(reviewerSlot(baseInputs.base)).toContain("against `origin/main`");
+  });
+
+  // Where the section SITS, not just what it says. Both templates render it
+  // ahead of the changeset, so both must point downwards — and a reviewer sent
+  // looking the other way lands on the issue anchor and the header, which is
+  // the one place the earlier members work is not. Asserted as an ordering
+  // rather than as a word, because the word is only right relative to the
+  // template that places it: move the slot and this fails, which is the point.
+  it("puts each section above the changeset it points at, and points down", () => {
+    const impl = implementerSlot(chunkBase);
+    expect(impl.indexOf("## This branch is part of a chunk")).toBeLessThan(
+      impl.indexOf("No commits yet on this branch."),
+    );
+    expect(impl).toContain("The diff below is");
+
+    const rev = reviewerSlot(chunkBase);
+    expect(rev.indexOf("## This branch is part of a chunk")).toBeLessThan(
+      rev.indexOf("## Commits on this branch"),
+    );
+    expect(rev.indexOf("## This branch is part of a chunk")).toBeLessThan(
+      rev.indexOf("## Branch diff"),
+    );
+    expect(rev).toContain("the commits and diff below");
+    expect(rev).not.toContain("the commits and diff above");
+  });
+
+  // Every auto-lane issue and every chunk root. The section must leave no
+  // trace: an issue that is NOT in a chunk being told about chunk branches is
+  // an invitation to go looking for one.
+  it("renders to nothing for a branch seeded from the source branch", () => {
+    for (const slot of [implementerSlot(baseInputs.base), reviewerSlot(baseInputs.base)]) {
+      expect(slot).not.toContain("part of a chunk");
+      expect(slot).not.toContain("chunk");
+      expect(slot).not.toContain("{{");
+    }
   });
 });

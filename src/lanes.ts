@@ -67,7 +67,7 @@
 // deadlocked in the planner regardless (neither blocker will ever read CLOSED).
 //
 // What a review lane MEANS for the plan — a review-gated issue is worked when
-// it is its chunk's root and held otherwise (#60) — lives in
+// it has a chunk to land on and held otherwise (#61) — lives in
 // `plan-resolver.ts`, next to the filter that applies it. This module only
 // computes lanes.
 

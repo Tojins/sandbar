@@ -159,7 +159,7 @@ import type { ChunkMember, ChunkTarget } from "./chunks.js";
 import { type EnvReader } from "./env.js";
 import { SandbarError } from "./errors.js";
 import { type PullRequestRef, ensurePullRequest } from "./forge-pr.js";
-import { dirtyWorktreePaths } from "./git-ops.js";
+import { dirtyWorktreePaths, fetchOriginChunkBranch } from "./git-ops.js";
 import {
   type Clock,
   type VerifiedFailureReason,
@@ -493,10 +493,15 @@ export type ChunkGroup = {
 // is what keeps the landing at a single call site per chunk rather than one
 // per issue.
 //
-// A group with more than one member is not reachable today — the planner only
-// ever picks a chunk's root, and a chunk has exactly one (see chunks.ts) — but
-// grouping rather than assuming that keeps #61's chained members a change to
-// the planner alone.
+// Groups of more than one member are reachable since #61: a chunk whose root
+// has landed can hand this cycle every member blocked on it at once. Those
+// members are necessarily SIBLINGS rather than a chain — a member plans only
+// once its own blockers carry `in-chunk`, which no issue planned in the same
+// cycle does — so the order within a group is not a dependency order and
+// ascending issue number (what `sortIssuesAsc` already gave) is simply
+// deterministic. Being siblings is also why they can conflict with each other
+// where a member and its ancestors provably cannot (#54 round-1 Q4): the
+// resolve loop handles them exactly as it handles two auto-lane branches.
 //
 // `root` and `landed` are taken from the FIRST member seen for a branch. Every
 // member of one group carries the same `ChunkTarget`, built once per chunk by
@@ -1532,30 +1537,28 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       }
     },
     async chunkBase(chunkBranch) {
-      // Ask ORIGIN, every time. A chunk branch outlives the run that created
-      // it and `.sandbar` is disposable, so a local ref is at best a cache and
-      // at worst a stale answer that would land this cycle's member on a base
-      // missing an earlier one. The refspec is explicit (and forced) so the
-      // remote-tracking ref is updated in a BARE cache too, where a plain
-      // `git fetch origin <branch>` writes only FETCH_HEAD.
-      const remoteRef = `refs/remotes/origin/${chunkBranch}`;
-      try {
-        await exec(
-          "git",
-          ["fetch", "origin", `+refs/heads/${chunkBranch}:${remoteRef}`, "--quiet"],
-          { cwd },
-        );
-        return remoteRef;
-      } catch {
-        // Origin has no such branch: this is the chunk's first landing, and
-        // `origin/<sourceBranch>` is where a chunk branch is created. A fetch
-        // that failed for some OTHER reason (network, auth) lands here too and
-        // reads as "first landing" — the composition would then be based on
-        // the source branch and the push below would be rejected as
-        // non-fast-forward rather than silently overwriting the branch, which
-        // is the safe way for this to be wrong.
-        return `origin/${deps.sourceBranch}`;
-      }
+      // Ask ORIGIN, every time — `fetchOriginChunkBranch` owns that argument
+      // and the refspec it rests on. Shared with the issue-branch seeding in
+      // git-ops.ts since #61, because a chained member is DEVELOPED against
+      // this same base: two copies of the question are two chances for the
+      // tree a member was written on and the tree it is merged onto to
+      // diverge, which is exactly what the by-construction no-conflict
+      // property forbids.
+      //
+      // Null ⇒ the cache can name no such ref at all: this is the chunk's
+      // first landing, and `origin/<sourceBranch>` is where a chunk branch is
+      // created. A fetch that merely FAILED (network, auth, or a sibling's
+      // concurrent fetch winning the ref lock) does not answer null — it
+      // answers with the tip the cache already holds, which is the whole point
+      // of sharing the function with the seeding. And should the cache ever be
+      // wrong about a chunk that does exist, the composition is based on the
+      // source branch and the push below is rejected as non-fast-forward
+      // rather than silently overwriting the branch, which is the safe way to
+      // be wrong.
+      return (
+        (await fetchOriginChunkBranch(cwd, chunkBranch)) ??
+        `origin/${deps.sourceBranch}`
+      );
     },
     async checkoutDetached(ref) {
       // Not `--force`: the tree is clean at every call site, and a dirty one

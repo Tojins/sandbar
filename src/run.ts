@@ -4,10 +4,10 @@
 //                              `ready-for-agent` issues by parsing each body's
 //                              `## Blocked by` section — and routes each by
 //                              LANE (#57), holding back the review-gated ones
-//                              that have nowhere to land yet (#60: everything
-//                              but a chunk's root) and saying on the issue
-//                              where an `auto-land` label lost to inherited
-//                              gating.
+//                              that have nowhere to land at all (#61: the ones
+//                              `chunks.ts` could give no chunk) and saying on
+//                              the issue where an `auto-land` label lost to
+//                              inherited gating.
 //   Phase 2 (Inner-loop ralph): Each issue runs in its own sandbox up to
 //                              config.maxImplAttempts times; on gate-1 green
 //                              the (strictly-advisory) reviewer runs in the
@@ -532,11 +532,12 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         const held = resolution.heldForReview.map((n) => `#${n}`).join(", ");
         console.log(
           `Held for review (${resolution.heldForReview.length}): ${held} — each ` +
-            "is not its chunk's root: a member chained behind another member, " +
-            "or an issue whose blockers sit in two chunks at once. A chained " +
-            "member is NOT waiting for a cycle — a chunk's root is the only " +
-            "member sandbar can work until #61, so a chain stops there and a " +
-            "human takes it from the chunk branch.",
+            "is review-gated and belongs to no chunk, so there is nothing for " +
+            "it to land on: its blockers sit in two different chunks at once, " +
+            "it is downstream of an issue in that state, or it is inside a " +
+            "`## Blocked by` cycle. None of these is waiting for a cycle of " +
+            "sandbar's — they clear when the blocking chunks land, or when a " +
+            "human edits the bodies.",
         );
         await runLogger.appendOrchestrator(
           `plan: held ${resolution.heldForReview.length} review-gated issue(s) — ${held}`,

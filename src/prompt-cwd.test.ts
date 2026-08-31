@@ -35,6 +35,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { sourceBranchBase } from "./git-ops.js";
 import {
   buildPrompt,
   buildProjectAnchor,
@@ -164,7 +165,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
         maxAttempts: 8,
         worktreePath: target,
         lastFailureTrace: "",
-        sourceBranch: "main",
+        base: sourceBranchBase("main"),
       },
       {
         repo: CONFIGURED,
@@ -253,6 +254,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       repoDir: target,
       worktreePath: launchedFrom,
       sourceBranch: "main",
+      base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
       codingStandardsPath: "CODING_STANDARDS.md",
     });
@@ -271,6 +273,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       repoDir: target,
       worktreePath: launchedFrom,
       sourceBranch: "main",
+      base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
       codingStandardsPath: "CODING_STANDARDS.md",
     });
@@ -286,6 +289,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       repoDir: target,
       worktreePath: launchedFrom,
       sourceBranch: "main",
+      base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
     });
 

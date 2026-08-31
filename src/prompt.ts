@@ -26,16 +26,26 @@
 //                              reviewer pass is stateless — no prior-round
 //                              transcript is included.
 //
-// Every range a slot renders is anchored at `origin/<sourceBranch>`, never the
-// bare branch name (#40). The agents work out of a worktree of the bare object
-// cache, whose local head namespace is sandbar's alone and holds exactly one
-// ref — the issue branch (repo-cache.ts deletes the imported `refs/heads/*`).
-// `main` therefore does not resolve there and never can: every range built on
-// the bare name exited 128, and a `catch` rendered the result as if the branch
-// held nothing. The implementer was told its own committed work did not exist,
-// and the reviewer — whose commit list AND diff both came from that ref — was
-// handed an empty changeset and asked for a verdict on it. Failures now throw
-// (see `readGit`), and a reviewer over an empty changeset is refused outright.
+// Every range a slot renders is anchored at the issue branch's SEED REF, never
+// a bare branch name (#40, #61). The agents work out of a worktree of the bare
+// object cache, whose local head namespace is sandbar's alone and holds exactly
+// one ref — the issue branch (repo-cache.ts deletes the imported
+// `refs/heads/*`). `main` therefore does not resolve there and never can: every
+// range built on the bare name exited 128, and a `catch` rendered the result as
+// if the branch held nothing. The implementer was told its own committed work
+// did not exist, and the reviewer — whose commit list AND diff both came from
+// that ref — was handed an empty changeset and asked for a verdict on it.
+// Failures now throw (see `readGit`), and a reviewer over an empty changeset is
+// refused outright.
+//
+// The seed ref is `origin/<sourceBranch>` for every auto-lane issue and for a
+// chunk's root, and the CHUNK TIP for a member chained behind one (#61). It is
+// not derived here: `ensureIssueBranch` returns the base it actually seeded the
+// branch from (`IssueBranchBase`) and the inner loop hands the same value to
+// both builders, so the tree an agent's diff is measured against is by
+// construction the tree its branch was cut from. Deriving a second answer in
+// this module is precisely how a chunk member would be shown its ancestors'
+// whole chunk as "the work done so far" and asked to review it.
 //
 // All prose lives in prompts/*.md and is loaded via prompts.ts; this module
 // only formats data into the templates' placeholders.
@@ -46,6 +56,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { SandbarError } from "./errors.js";
+import type { IssueBranchBase } from "./git-ops.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
@@ -63,6 +74,8 @@ const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
 const IMPLEMENTER_REVIEWER_FEEDBACK_TPL = loadTemplate("implementer-reviewer-feedback");
 const IMPLEMENTER_ESCALATION_TPL = loadTemplate("implementer-escalation");
 const IMPLEMENTER_SANDBOX_STACK_TPL = loadTemplate("implementer-sandbox-stack");
+const IMPLEMENTER_CHUNK_BASE_TPL = loadTemplate("implementer-chunk-base");
+const REVIEWER_CHUNK_BASE_TPL = loadTemplate("reviewer-chunk-base");
 
 // Attempt at which the implementer prompt starts surfacing the escalation block.
 const ESCALATION_ATTEMPT = 6;
@@ -78,19 +91,16 @@ function truncationNote(limit: number): string {
   return `[sandbar] output truncated: exceeded the ${limit}-byte read limit for this slot.`;
 }
 
-// The base of every range this module builds: `origin/<sourceBranch>`, never the
-// bare name (#40). See the module header for why the bare name cannot resolve.
-function baseRef(sourceBranch: string): string {
-  return `origin/${sourceBranch}`;
-}
-
 // Every git read behind a prompt slot goes through here, and the two ways it can
 // fail are deliberately NOT the same answer (#40).
 //
-// git BLOWING UP is a fault. The ranges below are built on a ref preflight has
-// already verified exists in the cache, read in a worktree sandbar created
-// itself, so there is no working configuration in which they fail. Mapping that
-// onto the empty string — which is what all three call sites did — makes it
+// git BLOWING UP is a fault. The ranges below are built on the ref the issue
+// branch was seeded from and read in a worktree sandbar created itself, so
+// there is no working configuration in which they fail: the seed is either
+// `origin/<sourceBranch>`, which preflight verifies exists in the cache, or a
+// chunk tip (#61), which `ensureIssueBranch` fetched and then cut this very
+// branch from a moment earlier. Mapping that onto the empty string — which is
+// what all three call sites did — makes it
 // indistinguishable from "there is genuinely nothing here yet", which is the
 // legitimate reading on attempt 1. That is the whole reason #40 stayed
 // invisible for a run: git exited 128 on every call, and the prompt said "No
@@ -125,9 +135,11 @@ export async function readGit(
     }
     throw new SandbarError(
       `could not read ${what}: \`git ${args.join(" ")}\` failed in ${cwd}. ` +
-        `Prompt ranges are based on \`origin/<sourceBranch>\`, which preflight verifies ` +
-        `exists in sandbar's object cache; had this been swallowed the slot would have ` +
-        `rendered as if the branch held no work at all (#40). ` +
+        `Prompt ranges are anchored at the ref the issue branch was SEEDED from — ` +
+        `\`origin/<sourceBranch>\`, or a chunk branch's tip for a chunk member (#61), ` +
+        `named in \`${what}\` above — and that ref resolves in sandbar's object cache ` +
+        `by construction; had this been swallowed the slot would have rendered as if ` +
+        `the branch held no work at all (#40). ` +
         (err instanceof Error ? err.message : String(err)),
       { cause: err },
     );
@@ -171,7 +183,12 @@ export type PromptInputs = {
   readonly maxAttempts: number;
   readonly worktreePath: string;
   readonly lastFailureTrace: string;
-  readonly sourceBranch: string;
+  // What the branch was seeded from and what every range below is measured
+  // against (#61). Replaces the `sourceBranch` this used to carry: that field's
+  // only job was to build `origin/<sourceBranch>`, and re-deriving the anchor
+  // here is what would show a chunk member its ancestors' work as its own.
+  // Project history still comes from `ProjectAnchorOptions.sourceBranch`.
+  readonly base: IssueBranchBase;
   readonly extraReprompt?: string;
   readonly latestReviewerProse?: string;
   // What came up beside the agent this sandbox cycle (#44 D8). Absent for a
@@ -203,7 +220,13 @@ export type ReviewerPromptInputs = {
   readonly repo: RepoRef;
   readonly repoDir: string;
   readonly worktreePath: string;
+  // The project history the anchor quotes, and the branch the review prose
+  // tells the reviewer does not resolve locally. NOT the range's anchor since
+  // #61 — that is `base`, which for a chunk member is the chunk tip.
   readonly sourceBranch: string;
+  // What the branch was seeded from, and what the commit list and diff below
+  // are measured against (#61). Same value the implementer was given.
+  readonly base: IssueBranchBase;
   // Optional project standards file that *extends* the built-in coding
   // standards. Absent for hosts that rely on the built-in standards alone.
   readonly codingStandardsPath?: string;
@@ -329,15 +352,15 @@ async function buildIssueAnchor(
 }
 
 async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
-  const { worktreePath, sourceBranch } = inputs;
+  const { worktreePath, base } = inputs;
 
   // Empty is a legitimate answer HERE and only here: attempt 1 has no commits.
   // Which is exactly why the read must not be able to fail quietly — the one
   // slot whose emptiness is unremarkable is the one that hid #40.
   const diff = await readGit(
-    ["log", "-p", "--reverse", `${baseRef(sourceBranch)}..HEAD`],
+    ["log", "-p", "--reverse", `${base.ref}..HEAD`],
     worktreePath,
-    `the work done so far on ${inputs.issue.branch}`,
+    `the work done so far on ${inputs.issue.branch}, anchored at ${base.ref}`,
   );
 
   return renderAttemptSlot({ ...inputs, diff });
@@ -353,6 +376,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     issue,
     attempt,
     maxAttempts,
+    base,
     lastFailureTrace,
     extraReprompt,
     latestReviewerProse,
@@ -362,6 +386,16 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
   const workDone = diff.trim()
     ? `## Work done so far\n\n\`\`\`diff\n${diff.trim()}\n\`\`\``
     : "No commits yet on this branch.";
+
+  // Renders to "" for every issue seeded from the source branch, which is every
+  // issue on the default lane. See the template for what a chunk member needs
+  // told that the diff above cannot say by itself.
+  const chunkBase = base.chunkBranch
+    ? render(IMPLEMENTER_CHUNK_BASE_TPL, {
+        chunkBranch: base.chunkBranch,
+        baseRef: base.ref,
+      })
+    : "";
 
   const gateFailure = lastFailureTrace
     ? render(IMPLEMENTER_GATE_FAILURE_TPL, { trace: lastFailureTrace })
@@ -391,6 +425,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     issueId: issue.id,
     issueTitle: issue.title,
     branch: issue.branch,
+    chunkBase: section(chunkBase),
     workDone: section(workDone),
     sandboxStack: section(sandboxStack),
     gateFailure: section(gateFailure),
@@ -448,14 +483,14 @@ export function renderSandboxStackSlot(
 }
 
 async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> {
-  const { worktreePath, sourceBranch } = inputs;
-  const base = baseRef(sourceBranch);
+  const { worktreePath } = inputs;
+  const base = inputs.base.ref;
 
   const commits = (
     await readGit(
       ["log", `${base}..HEAD`, "--oneline"],
       worktreePath,
-      `the commit list for ${inputs.issue.branch}`,
+      `the commit list for ${inputs.issue.branch}, anchored at ${base}`,
     )
   ).trim();
 
@@ -482,7 +517,7 @@ async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> 
     await readGit(
       ["diff", `${base}...HEAD`],
       worktreePath,
-      `the branch diff for ${inputs.issue.branch}`,
+      `the branch diff for ${inputs.issue.branch}, anchored at ${base}`,
     )
   ).trim();
 
@@ -509,16 +544,29 @@ export type ReviewerSlotRender = ReviewerPromptInputs & {
 };
 
 export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
-  const { issue, sourceBranch, codingStandardsPath, claudeMdPath, contextMdPath, commits, diff } =
+  const { issue, base, sourceBranch, codingStandardsPath, claudeMdPath, contextMdPath, commits, diff } =
     inputs;
+
+  // Same slot as the implementer's, aimed at the other half of the mistake: an
+  // uninformed reviewer would go looking for the chunk's earlier work in this
+  // diff and report it missing.
+  const chunkBase = base.chunkBranch
+    ? render(REVIEWER_CHUNK_BASE_TPL, {
+        chunkBranch: base.chunkBranch,
+        sourceBranch,
+      })
+    : "";
 
   const commitsBlock = commits
     ? `## Commits on this branch\n\n\`\`\`\n${commits}\n\`\`\``
     : "";
 
+  // Named ref, not "the source branch" (#61): for a chunk member that is the
+  // chunk tip, and calling it the source branch would tell the reviewer its
+  // emptiness was measured against a tree the branch was never cut from.
   const diffBlock = diff
     ? `## Branch diff\n\n\`\`\`diff\n${diff}\n\`\`\``
-    : "## Branch diff\n\n(empty — no changes against the source branch)";
+    : `## Branch diff\n\n(empty — no changes against \`${base.ref}\`)`;
 
   const projectStandards = codingStandardsPath
     ? render(REVIEWER_PROJECT_STANDARDS_TPL, { codingStandardsPath })
@@ -530,7 +578,9 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
 
   return render(REVIEWER_TPL, {
     branch: issue.branch,
+    baseRef: base.ref,
     sourceBranch,
+    chunkBase: section(chunkBase),
     issueId: issue.id,
     issueTitle: issue.title,
     commits: section(commitsBlock),

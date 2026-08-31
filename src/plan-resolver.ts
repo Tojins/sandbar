@@ -82,32 +82,35 @@
 // reached.
 //
 // ---------------------------------------------------------------------------
-// What the holding rule still covers (#60, and what #57 wrote it for)
+// What the holding rule still covers (#61, and what #57 wrote it for)
 // ---------------------------------------------------------------------------
 //
 // #57 held EVERY review-gated issue out of the plan, because working one could
 // only have ended in auto-landing it — there was nowhere else for it to go.
 // There is now: phase 3 merges a DONE review-gated issue onto its chunk's
-// branch (#60). So the rule narrows to the issues that still have nowhere to
-// land, and it narrows on exactly one axis — whether the issue is its chunk's
-// ROOT.
+// branch (#60). #60 lifted the rule for a chunk's ROOT only, because the root
+// was the only member whose issue branch — seeded from `origin/<sourceBranch>`
+// — agreed with the base its chunk branch is created at; a chained member would
+// have been developed against a tree missing the very work it declares itself
+// blocked by. #61 removes that constraint by seeding a chunk member's branch
+// from the CHUNK TIP (`ensureIssueBranch`), so the rule reduces to its last
+// irreducible clause:
 //
-// A root has no review-gated blocker, so nothing of its chunk's is under it.
-// Its issue branch seeds from `origin/<sourceBranch>` (git-ops.ts) and its
-// chunk branch is created at `origin/<sourceBranch>` when absent, so the tree
-// it is developed against and the tree it lands on are the same one, and the
-// merge is honest. A NON-ROOT member is built on a blocker whose commits sit
-// on the chunk branch and nowhere else: seeded from origin it would be
-// developed against a tree missing the very work it declares itself blocked
-// by. Giving those members a branch seeded from the chunk is #61; until then
-// they are held, exactly as #57 held them and for the same reason — no landing
-// that is not a lie. An issue `chunks.ts` gave no chunk at all (a two-chunk
-// parent, a cycle) is held on the same ground: `chunkOf` has no entry, so it
-// is not any chunk's root.
+//   a review-gated issue is held iff it has NO CHUNK AT ALL.
 //
-// A chunk therefore admits at most ONE planned issue per cycle, since a chunk
-// has exactly one root — which is also what keeps the merge phase's per-chunk
-// grouping free of intra-chunk ordering questions.
+// That is `chunks.ts`'s own refusal read back: a two-chunk parent, an issue
+// downstream of one, or an issue inside a `## Blocked by` cycle. Each has no
+// landing target — no `chunk.branch` for the merge phase to point at and no tip
+// for its branch to seed from — so working it could still only end in
+// auto-landing unreviewed code onto the source branch. All three mean "wait",
+// and all three resolve without sandbar's help (the blocking chunks land, or a
+// human edits the bodies).
+//
+// Everything else plans. A chunk can now admit SEVERAL issues in one cycle —
+// every member whose blockers have landed — though never a chain: a member is
+// unblocked only by a blocker already carrying `in-chunk`, which no issue
+// planned in the same cycle does. So same-cycle members of one chunk are always
+// siblings, which is what the merge phase's per-chunk grouping relies on.
 //
 // `resolvePlan` returns a RESOLUTION rather than a bare plan: the issues it
 // held for review, and the `auto-land` labels inheritance overrode, are things
@@ -196,10 +199,10 @@ export type PlanResolution = {
   readonly plan: Plan;
   // Issues that cleared every other filter and were held out of the plan by
   // the review lane's holding rule, in issue order. Empty for every host on
-  // the default lane. Since #60 these are the review-gated issues that are not
-  // their chunk's root (a chained member, waiting for #61) plus the ones
-  // `chunks.ts` could give no chunk at all — never a chunk root, which now
-  // plans.
+  // the default lane. Since #61 these are exactly the review-gated issues
+  // `chunks.ts` could give no chunk at all — a two-chunk parent, something
+  // downstream of one, or a `## Blocked by` cycle. Chunk members, root or
+  // chained, all plan.
   readonly heldForReview: readonly number[];
   // `auto-land` labels that inherited review-gating anyway (#57). Reported for
   // every candidate, not just the eligible ones: the contradiction is a fact
@@ -333,10 +336,21 @@ export function resolvePlan(
     // out on some other filter, and reporting it as held would make the
     // holding rule look like it costs more than it does.
     //
-    // What is still held (#60): a review-gated issue that is not its chunk's
-    // ROOT, and one `deriveChunks` gave no chunk at all. Everything else has
-    // somewhere to land — see "What the holding rule still covers" above.
-    if (lanes.get(c.number)?.lane === "review" && chunkOf.get(c.number) !== c.number) {
+    // What is still held (#61): a review-gated issue `deriveChunks` gave no
+    // chunk at all. Every member of a chunk — its root, and since #61 the
+    // members chained behind one — has somewhere to land and a tip to seed
+    // from. See "What the holding rule still covers" above.
+    //
+    // Guarded on `chunkTargetOf`, the very value the plan below attaches, and
+    // not on `chunkOf` — which is one of the two maps that value is composed
+    // from. They agree today because `deriveChunks` pushes a `Chunk` for every
+    // root it writes into `chunkOf`, but that is its invariant to keep, not
+    // this filter's to assume: were the two ever to disagree, asking `chunkOf`
+    // would clear a review-gated issue for a plan that then carried
+    // `chunk: null`, and phase 3 would land unreviewed work on the source
+    // branch — the one outcome the lane exists to prevent. Asking the same
+    // question the answer is built from costs nothing and cannot drift.
+    if (lanes.get(c.number)?.lane === "review" && chunkTargetOf(c.number) === null) {
       heldForReview.push(c.number);
       return false;
     }

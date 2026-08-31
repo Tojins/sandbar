@@ -30,15 +30,18 @@
 // is merged onto `chunk.branch` instead of onto the source branch, and finalise
 // then puts `IN_CHUNK_LABEL` on it.
 //
-// Only part of a chunk is WORKED, though. `plan-resolver.ts` lifts its holding
-// rule for a chunk's ROOT and for nothing else (#60): a root has no
-// review-gated blocker, so its issue branch seeds from `origin/<sourceBranch>`
-// — which is exactly where its chunk branch is created when absent — and the
-// two agree. A non-root member is built on a blocker whose commits are on the
-// chunk branch and NOT on the source branch, so working it needs the issue
-// branch to seed from the chunk branch instead. That is #61; until it lands,
-// those members stay held. So a chunk of one works end to end today, and a
-// chain grows by one member per issue after it.
+// A whole chunk is WORKED, one layer at a time. `plan-resolver.ts` plans any
+// member whose blockers are satisfied, root or not (#61): the root seeds from
+// `origin/<sourceBranch>` — exactly where its chunk branch is created when
+// absent, so the two agree — and every member behind it seeds from the chunk's
+// TIP, which is where its blockers' commits actually are. A chunk therefore
+// grows one LAYER per cycle rather than one member: a member is unblocked by a
+// blocker carrying `in-chunk`, and that label is applied in the cycle AFTER the
+// one that landed it, so every member planned together is a set of siblings.
+//
+// The one thing still held is a review-gated issue with NO chunk — the output
+// of `blocked` below. There is no branch to name and no tip to seed from, so
+// working it could only end in auto-landing unreviewed code.
 //
 // ---------------------------------------------------------------------------
 // `in-chunk`, the label a landed member carries (#59, §3 of #54)

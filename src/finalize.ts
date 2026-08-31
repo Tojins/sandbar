@@ -923,6 +923,16 @@ export type RealFinalizeAdapterDeps = {
   readonly repo: RepoRef;
   // Needed by branchIsContainedInOrigin: issue branches are seeded from
   // origin/<sourceBranch>, so that ref is what "already preserved" means here.
+  //
+  // Since #61 that is not the only seed — a chained chunk member is cut from
+  // `origin/<chunk branch>` — and this check does not know about the second
+  // one. It reads conservatively (false ⇒ keep the branch), so the cost is a
+  // kept branch and an error line saying it "carries commits that are not on
+  // origin (an earlier attempt's work)" about commits that are on origin, on
+  // the chunk branch. Narrow: it needs a chunk member reaching the one arm that
+  // asks — a NEEDS-UI-PROTOTYPE handoff whose `branch -d` refused. Fixing it
+  // means threading the chunk into this adapter, which is #60's shape, not the
+  // seeding change's.
   readonly sourceBranch: string;
 };
 
