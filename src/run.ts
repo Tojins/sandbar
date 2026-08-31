@@ -2,7 +2,10 @@
 //
 //   Phase 1 (Plan):            Deterministic resolver picks the unblocked
 //                              `ready-for-agent` issues by parsing each body's
-//                              `## Blocked by` section.
+//                              `## Blocked by` section — and routes each by
+//                              LANE (#57), holding the review-gated ones back
+//                              and saying on the issue where an `auto-land`
+//                              label lost to inherited gating.
 //   Phase 2 (Inner-loop ralph): Each issue runs in its own sandbox up to
 //                              config.maxImplAttempts times; on gate-1 green
 //                              the (strictly-advisory) reviewer runs in the
@@ -94,6 +97,7 @@ import {
   createMergerWorktree,
 } from "./merger-worktree.js";
 import { type Stack, startStack } from "./gate-stack.js";
+import { postLaneOverrideNotices } from "./lanes.js";
 import { buildPlan } from "./plan-resolver.js";
 import {
   absoluteMountSources,
@@ -497,15 +501,37 @@ export async function run(rawConfig: RunConfig): Promise<void> {
       // ---------------------------------------------------------------------
       // Phase 1: Plan
       // ---------------------------------------------------------------------
+      const resolution = await buildPlan(repo, {
+        excluded: mergedThisRun,
+        defaultLane: config.defaultLane,
+      });
       const issues: { id: string; title: string; branch: string }[] = [
-        ...(await buildPlan(repo, mergedThisRun)),
+        ...resolution.plan,
       ].slice(0, budget);
       const fingerprint = planFingerprint(issues.map((i) => i.id));
       await cycleLogger.writePlan(issues);
       await runLogger.appendOrchestrator(
         `plan: ${issues.length} unblocked issue(s) — ${issues.map((i) => `#${i.id}`).join(", ") || "none"}`,
       );
-  
+
+      // Both of these run BEFORE the plan-empty exit below (#57): a queue whose
+      // every ready issue is review-gated resolves to an empty plan, and that
+      // is precisely the cycle where "no unblocked issues" on its own would be
+      // read as "nothing left to do".
+      if (resolution.heldForReview.length > 0) {
+        const held = resolution.heldForReview.map((n) => `#${n}`).join(", ");
+        console.log(
+          `Held for review (${resolution.heldForReview.length}): ${held} — the ` +
+            "review lane has nowhere to land until chunks exist.",
+        );
+        await runLogger.appendOrchestrator(
+          `plan: held ${resolution.heldForReview.length} review-gated issue(s) — ${held}`,
+        );
+      }
+      await postLaneOverrideNotices(repo, resolution.overrides, (line) =>
+        runLogger.appendOrchestrator(line),
+      );
+
       if (issues.length === 0) {
         console.log("No unblocked issues to work on. Exiting.");
         await runLogger.appendOrchestrator(`exit: success — plan empty`);

@@ -16,6 +16,31 @@
 // resolvePlan) so it can be table-driven tested. The I/O wrappers
 // (fetchCandidates, fetchIssueStates) are thin adapters over `gh`.
 //
+// Lanes (#57). Every candidate also gets a LANE — `auto` (the gate is the last
+// word) or `review` (a human looks first) — computed in `lanes.ts` from the
+// `auto-land` label, `config.defaultLane`, and downward inheritance along the
+// same `## Blocked by` edges this module already parses. The lane graph is the
+// WHOLE candidate list, not the eligible subset: gating propagates from issues
+// this cycle will not pick, and dropping them from the graph would let a
+// descendant read as auto purely because its blocker was still open.
+//
+// TEMPORARY HOLDING RULE, and it is temporary on purpose: a review-gated issue
+// is excluded from the plan. Chunk machinery (#54) is what will give one
+// somewhere to land — a branch a human reviews before it reaches the source
+// branch — and until that exists, working the issue could only end in
+// auto-landing it, which is the one thing its lane says not to do. So it is
+// left in the queue, untouched, keeping `ready-for-agent`: nothing is
+// destroyed, and the day chunks exist the same queue is picked up as-is. The
+// rule is inert under `defaultLane: "auto"` with no `auto-land` labels in play,
+// which is every host that has not opted in, since nothing is review-gated
+// there at all.
+//
+// `resolvePlan` therefore returns a RESOLUTION rather than a bare plan: the
+// issues it held for review, and the `auto-land` labels inheritance overrode,
+// are things the run has to report — held work that vanished from the plan
+// without a word reads as an empty queue, and an overridden label read as
+// honoured is a human believing an issue auto-lands when it never will.
+//
 // `fetchCandidates` NAMES the repository (#34). It used to identify it the way
 // `gh` does by default — from the git remotes of the directory the command runs
 // in — which made the planner's queue a property of a directory: first of
@@ -39,6 +64,13 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import {
+  DEFAULT_LANE,
+  type Lane,
+  type LaneOverride,
+  computeLanes,
+  laneOverrides,
+} from "./lanes.js";
 import { BRANCH_PREFIX } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
@@ -65,6 +97,19 @@ export type PlannedIssue = {
 
 export type Plan = readonly PlannedIssue[];
 
+export type PlanResolution = {
+  readonly plan: Plan;
+  // Issues that cleared every other filter and were held out of the plan by
+  // the review lane's holding rule, in issue order. Empty for every host on
+  // the default lane.
+  readonly heldForReview: readonly number[];
+  // `auto-land` labels that inherited review-gating anyway (#57). Reported for
+  // every candidate, not just the eligible ones: the contradiction is a fact
+  // about the issue's labels, and a human wants it while the chain is still
+  // being queued, not once it reaches the front.
+  readonly overrides: readonly LaneOverride[];
+};
+
 export function parseBlockedBy(body: string): readonly number[] {
   // Match `## Blocked by` (case-insensitive) and capture everything up to the
   // next H2 or end of body.
@@ -88,7 +133,24 @@ export function resolvePlan(
   issueStates: ReadonlyMap<number, IssueState>,
   excluded: ReadonlySet<number> = new Set(),
   k: number = DEFAULT_K,
-): Plan {
+  defaultLane: Lane = DEFAULT_LANE,
+): PlanResolution {
+  // Parsed once and shared with the lane graph: the `## Blocked by` section is
+  // the dependency gate below AND the edge set gating inherits along, and two
+  // parses of one body are two chances for them to disagree.
+  const blockedBy = new Map(
+    candidates.map((c) => [c.number, parseBlockedBy(c.body)] as const),
+  );
+  const lanes = computeLanes(
+    candidates.map((c) => ({
+      number: c.number,
+      labels: c.labels,
+      blockedBy: blockedBy.get(c.number) ?? [],
+    })),
+    defaultLane,
+  );
+
+  const heldForReview: number[] = [];
   const eligible = candidates.filter((c) => {
     // Drop issues this run already merged, and issues the live tracker now
     // reports CLOSED — both guard against the stale-search re-pick described in
@@ -97,15 +159,30 @@ export function resolvePlan(
     if (excluded.has(c.number)) return false;
     if (issueStates.get(c.number) === "CLOSED") return false;
     if (c.labels.includes(WAITING_LABEL)) return false;
-    const blockers = parseBlockedBy(c.body);
-    return blockers.every((n) => issueStates.get(n) === "CLOSED");
+    const blockers = blockedBy.get(c.number) ?? [];
+    if (!blockers.every((n) => issueStates.get(n) === "CLOSED")) return false;
+    // LAST, so `heldForReview` counts only issues that would otherwise have
+    // been planned. A review-gated issue that is also blocked, closed or
+    // already merged is not being "held" by its lane — it was never going to
+    // be picked — and reporting it as such would make the holding rule look
+    // like it costs more than it does.
+    if (lanes.get(c.number)?.lane === "review") {
+      heldForReview.push(c.number);
+      return false;
+    }
+    return true;
   });
   const sorted = [...eligible].sort((a, b) => a.number - b.number);
-  return sorted.slice(0, k).map((c) => ({
+  const plan = sorted.slice(0, k).map((c) => ({
     id: String(c.number),
     title: c.title,
     branch: `${BRANCH_PREFIX}issue-${c.number}-${kebabSlug(c.title)}`,
   }));
+  return {
+    plan,
+    heldForReview: heldForReview.sort((a, b) => a - b),
+    overrides: laneOverrides(lanes),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -179,11 +256,23 @@ export async function fetchIssueStates(
   return result;
 }
 
+// Named options rather than a fourth positional: `defaultLane` is the one the
+// single caller cares about and `k` the one it never passes, and
+// `buildPlan(repo, merged, undefined, lane)` is a hole nobody should have to
+// read past. `resolvePlan` keeps its positional shape — it is the table-tested
+// pure function, and its tests state every argument anyway.
+export type BuildPlanOptions = {
+  readonly excluded?: ReadonlySet<number>;
+  readonly k?: number;
+  readonly defaultLane?: Lane;
+};
+
 export async function buildPlan(
   repo: RepoRef,
-  excluded: ReadonlySet<number> = new Set(),
-  k: number = DEFAULT_K,
-): Promise<Plan> {
+  options: BuildPlanOptions = {},
+): Promise<PlanResolution> {
+  const excluded = options.excluded ?? new Set<number>();
+  const k = options.k ?? DEFAULT_K;
   const candidates = await fetchCandidates(repo);
   // One GraphQL batch covers both the authoritative state of every candidate
   // (the #16 stale-search CLOSED guard) and of every blocker they reference.
@@ -193,5 +282,11 @@ export async function buildPlan(
     for (const n of parseBlockedBy(c.body)) wanted.add(n);
   }
   const states = await fetchIssueStates([...wanted], repo);
-  return resolvePlan(candidates, states, excluded, k);
+  return resolvePlan(
+    candidates,
+    states,
+    excluded,
+    k,
+    options.defaultLane ?? DEFAULT_LANE,
+  );
 }

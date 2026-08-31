@@ -260,6 +260,7 @@ sits in).
 | `labels` | `{ needsInfo: "needs-info", agentStuck: "agent-stuck" }` (override any subset) |
 | `mergeMode` | `{ kind: "direct" }` — see below |
 | `relaunchAfterLanding` | `false` — see below |
+| `defaultLane` | `"auto"` — see below |
 | `codingStandardsPath` | *(unset)* — no conventional path; see below |
 
 `cwd` is resolved to an absolute path, and it must be a checkout of
@@ -422,6 +423,46 @@ It is **explicit config, not detection**, on purpose: deriving self-hostedness
 (is `dist/cli.js` inside the operated repo?) false-positives for every consumer
 running the package from `node_modules`, whose non-looping launcher would then
 stop after the first landing cycle. Leave it off unless your launcher loops.
+
+### `defaultLane` — who gets the last word on a landing
+
+Every issue takes one of two **lanes**:
+
+- **`auto`** — the gate is the last word. What sandbar has always done: green
+  gate, advisory review, merged and pushed.
+- **`review`** — a human looks before the work lands.
+
+`defaultLane` sets the lane for issues that say nothing; the `auto-land` label
+on an issue puts that issue in the auto lane whatever the default. There is
+deliberately no `review` label: you state your posture once in config and label
+only the exceptions, so there is no third state where an issue is in neither
+lane because someone forgot a label.
+
+The default is `"auto"`, which is the pre-lane behaviour — set nothing and
+nothing about your runs changes.
+
+**Review-gating is inherited downward, transitively.** `## Blocked by` is a
+dependency edge: an issue that names `#N` builds on `#N`'s commits. So if `#N`
+is review-gated, everything queued behind it is working on top of code no human
+has approved yet, and letting a descendant auto-land would land that code by the
+back door. Gating therefore travels blocker → dependent, as far as the chain
+goes, and never the other way (a blocker's commits are complete before its
+dependents start, so a dependent's lane says nothing about it).
+
+That makes `auto-land` on a descendant of a review-gated issue a contradiction,
+and **inheritance wins** — the label cannot opt an issue out of a gate it sits
+behind. Sandbar says so on the issue rather than ignoring the label quietly: one
+comment per issue, naming the blocker that carried the gating in. To make such an
+issue auto-land, move the chain it depends on into the auto lane, or drop the
+dependency; relabelling the issue alone will not do it.
+
+> **Today, a review-gated issue is held out of the plan.** The lane says "a
+> human reviews this before it lands", and until the chunk machinery that gives
+> such work somewhere to land exists, sandbar has no way to honour that — so it
+> leaves the issue in the queue, untouched, `ready-for-agent` intact, and
+> reports it as held at the top of each cycle. `defaultLane: "review"` today
+> therefore means "queue this for a human", not "work it and hold it". The queue
+> is picked up as-is the day chunks arrive.
 
 ### `images` — what sandbar builds
 
