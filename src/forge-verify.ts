@@ -115,6 +115,10 @@ import { promisify } from "node:util";
 
 import type { ResolvedMergeMode } from "./config.js";
 import { SandbarError } from "./errors.js";
+import {
+  type PullRequestRef,
+  ensurePullRequest as ensureForgePullRequest,
+} from "./forge-pr.js";
 import { lastNLines, stripAnsi, summarizeGateFailure } from "./gate.js";
 import {
   type IssueRef,
@@ -608,10 +612,11 @@ export type PushOutcome =
   | { readonly kind: "ok" }
   | { readonly kind: "rejected"; readonly reason: string };
 
-export type PullRequestRef = {
-  readonly number: number;
-  readonly url: string;
-};
+// One shape for both kinds of pull request sandbar opens, declared beside the
+// create-or-update primitive that returns it (#62) and re-exported here: this
+// module's adapter is the older consumer, and everything that imported the type
+// from it still can.
+export type { PullRequestRef } from "./forge-pr.js";
 
 export type VerifyAdapter = {
   // Force-push HEAD of the merger worktree to the integration branch. Lease-
@@ -1384,72 +1389,19 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
     },
 
     async ensurePullRequest({ head, title, body }) {
-      const { stdout } = await exec(
-        "gh",
-        [
-          "pr",
-          "list",
-          "--repo",
-          repoFlag,
-          "--head",
-          head,
-          "--base",
-          deps.sourceBranch,
-          "--state",
-          "open",
-          "--json",
-          "number,url",
-        ],
-        { cwd, maxBuffer: MAX_BUFFER },
-      );
-      const existing: unknown = JSON.parse(stdout.trim() || "[]");
-      if (Array.isArray(existing) && existing.length > 0) {
-        const o = existing[0] as Record<string, unknown>;
-        const number = typeof o["number"] === "number" ? o["number"] : 0;
-        const url = typeof o["url"] === "string" ? o["url"] : "";
-        // Re-title and re-body it. This PR is a scratch ref's audit handle, so
-        // a survivor from an earlier cycle would otherwise describe issues that
-        // are not in the merge result it now points at.
-        if (number > 0) {
-          await exec(
-            "gh",
-            [
-              "pr",
-              "edit",
-              String(number),
-              "--repo",
-              repoFlag,
-              "--title",
-              title,
-              "--body",
-              body,
-            ],
-            { cwd, maxBuffer: MAX_BUFFER },
-          );
-        }
-        return { number, url };
-      }
-      const created = await exec(
-        "gh",
-        [
-          "pr",
-          "create",
-          "--repo",
-          repoFlag,
-          "--head",
-          head,
-          "--base",
-          deps.sourceBranch,
-          "--title",
-          title,
-          "--body",
-          body,
-        ],
-        { cwd, maxBuffer: MAX_BUFFER },
-      );
-      const url = created.stdout.trim().split("\n").pop() ?? "";
-      const m = url.match(/\/pull\/(\d+)/);
-      return { number: m && m[1] ? Number(m[1]) : 0, url };
+      // Not a draft: this PR is an audit handle for a scratch ref, and drafting
+      // it would only make the merge button GitHub is not being asked to press
+      // look disabled for a reason that does not apply here. The chunk PR (#62)
+      // is the one that draws on the draft mechanism.
+      return ensureForgePullRequest({
+        exec,
+        cwd,
+        repoFlag,
+        head,
+        base: deps.sourceBranch,
+        title,
+        body,
+      });
     },
 
     async closePullRequest(number, comment) {
