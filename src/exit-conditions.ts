@@ -31,15 +31,23 @@ export const EXIT_CODE_SUCCESS = 0;
 export const EXIT_CODE_STUCK = 2;
 export const EXIT_CODE_BUDGET = 3;
 // "Landed work; relaunch me to continue" (#65). A launcher that loops on
-// exactly this code — pull, rebuild, rerun — closes both staleness windows of a
-// self-hosted series: the checkout that fell behind origin between launches,
-// and the launch-time `dist/` (plus config and Containerfile) still driving
-// after a cycle landed orchestrator commits, where judge and judged come from
-// different eras. 75 is sysexits' EX_TEMPFAIL ("temporary failure; retry"),
-// which is the meaning, and it is clear of the run's own 0/1/2/3 and of the
-// shell's reserved 126+. The number is repeated by hand in the `sandbar`
-// script in package.json — a shell loop cannot import a constant — so a change
-// here must move that script (and the README's launcher example) with it.
+// exactly this code closes the staleness window a self-hosted series opens: a
+// cycle that lands orchestrator commits leaves the running process driving on
+// what it resolved at launch, where judge and judged come from different eras.
+//
+// What that covers narrowed with #66 and the flag survives it, which is worth
+// keeping straight: `dist/` no longer moves at all — the driver is an installed
+// release the repo pins, so a landing does not become the driver until a human
+// moves the pin — while the CONFIG (the gate stack!) is `import()`ed once at
+// launch and `ensureImages` runs once per run, so a landed change to either
+// still reaches a series only through the relaunch.
+//
+// 75 is sysexits' EX_TEMPFAIL ("temporary failure; retry"), which is the
+// meaning, and it is clear of the run's own 0/1/2/3 and of the shell's reserved
+// 126+. The number is repeated by hand in `scripts/sandbar-launch.mjs`, which
+// runs before the package it would import exists; `launcher.test.ts` asserts
+// the two spellings equal, and the README's launcher description moves with a
+// change here.
 export const EXIT_CODE_RELAUNCH = 75;
 
 export type ExitTag =

@@ -1,18 +1,24 @@
 // What is driving this run (#69).
 //
 // A run used to record nothing about the code producing its verdicts. That
-// matters because the driver is built from the operator's WORKING TREE:
-// `npm run sandbar` is `git pull --ff-only && npm run build && node
+// mattered because the driver was built from the operator's WORKING TREE:
+// `npm run sandbar` was `git pull --ff-only && npm run build && node
 // dist/cli.js`, and `build` is `rm -rf dist && tsc` over `src/` — uncommitted
-// edits included. The config file is the same story and worse: it is a PROGRAM
+// edits included. The config file was the same story and worse: it is a PROGRAM
 // that is `import()`ed (cli.ts), and it carries `gateStack`, so the thing that
-// judges every branch is also whatever happened to be on disk. On 2026-08-31 a
+// judges every branch was also whatever happened to be on disk. On 2026-08-31 a
 // series ran with uncommitted edits to `src/gate-stack.ts` and to
 // `sandbar.config.mjs`, and nothing in the logs said so.
 //
-// This module does not fix that coupling — #66 does. It makes it VISIBLE, which
-// is the cheapest possible mitigation and outlives the fix: after #66 this same
-// line is how an operator confirms the driver really is the pinned version.
+// This module never fixed that coupling — #66 did, for the CODE half: a
+// self-hosted run now installs the release `sandbar.pin` names into
+// `.sandbar/driver/` and runs that, so `built from … clean` at a commit an
+// operator chose is what this line reports, and is how they confirm it. The
+// CONFIG half survives on purpose (the config resolves against the process cwd,
+// `sandbar.env` against its own `import.meta.url`), which is exactly why this
+// line prints two trees rather than one: the config's is the tree still capable
+// of being dirty, and `requiresSandbar` is the guard on the version seam that
+// pinning one and not the other opens.
 //
 // A fact, never a warning. "dirty" does not block a run and is not phrased as
 // though it should — an operator iterating deliberately is a supported case,
@@ -42,11 +48,13 @@
 // the reason it is load-bearing is `git-ops.ts`'s to state.
 //
 // The read happens at RUN START, and says so by being one line printed there.
-// That is the build's tree in every shape the launcher produces — it builds
-// immediately before running, and rebuilds on each relaunch (#65) — but a
-// `dist/` from an older build against a tree since changed is NOT detected.
-// A build stamp would close that; it would also be a second artefact and a
-// second mechanism to keep true, for a coupling #66 removes outright.
+// A `dist/` from an older build against a tree since changed is NOT detected,
+// and after #66 that gap no longer has a way to open on the self-hosted path:
+// the driver is an installed release under `.sandbar/`, gitignored, so it
+// reports `unknown` by the check-ignore rule above rather than a stale HEAD,
+// and it is the pin — not this line — that says which release it is. The gap
+// survives only for someone running a hand build out of a dev tree, which is
+// the one case they already know they are in.
 //
 // Total, by construction: every git call is `.then(ok, fail)`, so nothing here
 // rejects and no field can stop a run. Everything degrades to `unknown`. No

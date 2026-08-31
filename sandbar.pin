@@ -1,0 +1,18 @@
+# The sandbar release that drives this repo's own unattended series (#66).
+#
+# `npm run sandbar` installs exactly this into `.sandbar/driver/` and runs it.
+# Nothing after that point is built from the working tree, so an operator can
+# hold local commits and uncommitted edits while a series runs.
+#
+# One npm spec, `github:<owner>/<repo>#v<major>.<minor>.<patch>`. A TAG, as a
+# consumer would pin: an untagged state is not pinnable and a sha is not a
+# substitute for one. The tag for a version is created by `auto-tag.yml` on the
+# push to `main` that lands it, so a pin only becomes installable once its
+# version is on `main`.
+#
+# Moving it is a one-line commit, made deliberately after watching a version
+# behave — that delay IS the feature. Iterating unlanded orchestrator code stays
+# a `npm run build && node dist/cli.js` away, by hand.
+#
+# Lines starting with `#` are comments; exactly one spec line must remain.
+github:Tojins/sandbar#v0.21.0

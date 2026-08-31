@@ -1,24 +1,44 @@
 // Sandbar operating on sandbar (#39).
 //
-// This repo IS the package, so there is nothing to `npm i` and no `npx sandbar`
-// on PATH: the import below is the local build, and the launcher is
-// `npm run sandbar` — a LOOP since #65: pull --ff-only, build, run, and go
-// again only when the run exits EXIT_CODE_RELAUNCH (75, hardcoded in the
-// script because a shell loop cannot import a constant). That code is what
-// `relaunchAfterLanding` below makes any landing cycle exit with, so an
-// unattended series is always driven by what it just landed — the launch tree
-// supplies `dist/`, THIS FILE and the Containerfile, while judged trees come
-// from origin/<sourceBranch>, and before #65 a queued chain of outer-loop
-// issues had slice N+1 built by a driver predating slice N (found 40 commits
-// behind once, across a `feat!`). The pull at the top of the loop closes the
-// at-launch half of the same gap; a dirty or diverged checkout makes it fail
-// loud with git's own message, no stash, no guessing.
+// Since #66 this repo is worked on by a PINNED sandbar, exactly as a consumer's
+// would be: `sandbar.pin` names a tag, `npm run sandbar` installs it into
+// `.sandbar/driver/` and runs that, and nothing in a series is built from the
+// working tree. The old launcher was `git pull --ff-only && npm run build &&
+// node dist/cli.js` in a loop, which meant the orchestrator AND the gate stack
+// were whatever a human had saved; the loop now re-reads the pin and loops on
+// EXIT_CODE_RELAUNCH (75) alone, which `relaunchAfterLanding` below is what
+// produces. Why the relaunch survives the pin — the config and the Containerfile
+// are still resolved once per run, only `dist/` stopped moving — is RunConfig's
+// to state.
 //
-// The residual is the one #39 already accepted: a subtle regression in slice N
-// now mis-drives slice N+1 UNATTENDED, one relaunch later rather than one
-// manual launch later. Recovery is a hand `git revert` — while preflight
-// refuses to start on the leftover branches.
-import { readEnvFile } from "./dist/index.js";
+// THIS FILE is the residual, and it is deliberate rather than overlooked: the
+// config resolves against the process cwd and `sandbar.env` against this file's
+// own `import.meta.url`, so both stay in the operator's checkout and a run's
+// gate stack is still whatever is saved here. `requiresSandbar` below is the
+// guard on the seam that opens as a result — a driver older than the field says
+// refuses the run by name instead of silently ignoring what it cannot read —
+// and #69's opening line names this path and whether its tree is dirty. What is
+// gone is the ORCHESTRATOR and its prompts being a function of the same tree.
+//
+// The import is from the installed driver rather than `./dist/`, for that same
+// reason: there is no build in this checkout during a series, and `readEnvFile`
+// should be the one from the version being run. `npm run driver` installs it
+// without starting a series, which is what the hand paths (`sandbar gate`, or
+// just loading this file) need.
+import { existsSync } from "node:fs";
+
+const DRIVER_ENTRY = new URL(
+  ".sandbar/driver/node_modules/@offergeist/sandbar/dist/index.js",
+  import.meta.url,
+);
+if (!existsSync(DRIVER_ENTRY)) {
+  throw new Error(
+    `No pinned sandbar driver at ${DRIVER_ENTRY.pathname}. Run \`npm run driver\` ` +
+      "to install the release `sandbar.pin` names (`npm run sandbar` does it " +
+      "itself). This file is a program and imports the driver it is run by (#66).",
+  );
+}
+const { readEnvFile } = await import(DRIVER_ENTRY.href);
 
 // One image serves both roles — the agent sandbox (`--user 1000:1000
 // --userns=keep-id`) and the gate runner (a pod member, where keep-id is
@@ -42,6 +62,16 @@ export default {
   ghOwner: "Tojins",
   ghRepo: "sandbar",
   sandboxImage: IMAGE,
+
+  // The oldest sandbar that can read this file (#66). Since the driver is
+  // pinned and this file is not, the two come from different commits by
+  // construction, and "config newer than driver" is the routine direction: a
+  // field landed here for a version the pin has not moved to yet would
+  // otherwise be dropped in silence, gate steps included. Not the same number
+  // as `sandbar.pin` and not required to be — the pin is what runs, this is the
+  // floor below which it must not — but raise it in the same commit as anything
+  // this file starts asking a newer sandbar for.
+  requiresSandbar: "0.21.0",
 
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
@@ -228,10 +258,12 @@ export default {
 
   env: readEnvFile(new URL("sandbar.env", import.meta.url)),
 
-  // Exit 75 after any cycle that lands merges, so the launcher loop above can
-  // pull, rebuild and relaunch (#65). Explicit rather than detected — see
-  // RunConfig — and set HERE because this is the one repo where the landed
-  // commits are the orchestrator itself. Budgets and stuck counters are
+  // Exit 75 after any cycle that lands merges, so `scripts/sandbar-launch.mjs`
+  // re-reads the pin and relaunches (#65). Explicit rather than detected — see
+  // RunConfig — and still set here after #66: the pin means a landed
+  // orchestrator commit is NOT the next cycle's driver, but this file and the
+  // Containerfile are both resolved once per run, and a landed change to either
+  // reaches a series only through a relaunch. Budgets and stuck counters are
   // per-run and reset across runs by design, so the relaunch resets them
   // exactly as a human re-launch would.
   relaunchAfterLanding: true,

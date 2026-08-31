@@ -156,6 +156,41 @@ describe("resolveConfig", () => {
     expect(r.relaunchAfterLanding).toBe(true);
   });
 
+  describe("requiresSandbar (#66)", () => {
+    it("is unset by default and checks nothing", () => {
+      expect(resolveConfig(minimal, "0.0.1").requiresSandbar).toBeUndefined();
+    });
+
+    it("passes a driver at or above the floor, and keeps the value", () => {
+      const r = resolveConfig(
+        { ...minimal, requiresSandbar: "0.21.0" },
+        "0.21.4",
+      );
+      expect(r.requiresSandbar).toBe("0.21.0");
+    });
+
+    it("refuses a driver below the floor, naming both versions", () => {
+      expect(() =>
+        resolveConfig({ ...minimal, requiresSandbar: "0.21.0" }, "0.20.33"),
+      ).toThrow(/requires sandbar 0\.21\.0 or newer.*driver is 0\.20\.33/s);
+    });
+
+    // Ahead of every other field: a config this driver cannot read must not
+    // first be complained about one field at a time.
+    it("is checked before the rest of the config is interpreted", () => {
+      expect(() =>
+        resolveConfig(
+          {
+            ...minimal,
+            requiresSandbar: "9.0.0",
+            ghOwner: "not/a/name",
+          } as RunConfig,
+          "0.21.0",
+        ),
+      ).toThrow(/requires sandbar 9\.0\.0 or newer/);
+    });
+  });
+
   it("derives coauthorTrailer from bot identity when unset", () => {
     const r = resolveConfig(minimal);
     expect(r.coauthorTrailer).toBe("Co-authored-by: sandbar-bot <bot@acme.dev>");
@@ -283,6 +318,20 @@ describe("resolveMergeMode (#22)", () => {
       noChecksGraceMs: 50,
       openPullRequest: true,
     });
+  });
+
+  // Before #66 everything that was not "direct" was READ as verified, so a
+  // `kind` a newer sandbar defines — or a typo — silently ran the forge
+  // verification protocol against a config that never described one.
+  it("refuses a kind it does not recognise, rather than reading it as verified", () => {
+    for (const kind of ["Verified", "queued", ""]) {
+      expect(() =>
+        resolveConfig({
+          ...minimal,
+          mergeMode: { kind } as unknown as RunConfig["mergeMode"],
+        }),
+      ).toThrow(/must be "direct" or "verified"/);
+    }
   });
 
   it("refuses an integration branch equal to the source branch", () => {
