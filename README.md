@@ -469,9 +469,27 @@ dependency; relabelling the issue alone will not do it.
 >
 > Three things this needs from you: the `in-chunk` label has to exist in the
 > repo (sandbar never creates labels), the `gh` credentials have to be allowed
-> to open and edit pull requests, and whoever reviews those branches has to know
-> they are theirs to land — the draft PR says as much on itself, but nothing
-> notifies them.
+> to open and edit pull requests and to file issues, and whoever reviews those
+> branches has to know they are theirs to land — the draft PR says as much on
+> itself, but nothing notifies them.
+>
+> **Requesting changes on that pull request is how you send work back.** Review
+> it the way you review anything — threads on the diff, a review body, submit as
+> *Request changes* — and at the top of its next cycle sandbar files one issue
+> per changes-requested review: `ready-for-agent`, blocked by the chunk's tip
+> members, bodied with your unresolved threads. It joins the chunk by the same
+> derivation as everything else, so it is worked from the chunk's tip and its
+> commits land back on the same branch, under the same pull request. The cycle
+> that files it also works it.
+>
+> Two things follow from that, and both are deliberate. Sandbar **never resolves
+> your threads** — resolving one is still how you say you are satisfied, and
+> nothing sandbar does depends on your having done it. And it files **one issue
+> per review**, recorded by a comment on the pull request naming the issue and
+> the review it came from; that comment is the whole of the bookkeeping, so
+> don't delete it (a review whose comment is gone is filed again next cycle).
+> A review you dismiss is never filed at all, and a review whose threads you
+> resolve before sandbar next runs is dropped if it had no body of its own.
 >
 > And one thing to avoid: **don't close a chunk's issues one at a time while
 > others are still queued behind them.** The branch name is derived from the

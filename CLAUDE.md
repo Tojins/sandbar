@@ -75,7 +75,10 @@ an exit condition fires.
    commits are; only the issues `chunks.ts` could give no chunk (two-chunk
    parent, cycle) stay held (`heldForReview`). Each planned issue carries its
    `chunk` target, which is how phase 3 knows where to land it and how phase 2
-   knows what to seed from. All inert under the default lane, `auto`.
+   knows what to seed from. Ahead of the plan proper, the **chunk-review scan**
+   (`src/chunk-follow-up.ts`, #63) turns each changes-requested review on a
+   chunk's PR into an issue in that chunk and re-plans with it. All inert under
+   the default lane, `auto`.
 
 2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
    planned issue runs in parallel in its own agent sandbox + per-issue gate
@@ -232,6 +235,20 @@ default 50, exit 3).
   merge button and leaves review intact. Sandbar re-titles and re-bodies, and
   never re-drafts a PR a human made ready — that override is #64's to
   reconcile. `src/chunk-pr.ts` owns the prose and what it may claim.
+- **A changes-requested review on that PR becomes an ISSUE in the same chunk
+  (#63).** `src/chunk-follow-up.ts` scans every chunk with work on origin at
+  the top of phase 1: one issue per review, bodied with the review's unresolved
+  threads and `## Blocked by` the chunk's tips — which is what joins it to the
+  chunk (#58), gates it (#57), and holds it behind the code the review is about
+  (#59, #61). Its header owns the idempotence argument: the record is a LEDGER
+  COMMENT on the PR carrying the review's node id, read by the same strongly
+  consistent query that reads the reviews and independent of the follow-up
+  issue's own labels and state; the issue body carries the marker as provenance,
+  never as the index. All three of its `gh` calls fail loud, the ledger one
+  loudest — it is the only failure that compounds. Sandbar never resolves a
+  thread. The planner supplies the two things the scan cannot derive
+  (`PlanResolution.landedChunks`, `buildPlan`'s `extraCandidates`, which is what
+  makes the cycle that files an issue the cycle that works it).
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One cleanup registry owns signals and the exit (#35).** No module but
