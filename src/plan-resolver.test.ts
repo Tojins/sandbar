@@ -671,3 +671,65 @@ describe("resolvePlan chunk PR members (#62)", () => {
     expect(r.plan[0]!.chunk).toBeNull();
   });
 });
+
+// #64 — the resolution also carries the DERIVATION, members named. Landing a
+// reviewed chunk has to close its members, and only this graph knows who they
+// are: the merge phase sees the cycle's DONE branches and nothing else.
+describe("resolvePlan chunks (#64)", () => {
+  it("names every member of every chunk, root title included", () => {
+    const r = resolvePlan(
+      [
+        issue(10, "", { title: "Root work" }),
+        issue(11, "## Blocked by\n- #10\n", { title: "Chained work" }),
+        issue(20, "", { title: "Other root" }),
+      ],
+      new Map(),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.chunks).toEqual([
+      {
+        root: 10,
+        branch: "sandbar/chunk-10-root-work",
+        title: "Root work",
+        members: [
+          { number: 10, title: "Root work" },
+          { number: 11, title: "Chained work" },
+        ],
+      },
+      {
+        root: 20,
+        branch: "sandbar/chunk-20-other-root",
+        title: "Other root",
+        members: [{ number: 20, title: "Other root" }],
+      },
+    ]);
+  });
+
+  it("carries a member that has already landed, which is the whole point", () => {
+    // #10 is `in-chunk` — landed on the branch, out of the queue, and listed
+    // back in by `fetchChunkMembers`. A chunk that forgot it could not close
+    // it when the chunk lands.
+    const r = resolvePlan(
+      [
+        issue(10, "", { title: "Root work", labels: [IN_CHUNK_LABEL] }),
+        issue(11, "## Blocked by\n- #10\n", { title: "Chained work" }),
+      ],
+      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.chunks.map((c) => c.members.map((m) => m.number))).toEqual([
+      [10, 11],
+    ]);
+  });
+
+  it("is empty on the default lane, where no chunk exists", () => {
+    const r = resolvePlan([issue(10, ""), issue(11, "")], new Map(), new Set(), 3);
+    expect(r.chunks).toEqual([]);
+  });
+});

@@ -358,3 +358,21 @@ export function deriveChunks(
 
   return { chunks, chunkOf, blocked };
 }
+
+// A chunk with its members NAMED, which is what landing one needs (#64).
+//
+// `Chunk` carries member numbers, because that is all the derivation itself has
+// to say. Landing a chunk on the source branch has to close every member and
+// say so in prose a human reads — on the issue, and on the pull request — so it
+// needs the titles too, and it needs the root's title to name the chunk when no
+// member list survives. Only the PLAN can build one of these: the titles come
+// from the candidate listing, and the membership from the graph that listing
+// carries (`plan-resolver.ts`). Phase 3 and the reconciler consume it.
+export type NamedChunk = {
+  readonly root: number;
+  readonly branch: string;
+  // The root issue's title — the same string `chunkBranchName` slugged.
+  readonly title: string;
+  // Every member, ascending, root included.
+  readonly members: readonly ChunkMember[];
+};
