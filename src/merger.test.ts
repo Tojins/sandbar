@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { SandbarError } from "./errors.js";
 import type { PushOutcome, VerifyAdapter } from "./forge-verify.js";
-import type { MergerGateOutput } from "./merger.js";
+import type { ChunkRefLookup, MergerGateOutput } from "./merger.js";
 import { LAND_LABEL, type ChunkLandTarget } from "./chunk-land.js";
 import { IN_CHUNK_LABEL } from "./chunks.js";
 import {
@@ -79,9 +79,11 @@ type Script = {
   chunkPushes?: PushResult[];
   // #62: how the forge answers `ensureChunkPullRequest`. An Error is thrown.
   chunkPrs?: ({ number: number; url: string } | Error)[];
-  // #64: what origin has for a chunk branch being LANDED, by branch name. A
-  // missing entry means origin has no such branch at all.
-  chunkRefs?: Record<string, string>;
+  // #64: what origin answers about a chunk branch being LANDED, by branch
+  // name. A missing entry is `absent` — origin was reached and has no such
+  // branch — which is a different script from an `unreadable` entry, and the
+  // whole point of the three states.
+  chunkRefs?: Record<string, ChunkRefLookup>;
   // #64: gh/git calls that throw, by operation name.
   wrapupFails?: Partial<
     Record<
@@ -239,10 +241,11 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       return script.chunkBases?.[branch] ?? "origin/main";
     },
     // #64. Unlike `chunkBase` there is no fallback: a chunk branch origin does
-    // not have cannot be landed.
+    // not have cannot be landed, and one origin could not be asked about is not
+    // known to be either.
     async fetchChunkRef(branch) {
       calls.chunkRefFetches.push(branch);
-      return script.chunkRefs?.[branch] ?? null;
+      return script.chunkRefs?.[branch] ?? { kind: "absent" };
     },
     async deleteChunkBranch(branch) {
       calls.chunkBranchDeletes.push(branch);
@@ -1821,11 +1824,14 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
 
   const originHas = (
     ...roots: readonly number[]
-  ): Record<string, string> =>
+  ): Record<string, ChunkRefLookup> =>
     Object.fromEntries(
       roots.map((r) => [
         `sandbar/chunk-${r}-c`,
-        `refs/remotes/origin/sandbar/chunk-${r}-c`,
+        {
+          kind: "present",
+          ref: `refs/remotes/origin/sandbar/chunk-${r}-c`,
+        } as const,
       ]),
     );
 
@@ -1933,6 +1939,33 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     expect(summary.pushed).toBe(false);
     expect(calls.pushes).toBe(0);
     expect(calls.closes).toEqual([]);
+  });
+
+  it("halts, keeping `land`, when origin could not be asked about the branch", async () => {
+    // The one that must NOT be read as `branch-missing`: nothing is known
+    // about this chunk, so the human's request stands and the next run tries
+    // again. Parking here would drop their label and tell them their branch
+    // was deleted because a proxy dropped a connection.
+    const { adapter, calls } = makeAdapter({
+      chunkRefs: {
+        "sandbar/chunk-42-c": { kind: "unreadable", detail: "could not read" },
+      },
+    });
+    const err = await runMergerWithAdapter(
+      [issue(10)],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(42)),
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(MergerError);
+    expect((err as MergerError).message).toContain("could not read");
+    expect((err as MergerError).partial?.skippedChunks).toEqual([]);
+    expect(calls.merges).toEqual([]);
+    expect(calls.prComments).toEqual([]);
+    expect(calls.prLabelRemovals).toEqual([]);
+    expect(calls.pushes).toBe(0);
   });
 
   it("parks the chunk when origin no longer has its branch, and never merges", async () => {

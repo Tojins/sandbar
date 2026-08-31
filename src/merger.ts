@@ -114,8 +114,15 @@
 // chunk's own problem, so `land` comes off and the pull request says why (a
 // label left on would retry that same failing merge every cycle forever). A
 // push race, a forge verdict that never arrived, a `gh` that could not be
-// reached — none of those is a fact about the chunk, so the label stays and the
-// next run tries again. Nothing lands and nothing is closed in either case.
+// reached, an ORIGIN that could not be reached — none of those is a fact about
+// the chunk, so the label stays and the next run tries again. Nothing lands and
+// nothing is closed in either case.
+//
+// That last one is why `fetchChunkRef` answers in three states instead of two
+// (`ChunkRefLookup`). "Origin has no such branch" is a fact about the chunk and
+// parks it; "origin could not be asked" is not, and reading one as the other
+// would take a human's `land` label off and tell them their branch had been
+// deleted because a proxy dropped a connection.
 //
 // The WRAP-UP runs only after the source branch has moved: close every member
 // ON THE BRANCH explicitly (the `in-chunk` ones — a component member that was
@@ -248,6 +255,26 @@ export type MergerGateOutput = {
 };
 
 const exec = promisify(execFile);
+
+// The exit status of a failed `exec`, or null when there is none to read — a
+// spawn that never got as far as an exit rejects with a string `code` (ENOENT)
+// instead. Distinguishing one non-zero exit from another is how a git command
+// with documented statuses (`ls-remote --exit-code`) is used as an answer
+// rather than as a yes/no.
+const exitCodeOf = (err: unknown): number | null => {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "number" ? code : null;
+};
+
+// What a failed git command said, for an operator to read in a halt message.
+// stderr first: git's own diagnosis of why it could not reach a remote is the
+// whole content, and `execFile`'s message is the command line around it.
+const gitFailureDetail = (err: unknown): string => {
+  const e = err as { stderr?: unknown; message?: unknown } | null;
+  const stderr = typeof e?.stderr === "string" ? e.stderr.trim() : "";
+  if (stderr) return stderr;
+  return typeof e?.message === "string" ? e.message : String(err);
+};
 
 export const READY_FOR_AGENT_LABEL = "ready-for-agent";
 
@@ -430,6 +457,28 @@ export type PushResult =
   | { readonly kind: "race" }
   | { readonly kind: "fatal"; readonly reason: string };
 
+// What origin has for a chunk branch — THREE answers, because two of them are
+// one `git fetch` failure from the outside and are not the same fact (#64).
+//
+//   * present    — origin has it, and the remote-tracking ref now names it.
+//   * absent     — origin was reached and does not have the branch. A fact
+//                  about the chunk: there is nothing left to land.
+//   * unreadable — origin could not be asked at all. A fact about the network,
+//                  the credentials or the proxy, and about nothing else.
+//
+// The distinction is bought with a second question — see `realAdapter` — and
+// it is bought because the two readers spend it differently. `chunkBase` (#60)
+// collapses the last two into "create the branch at the source branch", which
+// is safe wrong either way: a base built on a stale premise is rejected as a
+// non-fast-forward push. The #64 landing cannot: it PARKS on `absent`, which
+// takes a human's `land` label off and tells them their branch is gone. Being
+// wrong there costs a tracker write and a false claim, so `unreadable` halts
+// instead and the label survives to the next run.
+export type ChunkRefLookup =
+  | { readonly kind: "present"; readonly ref: string }
+  | { readonly kind: "absent" }
+  | { readonly kind: "unreadable"; readonly detail: string };
+
 // Adapter shape. Split into the merger's own primitives and the resolve-loop
 // primitives (which the merger forwards). The real adapter implements both.
 export type MergerAdapter = ResolveAdapter & {
@@ -468,12 +517,12 @@ export type MergerAdapter = ResolveAdapter & {
   }): Promise<PullRequestRef>;
   // --- landing a reviewed chunk on the source branch (#64) ---
   // ORIGIN's copy of the chunk branch, as a remote-tracking ref, freshly
-  // fetched. Null when origin has no such branch — which is a real answer and
-  // not an error: the review artifact is gone, so there is nothing to land.
-  // Unlike `chunkBase` this does NOT fall back to the source branch; merging
-  // the source branch into itself would be a no-op that closed every member of
-  // a chunk whose work is nowhere.
-  fetchChunkRef(chunkBranch: string): Promise<string | null>;
+  // fetched — or which of the two ways there is none, since the landing spends
+  // those differently. See `ChunkRefLookup`. Unlike `chunkBase` this does NOT
+  // fall back to the source branch; merging the source branch into itself
+  // would be a no-op that closed every member of a chunk whose work is
+  // nowhere.
+  fetchChunkRef(chunkBranch: string): Promise<ChunkRefLookup>;
   // Delete the chunk branch on origin, once its commits are on the source
   // branch. The last step of the wrap-up and the one that stops the reconciler
   // seeing this chunk again.
@@ -1255,13 +1304,27 @@ export async function runMergerWithAdapter(
         sourceBranch: chunkLanding.sourceBranch,
       };
       try {
-        const ref = await adapter.fetchChunkRef(request.branch);
-        if (ref === null) {
-          // Origin has no such branch. Either the reconciler already landed
-          // this chunk and deleted it (and the label is stale), or somebody
-          // deleted the branch by hand. Merging the source branch into itself
-          // instead would be a silent no-op that closed every member of a chunk
-          // whose work is nowhere, so this parks rather than lands.
+        const found = await adapter.fetchChunkRef(request.branch);
+        if (found.kind === "unreadable") {
+          // Origin could not be asked, so nothing is known about this chunk —
+          // and `land` is a human's request that only a fact about the chunk
+          // may cancel. Halting keeps the label on for the next run; parking
+          // here would drop it and tell a reviewer their branch was deleted on
+          // the strength of a proxy hiccup. This is the same class as a push
+          // race and it is handled the same way.
+          throw new SandbarError(
+            `origin's copy of ${request.branch} could not be read, so there is ` +
+              `no way to tell a deleted chunk branch from an unreachable ` +
+              `origin: ${found.detail}`,
+          );
+        }
+        if (found.kind === "absent") {
+          // Origin was reached and does not have the branch. Either the
+          // reconciler already landed this chunk and deleted it (and the label
+          // is stale), or somebody deleted the branch by hand. Merging the
+          // source branch into itself instead would be a silent no-op that
+          // closed every member of a chunk whose work is nowhere, so this
+          // parks rather than lands.
           await parkChunk(
             request,
             CHUNK_BRANCH_MISSING_PR_COMMENT({ chunkBranch: request.branch }),
@@ -1269,13 +1332,13 @@ export async function runMergerWithAdapter(
           );
           continue;
         }
-        const unit: MergedChunkUnit = { ...pending, ref };
+        const unit: MergedChunkUnit = { ...pending, ref: found.ref };
         const outcome = await attemptMerge(
           {
             unit: {
               id: String(request.root),
               title: request.title,
-              branch: ref,
+              branch: unit.ref,
               // Named for the BRANCH, not for an issue: what is being merged is
               // a whole chunk, and `Merge sandbar/issue-<root>` would claim it
               // was one issue's work.
@@ -1668,13 +1731,21 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   // ref is updated in a BARE cache too, where a plain `git fetch origin
   // <branch>` writes only FETCH_HEAD.
   //
-  // A fetch that failed for some OTHER reason (network, auth) is
-  // indistinguishable from "no such branch" here, and both readers are safe
-  // being wrong that way: `chunkBase` falls back to the source branch, whose
-  // push is then rejected as non-fast-forward rather than overwriting a branch,
-  // and the #64 landing parks the request rather than merging the source branch
-  // into itself.
-  const fetchChunkRef = async (chunkBranch: string): Promise<string | null> => {
+  // A FAILED FETCH IS TWO DIFFERENT FACTS, and the fetch cannot tell them
+  // apart: "origin has no such branch" and "origin could not be reached" are
+  // one non-zero exit. So a failure asks a second question — `ls-remote
+  // --exit-code`, which answers 2 for "reached it, no matching ref" and
+  // anything else non-zero for "could not ask" — and the answer is reported as
+  // `absent` or `unreadable` rather than collapsed. `chunkBase` collapses them
+  // anyway and is right to; the #64 landing must not, because its `absent` is
+  // a tracker write. See `ChunkRefLookup`.
+  //
+  // A probe that SUCCEEDS is `unreadable` too: origin has the branch and the
+  // fetch still failed, which is the transport being unreliable rather than
+  // the chunk being gone.
+  const fetchChunkRef = async (
+    chunkBranch: string,
+  ): Promise<ChunkRefLookup> => {
     const remoteRef = `refs/remotes/origin/${chunkBranch}`;
     try {
       await exec(
@@ -1682,9 +1753,18 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         ["fetch", "origin", `+refs/heads/${chunkBranch}:${remoteRef}`, "--quiet"],
         { cwd },
       );
-      return remoteRef;
-    } catch {
-      return null;
+      return { kind: "present", ref: remoteRef };
+    } catch (fetchErr) {
+      const probe = await exec(
+        "git",
+        ["ls-remote", "--exit-code", "origin", `refs/heads/${chunkBranch}`],
+        { cwd },
+      ).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      if (probe !== null && exitCodeOf(probe) === 2) return { kind: "absent" };
+      return { kind: "unreadable", detail: gitFailureDetail(probe ?? fetchErr) };
     }
   };
   return {
@@ -1982,9 +2062,15 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     fetchChunkRef,
     async chunkBase(chunkBranch) {
       // `origin/<sourceBranch>` when origin has no chunk branch, because that
-      // is where a chunk branch is created (#60). One fetch primitive, two
-      // readings of the same null — see `fetchChunkRef` above.
-      return (await fetchChunkRef(chunkBranch)) ?? `origin/${deps.sourceBranch}`;
+      // is where a chunk branch is created (#60) — and equally when origin
+      // could not be asked, which is the collapse `fetchChunkRef` refuses to
+      // make for its other reader and which is still right here: a base built
+      // on the wrong premise composes a branch whose push origin then rejects
+      // as a non-fast-forward, so being wrong costs a cycle and never a ref.
+      const found = await fetchChunkRef(chunkBranch);
+      return found.kind === "present"
+        ? found.ref
+        : `origin/${deps.sourceBranch}`;
     },
     async checkoutDetached(ref) {
       // Not `--force`: the tree is clean at every call site, and a dirty one

@@ -159,6 +159,53 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     expect(await adapter().chunkBase("sandbar/chunk-1-c")).toBe("origin/main");
   });
 
+  // #64 — the three answers, and the one git fact that separates two of them:
+  // `ls-remote --exit-code` exits 2 for "reached the remote, no matching ref"
+  // and something else non-zero for "could not ask". No fake can assert that,
+  // and the whole of the landing's `branch-missing` park — a human's `land`
+  // label removed and a comment about a deleted branch — rests on it.
+  it("says a chunk branch origin does not have is ABSENT", async () => {
+    expect(await adapter().fetchChunkRef("sandbar/chunk-1-c")).toEqual({
+      kind: "absent",
+    });
+  });
+
+  it("says PRESENT, and leaves the remote-tracking ref behind, when origin has it", async () => {
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
+
+    const found = await adapter().fetchChunkRef("sandbar/chunk-1-c");
+
+    expect(found).toEqual({
+      kind: "present",
+      ref: "refs/remotes/origin/sandbar/chunk-1-c",
+    });
+    expect(
+      await git(cache, "rev-parse", "--verify", "refs/remotes/origin/sandbar/chunk-1-c"),
+    ).toBeTruthy();
+  });
+
+  it("says UNREADABLE — not absent — when origin cannot be reached at all", async () => {
+    // The branch is on origin; only the transport is broken, which is what an
+    // expired key or a proxy looks like from here. Reading this as "the branch
+    // is gone" is a tracker write and a false claim on somebody's pull
+    // request.
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
+    await git(cache, "remote", "set-url", "origin", join(root, "gone.git"));
+
+    const found = await adapter().fetchChunkRef("sandbar/chunk-1-c");
+
+    expect(found.kind).toBe("unreadable");
+    expect(found.kind === "unreadable" && found.detail).toBeTruthy();
+  });
+
+  it("still bases an unreachable origin on the source branch, which is safe to be wrong about", async () => {
+    // `chunkBase` keeps the collapse the landing refuses: its wrongness is
+    // caught by a rejected push, never by a tracker write.
+    await git(cache, "remote", "set-url", "origin", join(root, "gone.git"));
+
+    expect(await adapter().chunkBase("sandbar/chunk-1-c")).toBe("origin/main");
+  });
+
   it("bases on origin's chunk branch when it exists, fetching it into the bare cache", async () => {
     await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
 
