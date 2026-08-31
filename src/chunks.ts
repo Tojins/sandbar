@@ -149,6 +149,13 @@ import { chunkBranchName } from "./naming.js";
 // read as "these commits are somewhere durable".
 export const IN_CHUNK_LABEL = "in-chunk";
 
+// An issue named as part of a chunk, in the one form the review surface needs
+// it: a number and the title a human reads next to it (#62).
+export type ChunkMember = {
+  readonly number: number;
+  readonly title: string;
+};
+
 // Where a review-gated issue lands. Carried on a planned issue so the merge
 // phase can point at a chunk without re-deriving one (#60): `root` identifies
 // the chunk, `branch` is the ref its members' commits are merged onto and
@@ -157,6 +164,26 @@ export const IN_CHUNK_LABEL = "in-chunk";
 export type ChunkTarget = {
   readonly root: number;
   readonly branch: string;
+  // The chunk's members that were ALREADY on `branch` when the plan was built
+  // — the ones carrying `IN_CHUNK_LABEL` (#62). Ascending, and never including
+  // the issue carrying this target, which is on its way there and not there
+  // yet.
+  //
+  // It rides here because the chunk PR's body has to list everything the
+  // branch carries, and the merge phase knows only what IT landed: a chunk
+  // whose second member lands next cycle would otherwise get a PR describing
+  // that member alone, dropping the first — the same wrong-record failure the
+  // create-or-update discipline exists to prevent, arriving from the other
+  // side. The whole candidate graph is what knows the answer, and that graph
+  // only exists in the plan.
+  //
+  // A SNAPSHOT, and prose only. Nothing may branch a landing decision on it:
+  // it was read from the tracker before phase 2 ran, and the authority on what
+  // is on the chunk branch is origin. Optional for the same reason `chunk`
+  // itself is optional on `IssueRef` — the dozen hand-built targets in tests
+  // and context builders have nothing to say about it, and an absent list
+  // reads as "none known", which is what they mean.
+  readonly landed?: readonly ChunkMember[];
 };
 
 // The minimum a chunk decision needs. `title` is here and not in `LaneIssue`

@@ -255,17 +255,6 @@ export function resolvePlan(
   );
   const chunkByRoot = new Map(chunks.map((c) => [c.root, c] as const));
 
-  // The chunk an issue lands on, or null when it lands on the source branch.
-  // Null covers both an auto-lane issue and a review-gated one `deriveChunks`
-  // held back — the second can never reach the plan (see the lane filter
-  // below), so a null here is always the auto lane by the time it is read.
-  const chunkTargetOf = (n: number): ChunkTarget | null => {
-    const root = chunkOf.get(n);
-    if (root === undefined) return null;
-    const chunk = chunkByRoot.get(root);
-    return chunk ? { root: chunk.root, branch: chunk.branch } : null;
-  };
-
   // `in-chunk` from either source, because neither invents a label and each can
   // be missing one the other has: the authoritative batch may have skipped the
   // issue entirely, and the lagging search index may predate the flip. For the
@@ -282,6 +271,32 @@ export function resolvePlan(
   const isInChunk = (n: number): boolean =>
     (issueFacts.get(n)?.labels ?? []).includes(IN_CHUNK_LABEL) ||
     (listedLabels.get(n) ?? []).includes(IN_CHUNK_LABEL);
+
+  // The chunk an issue lands on, or null when it lands on the source branch.
+  // Null covers both an auto-lane issue and a review-gated one `deriveChunks`
+  // held back — the second can never reach the plan (see the lane filter
+  // below), so a null here is always the auto lane by the time it is read.
+  //
+  // `landed` is the chunk PR's member list (#62): the members whose work is
+  // already ON the branch, which is exactly the ones carrying `in-chunk`. It is
+  // computed here rather than in the merge phase because only this function has
+  // the whole candidate graph — phase 3 sees the cycle's DONE branches and
+  // nothing else, so a chunk growing by one member per cycle would otherwise
+  // get a PR that forgets every member but the newest. Titles come from the
+  // listing, which carries every chunk member by construction:
+  // `fetchChunkMembers` lists the landed ones back in, and `deriveChunks` only
+  // ever names issues it was given.
+  const titleOf = new Map(candidates.map((c) => [c.number, c.title] as const));
+  const chunkTargetOf = (n: number): ChunkTarget | null => {
+    const root = chunkOf.get(n);
+    if (root === undefined) return null;
+    const chunk = chunkByRoot.get(root);
+    if (!chunk) return null;
+    const landed = chunk.members
+      .filter((m) => m !== n && isInChunk(m))
+      .map((m) => ({ number: m, title: titleOf.get(m) ?? "" }));
+    return { root: chunk.root, branch: chunk.branch, landed };
+  };
 
   // CLOSED means the blocker's work is on the source branch. `in-chunk` in the
   // SAME chunk means it is on the branch this issue will be worked on. Nothing
