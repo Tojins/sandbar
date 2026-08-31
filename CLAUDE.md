@@ -60,59 +60,33 @@ an exit condition fires.
 1. **Plan** (`src/plan-resolver.ts`) — purely deterministic, no LLM: lists
    issues labelled `ready-for-agent`, parses `## Blocked by` sections, selects
    the top-K unblocked issues (default 3) by number. Each candidate also gets a
-   **lane** (`src/lanes.ts`, #57): `auto-land` label else `config.defaultLane`,
-   with review-gating inherited downward along the same `## Blocked by` edges,
-   transitively — an `auto-land` contradicted by inheritance loses and sandbar
-   says so on the issue. A blocker counts as satisfied when it is CLOSED, or
-   (#59) when it carries `in-chunk` and sits in the *same* chunk as its
-   dependent — cross-chunk edges stay strict. That second clause is why the
-   planner also lists the `in-chunk` issues back in (`fetchChunkMembers`) and
-   drops them by label: out of the graph, a chunk re-roots around its surviving
-   members and a descendant of a landed issue reads as auto. A review-gated
-   issue plans iff it HAS a chunk (#61) — the root seeds from
-   `origin/<sourceBranch>`, which is where its chunk branch is created, and a
-   chained member seeds from the chunk TIP, which is where its blockers'
-   commits are; only the issues `chunks.ts` could give no chunk (two-chunk
-   parent, cycle) stay held (`heldForReview`). Each planned issue carries its
-   `chunk` target, which is how phase 3 knows where to land it and how phase 2
-   knows what to seed from. All inert under the default lane, `auto`.
+   **lane** (`src/lanes.ts`, #57) and, when review-gated, a `chunk` target
+   (#61) that tells phase 2 what to seed from and phase 3 where to land. All
+   inert under the default lane, `auto`; the blocker and chunk criteria are the
+   `plan-resolver.ts` and `chunks.ts` headers' to state.
 
 2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
    planned issue runs in parallel in its own agent sandbox + per-issue gate
    stack, ralph-style: up to `maxImplAttempts` (default 8) attempts in the
    **same** sandbox so commits accumulate on the issue branch. All transitions
-   live in the pure state machine; `inner-loop.ts` is I/O glue. Per attempt:
-   build prompt → implementer → parse `<promise>` → on `COMPLETE` with a clean
-   tree on the issue branch, run gate-1 → on green, run the reviewer (strictly
-   advisory, read-only) → `APPROVED` ⇒ DONE, `CHANGES-REQUESTED` ⇒ another
-   attempt with the prose surfaced. Two orthogonal budgets: impl attempts and
-   `maxReviewRounds` (default 5). HARD-ERROR is infra-only — the SM never emits
-   it; the runner wraps setup/container throws so `decideAfterTerminal` can
-   retry with a fresh sandbox. A reviewer that produced no review is not a
-   verdict (#41) — `src/reviewer-run.ts` header owns that policy. Terminals:
-   `DONE | NEEDS-INFO | NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN |
-   NEEDS-HUMAN-REVIEW | HARD-ERROR`.
+   live in the pure state machine; `inner-loop.ts` is I/O glue. Two orthogonal
+   budgets: impl attempts and `maxReviewRounds` (default 5). The reviewer is
+   strictly advisory and read-only; `src/reviewer-run.ts` owns what a failed
+   reviewer run means (#41). Terminals: `DONE | NEEDS-INFO |
+   NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | HARD-ERROR`
+   (infra-only).
 
 3. **Merge** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
    + `src/forge-verify.ts`) — procedural, in a dedicated ephemeral worktree
    detached at `origin/<sourceBranch>` (never the operator's checkout, #10).
-   Per DONE branch in issue order: `git merge --no-ff`, and on conflict or
-   post-merge-gate-red, the agentic resolve loop (which sees all sibling issue
-   bodies). `config.mergeMode` (#22): `direct` (default) pushes at the end;
-   `verified` gives CI the last word via a scratch `integrationBranch` — the
-   whole check-reading safety argument (pagination, settling, skipped ≠ pass,
-   commit statuses, `requiredChecks`, parked vs fatal, `MergerError.partial`)
-   is in `src/forge-verify.ts` and `src/merger.ts` headers. Its invariant: no
-   unknown verdict ever lands. **Two targets since #60**: an issue carrying a
-   `chunk` is merged onto `sandbar/chunk-<root>-<slug>` (created at
-   `origin/<sourceBranch>` when origin has none) and that branch is pushed —
-   directly, in both merge modes, because the forge gates what reaches the
-   *source* branch and a chunk branch reaches a human. Chunk groups land first
-   and the worktree returns to its entry sha, so the source pass and the
-   `landed` argument about what a partial may claim are untouched. Each pushed
-   chunk then gets its **draft PR** (#62), created-or-updated per cycle:
-   `src/chunk-pr.ts` is the prose, `src/forge-pr.ts` the one `gh pr`
-   create-or-update both PR kinds share.
+   Per DONE branch in issue order: `git merge --no-ff`, with the agentic
+   resolve loop on conflict or post-merge-gate-red. `config.mergeMode` (#22):
+   `direct` (default) or `verified` (CI gets the last word); the check-reading
+   safety argument — its invariant: no unknown verdict ever lands — is in the
+   `src/forge-verify.ts` and `src/merger.ts` headers. An issue carrying a
+   `chunk` lands on its chunk branch instead (#60) and each pushed chunk gets
+   a **draft PR** per cycle (#62): `src/chunk-pr.ts` is the prose,
+   `src/forge-pr.ts` the `gh pr` create-or-update both PR kinds share.
 
 4. **Finalise** (`src/finalize.ts` + `src/finalize-inputs.ts`) — per-issue
    branch lifecycle, bot comments, label flips (`ready-for-agent` ↔
@@ -134,22 +108,18 @@ default 50, exit 3).
   finalize logic are pure; I/O goes through `MergerAdapter`/`FinalizeAdapter`/
   `ResolveAdapter` etc. Table-test the pure layer; don't mock `gh`/`git` if the
   decision can be tested directly. Real-adapter argv is table-tested through
-  exec seams (`forge-verify.test.ts`, `gate-stack.test.ts`, `gh-argv.test.ts`);
-  what git/podman themselves define is asserted by *running* them
-  (`*-git.test.ts`, `*-podman.test.ts` — these self-skip at collection time
-  when the runtime is missing, and fail instead under
-  `SANDBAR_REQUIRE_PODMAN_TESTS=1`).
+  exec seams; what git/podman themselves define is asserted by *running* them
+  (`*-git.test.ts`, `*-podman.test.ts` — self-skip when the runtime is
+  missing, fail instead under `SANDBAR_REQUIRE_PODMAN_TESTS=1`).
 - **The repo sandbar operates on is not the repo the human stands in (#38).**
   `config.cwd` is the operator's real checkout; sandbar works only inside
-  `<cwd>/<workDir>`: a **bare** object cache (`repo.git`) plus worktrees,
-  threaded as one `RepoLayout`. Nothing in the state directory is
-  authoritative — `rm -rf .sandbar` costs agent time, never correctness. The
-  bare cache is a safety property: destructive ops (`branch -D`,
-  `worktree remove --force`, the force-pushed integration ref) provably cannot
-  reach the operator's refs. One hazard: `run.lock` lives in the state dir, so
-  a `git clean -x` in the checkout during a run deletes the lock out from under
-  it and replays #28's scope collision — never clean while a run is in flight.
-  Details: `src/repo-cache.ts` and `src/preflight.ts` headers.
+  `<cwd>/<workDir>` — a **bare** object cache plus worktrees, threaded as one
+  `RepoLayout` — so destructive git ops provably cannot reach the operator's
+  refs. Nothing in the state directory is authoritative: `rm -rf .sandbar`
+  costs agent time, never correctness. One hazard: `run.lock` lives there, so
+  a `git clean -x` in the checkout during a run deletes the lock out from
+  under it — never clean while a run is in flight. `src/repo-cache.ts` and
+  `src/preflight.ts` headers.
 - **Every shell-out names its repo; nothing inherits `process.cwd()` (#34),**
   and every `gh` call passes `--repo` (`src/repo-ref.ts`). Preflight verifies
   the configured tracker and the git remote agree on host and `owner/name`.
@@ -163,27 +133,19 @@ default 50, exit 3).
   under `--init` (#42), and every container gets `--image-volume=ignore` (#50)
   — see `src/agent-sandbox.ts` and `src/containers.ts` headers.
 - **The gate stack is config-driven (#24)** and `resolveGateStack` validates it
-  before the lock. `src/gate-stack.ts`'s header is authoritative for all of it:
-  lifecycle = whose failure a bringup is (D5), a red gate carries every
-  container's log tail (D9), worktree-mounting images must run as root or the
-  host uid (D3), healthcheck-based readiness with sandbar owning the schedule
-  (#43), mid-issue wedge detection (#49, #36), every podman call bounded
-  (`boundedPodman`, #26 — node's `timeout:` option is a green-on-red trap),
-  per-step `timeoutMs`, one pod per stack, mount-source preflight (#51).
+  before the lock. `src/gate-stack.ts`'s header is authoritative for the rest:
+  lifecycles, readiness, wedge detection, bounded podman calls, timeouts, one
+  pod per stack.
 - **The sandbox stack (#44).** `inSandbox: true` gate containers get a second
   copy beside the agent, in a netns chain off the sandbox container (a pod
   cannot host keep-id). Logs are followed to read-only files at
   `/sandbar/logs/<name>.log`; there is no restart. `src/sandbox-stack.ts`.
 - **An image that bakes dependencies is a function of the branch (#37, #46).**
-  `images[].rebuildOn` + fingerprint labels; the gate re-resolves per **gate
-  run** (content-addressed, scoped variant tags), the sandbox once per
-  **sandbox** with fallback to the declared tag on build failure. An
-  unbuildable image is a gate red, not a HARD-ERROR. `src/image-inputs.ts`,
-  `src/ensure-images.ts` headers.
-- **`sandbar gate` (#45)** is the one standalone runner for the same stack.
-  Exit 0 green / 1 red / 2 no-verdict; it suspends D1, the lock, preflight and
-  `sandboxHooks` deliberately, derives its own scope, and checks reuse via a
-  pod label. `src/gate-run.ts` header.
+  `images[].rebuildOn` + fingerprint labels; an unbuildable image is a gate
+  red, not a HARD-ERROR. `src/image-inputs.ts`, `src/ensure-images.ts` headers.
+- **`sandbar gate` (#45)** is the one standalone runner for the same stack; it
+  deliberately suspends D1, the lock, preflight and `sandboxHooks`.
+  `src/gate-run.ts` header.
 - **A gate verdict is about a commit.** The tree must be clean and ≡ HEAD
   (D1, #24) and HEAD must be `refs/heads/<branch>` (#27) — both re-checked
   after every implementer attempt; `sandbar gate` is the only caller allowed to
@@ -194,53 +156,27 @@ default 50, exit 3).
   `sandbar/issue-<n>-<kebab-slug>` and `sandbar/chunk-<root>-<kebab-slug>`
   (#58) — preflight cleanup, orphan sweep and worktree paths all key off them,
   so `src/naming.ts` owns both builders, both parsers and the one refglob list
-  every enumeration uses. Issue branches seed from origin, never local:
-  `origin/<sourceBranch>`, or the chunk tip for a chained chunk member (#61).
-  `ensureIssueBranch` returns the base it used (`IssueBranchBase`) and the inner
-  loop hands that same value to both prompt builders, so the tree an agent's
-  diff is measured against is by construction the tree its branch was cut from.
-  The source-branch fallback is the chunk ROOT's seed and is guarded as such: a
-  non-root member that can find no chunk branch throws `ChunkBaseMissingError`
-  (a per-issue HARD-ERROR, not a SandbarError) rather than being developed
-  against a tree missing its blockers' work. The way that happens is a chunk
-  RE-ROOTING — close a root and the survivors re-derive under a new name — and
-  the guard covers the members BEHIND the new root, not the new root itself,
-  which is indistinguishable from a fresh chunk with the facts seeding is given.
-  A host-facing hazard, so `config.ts` (`defaultLane`) and the README own it.
-- **A chunk is derived, never declared (#54 §2, #58).** `src/chunks.ts` is a
-  pure function: a chunk is a connected component of the *review-gated* issues
-  under the `## Blocked by` graph, rooted at its parentless member. Chunks are
-  never merged to accommodate an issue that straddles two — that issue is
-  blocked instead. The walk is topological because the two-chunk rule makes the
-  answer order-dependent; the header owns that argument. `IN_CHUNK_LABEL`
-  (#59) lives here too — the label a member carries once its branch has landed
-  on the chunk branch, OPEN and out of the queue; finalise applies it (#60),
-  never before the chunk branch carrying the commits is on origin. The
-  derivation itself still creates nothing: the planner turns `chunkOf` into a
-  blocker criterion and a `PlannedIssue.chunk` target, phase 2 turns that target
-  into the seed for the member's issue branch (#61), and the merge phase is what
-  makes a branch. A chunk grows one LAYER per cycle — a member is unblocked by a
-  blocker carrying `in-chunk`, applied the cycle after it landed, so members
-  planned together are always siblings. **Origin owns the chunk branch** — it is the review
-  artifact and the recovery point, so every landing bases on `origin/<chunk>`
-  and preflight fetches that namespace to reason about it.
+  every enumeration uses. Issue branches seed from origin, never local —
+  `origin/<sourceBranch>`, or the chunk tip for a chained chunk member (#61) —
+  and both prompt builders receive the same base `ensureIssueBranch` used.
+  The seeding fallback guard and the re-rooting argument are
+  `src/git-ops.ts`'s.
+- **A chunk is derived, never declared (#54 §2, #58).** A chunk is a connected
+  component of the *review-gated* issues under the `## Blocked by` graph,
+  rooted at its parentless member; an issue straddling two chunks is blocked,
+  never a reason to merge them. `src/chunks.ts` is the pure derivation and its
+  header owns the argument; `IN_CHUNK_LABEL` (#59) lives there too. **Origin
+  owns the chunk branch** — every landing bases on `origin/<chunk>` and
+  preflight fetches that namespace to reason about it.
 - **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,
-  created or updated after every landing push, listing everything the branch
-  carries — the members landing now plus `ChunkTarget.landed`, the planner's
-  snapshot of the members already holding `in-chunk` (only the plan has the
-  graph that knows them). Draft is the mechanism (#54 Q14): it disables the
-  merge button and leaves review intact. Sandbar re-titles and re-bodies, and
-  never re-drafts a PR a human made ready — that override is #64's to
-  reconcile. `src/chunk-pr.ts` owns the prose and what it may claim.
+  created or updated after every landing push; sandbar never re-drafts a PR a
+  human made ready. `src/chunk-pr.ts` owns the prose and what it may claim.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One cleanup registry owns signals and the exit (#35).** No module but
-  `src/cleanup.ts` may trap a signal or exit on one. `onCleanup` never forgets
-  an action — which is what makes registering a teardown *before* its resource
-  exists safe, and what makes a per-resource entry a leak: anything created in
-  a loop (gate stack, sandbox stack, merger worktree, a `sandbar gate` call)
-  registers with `registerDisposable` and withdraws itself when its idempotence
-  latch flips (#55).
+  `src/cleanup.ts` may trap a signal or exit on one. Anything created in a
+  loop registers with `registerDisposable` and withdraws itself when its
+  idempotence latch flips (#55).
 - **Credentials are a value, not a path (#38).** `config.env` is an allowlist
   record (empty value ⇒ inherit from `process.env`); `readEnvFile` is the
   opt-in loader. `src/env.ts`.
@@ -272,8 +208,8 @@ again only on exit 75.
   two host-only files: `gate-stack-hostpodman.test.ts` (local-client and
   systemd-session facts) and `sandbox-stack-podman.test.ts` (keep-id anchor
   chain, #44).
-- **`mergeMode` stays `direct`; hosted CI was built and removed on purpose**
-  (#39) — personal project, tests belong on host machines.
+- **`mergeMode` stays `direct` (#39)** — personal project; tests run on host
+  machines, not hosted CI.
 - **Serialize issues touching `run.ts`/`inner-loop`/`merger`** (blocked-by
   chains, not parallel): the orchestrator driving a cycle is whatever `dist/`
   held at launch, so a merged regression mis-drives the very next cycle.
