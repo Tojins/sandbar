@@ -28,7 +28,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { fetchCandidates } from "./plan-resolver.js";
+import { IN_CHUNK_LABEL } from "./chunks.js";
+import { fetchCandidates, fetchChunkMembers } from "./plan-resolver.js";
 
 const CONFIGURED = { owner: "acme", name: "app" };
 
@@ -47,14 +48,23 @@ describe("fetchCandidates names the configured repo (#34)", () => {
     // directory's `origin` — which is what real gh does when the flag is
     // absent. Modelling the fallback rather than printing a sentinel is what
     // lets the assertions below be about the WRONG repo instead of about the
-    // absence of a right one.
+    // absence of a right one. `body` carries the `--label` it was asked for,
+    // which is the only thing that distinguishes the two listings (#59).
     await writeFile(
       join(shimBin, "gh"),
       [
         "#!/bin/sh",
         'seen=""',
+        'label=""',
         "while [ $# -gt 0 ]; do",
-        '  case "$1" in --repo) seen="$2"; shift 2 ;; *) shift ;; esac',
+        '  case "$1" in',
+        '    --repo) seen="$2"; shift 2 ;;',
+        "    # Captured for #59: the two listings differ in this flag alone, and",
+        "    # a wrong label returns an empty list rather than an error — the",
+        "    # feature would simply be off, with nothing to notice.",
+        '    --label) label="$2"; shift 2 ;;',
+        "    *) shift ;;",
+        "  esac",
         "done",
         "# No --repo: resolve the repository the way gh itself does, from the",
         "# remotes of the working directory. That is what makes the",
@@ -79,7 +89,7 @@ describe("fetchCandidates names the configured repo (#34)", () => {
         '    seen="$owner/$repo"',
         "  fi",
         "fi",
-        'printf \'[{"number":1,"title":"%s","body":"","labels":[]}]\' "$seen"',
+        'printf \'[{"number":1,"title":"%s","body":"%s","labels":[]}]\' "$seen" "$label"',
       ].join("\n") + "\n",
       { mode: 0o755 },
     );
@@ -118,5 +128,21 @@ describe("fetchCandidates names the configured repo (#34)", () => {
     // `fetchCandidates` and this is what comes back.
     expect(candidates[0]?.title).not.toBe("other/wrong");
     expect(candidates[0]?.title).not.toBe("(no-remote)");
+  });
+
+  // #59 — the two listings share every argument but `--label`, which is the
+  // whole difference between "the queue" and "what has already landed on a
+  // chunk branch". Pinned here rather than left to the union in `buildPlan`:
+  // a wrong label is an empty list, not an error, so the only symptom would be
+  // a feature that quietly does nothing.
+  it("lists the queue on `ready-for-agent` and chunk members on `in-chunk`", async () => {
+    const queue = await fetchCandidates(CONFIGURED);
+    const members = await fetchChunkMembers(CONFIGURED);
+
+    expect(queue[0]?.body).toBe("ready-for-agent");
+    expect(members[0]?.body).toBe(IN_CHUNK_LABEL);
+    // And the chunk-member listing names the configured repo too — it is a
+    // second `gh issue list`, and #34 applies to it identically.
+    expect(members[0]?.title).toBe("acme/app");
   });
 });

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { IN_CHUNK_LABEL } from "./chunks.js";
 import {
+  type IssueFacts,
   type IssueState,
   type IssueSummary,
   type Plan,
@@ -20,12 +22,25 @@ function issue(
   };
 }
 
-const closed = (...ns: number[]): ReadonlyMap<number, IssueState> =>
-  new Map(ns.map((n) => [n, "CLOSED"]));
+const closed = (...ns: number[]): ReadonlyMap<number, IssueFacts> =>
+  new Map(ns.map((n) => [n, { state: "CLOSED" as IssueState, labels: [] }]));
 const states = (
   o: Record<number, IssueState>,
-): ReadonlyMap<number, IssueState> =>
-  new Map(Object.entries(o).map(([n, s]) => [Number(n), s]));
+): ReadonlyMap<number, IssueFacts> =>
+  new Map(
+    Object.entries(o).map(([n, s]) => [Number(n), { state: s, labels: [] }]),
+  );
+// The authoritative facts of a blocker that has landed on its chunk's branch:
+// still OPEN, carrying `in-chunk` and nothing else.
+const facts = (
+  o: Record<number, { state?: IssueState; labels?: string[] }>,
+): ReadonlyMap<number, IssueFacts> =>
+  new Map(
+    Object.entries(o).map(([n, f]) => [
+      Number(n),
+      { state: f.state ?? "OPEN", labels: f.labels ?? [] },
+    ]),
+  );
 
 // The plan half of the resolution, for the selection tests below — they are
 // about which issues get picked, and every one of them predates lanes. The
@@ -354,5 +369,195 @@ describe("resolvePlan lanes (#57)", () => {
 
     expect(r.plan.map((p) => p.id)).toEqual(["1", "3", "5"]);
     expect(r.heldForReview).toEqual([2, 4]);
+  });
+});
+
+// #59 — the second satisfaction clause, and the de-queue that makes it
+// necessary. Chunk DERIVATION is chunks.test.ts's job; these are about the
+// planner's use of it.
+//
+// Note what the observable is. The holding rule still keeps every review-gated
+// issue out of the plan, so a chunk member that clears the dependency gate does
+// not get planned — it gets HELD, and `heldForReview` is documented to count
+// only issues that were otherwise eligible. So "the blocker was satisfied" and
+// "the issue appears in heldForReview" are the same statement today, and become
+// "it appears in the plan" when a later issue lifts the hold.
+describe("resolvePlan in-chunk blockers (#59)", () => {
+  const inChunk = { labels: [IN_CHUNK_LABEL] };
+
+  it("satisfies a blocker that is `in-chunk` in the SAME chunk", () => {
+    // #10 landed on the chunk branch; #11 is built on it and is in that same
+    // chunk by construction, so #10's commits are already under its feet.
+    const r = resolvePlan(
+      [issue(10, "", inChunk), issue(11, "## Blocked by\n- #10\n")],
+      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.heldForReview).toEqual([11]);
+  });
+
+  it("does not satisfy a blocker that is merely OPEN", () => {
+    // The same graph with the label taken away: #10 is open, unlanded, and
+    // still blocking. Only #10 itself is held.
+    const r = resolvePlan(
+      [issue(10, ""), issue(11, "## Blocked by\n- #10\n")],
+      facts({ 10: {} }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.heldForReview).toEqual([10]);
+  });
+
+  it("keeps cross-chunk dependencies strict: two `in-chunk` parents, two chunks", () => {
+    // #30 straddles two chunks, so `deriveChunks` gives it none — and a
+    // dependent with no chunk shares one with nobody. Both its blockers have
+    // landed, and it still waits, exactly as the two-chunk-parent rule says.
+    const r = resolvePlan(
+      [
+        issue(10, "", inChunk),
+        issue(20, "", inChunk),
+        issue(30, "## Blocked by\n- #10\n- #20\n"),
+      ],
+      facts({
+        10: { labels: [IN_CHUNK_LABEL] },
+        20: { labels: [IN_CHUNK_LABEL] },
+      }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.heldForReview).toEqual([]);
+  });
+
+  it("does not satisfy an `in-chunk` blocker that is in no chunk sandbar can see", () => {
+    // #99 is not in the listing at all, so it has no lane and no chunk. The
+    // label alone is not the criterion — the shared branch is.
+    const r = resolvePlan(
+      [issue(11, "## Blocked by\n- #99\n")],
+      facts({ 99: { labels: [IN_CHUNK_LABEL] } }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.heldForReview).toEqual([]);
+  });
+
+  it("still satisfies a CLOSED blocker, label or no label", () => {
+    const r = resolvePlan(
+      [issue(11, "## Blocked by\n- #10\n")],
+      facts({ 10: { state: "CLOSED" } }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.heldForReview).toEqual([11]);
+  });
+
+  it("propagates one member at a time along a chain", () => {
+    // #10 landed, #11 can be worked, #12 cannot yet: its own blocker #11 is
+    // open and has not landed on the chunk branch.
+    const r = resolvePlan(
+      [
+        issue(10, "", inChunk),
+        issue(11, "## Blocked by\n- #10\n"),
+        issue(12, "## Blocked by\n- #11\n"),
+      ],
+      facts({ 10: { labels: [IN_CHUNK_LABEL] }, 11: {}, 12: {} }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.heldForReview).toEqual([11]);
+  });
+
+  it("drops an `in-chunk` candidate from the plan — the label is the de-queue", () => {
+    // Stated on the AUTO lane so nothing else can be the reason: without the
+    // in-chunk drop, #10 is an ordinary unblocked candidate and plans.
+    const r = resolvePlan(
+      [issue(10, "", inChunk), issue(11, "")],
+      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      new Set(),
+      3,
+      "auto",
+    );
+
+    expect(r.plan.map((p) => p.id)).toEqual(["11"]);
+  });
+
+  it("does not count an `in-chunk` candidate as held for review", () => {
+    // It is review-gated and out of the plan, but it is not waiting on a human
+    // to be worked — it has already been worked. Reporting it as held would
+    // make the held list grow with every member a chunk lands.
+    const r = resolvePlan(
+      [issue(10, "", inChunk)],
+      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.plan).toEqual([]);
+    expect(r.heldForReview).toEqual([]);
+  });
+
+  it("reads the label from the authoritative facts when the listing lags", () => {
+    // The search index still shows #10 as it was before the flip. GraphQL is
+    // strongly consistent, so it decides — both that #10 is out of the plan and
+    // that #11's blocker is satisfied.
+    const r = resolvePlan(
+      [issue(10, ""), issue(11, "## Blocked by\n- #10\n")],
+      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.plan).toEqual([]);
+    expect(r.heldForReview).toEqual([11]);
+  });
+
+  it("reads the label from the listing when the facts batch missed the issue", () => {
+    // The other direction of the same fail-safe: a state-fetch miss must not
+    // resurrect a landed member into the plan.
+    const r = resolvePlan(
+      [issue(10, "", inChunk), issue(11, "## Blocked by\n- #10\n")],
+      new Map(),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.plan).toEqual([]);
+    expect(r.heldForReview).toEqual([11]);
+  });
+
+  it("is inert with no `in-chunk` label anywhere, on either lane", () => {
+    const candidates = [
+      issue(10, ""),
+      issue(11, "## Blocked by\n- #10\n"),
+      issue(12, "## Blocked by\n- #9\n"),
+    ];
+
+    const auto = resolvePlan(candidates, facts({ 9: { state: "CLOSED" } }));
+    expect(auto.plan.map((p) => p.id)).toEqual(["10", "12"]);
+
+    const review = resolvePlan(
+      candidates,
+      facts({ 9: { state: "CLOSED" } }),
+      new Set(),
+      3,
+      "review",
+    );
+    expect(review.plan).toEqual([]);
+    expect(review.heldForReview).toEqual([10, 12]);
   });
 });
