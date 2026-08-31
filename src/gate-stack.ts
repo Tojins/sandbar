@@ -118,7 +118,8 @@ const MAX_BUFFER = 50 * 1024 * 1024;
 // hung postReadyCommand would report a seeded database. All three were live —
 // the readiness probe and the postReadyCommands have carried `timeout:` since
 // #24 and neither has ever been able to fail. Pinned in
-// gate-stack-podman.test.ts, because it is a fact about podman, not about node.
+// gate-stack-timeout-podman.test.ts, because it is a fact about podman, not
+// about node.
 //
 // So the deadline is ours, the signal is SIGKILL (which podman cannot exit 0
 // from, and which cannot be ignored — a client that swallowed SIGTERM would
@@ -1594,7 +1595,7 @@ export type HealthVerdict = "healthy" | "unhealthy" | "abandoned";
 // this feature, and a real podman will not produce a timed-out `healthcheck
 // run` or a SIGKILLed client on demand — the same argument `containerState`
 // makes for `PodmanProbe`. What only a real podman can produce, an actually
-// unhealthy container, is pinned in gate-stack-podman.test.ts.
+// unhealthy container, is pinned in gate-stack-health-podman.test.ts.
 export async function pollUntilHealthy(
   containerName: string,
   c: ResolvedStackContainer,
@@ -1664,7 +1665,8 @@ export type ContainerState = "running" | "stopped" | "gone" | "unknown";
 // job is to classify what podman answers, and the answers that matter most are
 // the ones a real podman will not produce on demand — a timed-out inspect, a
 // kill, an exit code `exists` does not document. Every other podman call in
-// this module is exercised against a live podman in gate-stack-podman.test.ts;
+// this module is exercised against a live podman in the gate-stack podman
+// shards (slice map in gate-stack-podman.test-util.ts's header);
 // this one branch cannot be, and it is the branch whose misfire is a
 // HARD-ERROR storm, so it gets an injectable probe instead (the same argument
 // `realVerifyAdapter`'s `exec` and `checkWorktreeImageUids`' `UidProbe` make).
@@ -2256,8 +2258,8 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
 //
 // The `podman exec` client is dead by the time this runs, and that is all the
 // kill accomplished: the process it started keeps running in the container
-// (pinned in gate-stack-podman.test.ts, for both the timer's SIGKILL and the
-// SIGTERM node sends on a maxBuffer overflow). Leaving it there means a wedged
+// (pinned in gate-stack-timeout-podman.test.ts, for both the timer's SIGKILL
+// and the SIGTERM node sends on a maxBuffer overflow). Leaving it there means a wedged
 // suite burning CPU beside the next attempt's gate and, for anything stateful,
 // skewing what that gate measures — the failure the timeout was supposed to
 // END, made quieter rather than fixed.

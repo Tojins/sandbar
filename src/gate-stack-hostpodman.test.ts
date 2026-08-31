@@ -29,7 +29,8 @@
 // and both of those tests. The property that replaces it — a dead port and a
 // live one separating outright, because the rootless forwarder is not in the
 // path — is asserted INSIDE the container, so it needs no local client and
-// lives in gate-stack-podman.test.ts where the gate runs it every attempt. That
+// lives in gate-stack-health-podman.test.ts where the gate runs it every
+// attempt. That
 // is a strict improvement in coverage, not a relocation.
 //
 // Both remaining guards are the same guard: this file runs only when the client
@@ -103,7 +104,7 @@ afterAll(async () => {
 // option (#26). This is about PODMAN, not about node, and it was discovered by
 // running it — which is the only reason the option looks safe in a diff. The
 // sibling assertions (the in-container process surviving the client's death)
-// hold under a remote client too and stayed in gate-stack-podman.test.ts.
+// hold under a remote client too and live in gate-stack-timeout-podman.test.ts.
 describe.runIf(available)("podman exec under a killed local client", () => {
   const NAME = cName("killprobe");
 

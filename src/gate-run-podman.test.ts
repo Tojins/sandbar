@@ -2,7 +2,7 @@
 //
 // The pure layers are pinned elsewhere — `parseArgs` in cli.test.ts,
 // `gateReuseToken` in gate-run.test.ts, the reuse/keep/dirty accommodations in
-// gate-stack-podman.test.ts. What only a real run can show is the thing a
+// gate-stack-standalone-podman.test.ts. What only a real run can show is the thing a
 // consumer actually invokes: does the command produce the exit code its
 // contract promises, and does it leave nothing behind.
 //
