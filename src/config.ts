@@ -574,10 +574,14 @@ export type RunConfig = {
   // `auto-land` label on a descendant is overridden (loudly — sandbar says so
   // on the issue). `lanes.ts` owns the whole argument.
   //
-  // Until chunk machinery lands (#54), a review-gated issue is EXCLUDED from
-  // the plan: there is nowhere for it to land yet. So `defaultLane: "review"`
-  // today means "queue this work for a human", not "work it and wait" — see
-  // plan-resolver.ts.
+  // A review-gated issue is worked and lands on its CHUNK's branch (#60) —
+  // `sandbar/chunk-<root>-<slug>`, pushed to origin, closed by nothing until a
+  // human reviews it. Two things a host has to have for that: the `in-chunk`
+  // label must EXIST in the repo (sandbar never creates labels, and this one is
+  // not configurable — see chunks.ts), and whoever reviews those branches has
+  // to know they are theirs to land. Chained members — a review-gated issue
+  // blocked by another one — are still held out of the plan until #61, so a
+  // chain progresses one issue per cycle.
   readonly defaultLane?: Lane;
 };
 

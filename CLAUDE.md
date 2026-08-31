@@ -68,9 +68,13 @@ an exit condition fires.
    dependent — cross-chunk edges stay strict. That second clause is why the
    planner also lists the `in-chunk` issues back in (`fetchChunkMembers`) and
    drops them by label: out of the graph, a chunk re-roots around its surviving
-   members and a descendant of a landed issue reads as auto. Holding rule until
-   chunks exist (#54): a review-gated issue is held out of the plan. All inert
-   under the default lane, `auto`.
+   members and a descendant of a landed issue reads as auto. A review-gated
+   issue plans iff it is its chunk's ROOT (#60) — the only member whose issue
+   branch, seeded from `origin/<sourceBranch>`, agrees with the base its chunk
+   branch is created at; chained members and issues with no chunk stay held
+   (`heldForReview`) until #61. Each planned issue carries its `chunk` target,
+   which is how phase 3 knows where to land it. All inert under the default
+   lane, `auto`.
 
 2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
    planned issue runs in parallel in its own agent sandbox + per-issue gate
@@ -98,11 +102,18 @@ an exit condition fires.
    whole check-reading safety argument (pagination, settling, skipped ≠ pass,
    commit statuses, `requiredChecks`, parked vs fatal, `MergerError.partial`)
    is in `src/forge-verify.ts` and `src/merger.ts` headers. Its invariant: no
-   unknown verdict ever lands.
+   unknown verdict ever lands. **Two targets since #60**: an issue carrying a
+   `chunk` is merged onto `sandbar/chunk-<root>-<slug>` (created at
+   `origin/<sourceBranch>` when origin has none) and that branch is pushed —
+   directly, in both merge modes, because the forge gates what reaches the
+   *source* branch and a chunk branch reaches a human. Chunk groups land first
+   and the worktree returns to its entry sha, so the source pass and the
+   `landed` argument about what a partial may claim are untouched.
 
 4. **Finalise** (`src/finalize.ts` + `src/finalize-inputs.ts`) — per-issue
    branch lifecycle, bot comments, label flips (`ready-for-agent` ↔
-   `labels.needsInfo`/`labels.agentStuck` are the only labels sandbar applies).
+   `labels.needsInfo`/`labels.agentStuck`, plus `in-chunk` for a chunk-landed
+   member, are the only labels sandbar applies).
    Runs in **two passes straddling the merge** (#30): Phase-2 terminals are
    finalised before Phase 3 so a merge-phase throw cannot discard them.
 
@@ -188,10 +199,13 @@ default 50, exit 3).
   blocked instead. The walk is topological because the two-chunk rule makes the
   answer order-dependent; the header owns that argument. `IN_CHUNK_LABEL`
   (#59) lives here too — the label a member carries once its branch has landed
-  on the chunk branch, OPEN and out of the queue. Derivation still creates
-  nothing: the planner reads `chunkOf` for its blocker criterion, but the
-  holding rule keeps every review-gated issue out of the plan, so no chunk
-  branch exists and nothing applies the label yet.
+  on the chunk branch, OPEN and out of the queue; finalise applies it (#60),
+  never before the chunk branch carrying the commits is on origin. The
+  derivation itself still creates nothing: the planner turns `chunkOf` into a
+  blocker criterion and a `PlannedIssue.chunk` target, and the merge phase is
+  what makes a branch. **Origin owns the chunk branch** — it is the review
+  artifact and the recovery point, so every landing bases on `origin/<chunk>`
+  and preflight fetches that namespace to reason about it.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One cleanup registry owns signals and the exit (#35).** No module but
