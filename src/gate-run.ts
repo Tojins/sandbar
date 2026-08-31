@@ -1,100 +1,40 @@
-// `sandbar gate` — the gate stack, and nothing else (#45).
+// `sandbar gate` — the standalone runner for the gate stack, and nothing else
+// (#45): the same `startStack` / `runGate` / `stop` the inner loop drives,
+// minus the run-shaped scaffolding, plus four narrow accommodations argued at
+// their own definitions — `allowDirtyWorktree` (D1), `reuseToken` and
+// `keepAlive` (gate-stack.ts's `StackOptions`), and `ensureImages`'
+// `rebuildInPlace`.
 //
-// The gate stack is the one part of sandbar a host repo needs OUTSIDE a sandbar
-// run: on a laptop before pushing, and in CI. Until this existed it was
-// reachable only THROUGH a run — issue selection, worktrees, agents, the
-// single-instance lock — so every consumer wrote a second implementation of it
-// in bash against the same `gateStack` literal. The observed one was 219 lines
-// with its own readiness loop and, having no pods, its own topology; the shared
-// config file then guaranteed the same DESCRIPTION of the stack and not the
-// same behaviour, and the gap between the two is where that repo's bugs lived.
+// Deliberate omissions:
+//   - NO LOCK: nothing here is shared with a run (podman resources in a scope
+//     no run computes, `gateScope`; nothing written under `<workDir>`), and a
+//     lock would refuse to run while a sandbar run is in flight — exactly when
+//     a developer wants a verdict.
+//   - NO `gh`, issue resolution, or branch machinery. `resolveConfig` still
+//     requires `ghOwner`/`ghRepo` because it is the same function the run uses.
+//   - NO PREFLIGHT; the three checks that do bear on running a stack are
+//     re-asked directly: podman usable, every referenced non-built image
+//     pulled, D3's root-or-host-uid rule over worktree-mounting images.
+//   - NO `sandboxHooks`: `onWorktreeReady` here would reinstall dependencies
+//     in the operator's own checkout every invocation. A CI job starting from
+//     a bare checkout runs its own install line before `npx sandbar gate`.
 //
-// So this module is deliberately thin. It is the same `startStack` /
-// `runGate` / `stop` the inner loop drives, with the run-shaped scaffolding
-// removed and four narrow accommodations, each of which suspends a rule stated
-// elsewhere and is therefore argued at its own definition rather than here:
-// `allowDirtyWorktree` (D1), `reuseToken` and `keepAlive` (both in
-// `gate-stack.ts`'s `StackOptions`), and `ensureImages`' `rebuildInPlace`.
+// Residuals: `cleanup.ts`'s traps still `process.exit` on
+// `uncaughtException`/`unhandledRejection` (#35) — the one place this
+// command's "returns rather than exits" contract does not reach an embedding
+// host. Under `--keep`, renamed `attempt` containers and the content-addressed
+// variant images outlive the invocation unswept (no lock, so a sweep could not
+// tell debris from a live sibling invocation); bounded by distinct input
+// states, and cleared by a token change or `pod rm -f`. `ensureImages` runs
+// against the GATED WORKTREE with `mustExist: true`: a declared `rebuildOn`
+// path missing there is reported as a typo rather than left silently inert
+// (#37) — including under `--worktree <other>`.
 //
-// ---------------------------------------------------------------------------
-// What it does NOT do, and why each omission is safe
-// ---------------------------------------------------------------------------
-//   - NO LOCK. `run.lock` exists so two orchestrators cannot drive one workdir;
-//     taking it here would make `sandbar gate` refuse to run while a sandbar run
-//     is in flight, which is exactly when a developer wants a verdict. Nothing
-//     this command touches is shared with a run: the podman resources are in a
-//     scope no run computes (`gateScope`), and it writes nothing under
-//     `<workDir>` at all — no logs, no state, no branches.
-//   - NO `gh`, NO ISSUE RESOLUTION, NO BRANCH MACHINERY. It never reads the
-//     tracker and never moves a ref. `resolveConfig` still requires `ghOwner` /
-//     `ghRepo` because it is the same function the run uses and the config is
-//     one file; that costs a consumer nothing, since a repo with a `gateStack`
-//     to run has them already.
-//   - NO PREFLIGHT. Preflight is about the repository — the cache, the source
-//     branch, the tracker, credentials — and none of it bears on running a
-//     stack. The three checks that DO are re-asked here directly: is podman
-//     usable at all, is every referenced image sandbar does not build already
-//     pulled, and D3's root-or-host-uid rule over the worktree-mounting images.
-//   - NO `sandboxHooks`, and this is the omission a consumer will actually
-//     trip over, so it is stated rather than left to be discovered.
-//     `onWorktreeReady` (a repo's `npm ci`, typically) runs when SANDBAR
-//     creates a worktree; here the tree already existed and belongs to the
-//     operator. Running it would mean `sandbar gate` reinstalling dependencies
-//     in someone's own checkout every invocation — slow, surprising, and a
-//     hook whose name is then false. A CI job that starts from a bare checkout
-//     therefore runs its own install line before `npx sandbar gate`, which is
-//     one line and visible, rather than inheriting one from a field named for
-//     a different moment.
-//
-// ---------------------------------------------------------------------------
-// Residuals, recorded rather than discovered
-// ---------------------------------------------------------------------------
-//   - It DOES install `cleanup.ts`'s traps, which register
-//     `uncaughtException`/`unhandledRejection` handlers that `process.exit`.
-//     That is the sanctioned route (no module but `cleanup.ts` may trap a
-//     signal or exit on one, #35) and `run()` does the same — but it is the one
-//     place this command's "returns rather than exits" contract does not reach,
-//     so an embedding host inherits an exit on a fault raised somewhere else
-//     entirely. Stated because it slightly qualifies "a thin bin can do nothing
-//     an embedding host cannot"; not worth a second cleanup mechanism to close.
-//   - A stack adopted under `--keep` keeps whatever `attempt` containers the
-//     invocation that created it left in the pod. They are recreated by name on
-//     every gate run, so a RENAMED one is never recreated and never removed
-//     either: the reuse token covers only the `issue` containers, deliberately
-//     (see `gateReuseToken`), and nothing sweeps the gate scope, deliberately
-//     (there is no lock, so a sweep could not tell debris from a live sibling
-//     invocation). Any token change or a `pod rm -f` clears it. It is the one
-//     class of debris no report ever names, and it costs a stopped container.
-//     Its IMAGES half is the same bullet: `--keep` skips `removeBranchImages`
-//     unconditionally, so a kept invocation's content-addressed variants
-//     outlive it and nothing sweeps this scope either. Bounded by the number of
-//     distinct input states rather than by invocations, and reused by the next
-//     gate over the same inputs, which is why it is accepted rather than
-//     closed — see the teardown for why the flag, and not "did a stack survive",
-//     is what it keys on.
-//   - `ensureImages` is handed the GATED WORKTREE as its context root, so
-//     `fingerprintImageInputs` runs with `mustExist: true` against a tree that
-//     is not necessarily the one the config sits in. That rule is documented
-//     one file over as being for the host checkout — a declared `rebuildOn`
-//     path missing there is a typo, while a branch is allowed to DELETE a
-//     lockfile — and the typo reading is the right one here: this command has
-//     exactly one tree, it is the tree the config is about in the default
-//     invocation, and an inert declaration silently gating every commit alike
-//     is the failure #37 exists to prevent. Under `--worktree <other>` the
-//     other reading applies and a deleted input is reported as a typo; the
-//     alternative is a gate that goes quietly inert on the tree the operator
-//     pointed it at, which is worse in the same direction.
-//
-// ---------------------------------------------------------------------------
-// Concurrency, stated rather than guarded
-// ---------------------------------------------------------------------------
-// Two `sandbar gate` invocations over the SAME worktree collide: they compute
-// one scope (they must, or reuse could not work), so the second force-removes
-// the first's pod mid-verdict and the first reports a red that is an artefact.
-// That is the bash script's behaviour too, and closing it means a lock, which
-// is the thing this command exists to do without. Two invocations over
-// DIFFERENT worktrees are disjoint by construction, including a `sandbar gate`
-// beside a live `sandbar` run — see `gateScope`.
+// Concurrency, stated rather than guarded: two invocations over the SAME
+// worktree collide — they compute one scope (they must, or reuse could not
+// work), so the second force-removes the first's pod mid-verdict; closing that
+// means a lock, the thing this command exists to do without. Different
+// worktrees are disjoint by construction — see `gateScope`.
 
 import { realpathSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";

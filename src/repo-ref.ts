@@ -1,28 +1,14 @@
 // The forge repository sandbar's tracker calls address, and the one function
 // that decides whether the git remote agrees with it (#34).
 //
-// Every `gh` call sandbar makes now names its repository with
-// `--repo <owner>/<name>`, built from `config.ghOwner`/`config.ghRepo`. Before
-// that, all of them except `forge-verify.ts`'s identified the repo the way `gh`
-// does by default: from the git remotes of the directory the command ran in.
-// #34 fixed the *directory* (nothing inherits `process.cwd()` any more) but not
-// the *class* — it moved the answer from "wherever the process was launched" to
-// "wherever the cache's origin points", which is still not the configured repo
-// and still nothing anyone declared.
-//
-// Naming the repo is the structural fix: `ghOwner`/`ghRepo` are required config
-// fields, so tracker access becomes a function of the config file rather than
-// of a directory's remotes, and `fetchCandidates` (the planner queue) and
-// `fetchIssueStates` (the authoritative state batch) can no longer resolve the
-// same issue numbers in two different repositories.
-//
-// What that leaves — and why `parseRepoFromRemoteUrl` exists — is the OTHER
-// half of the same disagreement. `gh` now follows the config; `git push` still
-// follows the cache's `origin`, which is copied from the operator's checkout.
-// If those two name different repositories, sandbar lands code in one and closes
-// the issues in the other, silently, and `mergeMode: "verified"` polls checks
-// for a sha the configured repo has never seen. So preflight compares them
-// once, loudly, at startup.
+// Every `gh` call sandbar makes names its repository with
+// `--repo <owner>/<name>`, built from `config.ghOwner`/`config.ghRepo` —
+// tracker access is a function of the config file, never of a directory's
+// remotes. `git push` still follows the cache's `origin`, copied from the
+// operator's checkout; if those two name different repositories, sandbar lands
+// code in one and closes the issues in the other, silently. So preflight
+// compares them once, loudly, at startup — which is why
+// `parseRepoFromRemoteUrl` exists.
 
 export type RepoRef = {
   readonly owner: string;

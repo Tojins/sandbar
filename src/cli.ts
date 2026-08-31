@@ -1,54 +1,31 @@
 #!/usr/bin/env node
 // The `sandbar` bin (#38).
 //
-// Sandbar is a library WITH a bin, not a CLI with an API: `run(config)` is
-// still the contract and `index.ts` is unchanged. What the bin removes is the
-// per-host entry-point file. Before it, being a library meant every consumer
-// authored and committed its own runner — which is how a repo ends up with a
-// `sandbar/` directory beside its `.sandbar/` one, two sandbar directories in a
-// root for a package that should need neither.
+// Sandbar is a library WITH a bin, not a CLI with an API: `run(config)` is the
+// contract and `index.ts` is unchanged. `run()` already owns its exit codes
+// and fault printing; the only thing this file adds is the same treatment for
+// throws that escape BEFORE that handler exists — chiefly `resolveConfig`'s
+// validation, which fires before the lock.
 //
-// It is thin because `run()` is already CLI-shaped: it owns its exit codes and
-// carries the top-level handler that prints a `SandbarError` as its message
-// alone and anything else with a stack. The only thing this file adds is that
-// same treatment for throws that escape BEFORE that handler exists — chiefly
-// `resolveConfig`'s validation, which fires before the lock. That is package
-// code, not copy-paste every host maintains its own drifting copy of.
-//
-// ---------------------------------------------------------------------------
-// The four constraints, written down so they are decisions and not drift
-// ---------------------------------------------------------------------------
+// The four constraints, written down so they are decisions and not drift:
 //   - EXACTLY ONE flag that carries configuration: `--config`. Every flag that
-//     duplicates a config field creates a second source of truth, which is the
-//     thing this issue removes. `--help` and `--version` duplicate nothing and
-//     answer questions the config cannot, so they are not exceptions to that
-//     rule — there is still only one way to configure a run. Neither are
-//     `gate`'s `--worktree` and `--keep` (#45), and it is worth saying why,
-//     because a subcommand with flags is what that rule looks like breaking:
-//     a run derives the tree it gates from an issue branch and tears the stack
-//     down with the issue, so there is no `RunConfig` field for either to
-//     duplicate. They name what a stack-only invocation has to be told and the
-//     config has no opinion about.
+//     duplicates a config field creates a second source of truth. (`--help`,
+//     `--version` and `gate`'s `--worktree`/`--keep` (#45) duplicate nothing —
+//     the latter name what a stack-only invocation has to be told and the
+//     config has no opinion about.)
 //   - NO config search up the directory tree. `./sandbar.config.mjs` or an
-//     explicit path. "Which config did it find" is not a question worth the
-//     ergonomics, and an ambiguous answer to it is a run against the wrong
-//     repo.
-//   - `.mjs`, not `.ts`. `engines` is node >= 20, which cannot import
-//     TypeScript without a loader. The file is imported, not parsed, so it
-//     stays a PROGRAM: computed image tags, a gate stack read from JSON, a
-//     shared constant — all of it survives, the way vite.config.js and
-//     eslint.config.js do and package.json does not.
+//     explicit path — an ambiguous "which config did it find" is a run against
+//     the wrong repo.
+//   - `.mjs`, not `.ts` (node >= 20 cannot import TypeScript without a
+//     loader). The file is imported, not parsed, so it stays a PROGRAM.
 //   - The default export is the config OBJECT. A zero-argument factory is not
-//     accepted, and the refusal is deliberate rather than lazy: config files
-//     are ESM and may use top-level await, so a factory buys nothing and would
-//     leave two shapes for a consumer to guess between.
+//     accepted: config files may use top-level await, so a factory buys
+//     nothing and would leave two shapes for a consumer to guess between.
 //
-// `cwd` is where the prize is. It defaults to the directory holding the
-// resolved config file, not to `process.cwd()` — so "you must launch sandbar
-// from the repo it operates on" is not fixed, it is unreachable. There is
-// nowhere to launch from that gets it wrong. `resolveConfig` keeps
-// `process.cwd()` as its own default for programmatic callers, which is right
-// for them and wrong here.
+// `cwd` defaults to the directory holding the resolved config file, not to
+// `process.cwd()` — there is nowhere to launch from that gets it wrong.
+// (`resolveConfig` keeps `process.cwd()` as its own default for programmatic
+// callers.)
 
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";

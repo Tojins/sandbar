@@ -1,51 +1,28 @@
-// Inner-loop runner — I/O glue around the pure state machine.
+// Inner-loop runner — I/O glue around the pure state machine
+// (inner-loop-machine.ts). All branching decisions live in the SM; this file
+// executes its actions, feeds results back as events, and translates the
+// verdict to a Terminal. On HARD-ERROR, decideAfterTerminal may dispose the
+// sandbox and restart from attempt 1 with a fresh one (up to
+// HARD_ERROR_MAX_RETRIES times).
 //
-// Per issue:
-//   1. Prepare the issue worktree, then set up an agent sandbox + the gate
-//      stack in parallel. The worktree comes FIRST (not in the parallel pair,
-//      #20): stack mounts bind-mount fixture files from it, and mount sources
-//      are read at container start — only the expensive container bringups
-//      overlap. That ordering is also what makes the sandbox's own image
-//      resolvable against the BRANCH (#46): the files a `rebuildOn` entry
-//      hashes are on disk before `createSandbox` is called. If the consumer
-//      marked any container `inSandbox`, the SANDBOX stack (#44) — the same
-//      containers again, in the agent container's own network namespace, so the
-//      agent can run the application before the gate does — is brought up
-//      INSIDE that first entry, through `beforeSandboxReady`: the siblings
-//      attach to the agent container, so it has to exist first, and a
-//      consumer's `onSandboxReady` hook is where the migration that wants them
-//      runs, so they have to be up before it. Not a third parallel entry for
-//      the same reason, and no serialisation against the gate stack either —
-//      it is still the same promise.
-//   2. Drive the state machine (inner-loop-machine.ts) to a verdict by
-//      executing the action it emits and feeding the result back as an event.
-//   3. Translate the verdict to a Terminal.
-//   4. If the verdict is HARD-ERROR, the outer loop here asks
-//      decideAfterTerminal whether to dispose the sandbox and restart from
-//      attempt 1 with a fresh one (up to HARD_ERROR_MAX_RETRIES times).
-//
-// Reviewer is strictly advisory and never commits — there is no gate-2 and
-// no revert-after-reviewer logic. All branching decisions live in the state
-// machine. This file only does I/O.
+// Setup ordering is load-bearing: the issue worktree comes FIRST, then agent
+// sandbox + gate stack in parallel (#20 — mount sources are read at container
+// start; #46 — the files a `rebuildOn` entry hashes must be on disk before
+// `createSandbox`). Containers marked `inSandbox` (#44) come up INSIDE the
+// sandbox entry via `beforeSandboxReady`: they attach to the agent
+// container's netns, so it must exist first, and they must be up before a
+// consumer's `onSandboxReady` hook runs.
 //
 // One deliberate exception to "all branching lives in the SM": the promise
-// nudge in runImplementer. An implementer that ends with no `<promise>` tag at
-// all gets one `--continue` follow-up in the same conversation before the
-// NO-SIGNAL reaches the state machine — the SM never sees the nudge, only the
-// re-parsed result. It sits here rather than in the SM because it is not a
-// transition: it is part of OBSERVING the implementer, the same way
-// dirtyWorktreePaths is — the runner finishing an incomplete reading of the
-// agent's answer before reporting it. The full argument (why missing-tag only,
-// why one shot, why a nudge throw propagates) is at the call site.
+// nudge in runImplementer. An implementer that ends with no `<promise>` tag
+// at all gets one `--continue` follow-up before the NO-SIGNAL reaches the SM
+// — the SM never sees the nudge, only the re-parsed result. The full argument
+// is at the call site.
 //
-// Which includes the one judgment this file used to make silently: what a
-// FAILED reviewer run means (#41). It caught the error, wrote the message into
-// `reviewerStdout`, and let the verdict parser turn it into CHANGES-REQUESTED —
-// so a harness fault arrived at the state machine wearing a verdict's clothes
-// and was charged a review round. The policy now lives in reviewer-run.ts and
-// its outcome is two distinct events; this file's remaining job is to adapt
-// `sandbox.run`'s throw into the shape that policy classifies, which is why the
-// try/catch below returns a value instead of substituting prose.
+// What a FAILED reviewer run means is reviewer-run.ts's policy (#41); this
+// file only adapts `sandbox.run`'s throw into the shape that policy
+// classifies, which is why the try/catch below returns a value instead of
+// substituting prose.
 
 import { join } from "node:path";
 

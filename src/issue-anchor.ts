@@ -1,16 +1,12 @@
 // Issue text for agent prompts, fetched via `gh issue view --json`.
 //
-// History: this used to shell out to `gh issue view <id> --comments` and embed
-// the stdout verbatim. That flag is TTY-sensitive: when piped (which execFile
-// always is), gh prints ONLY the comment thread — so a comment-less issue
-// produced an EMPTY anchor and the agents worked from the issue title alone.
-// The --json form is TTY-independent and version-stable; rendering is a pure
-// function (`renderIssueText`) so the prompt shape is table-testable.
+// Rejected: `gh issue view --comments` — that flag is TTY-sensitive: piped, gh
+// prints ONLY the comment thread, so a comment-less issue yields an EMPTY
+// anchor. The --json form is TTY-independent; rendering is a pure function
+// (`renderIssueText`) so the prompt shape is table-testable.
 //
-// Fetch/parse failures THROW (SandbarError): an agent run without the issue
-// spec is exactly the failure mode this module exists to prevent, so a missing
-// anchor must halt loudly rather than degrade into a placeholder string the
-// agent ignores.
+// Fetch/parse failures THROW (SandbarError): a missing anchor must halt loudly
+// rather than degrade into a placeholder string the agent ignores.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";

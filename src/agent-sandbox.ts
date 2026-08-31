@@ -1,54 +1,37 @@
-// In-house replacement for the @ai-hero/sandcastle subset sandbar consumes.
+// In-house replacement for the @ai-hero/sandcastle subset sandbar consumes
+// (drops the ~72 MB Effect runtime; authoritative behaviour notes live in
+// docs/agent-sandbox/01-07). Reproduces ONLY sandbar's exercised path: a
+// bind-mount podman provider, an explicit pre-existing branch,
+// `maxIterations: 1`, no session capture. The public surface is the five
+// symbols sandbar imports (`createSandbox`, `podman`, `claudeCode`, types
+// `Sandbox`/`SandboxHooks`).
 //
-// Drops the ~72 MB Effect runtime. Reverse-engineered from @ai-hero/sandcastle
-// v0.7.0 (historical provenance only — that package is no longer a dependency);
-// the authoritative behaviour notes live in docs/agent-sandbox/01-07. This
-// module reproduces ONLY sandbar's exercised path: a bind-mount podman
-// provider, an explicit pre-existing branch, `maxIterations: 1`, no session
-// capture. The public surface matches the five symbols sandbar imported
-// (`createSandbox`,
-// `podman`, `claudeCode`, types `Sandbox`/`SandboxHooks`) so call sites change
-// only their import path.
-//
-// Load-bearing 0.7.0 behaviours that look optional but are NOT (a naive port
+// Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
-//   F1 — `exec` retains a bounded 64 KiB rolling TAIL (`BoundedTail`), never an
-//        unbounded array; an unbounded join throws RangeError inside close() on
-//        long runs and tears down the whole cycle.
-//   F2 — git-setup execs retry on exit 126/137 only (transient container-exec
-//        races under parallelism); genuine failures fail fast.
-//   F3 — ONE process-wide shutdown registration fans out to a Set of teardowns;
-//        not a listener per sandbox (MaxListenersExceededWarning past ~5).
-//        Since #35 that registration is an `onCleanup` entry rather than this
-//        module's own SIGINT/SIGTERM handlers, which exited the process out
-//        from under the shared async cleanup — see the shutdown registry.
+//   F1 — `exec` retains a bounded 64 KiB rolling TAIL (`BoundedTail`), never
+//        an unbounded array (RangeError inside close() on long runs).
+//   F2 — git-setup execs retry on exit 126/137 only; genuine failures fail fast.
+//   F3 — ONE process-wide shutdown registration (an `onCleanup` entry, #35)
+//        fans out to a Set of teardowns; not a listener per sandbox.
 //   F4 — a failure after worktree create removes the worktree before rethrowing.
-//   F5 — two-phase agent timeout: once the completion signal is seen, a short
-//        grace timer resolves the run SUCCESSFULLY with the collected commits
-//        instead of a 600 s idle error that discards them.
+//   F5 — two-phase agent timeout: once the completion signal is seen, a grace
+//        timer resolves the run SUCCESSFULLY with the collected commits
+//        instead of an idle error that discards them.
 //   F7 — every host git invocation runs under LC_ALL=C (locale-stable stderr).
-//   F8 — the container runs with `--init`. The entrypoint is `sleep infinity`,
-//        which reaps nothing, so without it every process an agent orphans
-//        zombies for the lifetime of the issue (#42). See `sandboxRunArgs`.
+//   F8 — the container runs with `--init`: the entrypoint is `sleep infinity`,
+//        which reaps nothing (#42). See `sandboxRunArgs`.
 //   F9 — a run that FAILS still carries out whatever the agent had emitted
-//        (`agentPartialOutput`), and both timeout paths kill the exec they stop
-//        waiting for (#41). See the two blocks at invokeAgent for why each half
-//        of that is load-bearing.
+//        (`agentPartialOutput`), and both timeout paths kill the exec they
+//        stop waiting for (#41). See invokeAgent.
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
 //
-// Since #44 this container is also the ANCHOR of the sandbox stack's network
-// namespace: the application containers an agent needs in front of it join it
-// with `--network container:<name>`, so its name is public (`containerName`)
-// and its removal is `--depend`-aware because podman refuses to remove a
-// container others are attached to. It publishes nothing on their behalf —
-// #43 moved every readiness probe inside its own container, so a joiner needs
-// a host port no more than a pod member does. Nothing else about it moved —
-// keep-id, uid 1000, `HOME`, `--init` and `--dangerously-skip-permissions`
-// are exactly what they were, which is the whole reason #44 is an anchor chain
-// and not a pod (a pod cannot carry keep-id, and the agent CLI refuses to run
-// as root).
+// This container is also the ANCHOR of the sandbox stack's network namespace
+// (#44): joiners attach with `--network container:<name>`, so its name is
+// public (`containerName`) and its removal is `--depend`-aware. It publishes
+// no host ports on their behalf (#43). An anchor chain, not a pod, because a
+// pod cannot carry keep-id and the agent CLI refuses to run as root.
 
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";

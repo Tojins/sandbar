@@ -1,30 +1,17 @@
-// Agentic resolve loop — fires when `git merge --no-ff` of a DONE branch into
-// the source branch hits a conflict, produces a tree that fails the post-merge
-// gate, or (in verified merge mode, #22) produces a merge result the FORGE's
-// CI rejects.
+// Agentic resolve loop — fires when `git merge --no-ff` of a DONE branch hits
+// a conflict, produces a tree that fails the post-merge gate, or (in verified
+// merge mode, #22) produces a merge result the FORGE's CI rejects.
 //
-// Each attempt is a fresh prompt: project anchor + primary issue body + bodies
-// of all other issues in the same cycle + the current conflict markers or gate
-// trace + a small done-signal block. The agent emits one of:
-//   <promise>COMMITTED</promise> — claims it has either completed the merge
-//                                  (conflict mode) or pushed a fix on top of
-//                                  HEAD (gate-red mode). The orchestrator
-//                                  inspects state and gates. A still-conflicted
-//                                  tree or a still-red gate rolls into the
-//                                  next attempt with the new trace.
-//   <promise>ABANDON</promise>     — this can't be resolved automatically.
-//                                  Paired with a <reason> block. Surfaces to
-//                                  the merger so the branch is reverted and
-//                                  the issue gets a human-readable comment.
+// The agent emits `<promise>COMMITTED</promise>` (claims the merge is
+// completed or a fix pushed; a still-conflicted tree or still-red gate rolls
+// into the next attempt) or `<promise>ABANDON</promise>` with a `<reason>`
+// block (the merger reverts the branch and comments on the issue). The agent
+// never runs the gate itself; the orchestrator gates between attempts so the
+// agent can't talk a red tree into accepting itself.
 //
-// The agent never runs the gate itself; the orchestrator gates between
-// attempts so the agent can't talk a red tree into accepting itself.
-//
-// In `forge-red` mode the local gate is (usually) already green — the forge is
-// the one disagreeing. The loop's own local gate then acts as a cheap
-// pre-filter between expensive CI rounds: `resolved` means "worth asking the
-// forge again", not "verified". forge-verify.ts owns the re-push and the real
-// verdict.
+// In `forge-red` mode the loop's local gate is a cheap pre-filter between
+// expensive CI rounds: `resolved` means "worth asking the forge again", not
+// "verified". forge-verify.ts owns the re-push and the real verdict.
 
 import { summarizeGateFailure } from "./gate.js";
 import type { MergerGateOutput } from "./merger.js";

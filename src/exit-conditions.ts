@@ -1,29 +1,21 @@
 // Outer-loop budget + exit conditions.
 //
-// The orchestrator runs cycles of plan → execute → merge → finalise until one
-// of four conditions terminates the run:
-//
 //   (a) plan-empty       — no unblocked work this cycle. Success exit (0).
 //   (b) stuck-same-plan  — same plan as previous cycle AND 0 DONEs this cycle.
 //   (c) stuck-zero-dones — two consecutive cycles produced 0 DONEs.
 //   (d) budget           — issuesAttempted hits state.maxTotalIssues.
 //   (e) relaunch         — the cycle LANDED merges and the config asks for
-//                          relaunch-after-landing (#65). Not a failure: the
-//                          dedicated exit code tells the launcher "pull,
-//                          rebuild, run me again".
+//                          relaunch-after-landing (#65).
 //
-// (a) is checked at the top of each cycle (after building the plan); the
-// orchestrator handles it directly with a clean break. (b)/(c)/(d)/(e) are pure
-// decisions over the run state plus the just-completed cycle, evaluated by
-// applyCycle — (e) first, then (b)/(c)/(d) in that order. (e) before (d) is the
-// one ordering that carries weight: a landing is progress, and the budgets are
-// per-run and documented as resetting across runs by design, so a cycle that
-// both landed and exhausted the budget relaunches rather than stopping — the
-// relaunched process starts a fresh budget exactly as a human re-launch would.
-// No spin hides in that: (e) requires a landing, and a cycle that lands nothing
-// falls through to (b)/(c)/(d), whose codes break the launcher's loop.
-// remainingBudget is the pre-cycle hook the orchestrator uses to trim the plan
-// so no cycle can push issuesAttempted past the cap mid-run.
+// (a) is checked at the top of each cycle; the orchestrator handles it
+// directly. applyCycle evaluates (e) first, then (b)/(c)/(d). (e) before (d)
+// is the one ordering that carries weight: budgets are per-run and reset
+// across runs by design, so a cycle that both landed and exhausted the budget
+// relaunches rather than stopping. No spin hides in that: (e) requires a
+// landing, and a cycle that lands nothing falls through to codes that break
+// the launcher's loop. remainingBudget is the pre-cycle hook the orchestrator
+// uses to trim the plan so no cycle can push issuesAttempted past the cap
+// mid-run.
 
 import { DEFAULT_MAX_TOTAL_ISSUES } from "./config.js";
 

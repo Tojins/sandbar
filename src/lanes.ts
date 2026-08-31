@@ -1,75 +1,37 @@
 // Lane routing — which of the two landing lanes an issue belongs to (#57, and
-// §1 of the design in #54).
-//
-// A lane answers one question: does the work on this issue land on the source
-// branch on the gate's word alone, or does a human get to look first?
-//
-//   auto   — the gate is the last word. What sandbar has always done.
-//   review — a human reviews before it lands.
+// §1 of the design in #54): `auto` (the gate is the last word) or `review`
+// (a human reviews before it lands on the source branch).
 //
 // Two inputs decide it, and nothing else: the `auto-land` LABEL on the issue,
-// and `config.defaultLane` for issues that carry no label. `auto-land` is the
-// only label in the pair, deliberately — there is no `review` label to forget,
-// because the host states its default once in config and labels only the
-// exceptions. `defaultLane` defaults to "auto", so a host that never touches
-// either knob behaves exactly as it did before this module existed, and this
-// whole file is inert: with no issue declared review, nothing propagates and
-// nothing is held.
+// and `config.defaultLane` for issues that carry no label. There is
+// deliberately no `review` label — the host states its default once in config
+// and labels only the exceptions. `defaultLane` defaults to "auto", which
+// leaves this whole file inert. The label name is hardcoded for the reason
+// `ready-for-agent` is: it is protocol, not vocabulary, and a knob would only
+// let the two spellings drift.
 //
-// Hardcoded label name, for the reason `ready-for-agent` and `waiting` are
-// hardcoded in the planner: it is protocol, not vocabulary. The labels sandbar
-// APPLIES are configurable (LabelConfig) because they name a host's own
-// handoff conventions; the labels a human applies to ADDRESS sandbar are read
-// in one place here and written by hand on the tracker, and a knob would only
-// let those two spellings drift.
+// Review-gating is inherited DOWNWARD, transitively, along blocker →
+// dependent `## Blocked by` edges — a descendant of a review-gated issue is
+// built on code no human has approved yet — and NEVER the other way.
+// `auto-land` on such a descendant is a contradiction and inheritance wins;
+// it is not silently ignored: `laneOverrides` names every such issue and
+// `postLaneOverrideNotices` says so on the issue itself.
 //
-// ---------------------------------------------------------------------------
-// Review-gating is inherited DOWNWARD, transitively
-// ---------------------------------------------------------------------------
+// The graph is whatever the caller passes — for the planner, the
+// `ready-for-agent` OPEN candidate list, including the `in-chunk` members
+// `fetchChunkMembers` lists back in. A blocker OUTSIDE that set contributes
+// no gating (there is no lane to read); that is sound because an eligible
+// issue's blockers are each CLOSED — landed work, which for a review-gated
+// blocker means a human reviewed and landed its chunk, the approval this
+// inheritance waits for — or `in-chunk` in the set (plan-resolver.ts's two
+// clauses).
 //
-// `## Blocked by` is a dependency edge: an issue that names #N is built on
-// #N's commits. So if #N is review-gated, everything downstream of it is
-// working on top of code no human has approved yet, and letting a descendant
-// auto-land would land that unapproved code by the back door — the gate would
-// be passing a verdict on a tree it was never allowed to be the last word on.
-// Inheritance therefore runs along blocker → dependent edges, transitively,
-// and NEVER the other way: an issue's own lane says nothing about what it is
-// blocked by, since a blocker's commits are complete before the dependent
-// starts.
+// Cycles in `## Blocked by` are hostile input; the breadth-first walk visits
+// each issue at most once, so a cycle terminates (a cyclic pair is deadlocked
+// in the planner regardless).
 //
-// That makes `auto-land` on a descendant of a review-gated issue a
-// contradiction, and inheritance wins — the label cannot opt out of a gate it
-// sits behind. It is not silently ignored, though: `laneOverrides` names every
-// such issue and `postLaneOverrideNotices` says so on the issue itself. A
-// label that means nothing where it is written, with nothing anywhere saying
-// so, is how a human comes to believe an issue auto-lands for a whole series
-// while it never does.
-//
-// The graph is whatever the caller passes, which for the planner is the
-// `ready-for-agent` OPEN candidate list — every issue in the queue, including
-// the ones this cycle will not pick. A blocker OUTSIDE that set contributes no
-// gating, because there is no lane to read: sandbar has the labels only of the
-// issues it listed. That is sound where it matters, and it stayed sound when
-// chunks arrived. An eligible issue's blockers are each either CLOSED or
-// `in-chunk` in the same chunk (plan-resolver.ts's two clauses). An `in-chunk`
-// blocker is listed back in by `fetchChunkMembers`, so it is IN the set and
-// gates normally. A CLOSED one is landed work on the source branch: for an
-// auto-lane blocker the merger closed it, and for a review-gated one a human
-// did, by reviewing its chunk and landing it — which is the approval this
-// inheritance exists to wait for, so a descendant reading as auto after it is
-// the right answer rather than a gap. An unresolvable blocker on an issue that
-// is NOT eligible keeps it out of the plan anyway, so the missing lane changes
-// nothing this cycle.
-//
-// Cycles in the `## Blocked by` graph are hostile input — two issues can name
-// each other, and a human wrote them. The propagation is a breadth-first walk
-// that visits each issue at most once, so a cycle terminates; a cyclic pair is
-// deadlocked in the planner regardless (neither blocker will ever read CLOSED).
-//
-// What a review lane MEANS for the plan — a review-gated issue is worked when
-// it has a chunk to land on and held otherwise (#61) — lives in
-// `plan-resolver.ts`, next to the filter that applies it. This module only
-// computes lanes.
+// What a review lane MEANS for the plan (#61) lives in `plan-resolver.ts`;
+// this module only computes lanes.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";

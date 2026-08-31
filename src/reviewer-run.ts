@@ -1,41 +1,21 @@
 // Reviewer invocation policy (#41) — what counts as a review, and what to do
 // when nothing does.
 //
-// The reviewer is advisory, so its failure mode looks harmless and is not: a
-// run that emitted ZERO BYTES was fed through the verdict parser, came out as
-// CHANGES-REQUESTED (no token → the safe default), spent one of
-// `maxReviewRounds`, and handed the next implementer attempt a harness error
-// message as its entire feedback. Three separate charges to the issue for
-// something that happened to the harness. The fail-safe direction was right —
-// an unknown outcome must never read as APPROVED — but a fail-safe is not a
-// licence to invent evidence.
-//
-// So: a reviewer INVOCATION yields a verdict or it yields nothing, and this
-// module is the only place that decides which.
-//
-//   - Completed with output → a verdict. Whatever it printed, it looked and
-//     spoke; a missing token is the verdict parser's business, and its
-//     default-to-CHANGES-REQUESTED is a statement about the code (#40 already
-//     refuses to run a reviewer over an empty changeset, so there is nothing to
-//     review only if this loop is confused about what the branch holds).
+// A reviewer INVOCATION yields a verdict or it yields nothing, and this module
+// is the only place that decides which:
+//   - Completed with output → a verdict. A missing token is the verdict
+//     parser's business.
 //   - Failed, but the partial output holds a `<verdict>` token → a verdict.
-//     The run reached a decision and then died on the way out; discarding that
-//     would be the mirror-image fabrication — reporting "the reviewer never
-//     ran" about a reviewer that did. This is why `agentPartialOutput` exists:
-//     without the bytes, every failure is indistinguishable from silence.
-//   - Anything else → nothing. A failure with no decision in it, or a run that
-//     completed and printed nothing at all.
-//
-// "Nothing" is retried once before it is believed, because that is the cheapest
-// way to tell a flake from a fault and the retry costs no budget of any kind.
-// The transcript of every invocation is kept whole — the observed case left a
-// 73-byte log for a 15-minute run, and a partial review that failed on the way
-// out is the one artefact a human has.
+//     The run reached a decision and then died on the way out.
+//   - Anything else → nothing. An unknown outcome must never read as APPROVED,
+//     but a fail-safe is not a licence to invent evidence: feeding a zero-byte
+//     run through the parser charges the issue review rounds for a harness
+//     fault.
+// "Nothing" is retried once before it is believed (flake vs fault; the retry
+// costs no budget), and the transcript of every invocation is kept whole.
 //
 // What the caller does with a `harness-failed` outcome is the state machine's
-// business, not this module's: see inner-loop-machine.ts, which spends no
-// review round on it and never lets the detail below reach an implementer as
-// reviewer prose.
+// business, not this module's: see inner-loop-machine.ts.
 
 import { containsVerdictToken } from "./verdict-parser.js";
 

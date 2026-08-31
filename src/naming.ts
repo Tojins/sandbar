@@ -4,19 +4,13 @@
 // common prefix that the planner (creation), the preflight cleanup, and the
 // orphan sweeper key on. Keeping them here makes the prefix a single knob.
 //
-// Transition note (sandcastle → sandbar, issue #11): repos that ran an older
-// sandbar may still carry `sandcastle/issue-*` branches and `sandcastle-*`
-// containers/networks. New resources are always created with the current
-// prefixes; the LEGACY_* prefixes exist so those artifacts are not simply
-// forgotten. What happens to them differs by kind, and since #28 the two are
-// no longer the same:
-//   - BRANCHES are still cleaned automatically. They are in this repo, which
-//     this run holds the lock on, so they are unambiguously ours.
-//   - RESOURCES (containers, pods, networks) are only REPORTED, by
-//     `findUnattributableResources`. A legacy name carries no run scope, so
-//     nothing distinguishes a dead run's debris from a concurrently-running
-//     OLD sandbar's live stack — and force-removing on that guess is the #28
-//     bug itself. See containers.ts.
+// Legacy `sandcastle/*` / `sandcastle-*` artifacts (#11) are recognized, never
+// created:
+//   - BRANCHES are still cleaned automatically — this run holds the repo's
+//     lock, so they are unambiguously ours.
+//   - RESOURCES (containers, pods, networks) are only REPORTED: a legacy name
+//     carries no run scope, so a dead run's debris is indistinguishable from a
+//     concurrently-running OLD sandbar's live stack (#28, see containers.ts).
 // Once all hosts have drained their `sandcastle/*` artifacts, delete the
 // LEGACY_* exports and their call-site uses for a clean cutover.
 

@@ -1,51 +1,25 @@
-// 3-layer prompt assembly for the inner-loop implementer and reviewer.
+// 3-layer prompt assembly for the inner-loop implementer and reviewer:
+// project anchor (shared verbatim by both agents), issue anchor
+// (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
+// branch diff, sandbox-stack report #44, gate trace, reviewer prose, UI-impact
+// check #21; reviewer: diff + commits + coding standards, stateless per pass).
 //
-// Layer 1 (project anchor):    @CLAUDE.md, @CONTEXT.md (when present),
-//                              @docs/adr/* listing, last 10 commits on
-//                              sourceBranch. Shared verbatim by both agents.
-// Layer 2 (issue anchor):      `gh issue view <id> --json title,body,comments`
-//                              rendered deterministically (issue-anchor.ts).
-//                              NOT the human-readable `--comments` form, which
-//                              is TTY-sensitive and, when piped, omits the
-//                              body — a zero-comment issue produced an empty
-//                              anchor. A fetch failure throws (SandbarError)
-//                              instead of degrading to a placeholder.
-// Layer 3 (per-attempt slot):  implementer: attempt counter, full branch diff,
-//                              the sandbox stack running beside the agent and
-//                              what did or did not come up in it (#44),
-//                              last 200 lines of the previous gate-1 trace,
-//                              the previous reviewer's prose (when the prior
-//                              round returned CHANGES-REQUESTED), escalation
-//                              language at attempts ≥ 6, and the standing
-//                              UI-impact check (#21) that gates implementation
-//                              on a prototype existing for user-visible work.
-//                              reviewer: branch diff + commit list + the
-//                              built-in coding standards
-//                              (prompts/coding-standards.md) + optional project
-//                              standards + verdict-token instructions. Each
-//                              reviewer pass is stateless — no prior-round
-//                              transcript is included.
+// The issue anchor uses `--json`, NOT the human-readable `--comments` form —
+// that one is TTY-sensitive and, when piped, omits the body. A fetch failure
+// throws (SandbarError) instead of degrading to a placeholder.
 //
 // Every range a slot renders is anchored at the issue branch's SEED REF, never
-// a bare branch name (#40, #61). The agents work out of a worktree of the bare
-// object cache, whose local head namespace is sandbar's alone and holds exactly
-// one ref — the issue branch (repo-cache.ts deletes the imported
-// `refs/heads/*`). `main` therefore does not resolve there and never can: every
-// range built on the bare name exited 128, and a `catch` rendered the result as
-// if the branch held nothing. The implementer was told its own committed work
-// did not exist, and the reviewer — whose commit list AND diff both came from
-// that ref — was handed an empty changeset and asked for a verdict on it.
-// Failures now throw (see `readGit`), and a reviewer over an empty changeset is
-// refused outright.
+// a bare branch name (#40, #61): the agents' worktree head namespace holds
+// exactly one ref — the issue branch (repo-cache.ts deletes the imported
+// `refs/heads/*`) — so `main` never resolves there. Range failures throw (see
+// `readGit`), and a reviewer over an empty changeset is refused outright.
 //
-// The seed ref is `origin/<sourceBranch>` for every auto-lane issue and for a
-// chunk's root, and the CHUNK TIP for a member chained behind one (#61). It is
-// not derived here: `ensureIssueBranch` returns the base it actually seeded the
-// branch from (`IssueBranchBase`) and the inner loop hands the same value to
-// both builders, so the tree an agent's diff is measured against is by
-// construction the tree its branch was cut from. Deriving a second answer in
-// this module is precisely how a chunk member would be shown its ancestors'
-// whole chunk as "the work done so far" and asked to review it.
+// The seed ref is not derived here: `ensureIssueBranch` returns the base it
+// actually seeded from (`IssueBranchBase`) and the inner loop hands the same
+// value to both builders, so the tree an agent's diff is measured against is
+// by construction the tree its branch was cut from. Deriving a second answer
+// in this module is precisely how a chunk member would be shown its ancestors'
+// whole chunk as "the work done so far".
 //
 // All prose lives in prompts/*.md and is loaded via prompts.ts; this module
 // only formats data into the templates' placeholders.

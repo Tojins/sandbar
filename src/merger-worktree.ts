@@ -1,27 +1,18 @@
-// Ephemeral merger worktree (issue #10).
+// Ephemeral merger worktree (#10).
 //
-// The merger merges DONE branches into the source branch and pushes. Doing
-// that in the operator's primary checkout means a `git merge` / agentic
-// conflict-resolution runs against a working tree that may hold the operator's
-// unrelated uncommitted edits — which then get swept into the merge commit and
-// pushed under an unrelated issue. The cure is structural: do the merge in a
-// dedicated, throwaway worktree checked out (detached) at
-// `origin/<sourceBranch>`. The operator's edits live only in their own
-// checkout's working tree and are physically absent here, so nothing can
-// absorb them — in the clean path or the conflict path.
+// The merger works in a dedicated, throwaway worktree checked out (detached)
+// at `origin/<sourceBranch>` — never the operator's checkout, whose unrelated
+// uncommitted edits are physically absent here and so cannot be swept into a
+// merge commit.
 //
-// The worktree lives beside the per-issue worktrees (<cwd>/<workDir>/worktrees/
-// merger), registered in the bare cache since #38, so the existing
-// `git worktree prune` + orphan sweep at the next cycle's sandbox bring-up
-// reclaims any leftover after a crash. We still remove
-// it explicitly in run.ts's finally, and register removal with the cleanup
-// registry before creating it so a signal mid-bringup tears it down — as a
-// disposable (#55), since run.ts creates one of these per CYCLE.
+// The worktree lives beside the per-issue worktrees, registered in the bare
+// cache (#38), so `git worktree prune` + the orphan sweep reclaims any
+// leftover after a crash. Removal is also registered with the cleanup registry
+// before creation so a signal mid-bringup tears it down — as a disposable
+// (#55), since run.ts creates one per CYCLE.
 //
 // The merge result is pushed with `git push origin HEAD:<sourceBranch>`; the
-// operator's local branch is never touched. It catches up on the next
-// `git pull`, consistent with how issue branches already seed from origin
-// rather than local (see git-ops.ts / preflight.ts).
+// operator's local branch is never touched.
 
 import { execFile } from "node:child_process";
 import { readFile, rm, stat } from "node:fs/promises";

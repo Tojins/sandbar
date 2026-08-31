@@ -1,31 +1,23 @@
 // Promise-token parser.
 //
-// The agent signals state with a single `<promise>TOKEN</promise>` tag.
-// Three tokens are valid: `COMPLETE` (claims the work is done), `NEEDS-INFO`
-// (asks the human for help, paired with a `<questions>` block) and
-// `NEEDS-UI-PROTOTYPE` (#21 — the issue implies non-trivial user-visible UI and
-// carries no prototype, paired with a `<ui-impact>` block). Anything else is a
-// no-signal — the inner loop keeps going, optionally with a re-prompt hint
-// payload that the next attempt's prompt should include.
+// The agent signals state with a single `<promise>TOKEN</promise>` tag:
+// `COMPLETE`, `NEEDS-INFO` (paired with a `<questions>` block) or
+// `NEEDS-UI-PROTOTYPE` (#21, paired with a `<ui-impact>` block). Anything else
+// is a no-signal — the inner loop keeps going, optionally with a re-prompt
+// hint payload that the next attempt's prompt should include.
 //
 // `missingTag` marks the one NO-SIGNAL flavour where NO tag was emitted at
-// all, as opposed to a tag that failed its guard (unknown token, COMPLETE
-// with zero commits, an escalation missing its block). The distinction is the
-// inner loop's licence for the promise nudge: output that ends with no tag is
-// overwhelmingly a finished agent that forgot the contract at the end of a
-// long session — both observed cases were the two longest sessions of a run —
-// and is worth one cheap same-conversation follow-up before it costs a full
-// attempt. A tag that failed its guard is the opposite case: the agent
-// remembered the contract and got the substance wrong, and the guard's
-// specific re-prompt is the correction it needs.
+// all, as opposed to a tag that failed its guard. The distinction is the inner
+// loop's licence for the promise nudge: no tag is overwhelmingly a finished
+// agent that forgot the contract, worth one cheap same-conversation follow-up
+// before it costs a full attempt; a failed guard means the agent got the
+// substance wrong, and the guard's specific re-prompt is the correction.
 //
-// NEEDS-UI-PROTOTYPE is deliberately NOT guarded on `commitsAccumulated === 0`
-// (the mirror image of the COMPLETE guard). The prompt asks for the assessment
-// before any code is written, but an agent often only realises it is inventing
-// UI a few files in — and that is exactly when we most want it to stop.
-// Rejecting a late escalation would punish it for noticing, so "no commits
-// exist when this fires" stays a prompt-level expectation, never an invariant
-// downstream code relies on (finalize handles both cases).
+// NEEDS-UI-PROTOTYPE is deliberately NOT guarded on `commitsAccumulated === 0`:
+// an agent often only realises it is inventing UI a few files in, and rejecting
+// a late escalation would punish it for noticing. "No commits exist when this
+// fires" stays a prompt-level expectation, never an invariant downstream code
+// relies on (finalize handles both cases).
 
 export type ParseSignal =
   | { readonly kind: "COMPLETE" }

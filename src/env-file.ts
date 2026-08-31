@@ -1,16 +1,10 @@
 // Dotenv parsing, and the opt-in helper that turns a file into `config.env`.
 //
-// Since #38 this is no longer contract. `config.env` is a
-// `Record<string, string>` the host supplies however it likes, and sandbar
-// names no file — so a host whose compose already owns `.env`, or whose secrets
-// arrive from a vault, passes its own loader's output and never runs this
-// parser at all. What survives is the convenience: most hosts do want a
-// gitignored file beside the config, and `readEnvFile` is the one-liner for it.
-//
-// Keeping the parser here rather than deleting it also keeps the escape
-// dialect single. The two predecessors of this module disagreed on escapes;
-// the failure mode of two parsers over one file is a credential that differs
-// between the preflight check and the container by a backslash.
+// Not contract (#38): `config.env` is a record the host supplies however it
+// likes, and sandbar names no file — `readEnvFile` is the one-liner for hosts
+// that want a gitignored file beside the config. Keeping the parser here keeps
+// the escape dialect single: two parsers over one file is a credential that
+// differs between the preflight check and the container by a backslash.
 //
 // Supported syntax: `KEY=value` lines; blank lines and `#` comments ignored;
 // surrounding single or double quotes stripped; inside double quotes the

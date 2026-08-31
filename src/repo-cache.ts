@@ -1,98 +1,45 @@
 // The disposable state directory, and the bare object cache inside it (#38).
 //
-// ---------------------------------------------------------------------------
-// What changed and why
-// ---------------------------------------------------------------------------
-// Sandbar used to operate ON the directory `config.cwd` names: it created the
-// issue branches there, added the worktrees there, ran `gh` there, and — via
-// preflight's `deleteMergedSandbarBranches` — ran `git branch -D` there. That
-// forced every consumer to hand sandbar a checkout it did not otherwise want:
-// a second clone, machine-managed, that a human must not stand in. Two
-// symptoms followed. You had to launch from it (before #34, git and `gh`
-// inherited `process.cwd()`), and your credentials had to live in it
-// (`envFilePath` resolved against it).
+// Nothing sandbar keeps locally is authoritative — GitHub Issues is the
+// tracker, merged work is on `origin/<sourceBranch>` — so the local state is
+// `node_modules`-shaped: reproducible, deletable, gitignored inside the
+// operator's REAL checkout at `<hostCwd>/.sandbar/`: the bare cache
+// `repo.git` (every git call runs there; `gh` names its own repo with
+// `--repo`, #34), the worktrees, `run.lock`/`run.pid`, and logs. Sandbar
+// reads the host checkout and clones it once; it never writes to it.
 //
-// The fix is to stop needing a checkout at all. Nothing sandbar keeps locally
-// is authoritative — GitHub Issues is the tracker, branches are pushed at
-// finalise, merged work is on `origin/<sourceBranch>` — so the local state is
-// `node_modules`-shaped: reproducible, deletable, and therefore allowed to sit
-// gitignored inside the operator's REAL checkout:
+// `repo.git` being BARE is not tidiness: it is what makes the three
+// genuinely-destructive operations (`branch -D`, `worktree remove --force`,
+// force-pushing the scratch integration ref) provably unable to touch the
+// operator's repo, because the repo they run in holds nothing of the
+// operator's.
 //
-//   <hostCwd>/                     the operator's own checkout. Sandbar reads
-//     sandbar.config.mjs           it (git identity, `copyToWorktree`) and
-//     .sandbar/                    clones it once. It never writes to it.
-//       repo.git/                  <- every git call runs HERE (gh names its
-//                                     own repo with --repo, #34)
-//       worktrees/source/          <- image build context, at origin/<branch>
-//       worktrees/issue-<n>-<slug>/
-//       worktrees/merger/
-//       run.lock  run.pid  logs/
+// Creation: `git clone --bare <hostCwd>`, then `origin` retargeted to the URL
+// the host checkout's own `origin` carries — derived, never configured
+// (Rejected: a `remoteUrl` knob — it could disagree with `cwd`, and sandbar
+// would silently merge the right branches into the wrong repo). Then three
+// fixups, each load-bearing:
+//   - `remote.origin.fetch` is set EXPLICITLY to
+//     `+refs/heads/*:refs/remotes/origin/*`: `clone --bare` sets no refspec,
+//     and `--mirror` produces no `refs/remotes/origin/*` at all — the
+//     remote-tracking refs sandbar depends on everywhere (branch seeding, the
+//     merger detach, ancestry and merged-ness tests).
+//   - Local `refs/heads/*` copied in by the clone are DELETED: the cache's
+//     branch namespace belongs to sandbar alone, and an imported operator
+//     branch matching `sandbar/issue-*` would make preflight hard-refuse the
+//     run. The resulting unborn HEAD is fine for every operation sandbar
+//     performs (pinned in repo-cache-git.test.ts).
+//   - Creation is ATOMIC — prepared under `repo.git.incoming`, stamped, then
+//     renamed into place. A half-built cache is a perfectly valid bare repo,
+//     so the stamp, not bareness, is the evidence of full preparation. See
+//     `ensureRepoCache` and `isPreparedCache`.
 //
-// `repo.git` is a BARE repo: `git worktree add` needs an object store and a ref
-// namespace, and the merge phase and preflight's branch classification need the
-// objects offline — none of them needs a working tree. Making it bare is not
-// tidiness. It is what makes the three genuinely-destructive operations
-// (`branch -D`, `worktree remove --force`, force-pushing the scratch
-// integration ref) provably unable to touch the operator's repo, because the
-// repo they run in holds nothing of the operator's.
-//
-// ---------------------------------------------------------------------------
-// How the cache is created
-// ---------------------------------------------------------------------------
-// `git clone --bare <hostCwd> <repoDir>`, then `origin` is retargeted to
-// whatever URL the host checkout's own `origin` carries. Two consequences,
-// both deliberate:
-//
-//   - No config names the remote. `config.cwd` is a real checkout now, so the
-//     remote is derivable, and a derived value cannot drift from the repo the
-//     config file sits in. A `remoteUrl` knob could disagree with `cwd`, and
-//     the failure would be silent: sandbar would merge the right branches into
-//     the wrong repo.
-//   - The clone is local, so git hardlinks the objects. A multi-gigabyte repo
-//     costs a few hundred milliseconds and no network, and `git gc` in either
-//     repo is safe (a hardlink keeps the file alive).
-//
-// `remote.origin.fetch` is then set EXPLICITLY to
-// `+refs/heads/*:refs/remotes/origin/*`. `git clone --bare` sets no fetch
-// refspec at all, and `--mirror` (the other obvious spelling) maps the remote's
-// heads onto local `refs/heads/*` and produces no `refs/remotes/origin/*`
-// whatsoever. Sandbar depends on those remote-tracking refs everywhere:
-// issue branches seed from `origin/<sourceBranch>`, the merger worktree is
-// detached at it, `branchIsContainedInOrigin` is an ancestry test against it,
-// and preflight's merged-ness check falls back to it.
-//
-// Local `refs/heads/*` copied in by the clone are DELETED. The cache's local
-// branch namespace belongs to sandbar alone — `sandbar/issue-*` and nothing
-// else — and a copy of the operator's branches there is not merely untidy:
-// preflight globs `refs/heads/sandbar/issue-*` and refuses to start on an
-// unmerged one, so an operator who happened to have such a branch checked out
-// for review would get a hard refusal about a branch sandbar had itself
-// imported. It also removes a stale local `<sourceBranch>` from the merged-ness
-// test, leaving `origin/<sourceBranch>` — the ref that actually decides — as
-// the only answer. The resulting unborn HEAD is fine for every operation
-// sandbar performs (pinned in repo-cache-git.test.ts: `worktree add` names its
-// commit-ish explicitly in every case).
-//
-// Creation is ATOMIC — prepared under `repo.git.incoming`, stamped, and only
-// then renamed into place — so "the cache is there" and "the cache went
-// through every preparation step" cannot come apart. The stamp is what makes
-// the second fact checkable: a half-built cache is a perfectly valid bare
-// repository, so being one is not evidence of having been prepared. See
-// `ensureRepoCache` and `isPreparedCache`.
-//
-// ---------------------------------------------------------------------------
-// Never ask git WHICH repository this is; tell it
-// ---------------------------------------------------------------------------
-// Every path in the layout lives inside the operator's checkout, so `git
-// rev-parse --git-dir` — which discovers by walking UP — answers `0` and
-// `<hostCwd>/.git` for any of them that exists but is not a repository. Used
-// as an existence probe it reports the cache as present and hands the
-// operator's own repo to `branch -D`, `worktree remove --force`, `reset
-// --hard` and the force-pushed integration ref: the entire safety argument for
-// a bare cache, inverted, in the one state (`rm -rf .sandbar` interrupted) the
-// documentation invites. So the probes NAME what they are asking about —
-// `--git-dir=<path>` for the cache, `--git-common-dir` compared against it for
-// a worktree — and never let discovery pick the answer.
+// Never ask git WHICH repository this is; tell it. Every path in the layout
+// lives inside the operator's checkout, so `rev-parse --git-dir` discovery
+// walks UP and hands the operator's own repo to the destructive operations —
+// the bare-cache safety argument inverted. Probes NAME their target:
+// `--git-dir=<path>` for the cache, `--git-common-dir` compared against it
+// for a worktree.
 
 import { execFile } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
