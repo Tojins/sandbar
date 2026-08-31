@@ -22,6 +22,15 @@ const exec = promisify(execFile);
 // operate on, so `prepareWorktree` then failed to find a branch that had just
 // been created successfully. Since #38 it is `layout.repoDir`, the bare cache —
 // which is also why writing this ref cannot reach the operator's own branches.
+//
+// `origin/<sourceBranch>` is ALWAYS the seed, including for a review-gated
+// issue (#60) — and that is what bounds which chunk members the planner will
+// hand to the inner loop at all. A chunk's ROOT has no review-gated blocker, so
+// the source branch is the right base and the chunk branch is created there
+// too. A non-root member is built on commits that live only on the chunk
+// branch, so seeding it here would develop it against a tree missing the very
+// work it declares itself blocked by — which is why plan-resolver.ts holds
+// those members back until this function learns to seed from a chunk (#61).
 export async function ensureIssueBranch(
   repoDir: string,
   branch: string,
