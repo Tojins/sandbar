@@ -259,6 +259,15 @@ default 50, exit 3).
   human reads afterwards — the abandon comment on the issue, or on the parked
   chunk's PR — carries the conflicted paths, the per-attempt outcome and the
   log paths. `src/resolve-loop.ts`'s header owns the argument.
+- **A run opens by naming what is driving it (#69).** One line on stdout and in
+  `orchestrator.log`: version, the tree `dist/` was built from, the config
+  file's path, and whether either tree is dirty — because both are read from the
+  operator's working tree (`npm run sandbar` = pull, build, run) and #66 has not
+  removed that coupling yet. A fact, never a warning, never a refusal, and every
+  field degrades to `unknown`. `src/driver-identity.ts` owns the two-tree
+  argument and the `check-ignore` guard that keeps a driver under `node_modules`
+  from being attributed to the host repo's HEAD; `run(config, { configPath })`
+  is how the bin tells it which file it loaded.
 
 ## This repo runs itself (#39)
 

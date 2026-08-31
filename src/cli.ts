@@ -248,7 +248,15 @@ async function main(): Promise<number> {
   }
   // `run()` owns its own exit codes and calls `process.exit` for anything
   // non-zero, so there is no code to return here.
-  await run(withDefaultCwd(await loadConfig(configPath), configPath));
+  //
+  // `configPath` is handed over as an OPTION rather than folded into the config
+  // object (#69): this is the only place that knows which file was loaded — the
+  // config is a program and carries no address of its own — and the run's
+  // opening line names it, along with whether its tree is dirty. It is already
+  // absolute, resolved above against the process cwd.
+  await run(withDefaultCwd(await loadConfig(configPath), configPath), {
+    configPath,
+  });
   return 0;
 }
 

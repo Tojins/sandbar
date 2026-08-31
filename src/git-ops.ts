@@ -8,6 +8,9 @@
 // base (`merger.ts`, `chunkBase`). Deliberately one function — the tree a chunk
 // member is developed against and the tree it is merged onto have to be the
 // same, and two spellings of that question are two chances for them to drift.
+// `DIRTY_STATUS_ARGV` is exported on the same grounds and for the same kind of
+// second caller (`driver-identity.ts`, #69): the `-c` flag on it is the whole
+// reason `git status --porcelain` may not be typed out anywhere else.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -297,14 +300,24 @@ async function chunkOrSourceBase(
 // contain what was tested. It fails OPEN and silently, and both D1 entry points
 // go blind together, so gate-2 does not catch it either. Pinning the value on
 // the command line costs nothing and cannot be overridden from config.
+//
+// Exported as argv because a second caller asks the same question of a
+// different tree — `driver-identity.ts` (#69), about the tree the driver was
+// built from — and the paragraph above is the reason that must not become a
+// second spelling of `git status --porcelain`.
+export const DIRTY_STATUS_ARGV: readonly string[] = [
+  "-c",
+  "status.showUntrackedFiles=normal",
+  "status",
+  "--porcelain",
+];
+
 export async function dirtyWorktreePaths(
   worktreePath: string,
 ): Promise<readonly string[]> {
-  const { stdout } = await exec(
-    "git",
-    ["-c", "status.showUntrackedFiles=normal", "status", "--porcelain"],
-    { cwd: worktreePath },
-  );
+  const { stdout } = await exec("git", [...DIRTY_STATUS_ARGV], {
+    cwd: worktreePath,
+  });
   return stdout
     .split("\n")
     .map((l) => l.trim())
