@@ -533,7 +533,8 @@ export type BuildPlanOptions = {
   readonly defaultLane?: Lane;
   // Issues to add to the listing, whatever the tracker's search index says
   // (#63). Exactly one caller: the chunk-review scan files a follow-up issue
-  // and then re-plans so the cycle that filed it also works it — and a
+  // and then re-plans so it is queued from that cycle rather than the next run
+  // — and a
   // just-created issue is the one candidate the `gh` listing is guaranteed to
   // be wrong about, because that listing is the lagging search backend and
   // nothing else in the plan is newer than seconds old.

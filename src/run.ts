@@ -10,7 +10,7 @@
 //                              inherited gating. A changes-requested review on
 //                              a chunk's pull request is filed as a follow-up
 //                              issue in that chunk first (#63), and the plan
-//                              is rebuilt so the cycle that files one works it.
+//                              is rebuilt so one filed now is queued now.
 //   Phase 2 (Inner-loop ralph): Each issue runs in its own sandbox up to
 //                              config.maxImplAttempts times; on gate-1 green
 //                              the (strictly-advisory) reviewer runs in the
@@ -60,6 +60,10 @@ import {
 } from "./containers.js";
 import { installCleanupTraps, onCleanup, runCleanup } from "./cleanup.js";
 import {
+  fileChunkReviewFollowUps,
+  realAdapter as realChunkFollowUpAdapter,
+} from "./chunk-follow-up.js";
+import {
   type BranchImages,
   checkWorktreeImageUids,
   createBranchImages,
@@ -107,10 +111,6 @@ import {
   type MergerWorktree,
   createMergerWorktree,
 } from "./merger-worktree.js";
-import {
-  fileChunkReviewFollowUps,
-  realAdapter as realChunkFollowUpAdapter,
-} from "./chunk-follow-up.js";
 import { type Stack, startStack } from "./gate-stack.js";
 import { postLaneOverrideNotices } from "./lanes.js";
 import { type PlannedIssue, buildPlan } from "./plan-resolver.js";
