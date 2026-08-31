@@ -530,8 +530,9 @@ export async function run(rawConfig: RunConfig): Promise<void> {
         const held = resolution.heldForReview.map((n) => `#${n}`).join(", ");
         console.log(
           `Held for review (${resolution.heldForReview.length}): ${held} — each ` +
-            "is waiting on its chunk: a member behind another member that has " +
-            "yet to land, or an issue whose blockers sit in two chunks at once.",
+            "is not its chunk's root: a member chained behind another member " +
+            "(landed or not — a chunk still advances one issue per cycle, " +
+            "until #61), or an issue whose blockers sit in two chunks at once.",
         );
         await runLogger.appendOrchestrator(
           `plan: held ${resolution.heldForReview.length} review-gated issue(s) — ${held}`,

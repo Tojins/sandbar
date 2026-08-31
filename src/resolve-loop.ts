@@ -188,7 +188,9 @@ export async function runResolveLoop(
   for (let attempt = 1; attempt <= RESOLVE_MAX_ATTEMPTS; attempt++) {
     const prompt = buildResolvePromptBody({
       projectAnchor: deps.projectAnchor,
-      target: deps.target ?? SOURCE_TARGET_PHRASE,
+      // Passed through undefined and defaulted once, in the builder: two
+      // `?? SOURCE_TARGET_PHRASE` on one value is two places to change it.
+      target: deps.target,
       primaryIssue: issue,
       primaryIssueAnchor,
       relatedIssueAnchors,

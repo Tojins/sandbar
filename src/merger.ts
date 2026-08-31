@@ -156,6 +156,7 @@ import {
   RESOLVE_MAX_ATTEMPTS,
   type ResolveAdapter,
   type ResolveLogger,
+  SOURCE_TARGET_PHRASE,
   runResolveLoop,
 } from "./resolve-loop.js";
 
@@ -187,9 +188,13 @@ export type MergeTarget =
 
 export const SOURCE_TARGET: MergeTarget = { kind: "source" };
 
-export function describeMergeTarget(target: MergeTarget): string {
+// The noun phrase that names it. The source-branch wording is
+// `SOURCE_TARGET_PHRASE` rather than a literal here: the resolve prompt already
+// had to name a target before chunks existed, and one phrase written twice is
+// two prompts that can come to disagree about what they are describing.
+function describeMergeTarget(target: MergeTarget): string {
   return target.kind === "source"
-    ? "the source branch"
+    ? SOURCE_TARGET_PHRASE
     : `its chunk's branch \`${target.branch}\``;
 }
 
@@ -1082,6 +1087,29 @@ const RESOLVE_AGENT_TIMEOUT_MS = 10 * 60_000;
 
 export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   const cwd = deps.cwd;
+  // The merger worktree is always detached, so every push it makes is HEAD to a
+  // named ref on origin, and every one of them classifies its failure the same
+  // way. ONE copy of that classification (#60): the race regex is the whole
+  // basis for "the target moved under this cycle, so never force and never
+  // retry", which both landing targets rest on — a second copy is a git version
+  // or a server phrasing a rejection differently, patched in one place and
+  // silently reclassified as `fatal` in the other.
+  const pushHeadTo = async (dest: string): Promise<PushResult> => {
+    try {
+      await exec("git", ["push", "origin", `HEAD:${dest}`], { cwd });
+      return { kind: "ok" };
+    } catch (err) {
+      const e = err as { stderr?: string; message?: string };
+      const stderr = e.stderr ?? "";
+      if (/rejected|non-fast-forward|fetch first|stale info/i.test(stderr)) {
+        return { kind: "race" };
+      }
+      return {
+        kind: "fatal",
+        reason: stderr.trim() || e.message || "unknown push error",
+      };
+    }
+  };
   return {
     async mergeNoFf(issue) {
       try {
@@ -1398,27 +1426,10 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       }
     },
     async push() {
-      try {
-        // The worktree is detached at origin/<sourceBranch>; push HEAD to the
-        // source branch ref on origin. The operator's local branch is left
-        // untouched (it fast-forwards on their next pull).
-        await exec(
-          "git",
-          ["push", "origin", `HEAD:${deps.sourceBranch}`],
-          { cwd },
-        );
-        return { kind: "ok" };
-      } catch (err) {
-        const e = err as { stderr?: string; message?: string };
-        const stderr = e.stderr ?? "";
-        if (/rejected|non-fast-forward|fetch first|stale info/i.test(stderr)) {
-          return { kind: "race" };
-        }
-        return {
-          kind: "fatal",
-          reason: stderr.trim() || e.message || "unknown push error",
-        };
-      }
+      // The worktree is detached at origin/<sourceBranch>; push HEAD to the
+      // source branch ref on origin. The operator's local branch is left
+      // untouched (it fast-forwards on their next pull).
+      return pushHeadTo(deps.sourceBranch);
     },
     async pullFfOnly() {
       try {
@@ -1464,24 +1475,10 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       await exec("git", ["checkout", "--detach", ref], { cwd });
     },
     async pushChunkBranch(chunkBranch) {
-      try {
-        await exec(
-          "git",
-          ["push", "origin", `HEAD:refs/heads/${chunkBranch}`],
-          { cwd },
-        );
-        return { kind: "ok" };
-      } catch (err) {
-        const e = err as { stderr?: string; message?: string };
-        const stderr = e.stderr ?? "";
-        if (/rejected|non-fast-forward|fetch first|stale info/i.test(stderr)) {
-          return { kind: "race" };
-        }
-        return {
-          kind: "fatal",
-          reason: stderr.trim() || e.message || "unknown push error",
-        };
-      }
+      // Fully qualified, unlike the source branch's: a chunk branch may not
+      // exist on origin yet, and git only creates a ref from an unambiguous
+      // destination.
+      return pushHeadTo(`refs/heads/${chunkBranch}`);
     },
   };
 }

@@ -470,7 +470,13 @@ async function captureOk(
   }
 }
 
-export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
+export async function gatherState(
+  cfg: PreflightConfig,
+  // Issues carrying `in-chunk` (#60). Optional so a caller that has one already
+  // — `runPreflight`, which needs the same set for the delete pass — pays for
+  // the query once instead of twice; omitted, it is fetched here.
+  knownInChunkIssues?: ReadonlySet<number>,
+): Promise<RepoState> {
   const repoDir = cfg.layout.repoDir;
   const env = cfg.env;
   const hasGit = which("git");
@@ -505,7 +511,8 @@ export async function gatherState(cfg: PreflightConfig): Promise<RepoState> {
   const originUrl = await readOriginUrl(repoDir);
   const parsedOrigin = originUrl === null ? null : parseRepoFromRemoteUrl(originUrl);
   const openReadyIssues = await fetchOpenReadyIssueNumbers(cfg.repo);
-  const inChunkIssues = await fetchInChunkIssueNumbers(cfg.repo);
+  const inChunkIssues =
+    knownInChunkIssues ?? (await fetchInChunkIssueNumbers(cfg.repo));
   const { unmerged, discarded, resumable } = await classifySandbarBranches(
     repoDir,
     openReadyIssues,
@@ -882,15 +889,21 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
     "--quiet",
   ]);
 
+  // One query, two readers (#60): the delete pass uses it to decide which
+  // leftover branches are duplicates of published work, and `gatherState` uses
+  // it to decide which are none of its three classifications. Asking twice
+  // would also let the two disagree if a label moved in between.
+  const inChunkIssues = await fetchInChunkIssueNumbers(cfg.repo);
+
   const deleted = await deleteMergedSandbarBranches({
     layout: cfg.layout,
     sourceBranch: cfg.sourceBranch,
-    inChunkIssues: await fetchInChunkIssueNumbers(cfg.repo),
+    inChunkIssues,
   });
   if (deleted.length > 0) {
     console.log(`Cleaned up merged issue branches: ${deleted.join(", ")}`);
   }
-  const state = await gatherState(cfg);
+  const state = await gatherState(cfg, inChunkIssues);
   if (state.resumableIssueBranches.length > 0) {
     console.log(
       `Resuming ${state.resumableIssueBranches.length} stranded issue ` +
