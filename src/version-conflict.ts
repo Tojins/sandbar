@@ -65,9 +65,6 @@ const ALLOWED_VERSION_PATHS: Readonly<Record<string, readonly (readonly string[]
   "package-lock.json": [["version"], ["packages", "", "version"]],
 };
 
-export const VERSION_CONFLICT_FILES: readonly string[] =
-  Object.keys(ALLOWED_VERSION_PATHS);
-
 export function isVersionConflictFile(path: string): boolean {
   return Object.hasOwn(ALLOWED_VERSION_PATHS, path);
 }
