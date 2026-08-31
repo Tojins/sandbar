@@ -1069,21 +1069,24 @@ export async function runMergerWithAdapter(
       // was commented on and de-labelled.
       return asHalt(`Merge loop failed on issue #${issue.id}`)(err);
     }
-  };
-
-  // ---------------------------------------------------------------------
+  };  // ---------------------------------------------------------------------
   // Phase A: the chunk landings (#60), before the source-branch pass — see
   // the header for why that order and not the other one.
   // ---------------------------------------------------------------------
-  const sorted = sortIssuesAsc(issues);
-  const chunkGroups = groupByChunk(sorted);
-  // The sha the worktree entered on, i.e. `origin/<sourceBranch>`, to return to
-  // after the chunk landings have moved HEAD. Read only when there is a chunk
-  // to land, so a cycle without one makes no extra call.
-  const sourceBaseSha =
-    chunkGroups.length > 0 ? await adapter.getHeadSha() : null;
 
-  for (const group of chunkGroups) {
+  // ONE chunk branch: base the worktree at origin's copy of it, merge every
+  // member of the group on, push, and open or update the review surface.
+  // Named for the same reason `landRequestedChunks` below is — it is one pass
+  // over one input, and what it leaves behind is exactly the `chunkLanded`
+  // entries its members earned by reaching origin.
+  //
+  // A closure rather than a module-scope function taking its deps, unlike
+  // `attemptMerge`: it WRITES `chunkLanded`, and it has to write it before the
+  // pull-request call below, which halts. Returning the landed members for a
+  // caller to record instead would mean a halt on the PR left them out of the
+  // partial — and their commits are on origin by then, so `in-chunk` is owed
+  // whether or not the review surface came up.
+  const landChunkGroup = async (group: ChunkGroup): Promise<void> => {
     const branch = group.target.branch;
     const landedMembers: IssueRef[] = [];
     try {
@@ -1098,7 +1101,7 @@ export async function runMergerWithAdapter(
     }
     if (landedMembers.length === 0) {
       await emit(`chunk ${branch}: nothing landed`);
-      continue;
+      return;
     }
     // The one place a chunk branch is written, and the reason the whole group
     // is merged before it: a member is only ever recorded as landed once the
@@ -1162,16 +1165,26 @@ export async function runMergerWithAdapter(
         ),
       );
     await emit(`chunk ${branch}: draft PR ${pr.url || `#${pr.number}`}`);
-  }
+  };
 
-  // Back to where the cycle started, so the source-branch pass below merges
-  // onto `origin/<sourceBranch>` and not onto the last chunk it happened to
-  // land. Nothing else in this function moves HEAD across issues.
-  if (sourceBaseSha !== null) {
+  // Every group, and HEAD put back where the cycle started once they are done
+  // — so Phase B merges onto `origin/<sourceBranch>` and not onto the last
+  // chunk this happened to land. Nothing else in this function moves HEAD
+  // across issues. The entry sha is read only when there IS a group, so a
+  // cycle without one makes no extra call.
+  const landChunkGroups = async (
+    groups: readonly ChunkGroup[],
+  ): Promise<void> => {
+    if (groups.length === 0) return;
+    const sourceBaseSha = await adapter.getHeadSha();
+    for (const group of groups) await landChunkGroup(group);
     await adapter
       .checkoutDetached(sourceBaseSha)
       .catch(asHalt("Could not return the merger worktree to the source branch"));
-  }
+  };
+
+  const sorted = sortIssuesAsc(issues);
+  await landChunkGroups(groupByChunk(sorted));
 
   // ---------------------------------------------------------------------
   // Phase B: the source-branch pass. Reviewed chunks first (#64), then the
