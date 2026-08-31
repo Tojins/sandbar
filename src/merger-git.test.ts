@@ -103,3 +103,133 @@ describe("realAdapter.isMergeInProgress (real linked worktree)", () => {
     expect(await adapterAt(repo).isMergeInProgress()).toBe(true);
   });
 });
+
+// #60 — the three git primitives the chunk landing rests on, against real
+// repositories in the shape production uses: a BARE object cache with
+// `+refs/heads/*:refs/remotes/origin/*` configured, a detached linked worktree
+// hanging off it, and a bare origin. Every claim in the adapter's comments is a
+// claim about git's behaviour in exactly that shape, and none of it is visible
+// in a plain clone: a chunk branch is fetched into a repo with no working tree,
+// and pushed from a HEAD that is on no branch.
+describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
+  let root: string;
+  let origin: string;
+  let seed: string;
+  let cache: string;
+  let wt: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-chunk-"));
+    origin = join(root, "origin.git");
+    seed = join(root, "seed");
+    cache = join(root, "repo.git");
+    wt = join(root, "wt");
+
+    await exec("git", ["init", "--bare", "-b", "main", origin], { env: GIT_ENV });
+    await exec("git", ["init", "-b", "main", seed], { env: GIT_ENV });
+    await commit(seed, "a.txt", "one\n");
+    await git(seed, "remote", "add", "origin", origin);
+    await git(seed, "push", "-q", "origin", "main");
+
+    await exec("git", ["clone", "--bare", "--quiet", origin, cache], {
+      env: GIT_ENV,
+    });
+    await git(cache, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*");
+    await git(cache, "fetch", "origin", "--prune", "--quiet");
+    await git(cache, "worktree", "add", "--detach", wt, "origin/main");
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const adapter = () =>
+    realAdapter({
+      cwd: wt,
+      sourceBranch: "main",
+      botName: "bot",
+      botEmail: "bot@e",
+      coauthorTrailer: "",
+    } as unknown as Parameters<typeof realAdapter>[0]);
+
+  const originHas = async (branch: string): Promise<string | null> =>
+    git(origin, "rev-parse", branch).catch(() => null);
+
+  it("bases on origin/<sourceBranch> when origin has no such chunk branch", async () => {
+    expect(await adapter().chunkBase("sandbar/chunk-1-c")).toBe("origin/main");
+  });
+
+  it("bases on origin's chunk branch when it exists, fetching it into the bare cache", async () => {
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
+
+    const base = await adapter().chunkBase("sandbar/chunk-1-c");
+
+    expect(base).toBe("refs/remotes/origin/sandbar/chunk-1-c");
+    // The point of the explicit refspec: the remote-tracking ref really is in
+    // the cache afterwards, so `checkoutDetached(base)` has something to
+    // resolve. A fetch that only wrote FETCH_HEAD would pass the line above
+    // and fail here.
+    expect(await git(cache, "rev-parse", "--verify", base)).toBeTruthy();
+  });
+
+  it("pushes a detached HEAD to a chunk branch, creating it on origin", async () => {
+    await commit(wt, "b.txt", "member work\n");
+    const head = await git(wt, "rev-parse", "HEAD");
+
+    const r = await adapter().pushChunkBranch("sandbar/chunk-1-c");
+
+    expect(r).toEqual({ kind: "ok" });
+    expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(head);
+  });
+
+  it("fast-forwards the chunk branch when the next member lands on it", async () => {
+    await commit(wt, "b.txt", "first member\n");
+    await adapter().pushChunkBranch("sandbar/chunk-1-c");
+    await commit(wt, "c.txt", "second member\n");
+    const head = await git(wt, "rev-parse", "HEAD");
+
+    expect(await adapter().pushChunkBranch("sandbar/chunk-1-c")).toEqual({
+      kind: "ok",
+    });
+    expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(head);
+  });
+
+  it("reports a race rather than overwriting a chunk branch that moved", async () => {
+    // Somebody else's commit is on the branch and this composition is not
+    // built on it. A force-push here would drop that member silently.
+    await commit(seed, "d.txt", "somebody else\n");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
+    const theirs = (await originHas("refs/heads/sandbar/chunk-1-c"))!;
+    await commit(wt, "b.txt", "our work\n");
+
+    expect(await adapter().pushChunkBranch("sandbar/chunk-1-c")).toEqual({
+      kind: "race",
+    });
+    expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(theirs);
+  });
+
+  it("checks out a ref detached, leaving HEAD on no branch", async () => {
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
+    const a = adapter();
+    const base = await a.chunkBase("sandbar/chunk-1-c");
+
+    await a.checkoutDetached(base);
+
+    expect(await git(wt, "rev-parse", "HEAD")).toBe(
+      await git(cache, "rev-parse", base),
+    );
+    await expect(git(wt, "symbolic-ref", "HEAD")).rejects.toThrow();
+  });
+
+  it("comes back to a sha it was moved away from", async () => {
+    // The merge phase's return trip: chunk groups move HEAD, and the
+    // source-branch pass must resume on the sha the cycle entered on.
+    const entry = await git(wt, "rev-parse", "HEAD");
+    await commit(wt, "b.txt", "chunk work\n");
+    expect(await git(wt, "rev-parse", "HEAD")).not.toBe(entry);
+
+    await adapter().checkoutDetached(entry);
+
+    expect(await git(wt, "rev-parse", "HEAD")).toBe(entry);
+  });
+});
