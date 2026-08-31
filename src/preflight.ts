@@ -752,8 +752,11 @@ async function classifySandbarBranches(
     // either: the issue number in it is a chunk ROOT, and resuming means
     // handing a branch to one issue's inner loop, which is not what a chunk
     // branch holds. So it is recognized and left alone here; the only thing
-    // preflight does to one is delete it once merged, below. Chunk lifecycle
-    // is a later issue under #54 and this is where it plugs in.
+    // preflight does to one is delete it once merged, below — and since #64
+    // "merged" is the ordinary end of a chunk's life rather than a rarity, so
+    // this branch is reached by every chunk that ever lands. What retires the
+    // chunk on ORIGIN is the landing's own wrap-up or the plan-time
+    // reconciler (`chunk-reconcile.ts`); this is only the local copy.
     if (rootIssueFromChunkBranch(branch) !== null) continue;
     // `[gone]` = the branch had an upstream and the remote deleted it (PR
     // closed/merged-and-deleted). If the work isn't on the source branch

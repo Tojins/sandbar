@@ -7,7 +7,10 @@
 //     ref's audit handle, not a draft, closed by sandbar the moment its cycle
 //     is abandoned;
 //   * the CHUNK PR (#62, chunk-pr.ts + merger.ts) — a durable review surface
-//     for a review-gated chunk, opened as a DRAFT and never closed by sandbar.
+//     for a review-gated chunk, opened as a DRAFT and left open for as long as
+//     the review takes. Since #64 sandbar does close one, but only on the far
+//     side of the landing it asked for, and through its own `gh pr close`
+//     rather than through anything here.
 //
 // What they share is the discipline, and it is the part that is easy to get
 // subtly wrong twice: find the open PR for this head→base pair, RE-TITLE and
@@ -26,8 +29,9 @@
 // leaving review fully functional, so sandbar opens a chunk PR as a draft. But
 // a human marking that PR ready for review is a deliberate override, and this
 // function must not undo it on the next cycle: it re-titles and re-bodies an
-// existing PR and touches nothing else. Reconciling a chunk a human took over
-// that way is #64's problem, not a flag flip behind their back.
+// existing PR and touches nothing else. A chunk a human then merged themselves
+// is reconciled by #64's plan-time pass — which reads git rather than draft
+// state — so nothing here needs a flag flip behind their back.
 //
 // The process seam mirrors forge-verify's `ExecFn` for the same reason: the
 // bugs in a shell-out layer are in its argv, and no fake adapter can see argv.

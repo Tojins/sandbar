@@ -3,6 +3,8 @@
 // something sandbar does not do.
 import { describe, expect, it } from "vitest";
 
+import { LAND_LABEL } from "./chunk-land.js";
+
 import {
   chunkMembersOnBranch,
   chunkPullRequestBody,
@@ -73,18 +75,26 @@ describe("chunkPullRequestBody", () => {
     expect(body()).toMatch(/has reached the\nbase branch|reached the base branch/);
   });
 
-  it("does not invite a label nothing reads yet", () => {
-    // #62 sketches "apply the `land` label to land". There is no such label and
-    // nothing that would watch one, and a review surface whose first
-    // instruction does nothing is worse than one that stays quiet — the
-    // sentence belongs to the issue that builds the mechanism.
-    expect(body()).not.toMatch(/`land`/);
+  it("invites the one label that lands the chunk (#64)", () => {
+    // #62 held this sentence back because no code watched the label. #64 built
+    // the mechanism, so the invitation is written — and it names the LABEL, not
+    // an approval, because approve-now-land-later is the workflow the trigger
+    // was chosen to keep.
+    const b = body();
+    expect(b).toContain(`\`${LAND_LABEL}\` label on this pull request`);
+    expect(b).toMatch(/[Aa]pproving is not the trigger/);
   });
 
-  it("does not claim sandbar will land the reviewed chunk on its own", () => {
-    // It cannot yet. The body may say the merge button is disabled by design;
-    // it may not promise an automation that does not exist.
-    expect(body()).toContain("not automated yet");
+  it("says what landing actually does, so the label is not a leap of faith", () => {
+    const b = body();
+    expect(b).toContain("closes every issue above");
+    expect(b).toContain("deletes the branch");
+  });
+
+  it("still says a hand-merge is recovered from rather than forbidden", () => {
+    // The draft state makes the accident hard; the reconciler is what makes it
+    // survivable, and a reviewer who did it anyway needs to know that.
+    expect(body()).toMatch(/already contained in/);
   });
 });
 

@@ -29,8 +29,13 @@
 // `land` is HARDCODED, on the same ground as `AUTO_LAND_LABEL` in `lanes.ts`
 // and `IN_CHUNK_LABEL` in `chunks.ts`: the configurable labels (`LabelConfig`)
 // name a host's own handoff conventions, and this one is protocol — a human
-// addressing sandbar. Both ends of it are read here, so a knob could only let
-// the two spellings drift.
+// addressing sandbar. The SPELLING is declared in `chunks.ts` beside
+// `IN_CHUNK_LABEL` and re-exported below: the PR body that invites the label,
+// the code that reads it and the code that takes it off again are three
+// modules, and finalise names it in prose as well — one declaration is what
+// stops those four coming to disagree. (It also keeps the import graph a DAG:
+// this module reads finalise's bot prefix, so finalise cannot read a constant
+// back out of it.)
 //
 // The label is also the QUEUE, exactly as `ready-for-agent` is the queue for
 // issues, and every failure path below is written from that reading:
@@ -100,13 +105,19 @@
 // the members after the failing one and report a landing that did not finish
 // as a landing that did not happen.
 
-import { type ChunkMember, IN_CHUNK_LABEL, type NamedChunk } from "./chunks.js";
+import {
+  type ChunkMember,
+  IN_CHUNK_LABEL,
+  LAND_LABEL,
+  type NamedChunk,
+} from "./chunks.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
 import { rootIssueFromChunkBranch } from "./naming.js";
 
-// The label a human puts on a chunk's pull request to land it. See the header
-// for why it is on the PR, why it is not approval, and why it is hardcoded.
-export const LAND_LABEL = "land";
+// Re-exported because every consumer of this module wants the label and the
+// behaviour together, and none of them should have to know the string lives one
+// module down. `chunks.ts` owns the spelling; this file owns what it means.
+export { LAND_LABEL };
 
 // One chunk that is to be landed on the source branch, or that already has
 // been. Built by the two selectors below and consumed by the merge phase and

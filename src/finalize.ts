@@ -61,7 +61,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { IN_CHUNK_LABEL } from "./chunks.js";
+import { IN_CHUNK_LABEL, LAND_LABEL } from "./chunks.js";
 import type { LabelConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
 import type { HeadMismatch } from "./git-ops.js";
@@ -347,8 +347,11 @@ export const CHUNK_LANDED_COMMENT_TEMPLATE = (
   `before any of it lands.\n\n` +
   `The issue stays OPEN and \`${readyLabel}\` has been replaced with ` +
   `\`${inChunkLabel}\`: it is out of the agent queue (its work is done and on ` +
-  `the branch) but not finished, and it closes when the chunk lands. The local ` +
-  `issue branch was deleted — \`${chunkBranch}\` carries its commits.`;
+  `the branch) but not finished. It closes when the chunk lands, which a human ` +
+  `triggers by putting \`${LAND_LABEL}\` on the chunk's pull request (#64) — ` +
+  `sandbar then merges \`${chunkBranch}\` into the source branch and closes every ` +
+  `issue on it. The local issue branch was deleted — \`${chunkBranch}\` carries ` +
+  `its commits.`;
 
 export type FinalizeInput =
   | { readonly kind: "merged"; readonly issue: IssueRef }

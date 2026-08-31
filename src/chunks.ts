@@ -149,6 +149,21 @@ import { chunkBranchName } from "./naming.js";
 // read as "these commits are somewhere durable".
 export const IN_CHUNK_LABEL = "in-chunk";
 
+// The label a HUMAN puts on a chunk's pull request to land it (#64). The other
+// end of the same lifecycle: `in-chunk` says the work is on the branch,
+// `land` says a reviewer is done with it and the next run should merge the
+// branch into the source branch and close every member.
+//
+// Here rather than in `chunk-land.ts`, which owns everything ABOUT it — why it
+// is a label and not an approval, why it sits on the pull request, and how it
+// behaves as a queue. What lives here is the SPELLING, beside the other chunk
+// protocol label, so the module that writes the invitation into the PR body,
+// the module that reads it off the forge and the module that takes it back off
+// again cannot come to disagree about the string. Hardcoded for the reason
+// above and the one `lanes.ts` gives for `auto-land`: it is protocol a human
+// uses to address sandbar, not a host's handoff vocabulary.
+export const LAND_LABEL = "land";
+
 // An issue named as part of a chunk, in the one form the review surface needs
 // it: a number and the title a human reads next to it (#62).
 export type ChunkMember = {
