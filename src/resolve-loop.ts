@@ -109,18 +109,23 @@ export type ResolveMode =
       readonly failedChecks: string;
     };
 
-// How one `podman run … claude` invocation ended. `timeout` is sandbar's own
+// How one resolve-provider `podman run` invocation ended. `timeout` is sandbar's own
 // SIGTERM at RESOLVE_AGENT_TIMEOUT_MS and nothing else; `signal` is anything
 // else that killed the process (an OOM kill, an operator's Ctrl-C reaching the
 // group); `spawn-error` is a runtime that never produced a process at all.
 export type ResolveAgentEnd = "exit" | "timeout" | "signal" | "spawn-error";
 
 // What one invocation actually did. The token parser only ever needed
-// `stdout`; every other field here exists so that an attempt which produced
+// `output`; every other field here exists so that an attempt which produced
 // nothing can be told apart from an agent that chose to say nothing (#67).
 export type ResolveAgentRun = {
   readonly stdout: string;
   readonly stderr: string;
+  // Agent speech parsed by the selected provider. Raw stdout remains above for
+  // the byte-verbatim attempt log; promise tokens are read only from here.
+  readonly output?: string;
+  // A terminal failure reported in-band by the provider, never agent speech.
+  readonly providerFailure?: string;
   readonly end: ResolveAgentEnd;
   // The process's exit code, or null when it was killed before it had one.
   readonly exitCode: number | null;
@@ -195,10 +200,7 @@ export type ResolveAdapter = {
   // `attempt` is passed so the invocation can be NAMED after it — the
   // container name is the handle on a failure that produced nothing else, and
   // an anonymous one leaves an operator grepping `podman events` by timestamp.
-  runResolveAgent(
-    prompt: string,
-    attempt: number,
-  ): Promise<ResolveAgentRun>;
+  runResolveAgent(prompt: string, attempt: number): Promise<ResolveAgentRun>;
   isMergeInProgress(): Promise<boolean>;
   // `paths` is the unmerged set (`git diff --name-only --diff-filter=U`), kept
   // apart from the human-readable `status` because the abandon comment lists
@@ -349,7 +351,9 @@ export async function runResolveLoop(
       mode: trace,
     });
 
-    await log(`resolve-attempt ${attempt}/${RESOLVE_MAX_ATTEMPTS} mode=${trace.kind}`);
+    await log(
+      `resolve-attempt ${attempt}/${RESOLVE_MAX_ATTEMPTS} mode=${trace.kind}`,
+    );
     const run = await adapter.runResolveAgent(prompt, attempt);
     // Captured BEFORE anything is decided about the run, so the file exists
     // even on the path that throws — an infra failure whose output went
@@ -397,10 +401,12 @@ export async function runResolveLoop(
       // left the tree untouched — there is no honest verdict to file. Nothing
       // reads the journal on this path anyway: the throw is the report, and
       // the file the sink just wrote is the evidence behind it.
-      throw new SandbarError(buildInfraFailureMessage(issue, attempt, run, logPath));
+      throw new SandbarError(
+        buildInfraFailureMessage(issue, attempt, run, logPath),
+      );
     }
 
-    const signal = parseResolveSignal(run.stdout);
+    const signal = parseResolveSignal(run.output ?? run.stdout);
 
     if (signal.kind === "ABANDON") {
       const inProgress = await adapter.isMergeInProgress();
@@ -548,7 +554,7 @@ const VERDICT_PROSE: Record<ResolveAttemptVerdict, string> = {
 export function isInfraFailure(run: ResolveAgentRun): boolean {
   if (run.end === "spawn-error") return true;
   if (run.end === "timeout") return false;
-  return run.stdout.trim() === "";
+  return (run.output ?? run.stdout).trim() === "";
 }
 
 // How much of stderr rides along in the halt message. The whole of it is on
@@ -712,7 +718,9 @@ function buildDoneSignal(
   mode: AttemptTrace,
 ): string {
   const committedSignal =
-    mode.kind === "still-conflicted" ? COMMITTED_CONFLICT_TPL : COMMITTED_GATE_TPL;
+    mode.kind === "still-conflicted"
+      ? COMMITTED_CONFLICT_TPL
+      : COMMITTED_GATE_TPL;
   return render(DONE_SIGNAL_TPL, {
     attempt: String(attempt),
     maxAttempts: String(maxAttempts),

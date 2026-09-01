@@ -123,7 +123,11 @@
 
 import { realpathSync } from "node:fs";
 
-import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
+import {
+  type ResolvedConfig,
+  type RunConfig,
+  resolveConfig,
+} from "./config.js";
 import {
   type SweepResult,
   cleanupOrphanContainers,
@@ -134,10 +138,7 @@ import {
   fileChunkReviewFollowUps,
   realAdapter as realChunkFollowUpAdapter,
 } from "./chunk-follow-up.js";
-import {
-  formatDriverIdentity,
-  readDriverIdentity,
-} from "./driver-identity.js";
+import { formatDriverIdentity, readDriverIdentity } from "./driver-identity.js";
 import {
   type BranchImages,
   checkWorktreeImageUids,
@@ -177,7 +178,10 @@ import {
 } from "./forge-verify.js";
 import { startKeepawake, stopKeepawake } from "./keepawake.js";
 import { runInnerLoop, type Terminal } from "./inner-loop.js";
-import { requiredAgentProviders } from "./agent-providers.js";
+import {
+  buildAgentProvider,
+  requiredAgentProviders,
+} from "./agent-providers.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
 import { runScope } from "./naming.js";
 import { startRunLogger } from "./logs.js";
@@ -420,10 +424,7 @@ export async function run(
   // naming a pid that will be dead, which the next launch's takeover reads as a
   // crashed run and clears. Cheap, and it keeps every exit path in this file
   // uniform rather than one of them relying on a dependency's exit hook.
-  const stopAtStartup = async (
-    cause: string,
-    err: unknown,
-  ): Promise<never> => {
+  const stopAtStartup = async (cause: string, err: unknown): Promise<never> => {
     // `faultDetail` already renders a SandbarError as its bare message and
     // anything else as a stack — errors.ts owns that rule and all three places
     // sandbar prints a fault share it. The one case it does not know about is
@@ -477,7 +478,7 @@ export async function run(
       // For the one warning that is about the config FILE rather than its
       // contents: nothing refreshes the checkout it was imported from (#66).
       configPath: options.configPath ?? null,
-      // Every CLI the roles route to, plus claude for the merger (#72). A
+      // Every CLI the three roles route to (#72, #74). A
       // missing key for one of them is a refusal here, where it costs a
       // startup, rather than an in-container death an attempt at a time.
       agentProviders: requiredAgentProviders(config),
@@ -792,7 +793,7 @@ export async function run(
           runLogger.appendOrchestrator(line),
         );
       }
-  
+
       const budget = remainingBudget(runState);
       if (budget === 0) {
         // The same `budgetExit` applyCycle returns, rather than the second
@@ -803,11 +804,11 @@ export async function run(
         );
         break;
       }
-  
+
       console.log(`\n=== Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
       await runLogger.appendOrchestrator(`cycle ${iteration} start`);
       const cycleLogger = runLogger.cycle(iteration);
-  
+
       // ---------------------------------------------------------------------
       // Phase 1: Plan
       // ---------------------------------------------------------------------
@@ -1024,7 +1025,7 @@ export async function run(
             `labelled \`${LAND_LABEL}\`. Running the merge phase for those alone.`,
         );
       }
-  
+
       console.log(
         `Planning complete. ${issues.length} issue(s) to work in parallel:`,
       );
@@ -1041,11 +1042,11 @@ export async function run(
       for (const issue of issues) {
         console.log(`  #${issue.id}: ${issue.title}`);
       }
-  
+
       // ---------------------------------------------------------------------
       // Phase 2: Execute (inner-loop ralph)
       // ---------------------------------------------------------------------
-  
+
       const settled = await Promise.allSettled(
         issues.map(async (issue) => ({
           issue,
@@ -1064,8 +1065,11 @@ export async function run(
           }),
         })),
       );
-  
-      type IssueOutcome = { issue: typeof issues[number]; terminal: Terminal };
+
+      type IssueOutcome = {
+        issue: (typeof issues)[number];
+        terminal: Terminal;
+      };
       const outcomes: IssueOutcome[] = [];
       for (const [i, s] of settled.entries()) {
         if (s.status === "fulfilled") {
@@ -1078,9 +1082,7 @@ export async function run(
           // orchestrator.log. The parking comment names it too, from this same
           // issue, but that is on the tracker rather than here.
           console.log(`  #${issue.id} (${issue.branch}): ${t.type}`);
-          await runLogger.appendOrchestrator(
-            `terminal #${issue.id} ${t.type}`,
-          );
+          await runLogger.appendOrchestrator(`terminal #${issue.id} ${t.type}`);
         } else {
           console.error(
             `  ✗ #${issues[i]!.id} (${issues[i]!.branch}) failed: ${s.reason}`,
@@ -1090,18 +1092,18 @@ export async function run(
           );
         }
       }
-  
+
       const completedIssues = outcomes
         .filter((o) => o.terminal.type === "DONE")
         .map((o) => o.issue);
-  
+
       console.log(
         `\nExecution complete. ${completedIssues.length} issue(s) DONE:`,
       );
       for (const issue of completedIssues) {
         console.log(`  #${issue.id}: ${issue.title}`);
       }
-  
+
       // ---------------------------------------------------------------------
       // Phase 4a: Finalise the agent terminals — BEFORE the merge (#30)
       //
@@ -1130,7 +1132,7 @@ export async function run(
       // once and nobody stored has no such fallback.
       // ---------------------------------------------------------------------
       await runFinalize("agent terminals", terminalFinalizeInputs(outcomes));
-  
+
       // ---------------------------------------------------------------------
       // Phase 3: Merge (procedural, in an isolated worktree off origin)
       // ---------------------------------------------------------------------
@@ -1187,7 +1189,11 @@ export async function run(
             botName: config.botName,
             botEmail: config.botEmail,
             coauthorTrailer: config.coauthorTrailer,
-            modelId: config.mergerModelId,
+            agentProvider: buildAgentProvider(
+              config.mergerAgent,
+              config.mergerModelId,
+            ),
+            agentProviderName: config.mergerAgent,
             sandboxImage: config.sandboxImage,
             env,
             runStackGate: () => stackForGate2.runGate(),
@@ -1342,7 +1348,7 @@ export async function run(
           if (mergerWorktree) await mergerWorktree.remove();
         }
       }
-  
+
       // ---------------------------------------------------------------------
       // Phase 4b: Finalise the merge outcomes
       // ---------------------------------------------------------------------
@@ -1537,7 +1543,7 @@ export async function run(
         terminalExit = await announceExit(haltedExit(haltReasons));
         break;
       }
-  
+
       const decision = applyCycle(runState, {
         planFingerprint: fingerprint,
         planSize: issues.length,
@@ -1562,7 +1568,6 @@ export async function run(
         break;
       }
     }
-
   } catch (err) {
     // A sandbar-internal failure escaped a cycle (a required git/gh side-effect
     // that could not be completed, or an unexpected bug). FAIL LOUD: this is
@@ -1574,7 +1579,9 @@ export async function run(
     // rather than restated here (#45).
     const banner = "═".repeat(72);
     const detail = faultDetail(err);
-    console.error(`\n${banner}\nSANDBAR HALTED — internal failure\n${banner}\n${detail}\n${banner}`);
+    console.error(
+      `\n${banner}\nSANDBAR HALTED — internal failure\n${banner}\n${detail}\n${banner}`,
+    );
     await runLogger.appendOrchestrator(`HALTED — internal failure: ${detail}`);
     // The stderr box keeps its place as the last thing on THAT stream, and the
     // stdout line follows it (#70). That does not contradict the "last thing

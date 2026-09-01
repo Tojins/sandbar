@@ -248,6 +248,9 @@ sits in).
 | `implementerModelId` | `opus` |
 | `reviewerModelId` | `opus` |
 | `mergerModelId` | `opus` |
+| `implementerAgent` | `claude` |
+| `reviewerAgent` | `claude` |
+| `mergerAgent` | `claude` |
 | `coauthorTrailer` | `Co-authored-by: <botName> <<botEmail>>` |
 | `claudeMdPath` | `CLAUDE.md` |
 | `contextMdPath` | `CONTEXT.md` (referenced only if the file exists) |

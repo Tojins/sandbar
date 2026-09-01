@@ -212,7 +212,7 @@
 //
 // This file owns the two ENDS of that: the invocation, and the prose.
 //
-// `runResolveAgent` runs claude in a NAMED, run-scoped container and answers
+// `runResolveAgent` runs the configured provider in a NAMED, run-scoped container and answers
 // with a whole `ResolveAgentRun` — both streams, the exit code, the signal, the
 // duration and the container's name. Before, stderr was piped to a listener
 // that was never attached and stdout was returned to the token parser and
@@ -284,12 +284,14 @@ import {
   chunkForgeWrites,
   wrapUpLandedChunk,
 } from "./chunk-land.js";
-import {
-  chunkMembersOnBranch,
-  chunkPullRequestContent,
-} from "./chunk-pr.js";
+import { chunkMembersOnBranch, chunkPullRequestContent } from "./chunk-pr.js";
 import type { ChunkMember, ChunkTarget } from "./chunks.js";
 import { type EnvReader } from "./env.js";
+import {
+  PROVIDER_CREDENTIALS,
+  type AgentProviderName,
+} from "./agent-providers.js";
+import type { AgentProvider } from "./agent-sandbox.js";
 import { SandbarError } from "./errors.js";
 import { type PullRequestRef, ensurePullRequest } from "./forge-pr.js";
 import { dirtyWorktreePaths, fetchOriginChunkBranch } from "./git-ops.js";
@@ -467,7 +469,8 @@ export function buildForgeUnverifiedComment(args: {
   readonly hasResolveCommits: boolean;
 }): string {
   const cause: Record<VerifiedFailureReason, string> = {
-    "checks-red": "the forge's checks rejected the cycle's composed merge result",
+    "checks-red":
+      "the forge's checks rejected the cycle's composed merge result",
     "checks-timeout":
       "the forge's checks never concluded on the cycle's composed merge result " +
       "(nothing was rejected — the verdict simply never arrived)",
@@ -836,7 +839,9 @@ export class MergerError extends Error {
 export function issueNumberOf(issue: IssueRef): number {
   const n = Number(issue.id);
   if (!Number.isInteger(n) || n <= 0) {
-    throw new Error(`Invalid issue id (expected positive integer): ${issue.id}`);
+    throw new Error(
+      `Invalid issue id (expected positive integer): ${issue.id}`,
+    );
   }
   return n;
 }
@@ -878,7 +883,9 @@ export type ChunkGroup = {
 // the planner, so first-wins and a union of them agree; first-wins says which
 // answer is being trusted rather than papering over a disagreement that would
 // mean the plan contradicted itself.
-export function groupByChunk(issues: readonly IssueRef[]): readonly ChunkGroup[] {
+export function groupByChunk(
+  issues: readonly IssueRef[],
+): readonly ChunkGroup[] {
   const byBranch = new Map<
     string,
     { root: number; landed: readonly ChunkMember[]; members: IssueRef[] }
@@ -1011,7 +1018,9 @@ export async function resolveVersionCollision(
   emit: (line: string) => Promise<void>,
   label: string,
 ): Promise<VersionCollisionOutcome> {
-  const candidates = (await adapter.unmergedPaths()).filter(isVersionConflictFile);
+  const candidates = (await adapter.unmergedPaths()).filter(
+    isVersionConflictFile,
+  );
   if (candidates.length === 0) return "none";
   const files: { path: string; text: string | null }[] = [];
   for (const path of candidates) {
@@ -1097,7 +1106,10 @@ async function attemptMerge(
   // The version collision is settled mechanically first (#68); only what it
   // could not finish reaches the agent. `completed` falls through to the clean
   // path below, merge commit and all.
-  if (!m.ok && (await resolveVersionCollision(adapter, emit, label)) !== "completed") {
+  if (
+    !m.ok &&
+    (await resolveVersionCollision(adapter, emit, label)) !== "completed"
+  ) {
     await emit(`conflict ${label} entering resolve-loop`);
     const outcome = await runResolveLoop(
       unit,
@@ -1276,11 +1288,9 @@ export async function runMergerWithAdapter(
     (err: unknown): never => {
       if (err instanceof MergerError) throw err;
       const msg = err instanceof Error ? err.message : String(err);
-      throw new MergerError(
-        `${context}: ${msg}`,
-        nothingLanded(),
-        { cause: err },
-      );
+      throw new MergerError(`${context}: ${msg}`, nothingLanded(), {
+        cause: err,
+      });
     };
 
   // Flipped the instant this cycle's work reaches origin. Before that point a
@@ -1519,7 +1529,9 @@ export async function runMergerWithAdapter(
     for (const group of groups) await landChunkGroup(group);
     await adapter
       .checkoutDetached(sourceBaseSha)
-      .catch(asHalt("Could not return the merger worktree to the source branch"));
+      .catch(
+        asHalt("Could not return the merger worktree to the source branch"),
+      );
   };
 
   const sorted = sortIssuesAsc(issues);
@@ -1546,9 +1558,7 @@ export async function runMergerWithAdapter(
   // only `origin/<chunk>` exists here, which is why the caller passes the ref
   // `fetchChunkRef` resolved rather than `request.branch`. See
   // `MergedChunkUnit`.
-  const chunkMemberRefs = (
-    unit: MergedChunkUnit,
-  ): readonly IssueRef[] =>
+  const chunkMemberRefs = (unit: MergedChunkUnit): readonly IssueRef[] =>
     unit.target.members.map((m) => ({
       id: String(m.number),
       title: m.title,
@@ -1708,14 +1718,15 @@ export async function runMergerWithAdapter(
             chunkBranch: request.branch,
             sourceBranch: pending.sourceBranch,
             mode:
-              outcome.kind === "install-failed" ? "install-failed" : outcome.mode,
+              outcome.kind === "install-failed"
+                ? "install-failed"
+                : outcome.mode,
             reason: outcome.kind === "install-failed" ? "" : outcome.reason,
             // The same diagnostics the auto lane's issue comment carries
             // (#67). A reviewer reading a parked chunk needs to tell a real
             // collision from a broken container exactly as an issue's author
             // does, and `install-failed` never entered the loop at all.
-            attempts:
-              outcome.kind === "install-failed" ? [] : outcome.attempts,
+            attempts: outcome.kind === "install-failed" ? [] : outcome.attempts,
             conflictPaths:
               outcome.kind === "install-failed" ? [] : outcome.conflictPaths,
           }),
@@ -1994,7 +2005,9 @@ async function closeMergedIssues(
         break;
       } catch (err) {
         lastErr = err instanceof Error ? err.message : String(err);
-        await deps.emit(`close #${n} attempt ${attempt + 1} failed: ${lastErr}`);
+        await deps.emit(
+          `close #${n} attempt ${attempt + 1} failed: ${lastErr}`,
+        );
       }
     }
     if (!ok) {
@@ -2028,9 +2041,13 @@ export type RealAdapterDeps = {
   readonly botName: string;
   readonly botEmail: string;
   readonly coauthorTrailer: string;
-  readonly modelId: string;
-  // The image the resolve agent runs in — claude is installed there, not in
-  // any gate-stack image (#24 D7).
+  // The provider owns the resolve invocation's argv and output parser (#74).
+  // It is built without resume semantics: each attempt is a fresh container
+  // whose prompt carries the whole state.
+  readonly agentProvider: AgentProvider;
+  readonly agentProviderName: AgentProviderName;
+  // The image the resolve agent runs in — both supported CLIs are installed
+  // there, not in any gate-stack image (#24 D7, #39).
   readonly sandboxImage: string;
   readonly env: EnvReader;
   // Gate-2, already bound to the merger worktree's stack. The merger does not
@@ -2175,6 +2192,34 @@ export function captureAgentRun(
   });
 }
 
+// Interpret a completed capture through the SAME provider object that built
+// its command. Raw streams stay on the returned run for #67's attempt log;
+// only this parsed speech register is eligible to carry a resolve promise.
+export function parseCapturedAgentRun(
+  run: ResolveAgentRun,
+  agent: AgentProvider,
+): ResolveAgentRun {
+  let result = "";
+  let accumulated = "";
+  let failure: string | undefined;
+  for (const line of run.stdout.split(/\r?\n/)) {
+    for (const event of agent.parseStreamLine(line)) {
+      if (event.type === "text") accumulated += event.text;
+      else if (event.type === "result") {
+        result = event.result;
+        accumulated += event.result;
+      } else if (event.type === "failure") failure = event.message;
+    }
+  }
+  const spoken = result || accumulated;
+  return {
+    ...run,
+    output: spoken || (agent.parsedOutputOnly === true ? "" : run.stdout),
+    ...(failure === undefined ? {} : { providerFailure: failure }),
+    ...(!spoken && failure !== undefined ? { detail: failure } : {}),
+  };
+}
+
 export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   const cwd = deps.cwd;
   // The merger worktree is always detached, so every push it makes is HEAD to a
@@ -2252,7 +2297,12 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     try {
       await exec(
         "git",
-        ["fetch", "origin", `+refs/heads/${chunkBranch}:${remoteRef}`, "--quiet"],
+        [
+          "fetch",
+          "origin",
+          `+refs/heads/${chunkBranch}:${remoteRef}`,
+          "--quiet",
+        ],
         { cwd },
       );
       return { kind: "present", ref: remoteRef };
@@ -2266,7 +2316,10 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         (err: unknown) => err,
       );
       if (probe !== null && exitCodeOf(probe) === 2) return { kind: "absent" };
-      return { kind: "unreadable", detail: gitFailureDetail(probe ?? fetchErr) };
+      return {
+        kind: "unreadable",
+        detail: gitFailureDetail(probe ?? fetchErr),
+      };
     }
   };
   return {
@@ -2300,8 +2353,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       }
     },
     async runResolveAgent(prompt, attempt) {
-      // Runs claude inside a podman container off the SANDBOX image (claude is
-      // pre-installed there; no gate-stack image is required to have it).
+      // Runs the routed provider inside a podman container off the SANDBOX
+      // image (both CLIs are pre-installed there; #39).
       // Bind-mounts the merger worktree at /workspace so
       // the agent's edits and commits are live on host. `cwd` is a git worktree
       // (detached at origin/<sourceBranch>), so its `.git` is a gitlink file
@@ -2318,8 +2371,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // something an operator can pass to `podman logs`. The uuid is what keeps
       // two cycles resolving the same issue from colliding on the name; the
       // attempt number is in it so the name is greppable against the log line.
-      const container =
-        `${scopedResourcePrefix(deps.scope)}resolve-${attempt}-${randomUUID()}`;
+      const container = `${scopedResourcePrefix(deps.scope)}resolve-${attempt}-${randomUUID()}`;
       const extraMounts = await gitMountsForWorktree(cwd);
       const args: string[] = [
         "run",
@@ -2341,12 +2393,16 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         "sandbar=true",
       ];
       for (const key of [
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "ANTHROPIC_API_KEY",
+        ...PROVIDER_CREDENTIALS[deps.agentProviderName].map(
+          (credential) => credential.key,
+        ),
         "GH_TOKEN",
       ]) {
         const v = deps.env(key);
         if (v) args.push("-e", `${key}=${v}`);
+      }
+      for (const [key, value] of Object.entries(deps.agentProvider.env)) {
+        args.push("-e", `${key}=${value}`);
       }
       args.push(
         "-e",
@@ -2358,21 +2414,22 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         "-e",
         `GIT_COMMITTER_EMAIL=${deps.botEmail}`,
       );
+      const command = deps.agentProvider.buildPrintCommand({
+        prompt,
+        dangerouslySkipPermissions: true,
+      });
       args.push(
         "--entrypoint",
-        "claude",
+        "/bin/sh",
         deps.sandboxImage,
-        "--print",
-        "--dangerously-skip-permissions",
-        "--model",
-        deps.modelId,
-        "-p",
-        "-",
+        "-lc",
+        command.command,
       );
-      return captureAgentRun(RUNTIME, args, prompt, {
+      const run = await captureAgentRun(RUNTIME, args, command.stdin ?? "", {
         container,
         timeoutMs: RESOLVE_AGENT_TIMEOUT_MS,
       });
+      return parseCapturedAgentRun(run, deps.agentProvider);
     },
     async isMergeInProgress() {
       // NOT `<cwd>/.git/MERGE_HEAD`. Since #10 the merger always runs in a

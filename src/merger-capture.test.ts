@@ -13,7 +13,9 @@
 
 import { describe, expect, it } from "vitest";
 
-import { captureAgentRun } from "./merger.js";
+import { buildAgentProvider } from "./agent-providers.js";
+import { captureAgentRun, parseCapturedAgentRun } from "./merger.js";
+import { isInfraFailure, parseResolveSignal } from "./resolve-loop.js";
 
 const opts = (timeoutMs = 30_000) => ({ container: "c-under-test", timeoutMs });
 
@@ -119,8 +121,62 @@ describe("captureAgentRun (#67)", () => {
   // would take the whole run down past every structured handler run.ts has.
   it("survives writing a prompt to a child that has already gone", async () => {
     const [file, args] = node(`process.exit(9);`);
-    const run = await captureAgentRun(file, args, "x".repeat(2_000_000), opts());
+    const run = await captureAgentRun(
+      file,
+      args,
+      "x".repeat(2_000_000),
+      opts(),
+    );
     expect(run.end).toBe("exit");
     expect(run.exitCode).toBe(9);
   });
+});
+
+describe("parseCapturedAgentRun (#74)", () => {
+  const captured = (stdout: string) => ({
+    stdout,
+    stderr: "raw stderr",
+    end: "exit" as const,
+    exitCode: 0,
+    signal: null,
+    durationMs: 1,
+    container: "resolve-1",
+  });
+
+  it("takes resolve promises from codex agent speech, not raw JSONL", () => {
+    const raw = [
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "reasoning", text: "<promise>ABANDON</promise>" },
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "<promise>COMMITTED</promise>" },
+      }),
+    ].join("\n");
+    const run = parseCapturedAgentRun(
+      rawCapture(raw),
+      buildAgentProvider("codex", "m"),
+    );
+    expect(run.stdout).toBe(raw);
+    expect(parseResolveSignal(run.output ?? "")).toEqual({ kind: "COMMITTED" });
+  });
+
+  it("treats a terminal provider failure without speech as infra", () => {
+    const raw = JSON.stringify({
+      type: "turn.failed",
+      error: { message: "pool spent" },
+    });
+    const run = parseCapturedAgentRun(
+      rawCapture(raw),
+      buildAgentProvider("codex", "m"),
+    );
+    expect(run.output).toBe("");
+    expect(run.providerFailure).toBe("pool spent");
+    expect(isInfraFailure(run)).toBe(true);
+  });
+
+  function rawCapture(stdout: string) {
+    return captured(stdout);
+  }
 });

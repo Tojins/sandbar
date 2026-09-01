@@ -20,7 +20,9 @@ import { SandbarError } from "./errors.js";
 describe("parseAgentProviderName", () => {
   // The default is what makes #72 a no-op for every config written before it.
   it("defaults to claude when the field is absent", () => {
-    expect(parseAgentProviderName("implementerAgent", undefined)).toBe("claude");
+    expect(parseAgentProviderName("implementerAgent", undefined)).toBe(
+      "claude",
+    );
     expect(DEFAULT_AGENT_PROVIDER).toBe("claude");
   });
 
@@ -34,9 +36,9 @@ describe("parseAgentProviderName", () => {
   // driver cannot build has to be refused where the config is read rather than
   // spread through and discovered as an implementer dying in-container.
   it("refuses an unknown name, quoting it and listing what is accepted", () => {
-    expect(() => parseAgentProviderName("implementerAgent", "opencode")).toThrow(
-      SandbarError,
-    );
+    expect(() =>
+      parseAgentProviderName("implementerAgent", "opencode"),
+    ).toThrow(SandbarError);
     try {
       parseAgentProviderName("implementerAgent", "opencode");
       expect.unreachable("should have thrown");
@@ -192,6 +194,7 @@ describe("requiredAgentProviders", () => {
       requiredAgentProviders({
         implementerAgent: "claude",
         reviewerAgent: "claude",
+        mergerAgent: "claude",
       }),
     ).toEqual(["claude"]);
   });
@@ -201,6 +204,7 @@ describe("requiredAgentProviders", () => {
       requiredAgentProviders({
         implementerAgent: "codex",
         reviewerAgent: "claude",
+        mergerAgent: "claude",
       }),
     ).toEqual(["claude", "codex"]);
   });
@@ -208,13 +212,14 @@ describe("requiredAgentProviders", () => {
   // The headline configuration of #72 — codex implementer, Opus reviewer —
   // needs both vendors' credentials, and so does its mirror image. The exact
   // equality is also the dedupe: both roles name codex and it appears once.
-  it("keeps claude even when NO role names it (the merger, #72)", () => {
+  it("does not require claude when no role names it (#74)", () => {
     expect(
       requiredAgentProviders({
         implementerAgent: "codex",
         reviewerAgent: "codex",
+        mergerAgent: "codex",
       }),
-    ).toEqual(["claude", "codex"]);
+    ).toEqual(["codex"]);
   });
 
   // The list feeds a refusal message; an order that moved with the config
@@ -223,10 +228,12 @@ describe("requiredAgentProviders", () => {
     const a = requiredAgentProviders({
       implementerAgent: "codex",
       reviewerAgent: "claude",
+      mergerAgent: "claude",
     });
     const b = requiredAgentProviders({
       implementerAgent: "claude",
       reviewerAgent: "codex",
+      mergerAgent: "claude",
     });
     expect(a).toEqual(b);
   });
@@ -252,9 +259,9 @@ describe("assertRoleModelIdNamed", () => {
   });
 
   it("names the role it was given", () => {
-    expect(() => assertRoleModelIdNamed("reviewer", "codex", undefined)).toThrow(
-      /config\.reviewerModelId/,
-    );
+    expect(() =>
+      assertRoleModelIdNamed("reviewer", "codex", undefined),
+    ).toThrow(/config\.reviewerModelId/);
   });
 
   it("accepts a non-claude provider once the role names an id", () => {
@@ -321,8 +328,9 @@ describe("buildAgentProvider", () => {
   it("carries the prompt on stdin for every provider", () => {
     for (const name of AGENT_PROVIDER_NAMES) {
       expect(
-        buildAgentProvider(name, "m").buildPrintCommand({ prompt: "the prompt" })
-          .stdin,
+        buildAgentProvider(name, "m").buildPrintCommand({
+          prompt: "the prompt",
+        }).stdin,
       ).toBe("the prompt");
     }
   });

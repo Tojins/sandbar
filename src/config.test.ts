@@ -97,7 +97,10 @@ describe("resolveConfig: rebuildOn must reach something that runs the image", ()
           containerfile: "Containerfile",
           rebuildOn: ["package-lock.json"],
         },
-        { tag: "localhost/sandbar:widgets", containerfile: "Containerfile.gate" },
+        {
+          tag: "localhost/sandbar:widgets",
+          containerfile: "Containerfile.gate",
+        },
       ],
     });
     expect(r.images[0]?.rebuildOn).toEqual(["package-lock.json"]);
@@ -211,7 +214,9 @@ describe("resolveConfig", () => {
 
   it("derives coauthorTrailer from bot identity when unset", () => {
     const r = resolveConfig(minimal);
-    expect(r.coauthorTrailer).toBe("Co-authored-by: sandbar-bot <bot@acme.dev>");
+    expect(r.coauthorTrailer).toBe(
+      "Co-authored-by: sandbar-bot <bot@acme.dev>",
+    );
   });
 
   it("honours explicit deviations over defaults", () => {
@@ -253,10 +258,11 @@ describe("resolveConfig", () => {
 
   // #72 — the vendor knob beside the tiering one. Defaulting both to "claude"
   // is what makes the field a no-op for every config written before it.
-  it("defaults both agent roles to claude (#72)", () => {
+  it("defaults all agent roles to claude (#72, #74)", () => {
     const r = resolveConfig(minimal);
     expect(r.implementerAgent).toBe("claude");
     expect(r.reviewerAgent).toBe("claude");
+    expect(r.mergerAgent).toBe("claude");
   });
 
   // #72's headline configuration: a cheaper implementer under an Opus reviewer.
@@ -272,6 +278,18 @@ describe("resolveConfig", () => {
     // routing — there is no global provider knob that could bleed across roles.
     expect(r.reviewerAgent).toBe("claude");
     expect(r.reviewerModelId).toBe("opus");
+  });
+
+  it("routes the merger independently (#74)", () => {
+    const r = resolveConfig({
+      ...minimal,
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+    });
+    expect(r.mergerAgent).toBe("codex");
+    expect(r.mergerModelId).toBe("gpt-5.6-sol");
+    expect(r.implementerAgent).toBe("claude");
+    expect(r.reviewerAgent).toBe("claude");
   });
 
   // The config is a PROGRAM (#66): the value can be computed, and a field
@@ -298,6 +316,9 @@ describe("resolveConfig", () => {
     ).toThrow(/implementerModelId/);
     expect(() => resolveConfig({ ...minimal, reviewerAgent: "codex" })).toThrow(
       /reviewerModelId/,
+    );
+    expect(() => resolveConfig({ ...minimal, mergerAgent: "codex" })).toThrow(
+      /mergerModelId/,
     );
     expect(() =>
       resolveConfig({
@@ -331,7 +352,10 @@ describe("resolveConfig", () => {
     const r = resolveConfig(minimal);
     const db = r.gateStack.containers[0]!;
     expect(db.readinessTimeoutMs).toBe(DEFAULT_READINESS_TIMEOUT_MS);
-    expect(db.env).toEqual({ MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "widgets" });
+    expect(db.env).toEqual({
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes",
+      MYSQL_DATABASE: "widgets",
+    });
     expect(db.args).toEqual([]);
     expect(db.mounts).toEqual([]);
     expect(db.mountWorktree).toBeNull();
@@ -428,10 +452,16 @@ describe("resolveMergeMode (#22)", () => {
     { label: "empty", branch: "" },
     { label: "whitespace-padded onto the source branch", branch: " main " },
     { label: "a full ref", branch: "refs/heads/ci" },
-    { label: "inside the reaped issue-branch namespace", branch: "sandbar/issue-x" },
+    {
+      label: "inside the reaped issue-branch namespace",
+      branch: "sandbar/issue-x",
+    },
     // #58's second shape is reaped by the same preflight glob, so it is
     // reserved on the same grounds.
-    { label: "inside the reaped chunk-branch namespace", branch: "sandbar/chunk-x" },
+    {
+      label: "inside the reaped chunk-branch namespace",
+      branch: "sandbar/chunk-x",
+    },
   ])("refuses an integration branch that is $label", ({ branch }) => {
     expect(() =>
       resolveConfig({
@@ -532,7 +562,11 @@ describe("resolveMergeMode (#22)", () => {
 // addresses a different repository on every call rather than one.
 describe("resolveConfig — ghOwner/ghRepo are validated (#34)", () => {
   it("trims, the way sourceBranch is trimmed and for the same reason", () => {
-    const r = resolveConfig({ ...minimal, ghOwner: " acme ", ghRepo: "widgets\n" });
+    const r = resolveConfig({
+      ...minimal,
+      ghOwner: " acme ",
+      ghRepo: "widgets\n",
+    });
     expect(r.ghOwner).toBe("acme");
     expect(r.ghRepo).toBe("widgets");
   });
@@ -540,9 +574,9 @@ describe("resolveConfig — ghOwner/ghRepo are validated (#34)", () => {
   // The likeliest slip: gh reads a three-part --repo as HOST/OWNER/REPO, so
   // `ghOwner: "acme/widgets"` sends every call to a host called `acme`.
   it("rejects a slash, which gh would read as a host", () => {
-    expect(() => resolveConfig({ ...minimal, ghOwner: "acme/widgets" })).toThrow(
-      /ghOwner/,
-    );
+    expect(() =>
+      resolveConfig({ ...minimal, ghOwner: "acme/widgets" }),
+    ).toThrow(/ghOwner/);
   });
 
   it("rejects an interior space", () => {
@@ -553,7 +587,9 @@ describe("resolveConfig — ghOwner/ghRepo are validated (#34)", () => {
 
   it("rejects empty and whitespace-only", () => {
     expect(() => resolveConfig({ ...minimal, ghOwner: "" })).toThrow(/ghOwner/);
-    expect(() => resolveConfig({ ...minimal, ghRepo: "   " })).toThrow(/ghRepo/);
+    expect(() => resolveConfig({ ...minimal, ghRepo: "   " })).toThrow(
+      /ghRepo/,
+    );
   });
 
   it("accepts the punctuation GitHub actually allows", () => {
@@ -582,7 +618,11 @@ describe("resolveConfig — cwd is absolute (#34)", () => {
   // itself is that child's working directory, so a relative one is applied
   // twice.
   it("makes a derived worktree path absolute too", () => {
-    const r = resolveConfig({ ...minimal, cwd: "sub/repo", workDir: ".sandbar" });
+    const r = resolveConfig({
+      ...minimal,
+      cwd: "sub/repo",
+      workDir: ".sandbar",
+    });
     expect(join(r.cwd, r.workDir)).toBe(
       join(process.cwd(), "sub", "repo", ".sandbar"),
     );
@@ -617,9 +657,9 @@ describe("resolveConfig — env is a record, passed through", () => {
     ["an array", ["GH_TOKEN=x"]],
     ["null", null],
   ])("refuses %s in place of the record", (_name, value) => {
-    expect(() =>
-      resolveConfig({ ...minimal, env: value as never }),
-    ).toThrow(/config\.env must be an object/);
+    expect(() => resolveConfig({ ...minimal, env: value as never })).toThrow(
+      /config\.env must be an object/,
+    );
   });
 
   it("refuses a non-string value", () => {
@@ -642,9 +682,9 @@ describe("resolveConfig — env is a record, passed through", () => {
 // and, being a default rather than a per-issue label, gets none on everything.
 describe("resolveConfig — defaultLane (#57)", () => {
   it("accepts both lanes", () => {
-    expect(resolveConfig({ ...minimal, defaultLane: "review" }).defaultLane).toBe(
-      "review",
-    );
+    expect(
+      resolveConfig({ ...minimal, defaultLane: "review" }).defaultLane,
+    ).toBe("review");
     expect(resolveConfig({ ...minimal, defaultLane: "auto" }).defaultLane).toBe(
       "auto",
     );
