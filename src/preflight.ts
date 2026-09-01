@@ -1020,6 +1020,17 @@ export type ConfigStaleness = {
 // is about. Preflight has just fetched the bare cache, so the cache is asked
 // instead, about the sha the checkout's branch actually points at.
 //
+// The commit it asks about is the checkout's `<sourceBranch>`, NOT its checked
+// out HEAD, and that narrowing is deliberate rather than an oversight: the file
+// the run imported did come off whatever branch the operator is standing on, so
+// one sitting on a feature branch that already carries the landed config change
+// is warned about `main` anyway. Deliberate because `<sourceBranch>` is the
+// branch this run's verdicts are about, it is the ref the ahead-warning above
+// asks about too, and the alternative — a detached HEAD, a branch that exists
+// nowhere on origin — has no upstream to be behind. A soft warning that
+// occasionally fires on an operator who is already current is a cheaper error
+// than one that reads their branch and goes quiet.
+//
 // Every failure answers 0 rather than throwing, and each is a real state: a
 // `--config` outside the repository has no path in this history to ask about; a
 // checkout with no local `<sourceBranch>` has no commit to compare; and a local

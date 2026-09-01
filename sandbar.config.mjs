@@ -32,16 +32,21 @@
 // without starting a series, which is what the hand paths (`sandbar gate`, or
 // just loading this file) need.
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const DRIVER_ENTRY = new URL(
   ".sandbar/driver/node_modules/@offergeist/sandbar/dist/index.js",
   import.meta.url,
 );
 if (!existsSync(DRIVER_ENTRY)) {
+  // `fileURLToPath`, not `.pathname`: a URL keeps its path percent-encoded, so
+  // a checkout under a directory whose name has a space would name itself
+  // `/home/op/my%20repo/...` — not a path the operator can paste anywhere.
   throw new Error(
-    `No pinned sandbar driver at ${DRIVER_ENTRY.pathname}. Run \`npm run driver\` ` +
-      "to install the release `sandbar.pin` names (`npm run sandbar` does it " +
-      "itself). This file is a program and imports the driver it is run by (#66).",
+    `No pinned sandbar driver at ${fileURLToPath(DRIVER_ENTRY)}. Run ` +
+      "`npm run driver` to install the release `sandbar.pin` names " +
+      "(`npm run sandbar` does it itself). This file is a program and imports " +
+      "the driver it is run by (#66).",
   );
 }
 const { readEnvFile } = await import(DRIVER_ENTRY.href);

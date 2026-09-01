@@ -69,7 +69,14 @@
 // cannot start a series.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -307,11 +314,18 @@ function main(argv) {
 // Only when this file IS the program — `launcher.test.ts` imports it for the
 // pure functions above, and an import that launched a series would be its own
 // kind of #66.
+//
+// `realpathSync` on both sides, because Node's ESM loader resolves symlinks
+// before it fills `import.meta.url`: invoked through a symlink, a plain
+// `resolve(argv[1])` compares the link against its target, does not match, and
+// the launcher exits 0 having done NOTHING — no series, no output, no error.
+// `npm run sandbar` never takes that path, but a silent no-op is the worst
+// available failure for the one file whose job is to fail loudly.
 function isEntrypoint() {
   const argv1 = process.argv[1];
   if (argv1 === undefined) return false;
   try {
-    return resolve(argv1) === fileURLToPath(import.meta.url);
+    return realpathSync(resolve(argv1)) === fileURLToPath(import.meta.url);
   } catch {
     return false;
   }

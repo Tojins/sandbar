@@ -206,13 +206,22 @@ describe("sandbar.pin (#66)", () => {
   // config runs it, and it throws unless a driver is installed — the literal
   // is what this repo's config carries, and a computed floor here would want
   // this assertion rewritten rather than deleted.
+  //
+  // A missing match FAILS rather than passing vacuously. "This config declares
+  // no floor" and "the floor is spelled some way this regex does not read" —
+  // single quotes, a computed value, a reformat — are indistinguishable from
+  // here, and reading the second as a pass would retire the pairing check in
+  // silence, which is the failure mode #66 is about.
   it("satisfies the floor sandbar.config.mjs declares", () => {
     const declared = /^\s*requiresSandbar:\s*"([^"]*)"/m.exec(
       read("sandbar.config.mjs"),
     );
-    if (declared === null) return; // No floor declared: nothing to satisfy.
-    const floor = parseVersion(declared[1]!);
-    expect(floor, declared[1]).not.toBeNull();
+    expect(
+      declared,
+      "sandbar.config.mjs declares no `requiresSandbar: \"X.Y.Z\"` this test can read",
+    ).not.toBeNull();
+    const floor = parseVersion(declared![1]!);
+    expect(floor, declared![1]).not.toBeNull();
     expect(compareVersions(pinned(), floor!)).toBeGreaterThanOrEqual(0);
   });
 });
