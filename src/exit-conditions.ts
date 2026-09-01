@@ -37,7 +37,12 @@ export const EXIT_CODE_BUDGET = 3;
 //
 // What that covers narrowed with #66, in two different ways, and the flag
 // survives both — worth keeping straight, because the three objects it used to
-// refresh now behave differently from each other:
+// refresh now behave differently from each other. Read the three as a
+// description of SANDBAR'S OWN launcher and not as a contract: this flag is
+// library config, it requires no pin, and a consumer whose loop is `git pull &&
+// npm run build` (README) still refreshes all three. That is why the exit
+// `reason` below names the two THIS run re-resolves and leaves the driver to
+// whoever wrote the loop.
 //
 //   - `dist/` no longer moves at all. The driver is an installed release the
 //     repo pins, so a landing does not become the driver until a human moves
@@ -159,16 +164,20 @@ export function applyCycle(state: RunState, cycle: CycleOutcome): ExitDecision {
     return {
       kind: "exit",
       tag: "relaunch",
-      // What the next launch actually re-resolves, and nothing more. It used
-      // to say "relaunching so the driver is what it just landed", which #66
-      // made false on every landing cycle: the driver is the release the host
-      // pinned and a landing does not become it until a human moves the pin.
-      // This line is what an operator reads to decide whether their landed
-      // change is now in play, so it names the two things that are.
+      // What THIS run re-resolves at the next launch, and nothing more. It
+      // used to say "relaunching so the driver is what it just landed", which
+      // #66 made false for a pinned launcher: a landing does not become the
+      // driver until a human moves the pin. But the correction may not go the
+      // other way either — this flag is library config, and nothing about it
+      // requires a pin, so a message naming one would be equally false for the
+      // consumer README describes running `git pull && npm run build` in the
+      // same loop. What is true of EVERY launcher is the split: images and the
+      // config file are this run's to re-resolve, and which code does the
+      // driving is the launcher's answer, whatever shape it has.
       reason:
         `landed ${cycle.landedMerges} merge(s); relaunching so the next run ` +
-        "rebuilds its images from origin and re-imports the config file (the " +
-        "pinned driver itself does not move)",
+        "rebuilds its images from origin and re-imports the config file " +
+        "(which driver that run uses is the launcher's to decide)",
       exitCode: EXIT_CODE_RELAUNCH,
     };
   }

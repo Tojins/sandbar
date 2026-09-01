@@ -199,11 +199,12 @@ describe("applyCycle — relaunch after landing (#65)", () => {
 
   // The reason is stdout and `orchestrator.log`, and it is what an operator
   // reads to decide whether the change they just landed is now in play. Before
-  // #66 it said "relaunching so the driver is what it just landed", which the
-  // pin made false on every landing cycle — the driver is the release
-  // `sandbar.pin` names and a landing does not become it. Asserted here so the
-  // claim cannot drift back.
-  it("names what the relaunch re-resolves, and does not claim the driver moved", () => {
+  // #66 it said "relaunching so the driver is what it just landed", which a
+  // pinned launcher made false on every landing cycle. The correction may not
+  // claim a pin either: this flag is library config, and a consumer looping
+  // `git pull && npm run build` (README) has none. So both over-claims are
+  // asserted against — what the line may name is what THIS run re-resolves.
+  it("names what the relaunch re-resolves, and claims nothing about the driver", () => {
     const s = newRunState({ relaunchAfterLanding: true });
     const d = applyCycle(s, {
       planFingerprint: "10",
@@ -215,6 +216,7 @@ describe("applyCycle — relaunch after landing (#65)", () => {
     expect(d.reason).toMatch(/images/);
     expect(d.reason).toMatch(/config/);
     expect(d.reason).not.toMatch(/driver is what it just landed/);
+    expect(d.reason).not.toMatch(/pin/);
   });
 
   it("is inert without the flag — a landing cycle continues as before", () => {

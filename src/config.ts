@@ -670,8 +670,9 @@ export type RunConfig = {
 // After resolution every defaultable field is concrete. TWO stay optional, for
 // different reasons: `codingStandardsPath` is genuinely absent on most hosts
 // and has nothing to default to, while `requiresSandbar` is a gate on
-// `resolveConfig` itself (#66) and is spent by the time there is a resolved
-// config — the `Omit<>` below says the rest of that argument. The other three
+// `resolveConfig` itself (#66), spent by the time there is a resolved config —
+// and inventing a value for it here would make "this host declared a floor"
+// indistinguishable from "this host did not". The other three
 // are re-declared rather than merely `Required<>`d because resolution changes
 // their TYPE, not just their presence: `labels` widens from Partial to the
 // fully-populated vocabulary, `gateStack` and `mergeMode` become their
@@ -683,10 +684,6 @@ export type ResolvedConfig = Required<
     | "labels"
     | "gateStack"
     | "mergeMode"
-    // Stays optional because it has no default and nothing downstream reads it:
-    // `requiresSandbar` is a gate on `resolveConfig` itself (#66), spent by the
-    // time there is a resolved config, and inventing a value here would make
-    // "this host declared a floor" indistinguishable from "this host did not".
     | "requiresSandbar"
   >
 > & {

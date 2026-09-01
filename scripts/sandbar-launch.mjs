@@ -317,6 +317,18 @@ export function main(argv, { root = repoRoot(), ...io } = {}) {
     const { spec, cli } = ensureDriver(root, io);
     if (installOnly) return 0;
     log(`running ${spec}`);
+    // `cwd: root` rather than this process's own, and that is a decision. The
+    // config resolves against the process cwd (cli.ts) and `config.cwd`
+    // defaults to it, so the driver's cwd decides which repository a series
+    // operates on — and the answer must be the repo whose `sandbar.pin` chose
+    // the driver, not wherever the launcher happened to be invoked. Under
+    // `npm run sandbar` the two agree (npm runs scripts from the package
+    // root); invoked directly from a subdirectory, or through a symlink, they
+    // do not, and the old shell loop would have gone looking for a config that
+    // is not there. The one visible cost is that a RELATIVE `--config` passed
+    // through now resolves against the root as well — absolute paths are
+    // unaffected, and pinning it here at least makes the resolution the same
+    // on every launch of a series.
     const child = run(process.execPath, [cli, ...argv], {
       cwd: root,
       stdio: "inherit",

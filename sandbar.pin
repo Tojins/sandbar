@@ -16,8 +16,8 @@
 # series of thirty-odd bumps, which `git tag --list 'v*'` beside `git log
 # -- package.json` shows for any of them — and stating it as a ratio rather
 # than a count is deliberate: the count moves every time a pass lands, the
-# sparsity does not. The version being
-# written in this checkout is therefore never installable: it has not landed,
+# sparsity does not. The version being written in this checkout is therefore
+# never installable: it has not landed,
 # and even once it does it may not be the one that gets tagged. Pinning it
 # would leave `npm install` failing on every launch and the loop stopping until
 # a human intervened — the exact manual step #65 and #66 exist to delete.
@@ -30,6 +30,19 @@
 # is what makes a self-hosted series behave like a consumer's. Iterating
 # unlanded orchestrator code stays a `npm run build && node dist/cli.js` away,
 # by hand.
+#
+# Nothing warns when THIS file is behind origin, and preflight's
+# `staleConfigWarning` deliberately does not cover it even though the launcher
+# reads it from the same unrefreshed checkout the config comes from. The two
+# are not symmetric. A landed `gateStack` change is a decision about how
+# branches are judged that somebody made FOR the series, and a run holding an
+# older copy judges with a standard nobody chose — which is why it is worth a
+# line on stdout. Moving the pin is the opposite: a deliberate commit whose
+# whole point is that a human decided a release had been watched long enough,
+# so the pin in the operator's checkout IS the driver they chose, and one they
+# have not pulled is one they have not chosen yet. There is also nothing to
+# warn from — the launcher runs before the driver exists and has no preflight,
+# no cache and no fetch.
 #
 # Moving it forward: pick a version `git tag --list 'v*'` actually shows, and
 # raise `requiresSandbar` in `sandbar.config.mjs` in the same commit as anything

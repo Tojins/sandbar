@@ -1113,9 +1113,6 @@ export function staleConfigWarning(s: ConfigStaleness): string | null {
   );
 }
 
-// Commits in `base..tip`, optionally narrowed to one path. 0 for anything git
-// will not answer — an unknown ref, a pathspec outside the repository — which
-// is what keeps both callers soft.
 // A path resolved through its symlinks, or itself when it will not resolve.
 // The one caller is a soft warning, and a path that cannot be resolved is not
 // a reason to have an opinion about it.
@@ -1127,6 +1124,9 @@ function realpathOr(path: string): string {
   }
 }
 
+// Commits in `base..tip`, optionally narrowed to one path. 0 for anything git
+// will not answer — an unknown ref, a pathspec outside the repository — which
+// is what keeps both callers soft.
 async function countCommits(
   cwd: string,
   base: string,
