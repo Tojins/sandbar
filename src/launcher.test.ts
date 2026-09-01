@@ -4,12 +4,14 @@
 // package exists — so this file reaches across to it by path. What is tested is
 // exactly what is decidable without a network: which spec a pin file names,
 // when an install is required, the argv that performs it, and — through the
-// launcher's one process seam — what an install that FAILS leaves behind. That
-// last one is the safety property #66 is for ("never continue on whichever
-// driver is on disk"), so it is asserted on the artefact the next launch
-// actually reads: the stamp. What npm does with that argv, and what the loop
-// does with a real child process, are npm's and `spawnSync`'s to define and are
-// not faked here.
+// launcher's two process seams — what an install that FAILS leaves behind, plus
+// which exit codes the loop continues on. Those last two are the safety
+// properties #66 and #65 are for ("never continue on whichever driver is on
+// disk", "loop only on 75"), so the first is asserted on the artefact the next
+// launch actually reads — the stamp — and the second on the number of launches
+// a sequence of exit codes produces. What npm does with that argv, and what
+// `spawnSync` does with a real child process, are npm's and node's to define
+// and are not faked here.
 //
 // It lives under `src/` with every other test, and `files` ships `src/` — so
 // the published tarball carries this one file whose import points outside it.
@@ -34,6 +36,7 @@ import {
   installArgv,
   installDriver,
   installNeeded,
+  main,
   parsePin,
   readInstallState,
 } from "../scripts/sandbar-launch.mjs";
@@ -457,5 +460,155 @@ describe("ensureDriver (#66)", () => {
   it("refuses a root with no pin file at all", async () => {
     await rm(join(root, PIN_FILE));
     expect(() => ensureDriver(root, refuse)).toThrow(/cannot read .*sandbar\.pin/);
+  });
+});
+
+// #65's contract, which is the whole of the loop: continue on
+// EXIT_CODE_RELAUNCH and on nothing else, propagate every other exit code
+// unchanged. It is the one claim the launcher makes that the shell one-liner
+// also made and that nothing has ever exercised — a `[ "$c" -eq 75 ]` typo, or
+// a `!==` slipped to `!=`, would turn "landed, go again" into either a stopped
+// series or an unbounded one. The driver is stamped in place so no install is
+// attempted, and a fake `run` answers a scripted sequence of exits.
+describe("main — the relaunch loop (#65, #66)", () => {
+  let root: string;
+  let paths: ReturnType<typeof driverPaths>;
+
+  // A driver already installed at the pin: `ensureDriver` skips straight past
+  // the install, which is what every launch after the first does.
+  const stampInstalled = () => {
+    mkdirSync(dirname(paths.cli), { recursive: true });
+    writeFileSync(paths.cli, "#!/usr/bin/env node\n");
+    writeFileSync(paths.stamp, `${PIN}\n`);
+  };
+
+  // Answers `exits` in order, recording the argv each launch was given.
+  const driver = (...exits: Array<Record<string, unknown>>) => {
+    const launches: unknown[][] = [];
+    return {
+      launches,
+      run: ((...args: unknown[]) => {
+        launches.push(args);
+        return exits[launches.length - 1] ?? { status: 0 };
+      }) as never,
+    };
+  };
+
+  const io = (over: Record<string, unknown>) => ({
+    log: () => {},
+    spawn: (() => {
+      throw new Error("no install expected");
+    }) as never,
+    root,
+    ...over,
+  });
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-launcher-"));
+    paths = driverPaths(root);
+    writeFileSync(join(root, PIN_FILE), `${PIN}\n`);
+    stampInstalled();
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("launches once and returns the driver's exit code", () => {
+    const d = driver({ status: 0 });
+    expect(main([], io({ run: d.run }))).toBe(0);
+    expect(d.launches).toHaveLength(1);
+    expect(d.launches[0]?.[0]).toBe(process.execPath);
+    expect(d.launches[0]?.[1]).toEqual([paths.cli]);
+  });
+
+  it("loops on 75 and stops on the first code that is not", () => {
+    const d = driver(
+      { status: EXIT_CODE_RELAUNCH },
+      { status: EXIT_CODE_RELAUNCH },
+      { status: 3 },
+    );
+    expect(main([], io({ run: d.run }))).toBe(3);
+    expect(d.launches).toHaveLength(3);
+  });
+
+  // Every non-75 code is the run's own answer and belongs to whoever launched
+  // the loop: 2 is stuck, 3 is the budget, 1 is a fault. Swallowing any of them
+  // would report a failed series as a finished one.
+  it("propagates every other exit code without a second launch", () => {
+    for (const status of [0, 1, 2, 3, 74, 76]) {
+      const d = driver({ status });
+      expect(main([], io({ run: d.run })), String(status)).toBe(status);
+      expect(d.launches, String(status)).toHaveLength(1);
+    }
+  });
+
+  it("forwards its own argv to the driver", () => {
+    const d = driver({ status: 0 });
+    main(["gate", "--config", "other.mjs"], io({ run: d.run }));
+    expect(d.launches[0]?.[1]).toEqual([
+      paths.cli,
+      "gate",
+      "--config",
+      "other.mjs",
+    ]);
+  });
+
+  // The hand path: install the driver and stop, without starting a series.
+  it("returns 0 without launching under --install-only", () => {
+    const d = driver({ status: 0 });
+    expect(main(["--install-only"], io({ run: d.run }))).toBe(0);
+    expect(d.launches).toHaveLength(0);
+  });
+
+  // A driver that could not be started, and one killed by a signal, are not
+  // exit codes to propagate — there is no verdict behind either.
+  it("stops loudly when the driver cannot be spawned", () => {
+    const d = driver({ error: new Error("spawn ENOENT") });
+    expect(() => main([], io({ run: d.run }))).toThrow(/could not run .*cli\.js/);
+  });
+
+  it("stops loudly when the driver is killed by a signal", () => {
+    const d = driver({ status: null, signal: "SIGKILL" });
+    expect(() => main([], io({ run: d.run }))).toThrow(/killed by SIGKILL/);
+  });
+
+  // Decision 4 reaching the loop: an install that fails stops it, rather than
+  // launching whatever is on disk.
+  it("never launches when the install failed", () => {
+    writeFileSync(join(root, PIN_FILE), "github:Tojins/sandbar#v9.9.9\n");
+    const d = driver({ status: 0 });
+    expect(() =>
+      main([], io({ run: d.run, spawn: (() => ({ status: 1 })) as never })),
+    ).toThrow(LaunchError);
+    expect(d.launches).toHaveLength(0);
+  });
+
+  // The pin is re-read every iteration, so an operator who edits it between
+  // cycles gets the new driver at the next relaunch — the one way a series can
+  // change drivers under itself, and it takes an edit to a committed file.
+  it("re-reads the pin on each relaunch", () => {
+    const moved = "github:Tojins/sandbar#v0.21.1";
+    const installs: string[] = [];
+    const d = driver({ status: EXIT_CODE_RELAUNCH }, { status: 0 });
+    let launched = 0;
+
+    main(
+      [],
+      io({
+        run: ((...args: unknown[]) => {
+          if (launched++ === 0) writeFileSync(join(root, PIN_FILE), `${moved}\n`);
+          return d.run(...(args as [])) as never;
+        }) as never,
+        spawn: ((_cmd: string, argv: string[]) => {
+          installs.push(argv[argv.length - 1]!);
+          writeFileSync(paths.cli, "#!/usr/bin/env node\n");
+          return { status: 0 };
+        }) as never,
+      }),
+    );
+
+    expect(installs).toEqual([moved]);
+    expect(d.launches).toHaveLength(2);
   });
 });

@@ -11,8 +11,12 @@
 # THE PIN LAGS THIS CHECKOUT, ALWAYS, and that is a rule rather than an
 # accident. `auto-tag.yml` creates `vX.Y.Z` from package.json's version at the
 # PUSHED HEAD, and the merger lands a whole source pass in one push, so a
-# version that is not last in its pass never becomes a tag at all — `git tag
-# --list 'v*'` shows two tags across the whole of 0.20.x. The version being
+# version that is not last in its pass never becomes a tag at all. Tags are
+# therefore SPARSE relative to versions — a handful across a whole minor
+# series of thirty-odd bumps, which `git tag --list 'v*'` beside `git log
+# -- package.json` shows for any of them — and stating it as a ratio rather
+# than a count is deliberate: the count moves every time a pass lands, the
+# sparsity does not. The version being
 # written in this checkout is therefore never installable: it has not landed,
 # and even once it does it may not be the one that gets tagged. Pinning it
 # would leave `npm install` failing on every launch and the loop stopping until

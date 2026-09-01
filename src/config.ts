@@ -571,8 +571,11 @@ export type RunConfig = {
   //
   // #66 changed what a relaunch is worth, and the three objects it used to
   // refresh no longer behave alike. `dist/` stopped moving: a self-hosted
-  // driver is an installed release the repo pins, byte-identical across a
-  // relaunch by construction. IMAGES are why this flag survives — `ensureImages`
+  // driver is an installed release the repo pins, so a relaunch re-runs the
+  // same bytes unless a human moves the pin between cycles — the launcher
+  // re-reads it every iteration on purpose, which is the one way a series can
+  // change drivers under itself, and it takes a deliberate edit to a committed
+  // file. IMAGES are why this flag survives — `ensureImages`
   // runs once per run (run.ts) against a source worktree at
   // `origin/<sourceBranch>`, so a landed `Containerfile` reaches a series
   // through the relaunch and through nothing else.
@@ -664,12 +667,15 @@ export type RunConfig = {
   readonly defaultLane?: Lane;
 };
 
-// After resolution every defaultable field is concrete. `codingStandardsPath`
-// is the only one that stays optional (genuinely absent on most hosts). The
-// other three are re-declared rather than merely `Required<>`d because
-// resolution changes their TYPE, not just their presence: `labels` widens from
-// Partial to the fully-populated vocabulary, `gateStack` and `mergeMode` become
-// their resolved-and-validated forms.
+// After resolution every defaultable field is concrete. TWO stay optional, for
+// different reasons: `codingStandardsPath` is genuinely absent on most hosts
+// and has nothing to default to, while `requiresSandbar` is a gate on
+// `resolveConfig` itself (#66) and is spent by the time there is a resolved
+// config — the `Omit<>` below says the rest of that argument. The other three
+// are re-declared rather than merely `Required<>`d because resolution changes
+// their TYPE, not just their presence: `labels` widens from Partial to the
+// fully-populated vocabulary, `gateStack` and `mergeMode` become their
+// resolved-and-validated forms.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,

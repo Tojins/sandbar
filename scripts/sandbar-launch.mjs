@@ -61,12 +61,14 @@
 //
 // Plain `.mjs` under `scripts/`, outside `files` and outside `src/`: it is not
 // part of the package, no consumer runs it, and it must run before anything is
-// built. `launcher.test.ts` covers all four decisions, which is why each is a
-// separately exported function, and why the one that shells out takes a process
-// seam (`io.spawn`) instead of reaching for `spawnSync` directly: decisions 3
-// and 4 ARE the safety property of #66, and a safety property nothing exercises
-// is a claim. `main()` runs only when this file IS the program, so importing it
-// cannot start a series.
+// built. `launcher.test.ts` covers all four decisions AND the loop contract
+// #65 states (continue on 75, propagate every other exit), which is why each is
+// a separately exported function and why the two that shell out take process
+// seams (`io.spawn`, `io.run`) instead of reaching for `spawnSync` directly:
+// those decisions ARE the safety property of #66, and a safety property nothing
+// exercises is a claim. `main` is exported for that reason alone — it still
+// runs only when this file IS the program, so importing it cannot start a
+// series.
 
 import { spawnSync } from "node:child_process";
 import {
@@ -173,16 +175,25 @@ function say(message) {
   console.log(`sandbar launcher: ${message}`);
 }
 
-// The one process seam in this file, and the reason it exists is decision 4:
-// "a failed install stops the loop" is the safety property of #66 and cannot be
-// asserted against a real `npm install` — it would need a network, a tag and a
-// way to make npm fail on demand. Production passes nothing; a test passes a
-// fake `spawn` and reads back what happened to the STAMP, which is the fact
-// that decides whether the next launch reinstalls or runs what is on disk.
-// `log` is seamed for the ordinary reason: this file talks to an operator, and
-// a test suite is not one.
+// The process seams in this file, and the reason they exist is that decisions 3
+// and 4 — plus #65's loop contract — are the safety properties of #66 and none
+// of them can be asserted against the real thing: `spawn` would need a network,
+// a tag and a way to make `npm install` fail on demand, and `run` would need a
+// driver that exits 75 exactly as often as a test wants. Production passes
+// nothing. A test passes a fake `spawn` and reads back what happened to the
+// STAMP, which is the fact deciding whether the next launch reinstalls or runs
+// what is on disk, and a fake `run` to count the launches a sequence of exit
+// codes produces. TWO seams rather than one because the two calls mean
+// different things — installing the driver, and being driven by it — and a test
+// that could not tell them apart could not assert either. `log` is seamed for
+// the ordinary reason: this file talks to an operator, and a test suite is not
+// one.
 function seams(io) {
-  return { spawn: io.spawn ?? spawnSync, log: io.log ?? say };
+  return {
+    spawn: io.spawn ?? spawnSync,
+    run: io.run ?? spawnSync,
+    log: io.log ?? say,
+  };
 }
 
 // Throws LaunchError on every outcome that is not "there is a driver at
@@ -280,8 +291,13 @@ function repoRoot() {
   return resolve(dirname(fileURLToPath(import.meta.url)), "..");
 }
 
-function main(argv) {
-  const root = repoRoot();
+// The loop itself, and #65's contract is the whole of it: continue on
+// EXIT_CODE_RELAUNCH and on nothing else, propagate every other exit code
+// unchanged. `root` is a parameter so a test can point it at a temporary
+// directory holding a pin and a fake install; production passes neither it nor
+// the seams.
+export function main(argv, { root = repoRoot(), ...io } = {}) {
+  const { run, log } = seams(io);
   // `--install-only` is for the hand paths — `sandbar gate`, or a config load —
   // which need the driver present but are not a series. Deliberately not a
   // `--config`-style flag: it configures nothing, it stops the loop before it
@@ -291,10 +307,10 @@ function main(argv) {
   for (;;) {
     // Re-read every iteration, so a pin edited between cycles is honoured at
     // the next relaunch rather than at the next series.
-    const { spec, cli } = ensureDriver(root);
+    const { spec, cli } = ensureDriver(root, io);
     if (installOnly) return 0;
-    say(`running ${spec}`);
-    const child = spawnSync(process.execPath, [cli, ...argv], {
+    log(`running ${spec}`);
+    const child = run(process.execPath, [cli, ...argv], {
       cwd: root,
       stdio: "inherit",
     });
@@ -307,7 +323,7 @@ function main(argv) {
       );
     }
     if (child.status !== EXIT_CODE_RELAUNCH) return child.status;
-    say(`relaunching (exit ${EXIT_CODE_RELAUNCH})`);
+    log(`relaunching (exit ${EXIT_CODE_RELAUNCH})`);
   }
 }
 
