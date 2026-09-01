@@ -75,6 +75,8 @@ import {
 } from "./sandbox-stack.js";
 import {
   REVIEWER_MAX_INVOCATIONS,
+  continueReviewerSession,
+  decideReviewRound,
   runReviewerInvocations,
 } from "./reviewer-run.js";
 import type { RepoLayout } from "./repo-cache.js";
@@ -84,7 +86,6 @@ import {
   buildPrompt,
   buildReviewerPrompts,
 } from "./prompt.js";
-import { parseVerdict } from "./verdict-parser.js";
 
 export const FAILURE_TAIL_LINES = 200;
 
@@ -775,7 +776,7 @@ async function runReviewer(
           agent: buildAgentProvider(config.reviewerAgent, modelId, {
             // Only the first follow-up invocation resumes correctness. Any
             // rerun is cold: a crashed follow-up may itself now be "last".
-            continueSession: pass === "followup" && invocation === 1,
+            continueSession: continueReviewerSession(pass, invocation),
           }),
           prompt,
         });
@@ -820,37 +821,32 @@ async function runReviewer(
     }
   };
 
-  const harnessFailure = async (
+  const logHarnessFailure = async (
     pass: "correctness" | "followup",
     outcome: Extract<Awaited<ReturnType<typeof runPass>>, { kind: "harness-failed" }>,
-  ): Promise<LoopEvent> => {
+  ): Promise<void> => {
     await writeTranscript();
     const line =
       `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
       `pass=${pass} harness-failed invocations=${outcome.invocations} (round not consumed)`;
     console.error(`  ${line}`);
     if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
-    return { kind: "reviewer-harness-failed", detail: `${pass}: ${outcome.detail}` };
   };
 
-  if (correctness.kind === "harness-failed") {
-    return harnessFailure("correctness", correctness);
-  }
-
-  const correctnessResult = parseVerdict(correctness.stdout);
-  if (correctnessResult.verdict === "CHANGES-REQUESTED") {
+  const afterCorrectness = decideReviewRound(correctness);
+  if (afterCorrectness.kind === "finished") {
+    if (correctness.kind === "harness-failed") {
+      await logHarnessFailure("correctness", correctness);
+      return afterCorrectness.event;
+    }
     await writeTranscript();
     if (opts.onOrchestratorLog) {
       await opts.onOrchestratorLog(
         `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-          `correctness=CHANGES-REQUESTED followup=SKIPPED`,
+          `correctness=${afterCorrectness.correctness} followup=${afterCorrectness.followup}`,
       );
     }
-    return {
-      kind: "reviewer-result",
-      verdict: "CHANGES-REQUESTED",
-      prose: `### Correctness\n\n${correctnessResult.prose}`,
-    };
+    return afterCorrectness.event;
   }
 
   const followup = await runPass(
@@ -860,20 +856,23 @@ async function runReviewer(
   );
   transcripts.push(`=== follow-up pass ===\n${followup.transcript}`);
 
-  if (followup.kind === "harness-failed") {
-    return harnessFailure("followup", followup);
-  }
-
   // Every invocation's output, not just the reviewing one: the observed failure
   // left a 73-byte log for a 15-minute run, and this file is the only offline
   // artefact of what the reviewer did or did not say.
+  const decision = decideReviewRound(correctness, followup);
+  if (decision.kind !== "finished") {
+    throw new SandbarError("follow-up outcome did not finish review round");
+  }
+  if (followup.kind === "harness-failed") {
+    await logHarnessFailure("followup", followup);
+    return decision.event;
+  }
   await writeTranscript();
-  const { verdict, prose } = parseVerdict(followup.stdout);
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(
       `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-        `correctness=APPROVED followup=${verdict}`,
+        `correctness=${decision.correctness} followup=${decision.followup}`,
     );
   }
-  return { kind: "reviewer-result", verdict, prose };
+  return decision.event;
 }

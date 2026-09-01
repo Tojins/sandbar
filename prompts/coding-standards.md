@@ -25,6 +25,7 @@ simplification — prefer deleting a branch, helper, or layer over polishing it.
    state what is true.
 6. **Non-atomic orchestration.** Multi-step state updates that can leave
    partial state on failure; independent async work serialized for no reason.
+
 ### Do not block on
 
 - Pure taste or naming you can't tie to a rule above.
