@@ -139,8 +139,10 @@ import {
   readDriverIdentity,
 } from "./driver-identity.js";
 import {
+  type AgentImages,
   type BranchImages,
   checkWorktreeImageUids,
+  createAgentImages,
   createBranchImages,
   ensureImages,
   pulledImagesOf,
@@ -606,9 +608,15 @@ export async function run(
   // refusal.
   let sourceWorktree: string;
   let baseFingerprints: ReadonlyMap<string, string>;
+  let agentImages: AgentImages;
   try {
     sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
     baseFingerprints = await ensureImages(config.images, sourceWorktree);
+    agentImages = await createAgentImages({
+      declaredBaseTag: config.sandboxImage,
+      providers: requiredAgentProviders(config),
+      scope,
+    });
   } catch (err) {
     return await stopAtStartup("image-build-failed", err);
   }
@@ -632,7 +640,9 @@ export async function run(
     hostUid: process.getuid?.() ?? 0,
   });
   onCleanup(async () => {
-    const tags = branchImages.builtTags();
+    // Augmented images are FROM-children of branch variants. Remove leaves
+    // first so podman can then remove their parents.
+    const tags = [...agentImages.builtTags(), ...branchImages.builtTags()];
     if (tags.length === 0) return;
     const failures = await removeBranchImages(tags);
     if (failures.length > 0) {
@@ -760,6 +770,7 @@ export async function run(
     maxImplAttempts: config.maxImplAttempts,
     maxReviewRounds: config.maxReviewRounds,
     sandboxImage: config.sandboxImage,
+    agentImages,
     scope,
     gateStack: config.gateStack,
     claudeMdPath: config.claudeMdPath,
@@ -1190,7 +1201,7 @@ export async function run(
             coauthorTrailer: config.coauthorTrailer,
             mergerAgent: config.mergerAgent,
             mergerModelId: config.mergerModelId,
-            sandboxImage: config.sandboxImage,
+            sandboxImage: agentImages.declaredTag,
             env,
             runStackGate: () => stackForGate2.runGate(),
           });

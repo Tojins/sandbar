@@ -45,7 +45,10 @@ export type { SandboxHooks } from "./agent-sandbox.js";
 // is closed and a driver refuses a name it cannot build, so a host that
 // computes the field — the config is a program — should ask this list what
 // this driver accepts rather than spell a string and find out at startup.
-export { AGENT_PROVIDER_NAMES, type AgentProviderName } from "./agent-providers.js";
+export {
+  AGENT_PROVIDER_NAMES,
+  type AgentProviderName,
+} from "./agent-providers.js";
 // `config.defaultLane`'s type, and the label a host writes on the issues that
 // depart from it (#57) — exported for the same reason the exit codes are: the
 // string IS the protocol, and a host spelling `"auto-land"` by hand in a

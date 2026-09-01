@@ -1,5 +1,6 @@
-// Which CLI a role's agent runs (#72, #74) — the NAME → provider mapping, and the
-// one place that says what credential each provider needs.
+// Which CLI a role's agent runs (#72, #74, #75) — the NAME → provider mapping,
+// the package and protocol-version pin the driver installs, and the one place
+// that says what credential each provider needs.
 //
 // The config splits the MODEL per call (`implementerModelId`, correctness
 // `reviewerModelId`, `reviewerFollowupModelId`, and `mergerModelId`); this is
@@ -52,6 +53,35 @@ import { SandbarError } from "./errors.js";
 export const AGENT_PROVIDER_NAMES = ["claude", "codex"] as const;
 
 export type AgentProviderName = (typeof AGENT_PROVIDER_NAMES)[number];
+
+// Driver-owned because these binaries implement the provider protocol this
+// release parses. A routed role must not inherit whichever CLI a host image (or
+// an old branch's image recipe) happened to bake (#75).
+export type AgentProviderPackage = {
+  readonly spec: string;
+  readonly npmFlags?: readonly string[];
+};
+
+// npm >= 11 blocks lifecycle scripts by default with only a warning. Claude's
+// postinstall must therefore be explicitly allowed: silently skipping it can
+// turn a future package change into an apparent agent failure. Codex declares
+// no lifecycle scripts; it resolves its platform binary through optional
+// dependencies, so granting it a script permission would be misleading.
+//
+// Both packages are pinned because a generated RUN instruction would otherwise
+// remain byte-identical and freeze whichever version first entered the layer
+// cache. Codex's pin is additionally co-versioned with parseCodexJsonLine: its
+// JSONL dialect is load-bearing under parsedOutputOnly, so a parser change and
+// a CLI change belong to the same driver release.
+export const AGENT_PROVIDER_PACKAGES: Readonly<
+  Record<AgentProviderName, AgentProviderPackage>
+> = {
+  claude: {
+    spec: "@anthropic-ai/claude-code@2.1.257",
+    npmFlags: ["--allow-scripts=@anthropic-ai/claude-code"],
+  },
+  codex: { spec: "@openai/codex@0.152.0" },
+};
 
 // Default for every role, so every config written before #72 resolves
 // unchanged. The reviewer holding the verdict is the role whose default matters

@@ -30,6 +30,10 @@
 // verdict about the branch, not an infrastructure fault to route to
 // HARD-ERROR.
 //
+// Agent base images additionally provide node >= 20 and npm (#75). The
+// generated augmentation build enforces that contract without a separate
+// probe: npm failing names the base image and routed toolset.
+//
 // The uid check (#24 D3): a container in a pod cannot use `--userns=keep-id`,
 // and `--user 1000:1000` maps to a SUBUID whose worktree writes fail EACCES;
 // only uid 0 (mapped to the invoking user) or the host uid works. Every image
@@ -40,11 +44,16 @@
 // as a silent EACCES mid-gate.
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
 import { createReadStream } from "node:fs";
 import { promisify } from "node:util";
 
 import { onCleanup } from "./cleanup.js";
+import {
+  AGENT_PROVIDER_PACKAGES,
+  type AgentProviderName,
+} from "./agent-providers.js";
 import type { BuiltImage, ResolvedGateStack } from "./config.js";
 import type { RuntimeExec, SweepResult } from "./containers.js";
 import { SandbarError } from "./errors.js";
@@ -217,6 +226,9 @@ export type BuildOptions = {
   readonly capture?: boolean;
   // Deadline for the whole build. Defaults to DEFAULT_BUILD_TIMEOUT_MS.
   readonly timeoutMs?: number;
+  // Generated Containerfile bytes. They are piped to `podman build ... -`, so
+  // no transient recipe or context lands in the state directory (#75).
+  readonly content?: string;
 };
 
 // The `podman build` argv for one entry. Pure so the stdin-context, build-arg
@@ -229,7 +241,7 @@ export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
   if (opts?.fingerprint) {
     args.push("--label", `${IMAGE_INPUTS_LABEL}=${opts.fingerprint}`);
   }
-  if (image.stdinContext) {
+  if (image.stdinContext || opts?.content !== undefined) {
     // The Containerfile arrives on stdin and the context is empty. `-f` would
     // be redundant and podman rejects it alongside the `-` context.
     args.push("-");
@@ -272,7 +284,7 @@ export async function buildImage(
   await new Promise<void>((resolve, reject) => {
     const child = spawn(RUNTIME, args, {
       stdio: [
-        image.stdinContext ? "pipe" : "ignore",
+        image.stdinContext || opts.content !== undefined ? "pipe" : "ignore",
         capture ? "pipe" : "inherit",
         capture ? "pipe" : "inherit",
       ],
@@ -326,7 +338,10 @@ export async function buildImage(
         ),
       );
     });
-    if (image.stdinContext && child.stdin) {
+    if (opts.content !== undefined && child.stdin) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(opts.content);
+    } else if (image.stdinContext && child.stdin) {
       const src = createReadStream(
         containerfilePath(image, opts.root),
       );
@@ -433,6 +448,105 @@ export async function ensureImages(
     });
   }
   return baseFingerprints;
+}
+
+// ---------------------------------------------------------------------------
+// Run-owned agent tools (#75)
+// ---------------------------------------------------------------------------
+// The branch owns the environment; the run owns the tools. Agent CLIs are
+// selected by resolved role routing, so they are appended AFTER the declared
+// image or a per-branch variant has been resolved. Base images must provide
+// node >= 20 and npm; the generated build is the executable enforcement of
+// that contract. Installation selects root because global npm installs must
+// not depend on the base's default user. That default is inert on the result:
+// both the sandbox and merger resolve container pass an explicit `--user`.
+
+export function agentToolsetSpec(
+  providers: readonly AgentProviderName[],
+): string {
+  return providers
+    .map((provider) => `${provider}: ${AGENT_PROVIDER_PACKAGES[provider].spec}`)
+    .join(", ");
+}
+
+export function agentToolsContainerfile(
+  baseTag: string,
+  providers: readonly AgentProviderName[],
+): string {
+  const packages = providers.flatMap((provider) => {
+    const install = AGENT_PROVIDER_PACKAGES[provider];
+    return [...(install.npmFlags ?? []), install.spec];
+  });
+  return `FROM ${baseTag}\nUSER 0\nRUN npm install -g ${packages.join(" ")}\n`;
+}
+
+export type AgentImages = {
+  readonly declaredTag: string;
+  readonly augment: (baseTag: string) => Promise<string>;
+  readonly builtTags: () => readonly string[];
+};
+
+export async function createAgentImages(opts: {
+  readonly declaredBaseTag: string;
+  readonly providers: readonly AgentProviderName[];
+  readonly scope: RunScope;
+  readonly build?: (image: BuiltImage, opts: BuildOptions) => Promise<unknown>;
+  readonly inputsLabel?: (tag: string) => Promise<string | null>;
+  readonly log?: (line: string) => void;
+}): Promise<AgentImages> {
+  const build = opts.build ?? buildImage;
+  const inputsLabel = opts.inputsLabel ?? readInputsLabel;
+  const log = opts.log ?? ((line: string) => console.log(line));
+  const toolset = agentToolsetSpec(opts.providers);
+  const pending = new Map<string, Promise<string>>();
+  const order: string[] = [];
+
+  const augment = async (baseTag: string): Promise<string> => {
+    let promise = pending.get(baseTag);
+    if (promise === undefined) {
+      promise = (async () => {
+        const baseInputs = await inputsLabel(baseTag);
+        const containerfile = agentToolsContainerfile(baseTag, opts.providers);
+        const fingerprint = createHash("sha256")
+          .update(JSON.stringify([baseInputs ?? "unknown", containerfile]))
+          .digest("hex");
+        const tag = variantImageTag(baseTag, opts.scope, fingerprint);
+        // An unlabelled base has unknown provenance. Its derived tag can be a
+        // cache hint, never proof, so rebuild it and let podman's layer cache
+        // make the common case cheap.
+        if (baseInputs === null || (await inputsLabel(tag)) !== fingerprint) {
+          log(
+            `Augmenting '${baseTag}' as '${tag}' with agent tools ` +
+              `${toolset}...`,
+          );
+          await build(
+            { tag, containerfile: "<generated-agent-tools>" },
+            {
+              root: "",
+              content: containerfile,
+              fingerprint,
+              capture: true,
+            },
+          );
+        }
+        order.push(tag);
+        return tag;
+      })().catch((err: unknown) => {
+        pending.delete(baseTag);
+        throw new SandbarError(
+          `could not augment image '${baseTag}' with agent tools ` +
+            `${toolset}: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      });
+      pending.set(baseTag, promise);
+    }
+    return promise;
+  };
+
+  const declaredTag = await augment(opts.declaredBaseTag);
+  return { declaredTag, augment, builtTags: () => [...order] };
 }
 
 // ---------------------------------------------------------------------------
@@ -645,10 +759,21 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
 // cannot arrive, so `gateRunsSameImage` is a required parameter rather than an
 // assumption the message makes on their behalf.
 //
+// Appending the run-owned tools can fail after the branch variant itself built.
+// That also falls back, but specifically to the augmented declared tag: startup
+// either produced it or refused the run, so an unaugmented image can never
+// reach an agent. The gate still runs the successfully built branch variant and
+// cannot reproduce this augmentation failure, making this report the only one
+// the operator gets; it must name both that fact and the same stale-environment
+// cost as the branch-build fallback.
+//
 // The fallback is reported rather than swallowed: `onFallback` reaches the run
 // log and the operator's console at the call site.
 export async function resolveSandboxImage(opts: {
   readonly declaredTag: string;
+  // Required because no image may reach an agent without the run-owned tools
+  // selected by its role routing (#75).
+  readonly agentImages: AgentImages;
   readonly worktreePath: string;
   // Absent when the run has no per-branch resolver at all (tests, a host that
   // declares no `rebuildOn`) — the declared tag is then the only answer.
@@ -660,18 +785,19 @@ export async function resolveSandboxImage(opts: {
   readonly onFallback?: (line: string) => void | Promise<void>;
 }): Promise<string> {
   const { branchImages, declaredTag, worktreePath } = opts;
-  if (!branchImages) return declaredTag;
+  if (!branchImages) return opts.agentImages.declaredTag;
+  let base: string;
   try {
     const map = await branchImages.resolve(
       worktreePath,
       new Set([declaredTag]),
     );
-    return map.get(declaredTag) ?? declaredTag;
+    base = map.get(declaredTag) ?? declaredTag;
   } catch (err) {
     await opts.onFallback?.(
       `could not build a per-branch agent sandbox image from '${declaredTag}' ` +
-        `for ${worktreePath}; starting the sandbox on '${declaredTag}' as ` +
-        "declared, which carries the source branch's version of its declared " +
+        `for ${worktreePath}; starting the sandbox on '${opts.agentImages.declaredTag}' as ` +
+        "the augmented declared image, which carries the source branch's version of its declared " +
         "inputs. " +
         (opts.gateRunsSameImage
           ? "A gate container runs this same image, so the gate resolves the " +
@@ -683,7 +809,26 @@ export async function resolveSandboxImage(opts: {
         " The agent's environment is a commit behind its own branch until it " +
         `installs for itself: ${err instanceof Error ? err.message : String(err)}`,
     );
-    return declaredTag;
+    return opts.agentImages.declaredTag;
+  }
+  try {
+    return await opts.agentImages.augment(base);
+  } catch (err) {
+    await opts.onFallback?.(
+      `resolved the per-branch agent sandbox image '${base}' for ` +
+        `${worktreePath}, but could not append the run-owned agent tools; ` +
+        `starting the sandbox on '${opts.agentImages.declaredTag}', whose ` +
+        "environment is a commit behind its own branch. " +
+        (opts.gateRunsSameImage
+          ? "The gate runs the successfully resolved branch image, so it " +
+            "cannot report this tool-layer failure; this line is the only " +
+            "report it gets: "
+          : "No `gateStack` container runs the sandbox image, and nothing " +
+            "else resolves its tool layer; this line is the only report it " +
+            "gets: ") +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+    return opts.agentImages.declaredTag;
   }
 }
 
@@ -778,7 +923,10 @@ export async function sweepBranchImages(
   const tags = stdout
     .split("\n")
     .map((s) => s.trim())
-    .filter((t) => isVariantImageTagIn(scope, t));
+    .filter((t) => isVariantImageTagIn(scope, t))
+    // Agent-tool images are children of branch variants and carry one more
+    // variant suffix. Remove the more-derived (therefore longer) tags first.
+    .sort((a, b) => b.length - a.length);
   const removed: string[] = [];
   const failures: string[] = [];
   for (const tag of tags) {

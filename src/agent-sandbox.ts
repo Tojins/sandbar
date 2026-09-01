@@ -543,8 +543,9 @@ export const claudeCode = (
 //
 // `codex exec --json` streams one JSON object per line on STDOUT while the
 // agent works; its tracing (`ERROR codex_api::…`) goes to stderr and never
-// reaches this parser. Verified against codex-cli 0.152.0, whose event union is
-// `@openai/codex-sdk`'s `ThreadEvent`.
+// reaches this parser. Verified against the codex-cli version pinned by
+// AGENT_PROVIDER_PACKAGES.codex, whose event union is `@openai/codex-sdk`'s
+// `ThreadEvent`; that pin moves with a parser change.
 //
 // Only `agent_message` becomes `text`, and that is the load-bearing choice:
 // Parsed accumulated speech is what the completion-signal watcher scans and
@@ -557,7 +558,8 @@ export const claudeCode = (
 // Errors arrive in THREE shapes and only ONE of them is terminal, which is the
 // distinction the `failure` register lives or dies on — `invokeAgent` rejects
 // on a failure, so anything spent on a recoverable notice escalates a blip to a
-// human. Captured from a live 0.152.0 run with no credential:
+// human. Captured from a live run of the version pinned by
+// AGENT_PROVIDER_PACKAGES.codex with no credential:
 //
 //   {"type":"error","message":"Reconnecting... 2/5 (unexpected status 401 …)"}
 //   {"type":"item.completed","item":{"type":"error","message":
@@ -722,9 +724,9 @@ export const codex = (model: string, options?: CodexOptions): AgentProvider => (
     // the FIRST positional to the session id — so a `-` written for the prompt
     // is swallowed as a thread NAME, and only `--last` overriding it keeps the
     // nudge working by accident. Omitted, both forms fall through to the same
-    // documented stdin read (verified against 0.152.0: both print "Reading
-    // prompt from stdin…", and an empty stdin is REFUSED rather than sent as
-    // an empty prompt).
+    // documented stdin read (verified against the version pinned by
+    // AGENT_PROVIDER_PACKAGES.codex: both print "Reading prompt from stdin…",
+    // and an empty stdin is REFUSED rather than sent as an empty prompt).
     // The seed runs ahead of every invocation rather than at bringup, and it is
     // unconditional here rather than switched host-side: the condition is
     // "`CODEX_AUTH_JSON` is in this container's environment", which the shell
@@ -1742,10 +1744,11 @@ const invokeAgent = (
         // and spend the budget doing it.
         //
         // This is a guard, not the codex credential path — that one exits 1 and
-        // is caught above (verified: 0.152.0 with no key prints `turn.failed`
-        // and exits 1). It is here because an exit code is not a contract the
-        // CLI states, and the two ways of being wrong are not symmetrical. Read
-        // as an answer, a silent terminal failure is an implementer attempt
+        // is caught above (verified at the AGENT_PROVIDER_PACKAGES.codex pin:
+        // no key prints `turn.failed` and exits 1). It is here because an exit
+        // code is not a contract the CLI states, and the two ways of being
+        // wrong are not symmetrical. Read as an answer, a silent terminal
+        // failure is an implementer attempt
         // with no promise tag: a nudge, a spent attempt, and eight more of them
         // across every issue in the plan, parking each with empty transcripts.
         // Read as infra it is a HARD-ERROR on a run that had nothing to say

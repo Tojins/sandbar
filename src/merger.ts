@@ -2054,8 +2054,8 @@ export type RealAdapterDeps = {
   // credential routing cannot disagree with the command being invoked.
   readonly mergerAgent: AgentProviderName;
   readonly mergerModelId: string;
-  // The image the resolve agent runs in — both supported CLIs are installed
-  // there, not in any gate-stack image (#24 D7, #39).
+  // The image the resolve agent runs in — augmented with exactly the providers
+  // routed by this run, unlike any gate-stack image (#24 D7, #75).
   readonly sandboxImage: string;
   readonly env: EnvReader;
   // Gate-2, already bound to the merger worktree's stack. The merger does not
@@ -2421,7 +2421,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     },
     async runResolveAgent(prompt, attempt) {
       // Runs the routed provider inside a podman container off the SANDBOX
-      // image (both CLIs are pre-installed there; #39).
+      // image, augmented with this run's routed providers (#75).
       // Bind-mounts the merger worktree at /workspace so
       // the agent's edits and commits are live on host. `cwd` is a git worktree
       // (detached at origin/<sourceBranch>), so its `.git` is a gitlink file

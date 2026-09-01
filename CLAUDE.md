@@ -299,10 +299,15 @@ and used to announce themselves in four different ways, the halt in none at all.
   reason buried under a dozen tracing lines — and, since no CLI documents its
   exit codes, #67's rule for a terminal failure under an exit-0 process: infra,
   not an answer (read as an answer it is a nudge, an attempt, and eight more of
-  them). Both CLIs are in the one image (#39): which one a role runs is resolved
-  per run, so the image cannot be a function of it — and codex is PINNED there,
-  because `parsedOutputOnly` makes its stream format load-bearing in a way
-  claude-code's is not. `PROVIDER_CREDENTIALS` is ANY-OF per provider, which is
+  them). **The branch owns the environment; the run owns the tools (#75).**
+  After resolving the declared sandbox image or a per-branch variant, the
+  driver appends exactly the routed CLIs at pins owned by
+  `AGENT_PROVIDER_PACKAGES`; an old branch recipe can therefore change its
+  dependencies but cannot remove this run's agent. The merger uses the same
+  augmented declared image, while gate containers keep the unaugmented base
+  because they run no agent. Both pins move with the driver, and codex's is
+  specifically co-versioned with its load-bearing `parsedOutputOnly` parser.
+  `PROVIDER_CREDENTIALS` is ANY-OF per provider, which is
   what let #73 add codex's subscription as data; what a second accepted key
   needed beyond data is `billingPrecedenceWarnings`, because a CLI handed both a
   metered key and a subscription picks the metered one ITSELF (both vendors do)
