@@ -205,7 +205,7 @@ export type ClaudeCodeOptions = {
   // because it is NOT sound in general: the container's $HOME persists for the
   // life of the issue and only sandbar's own runs write conversations there,
   // so "most recent" is exactly the run that just returned. The promise nudge
-  // (inner-loop.ts) is the consumer.
+  // and sequential reviewer follow-up (inner-loop.ts) are the consumers.
   continueSession?: boolean;
 };
 
@@ -699,7 +699,8 @@ export type CodexOptions = {
   // the reason ClaudeCodeOptions.continueSession gives: the container's $HOME
   // (and so `$CODEX_HOME`) persists for the life of the issue and only
   // sandbar's own runs write threads there, so "last" is the run that just
-  // returned. The promise nudge (inner-loop.ts) is the consumer.
+  // returned. The promise nudge and sequential reviewer follow-up
+  // (inner-loop.ts) are the consumers.
   continueSession?: boolean;
 };
 

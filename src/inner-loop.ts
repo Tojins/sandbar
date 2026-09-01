@@ -13,11 +13,14 @@
 // container's netns, so it must exist first, and they must be up before a
 // consumer's `onSandboxReady` hook runs.
 //
-// One deliberate exception to "all branching lives in the SM": the promise
-// nudge in runImplementer. An implementer that ends with no `<promise>` tag
-// at all gets one `--continue` follow-up before the NO-SIGNAL reaches the SM
+// Two deliberate exceptions to "all branching lives in the SM" stay within
+// one action each. The promise nudge in runImplementer gives an implementer
+// that ends with no `<promise>` tag at all one `--continue` follow-up before
+// the NO-SIGNAL reaches the SM
 // — the SM never sees the nudge, only the re-parsed result. The full argument
-// is at the call site.
+// is at the call site. A review round is likewise a correctness pass followed,
+// only when approved, by a checklist pass resumed on its separately configured
+// model; the SM receives one aggregate reviewer result and spends one round.
 //
 // What a FAILED reviewer run means is reviewer-run.ts's policy (#41); this
 // file only adapts `sandbox.run`'s throw into the shape that policy
@@ -79,7 +82,6 @@ import type { RepoRef } from "./repo-ref.js";
 import {
   type ProjectAnchorOptions,
   buildPrompt,
-  buildReviewerFollowupPrompt,
   buildReviewerPrompt,
 } from "./prompt.js";
 import { parseVerdict } from "./verdict-parser.js";
@@ -807,11 +809,7 @@ async function runReviewer(
   );
 
   const transcripts = [`=== correctness pass ===\n${correctness.transcript}`];
-
-  const harnessFailure = async (
-    pass: "correctness" | "followup",
-    outcome: Extract<Awaited<ReturnType<typeof runPass>>, { kind: "harness-failed" }>,
-  ): Promise<LoopEvent> => {
+  const writeTranscript = async (): Promise<void> => {
     if (opts.attemptLogger) {
       await opts.attemptLogger.writeAttemptReviewer(
         issue.id,
@@ -819,6 +817,13 @@ async function runReviewer(
         transcripts.join("\n\n"),
       );
     }
+  };
+
+  const harnessFailure = async (
+    pass: "correctness" | "followup",
+    outcome: Extract<Awaited<ReturnType<typeof runPass>>, { kind: "harness-failed" }>,
+  ): Promise<LoopEvent> => {
+    await writeTranscript();
     const line =
       `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
       `pass=${pass} harness-failed invocations=${outcome.invocations} (round not consumed)`;
@@ -833,13 +838,7 @@ async function runReviewer(
 
   const correctnessResult = parseVerdict(correctness.stdout);
   if (correctnessResult.verdict === "CHANGES-REQUESTED") {
-    if (opts.attemptLogger) {
-      await opts.attemptLogger.writeAttemptReviewer(
-        issue.id,
-        action.attempt,
-        transcripts.join("\n\n"),
-      );
-    }
+    await writeTranscript();
     if (opts.onOrchestratorLog) {
       await opts.onOrchestratorLog(
         `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
@@ -856,17 +855,20 @@ async function runReviewer(
   // Build this only after correctness passes. Besides avoiding a redundant
   // issue fetch on early exit, this keeps "skip pass 2" literal: none of its
   // preparation runs against code that is about to be rewritten.
-  const followupPrompt = await buildReviewerFollowupPrompt({
-    issue,
-    repo: config.repo,
-    repoDir: config.layout.repoDir,
-    worktreePath: sandbox.worktreePath,
-    sourceBranch: config.sourceBranch,
-    base: ctx.base,
-    codingStandardsPath: config.codingStandardsPath,
-    claudeMdPath: config.claudeMdPath,
-    contextMdPath: config.contextMdPath,
-  });
+  const followupPrompt = await buildReviewerPrompt(
+    {
+      issue,
+      repo: config.repo,
+      repoDir: config.layout.repoDir,
+      worktreePath: sandbox.worktreePath,
+      sourceBranch: config.sourceBranch,
+      base: ctx.base,
+      codingStandardsPath: config.codingStandardsPath,
+      claudeMdPath: config.claudeMdPath,
+      contextMdPath: config.contextMdPath,
+    },
+    "followup",
+  );
   const followup = await runPass(
     "followup",
     followupPrompt,
@@ -881,13 +883,7 @@ async function runReviewer(
   // Every invocation's output, not just the reviewing one: the observed failure
   // left a 73-byte log for a 15-minute run, and this file is the only offline
   // artefact of what the reviewer did or did not say.
-  if (opts.attemptLogger) {
-    await opts.attemptLogger.writeAttemptReviewer(
-      issue.id,
-      action.attempt,
-      transcripts.join("\n\n"),
-    );
-  }
+  await writeTranscript();
   const { verdict, prose } = parseVerdict(followup.stdout);
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(

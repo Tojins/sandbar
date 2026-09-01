@@ -231,6 +231,7 @@ export async function buildPrompt(
 
 export async function buildReviewerPrompt(
   inputs: ReviewerPromptInputs,
+  pass: "correctness" | "followup" = "correctness",
 ): Promise<string> {
   const layers = [
     await buildProjectAnchor(
@@ -244,34 +245,14 @@ export async function buildReviewerPrompt(
       inputs.worktreePath,
     ),
     await buildIssueAnchor(inputs.issue.id, inputs.repo),
-    await buildReviewerSlot(inputs),
-  ];
-  return layers.join("\n\n---\n\n");
-}
-
-export async function buildReviewerFollowupPrompt(
-  inputs: ReviewerPromptInputs,
-): Promise<string> {
-  const layers = [
-    await buildProjectAnchor(
-      {
-        repo: inputs.repo,
-        repoDir: inputs.repoDir,
-        claudeMdPath: inputs.claudeMdPath,
-        contextMdPath: inputs.contextMdPath,
-        sourceBranch: inputs.sourceBranch,
-      },
-      inputs.worktreePath,
-    ),
-    await buildIssueAnchor(inputs.issue.id, inputs.repo),
-    await buildReviewerSlot(inputs, "followup"),
+    await buildReviewerSlot(inputs, pass),
   ];
   return layers.join("\n\n---\n\n");
 }
 
 // `probeWorktree` is the tree the emitted `@refs` will be resolved in — the
 // working tree the agent gets. It is a POSITIONAL argument rather than a field
-// on `opts` because the two prompt builders derive it from the worktree they
+// on `opts` because the prompt builders derive it from the worktree they
 // are already about, and only the merge phase supplies one by hand; a field
 // would have made it one more string among six that a call site has to get
 // right, with nothing but a name to distinguish it from `repoDir` and no test
@@ -480,7 +461,7 @@ export function renderSandboxStackSlot(
 
 async function buildReviewerSlot(
   inputs: ReviewerPromptInputs,
-  pass: "correctness" | "followup" = "correctness",
+  pass: "correctness" | "followup",
 ): Promise<string> {
   const { worktreePath } = inputs;
   const base = inputs.base.ref;
@@ -546,17 +527,16 @@ export type ReviewerSlotRender = ReviewerPromptInputs & {
 };
 
 export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
-  return renderReviewerTemplate(REVIEWER_TPL, inputs, false);
+  return renderReviewerTemplate(REVIEWER_TPL, inputs);
 }
 
 export function renderReviewerFollowupSlot(inputs: ReviewerSlotRender): string {
-  return renderReviewerTemplate(REVIEWER_FOLLOWUP_TPL, inputs, true);
+  return renderReviewerTemplate(REVIEWER_FOLLOWUP_TPL, inputs);
 }
 
 function renderReviewerTemplate(
   template: string,
   inputs: ReviewerSlotRender,
-  includeStandards: boolean,
 ): string {
   const { issue, base, sourceBranch, codingStandardsPath, claudeMdPath, contextMdPath, commits, diff } =
     inputs;
@@ -582,7 +562,7 @@ function renderReviewerTemplate(
     ? `## Branch diff\n\n\`\`\`diff\n${diff}\n\`\`\``
     : `## Branch diff\n\n(empty — no changes against \`${base.ref}\`)`;
 
-  const projectStandards = includeStandards && codingStandardsPath
+  const projectStandards = codingStandardsPath
     ? render(REVIEWER_PROJECT_STANDARDS_TPL, { codingStandardsPath })
     : "";
 
@@ -599,7 +579,7 @@ function renderReviewerTemplate(
     issueTitle: issue.title,
     commits: section(commitsBlock),
     diff: section(diffBlock),
-    codingStandards: includeStandards ? CODING_STANDARDS : "",
+    codingStandards: CODING_STANDARDS,
     projectStandards: section(projectStandards),
     conventionsRef,
   });

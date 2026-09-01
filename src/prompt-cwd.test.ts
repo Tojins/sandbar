@@ -40,7 +40,6 @@ import {
   buildPrompt,
   buildProjectAnchor,
   buildReviewerPrompt,
-  buildReviewerFollowupPrompt,
 } from "./prompt.js";
 
 const exec = promisify(execFile);
@@ -249,7 +248,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("points the reviewer at standards the BRANCH adds", async () => {
     await writeFile(join(launchedFrom, "CODING_STANDARDS.md"), "# std\n");
 
-    const prompt = await buildReviewerFollowupPrompt({
+    const prompt = await buildReviewerPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
@@ -258,7 +257,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
       codingStandardsPath: "CODING_STANDARDS.md",
-    });
+    }, "followup");
 
     expect(prompt).toContain("@CODING_STANDARDS.md");
   });
@@ -268,7 +267,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     // review — so probing the wrong one emits an @ref the reviewer cannot open.
     await writeFile(join(target, "CODING_STANDARDS.md"), "# std\n");
 
-    const prompt = await buildReviewerFollowupPrompt({
+    const prompt = await buildReviewerPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
@@ -277,7 +276,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
       codingStandardsPath: "CODING_STANDARDS.md",
-    });
+    }, "followup");
 
     expect(prompt).not.toContain("@CODING_STANDARDS.md");
   });
