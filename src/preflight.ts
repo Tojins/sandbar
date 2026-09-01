@@ -58,6 +58,15 @@
 // config file, because "the checkout is behind" is true after every landing a
 // series makes and a warning that always fires is one nobody reads.
 //
+// A THIRD soft warning joined those two with #73, and it reads no repository at
+// all — it is about `config.env`. The credential check itself is any-of and
+// refuses only a provider with NO key (`uncredentialledProviders`); what it
+// cannot see is a provider given TWO that bill differently, where the CLI picks
+// the metered one by itself and a subscription is paid for and never spent.
+// `billingPrecedenceWarnings` (agent-providers.ts) owns the rule; this module
+// owns only when it is printed — before the invariant throw, beside the
+// origin-URL warning and for the same reason.
+//
 // Two layers:
 //   - checkInvariants(state)  — pure function over a captured RepoState.
 //                               Unit-tested with hand-built fixtures.
@@ -137,6 +146,7 @@ import { promisify } from "node:util";
 
 import {
   type AgentProviderName,
+  billingPrecedenceWarnings,
   PROVIDER_CREDENTIALS,
 } from "./agent-providers.js";
 import type { ResolvedStackContainer } from "./config.js";
@@ -984,6 +994,16 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
         "`origin`. If those are not the same repository, sandbar will close " +
         "issues for work that landed somewhere else.",
     );
+  }
+
+  // Also before the throw, and for the same reason the line above it is (#73):
+  // this is about the credentials an operator is standing in the middle of
+  // configuring, and the run where it is most worth reading is a first codex
+  // run — which is exactly the run most likely to be failing preflight for some
+  // other reason. Soft, because both keys work: what it costs is a bill, and
+  // sandbar cannot know which of the two the operator meant to spend.
+  for (const warning of billingPrecedenceWarnings(cfg.agentProviders, cfg.env)) {
+    console.warn(warning);
   }
 
   const results = checkInvariants(state);

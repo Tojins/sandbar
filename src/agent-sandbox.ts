@@ -9,7 +9,11 @@
 // at. Everything downstream of that seam — the completion-signal watch, the
 // idle timeout, commit collection, the bounded tail — consumes parsed events
 // and git, never a CLI, so a provider is argv plus a line parser and nothing
-// else. `agent-providers.ts` owns which NAME resolves to which of them.
+// else. `agent-providers.ts` owns which NAME resolves to which of them. #73
+// leans on exactly that: codex's ChatGPT-subscription credential is a FILE, and
+// a provider that owns its argv can materialise one in-container from a
+// `config.env` VALUE — so the seam absorbs a file-shaped credential without
+// sandbar learning a path or mounting anything (`CODEX_AUTH_SEED`).
 //
 // A provider's parser answers in three registers and the difference between
 // them is load-bearing: `text`/`result` is the agent's SPEECH and is the only
@@ -586,6 +590,52 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
   return [];
 };
 
+// The ChatGPT-subscription credential, materialised in-container (#73).
+//
+// codex has no env-var analogue of `CLAUDE_CODE_OAUTH_TOKEN`: `codex login`
+// writes `$CODEX_HOME/auth.json` (default `$HOME/.codex/auth.json`) and THAT
+// FILE is the whole credential — access token, refresh token,
+// `auth_mode: "chatgpt"`. Seeding it into a container is OpenAI's own
+// documented CI/CD route. Sandbar still names no file and mounts nothing: the
+// content arrives as a `config.env` value (`CODEX_AUTH_JSON`), exactly like
+// every other credential (#38), and this snippet is what turns that value back
+// into the file codex reads.
+//
+// The value is referenced, never interpolated. The secret is already in the
+// container's environment, so `$CODEX_AUTH_JSON` costs nothing; the host-side
+// value spliced into this string would put a refresh token in the `podman exec`
+// argv, where any process on the host can read it out of `ps`.
+//
+// ONLY IF MISSING, and that is the load-bearing half. codex refreshes tokens in
+// place and writes them back to this file — so on a later attempt in the same
+// sandbox (the container, and `$HOME` with it, lives for the whole issue) a
+// re-seed would roll the credential back to a token the refresh may already
+// have rotated away. Per-issue copies of one host file are sound for the same
+// reason the other direction is not: a container lives hours and the refresh
+// cycle is days, so the host's copy only has to be fresh when the series
+// starts. (What it costs is stated where the operator can act on it — the
+// `CODEX_AUTH_JSON` note in `agent-providers.ts` — since parallel sandboxes are
+// concurrent holders of one credential, and an in-container refresh can leave
+// the host's copy stale enough that a LATER series needs `codex login` again.)
+//
+// A seed that FAILS exits non-zero rather than falling through to `codex exec`.
+// Unauthenticated, codex would spend the run's idle budget on retries and end
+// in a `turn.failed` about a 401 — an answer-shaped report of a filesystem
+// problem. Exiting here puts it on `invokeAgent`'s non-zero path with the
+// mkdir/write error on stderr, which is where infra belongs (#67).
+//
+// `${CODEX_HOME:-$HOME/.codex}` because that is codex's own resolution order: a
+// config that declares `CODEX_HOME` would otherwise be handed a seeded file in
+// a directory the CLI never reads.
+export const CODEX_AUTH_SEED = [
+  'if [ -n "${CODEX_AUTH_JSON:-}" ]; then',
+  'codex_home="${CODEX_HOME:-$HOME/.codex}";',
+  '[ -f "$codex_home/auth.json" ] ||',
+  "(umask 077 && mkdir -p \"$codex_home\" && printf '%s' \"$CODEX_AUTH_JSON\" > \"$codex_home/auth.json\") ||",
+  '{ echo "sandbar: could not seed $codex_home/auth.json from CODEX_AUTH_JSON" >&2; exit 1; };',
+  "fi;",
+].join(" ");
+
 export type CodexOptions = {
   env?: Record<string, string>;
   // `codex exec resume --last` — the `--continue` analogue, sound for exactly
@@ -617,8 +667,14 @@ export const codex = (model: string, options?: CodexOptions): AgentProvider => (
     // documented stdin read (verified against 0.152.0: both print "Reading
     // prompt from stdin…", and an empty stdin is REFUSED rather than sent as
     // an empty prompt).
+    // The seed runs ahead of every invocation rather than at bringup, and it is
+    // unconditional here rather than switched host-side: the condition is
+    // "`CODEX_AUTH_JSON` is in this container's environment", which the shell
+    // can ask directly and which no argument threaded down from the config
+    // could answer more accurately. With the key undeclared the guard is one
+    // `test` that falls through to the same `codex exec` as before.
     return {
-      command: `codex exec${resume} --json${bypass} --model ${shellEscape(model)}`,
+      command: `${CODEX_AUTH_SEED} codex exec${resume} --json${bypass} --model ${shellEscape(model)}`,
       stdin: prompt,
     };
   },
