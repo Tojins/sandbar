@@ -536,6 +536,18 @@ export const claudeCode = (
 // — and, since no CLI documents its exit codes as a contract, the guard for a
 // turn that fails under an exit-0 process: infra, not an answer.
 //
+// A SPENT SUBSCRIPTION arrives here too, and it is worth knowing which shape it
+// takes (#73). When the plan's 5-hour or weekly cap is reached, `codex exec`
+// ends the turn — a `turn.failed` like any other, so the cap's own words become
+// the `AgentError` and the HARD-ERROR reason, verbatim, and reach a human on
+// stdout as `<issue>: HARD-ERROR (…)` per retry. Nothing here classifies it:
+// sandbar has no rate-limit vocabulary and inventing one would mean matching
+// another vendor's prose. What the run does with it is #67's rule unchanged —
+// two fresh sandboxes, then NEEDS-HUMAN — which for an exhausted pool is a
+// whole cycle of bringups that could not have worked. Naming the shape is the
+// pre-work for ever treating it differently; parking issues nothing is wrong
+// with is the cost until then.
+//
 // The turn's give-up cause, never empty: the string becomes the whole of an
 // `AgentError` message and so the NEEDS-HUMAN trace a person reads, and "the
 // turn failed" with a blank cause at least says which half of the system to
