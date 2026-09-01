@@ -77,6 +77,21 @@ RUN curl -fsSL https://github.com/containers/podman/releases/download/v4.9.3/pod
 # failure rather than an image one.
 RUN npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code
 
+# The second agent CLI, beside the first rather than in an image of its own
+# (#72): ONE image serves both roles (#39), and which CLI a role runs is a
+# config field the image cannot see — `implementerAgent` is resolved per run, so
+# an image that carried only the CLI its config named would have to be rebuilt
+# to change a role's vendor.
+#
+# Unpinned for the same reason as the block above, and NOT `--allow-scripts`:
+# `@openai/codex` declares no lifecycle scripts at all. It resolves its platform
+# binary through optionalDependencies, so npm's default block has nothing to
+# skip here and naming a package that runs nothing would only suggest it does.
+#
+# Inert unless a role names it — an installed CLI nobody invokes costs disk and
+# nothing else, exactly like the podman remote client above in the sandbox role.
+RUN npm install -g @openai/codex
+
 # No `ENV HOME`: the sandbox provider sets HOME=/home/agent itself, and the
 # gate runner is root, whose /root is the right answer for it.
 ENV GIT_PAGER=cat \

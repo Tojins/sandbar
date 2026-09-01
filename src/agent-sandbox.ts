@@ -4,7 +4,12 @@
 // bind-mount podman provider, an explicit pre-existing branch,
 // `maxIterations: 1`, no session capture. The public surface is the five
 // symbols sandbar imports (`createSandbox`, `podman`, `claudeCode`, types
-// `Sandbox`/`SandboxHooks`).
+// `Sandbox`/`SandboxHooks`) — plus `codex` since #72, the second
+// implementation of `AgentProvider`, which is the seam a role's CLI is chosen
+// at. Everything downstream of that seam — the completion-signal watch, the
+// idle timeout, commit collection, the bounded tail — consumes parsed events
+// and git, never a CLI, so a provider is argv plus a line parser and nothing
+// else. `agent-providers.ts` owns which NAME resolves to which of them.
 //
 // Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
@@ -105,6 +110,19 @@ export type AgentProvider = {
     dangerouslySkipPermissions?: boolean;
   }): { command: string; stdin?: string };
   parseStreamLine(line: string): ParsedStreamEvent[];
+  // When true, `parseStreamLine` is the ONLY source of a run's output: a run
+  // whose lines yielded no `text`/`result` event returns "" rather than the raw
+  // stream (#72). Absent, the raw stream is the last-resort fallback, which is
+  // what a provider that does not emit machine-readable lines at all needs.
+  //
+  // This is not a formatting preference, it is #41's evidence rule. "Completed
+  // with output" is what `reviewer-run.ts` reads as a verdict, so the string a
+  // run returns must be the agent's own SPEECH or nothing — and a provider's
+  // transport is not speech. `codex exec --json` exits 0 on a turn it reports
+  // as FAILED, so without this the JSONL of an auth failure would come back as
+  // "output", read as a review, and default to CHANGES-REQUESTED: a verdict
+  // about code that no model ever looked at, charged to the issue's rounds.
+  readonly parsedOutputOnly?: boolean;
 };
 
 export type ClaudeCodeOptions = {
@@ -444,6 +462,106 @@ export const claudeCode = (
   },
   parseStreamLine(line) {
     return parseStreamJsonLine(line);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// codex — the second provider (#72)
+// ---------------------------------------------------------------------------
+//
+// `codex exec --json` streams one JSON object per line on STDOUT while the
+// agent works; its tracing (`ERROR codex_api::…`) goes to stderr and never
+// reaches this parser. Verified against codex-cli 0.152.0, whose event union is
+// `@openai/codex-sdk`'s `ThreadEvent`.
+//
+// Only `agent_message` becomes `text`, and that is the load-bearing choice:
+// `accumulatedOutput` is what the completion-signal watcher scans and what the
+// `<promise>`/`<verdict>` parsers are handed, so it must hold the agent's
+// SPEECH and nothing else. Two neighbours are deliberately dropped rather than
+// degraded:
+//   - `reasoning`, which is a summary of the model's own thinking. Folding it
+//     in would let a model that merely CONSIDERED emitting the completion tag
+//     end the run by talking about it.
+//   - `error` items and the `error` / `turn.failed` events, for #41's reason —
+//     see `parsedOutputOnly`. A failed turn must come back as no output at all,
+//     which is what makes it a harness fault rather than a review.
+// The cost of that strictness is that a codex run which only errored writes an
+// EMPTY attempt transcript; the diagnosis is the container's stderr. Worth it:
+// a thin log costs a human one read, an invented CHANGES-REQUESTED costs the
+// issue a review round and tells the implementer to fix a phantom.
+export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
+  if (!line.startsWith("{")) return [];
+  try {
+    // As in parseStreamJsonLine: the wire format is another process's, so it is
+    // read as `any` and every field is checked before it is believed.
+    const obj = JSON.parse(line) as any;
+    if (obj.type === "thread.started" && typeof obj.thread_id === "string") {
+      // Claude-shaped, and knowingly approximate: a codex THREAD is the unit
+      // `resume --last` reopens, which is what a session id is used for here.
+      return [{ type: "session_id", sessionId: obj.thread_id }];
+    }
+    // Items are reported started → updated → completed; only the completed form
+    // is read, so a command's `aggregated_output` and an agent message's text
+    // are whole rather than a prefix that arrives again later.
+    if (obj.type === "item.completed" && obj.item !== null && typeof obj.item === "object") {
+      const item = obj.item;
+      if (item.type === "agent_message" && typeof item.text === "string") {
+        return [{ type: "text", text: item.text }];
+      }
+      // tool_call is informational (ignored on sandbar's path). Named after the
+      // codex item rather than mapped onto a Claude tool: the two vocabularies
+      // are not the same and a false equivalence would only mislead a reader.
+      if (item.type === "command_execution" && typeof item.command === "string") {
+        return [{ type: "tool_call", name: "command_execution", args: item.command }];
+      }
+      if (item.type === "web_search" && typeof item.query === "string") {
+        return [{ type: "tool_call", name: "web_search", args: item.query }];
+      }
+    }
+  } catch {
+    // Stream lines are routinely partial; swallow → [], never throw.
+  }
+  return [];
+};
+
+export type CodexOptions = {
+  env?: Record<string, string>;
+  // `codex exec resume --last` — the `--continue` analogue, sound for exactly
+  // the reason ClaudeCodeOptions.continueSession gives: the container's $HOME
+  // (and so `$CODEX_HOME`) persists for the life of the issue and only
+  // sandbar's own runs write threads there, so "last" is the run that just
+  // returned. The promise nudge (inner-loop.ts) is the consumer.
+  continueSession?: boolean;
+};
+
+export const codex = (model: string, options?: CodexOptions): AgentProvider => ({
+  name: "codex",
+  env: options?.env ?? {},
+  parsedOutputOnly: true,
+  buildPrintCommand({ prompt, dangerouslySkipPermissions }) {
+    // Wanted on its own merits, not merely as the `--dangerously-skip-permissions`
+    // analogue: codex's own sandbox is Landlock, which does not generally work
+    // inside a container, and podman is already the isolation boundary here.
+    const bypass = dangerouslySkipPermissions
+      ? " --dangerously-bypass-approvals-and-sandbox"
+      : "";
+    const resume = options?.continueSession ? " resume --last" : "";
+    // NO positional argument, and that is the difference between the two
+    // subcommands rather than a style choice. `codex exec [PROMPT]` documents
+    // `-` as "read stdin", but `codex exec resume [SESSION_ID] [PROMPT]` binds
+    // the FIRST positional to the session id — so a `-` written for the prompt
+    // is swallowed as a thread NAME, and only `--last` overriding it keeps the
+    // nudge working by accident. Omitted, both forms fall through to the same
+    // documented stdin read (verified against 0.152.0: both print "Reading
+    // prompt from stdin…", and an empty stdin is REFUSED rather than sent as
+    // an empty prompt).
+    return {
+      command: `codex exec${resume} --json${bypass} --model ${shellEscape(model)}`,
+      stdin: prompt,
+    };
+  },
+  parseStreamLine(line) {
+    return parseCodexJsonLine(line);
   },
 });
 
@@ -1433,7 +1551,18 @@ const invokeAgent = (
           );
           return;
         }
-        settleResolve({ result: resultText || execResult.stdout });
+        // `accumulatedOutput` sits between the two for #72. The grace path
+        // above already settles on `resultText || accumulatedOutput`, so
+        // without it the two settle paths disagreed about the same run: a
+        // provider that emits assistant text but no terminal `result` event
+        // returned its PARSED speech when the completion timer fired and the
+        // raw stream when the exec merely exited. Codex is that provider on
+        // every run — it has no `result` event — and for it the raw stream is
+        // not a degraded answer but a wrong one (see `parsedOutputOnly`).
+        const spoken = resultText || accumulatedOutput;
+        settleResolve({
+          result: spoken || (agent.parsedOutputOnly === true ? "" : execResult.stdout),
+        });
       })
       .catch((err) => settleReject(err));
   });

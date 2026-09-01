@@ -26,6 +26,10 @@
 
 import { join } from "node:path";
 
+import {
+  type AgentProviderName,
+  buildAgentProvider,
+} from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
 import { agentPartialOutput, podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
@@ -162,6 +166,12 @@ export type InnerLoopConfig = {
   readonly env: Record<string, string>;
   readonly implementerModelId: string;
   readonly reviewerModelId: string;
+  // Which CLI each role runs (#72). Paired with the model id above rather than
+  // folded into it: the two are independent choices, and every provider takes
+  // whatever id it is handed. `agent-providers.ts` owns the set and the
+  // credential each member needs.
+  readonly implementerAgent: AgentProviderName;
+  readonly reviewerAgent: AgentProviderName;
   readonly maxImplAttempts: number;
   readonly maxReviewRounds: number;
   readonly sandboxImage: string;
@@ -617,7 +627,7 @@ async function runImplementer(
   const run = await sandbox.run({
     name: `implementer-${issue.id}-attempt-${action.attempt}`,
     maxIterations: 1,
-    agent: agentSandbox.claudeCode(config.implementerModelId),
+    agent: buildAgentProvider(config.implementerAgent, config.implementerModelId),
     prompt,
   });
   if (opts.attemptLogger) {
@@ -657,7 +667,7 @@ async function runImplementer(
     const nudge = await sandbox.run({
       name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
       maxIterations: 1,
-      agent: agentSandbox.claudeCode(config.implementerModelId, {
+      agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
         continueSession: true,
       }),
       prompt: PROMISE_NUDGE_TPL,
@@ -754,7 +764,7 @@ async function runReviewer(
             `reviewer-${issue.id}-round-${action.reviewRound}` +
             (invocation > 1 ? `-invocation-${invocation}` : ""),
           maxIterations: 1,
-          agent: agentSandbox.claudeCode(config.reviewerModelId),
+          agent: buildAgentProvider(config.reviewerAgent, config.reviewerModelId),
           prompt: reviewerPrompt,
         });
         return { output: reviewerRun.stdout, error: null };

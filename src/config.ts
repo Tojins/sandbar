@@ -1,5 +1,9 @@
 import { resolve } from "node:path";
 
+import {
+  type AgentProviderName,
+  parseAgentProviderName,
+} from "./agent-providers.js";
 import type { SandboxHooks } from "./agent-sandbox.js";
 import { SandbarError } from "./errors.js";
 import { DEFAULT_LANE, type Lane } from "./lanes.js";
@@ -482,15 +486,32 @@ export type RunConfig = {
   // pulls, so no run does silent network work at startup.
   readonly images?: readonly BuiltImage[];
 
-  // Model ids passed to the claude agent provider, one per role. There is no
+  // Model ids passed to the role's agent provider, one per role. There is no
   // single global model knob: every agent role names its own model so the
   // tiering is explicit at the call site. Every role defaults to the version-
   // agnostic "opus" alias, which the claude CLI resolves to the latest Opus —
   // so the defaults don't pin a version and don't need bumping per release.
+  // A role routed to another provider (below) puts THAT vendor's id in the same
+  // field: the fields name the model, not the vendor.
   // Defaults: implementer/reviewer/merger all "opus".
   readonly implementerModelId?: string;
   readonly reviewerModelId?: string;
   readonly mergerModelId?: string;
+
+  // Which CLI each role runs (#72) — the vendor knob beside the tiering one.
+  // `agent-providers.ts` owns the set, the credential each member needs, and
+  // why the set is closed. Both default to "claude", so every config written
+  // before #72 resolves unchanged.
+  //
+  // There is deliberately no `mergerAgent`. The merger's resolve agent is a
+  // separate path that spells its container's entrypoint directly
+  // (`merger.ts`), and it stays Claude/Opus on purpose: it is rare, and
+  // conflict resolution is exactly where the strongest model earns its price.
+  // A field here that nothing read would be the same silent failure an unknown
+  // provider name is — a config asking for something the driver does not do,
+  // and never saying so.
+  readonly implementerAgent?: AgentProviderName;
+  readonly reviewerAgent?: AgentProviderName;
 
   // Trailer appended to merge commits. Default: a `Co-authored-by:` line built
   // from botName/botEmail.
@@ -1657,6 +1678,11 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     implementerModelId: config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,
     reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
+    implementerAgent: parseAgentProviderName(
+      "implementerAgent",
+      config.implementerAgent,
+    ),
+    reviewerAgent: parseAgentProviderName("reviewerAgent", config.reviewerAgent),
     coauthorTrailer:
       config.coauthorTrailer ??
       defaultCoauthorTrailer(config.botName, config.botEmail),

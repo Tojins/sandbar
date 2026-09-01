@@ -177,6 +177,7 @@ import {
 } from "./forge-verify.js";
 import { startKeepawake, stopKeepawake } from "./keepawake.js";
 import { runInnerLoop, type Terminal } from "./inner-loop.js";
+import { requiredAgentProviders } from "./agent-providers.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
 import { runScope } from "./naming.js";
 import { startRunLogger } from "./logs.js";
@@ -476,6 +477,10 @@ export async function run(
       // For the one warning that is about the config FILE rather than its
       // contents: nothing refreshes the checkout it was imported from (#66).
       configPath: options.configPath ?? null,
+      // Every CLI the roles route to, plus claude for the merger (#72). A
+      // missing key for one of them is a refusal here, where it costs a
+      // startup, rather than an in-container death an attempt at a time.
+      agentProviders: requiredAgentProviders(config),
     });
   } catch (err) {
     return await stopAtStartup("preflight-failed", err);
@@ -749,6 +754,8 @@ export async function run(
     env: config.env,
     implementerModelId: config.implementerModelId,
     reviewerModelId: config.reviewerModelId,
+    implementerAgent: config.implementerAgent,
+    reviewerAgent: config.reviewerAgent,
     maxImplAttempts: config.maxImplAttempts,
     maxReviewRounds: config.maxReviewRounds,
     sandboxImage: config.sandboxImage,
