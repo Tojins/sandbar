@@ -661,6 +661,7 @@ describe("resolveSandboxImage", () => {
     });
     const base = new Map([["sandbox", (await fp(source, SANDBOX))!]]);
     const attempted: string[] = [];
+    const reported: string[] = [];
     const image = await resolveSandboxImage({
       declaredTag: "sandbox",
       agentImages: agentImages(async (tag) => {
@@ -669,12 +670,18 @@ describe("resolveSandboxImage", () => {
       }),
       worktreePath: branch,
       branchImages: harness(base, async () => {}),
-      gateRunsSameImage: false,
+      gateRunsSameImage: true,
+      onFallback: (line) => {
+        reported.push(line);
+      },
     });
     expect(attempted).toEqual([
       variantImageTag("sandbox", scope, (await fp(branch, SANDBOX))!),
     ]);
     expect(image).toBe("agent:sandbox");
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toContain("could not append the run-owned agent tools");
+    expect(reported[0]).not.toContain("gate");
   });
 
   it("promises a second report only when a gate container runs the same image", async () => {

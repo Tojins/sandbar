@@ -56,9 +56,9 @@ describe("run-owned agent images", () => {
   });
 
   it("reuses a derived image whose label matches a labelled base and toolset", async () => {
-    const toolset = `codex: ${AGENT_PROVIDER_PACKAGES.codex.spec}`;
+    const containerfile = agentToolsContainerfile("base", ["codex"]);
     const fingerprint = createHash("sha256")
-      .update(JSON.stringify(["base-fp", toolset]))
+      .update(JSON.stringify(["base-fp", containerfile]))
       .digest("hex");
     let reads = 0;
     let builds = 0;
@@ -74,5 +74,52 @@ describe("run-owned agent images", () => {
       log: () => {},
     });
     expect(builds).toBe(0);
+  });
+
+  it("deduplicates concurrent augmentation of the same base", async () => {
+    let builds = 0;
+    let releaseBuild!: () => void;
+    const buildStarted = new Promise<void>((resolve) => {
+      releaseBuild = resolve;
+    });
+    const imagesPromise = createAgentImages({
+      declaredBaseTag: "base",
+      providers: ["codex"],
+      scope: runScope("/deduplicated-agent-image"),
+      inputsLabel: async () => null,
+      build: async () => {
+        builds += 1;
+        await buildStarted;
+      },
+      probeUid: async () => 0,
+      log: () => {},
+    });
+    releaseBuild();
+    const images = await imagesPromise;
+    const [first, second, third] = await Promise.all([
+      images.augment("variant"),
+      images.augment("variant"),
+      images.augment("variant"),
+    ]);
+    expect(first).toBe(second);
+    expect(second).toBe(third);
+    expect(builds).toBe(2);
+  });
+
+  it("names the base and routed toolset when augmentation fails", async () => {
+    await expect(
+      createAgentImages({
+        declaredBaseTag: "broken-base",
+        providers: ["codex"],
+        scope: runScope("/failed-agent-image"),
+        inputsLabel: async () => null,
+        build: async () => {
+          throw new Error("registry unavailable");
+        },
+        log: () => {},
+      }),
+    ).rejects.toThrow(
+      `could not augment image 'broken-base' with agent tools codex: ${AGENT_PROVIDER_PACKAGES.codex.spec}: registry unavailable`,
+    );
   });
 });

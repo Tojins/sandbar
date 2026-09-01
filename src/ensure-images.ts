@@ -507,8 +507,9 @@ export async function createAgentImages(opts: {
     if (promise === undefined) {
       promise = (async () => {
         const baseInputs = await inputsLabel(baseTag);
+        const containerfile = agentToolsContainerfile(baseTag, opts.providers);
         const fingerprint = createHash("sha256")
-          .update(JSON.stringify([baseInputs ?? "unknown", toolset]))
+          .update(JSON.stringify([baseInputs ?? "unknown", containerfile]))
           .digest("hex");
         const tag = variantImageTag(baseTag, opts.scope, fingerprint);
         // An unlabelled base has unknown provenance. Its derived tag can be a
@@ -523,7 +524,7 @@ export async function createAgentImages(opts: {
             { tag, containerfile: "<generated-agent-tools>" },
             {
               root: "",
-              content: agentToolsContainerfile(baseTag, opts.providers),
+              content: containerfile,
               fingerprint,
               capture: true,
             },
@@ -779,13 +780,13 @@ export async function resolveSandboxImage(opts: {
 }): Promise<string> {
   const { branchImages, declaredTag, worktreePath } = opts;
   if (!branchImages) return opts.agentImages.declaredTag;
+  let base: string;
   try {
     const map = await branchImages.resolve(
       worktreePath,
       new Set([declaredTag]),
     );
-    const base = map.get(declaredTag) ?? declaredTag;
-    return await opts.agentImages.augment(base);
+    base = map.get(declaredTag) ?? declaredTag;
   } catch (err) {
     await opts.onFallback?.(
       `could not build a per-branch agent sandbox image from '${declaredTag}' ` +
@@ -801,6 +802,17 @@ export async function resolveSandboxImage(opts: {
             "built, and this line is the only report this failure gets.") +
         " The agent's environment is a commit behind its own branch until it " +
         `installs for itself: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return opts.agentImages.declaredTag;
+  }
+  try {
+    return await opts.agentImages.augment(base);
+  } catch (err) {
+    await opts.onFallback?.(
+      `resolved the per-branch agent sandbox image '${base}' for ` +
+        `${worktreePath}, but could not append the run-owned agent tools; ` +
+        `starting the sandbox on '${opts.agentImages.declaredTag}': ` +
+        `${err instanceof Error ? err.message : String(err)}`,
     );
     return opts.agentImages.declaredTag;
   }

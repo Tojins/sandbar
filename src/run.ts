@@ -139,6 +139,7 @@ import {
   readDriverIdentity,
 } from "./driver-identity.js";
 import {
+  type AgentImages,
   type BranchImages,
   checkWorktreeImageUids,
   createAgentImages,
@@ -607,7 +608,7 @@ export async function run(
   // refusal.
   let sourceWorktree: string;
   let baseFingerprints: ReadonlyMap<string, string>;
-  let agentImages: Awaited<ReturnType<typeof createAgentImages>>;
+  let agentImages: AgentImages;
   try {
     sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
     baseFingerprints = await ensureImages(config.images, sourceWorktree);
