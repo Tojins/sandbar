@@ -31,7 +31,9 @@
 // should be the one from the version being run. `npm run driver` installs it
 // without starting a series, which is what the hand paths (`sandbar gate`, or
 // just loading this file) need.
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DRIVER_ENTRY = new URL(
@@ -83,14 +85,15 @@ export default {
   // floor below which it must not — but raise it in the same commit as anything
   // this file starts asking a newer sandbar for.
   //
-  // It is 0.20.33, the oldest driver this file has ever been run by — the most
-  // it can honestly claim — and it moves when this file starts asking a newer
-  // sandbar for something, not when the pin does. The check itself is live:
-  // 0.20.33 predated `requiresSandbar` and spread the field through unread,
-  // but the pin has since moved to a release that carries it, so a driver
-  // below this floor now refuses the run by name instead of silently dropping
-  // what it cannot read.
-  requiresSandbar: "0.20.33",
+  // It is 0.23.0, the release this file started asking for by routing the
+  // implementer at codex below: `implementerAgent` landed in #72 and a driver
+  // that predates it spreads the field through UNREAD — the run comes up
+  // claude on the implementer with no refusal anywhere, #66's exact silent
+  // failure — and `CODEX_AUTH_JSON` (#73, 0.23.0) is the credential that
+  // routing declares, which an in-between driver would refuse loudly but
+  // refuse every time. It moves when this file starts asking a newer sandbar
+  // for something, not when the pin does.
+  requiresSandbar: "0.23.0",
 
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
@@ -275,53 +278,45 @@ export default {
     { tag: IMAGE, containerfile: "Containerfile", rebuildOn: ["Containerfile"] },
   ],
 
-  env: readEnvFile(new URL("sandbar.env", import.meta.url)),
+  // The credential the codex routing below spends is the ChatGPT subscription,
+  // not the API (#73). The included pool is the whole discount — top-up credits
+  // are priced at API parity — and `OPENAI_API_KEY` bills the API without
+  // touching it. The subscription is a FILE: `codex login` on this host writes
+  // `~/.codex/auth.json`, and `CODEX_AUTH_JSON` carries its content as a value,
+  // which this file is a program and reads for itself. Not `sandbar.env`: that
+  // parser is line-based and `auth.json` is pretty JSON. Declare ONE of the
+  // two — codex prefers `OPENAI_API_KEY` when both are visible, so a config
+  // carrying both pays the subscription and bills the API anyway, which
+  // preflight warns about. Re-run `codex login` here if a series is ever
+  // refused for a stale token: the container's copy refreshes in place and
+  // this host's can be left behind.
+  env: {
+    ...readEnvFile(new URL("sandbar.env", import.meta.url)),
+    CODEX_AUTH_JSON: readFileSync(join(homedir(), ".codex/auth.json"), "utf8"),
+  },
 
-  // No `implementerAgent`/`reviewerAgent` (#72), and their absence is the
-  // deviations-only rule rather than a verdict on the feature: both default to
-  // "claude", which is what this repo runs today. Routing the implementer at
-  // Codex is THREE edits made together, and made by a human, because it spends
-  // a different quota and needs a key this file cannot check for:
+  // The implementer runs codex (#72), on the subscription above (#73); the
+  // pair is deviations from "claude"/"opus", so only the routed role is
+  // spelled. The model id is the same field the claude default used, holding
+  // the other vendor's id — the driver enforces the pairing rather than
+  // trusting it (`assertRoleModelIdNamed`): a model id left unset is the
+  // claude alias "opus", so a half-moved config would ask codex for it on
+  // every attempt. Preflight refuses the run when no codex credential is
+  // declared in `env`, rather than letting the failure arrive as an
+  // implementer dying in-container.
   //
-  //   implementerAgent: "codex",
-  //   implementerModelId: "gpt-5.6-sol",   // the same field, the other vendor's id
-  //
-  // plus a codex credential in `env` below — preflight refuses the run without
-  // one rather than letting the failure arrive as an implementer dying
-  // in-container — plus `requiresSandbar` raised to a release that HAS the
-  // field, in the same commit (#66).
-  //
-  // WHICH credential is the money question, and for a ChatGPT Pro operator it
-  // is not the API key (#73). The included pool is the whole discount — top-up
-  // credits are priced at API parity — and `OPENAI_API_KEY` bills the API
-  // without touching it. The subscription is a FILE: `codex login` on this host
-  // writes `~/.codex/auth.json`, and `CODEX_AUTH_JSON` carries its content as a
-  // value, which this file is a program and can read for itself:
-  //
-  //   env: {
-  //     ...readEnvFile(new URL("sandbar.env", import.meta.url)),
-  //     CODEX_AUTH_JSON: readFileSync(join(homedir(), ".codex/auth.json"), "utf8"),
-  //   },
-  //
-  // (with `readFileSync`, `homedir` and `join` imported at the top beside
-  // `existsSync`). Not `sandbar.env`: that parser is line-based and `auth.json`
-  // is pretty JSON. Declare ONE of the two — codex prefers `OPENAI_API_KEY` when both are
-  // visible, so a config carrying both pays the subscription and bills the API
-  // anyway, which preflight warns about. Re-run `codex login` here if a series
-  // is ever refused for a stale token: the container's copy refreshes in place
-  // and this host's can be left behind.
-  //
-  // The agent/model pair is one the driver enforces rather than trusts: a model
-  // id left unset is the claude alias "opus", so a half-moved config would ask
-  // codex for it on every attempt.
   // The reviewer stays claude on purpose: it holds the verdict, and #72's
-  // whole argument is that the strongest model belongs where the judgement
-  // is, not where the tokens are.
+  // whole argument is that the strongest model belongs where the judgement is,
+  // not where the tokens are. The merger's resolve agent is not a knob at all
+  // — hard-coded claude, which is why preflight demands that credential
+  // unconditionally.
   //
   // Nothing here takes effect through the pin. This file comes from the
   // checkout, not from `.sandbar/driver/`, so an edit applies on the next run
   // — but the DRIVER that reads it must already understand the field, which is
   // what `requiresSandbar` is checking.
+  implementerAgent: "codex",
+  implementerModelId: "gpt-5.6-sol",
 
   // Exit 75 after any cycle that lands merges, so `scripts/sandbar-launch.mjs`
   // re-reads the pin and relaunches (#65). Explicit rather than detected — see
