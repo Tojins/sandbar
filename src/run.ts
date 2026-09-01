@@ -1286,8 +1286,11 @@ export async function run(
         // landed. A landed-but-unclosed cycle also broke out above (exit 1):
         // relaunching past an operator-actionable tracker mess would bury it.
         // A chunk landing counts (#64): it moves the source branch exactly as
-        // a merged issue does, so the `dist/` driving this process is just as
-        // stale afterwards — which is the whole of what #65 relaunches for.
+        // a merged issue does, so the inputs this process resolved at launch
+        // are just as stale afterwards — which is the whole of what #65
+        // relaunches for. Which inputs those still are is
+        // `exit-conditions.ts`'s to say, and since #66 the driver is not
+        // among them.
         landedMerges:
           mergerSummary && mergerSummary.pushed
             ? mergerSummary.merged.length + mergerSummary.mergedChunks.length

@@ -615,6 +615,24 @@ describe("readConfigStaleness — the config the checkout is missing (#66)", () 
     ).toMatchObject({ behind: 2, touchingConfig: 1 });
   });
 
+  // `--show-toplevel` answers with symlinks resolved and `--config` does not
+  // (the bin `resolve()`s argv), so an operator whose checkout is reached
+  // through a symlinked parent would otherwise have this warning silently
+  // retired: `relative()` would compare the link against its target and the
+  // config would look like a file outside the repository.
+  it("sees a config named through a symlinked path to the checkout", async () => {
+    const link = join(await mkdtemp(join(tmpdir(), "sandbar-link-")), "repo");
+    await symlink(checkout, link);
+
+    expect(
+      await readConfigStaleness({
+        layout: { ...layout, hostCwd: link },
+        sourceBranch: "main",
+        configPath: join(link, CONFIG),
+      }),
+    ).toMatchObject({ behind: 2, touchingConfig: 1 });
+  });
+
   it("asks git nothing when the run has no config file", async () => {
     expect(
       await readConfigStaleness({

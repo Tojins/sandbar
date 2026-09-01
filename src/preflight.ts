@@ -130,8 +130,9 @@
 // classifications either — see `classifySandbarBranches`.
 
 import { execFile, execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { isAbsolute, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 
 import type { ResolvedStackContainer } from "./config.js";
@@ -1057,7 +1058,21 @@ export async function readConfigStaleness(args: {
   // nothing forever.
   const top = await captureOk(hostCwd, "git", ["rev-parse", "--show-toplevel"]);
   if (!top.ok) return nothing;
-  const rel = relative(top.stdout.trim(), args.configPath);
+  // BOTH sides realpath'd before they are compared, because they arrive
+  // resolved to different degrees: `--show-toplevel` answers with symlinks
+  // already resolved, while `configPath` is whatever the bin's `resolve()` made
+  // of argv (cli.ts). A checkout reached through a symlinked parent — a
+  // `~/work` pointing at a volume, say — would otherwise make `rel` start with
+  // `..` and take this warning permanently quiet, which is the one failure a
+  // soft check cannot afford. The config's DIRECTORY is what is resolved, not
+  // the file: this asks a question about history, and a path history knows
+  // about is not required to exist on disk. Neither call has to succeed either
+  // — a path that will not resolve falls back to itself, and the guard below
+  // still answers "nothing".
+  const rel = relative(
+    realpathOr(top.stdout.trim()),
+    join(realpathOr(dirname(args.configPath)), basename(args.configPath)),
+  );
   if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return nothing;
 
   const local = await captureOk(hostCwd, "git", [
@@ -1101,6 +1116,17 @@ export function staleConfigWarning(s: ConfigStaleness): string | null {
 // Commits in `base..tip`, optionally narrowed to one path. 0 for anything git
 // will not answer — an unknown ref, a pathspec outside the repository — which
 // is what keeps both callers soft.
+// A path resolved through its symlinks, or itself when it will not resolve.
+// The one caller is a soft warning, and a path that cannot be resolved is not
+// a reason to have an opinion about it.
+function realpathOr(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
 async function countCommits(
   cwd: string,
   base: string,

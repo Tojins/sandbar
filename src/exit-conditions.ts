@@ -88,8 +88,10 @@ export type RunState = {
   silentNoopAttemptsByIssue: Map<string, number>;
   readonly maxTotalIssues: number;
   // Exit (e) after any cycle that lands merges, instead of continuing on the
-  // launch-time build (#65). Config rather than state, like maxTotalIssues —
-  // carried here so applyCycle stays the single owner of the exit ordering.
+  // inputs this run resolved at launch (#65). Which inputs those still are is
+  // EXIT_CODE_RELAUNCH's comment above, and since #66 it is not all three of
+  // them. Config rather than state, like maxTotalIssues — carried here so
+  // applyCycle stays the single owner of the exit ordering.
   readonly relaunchAfterLanding: boolean;
 };
 
@@ -100,8 +102,8 @@ export type CycleOutcome = {
   // Merges the merger pushed to origin this cycle; 0 when the merge phase did
   // not run, did not push, or the cycle was reset (verified mode). REQUIRED
   // rather than defaulted, because the one caller forgetting to thread it
-  // would disable relaunch silently — the run would just keep driving on the
-  // stale build, which is #65's own bug wearing the fix.
+  // would disable relaunch silently — the run would just keep cycling on the
+  // inputs it resolved at launch, which is #65's own bug wearing the fix.
   readonly landedMerges: number;
 };
 
@@ -148,17 +150,25 @@ export function applyCycle(state: RunState, cycle: CycleOutcome): ExitDecision {
   state.lastPlanFingerprint = cycle.planFingerprint;
 
   // (e) relaunch — the cycle landed merges, so the source branch has moved and
-  // this process is now driving with a `dist/`, a config and a Containerfile
-  // from before the landing. Checked FIRST (see the header for why it beats
-  // the budget): a landing is the one outcome that guarantees progress, so
-  // exiting here can never spin the launcher's loop.
+  // this process is still holding the inputs it resolved before the landing
+  // (the images above all; the constant's comment above owns how the three
+  // objects came to differ under #66). Checked FIRST (see the header for why
+  // it beats the budget): a landing is the one outcome that guarantees
+  // progress, so exiting here can never spin the launcher's loop.
   if (state.relaunchAfterLanding && cycle.landedMerges > 0) {
     return {
       kind: "exit",
       tag: "relaunch",
+      // What the next launch actually re-resolves, and nothing more. It used
+      // to say "relaunching so the driver is what it just landed", which #66
+      // made false on every landing cycle: the driver is the release the host
+      // pinned and a landing does not become it until a human moves the pin.
+      // This line is what an operator reads to decide whether their landed
+      // change is now in play, so it names the two things that are.
       reason:
-        `landed ${cycle.landedMerges} merge(s); relaunching so the driver ` +
-        "is what it just landed",
+        `landed ${cycle.landedMerges} merge(s); relaunching so the next run ` +
+        "rebuilds its images from origin and re-imports the config file (the " +
+        "pinned driver itself does not move)",
       exitCode: EXIT_CODE_RELAUNCH,
     };
   }

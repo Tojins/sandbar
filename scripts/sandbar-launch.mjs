@@ -238,8 +238,15 @@ export function installDriver(paths, spec, io = {}) {
     );
   }
   if (result.status !== 0) {
+    // `status` is null when npm died by a signal — a Ctrl-C during the install
+    // takes exactly this path, since `spawnSync` inherits the process group —
+    // so the signal is named rather than printed as the literal word "signal".
+    const how =
+      result.status === null
+        ? `killed by ${result.signal ?? "a signal"}`
+        : `exit ${result.status}`;
     throw new LaunchError(
-      `npm install of ${spec} failed (exit ${result.status ?? "signal"}).\n` +
+      `npm install of ${spec} failed (${how}).\n` +
         "The loop stops here rather than continuing on whichever driver is on " +
         "disk. Usual causes: the tag does not exist yet (it is created by " +
         "auto-tag.yml on the push to main that lands the version), or the host " +
