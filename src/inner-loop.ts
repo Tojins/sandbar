@@ -82,7 +82,7 @@ import type { RepoRef } from "./repo-ref.js";
 import {
   type ProjectAnchorOptions,
   buildPrompt,
-  buildReviewerPrompt,
+  buildReviewerPrompts,
 } from "./prompt.js";
 import { parseVerdict } from "./verdict-parser.js";
 
@@ -743,7 +743,7 @@ async function runReviewer(
 ): Promise<LoopEvent> {
   const { issue, sandbox, opts, config } = ctx;
 
-  const reviewerPrompt = await buildReviewerPrompt({
+  const reviewerPromptInputs = {
     issue,
     repo: config.repo,
     repoDir: config.layout.repoDir,
@@ -753,7 +753,8 @@ async function runReviewer(
     codingStandardsPath: config.codingStandardsPath,
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
-  });
+  };
+  const reviewerPrompts = await buildReviewerPrompts(reviewerPromptInputs);
   const runPass = async (
     pass: "correctness" | "followup",
     prompt: string,
@@ -804,7 +805,7 @@ async function runReviewer(
 
   const correctness = await runPass(
     "correctness",
-    reviewerPrompt,
+    reviewerPrompts.correctness,
     config.reviewerModelId,
   );
 
@@ -852,26 +853,9 @@ async function runReviewer(
     };
   }
 
-  // Build this only after correctness passes. Besides avoiding a redundant
-  // issue fetch on early exit, this keeps "skip pass 2" literal: none of its
-  // preparation runs against code that is about to be rewritten.
-  const followupPrompt = await buildReviewerPrompt(
-    {
-      issue,
-      repo: config.repo,
-      repoDir: config.layout.repoDir,
-      worktreePath: sandbox.worktreePath,
-      sourceBranch: config.sourceBranch,
-      base: ctx.base,
-      codingStandardsPath: config.codingStandardsPath,
-      claudeMdPath: config.claudeMdPath,
-      contextMdPath: config.contextMdPath,
-    },
-    "followup",
-  );
   const followup = await runPass(
     "followup",
-    followupPrompt,
+    reviewerPrompts.followup,
     config.reviewerFollowupModelId,
   );
   transcripts.push(`=== follow-up pass ===\n${followup.transcript}`);

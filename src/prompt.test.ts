@@ -124,8 +124,10 @@ describe("renderReviewerSlot", () => {
       diff: "diff --git a/x b/x\n+hi",
     });
     expect(slot).toMatch(/correctness of logic only/i);
+    expect(slot).toContain("Gate-1 is green");
+    expect(slot).toContain("@CLAUDE.md");
+    expect(slot).toMatch(/if you cannot name a concrete correctness defect,\s*APPROVE/i);
     expect(slot).not.toContain("## Coding standards");
-    expect(slot).not.toContain("@CLAUDE.md");
   });
 
   it("does not reference the optional project standards file", () => {
@@ -150,14 +152,14 @@ describe("renderReviewerSlot", () => {
     expect(slot).not.toContain("CODING_STANDARDS");
   });
 
-  it("does not spend pass-1 attention on the optional context reference", () => {
+  it("includes the optional context reference as part of the correctness conventions", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       contextMdPath: "CONTEXT.md",
       commits: "a1 first",
       diff: "diff",
     });
-    expect(slot).not.toContain("@CONTEXT.md");
+    expect(slot).toContain("@CONTEXT.md");
   });
 
   it("omits the context-md reference when not provided", () => {

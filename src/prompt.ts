@@ -233,8 +233,18 @@ export async function buildReviewerPrompt(
   inputs: ReviewerPromptInputs,
   pass: "correctness" | "followup" = "correctness",
 ): Promise<string> {
-  const layers = [
-    await buildProjectAnchor(
+  const prompts = await buildReviewerPrompts(inputs);
+  return prompts[pass];
+}
+
+// Both passes review one immutable, gate-green branch snapshot. Build every
+// shared layer and git range once so the resumed follow-up cannot gain a second
+// issue fetch failure point or observe a different prompt surface.
+export async function buildReviewerPrompts(
+  inputs: ReviewerPromptInputs,
+): Promise<Readonly<Record<"correctness" | "followup", string>>> {
+  const [projectAnchor, issueAnchor, slotInputs] = await Promise.all([
+    buildProjectAnchor(
       {
         repo: inputs.repo,
         repoDir: inputs.repoDir,
@@ -244,10 +254,19 @@ export async function buildReviewerPrompt(
       },
       inputs.worktreePath,
     ),
-    await buildIssueAnchor(inputs.issue.id, inputs.repo),
-    await buildReviewerSlot(inputs, pass),
+    buildIssueAnchor(inputs.issue.id, inputs.repo),
+    buildReviewerSlotInputs(inputs),
+  ]);
+  const layers = [
+    projectAnchor,
+    issueAnchor,
   ];
-  return layers.join("\n\n---\n\n");
+  const assemble = (slot: string): string =>
+    [...layers, slot].join("\n\n---\n\n");
+  return {
+    correctness: assemble(renderReviewerSlot(slotInputs)),
+    followup: assemble(renderReviewerFollowupSlot(slotInputs)),
+  };
 }
 
 // `probeWorktree` is the tree the emitted `@refs` will be resolved in — the
@@ -459,10 +478,9 @@ export function renderSandboxStackSlot(
   });
 }
 
-async function buildReviewerSlot(
+async function buildReviewerSlotInputs(
   inputs: ReviewerPromptInputs,
-  pass: "correctness" | "followup",
-): Promise<string> {
+): Promise<ReviewerSlotRender> {
   const { worktreePath } = inputs;
   const base = inputs.base.ref;
 
@@ -512,10 +530,7 @@ async function buildReviewerSlot(
       ? inputs.codingStandardsPath
       : undefined;
 
-  const renderInputs = { ...inputs, codingStandardsPath, commits, diff };
-  return pass === "correctness"
-    ? renderReviewerSlot(renderInputs)
-    : renderReviewerFollowupSlot(renderInputs);
+  return { ...inputs, codingStandardsPath, commits, diff };
 }
 
 // Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
