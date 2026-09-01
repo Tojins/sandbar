@@ -14,6 +14,38 @@
 // and uncaught exceptions don't lose lines that already returned. finalize()
 // drops a closing marker on the orchestrator log via the cleanup trap.
 //
+// THE INVARIANT (#70): every line reporting an OUTCOME or a REFUSAL exists in
+// this log; the terminal may additionally render it for a human. The two
+// streams are hand-paired at every site in run.ts — ~26 appends against ~44
+// `console.*` — and most of the difference between them is deliberate and
+// right: the log carries the whole per-attempt `gate-1 ok=…` / `reviewer
+// round=N verdict=…` trace, which stdout must never carry, and the terminal
+// renders titled lists and multi-paragraph banners, which would make the log
+// unreadable. What is NOT allowed is an outcome the log never heard about,
+// which is how a parked chunk and a halted run each came to be reportable only
+// on a terminal nobody kept. It reaches the CLEANUP handlers too, which is
+// where an operator has most likely stopped watching and so where the log is
+// the only reader left.
+//
+// The invariant is about coverage and NOT a licence to say more than the
+// terminal does. A log line is read long after the fact, by someone who has
+// only it, so it may only claim what the code reaching it actually knows: the
+// parked-chunk line names the decision and not the `gh` writes that follow it,
+// because those can be skipped or can throw, and a confident record of a write
+// that never happened is worse than no record at all.
+//
+// One `report()` writing both would enforce it mechanically and is the wrong
+// instrument for exactly the reason above: the two streams carry different
+// content on purpose. Two streams, one invariant.
+//
+// The other half of #70 is WHEN this tree exists. `startRunLogger` is called
+// the moment the single-instance lock is won and before anything else — a
+// refusal from preflight, from an image build or from the uid check is a
+// verdict this driver reached, and each of them used to leave nothing on disk
+// at all. The boundary is the LOCK, and run.ts's header owns the three exits
+// that stay outside it — a refused config and a missing `GH_TOKEN`, both
+// checked before the lock is won, and losing the lock itself.
+//
 // The ISO stamp has `:` and `.` swapped for `-` so the directory name is safe
 // on every filesystem we care about (including Windows under WSL).
 

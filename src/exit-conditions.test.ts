@@ -3,12 +3,25 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_MAX_TOTAL_ISSUES } from "./config.js";
 import {
   EXIT_CODE_BUDGET,
+  EXIT_CODE_HALTED,
   EXIT_CODE_RELAUNCH,
   EXIT_CODE_STUCK,
+  EXIT_CODE_SUCCESS,
+  EXIT_TAGS,
+  type ExitTag,
+  type TerminalExit,
   applyCycle,
+  budgetExit,
+  formatExitLine,
+  haltedExit,
+  iterationCeilingExit,
   newRunState,
+  planEmptyExit,
   planFingerprint,
+  relaunchExit,
   remainingBudget,
+  stuckSamePlanExit,
+  stuckZeroDonesExit,
 } from "./exit-conditions.js";
 
 describe("planFingerprint", () => {
@@ -277,5 +290,127 @@ describe("applyCycle — relaunch after landing (#65)", () => {
     expect([0, 1, EXIT_CODE_STUCK, EXIT_CODE_BUDGET]).not.toContain(
       EXIT_CODE_RELAUNCH,
     );
+  });
+});
+
+// The whole decision union, one row per tag (#70). A run stops in exactly one
+// shape — `Exit (<tag>): <reason>` on stdout, once, on every path — and before
+// this issue the halt path printed nothing at all while plan-empty printed a
+// success banner. Nothing can assert what `run()` prints (no test calls it, and
+// this issue does not change that), so what IS asserted is the pure mapping
+// from a terminal to its line: a tag added without a row here fails the last
+// assertion in this block, which is what stops the next silent path from being
+// noticed six weeks later.
+describe("terminal exit lines", () => {
+  const TABLE: ReadonlyArray<{
+    readonly tag: ExitTag;
+    readonly exit: TerminalExit;
+    readonly exitCode: number;
+    readonly reasonMatches: RegExp;
+  }> = [
+    {
+      tag: "plan-empty",
+      exit: planEmptyExit(),
+      exitCode: EXIT_CODE_SUCCESS,
+      reasonMatches: /no unblocked issues/,
+    },
+    {
+      tag: "relaunch",
+      exit: relaunchExit(2),
+      exitCode: EXIT_CODE_RELAUNCH,
+      reasonMatches: /landed 2 merge/,
+    },
+    {
+      tag: "stuck-same-plan",
+      exit: stuckSamePlanExit("10,42"),
+      exitCode: EXIT_CODE_STUCK,
+      reasonMatches: /plan 10,42 repeated/,
+    },
+    {
+      tag: "stuck-zero-dones",
+      exit: stuckZeroDonesExit(2),
+      exitCode: EXIT_CODE_STUCK,
+      reasonMatches: /2 consecutive cycles/,
+    },
+    {
+      tag: "budget",
+      exit: budgetExit(50, 50),
+      exitCode: EXIT_CODE_BUDGET,
+      reasonMatches: /issuesAttempted=50 >= maxTotalIssues=50/,
+    },
+    {
+      tag: "halted",
+      exit: haltedExit(["merger-halted"]),
+      exitCode: EXIT_CODE_HALTED,
+      reasonMatches: /merger-halted/,
+    },
+    {
+      tag: "iteration-ceiling",
+      exit: iterationCeilingExit(100),
+      exitCode: EXIT_CODE_SUCCESS,
+      reasonMatches: /100 cycles/,
+    },
+  ];
+
+  for (const row of TABLE) {
+    it(`${row.tag}: formats one line, with its own tag and code`, () => {
+      expect(row.exit.tag).toBe(row.tag);
+      expect(row.exit.exitCode).toBe(row.exitCode);
+      expect(row.exit.reason).toMatch(row.reasonMatches);
+      const line = formatExitLine(row.exit);
+      expect(line).toBe(`Exit (${row.tag}): ${row.exit.reason}`);
+      // One line. A reason that wrapped would break `grep "^Exit ("`, which is
+      // the whole promise being made to an operator here.
+      expect(line.includes("\n")).toBe(false);
+      expect(row.exit.reason.trim()).not.toBe("");
+    });
+  }
+
+  it("covers every tag in the union — no terminal path without a line", () => {
+    expect(new Set(TABLE.map((r) => r.tag))).toEqual(new Set(EXIT_TAGS));
+    expect(TABLE.length).toBe(EXIT_TAGS.length);
+  });
+
+  it("halted names every cause, not just the first", () => {
+    // The two post-merge reports share a cause — a `gh` having a bad minute —
+    // so they fire together more often than chance, and the run log's one
+    // handle on why the run stopped must not hide one behind the other.
+    const line = formatExitLine(
+      haltedExit(["chunk-wrapup-incomplete", "merger-close-failed"]),
+    );
+    expect(line).toContain("chunk-wrapup-incomplete");
+    expect(line).toContain("merger-close-failed");
+  });
+
+  it("halted still says something with no cause at all", () => {
+    expect(formatExitLine(haltedExit([]))).toMatch(/^Exit \(halted\): \S/);
+  });
+
+  it("applyCycle's decisions are the same values the constructors build", () => {
+    // The decision the orchestrator prints and the constructor a test pins must
+    // not drift: applyCycle spreads these, it does not re-spell them.
+    const s = newRunState({ maxTotalIssues: 2, relaunchAfterLanding: true });
+    const d = applyCycle(s, {
+      planFingerprint: "10,42",
+      planSize: 2,
+      doneCount: 2,
+      landedMerges: 2,
+    });
+    expect(d).toEqual({ kind: "exit", ...relaunchExit(2) });
+  });
+
+  it("the pre-cycle budget stop and applyCycle's agree word for word", () => {
+    // Two call sites, one reason. They used to be hand-written copies printed
+    // in different words at different moments (#70).
+    const s = newRunState({ maxTotalIssues: 2 });
+    const d = applyCycle(s, {
+      planFingerprint: "10,42",
+      planSize: 2,
+      doneCount: 1,
+      landedMerges: 0,
+    });
+    expect(d.kind).toBe("exit");
+    if (d.kind !== "exit") throw new Error("unreachable");
+    expect(d.reason).toBe(budgetExit(2, 2).reason);
   });
 });

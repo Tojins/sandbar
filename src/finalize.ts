@@ -92,15 +92,48 @@ export const BOT_COMMENT_PREFIX = "**Sandbar:**";
 // everywhere else stays in module headers and comments; the only `#N` a body
 // may carry is one it was HANDED, which is a host issue number by
 // construction.
+//
+// EVERY PARKING TEMPLATE WHOSE TERMINAL PUSHES THE BRANCH NAMES IT (#70).
+// These bodies are the place the human is standing when they act — "push a fix
+// on this branch" was in three of them and none of them said which. The name is
+// re-derivable in principle (`issueBranchName` = number + `kebabSlug(title)`)
+// but lossily: `operator's` kebabs to `operator-s`, and a retitled issue gets
+// a DIFFERENT branch next cycle, so re-deriving a parked branch's name can
+// simply be wrong. It is handed in from `input.issue.branch`, which is the
+// branch that was actually pushed.
+//
+// The qualifier is the whole rule, because two terminals leave no branch to
+// name and correctly say so instead. `NEEDS_UI_PROTOTYPE` normally escalates
+// before a line of code exists and `finalizeOne` deletes the local branch, so
+// it takes a nullable `branchPushed` and names one only on the late
+// escalation that did push. `SILENT_NOOP_EXHAUSTED` never has one: that
+// terminal discards the branch after every attempt, which its body says.
+//
+// What each of them names is the LOCATION, never what the push CARRIES. The
+// two are not the same claim: an off-branch run pushes the branch and moves
+// nothing onto it, and `STRANDED_COMMITS_NOTE` — appended by the needs-info and
+// off-branch arms below — is the one sentence entitled to say where the work
+// actually is. A template that also claimed "whatever it wrote is pushed here"
+// would contradict the paragraph directly beneath it in the same comment body.
+//
+// Nor does naming it predict what the NEXT attempt will do with it. The branch
+// is where the work is now; whether an attempt resumes on it is preflight's
+// business and the operator's — preflight offers deleting a merged issue branch,
+// and a parked branch deleted by hand seeds the next attempt from
+// `origin/<sourceBranch>` instead. #70 asks these bodies to say where the human
+// is standing, which is a fact about the present, and every clause past that is
+// a forecast the template cannot keep.
 
 export const NEEDS_INFO_COMMENT_TEMPLATE = (
+  branch: string,
   questions: string,
   needsInfoLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} the agent paused with NEEDS-INFO. Please answer the ` +
-  `questions below, then drop \`${needsInfoLabel}\` and re-apply \`${readyLabel}\` ` +
-  `when the answers are ready.\n\n---\n\n${questions}`;
+  `${BOT_COMMENT_PREFIX} the agent paused with NEEDS-INFO. The branch is ` +
+  `\`${branch}\`. Please answer the questions below, then drop ` +
+  `\`${needsInfoLabel}\` and re-apply \`${readyLabel}\` when the answers are ` +
+  `ready.\n\n---\n\n${questions}`;
 
 // #21 — the implementer stopped before writing code because the issue implies
 // non-trivial user-visible UI and carries no prototype. Same human round-trip
@@ -151,12 +184,13 @@ export const NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE = (
   `---\n\n${uiImpact}`;
 
 export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
+  branch: string,
   failureTrace: string,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} exhausted the attempt budget without a green gate. ` +
-  `Investigate the trace below and push a fix on this branch, then drop ` +
+  `Investigate the trace below and push a fix on \`${branch}\`, then drop ` +
   `\`${stuckLabel}\` and re-apply \`${readyLabel}\` when ready.\n\n` +
   `<details><summary>Last failure trace</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
@@ -168,11 +202,12 @@ export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
 // attempts rather than the full budget. What the human needs is the path list
 // and the knowledge that the cause is almost never the branch's code.
 export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
+  branch: string,
   failureTrace: string,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} stopped: the worktree kept the same uncommitted ` +
+  `${BOT_COMMENT_PREFIX} stopped: the worktree for \`${branch}\` kept the same uncommitted ` +
   `changes across attempts, so no gate could run — a gate verdict is about a ` +
   `commit, and there was never one to judge. The implementer was asked to ` +
   `commit and came back with an identical dirty set, which usually means the ` +
@@ -253,6 +288,7 @@ export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
 // "without a green gate") and from REVIEW_BUDGET_EXHAUSTED (a different budget):
 // here the *attempt* budget ran out, not the reviewer-round budget.
 export const NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE = (
+  branch: string,
   latestReviewerProse: string,
   stuckLabel: string,
   readyLabel: string,
@@ -260,7 +296,7 @@ export const NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE = (
   `${BOT_COMMENT_PREFIX} exhausted the attempt budget with a green gate — the ` +
   `build and tests pass; the code reviewer's \`CHANGES-REQUESTED\` is the blocker, ` +
   `not a failing gate. The latest reviewer pass below is what the human needs to ` +
-  `resolve. Push a fix on this branch (or rewrite the standards if the reviewer ` +
+  `resolve. Push a fix on \`${branch}\` (or rewrite the standards if the reviewer ` +
   `was wrong), then drop \`${stuckLabel}\` and re-apply \`${readyLabel}\` when ` +
   `ready.\n\n---\n\n${latestReviewerProse}`;
 
@@ -293,6 +329,7 @@ export const NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE = (
 // With no prose the stronger sentence is the true one and is kept: no reviewer
 // has said anything about this branch at all.
 export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
+  branch: string,
   failureTrace: string,
   latestReviewerProse: string | null,
   stuckLabel: string,
@@ -309,7 +346,7 @@ export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
     : `An earlier round did review this branch, and its report is reproduced at ` +
       `the bottom. Treat it as still standing: work went on after it, but nothing ` +
       `reviewed the result, so whether it was addressed is unverified. `) +
-  `The branch is pushed and its commits pass the gate. Review it yourself, or ` +
+  `\`${branch}\` is pushed and its commits pass the gate. Review it yourself, or ` +
   `fix what stopped the reviewer and re-run — then drop \`${stuckLabel}\` and ` +
   `re-apply \`${readyLabel}\`.\n\n` +
   `<details><summary>Why each reviewer invocation produced nothing</summary>\n\n` +
@@ -320,13 +357,14 @@ export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
       `earlier round:\n\n${latestReviewerProse}`);
 
 export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
+  branch: string,
   latestReviewerProse: string,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} exhausted the reviewer-round budget without an ` +
   `\`APPROVED\` verdict. The latest reviewer pass below is the standards-violation ` +
-  `report the human needs to resolve. Push a fix on this branch (or rewrite ` +
+  `report the human needs to resolve. Push a fix on \`${branch}\` (or rewrite ` +
   `the standards if the reviewer was wrong), then drop \`${stuckLabel}\` and ` +
   `re-apply \`${readyLabel}\` when ready.\n\n---\n\n${latestReviewerProse}`;
 
@@ -705,6 +743,7 @@ export async function finalizeOne(
       await adapter.postComment(
         n,
         NEEDS_INFO_COMMENT_TEMPLATE(
+          input.issue.branch,
           input.questions,
           labels.needsInfo,
           READY_FOR_AGENT_LABEL,
@@ -791,6 +830,7 @@ export async function finalizeOne(
         switch (input.cause) {
           case "reviewer-harness-failed":
             return NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE(
+              input.issue.branch,
               input.failureTrace,
               // An earlier round's real report, when there was one (#41). It is
               // rendered as an earlier round's, never as the blocker — but
@@ -802,12 +842,14 @@ export async function finalizeOne(
             );
           case "reviewer-blocked":
             return NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE(
+              input.issue.branch,
               input.latestReviewerProse ?? "",
               labels.agentStuck,
               READY_FOR_AGENT_LABEL,
             );
           case "uncommittable-worktree":
             return NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE(
+              input.issue.branch,
               input.failureTrace,
               labels.agentStuck,
               READY_FOR_AGENT_LABEL,
@@ -824,6 +866,7 @@ export async function finalizeOne(
             );
           case "gate-red":
             return NEEDS_HUMAN_COMMENT_TEMPLATE(
+              input.issue.branch,
               input.failureTrace,
               labels.agentStuck,
               READY_FOR_AGENT_LABEL,
@@ -846,6 +889,7 @@ export async function finalizeOne(
       await adapter.postComment(
         n,
         REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(
+          input.issue.branch,
           input.latestReviewerProse,
           labels.agentStuck,
           READY_FOR_AGENT_LABEL,

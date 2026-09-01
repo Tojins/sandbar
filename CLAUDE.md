@@ -125,7 +125,14 @@ an exit condition fires.
 First of: **plan-empty** (exit 0) · **relaunch** (#65, exit 75 after any cycle
 that landed merges, when `config.relaunchAfterLanding`) · **stuck-same-plan**
 (exit 2) · **stuck-zero-dones** (exit 2) · **budget** (`maxTotalIssues`,
-default 50, exit 3).
+default 50, exit 3) · **halted** (exit 1) · **iteration-ceiling**.
+
+All seven are one type, `TerminalExit`, and the run ends with exactly one
+`Exit (<tag>): <reason>` on stdout whichever fired (#70) — `formatExitLine` is
+the only spelling of it, `EXIT_TAGS` is exhaustive over the union, and a table
+test asserts every tag has a line. `applyCycle` owns only the four that judge a
+completed cycle; plan-empty, halted and the ceiling are the orchestrator's own
+and used to announce themselves in four different ways, the halt in none at all.
 
 ## Key invariants — where the details live
 
@@ -253,7 +260,19 @@ default 50, exit 3).
 - **Prompt prose lives in `prompts/*.md`**, loaded by `src/prompts.ts`; TS
   keeps only structure. Every git range a prompt renders anchors at the issue
   branch's SEED REF, never a bare branch name (#40, #61) — `src/prompt.ts`.
-- **Logs are append-only and unbuffered** (`src/logs.ts`).
+- **Logs are append-only and unbuffered** (`src/logs.ts`), and **from the
+  moment sandbar holds the lock there is a record (#70)**. `startRunLogger`
+  runs immediately after `acquireLock` — not fifteen steps later, after
+  preflight and the image builds — so every startup refusal lands in
+  `run-<stamp>/orchestrator.log` instead of only on a terminal; `run.ts` names
+  the three exits deliberately left outside it — a refused config and a missing
+  `GH_TOKEN`, both decided before the lock is won, and losing the lock, whose
+  answer is the other run's log. The
+  invariant `logs.ts`'s header owns: every line reporting an OUTCOME or a
+  REFUSAL exists in the log, and the terminal may additionally render it. Two
+  streams, not one tee — the log keeps the per-attempt gate/reviewer trace
+  stdout must never carry, and stdout keeps titled renderings that would make
+  the log unreadable.
 - **The resolve loop leaves a trace, and a container that never ran halts
   (#67).** Every attempt's stdout AND stderr go to
   `cycle-N/resolve-<key>-attempt-<k>.log`, keyed like the gate artefact beside

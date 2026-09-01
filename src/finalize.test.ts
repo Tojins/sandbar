@@ -127,13 +127,26 @@ describe("issueNumberOf", () => {
 });
 
 describe("comment templates", () => {
-  it("NEEDS-INFO body includes bot prefix, the questions verbatim, and the configured labels", () => {
-    const body = NEEDS_INFO_COMMENT_TEMPLATE("Q1?\nQ2?", NEEDS_INFO, READY_FOR_AGENT);
+  it("NEEDS-INFO body includes bot prefix, the branch, the questions verbatim, and the configured labels", () => {
+    const body = NEEDS_INFO_COMMENT_TEMPLATE(
+      "sandbar/issue-45-t-45",
+      "Q1?\nQ2?",
+      NEEDS_INFO,
+      READY_FOR_AGENT,
+    );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
+    expect(body).toContain("sandbar/issue-45-t-45"); // #70
     expect(body).toContain("Q1?");
     expect(body).toContain("Q2?");
     expect(body).toContain(NEEDS_INFO);
     expect(body).toContain(READY_FOR_AGENT);
+    // The branch is a LOCATION here and nothing more. STRANDED_COMMITS_NOTE is
+    // appended to this same body when the run went off-branch, and it says none
+    // of the work is on the branch — so this template may not claim it is.
+    // Asserted as the absence of the WORD, not of the sentence that once said
+    // it: "push" is what a payload claim is built out of, and the note below
+    // this one in the composed comment is the only part entitled to use it.
+    expect(body).not.toMatch(/push/i);
   });
   it("NEEDS-UI-PROTOTYPE body includes bot prefix, the impact prose, both unblock routes, and the configured labels", () => {
     const body = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
@@ -181,24 +194,36 @@ describe("comment templates", () => {
     expect(late).not.toContain("before writing any code");
     expect(late).toContain("sandbar/issue-45-t-45");
   });
-  it("NEEDS-HUMAN body includes bot prefix, the failure trace, and the configured labels", () => {
-    const body = NEEDS_HUMAN_COMMENT_TEMPLATE("E: boom\nstack…", AGENT_STUCK, READY_FOR_AGENT);
+  it("NEEDS-HUMAN body includes bot prefix, the branch, the failure trace, and the configured labels", () => {
+    const body = NEEDS_HUMAN_COMMENT_TEMPLATE(
+      "sandbar/issue-45-t-45",
+      "E: boom\nstack…",
+      AGENT_STUCK,
+      READY_FOR_AGENT,
+    );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
+    expect(body).toContain("sandbar/issue-45-t-45"); // #70
     expect(body).toContain("E: boom");
     expect(body).toContain("stack…");
     expect(body).toContain(AGENT_STUCK);
     expect(body).toContain(READY_FOR_AGENT);
   });
-  it("REVIEW_BUDGET_EXHAUSTED body includes bot prefix, the latest reviewer prose verbatim, and the configured labels", () => {
+  it("REVIEW_BUDGET_EXHAUSTED body includes bot prefix, the branch, the latest reviewer prose verbatim, and the configured labels", () => {
     const body = REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(
+      "sandbar/issue-45-t-45",
       "## Bar violations\n- foo not extracted\n- naming is unclear",
       AGENT_STUCK,
       READY_FOR_AGENT,
     );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
+    expect(body).toContain("sandbar/issue-45-t-45"); // #70
     expect(body).toContain("foo not extracted");
     expect(body).toContain("naming is unclear");
     expect(body).toContain(AGENT_STUCK);
+    // The LAST positional argument, which is what a signature shift silently
+    // drops off the end: without this the whole call could slide one slot and
+    // every other assertion here would still pass.
+    expect(body).toContain(READY_FOR_AGENT);
   });
 
   // A comment body is posted into the HOST repository, where `#64` is not this
@@ -437,6 +462,8 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.n).toBe(45);
     expect(calls.comments[0]!.body).toContain("Should X be Y?");
+    // #70 — the branch it was pushed to, named where the human is standing.
+    expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
@@ -628,6 +655,8 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.body).toContain("AssertionError: red");
     expect(calls.comments[0]!.body).toContain("without a green gate");
+    // #70 — "push a fix on this branch" used to never say which.
+    expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
@@ -656,6 +685,7 @@ describe("finalizeOne", () => {
     expect(body).toContain("Extract the duplicated lifecycle dispatch");
     expect(body).toContain("green gate");
     expect(body).toContain("CHANGES-REQUESTED");
+    expect(body).toContain(i.branch); // #70
     // Must NOT misreport the gate as the blocker.
     expect(body).not.toContain("without a green gate");
     expect(calls.labelEdits).toEqual([
@@ -688,6 +718,9 @@ describe("finalizeOne", () => {
     expect(body).toContain("no review at all");
     expect(body).toContain("harness or environment failure");
     expect(body).toContain("No reviewer has said anything about this branch at all");
+    // #70 — and this one is telling the reader to review it themselves, so it
+    // had better say what to check out.
+    expect(body).toContain(i.branch);
     // The claim the reviewer-blocked comment would have made, and it is false
     // here: that a standards complaint is what the human has to resolve.
     expect(body).not.toContain("the code reviewer's `CHANGES-REQUESTED` is the blocker");
@@ -736,6 +769,30 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
+  });
+
+  it("needs-human uncommittable-worktree: names the branch whose worktree stayed dirty (#70)", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "needs-human",
+        issue: i,
+        cause: "uncommittable-worktree",
+        failureTrace: "?? node_modules/.cache/foo",
+        latestReviewerProse: null,
+        strandedHead: null,
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    const body = calls.comments[0]!.body;
+    expect(body).toContain("?? node_modules/.cache/foo");
+    expect(body).toContain(i.branch);
+    // The gate never ran, so the reader must not be sent looking for a red one.
+    expect(body).not.toContain("without a green gate");
   });
 
   it("needs-human off-branch-head: names the branch, the stranded sha, and how to rescue it (#27)", async () => {
@@ -896,6 +953,8 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.n).toBe(45);
     expect(calls.comments[0]!.body).toContain("too much indirection");
+    // #70 — "Push a fix on this branch" is only actionable with a name on it.
+    expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
