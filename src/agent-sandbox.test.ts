@@ -31,6 +31,7 @@ import {
   type ProviderCreateOptions,
   type SandboxProvider,
   SANDBOX_REPO_DIR,
+  AgentError,
   agentPartialOutput,
   claudeCode,
   codex,
@@ -241,20 +242,42 @@ describe("parseCodexJsonLine", () => {
   // #41's rule: an unknown outcome must never read as a verdict. `codex exec`
   // exits 0 on a turn it reports as FAILED, so if any of these became text a
   // 401 would arrive as a review and default to CHANGES-REQUESTED.
-  it("drops every error shape, so a failed turn yields no output at all", () => {
+  // Three wire shapes, one fact. `failure` rather than `text` is what keeps
+  // #41 (a 401 must never read as a review) and #67 (a run that captured no
+  // answer is an infra failure, not an answer) both true of the same line —
+  // and `codex exec` exits 0 on all three, so this is the only channel that
+  // carries the difference.
+  it("surfaces every error shape as a failure, never as text", () => {
     expect(
       parseCodexJsonLine('{"type":"error","message":"401 Unauthorized"}'),
-    ).toEqual([]);
+    ).toEqual([{ type: "failure", message: "401 Unauthorized" }]);
     expect(
       parseCodexJsonLine(
         '{"type":"turn.failed","error":{"message":"401 Unauthorized"}}',
       ),
-    ).toEqual([]);
+    ).toEqual([{ type: "failure", message: "401 Unauthorized" }]);
     expect(
       parseCodexJsonLine(
         completed({ id: "item_1", type: "error", message: "401 Unauthorized" }),
       ),
-    ).toEqual([]);
+    ).toEqual([{ type: "failure", message: "401 Unauthorized" }]);
+  });
+
+  // The message is the whole of the AgentError a human reads, so an error
+  // shape that carries no message must still say which half of the system
+  // failed rather than rejecting with a blank line.
+  it("names a failure whose message is missing or the wrong type", () => {
+    for (const line of [
+      '{"type":"turn.failed"}',
+      '{"type":"turn.failed","error":{}}',
+      '{"type":"turn.failed","error":{"message":42}}',
+      '{"type":"error"}',
+      '{"type":"error","message":"   "}',
+    ]) {
+      expect(parseCodexJsonLine(line)).toEqual([
+        { type: "failure", message: "no message" },
+      ]);
+    }
   });
 
   it("reports command execution and web search as informational tool calls", () => {
@@ -794,33 +817,39 @@ describe("createSandbox integration (local provider)", () => {
   // the run's output; reviewer-run.ts (#41) reads "completed with output" as a
   // verdict, and the verdict parser defaults a tokenless one to
   // CHANGES-REQUESTED — a review of code that no model ever looked at.
+  // A stream that is well-formed, exits 0, and carries no speech at all —
+  // codex's shape for a turn that ended on tool calls. The transport is not an
+  // answer: reviewer-run.ts (#41) reads "completed with output" as a verdict,
+  // and the verdict parser defaults a tokenless one to CHANGES-REQUESTED, a
+  // review of code no model looked at.
+  const toolCallOnly = JSON.stringify({
+    type: "item.completed",
+    item: { id: "item_1", type: "command_execution", command: "ls" },
+  });
+
   it("returns nothing for a parsedOutputOnly run whose lines carried no speech (#72)", async () => {
-    await git(["branch", "sandbar/issue-4-codex-fail"], dir);
+    await git(["branch", "sandbar/issue-4-codex-quiet"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
       env: {},
-      branch: "sandbar/issue-4-codex-fail",
+      branch: "sandbar/issue-4-codex-quiet",
       sandbox: provider,
       layout: layoutFor(dir),
     });
     try {
-      const failed = JSON.stringify({
-        type: "turn.failed",
-        error: { message: "401 Unauthorized" },
-      });
       const agent: AgentProvider = {
         name: "codex",
         env: {},
         parsedOutputOnly: true,
         buildPrintCommand: () => ({
-          command: `printf '%s\\n' ${JSON.stringify(failed)}`,
+          command: `printf '%s\\n' ${JSON.stringify(toolCallOnly)}`,
           stdin: "",
         }),
         parseStreamLine: parseCodexJsonLine,
       };
       const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
       expect(run.stdout).toBe("");
-      expect(run.stdout).not.toContain("401");
+      expect(run.stdout).not.toContain("command_execution");
     } finally {
       await sandbox.close();
     }
@@ -842,13 +871,99 @@ describe("createSandbox integration (local provider)", () => {
         name: "codex",
         env: {},
         buildPrintCommand: () => ({
-          command: `printf '%s\\n' '{"type":"turn.failed"}'`,
+          command: `printf '%s\\n' ${JSON.stringify(toolCallOnly)}`,
           stdin: "",
         }),
         parseStreamLine: parseCodexJsonLine,
       };
       const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
-      expect(run.stdout).toContain("turn.failed");
+      expect(run.stdout).toContain("command_execution");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // #72, the finding this round closes. `codex exec` exits 0 on a turn it
+  // reports as FAILED, so an expired OPENAI_API_KEY, a rate limit or a model
+  // the account cannot use all arrive as a clean process with an empty answer.
+  // Returned as output that is a silent full-budget drain on the implementer
+  // path — no promise tag, so a nudge, then an attempt, ×8 ×3 issues, parking
+  // the issue with empty transcripts. Rejecting routes it to the infra path
+  // that already exists for a non-zero exit (#67's rule: an attempt that
+  // captured no answer is not an answer).
+  it("rejects a run that reported a failed turn and said nothing (#72)", async () => {
+    await git(["branch", "sandbar/issue-7-codex-fail"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-7-codex-fail",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const failed = JSON.stringify({
+        type: "turn.failed",
+        error: { message: "401 Unauthorized" },
+      });
+      const agent: AgentProvider = {
+        name: "codex",
+        env: {},
+        parsedOutputOnly: true,
+        buildPrintCommand: () => ({
+          command: `printf '%s\\n' ${JSON.stringify(failed)}`,
+          stdin: "",
+        }),
+        parseStreamLine: parseCodexJsonLine,
+      };
+      const err = await sandbox
+        .run({ agent, prompt: "go", maxIterations: 1 })
+        .then(() => null)
+        .catch((e: unknown) => e);
+      // AgentError, not SandbarError: inner-loop.ts lets a SandbarError out to
+      // the top-level handler and converts everything else to HARD-ERROR.
+      expect(err).toBeInstanceOf(AgentError);
+      // The cause reaches the NEEDS-HUMAN trace, and the partial output stays
+      // empty — which is what keeps the REVIEWER path unchanged: no verdict
+      // token in "", so #41 classifies it harness-failed and the round is not
+      // consumed.
+      expect((err as Error).message).toContain("401 Unauthorized");
+      expect(agentPartialOutput(err)).toBe("");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // Guarded on speech, not on the failure alone: an agent that said its piece
+  // and then hit a failure on the way out keeps what it said. Same rule #41
+  // already applies to a non-zero exit carrying partial output.
+  it("keeps the agent's speech when a failure follows it (#72)", async () => {
+    await git(["branch", "sandbar/issue-8-late-fail"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-8-late-fail",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const spoke = JSON.stringify({
+        type: "item.completed",
+        item: { id: "item_1", type: "agent_message", text: "<verdict>APPROVED</verdict>" },
+      });
+      const failed = JSON.stringify({ type: "turn.failed", error: { message: "boom" } });
+      const agent: AgentProvider = {
+        name: "codex",
+        env: {},
+        parsedOutputOnly: true,
+        buildPrintCommand: () => ({
+          command: `printf '%s\\n%s\\n' ${JSON.stringify(spoke)} ${JSON.stringify(failed)}`,
+          stdin: "",
+        }),
+        parseStreamLine: parseCodexJsonLine,
+      };
+      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      expect(run.stdout).toBe("<verdict>APPROVED</verdict>");
+      expect(run.stdout).not.toContain("boom");
     } finally {
       await sandbox.close();
     }
