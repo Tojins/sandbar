@@ -229,14 +229,6 @@ export async function buildPrompt(
   return layers.join("\n\n---\n\n");
 }
 
-export async function buildReviewerPrompt(
-  inputs: ReviewerPromptInputs,
-  pass: "correctness" | "followup" = "correctness",
-): Promise<string> {
-  const prompts = await buildReviewerPrompts(inputs);
-  return prompts[pass];
-}
-
 // Both passes review one immutable, gate-green branch snapshot. Build every
 // shared layer and git range once so the resumed follow-up cannot gain a second
 // issue fetch failure point or observe a different prompt surface.

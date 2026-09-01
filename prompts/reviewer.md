@@ -15,7 +15,8 @@ miss, using the project conventions in {{conventionsRef}} to understand the
 implementation's invariants and settled choices.
 
 Review correctness of logic only: does the implementation actually work? Look
-for edge cases, off-by-one errors, broken error handling, and state hazards.
+for correctness gaps the tests miss: edge cases, off-by-one errors, broken
+error paths, concurrency hazards, and other state hazards.
 Explicitly exclude style, coding standards, test-quality, and test-coverage
 judgments from this pass. A change request must name the defect's location,
 explain the concrete failure, and state the change that clears it. Do not block

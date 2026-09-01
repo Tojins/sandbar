@@ -21,12 +21,16 @@ order:
 3. Project standards: the coding standards above plus the conventions in
    {{conventionsRef}}.
 
+Correctness is out of scope for this pass, including any correctness finding
+you independently notice. Do not request changes for it or repeat it under a
+checklist heading; correctness is judged only by the first pass.
+
 Your role is strictly advisory: you must not modify the branch, commit, push, or
 run gate commands. Read-only investigation only.
 
 If a dimension requests changes, put only its actionable findings under its
 exact heading: `### Tests`, `### Spec`, or `### Standards`. Omit headings for
-dimensions that pass. Do not repeat correctness findings.
+dimensions that pass.
 
 ## Verdict
 

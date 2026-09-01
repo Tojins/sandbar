@@ -290,6 +290,21 @@ describe("renderReviewerFollowupSlot", () => {
     expect(slot).toMatch(/1\. Test quality and coverage[\s\S]*2\. Spec conformance[\s\S]*3\. Project standards/);
   });
 
+  it("carries the chunk base needed by a cold follow-up", () => {
+    const slot = renderReviewerFollowupSlot({
+      ...baseInputs,
+      base: {
+        ref: "refs/remotes/origin/sandbar/chunk-1-root",
+        chunkBranch: "sandbar/chunk-1-root",
+      },
+      commits: "a1 first",
+      diff: "diff",
+    });
+    expect(slot).toContain("## This branch is part of a chunk");
+    expect(slot).toContain("sandbar/chunk-1-root");
+    expect(slot).not.toContain("{{");
+  });
+
   it("puts standards and project references only in the follow-up", () => {
     const slot = renderFollowup();
     expect(slot).toContain("## Coding standards");

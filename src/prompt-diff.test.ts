@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { SandbarError } from "./errors.js";
 import { ensureIssueBranch, sourceBranchBase } from "./git-ops.js";
-import { buildPrompt, buildReviewerPrompt, readGit } from "./prompt.js";
+import { buildPrompt, buildReviewerPrompts, readGit } from "./prompt.js";
 import { repoLayout, worktreePathFor } from "./repo-cache.js";
 import { ensureRepoCache } from "./repo-cache.js";
 
@@ -160,7 +160,7 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
   it("hands the reviewer both the commit list and the diff", async () => {
     await commitOnBranch();
 
-    const prompt = await buildReviewerPrompt(reviewerInputs());
+    const prompt = (await buildReviewerPrompts(reviewerInputs())).correctness;
 
     expect(prompt).toContain(SUBJECT);
     expect(prompt).toContain(ADDED_LINE);
@@ -189,7 +189,7 @@ describe("a failed read is never rendered as an empty slot (#40)", () => {
   it("throws out of the reviewer slot instead of asking for a verdict on nothing", async () => {
     await commitOnBranch();
 
-    const built = buildReviewerPrompt(
+    const built = buildReviewerPrompts(
       reviewerInputs(sourceBranchBase("no-such-branch"), "no-such-branch"),
     );
 
@@ -202,7 +202,7 @@ describe("a failed read is never rendered as an empty slot (#40)", () => {
   // Here the range is valid and simply empty, which the loop's own invariants
   // say cannot happen by the time a reviewer runs.
   it("refuses a reviewer over an empty changeset", async () => {
-    await expect(buildReviewerPrompt(reviewerInputs())).rejects.toThrow(
+    await expect(buildReviewerPrompts(reviewerInputs())).rejects.toThrow(
       /refusing to launch a reviewer/,
     );
   });
@@ -304,11 +304,11 @@ describe("a chunk member's slots are measured from the chunk tip (#61)", () => {
   });
 
   it("gives the reviewer this issue's changeset and not the chunk's", async () => {
-    const prompt = await buildReviewerPrompt({
+    const prompt = (await buildReviewerPrompts({
       ...reviewerInputs(base),
       issue: MEMBER_ISSUE,
       worktreePath: memberWt,
-    });
+    })).correctness;
 
     expect(prompt).toContain(MEMBER_SUBJECT);
     expect(prompt).toContain(MEMBER_LINE);
