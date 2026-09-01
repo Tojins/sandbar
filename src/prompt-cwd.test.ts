@@ -39,7 +39,7 @@ import { sourceBranchBase } from "./git-ops.js";
 import {
   buildPrompt,
   buildProjectAnchor,
-  buildReviewerPrompt,
+  buildReviewerPrompts,
 } from "./prompt.js";
 
 const exec = promisify(execFile);
@@ -248,7 +248,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("points the reviewer at standards the BRANCH adds", async () => {
     await writeFile(join(launchedFrom, "CODING_STANDARDS.md"), "# std\n");
 
-    const prompt = await buildReviewerPrompt({
+    const prompt = (await buildReviewerPrompts({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
@@ -257,7 +257,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
       codingStandardsPath: "CODING_STANDARDS.md",
-    });
+    })).followup;
 
     expect(prompt).toContain("@CODING_STANDARDS.md");
   });
@@ -267,7 +267,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     // review — so probing the wrong one emits an @ref the reviewer cannot open.
     await writeFile(join(target, "CODING_STANDARDS.md"), "# std\n");
 
-    const prompt = await buildReviewerPrompt({
+    const prompt = (await buildReviewerPrompts({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
@@ -276,14 +276,14 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
       codingStandardsPath: "CODING_STANDARDS.md",
-    });
+    })).followup;
 
     expect(prompt).not.toContain("@CODING_STANDARDS.md");
   });
 
   // History is the half that must NOT follow the branch.
   it("builds the reviewer's history from the repo, not from the worktree under review", async () => {
-    const prompt = await buildReviewerPrompt({
+    const prompt = (await buildReviewerPrompts({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
@@ -291,7 +291,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       sourceBranch: "main",
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
-    });
+    })).correctness;
 
     expect(prompt).toContain("commit-from-target-repo");
     expect(prompt).not.toContain("commit-from-launch-dir");

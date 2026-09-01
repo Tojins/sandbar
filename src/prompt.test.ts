@@ -8,6 +8,7 @@ import {
 import { sourceBranchBase } from "./git-ops.js";
 import {
   renderAttemptSlot,
+  renderReviewerFollowupSlot,
   renderReviewerSlot,
   renderSandboxStackSlot,
 } from "./prompt.js";
@@ -116,39 +117,30 @@ describe("renderAttemptSlot — commit-on-the-issue-branch rule (#27)", () => {
 });
 
 describe("renderReviewerSlot", () => {
-  it("embeds the built-in coding standards and references conventions", () => {
+  it("focuses only correctness and excludes standards boilerplate", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first\nb2 second",
       diff: "diff --git a/x b/x\n+hi",
     });
-    expect(slot).toContain("## Coding standards");
+    expect(slot).toMatch(/correctness of logic only/i);
+    expect(slot).toContain("Gate-1 is green");
     expect(slot).toContain("@CLAUDE.md");
+    expect(slot).toMatch(/if you cannot name a concrete correctness defect,\s*APPROVE/i);
+    expect(slot).not.toContain("## Coding standards");
   });
 
-  it("references the optional project standards file when provided", () => {
+  it("does not reference the optional project standards file", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first",
       diff: "diff",
     });
-    expect(slot).toContain("### Project standards");
-    expect(slot).toContain("@docs/CODING_STANDARDS.md");
-  });
-
-  it("emits only the built-in standards when no project standards file is provided", () => {
-    const { codingStandardsPath: _omit, ...noStandards } = baseInputs;
-    const slot = renderReviewerSlot({
-      ...noStandards,
-      commits: "a1 first",
-      diff: "diff",
-    });
-    expect(slot).toContain("## Coding standards");
     expect(slot).not.toContain("### Project standards");
-    expect(slot).not.toContain("CODING_STANDARDS");
+    expect(slot).not.toContain("@docs/CODING_STANDARDS.md");
   });
 
-  it("includes the optional context-md reference when provided", () => {
+  it("includes the optional context reference as part of the correctness conventions", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       contextMdPath: "CONTEXT.md",
@@ -267,6 +259,71 @@ describe("renderReviewerSlot", () => {
     expect(slot).toContain("Issue #42: do the thing");
     expect(slot).toContain("`sandbar/issue-42-do-the-thing`");
     expect(slot).toContain("`main`");
+  });
+});
+
+describe("renderReviewerFollowupSlot", () => {
+  const renderFollowup = () =>
+    renderReviewerFollowupSlot({
+      ...baseInputs,
+      contextMdPath: "CONTEXT.md",
+      commits: "a1 first",
+      diff: "diff --git a/x b/x\n+hi",
+    });
+
+  it("is self-sufficient and carries all three ordered dimensions", () => {
+    const slot = renderFollowup();
+    expect(slot).toContain("## Commits on this branch");
+    expect(slot).toContain("## Branch diff");
+    expect(slot).toMatch(/1\. Test quality and coverage[\s\S]*2\. Spec conformance[\s\S]*3\. Project standards/);
+  });
+
+  it("carries the chunk base needed by a cold follow-up", () => {
+    const slot = renderReviewerFollowupSlot({
+      ...baseInputs,
+      base: {
+        ref: "refs/remotes/origin/sandbar/chunk-1-root",
+        chunkBranch: "sandbar/chunk-1-root",
+      },
+      commits: "a1 first",
+      diff: "diff",
+    });
+    expect(slot).toContain("## This branch is part of a chunk");
+    expect(slot).toContain("sandbar/chunk-1-root");
+    expect(slot).not.toContain("{{");
+  });
+
+  it("puts standards and project references only in the follow-up", () => {
+    const slot = renderFollowup();
+    expect(slot).toContain("## Coding standards");
+    expect(slot).toContain("@docs/CODING_STANDARDS.md");
+    expect(slot).toContain("@CLAUDE.md");
+    expect(slot).toContain("@CONTEXT.md");
+  });
+
+  it("keeps built-in standards when no project standards file is provided", () => {
+    const { codingStandardsPath: _omit, ...noStandards } = baseInputs;
+    const slot = renderReviewerFollowupSlot({
+      ...noStandards,
+      commits: "a1 first",
+      diff: "diff",
+    });
+    expect(slot).toContain("## Coding standards");
+    expect(slot).not.toContain("### Project standards");
+    expect(slot).not.toContain("CODING_STANDARDS");
+  });
+
+  it("requires dimension headings and the existing single-verdict contract", () => {
+    const slot = renderFollowup();
+    expect(slot).toContain("`### Tests`");
+    expect(slot).toContain("`### Spec`");
+    expect(slot).toContain("`### Standards`");
+    expect(slot).toContain("`### Correctness`");
+    expect(slot).toMatch(/Do not search for correctness defects/);
+    expect(slot).toMatch(/independently notice a concrete correctness defect/);
+    expect(slot).toContain("<verdict>APPROVED</verdict>");
+    expect(slot).toContain("<verdict>CHANGES-REQUESTED</verdict>");
+    expect(slot).toMatch(/Emit exactly one verdict/);
   });
 });
 

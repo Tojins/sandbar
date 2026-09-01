@@ -1,5 +1,5 @@
-// Reviewer invocation policy (#41) — what counts as a review, and what to do
-// when nothing does.
+// Reviewer policy (#19, #41) — what counts as a review, how the two sequential
+// passes compose into one round, and what to do when nothing does.
 //
 // A reviewer INVOCATION yields a verdict or it yields nothing, and this module
 // is the only place that decides which:
@@ -14,10 +14,15 @@
 // "Nothing" is retried once before it is believed (flake vs fault; the retry
 // costs no budget), and the transcript of every invocation is kept whole.
 //
-// What the caller does with a `harness-failed` outcome is the state machine's
-// business, not this module's: see inner-loop-machine.ts.
+// A review ROUND first applies that policy to correctness. A correctness
+// rejection finishes the round immediately; an approval asks the runner for a
+// follow-up, and the second outcome completes the AND. This module returns the
+// one event the state machine understands, keeping pass policy out of the I/O
+// runner. Follow-up invocation 1 resumes correctness; every retry is cold so a
+// crashed follow-up cannot accidentally resume its own partial session.
 
-import { containsVerdictToken } from "./verdict-parser.js";
+import type { LoopEvent } from "./inner-loop-machine.js";
+import { containsVerdictToken, parseVerdict } from "./verdict-parser.js";
 
 // One retry. A second flake in a row is not a flake, and each invocation can
 // cost a full idle timeout (10 minutes) with the run's lock held.
@@ -58,6 +63,81 @@ export type ReviewerOutcome =
       readonly transcript: string;
       readonly invocations: number;
     };
+
+export type ReviewerPass = "correctness" | "followup";
+
+export type ReviewRoundDecision =
+  | { readonly kind: "run-followup" }
+  | {
+      readonly kind: "finished";
+      readonly event: Extract<
+        LoopEvent,
+        { kind: "reviewer-result" | "reviewer-harness-failed" }
+      >;
+      readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED";
+      readonly followup: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED";
+    };
+
+export type FinishedReviewRoundDecision = Extract<
+  ReviewRoundDecision,
+  { readonly kind: "finished" }
+>;
+
+export function continueReviewerSession(pass: ReviewerPass, invocation: number): boolean {
+  return pass === "followup" && invocation === 1;
+}
+
+export function decideReviewRound(correctness: ReviewerOutcome): ReviewRoundDecision;
+export function decideReviewRound(
+  correctness: ReviewerOutcome,
+  followup: ReviewerOutcome,
+): FinishedReviewRoundDecision;
+export function decideReviewRound(
+  correctness: ReviewerOutcome,
+  followup?: ReviewerOutcome,
+): ReviewRoundDecision {
+  if (correctness.kind === "harness-failed") {
+    return {
+      kind: "finished",
+      event: { kind: "reviewer-harness-failed", detail: `correctness: ${correctness.detail}` },
+      correctness: "HARNESS-FAILED",
+      followup: "SKIPPED",
+    };
+  }
+  const correctnessVerdict = parseVerdict(correctness.stdout);
+  if (correctnessVerdict.verdict === "CHANGES-REQUESTED") {
+    return {
+      kind: "finished",
+      event: {
+        kind: "reviewer-result",
+        verdict: "CHANGES-REQUESTED",
+        prose: `### Correctness\n\n${correctnessVerdict.prose}`,
+      },
+      correctness: "CHANGES-REQUESTED",
+      followup: "SKIPPED",
+    };
+  }
+  if (followup === undefined) return { kind: "run-followup" };
+  if (followup.kind === "harness-failed") {
+    return {
+      kind: "finished",
+      event: { kind: "reviewer-harness-failed", detail: `followup: ${followup.detail}` },
+      correctness: "APPROVED",
+      followup: "HARNESS-FAILED",
+    };
+  }
+  const followupVerdict = parseVerdict(followup.stdout);
+  return {
+    kind: "finished",
+    event: {
+      kind: "reviewer-result",
+      verdict: followupVerdict.verdict,
+      prose: followupVerdict.prose,
+    },
+    correctness: "APPROVED",
+    followup: followupVerdict.verdict,
+  };
+}
 
 function tail(s: string, max: number): string {
   return s.length <= max ? s : `…(${s.length - max} earlier chars elided)\n${s.slice(-max)}`;

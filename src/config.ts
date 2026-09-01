@@ -495,9 +495,13 @@ export type RunConfig = {
   // A role routed to another provider (below) puts THAT vendor's id in the same
   // field: the fields name the model, not the vendor — and must then name it,
   // since the default is a claude alias (`assertRoleModelIdNamed`).
-  // Defaults: implementer/reviewer/merger all "opus".
+  // Defaults: implementer/reviewer/reviewer-followup/merger all "opus".
   readonly implementerModelId?: string;
   readonly reviewerModelId?: string;
+  // The checklist pass resumes the correctness review under the same provider,
+  // but may use a cheaper model. Cross-provider resume is intentionally not a
+  // configuration shape: one reviewer role owns one CLI and its session files.
+  readonly reviewerFollowupModelId?: string;
   readonly mergerModelId?: string;
 
   // Which CLI each role runs (#72, #74) — the vendor knob beside the tiering one.
@@ -730,6 +734,7 @@ export const DEFAULT_SOURCE_BRANCH = "main";
 export const DEFAULT_CONTAINERFILE_PATH = "Containerfile";
 export const DEFAULT_IMPLEMENTER_MODEL_ID = "opus";
 export const DEFAULT_REVIEWER_MODEL_ID = "opus";
+export const DEFAULT_REVIEWER_FOLLOWUP_MODEL_ID = "opus";
 export const DEFAULT_MERGER_MODEL_ID = "opus";
 export const DEFAULT_CLAUDE_MD_PATH = "CLAUDE.md";
 export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
@@ -1675,6 +1680,12 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   const mergerAgent = parseAgentProviderName("mergerAgent", config.mergerAgent);
   assertRoleModelIdNamed("implementer", implementerAgent, config.implementerModelId);
   assertRoleModelIdNamed("reviewer", reviewerAgent, config.reviewerModelId);
+  assertRoleModelIdNamed(
+    "reviewer",
+    reviewerAgent,
+    config.reviewerFollowupModelId,
+    "reviewerFollowupModelId",
+  );
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
   return {
     ...config,
@@ -1686,6 +1697,8 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     images,
     implementerModelId: config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,
     reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
+    reviewerFollowupModelId:
+      config.reviewerFollowupModelId ?? DEFAULT_REVIEWER_FOLLOWUP_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     implementerAgent,
     reviewerAgent,

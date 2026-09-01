@@ -2,7 +2,8 @@
 // project anchor (shared verbatim by both agents), issue anchor
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
 // branch diff, sandbox-stack report #44, gate trace, reviewer prose, UI-impact
-// check #21; reviewer: diff + commits + coding standards, stateless per pass).
+// check #21; reviewer: diff + commits, split into a correctness pass and a
+// self-sufficient checklist follow-up sharing one provider session (#19)).
 //
 // The issue anchor uses `--json`, NOT the human-readable `--comments` form —
 // that one is TTY-sensitive and, when piped, omits the body. A fetch failure
@@ -42,6 +43,7 @@ const exec = promisify(execFile);
 // below substitute into these in-memory strings and stay pure.
 const CODING_STANDARDS = loadTemplate("coding-standards");
 const REVIEWER_TPL = loadTemplate("reviewer");
+const REVIEWER_FOLLOWUP_TPL = loadTemplate("reviewer-followup");
 const REVIEWER_PROJECT_STANDARDS_TPL = loadTemplate("reviewer-project-standards");
 const IMPLEMENTER_TPL = loadTemplate("implementer");
 const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
@@ -227,11 +229,14 @@ export async function buildPrompt(
   return layers.join("\n\n---\n\n");
 }
 
-export async function buildReviewerPrompt(
+// Both passes review one immutable, gate-green branch snapshot. Build every
+// shared layer and git range once so the resumed follow-up cannot gain a second
+// issue fetch failure point or observe a different prompt surface.
+export async function buildReviewerPrompts(
   inputs: ReviewerPromptInputs,
-): Promise<string> {
-  const layers = [
-    await buildProjectAnchor(
+): Promise<Readonly<Record<"correctness" | "followup", string>>> {
+  const [projectAnchor, issueAnchor, slotInputs] = await Promise.all([
+    buildProjectAnchor(
       {
         repo: inputs.repo,
         repoDir: inputs.repoDir,
@@ -241,15 +246,20 @@ export async function buildReviewerPrompt(
       },
       inputs.worktreePath,
     ),
-    await buildIssueAnchor(inputs.issue.id, inputs.repo),
-    await buildReviewerSlot(inputs),
-  ];
-  return layers.join("\n\n---\n\n");
+    buildIssueAnchor(inputs.issue.id, inputs.repo),
+    buildReviewerSlotInputs(inputs),
+  ]);
+  const assemble = (slot: string): string =>
+    [projectAnchor, issueAnchor, slot].join("\n\n---\n\n");
+  return {
+    correctness: assemble(renderReviewerSlot(slotInputs)),
+    followup: assemble(renderReviewerFollowupSlot(slotInputs)),
+  };
 }
 
 // `probeWorktree` is the tree the emitted `@refs` will be resolved in — the
 // working tree the agent gets. It is a POSITIONAL argument rather than a field
-// on `opts` because the two prompt builders derive it from the worktree they
+// on `opts` because the prompt builders derive it from the worktree they
 // are already about, and only the merge phase supplies one by hand; a field
 // would have made it one more string among six that a call site has to get
 // right, with nothing but a name to distinguish it from `repoDir` and no test
@@ -456,7 +466,9 @@ export function renderSandboxStackSlot(
   });
 }
 
-async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> {
+async function buildReviewerSlotInputs(
+  inputs: ReviewerPromptInputs,
+): Promise<ReviewerSlotRender> {
   const { worktreePath } = inputs;
   const base = inputs.base.ref;
 
@@ -506,7 +518,7 @@ async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> 
       ? inputs.codingStandardsPath
       : undefined;
 
-  return renderReviewerSlot({ ...inputs, codingStandardsPath, commits, diff });
+  return { ...inputs, codingStandardsPath, commits, diff };
 }
 
 // Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
@@ -518,6 +530,17 @@ export type ReviewerSlotRender = ReviewerPromptInputs & {
 };
 
 export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
+  return renderReviewerTemplate(REVIEWER_TPL, inputs);
+}
+
+export function renderReviewerFollowupSlot(inputs: ReviewerSlotRender): string {
+  return renderReviewerTemplate(REVIEWER_FOLLOWUP_TPL, inputs);
+}
+
+function renderReviewerTemplate(
+  template: string,
+  inputs: ReviewerSlotRender,
+): string {
   const { issue, base, sourceBranch, codingStandardsPath, claudeMdPath, contextMdPath, commits, diff } =
     inputs;
 
@@ -550,7 +573,7 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
     ? `@${claudeMdPath} (and @${contextMdPath} if it exists)`
     : `@${claudeMdPath}`;
 
-  return render(REVIEWER_TPL, {
+  return render(template, {
     branch: issue.branch,
     baseRef: base.ref,
     sourceBranch,

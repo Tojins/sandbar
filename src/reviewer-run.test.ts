@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   REVIEWER_DETAIL_TAIL_CHARS,
   REVIEWER_MAX_INVOCATIONS,
+  continueReviewerSession,
+  decideReviewRound,
+  type ReviewerOutcome,
   type ReviewerRun,
   isReview,
   runReviewerInvocations,
@@ -14,6 +17,93 @@ import { parseVerdict } from "./verdict-parser.js";
 const IDLE = "Agent idle for 600 seconds — no output received.";
 const idleRun: ReviewerRun = { output: "", error: IDLE };
 const blankRun: ReviewerRun = { output: "   \n", error: null };
+
+const reviewed = (stdout: string): ReviewerOutcome => ({
+  kind: "reviewed",
+  stdout,
+  transcript: stdout,
+  invocations: 1,
+});
+const failed = (detail: string): ReviewerOutcome => ({
+  kind: "harness-failed",
+  detail,
+  transcript: "",
+  invocations: 2,
+});
+
+describe("sequential review round policy", () => {
+  it.each([
+    ["correctness", 1, false],
+    ["correctness", 2, false],
+    ["followup", 1, true],
+    ["followup", 2, false],
+  ] as const)("pass=%s invocation=%i continue=%s", (pass, invocation, expected) => {
+    expect(continueReviewerSession(pass, invocation)).toBe(expected);
+  });
+
+  it("correctness harness failure finishes without spending a round", () => {
+    expect(decideReviewRound(failed("idle"))).toEqual({
+      kind: "finished",
+      event: { kind: "reviewer-harness-failed", detail: "correctness: idle" },
+      correctness: "HARNESS-FAILED",
+      followup: "SKIPPED",
+    });
+  });
+
+  it("correctness changes skip follow-up and receive the dimension heading", () => {
+    expect(
+      decideReviewRound(reviewed("broken edge\n<verdict>CHANGES-REQUESTED</verdict>")),
+    ).toEqual({
+      kind: "finished",
+      event: {
+        kind: "reviewer-result",
+        verdict: "CHANGES-REQUESTED",
+        prose:
+          "### Correctness\n\nbroken edge\n<verdict>CHANGES-REQUESTED</verdict>",
+      },
+      correctness: "CHANGES-REQUESTED",
+      followup: "SKIPPED",
+    });
+  });
+
+  it("approved correctness requests the follow-up", () => {
+    expect(decideReviewRound(reviewed("<verdict>APPROVED</verdict>"))).toEqual({
+      kind: "run-followup",
+    });
+  });
+
+  it("follow-up harness failure discards the approval and retries the action", () => {
+    expect(
+      decideReviewRound(reviewed("<verdict>APPROVED</verdict>"), failed("crashed")),
+    ).toEqual({
+      kind: "finished",
+      event: { kind: "reviewer-harness-failed", detail: "followup: crashed" },
+      correctness: "APPROVED",
+      followup: "HARNESS-FAILED",
+    });
+  });
+
+  it.each(["APPROVED", "CHANGES-REQUESTED"] as const)(
+    "APPROVED + %s produces the follow-up verdict and prose",
+    (verdict) => {
+      expect(
+        decideReviewRound(
+          reviewed("<verdict>APPROVED</verdict>"),
+          reviewed(`checklist prose\n<verdict>${verdict}</verdict>`),
+        ),
+      ).toEqual({
+        kind: "finished",
+        event: {
+          kind: "reviewer-result",
+          verdict,
+          prose: `checklist prose\n<verdict>${verdict}</verdict>`,
+        },
+        correctness: "APPROVED",
+        followup: verdict,
+      });
+    },
+  );
+});
 
 // Drives the policy over a fixed script, recording what it was asked for.
 function drive(script: readonly ReviewerRun[]) {

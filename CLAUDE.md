@@ -87,8 +87,12 @@ an exit condition fires.
    exhaust on the same attempt and park the issue with the terminal carrying
    the latest review; `DEFAULT_MAX_REVIEW_ROUNDS`'s comment in `src/config.ts`
    owns the number and the two dogfooding exhaustions behind it (#8, #66). The
-   reviewer is strictly advisory and read-only; `src/reviewer-run.ts` owns what
-   a failed reviewer run means (#41). Terminals: `DONE | NEEDS-INFO |
+   reviewer is strictly advisory and read-only. One review round is up to two
+   sequential calls in the same provider session (#19): correctness first on
+   `reviewerModelId`, then — only after approval — tests/spec/standards on
+   `reviewerFollowupModelId`; the state machine receives their single aggregate
+   result and spends one round. `src/reviewer-run.ts` owns what a failed
+   reviewer invocation means (#41). Terminals: `DONE | NEEDS-INFO |
    NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | HARD-ERROR`
    (infra-only).
 
@@ -260,9 +264,12 @@ and used to announce themselves in four different ways, the halt in none at all.
   rotated away. Not a bind mount: that would be a writable channel from a
   sandbox back onto the host's credential, with three parallel sandboxes as
   concurrent writers on one file.
-- **A role names its CLI as well as its model (#72, #74).** `implementerAgent` /
-  `reviewerAgent` / `mergerAgent`, all defaulting to `claude`, beside the model ids that were
-  already per-role: the tiering knob and the vendor knob are independent, and
+- **A role names its CLI as well as its model (#19, #72, #74).**
+  `implementerAgent` / `reviewerAgent` / `mergerAgent`, all defaulting to
+  `claude`, beside model ids
+  that are per call: the reviewer has correctness and follow-up ids under its
+  one provider because sessions cannot cross vendor CLIs. The tiering knob and
+  the vendor knob are independent, and
   every provider takes whatever id its role's field holds — which is why a role
   routed off claude must NAME its model (`assertRoleModelIdNamed`), the default
   being a claude alias and a half-moved config otherwise asking codex for

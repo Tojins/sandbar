@@ -8,20 +8,30 @@ does not resolve.)
 
 Issue #{{issueId}}: {{issueTitle}}
 
-{{chunkBase}}{{commits}}{{diff}}{{codingStandards}}
+{{chunkBase}}{{commits}}{{diff}}## Review process
 
-{{projectStandards}}## Review process
+Gate-1 is green. Review for concrete correctness defects that its checks may
+miss, using the project conventions in {{conventionsRef}} to understand the
+implementation's invariants and settled choices.
 
-Check the branch against the coding standards above, plus the conventions in
-{{conventionsRef}}. Your role is strictly advisory: you must not modify the branch,
-commit, push, or run gate commands. Read-only investigation only.
+Review correctness of logic only: does the implementation actually work? Look
+for correctness gaps the tests miss: edge cases, off-by-one errors, broken
+error paths, concurrency hazards, and other state hazards.
+Explicitly exclude style, coding standards, test-quality, and test-coverage
+judgments from this pass. A change request must name the defect's location,
+explain the concrete failure, and state the change that clears it. Do not block
+on speculation or preference: if you cannot name a concrete correctness defect,
+APPROVE.
+
+Your role is strictly advisory. You must not modify the branch. Do not commit,
+push, or run gate commands. Read-only investigation only.
 
 ## Verdict
 
 End your review with a single verdict token on its own:
 
 - `<verdict>APPROVED</verdict>` — branch meets the bar, ship it.
-- `<verdict>CHANGES-REQUESTED</verdict>` — list the standards violations above and
+- `<verdict>CHANGES-REQUESTED</verdict>` — list the correctness defects above and
   the implementer will address them in the next round.
 
 A missing verdict defaults to CHANGES-REQUESTED. Emit exactly one verdict.

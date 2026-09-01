@@ -754,6 +754,7 @@ export async function run(
     env: config.env,
     implementerModelId: config.implementerModelId,
     reviewerModelId: config.reviewerModelId,
+    reviewerFollowupModelId: config.reviewerFollowupModelId,
     implementerAgent: config.implementerAgent,
     reviewerAgent: config.reviewerAgent,
     maxImplAttempts: config.maxImplAttempts,

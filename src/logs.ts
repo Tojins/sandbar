@@ -19,7 +19,7 @@
 // streams are hand-paired at every site in run.ts — ~26 appends against ~44
 // `console.*` — and most of the difference between them is deliberate and
 // right: the log carries the whole per-attempt `gate-1 ok=…` / `reviewer
-// round=N verdict=…` trace, which stdout must never carry, and the terminal
+// round=N correctness=… followup=…` trace, which stdout must never carry, and the terminal
 // renders titled lists and multi-paragraph banners, which would make the log
 // unreadable. What is NOT allowed is an outcome the log never heard about,
 // which is how a parked chunk and a halted run each came to be reportable only

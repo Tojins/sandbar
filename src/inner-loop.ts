@@ -13,11 +13,14 @@
 // container's netns, so it must exist first, and they must be up before a
 // consumer's `onSandboxReady` hook runs.
 //
-// One deliberate exception to "all branching lives in the SM": the promise
-// nudge in runImplementer. An implementer that ends with no `<promise>` tag
-// at all gets one `--continue` follow-up before the NO-SIGNAL reaches the SM
+// Two deliberate exceptions to "all branching lives in the SM" stay within
+// one action each. The promise nudge in runImplementer gives an implementer
+// that ends with no `<promise>` tag at all one `--continue` follow-up before
+// the NO-SIGNAL reaches the SM
 // — the SM never sees the nudge, only the re-parsed result. The full argument
-// is at the call site.
+// is at the call site. A review round is likewise a correctness pass followed,
+// only when approved, by a checklist pass resumed on its separately configured
+// model; the SM receives one aggregate reviewer result and spends one round.
 //
 // What a FAILED reviewer run means is reviewer-run.ts's policy (#41); this
 // file only adapts `sandbox.run`'s throw into the shape that policy
@@ -72,16 +75,20 @@ import {
 } from "./sandbox-stack.js";
 import {
   REVIEWER_MAX_INVOCATIONS,
+  continueReviewerSession,
+  decideReviewRound,
   runReviewerInvocations,
+  type FinishedReviewRoundDecision,
+  type ReviewerOutcome,
+  type ReviewerPass,
 } from "./reviewer-run.js";
 import type { RepoLayout } from "./repo-cache.js";
 import type { RepoRef } from "./repo-ref.js";
 import {
   type ProjectAnchorOptions,
   buildPrompt,
-  buildReviewerPrompt,
+  buildReviewerPrompts,
 } from "./prompt.js";
-import { parseVerdict } from "./verdict-parser.js";
 
 export const FAILURE_TAIL_LINES = 200;
 
@@ -166,6 +173,7 @@ export type InnerLoopConfig = {
   readonly env: Record<string, string>;
   readonly implementerModelId: string;
   readonly reviewerModelId: string;
+  readonly reviewerFollowupModelId: string;
   // Which CLI each role runs (#72). Paired with the model id above rather than
   // folded into it: the two are independent choices, and every provider takes
   // whatever id it is handed. `agent-providers.ts` owns the set and the
@@ -739,7 +747,7 @@ async function runReviewer(
 ): Promise<LoopEvent> {
   const { issue, sandbox, opts, config } = ctx;
 
-  const reviewerPrompt = await buildReviewerPrompt({
+  const reviewerPromptInputs = {
     issue,
     repo: config.repo,
     repoDir: config.layout.repoDir,
@@ -749,9 +757,13 @@ async function runReviewer(
     codingStandardsPath: config.codingStandardsPath,
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
-  });
-
-  const outcome = await runReviewerInvocations(
+  };
+  const reviewerPrompts = await buildReviewerPrompts(reviewerPromptInputs);
+  const runPass = async (
+    pass: ReviewerPass,
+    prompt: string,
+    modelId: string,
+  ): Promise<ReviewerOutcome> => runReviewerInvocations(
     async (invocation) => {
       // The retry is a fresh agent run in the SAME sandbox. The sandbox is not
       // what failed — in the observed case the implementer was working in it
@@ -761,11 +773,15 @@ async function runReviewer(
       try {
         const reviewerRun = await sandbox.run({
           name:
-            `reviewer-${issue.id}-round-${action.reviewRound}` +
+            `reviewer-${issue.id}-round-${action.reviewRound}-${pass}` +
             (invocation > 1 ? `-invocation-${invocation}` : ""),
           maxIterations: 1,
-          agent: buildAgentProvider(config.reviewerAgent, config.reviewerModelId),
-          prompt: reviewerPrompt,
+          agent: buildAgentProvider(config.reviewerAgent, modelId, {
+            // Only the first follow-up invocation resumes correctness. Any
+            // rerun is cold: a crashed follow-up may itself now be "last".
+            continueSession: continueReviewerSession(pass, invocation),
+          }),
+          prompt,
         });
         return { output: reviewerRun.stdout, error: null };
       } catch (err) {
@@ -783,42 +799,63 @@ async function runReviewer(
       onRetry: async (invocation, detail) => {
         const line =
           `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-          `invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} no-review — retrying (${detail.split("\n")[0]})`;
+          `pass=${pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} no-review — ` +
+          `${pass === "followup" ? "retrying cold" : "retrying"} (${detail.split("\n")[0]})`;
         console.error(`  ${line}`);
         if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
       },
     },
   );
 
+  const correctness = await runPass(
+    "correctness",
+    reviewerPrompts.correctness,
+    config.reviewerModelId,
+  );
+
+  const transcripts = [`=== correctness pass ===\n${correctness.transcript}`];
   // Every invocation's output, not just the reviewing one: the observed failure
   // left a 73-byte log for a 15-minute run, and this file is the only offline
   // artefact of what the reviewer did or did not say.
+  const afterCorrectness = decideReviewRound(correctness);
+  let decision: FinishedReviewRoundDecision;
+  let failed: { readonly pass: ReviewerPass; readonly invocations: number } | null =
+    correctness.kind === "harness-failed"
+      ? { pass: "correctness", invocations: correctness.invocations }
+      : null;
+
+  if (afterCorrectness.kind === "run-followup") {
+    const followup = await runPass(
+      "followup",
+      reviewerPrompts.followup,
+      config.reviewerFollowupModelId,
+    );
+    transcripts.push(`=== follow-up pass ===\n${followup.transcript}`);
+    if (followup.kind === "harness-failed") {
+      failed = { pass: "followup", invocations: followup.invocations };
+    }
+    decision = decideReviewRound(correctness, followup);
+  } else {
+    decision = afterCorrectness;
+  }
+
   if (opts.attemptLogger) {
     await opts.attemptLogger.writeAttemptReviewer(
       issue.id,
       action.attempt,
-      outcome.transcript,
+      transcripts.join("\n\n"),
     );
   }
-
-  if (outcome.kind === "harness-failed") {
-    // Logged as its own thing, never as `verdict=CHANGES-REQUESTED` — the run
-    // log was the only place the two were distinguishable and it did not
-    // distinguish them either. The round number repeats on the next attempt
-    // because the round is not consumed, so the line says so.
-    const line =
-      `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-      `harness-failed invocations=${outcome.invocations} (round not consumed)`;
-    console.error(`  ${line}`);
-    if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
-    return { kind: "reviewer-harness-failed", detail: outcome.detail };
-  }
-
-  const { verdict, prose } = parseVerdict(outcome.stdout);
+  const line =
+    `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
+    (failed
+      ? `pass=${failed.pass} harness-failed invocations=${failed.invocations} `
+      : "") +
+    `correctness=${decision.correctness} followup=${decision.followup}` +
+    (failed ? " (round not consumed)" : "");
+  if (failed) console.error(`  ${line}`);
   if (opts.onOrchestratorLog) {
-    await opts.onOrchestratorLog(
-      `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} verdict=${verdict}`,
-    );
+    await opts.onOrchestratorLog(line);
   }
-  return { kind: "reviewer-result", verdict, prose };
+  return decision.event;
 }
