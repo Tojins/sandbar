@@ -176,6 +176,25 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(isInfraFailure(run)).toBe(true);
   });
 
+  it("does not spend a resolve attempt when failure follows agent speech", () => {
+    const raw = [
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "partial answer" },
+      }),
+      JSON.stringify({
+        type: "turn.failed",
+        error: { message: "terminal fault" },
+      }),
+    ].join("\n");
+    const run = parseCapturedAgentRun(
+      rawCapture(raw),
+      buildAgentProvider("codex", "m"),
+    );
+    expect(run.output).toBe("partial answer");
+    expect(isInfraFailure(run)).toBe(true);
+  });
+
   function rawCapture(stdout: string) {
     return captured(stdout);
   }

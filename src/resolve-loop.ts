@@ -554,6 +554,7 @@ const VERDICT_PROSE: Record<ResolveAttemptVerdict, string> = {
 export function isInfraFailure(run: ResolveAgentRun): boolean {
   if (run.end === "spawn-error") return true;
   if (run.end === "timeout") return false;
+  if (run.providerFailure !== undefined) return true;
   return (run.output ?? run.stdout).trim() === "";
 }
 
@@ -571,12 +572,15 @@ export function buildInfraFailureMessage(
 ): string {
   const remaining = RESOLVE_MAX_ATTEMPTS - attempt;
   const tail = run.stderr.trim().slice(-INFRA_STDERR_TAIL);
+  const reportedFailure = run.providerFailure !== undefined;
   return (
-    `merger: the resolve agent for #${issue.id} produced no output on attempt ` +
+    `merger: the resolve agent for #${issue.id} ` +
+    (reportedFailure ? "reported a terminal provider failure" : "produced no output") +
+    " on attempt " +
     `${attempt}/${RESOLVE_MAX_ATTEMPTS}. Container \`${run.container}\` ` +
     `${describeEndForHumans(run)}` +
     (run.detail ? ` (${run.detail})` : "") +
-    ". A container that never ran is an infrastructure failure — a missing or " +
+    ". A provider failure or container that never ran is an infrastructure failure — a missing or " +
     "unbuildable sandbox image, a refused podman socket, an OOM kill, a bad " +
     "mount — not an agent declining to answer, so the merge phase halts here " +
     `rather than spending the remaining ${remaining} resolve attempt` +
