@@ -277,6 +277,27 @@ export default {
 
   env: readEnvFile(new URL("sandbar.env", import.meta.url)),
 
+  // No `implementerAgent`/`reviewerAgent` (#72), and their absence is the
+  // deviations-only rule rather than a verdict on the feature: both default to
+  // "claude", which is what this repo runs today. Routing the implementer at
+  // Codex is THREE edits made together, and made by a human, because it spends
+  // a different quota and needs a key this file cannot check for:
+  //
+  //   implementerAgent: "codex",
+  //   implementerModelId: "gpt-5.6-sol",   // the same field, the other vendor's id
+  //
+  // plus `OPENAI_API_KEY` in `sandbar.env` — preflight refuses the run without
+  // it rather than letting the failure arrive as an implementer dying
+  // in-container — plus `requiresSandbar` raised to a release that HAS the
+  // field, in the same commit (#66). The reviewer stays claude on purpose: it
+  // holds the verdict, and #72's whole argument is that the strongest model
+  // belongs where the judgement is, not where the tokens are.
+  //
+  // Nothing here takes effect through the pin. This file comes from the
+  // checkout, not from `.sandbar/driver/`, so an edit applies on the next run
+  // — but the DRIVER that reads it must already understand the field, which is
+  // what `requiresSandbar` is checking.
+
   // Exit 75 after any cycle that lands merges, so `scripts/sandbar-launch.mjs`
   // re-reads the pin and relaunches (#65). Explicit rather than detected — see
   // RunConfig — and still set here after #66, for the Containerfile: images are

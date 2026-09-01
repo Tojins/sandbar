@@ -252,6 +252,27 @@ and used to announce themselves in four different ways, the halt in none at all.
 - **Credentials are a value, not a path (#38).** `config.env` is an allowlist
   record (empty value ⇒ inherit from `process.env`); `readEnvFile` is the
   opt-in loader. `src/env.ts`.
+- **A role names its CLI as well as its model (#72).** `implementerAgent` /
+  `reviewerAgent`, both defaulting to `claude`, beside the model ids that were
+  already per-role: the tiering knob and the vendor knob are independent, and
+  every provider takes whatever id its role's field holds. `AgentProvider`
+  (`src/agent-sandbox.ts`) was already the whole seam — argv plus a line parser,
+  with the completion watch, the idle timeout and commit collection reading
+  parsed events and git — so `codex` is a second implementation of it and
+  nothing downstream knows which ran. `src/agent-providers.ts` owns the
+  NAME→factory map, each provider's credential and `requiredAgentProviders`;
+  its header owns why the set is CLOSED at what the driver can build (a config
+  is a program, so a name nothing implements is #66's silent failure) and why
+  there is no `mergerAgent` — that path stays Claude/Opus, and a field nothing
+  reads is the same failure. Preflight refuses per routed provider, with claude
+  unconditional because the merger's resolve agent is hard-coded to it. The one
+  rule a new provider must not break is #41's: `parseStreamLine` may surface the
+  agent's SPEECH and nothing else, since "completed with output" is what
+  `reviewer-run.ts` reads as a verdict — which is why codex's `reasoning` and
+  every error shape are dropped, and why `parsedOutputOnly` stops a `turn.failed`
+  under an exit-0 process from returning raw JSONL that would default to
+  CHANGES-REQUESTED. Both CLIs are in the one image (#39): which one a role runs
+  is resolved per run, so the image cannot be a function of it.
 - **Token contracts.** Implementer: `<promise>COMPLETE|NEEDS-INFO|
   NEEDS-UI-PROTOTYPE</promise>`; resolve loop: `COMMITTED|ABANDON`; anything
   else re-prompts. Reviewer: `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`,
