@@ -249,12 +249,8 @@ export async function buildReviewerPrompts(
     buildIssueAnchor(inputs.issue.id, inputs.repo),
     buildReviewerSlotInputs(inputs),
   ]);
-  const layers = [
-    projectAnchor,
-    issueAnchor,
-  ];
   const assemble = (slot: string): string =>
-    [...layers, slot].join("\n\n---\n\n");
+    [projectAnchor, issueAnchor, slot].join("\n\n---\n\n");
   return {
     correctness: assemble(renderReviewerSlot(slotInputs)),
     followup: assemble(renderReviewerFollowupSlot(slotInputs)),

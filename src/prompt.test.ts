@@ -140,18 +140,6 @@ describe("renderReviewerSlot", () => {
     expect(slot).not.toContain("@docs/CODING_STANDARDS.md");
   });
 
-  it("omits standards when no project standards file is provided", () => {
-    const { codingStandardsPath: _omit, ...noStandards } = baseInputs;
-    const slot = renderReviewerSlot({
-      ...noStandards,
-      commits: "a1 first",
-      diff: "diff",
-    });
-    expect(slot).not.toContain("## Coding standards");
-    expect(slot).not.toContain("### Project standards");
-    expect(slot).not.toContain("CODING_STANDARDS");
-  });
-
   it("includes the optional context reference as part of the correctness conventions", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
@@ -311,6 +299,18 @@ describe("renderReviewerFollowupSlot", () => {
     expect(slot).toContain("@docs/CODING_STANDARDS.md");
     expect(slot).toContain("@CLAUDE.md");
     expect(slot).toContain("@CONTEXT.md");
+  });
+
+  it("keeps built-in standards when no project standards file is provided", () => {
+    const { codingStandardsPath: _omit, ...noStandards } = baseInputs;
+    const slot = renderReviewerFollowupSlot({
+      ...noStandards,
+      commits: "a1 first",
+      diff: "diff",
+    });
+    expect(slot).toContain("## Coding standards");
+    expect(slot).not.toContain("### Project standards");
+    expect(slot).not.toContain("CODING_STANDARDS");
   });
 
   it("requires dimension headings and the existing single-verdict contract", () => {

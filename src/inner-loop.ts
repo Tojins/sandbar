@@ -78,6 +78,9 @@ import {
   continueReviewerSession,
   decideReviewRound,
   runReviewerInvocations,
+  type FinishedReviewRoundDecision,
+  type ReviewerOutcome,
+  type ReviewerPass,
 } from "./reviewer-run.js";
 import type { RepoLayout } from "./repo-cache.js";
 import type { RepoRef } from "./repo-ref.js";
@@ -757,10 +760,10 @@ async function runReviewer(
   };
   const reviewerPrompts = await buildReviewerPrompts(reviewerPromptInputs);
   const runPass = async (
-    pass: "correctness" | "followup",
+    pass: ReviewerPass,
     prompt: string,
     modelId: string,
-  ) => runReviewerInvocations(
+  ): Promise<ReviewerOutcome> => runReviewerInvocations(
     async (invocation) => {
       // The retry is a fresh agent run in the SAME sandbox. The sandbox is not
       // what failed — in the observed case the implementer was working in it
@@ -814,64 +817,45 @@ async function runReviewer(
   // Every invocation's output, not just the reviewing one: the observed failure
   // left a 73-byte log for a 15-minute run, and this file is the only offline
   // artefact of what the reviewer did or did not say.
-  const writeTranscript = async (): Promise<void> => {
-    if (opts.attemptLogger) {
-      await opts.attemptLogger.writeAttemptReviewer(
-        issue.id,
-        action.attempt,
-        transcripts.join("\n\n"),
-      );
-    }
-  };
-
-  const logHarnessFailure = async (
-    pass: "correctness" | "followup",
-    outcome: Extract<Awaited<ReturnType<typeof runPass>>, { kind: "harness-failed" }>,
-    decision: Extract<ReturnType<typeof decideReviewRound>, { kind: "finished" }>,
-  ): Promise<void> => {
-    await writeTranscript();
-    const line =
-      `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-      `pass=${pass} harness-failed invocations=${outcome.invocations} ` +
-      `correctness=${decision.correctness} followup=${decision.followup} (round not consumed)`;
-    console.error(`  ${line}`);
-    if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
-  };
-
   const afterCorrectness = decideReviewRound(correctness);
-  if (afterCorrectness.kind === "finished") {
-    if (correctness.kind === "harness-failed") {
-      await logHarnessFailure("correctness", correctness, afterCorrectness);
-      return afterCorrectness.event;
-    }
-    await writeTranscript();
-    if (opts.onOrchestratorLog) {
-      await opts.onOrchestratorLog(
-        `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-          `correctness=${afterCorrectness.correctness} followup=${afterCorrectness.followup}`,
-      );
-    }
-    return afterCorrectness.event;
-  }
+  let decision: FinishedReviewRoundDecision;
+  let failed: { readonly pass: ReviewerPass; readonly invocations: number } | null =
+    correctness.kind === "harness-failed"
+      ? { pass: "correctness", invocations: correctness.invocations }
+      : null;
 
-  const followup = await runPass(
-    "followup",
-    reviewerPrompts.followup,
-    config.reviewerFollowupModelId,
-  );
-  transcripts.push(`=== follow-up pass ===\n${followup.transcript}`);
-
-  const decision = decideReviewRound(correctness, followup);
-  if (followup.kind === "harness-failed") {
-    await logHarnessFailure("followup", followup, decision);
-    return decision.event;
-  }
-  await writeTranscript();
-  if (opts.onOrchestratorLog) {
-    await opts.onOrchestratorLog(
-      `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-        `correctness=${decision.correctness} followup=${decision.followup}`,
+  if (afterCorrectness.kind === "run-followup") {
+    const followup = await runPass(
+      "followup",
+      reviewerPrompts.followup,
+      config.reviewerFollowupModelId,
     );
+    transcripts.push(`=== follow-up pass ===\n${followup.transcript}`);
+    if (followup.kind === "harness-failed") {
+      failed = { pass: "followup", invocations: followup.invocations };
+    }
+    decision = decideReviewRound(correctness, followup);
+  } else {
+    decision = afterCorrectness;
+  }
+
+  if (opts.attemptLogger) {
+    await opts.attemptLogger.writeAttemptReviewer(
+      issue.id,
+      action.attempt,
+      transcripts.join("\n\n"),
+    );
+  }
+  const line =
+    `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
+    (failed
+      ? `pass=${failed.pass} harness-failed invocations=${failed.invocations} `
+      : "") +
+    `correctness=${decision.correctness} followup=${decision.followup}` +
+    (failed ? " (round not consumed)" : "");
+  if (failed) console.error(`  ${line}`);
+  if (opts.onOrchestratorLog) {
+    await opts.onOrchestratorLog(line);
   }
   return decision.event;
 }
