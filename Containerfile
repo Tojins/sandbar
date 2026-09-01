@@ -83,14 +83,28 @@ RUN npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claud
 # an image that carried only the CLI its config named would have to be rebuilt
 # to change a role's vendor.
 #
-# Unpinned for the same reason as the block above, and NOT `--allow-scripts`:
-# `@openai/codex` declares no lifecycle scripts at all. It resolves its platform
-# binary through optionalDependencies, so npm's default block has nothing to
-# skip here and naming a package that runs nothing would only suggest it does.
+# PINNED, unlike the block above and for podman's reason rather than its own:
+# sandbar's reader is coupled to a stream format the CLI does not version. The
+# difference from claude-code is `parsedOutputOnly` (#72) — a claude schema
+# drift still degrades to raw stdout, which carries the `<promise>`/`<verdict>`
+# tokens and so keeps the loop working, while a codex drift returns an EMPTY
+# answer on every attempt: no tag, a nudge, a spent attempt, eight of them per
+# issue, and nothing in the transcripts to say why. That is silent, which is the
+# one failure class this repo pins against.
+#
+# The pin is therefore revisited exactly when `parseCodexJsonLine` is — its
+# header names the version its event union was verified against, and this is
+# that version. A yanked or unbuildable version is a gate red (#37, #46), not a
+# silent fallback.
+#
+# NOT `--allow-scripts`: `@openai/codex` declares no lifecycle scripts at all.
+# It resolves its platform binary through optionalDependencies, so npm's default
+# block has nothing to skip here and naming a package that runs nothing would
+# only suggest it does.
 #
 # Inert unless a role names it — an installed CLI nobody invokes costs disk and
 # nothing else, exactly like the podman remote client above in the sandbox role.
-RUN npm install -g @openai/codex
+RUN npm install -g @openai/codex@0.152.0
 
 # No `ENV HOME`: the sandbox provider sets HOME=/home/agent itself, and the
 # gate runner is root, whose /root is the right answer for it.

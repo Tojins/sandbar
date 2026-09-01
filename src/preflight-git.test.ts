@@ -527,16 +527,32 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       expect(state.uncredentialledProviders).toEqual(["codex"]);
     });
 
-    // An empty value is not a credential. `config.env` gives an empty value the
-    // meaning "inherit from the host" (#38), so a key that inherited NOTHING
-    // must not read as declared — that is the failure that would otherwise
-    // reach the container.
-    it("treats an empty value as no credential at all (#72)", async () => {
-      const state = await gatherState({
-        ...cfg(layoutAt(target)),
-        env: makeEnvReader({ ANTHROPIC_API_KEY: "" }),
-      });
-      expect(state.uncredentialledProviders).toEqual(["claude"]);
+    // An empty value means INHERIT (#38), not "absent", so this key's answer is
+    // the HOST's — which is why the host half is set explicitly here rather
+    // than left to whatever the machine running the suite exports. Both
+    // directions, because the rule is one rule: nothing to inherit is no
+    // credential, and something to inherit is one, from the same declaration.
+    it("resolves an empty value from the host, and refuses when it is unset (#72)", async () => {
+      const KEY = "ANTHROPIC_API_KEY";
+      const saved = process.env[KEY];
+      try {
+        delete process.env[KEY];
+        const missing = await gatherState({
+          ...cfg(layoutAt(target)),
+          env: makeEnvReader({ [KEY]: "" }),
+        });
+        expect(missing.uncredentialledProviders).toEqual(["claude"]);
+
+        process.env[KEY] = "from-the-host";
+        const inherited = await gatherState({
+          ...cfg(layoutAt(target)),
+          env: makeEnvReader({ [KEY]: "" }),
+        });
+        expect(inherited.uncredentialledProviders).toEqual([]);
+      } finally {
+        if (saved === undefined) delete process.env[KEY];
+        else process.env[KEY] = saved;
+      }
     });
 
     it("asks only about the providers the run will invoke (#72)", async () => {

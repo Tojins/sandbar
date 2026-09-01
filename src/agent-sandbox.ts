@@ -13,11 +13,13 @@
 //
 // A provider's parser answers in three registers and the difference between
 // them is load-bearing: `text`/`result` is the agent's SPEECH and is the only
-// thing a run returns, `failure` is the provider reporting that the turn never
-// reached an answer, and everything else is transport. A CLI that exits 0 on a
-// failed turn — `codex exec` does — makes the second register the ONLY way to
-// tell a dead key from an agent that worked in silence; see `ParsedStreamEvent`
-// and the rejection in `invokeAgent`.
+// thing a run returns, `failure` is the provider naming a TERMINAL fault of its
+// own, and everything else — including a recoverable one it merely reports — is
+// transport. The third register is the one that is easy to get wrong: a CLI
+// that narrates its own retries (`codex exec` does, over the same wire shape it
+// uses for the fatal case) will hand a naive parser a `failure` for a
+// reconnect, and `invokeAgent` rejects on a failure, so a blip would arrive at
+// a human as NEEDS-HUMAN. See `ParsedStreamEvent` and `parseCodexJsonLine`.
 //
 // Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
@@ -109,14 +111,17 @@ export type ParsedStreamEvent =
   | { type: "result"; result: string }
   | { type: "tool_call"; name: string; args: string }
   | { type: "session_id"; sessionId: string }
-  // The provider REPORTING that its turn did not complete (#72). Never folded
-  // into the run's output — it is not the agent's speech, and #41 turns on that
-  // distinction — but not dropped either: a CLI that exits 0 on a turn it
-  // reports as failed (which `codex exec` does, on an expired key, a rate limit
-  // or a model the account cannot use) would otherwise be indistinguishable
-  // from an agent that worked and said nothing. That difference is the whole of
-  // #67's rule: an attempt that captured no answer is an infra failure, not an
-  // answer, and must not spend the budget pretending otherwise.
+  // The provider naming a TERMINAL fault of its own (#72) — its turn ended
+  // without reaching an answer. Never folded into the run's output (it is not
+  // the agent's speech, and #41 turns on that distinction) and never emitted
+  // for a fault the provider is still recovering from: `invokeAgent` rejects on
+  // one, which is the HARD-ERROR path, so a parser that spent it on a reconnect
+  // notice would escalate a blip to a human.
+  //
+  // What it buys, for a provider that reports faults in-band: the CAUSE, in the
+  // provider's own words, ahead of whatever its stderr happens to hold — and,
+  // where a CLI's exit code does not answer the question, #67's rule that an
+  // attempt which captured no answer is an infra failure rather than an answer.
   | { type: "failure"; message: string };
 
 export type AgentProvider = {
@@ -135,16 +140,11 @@ export type AgentProvider = {
   // This is not a formatting preference, it is #41's evidence rule. "Completed
   // with output" is what `reviewer-run.ts` reads as a verdict, so the string a
   // run returns must be the agent's own SPEECH or nothing — and a provider's
-  // transport is not speech. `codex exec --json` exits 0 on a turn it reports
-  // as FAILED, so without this the JSONL of an auth failure would come back as
-  // "output", read as a review, and default to CHANGES-REQUESTED: a verdict
-  // about code that no model ever looked at, charged to the issue's rounds.
-  //
-  // It still earns its place beside the `failure` event, which covers only the
-  // runs a provider ANNOUNCES as failed. A machine-readable stream carrying
-  // neither speech nor a failure — a turn that ended on tool calls alone — is
-  // the residual case, and there the raw JSONL is a wrong answer for the same
-  // reason: no part of it was said by the agent.
+  // transport is not speech. A codex turn that ends on tool calls alone, or on
+  // reconnect notices it recovered from, is a well-formed JSONL stream under a
+  // successful process containing not one word the model said; returned as
+  // "output" it would be read as a review and default to CHANGES-REQUESTED, a
+  // verdict about code no model ever looked at, charged to the issue's rounds.
   readonly parsedOutputOnly?: boolean;
 };
 
@@ -505,26 +505,39 @@ export const claudeCode = (
 // merely CONSIDERED emitting the completion tag end the run by talking about
 // it.
 //
-// The `error` item and the `error` / `turn.failed` events are kept OUT of the
-// text for the same reason and are not dropped either: they become `failure`,
-// the one event kind that is neither speech nor silence. `codex exec` exits 0
-// on a turn it reports as failed, so a 401, a rate limit or a model the account
-// cannot use arrives here as a well-formed stream under a successful process —
-// and the two readings of that stream have opposite costs. As output it is a
-// review of code nobody looked at (#41), defaulting to CHANGES-REQUESTED. As
-// silence it is an implementer attempt with no promise tag, which buys a nudge,
-// spends an attempt, and repeats until the issue parks with nothing in its
-// transcripts to say why — the whole budget, three issues wide, for a key that
-// expired. As a `failure` it is what it says it is: `invokeAgent` rejects, and
-// #67's existing infra path takes it (HARD-ERROR, two fresh sandboxes, then
-// NEEDS-HUMAN quoting the message).
-// The human-readable half of a codex error shape, never empty: the string ends
-// up as the whole of an `AgentError` message and so as the NEEDS-HUMAN trace a
-// person reads, and "the turn failed" with a blank cause at least says which
-// half of the system to look at. `unknown` rather than `any` because this is
-// reached from three different shapes and none of them is trusted.
+// Errors arrive in THREE shapes and only ONE of them is terminal, which is the
+// distinction the `failure` register lives or dies on — `invokeAgent` rejects
+// on a failure, so anything spent on a recoverable notice escalates a blip to a
+// human. Captured from a live 0.152.0 run with no credential:
+//
+//   {"type":"error","message":"Reconnecting... 2/5 (unexpected status 401 …)"}
+//   {"type":"item.completed","item":{"type":"error","message":
+//     "Falling back from WebSockets to HTTPS transport. …"}}
+//   {"type":"turn.failed","error":{"message":"unexpected status 401 …"}}
+//
+// The first two are the agent CARRYING ON: five reconnects, a transport
+// downgrade, five more. The SDK says so of the second — `ErrorItem` is
+// "a non-fatal error surfaced as an item" — and the first is emitted for both
+// the retries and the give-up, identically shaped, so it cannot be read either.
+// A websocket→HTTPS fallback is entirely ordinary inside a container.
+//
+// `turn.failed` is the terminal one, arrives once, and carries the give-up
+// cause verbatim. It is the only `failure`, and the rest are transport: dropped
+// rather than degraded to text, because `accumulatedOutput` is the agent's
+// claim and a 401 read as a review defaults to CHANGES-REQUESTED (#41).
+//
+// That run exits 1, so a dead key lands on `invokeAgent`'s existing non-zero
+// path and is loud already. What the register buys is the CAUSE on that path —
+// it leads the detail, ahead of stderr's dozen `ERROR codex_api::…` retry lines
+// — and, since no CLI documents its exit codes as a contract, the guard for a
+// turn that fails under an exit-0 process: infra, not an answer.
+//
+// The turn's give-up cause, never empty: the string becomes the whole of an
+// `AgentError` message and so the NEEDS-HUMAN trace a person reads, and "the
+// turn failed" with a blank cause at least says which half of the system to
+// look at. `unknown` because it is another process's wire format (`ThreadError`
+// promises a `message`, and nothing here takes that on trust).
 const codexErrorMessage = (err: unknown): string => {
-  if (typeof err === "string" && err.trim() !== "") return err;
   if (err !== null && typeof err === "object") {
     const message = (err as { message?: unknown }).message;
     if (typeof message === "string" && message.trim() !== "") return message;
@@ -543,16 +556,11 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
       // `resume --last` reopens, which is what a session id is used for here.
       return [{ type: "session_id", sessionId: obj.thread_id }];
     }
-    // Three shapes for one fact. `turn.failed` carries a nested error, the
-    // top-level `error` event carries a flat message, and a failed tool step
-    // arrives as an `error` ITEM — all three mean the turn did not reach an
-    // answer, and none of them is worth distinguishing to a caller that will
-    // reject on any of them.
+    // The one terminal shape (see above). The top-level `error` event and the
+    // `error` ITEM fall through to [] — they are what the CLI says while it is
+    // still trying.
     if (obj.type === "turn.failed") {
       return [{ type: "failure", message: codexErrorMessage(obj.error) }];
-    }
-    if (obj.type === "error") {
-      return [{ type: "failure", message: codexErrorMessage(obj) }];
     }
     // Items are reported started → updated → completed; only the completed form
     // is read, so a command's `aggregated_output` and an agent message's text
@@ -570,9 +578,6 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
       }
       if (item.type === "web_search" && typeof item.query === "string") {
         return [{ type: "tool_call", name: "web_search", args: item.query }];
-      }
-      if (item.type === "error") {
-        return [{ type: "failure", message: codexErrorMessage(item) }];
       }
     }
   } catch {
@@ -1488,8 +1493,10 @@ const invokeAgent = (
   new Promise((resolveRun, rejectRun) => {
     let resultText = "";
     let accumulatedOutput = "";
-    // The FIRST reported failure, not the last: a stream that fails usually
-    // fails once and then cascades, and the first line is the cause.
+    // The LAST reported failure. A `failure` is by construction terminal for
+    // the turn that emitted it (a provider's recoverable notices are transport
+    // and never reach here), so a second one is a second turn and the last is
+    // the one the process ended on.
     let reportedFailure: string | null = null;
     let completionDetected = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1582,7 +1589,7 @@ const invokeAgent = (
             } else if (parsed.type === "result") {
               resultText = parsed.result;
               accumulatedOutput += parsed.result;
-            } else if (parsed.type === "failure" && reportedFailure === null) {
+            } else if (parsed.type === "failure") {
               // Recorded, deliberately NOT accumulated: it is the provider
               // speaking, not the agent, and everything downstream of
               // `accumulatedOutput` — the completion watch, the promise and
@@ -1602,12 +1609,16 @@ const invokeAgent = (
       })
       .then((execResult) => {
         if (execResult.exitCode !== 0) {
-          // Four-tier detail: stderr → the reported failure → resultText →
-          // last 20 stdout lines. The reported failure sits second because it
-          // is the provider's own statement of the cause, which beats a tail
-          // of transport a human then has to read as JSON.
-          let detail = execResult.stderr;
-          if (!detail.trim()) detail = reportedFailure ?? "";
+          // Four-tier detail: the reported failure → stderr → resultText →
+          // last 20 stdout lines. The reported failure leads because it is the
+          // provider naming its own give-up cause, and this is the path a codex
+          // credential failure actually takes (it exits 1) — whose stderr is a
+          // dozen timestamped `ERROR codex_api::…` retry lines that bury the
+          // one sentence a human needs. A provider that reports nothing in-band
+          // is unaffected: claudeCode never emits `failure`, so stderr still
+          // leads for it, exactly as before #72.
+          let detail = reportedFailure ?? "";
+          if (!detail.trim()) detail = execResult.stderr;
           if (!detail.trim()) detail = resultText;
           if (!detail.trim()) {
             detail = execResult.stdout
@@ -1630,14 +1641,21 @@ const invokeAgent = (
         // every run — it has no `result` event — and for it the raw stream is
         // not a degraded answer but a wrong one (see `parsedOutputOnly`).
         const spoken = resultText || accumulatedOutput;
-        // A process that exited 0 having ANNOUNCED that its turn failed, and
-        // said nothing else, did not answer — and #67's rule for the resolve
-        // loop is the precedent: an attempt that captured no answer is an infra
-        // failure, not one, and must not be allowed to launder itself into "the
-        // agent tried and failed" and spend the budget doing it. Rejecting puts
-        // it on the path that already exists for a CLI that exits non-zero:
-        // HARD-ERROR, two fresh sandboxes, then NEEDS-HUMAN quoting this
-        // message — loud, in three attempts, instead of eight silent ones.
+        // A process that exited 0 having ANNOUNCED a terminal failure, and said
+        // nothing else, did not answer — #67's rule for the resolve loop, held
+        // here: an attempt that captured no answer is an infra failure, not an
+        // answer, and must not launder itself into "the agent tried and failed"
+        // and spend the budget doing it.
+        //
+        // This is a guard, not the codex credential path — that one exits 1 and
+        // is caught above (verified: 0.152.0 with no key prints `turn.failed`
+        // and exits 1). It is here because an exit code is not a contract the
+        // CLI states, and the two ways of being wrong are not symmetrical. Read
+        // as an answer, a silent terminal failure is an implementer attempt
+        // with no promise tag: a nudge, a spent attempt, and eight more of them
+        // across every issue in the plan, parking each with empty transcripts.
+        // Read as infra it is a HARD-ERROR on a run that had nothing to say
+        // anyway — two fresh sandboxes, then NEEDS-HUMAN quoting the cause.
         //
         // Guarded on `spoken`, so an agent that reviewed the code and then hit
         // a failure on the way out keeps its review. That is #41's own rule for

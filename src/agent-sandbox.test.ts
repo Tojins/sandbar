@@ -239,40 +239,53 @@ describe("parseCodexJsonLine", () => {
     ).toEqual([]);
   });
 
-  // #41's rule: an unknown outcome must never read as a verdict. `codex exec`
-  // exits 0 on a turn it reports as FAILED, so if any of these became text a
-  // 401 would arrive as a review and default to CHANGES-REQUESTED.
-  // Three wire shapes, one fact. `failure` rather than `text` is what keeps
-  // #41 (a 401 must never read as a review) and #67 (a run that captured no
-  // answer is an infra failure, not an answer) both true of the same line —
-  // and `codex exec` exits 0 on all three, so this is the only channel that
-  // carries the difference.
-  it("surfaces every error shape as a failure, never as text", () => {
-    expect(
-      parseCodexJsonLine('{"type":"error","message":"401 Unauthorized"}'),
-    ).toEqual([{ type: "failure", message: "401 Unauthorized" }]);
+  // Only `turn.failed` is terminal, and the difference decides whether a
+  // reconnect reaches a human. `invokeAgent` rejects on a `failure`, so a
+  // parser that spent one on a retry notice would turn a websocket blip into
+  // HARD-ERROR → NEEDS-HUMAN. These three lines are a live 0.152.0 run with no
+  // credential, in the order it printed them.
+  it("reads only turn.failed as a failure; retries and notices are transport", () => {
     expect(
       parseCodexJsonLine(
-        '{"type":"turn.failed","error":{"message":"401 Unauthorized"}}',
+        '{"type":"error","message":"Reconnecting... 2/5 (unexpected status 401)"}',
       ),
-    ).toEqual([{ type: "failure", message: "401 Unauthorized" }]);
+    ).toEqual([]);
     expect(
       parseCodexJsonLine(
-        completed({ id: "item_1", type: "error", message: "401 Unauthorized" }),
+        completed({
+          id: "item_0",
+          type: "error",
+          message: "Falling back from WebSockets to HTTPS transport.",
+        }),
       ),
-    ).toEqual([{ type: "failure", message: "401 Unauthorized" }]);
+    ).toEqual([]);
+    expect(
+      parseCodexJsonLine(
+        '{"type":"turn.failed","error":{"message":"unexpected status 401"}}',
+      ),
+    ).toEqual([{ type: "failure", message: "unexpected status 401" }]);
   });
 
-  // The message is the whole of the AgentError a human reads, so an error
-  // shape that carries no message must still say which half of the system
-  // failed rather than rejecting with a blank line.
+  // The give-up `error` event is shaped identically to the retries above it —
+  // same type, same field — so nothing at the line level tells them apart.
+  // Reading it would buy the false positive; dropping it costs nothing, since
+  // `turn.failed` follows it carrying the same message.
+  it("drops the fatal top-level error too, since turn.failed repeats it", () => {
+    expect(
+      parseCodexJsonLine('{"type":"error","message":"401 Unauthorized"}'),
+    ).toEqual([]);
+  });
+
+  // The message is the whole of the AgentError a human reads, so a turn.failed
+  // carrying no usable message must still say which half of the system failed
+  // rather than rejecting with a blank line.
   it("names a failure whose message is missing or the wrong type", () => {
     for (const line of [
       '{"type":"turn.failed"}',
       '{"type":"turn.failed","error":{}}',
       '{"type":"turn.failed","error":{"message":42}}',
-      '{"type":"error"}',
-      '{"type":"error","message":"   "}',
+      '{"type":"turn.failed","error":{"message":"   "}}',
+      '{"type":"turn.failed","error":"401 Unauthorized"}',
     ]) {
       expect(parseCodexJsonLine(line)).toEqual([
         { type: "failure", message: "no message" },
@@ -811,15 +824,10 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
-  // #72 — a provider whose stream IS machine-readable returns its parsed
-  // SPEECH or nothing, never the transport. `codex exec` exits 0 on a turn it
-  // reports as failed, so without this the JSONL of a 401 would come back as
-  // the run's output; reviewer-run.ts (#41) reads "completed with output" as a
-  // verdict, and the verdict parser defaults a tokenless one to
-  // CHANGES-REQUESTED — a review of code that no model ever looked at.
-  // A stream that is well-formed, exits 0, and carries no speech at all —
+  // #72 — a stream that is well-formed, exits 0, and carries no speech at all:
   // codex's shape for a turn that ended on tool calls. The transport is not an
-  // answer: reviewer-run.ts (#41) reads "completed with output" as a verdict,
+  // answer, so a parsedOutputOnly provider returns nothing rather than its own
+  // JSONL — reviewer-run.ts (#41) reads "completed with output" as a verdict,
   // and the verdict parser defaults a tokenless one to CHANGES-REQUESTED, a
   // review of code no model looked at.
   const toolCallOnly = JSON.stringify({
@@ -883,14 +891,13 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
-  // #72, the finding this round closes. `codex exec` exits 0 on a turn it
-  // reports as FAILED, so an expired OPENAI_API_KEY, a rate limit or a model
-  // the account cannot use all arrive as a clean process with an empty answer.
-  // Returned as output that is a silent full-budget drain on the implementer
-  // path — no promise tag, so a nudge, then an attempt, ×8 ×3 issues, parking
-  // the issue with empty transcripts. Rejecting routes it to the infra path
-  // that already exists for a non-zero exit (#67's rule: an attempt that
-  // captured no answer is not an answer).
+  // The guard, not the credential path: a dead key makes codex print
+  // `turn.failed` and exit 1, which the non-zero branch above already catches.
+  // This is the residual — an exit code is not a contract the CLI states — and
+  // the two readings are not symmetrical. Read as an answer, a silent terminal
+  // failure has no promise tag: a nudge, a spent attempt, ×8 ×3 issues, each
+  // parked with empty transcripts. Read as infra it is a HARD-ERROR on a run
+  // that said nothing anyway (#67's rule).
   it("rejects a run that reported a failed turn and said nothing (#72)", async () => {
     await git(["branch", "sandbar/issue-7-codex-fail"], dir);
     const provider = makeLocalProvider();
@@ -928,6 +935,121 @@ describe("createSandbox integration (local provider)", () => {
       // consumed.
       expect((err as Error).message).toContain("401 Unauthorized");
       expect(agentPartialOutput(err)).toBe("");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // The path a dead key ACTUALLY takes, live: codex prints its retries, then
+  // `turn.failed`, then exits 1, with a dozen timestamped
+  // `ERROR codex_api::endpoint…` lines on stderr. Both halves are here, so the
+  // assertion is about which one a human is handed — the give-up cause leads
+  // the detail, and the tracing does not bury it.
+  it("leads the non-zero-exit detail with the reported cause, not stderr (#72)", async () => {
+    await git(["branch", "sandbar/issue-10-exit1"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-10-exit1",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const failed = JSON.stringify({
+        type: "turn.failed",
+        error: { message: "unexpected status 401 Unauthorized" },
+      });
+      const agent: AgentProvider = {
+        name: "codex",
+        env: {},
+        parsedOutputOnly: true,
+        buildPrintCommand: () => ({
+          command:
+            `printf '%s\\n' ${JSON.stringify(failed)}; ` +
+            `printf '%s\\n' 'ERROR codex_api::endpoint::responses_websocket: failed to connect' >&2; ` +
+            `exit 1`,
+          stdin: "",
+        }),
+        parseStreamLine: parseCodexJsonLine,
+      };
+      const err = await sandbox
+        .run({ agent, prompt: "go", maxIterations: 1 })
+        .then(() => null)
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(AgentError);
+      const message = (err as Error).message;
+      expect(message).toContain("exited with code 1");
+      expect(message).toContain("unexpected status 401 Unauthorized");
+      expect(message).not.toContain("responses_websocket");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // A provider that reports nothing in-band is untouched by that ordering:
+  // claudeCode never emits `failure`, so stderr still leads for it.
+  it("still leads with stderr for a provider that reports no failure (#72)", async () => {
+    await git(["branch", "sandbar/issue-11-stderr"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-11-stderr",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const agent = scriptedAgent(`printf '%s\\n' 'boom on stderr' >&2; exit 1`);
+      const err = await sandbox
+        .run({ agent, prompt: "go", maxIterations: 1 })
+        .then(() => null)
+        .catch((e: unknown) => e);
+      expect((err as Error).message).toContain("boom on stderr");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // The other side of that guard, and the reason the parser reads only
+  // `turn.failed`: a codex run that reconnects and downgrades its transport and
+  // then works is ORDINARY inside a container, and this is the stream it prints
+  // while doing it. Rejecting here would escalate a websocket blip to
+  // HARD-ERROR → NEEDS-HUMAN, where the pre-#72 behaviour was a cheap
+  // same-session nudge. Exit 0, no speech, no rejection — "" and on with the
+  // attempt.
+  it("does not reject a run whose only errors were recoverable notices (#72)", async () => {
+    await git(["branch", "sandbar/issue-9-reconnect"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-9-reconnect",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const retry = JSON.stringify({
+        type: "error",
+        message: "Reconnecting... 2/5 (unexpected status 401)",
+      });
+      const downgrade = JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "item_0",
+          type: "error",
+          message: "Falling back from WebSockets to HTTPS transport.",
+        },
+      });
+      const agent: AgentProvider = {
+        name: "codex",
+        env: {},
+        parsedOutputOnly: true,
+        buildPrintCommand: () => ({
+          command: `printf '%s\\n%s\\n' ${JSON.stringify(retry)} ${JSON.stringify(downgrade)}`,
+          stdin: "",
+        }),
+        parseStreamLine: parseCodexJsonLine,
+      };
+      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      expect(run.stdout).toBe("");
     } finally {
       await sandbox.close();
     }

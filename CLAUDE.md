@@ -273,15 +273,21 @@ and used to announce themselves in four different ways, the halt in none at all.
   is that they stay apart: `text`/`result` is the agent's SPEECH and the only
   thing a run returns (#41 — "completed with output" is what `reviewer-run.ts`
   reads as a verdict, so codex's `reasoning` is dropped and `parsedOutputOnly`
-  keeps raw JSONL out); `failure` is the PROVIDER saying the turn never reached
-  an answer; everything else is transport. The second register exists because
-  `codex exec` exits 0 on a turn it reports as failed, which makes a dead key
-  indistinguishable from an agent that worked in silence — read as output it is
-  an invented CHANGES-REQUESTED, read as silence it is a nudge and an attempt
-  and eight more of them, so `invokeAgent` rejects on a reported failure with no
-  speech and #67's infra path (HARD-ERROR → NEEDS-HUMAN) takes it. Both CLIs are
-  in the one image (#39): which one a role runs is resolved per run, so the
-  image cannot be a function of it.
+  keeps raw JSONL out); `failure` is the provider naming a TERMINAL fault of its
+  own; everything else — including a fault it is still recovering from — is
+  transport. That last distinction is the sharp one, because `invokeAgent`
+  rejects on a `failure`: codex narrates its reconnects and a transport
+  downgrade over the same wire shape it uses for the fatal case, so only
+  `turn.failed` may be read, and a parser that spent a `failure` on a retry
+  would escalate a websocket blip to NEEDS-HUMAN. What the register buys is the
+  CAUSE leading the `AgentError` detail — a dead key exits 1 with the give-up
+  reason buried under a dozen tracing lines — and, since no CLI documents its
+  exit codes, #67's rule for a terminal failure under an exit-0 process: infra,
+  not an answer (read as an answer it is a nudge, an attempt, and eight more of
+  them). Both CLIs are in the one image (#39): which one a role runs is resolved
+  per run, so the image cannot be a function of it — and codex is PINNED there,
+  because `parsedOutputOnly` makes its stream format load-bearing in a way
+  claude-code's is not.
 - **Token contracts.** Implementer: `<promise>COMPLETE|NEEDS-INFO|
   NEEDS-UI-PROTOTYPE</promise>`; resolve loop: `COMMITTED|ABANDON`; anything
   else re-prompts. Reviewer: `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`,
