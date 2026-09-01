@@ -63,6 +63,32 @@
 // and agent output: orchestrator.log at the run root, plan.json + merger.log
 // + issue-<id>/attempt-<m>.log per cycle.
 //
+// IT EXISTS FROM THE MOMENT THE LOCK IS WON (#70), which is fifteen steps
+// earlier than it used to. Everything before `startRunLogger` is unrecorded by
+// construction, and that used to include preflight, both orphan sweeps, the
+// image builds and the uid check — so the single most operator-actionable
+// thing sandbar produces, a preflight refusal, was the one class of stop that
+// left nothing to read afterwards. Every one of those now writes its complaint
+// into the tree before it dies (`stopAtStartup`), including the two that
+// escaped `run()` uncaught.
+//
+// TWO EXITS STAY OUTSIDE THE RECORD, deliberately:
+//   - GH_TOKEN missing. Checked before the lock — writing a log tree there
+//     would mean writing one while a second launch may be racing us for the
+//     workdir — and its message needs no context to act on.
+//   - Losing the lock. The answer to "what happened" is the OTHER run's log,
+//     and one empty directory per turned-away launch is noise in the one tree
+//     an operator greps.
+//
+// And the run STOPS IN ONE SHAPE. `Exit (<tag>): <reason>` on stdout, once, on
+// every terminal path — plan-empty, relaunch, stuck, budget, halted, and the
+// defensive iteration ceiling. There used to be five terminal shapes in four
+// spellings, one of which (the halt) printed nothing on stdout at all and one
+// of which (plan-empty) printed a success banner. `exit-conditions.ts` owns
+// the tags, the reasons and the line; `announceExit` below is the single site
+// that writes one to the log, and there is one `console.log` for it at the end
+// of the function.
+//
 // Ahead of all of it, on stdout and then again as orchestrator.log's first
 // line, is the DRIVER IDENTITY (#69) — the version, the tree `dist/` was built
 // from, the config file's path, and whether either tree is dirty. It is printed
@@ -113,9 +139,14 @@ import {
 import { makeEnvReader } from "./env.js";
 import { SandbarError, faultDetail } from "./errors.js";
 import {
-  EXIT_CODE_BUDGET,
+  type TerminalExit,
   applyCycle,
+  budgetExit,
+  formatExitLine,
+  haltedExit,
+  iterationCeilingExit,
   newRunState,
+  planEmptyExit,
   planFingerprint,
   remainingBudget,
 } from "./exit-conditions.js";
@@ -188,12 +219,24 @@ const MERGER_STACK_ID = "merger";
 // a namesake before creating one — so a failed sweep is not fatal. It is also
 // not silent: it leaks a pod, its invisible infra container and its network, and
 // the operator is the only one who can tell whether that matters.
-function reportSweepFailures(result: SweepResult): void {
+//
+// Takes the log writer rather than reaching for one, because it is called from
+// three places and every one of them is now inside the record (#70): a sweep
+// failure is an outcome, so it exists in the log whether or not anyone was
+// watching the terminal.
+async function reportSweepFailures(
+  result: SweepResult,
+  log: (line: string) => Promise<void>,
+): Promise<void> {
   if (result.failures.length === 0) return;
   console.warn(
     `Could not remove ${result.failures.length} orphaned sandbar resource(s). ` +
       "They will be retried next cycle; clear them by hand if they persist:\n" +
       result.failures.join("\n"),
+  );
+  await log(
+    `sweep: could not remove ${result.failures.length} orphaned resource(s): ` +
+      result.failures.join("; "),
   );
 }
 
@@ -277,9 +320,56 @@ export async function run(
     if (release) await release();
   });
 
-  // Still ahead of the sweep and every container operation below, which is the
-  // dependency that matters: those assume a working container runtime because
-  // this is what hard-fails when there isn't one.
+  // -------------------------------------------------------------------------
+  // Per-run log tree
+  //
+  // THE FIRST THING THE WINNER DOES (#70). It used to be created fifteen steps
+  // further down, after preflight, both sweeps and the image builds — so every
+  // refusal above it existed only on a terminal, and the single most
+  // operator-actionable thing sandbar produces, a preflight refusal, was the
+  // one class of stop that left nothing to read afterwards. A run of
+  // 2026-08-31 stopped somewhere in that window and could not be diagnosed at
+  // all: there was no run directory on disk to diagnose it from.
+  //
+  // The invariant that placement was protecting is untouched: non-winners
+  // don't litter the `logs/` tree. A loser exits AT `acquireLock`, which is
+  // the line above this one. And it costs nothing to move — `repoLayout` is
+  // pure path arithmetic, so `layout.logsDir` has been known since well before
+  // the lock, and `startRunLogger` is one `mkdir -p` plus one append.
+  //
+  // Append writers are unbuffered, so the cleanup trap only needs to drop a
+  // closing run-end marker — no in-memory state to flush.
+  //
+  // TWO exits stay outside the record, deliberately. `GH_TOKEN` is checked
+  // before the lock, writes nothing to disk in any case, and its message is
+  // self-contained — recording it would mean creating a log tree a second
+  // launch could be racing us for. And a run that LOSES the lock leaves none
+  // on purpose: the answer to "what happened" is the other run's log, and a
+  // fresh empty directory per turned-away launch is noise in the one tree an
+  // operator greps.
+  // -------------------------------------------------------------------------
+  const runLogger = await startRunLogger({
+    baseDir: layout.logsDir,
+  });
+  console.log(`Run log tree: ${runLogger.runDir}`);
+  // The same line the banner already printed, now in the tree it belongs to
+  // (#69). It is the first line after `run-start` because every verdict below
+  // it — including, since #70, the startup refusals — is a verdict this driver
+  // reached.
+  await runLogger.appendOrchestrator(driverIdentity);
+  let cleanupReason = "normal-exit";
+  onCleanup(() => runLogger.finalize(cleanupReason));
+
+  // Every stop between here and the first cycle goes through this, so none of
+  // them can be the silent one again (#70). It records the complaint verbatim,
+  // prints it, adds the same `Exit (halted): …` line every other terminal path
+  // ends with, and runs cleanup — which is what recovers the `run.pid`
+  // sidecar, since `process.exit` runs no handler.
+  //
+  // An unexpected error takes the same route rather than escaping to the bin.
+  // It still prints its stack (`faultDetail`'s rule, shared with the bin), so
+  // nothing about locating a bug gets worse; what changes is that the record
+  // exists either way, which is the whole point of the paragraph above.
   //
   // `runCleanup` before the exit, because the lock is held by here and
   // `process.exit` runs no cleanup handler. What that actually recovers is the
@@ -289,6 +379,20 @@ export async function run(
   // naming a pid that will be dead, which the next launch's takeover reads as a
   // crashed run and clears. Cheap, and it keeps every exit path in this file
   // uniform rather than one of them relying on a dependency's exit hook.
+  const stopAtStartup = async (
+    cause: string,
+    err: unknown,
+  ): Promise<never> => {
+    const actionable = err instanceof SandbarError || err instanceof PreflightError;
+    const detail = actionable ? err.message : faultDetail(err);
+    cleanupReason = cause;
+    await runLogger.appendOrchestrator(`stopped (${cause}): ${detail}`);
+    console.error(detail);
+    const exit = haltedExit([cause]);
+    console.log(`\n${formatExitLine(exit)}`);
+    await runCleanup();
+    process.exit(exit.exitCode);
+  };
 
   // One `repo` for the whole run (#34). Every `gh` call sandbar makes — the
   // planner's queue, the issue anchor, the finalise writes, the merger's closes
@@ -298,6 +402,9 @@ export async function run(
   // identity sandbar does NOT get from config.
   const repo = { owner: config.ghOwner, name: config.ghRepo };
 
+  // Preflight is still ahead of the sweep and every container operation below,
+  // which is the dependency that matters: those assume a working container
+  // runtime because this is what hard-fails when there isn't one.
   try {
     // The object cache, before anything reads a ref (#38). Created from
     // `config.cwd` when absent — a local clone, so hardlinked and offline —
@@ -327,12 +434,7 @@ export async function run(
       configPath: options.configPath ?? null,
     });
   } catch (err) {
-    if (err instanceof PreflightError || err instanceof SandbarError) {
-      console.error(err.message);
-      await runCleanup();
-      process.exit(1);
-    }
-    throw err;
+    return await stopAtStartup("preflight-failed", err);
   }
 
   // Derived from the CANONICAL path the lock is held on, so lock and
@@ -362,8 +464,13 @@ export async function run(
     console.log(
       `Removed ${orphans.removed.length} orphaned sandbar resource(s) from prior runs.`,
     );
+    await runLogger.appendOrchestrator(
+      `swept ${orphans.removed.length} orphan(s) from prior runs: ${orphans.removed.join(", ")}`,
+    );
   }
-  reportSweepFailures(orphans);
+  await reportSweepFailures(orphans, (line) =>
+    runLogger.appendOrchestrator(line),
+  );
 
   // The image half of the same sweep (#37). Per-branch gate images are removed
   // at the end of a run, but that removal is an `onCleanup` action and so does
@@ -376,8 +483,13 @@ export async function run(
     console.log(
       `Removed ${staleImages.removed.length} per-branch gate image(s) left by a prior run.`,
     );
+    await runLogger.appendOrchestrator(
+      `swept ${staleImages.removed.length} stale per-branch gate image(s): ${staleImages.removed.join(", ")}`,
+    );
   }
-  reportSweepFailures(staleImages);
+  await reportSweepFailures(staleImages, (line) =>
+    runLogger.appendOrchestrator(line),
+  );
 
   // Debris no run's scope claims: from a build predating #28, or the sandcastle
   // era. Reported rather than removed, because a bare-prefix match cannot tell
@@ -393,6 +505,9 @@ export async function run(
         "clear them with:\n" +
         unattributable.removalCommands.map((c) => `  ${c}`).join("\n") +
         "\n",
+    );
+    await runLogger.appendOrchestrator(
+      `unattributable podman resource(s), not removed: ${unattributable.names.join(", ")}`,
     );
   }
 
@@ -414,8 +529,20 @@ export async function run(
   // the fingerprint recorded on each image is a true claim about a named tree.
   // #37's validation moves with it: `rebuildOn`'s must-exist check and
   // `checkWorktreeImageUids` both resolve against this root.
-  const sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
-  const baseFingerprints = await ensureImages(config.images, sourceWorktree);
+  // Wrapped because these two used to be the only startup steps whose
+  // SandbarError `run()` never caught at all: it escaped to the bin, which
+  // printed it and exited without running cleanup and without the log tree
+  // ever hearing about it (#70). An unbuildable declared image and a bad uid
+  // are ordinary host-configuration faults, and they are now recorded like
+  // every other refusal.
+  let sourceWorktree: string;
+  let baseFingerprints: ReadonlyMap<string, string>;
+  try {
+    sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
+    baseFingerprints = await ensureImages(config.images, sourceWorktree);
+  } catch (err) {
+    return await stopAtStartup("image-build-failed", err);
+  }
 
   // Per-branch gate images (#37). One instance for the whole run — every issue
   // and the merger share it, because the per-branch tag is content-addressed
@@ -458,36 +585,42 @@ export async function run(
   // exist yet — but it is not exempt: `createBranchImages` re-probes one it has
   // just built, and reports a bad uid as a gate red, because the recipe that
   // changed the uid came from the branch.
-  await checkWorktreeImageUids(config.gateStack, process.getuid?.() ?? 0);
+  try {
+    await checkWorktreeImageUids(config.gateStack, process.getuid?.() ?? 0);
+  } catch (err) {
+    return await stopAtStartup("image-uid-check-failed", err);
+  }
 
   startKeepawake();
   onCleanup(stopKeepawake);
-
-  // -------------------------------------------------------------------------
-  // Per-run log tree
-  //
-  // Created after lock acquisition so non-winners don't litter the logs/ tree.
-  // Append writers are unbuffered, so the cleanup trap only needs to drop a
-  // closing run-end marker — no in-memory state to flush.
-  // -------------------------------------------------------------------------
-  const runLogger = await startRunLogger({
-    baseDir: layout.logsDir,
-  });
-  console.log(`Run log tree: ${runLogger.runDir}`);
-  // The same line the banner already printed, now in the tree it belongs to
-  // (#69). It cannot be written when it is computed — the log tree is created
-  // under the lock, after preflight, so that nothing which loses a race litters
-  // `logs/` — and it is the first line after `run-start` because every verdict
-  // below it is a verdict this driver reached.
-  await runLogger.appendOrchestrator(driverIdentity);
-  let cleanupReason = "normal-exit";
-  onCleanup(() => runLogger.finalize(cleanupReason));
 
   const runState = newRunState({
     maxTotalIssues: config.maxTotalIssues,
     relaunchAfterLanding: config.relaunchAfterLanding,
   });
-  let exitCode = 0;
+  // The one stop this run ends on (#70). Every break out of the loop below
+  // assigns it, the bottom of the function prints it, and the process exit code
+  // comes off it — so "did this stop normally?" is answered by one line in one
+  // place, on every path, instead of by four spellings of which one printed
+  // nothing at all. It also retires a second `exitCode` variable that had to be
+  // kept in step with the tag by hand.
+  let terminalExit: TerminalExit | null = null;
+
+  // Writes a terminal to the LOG and hands it back for the caller to assign.
+  // Assigning `terminalExit` in here instead would be shorter and is wrong:
+  // TypeScript does not track assignments made inside a closure, so the
+  // `terminalExit` at the bottom of this function would narrow to `null` and
+  // the one line #70 exists to guarantee would be dead code as far as the
+  // checker is concerned.
+  //
+  // Both streams get it, because they are two streams with one invariant
+  // (logs.ts): the log carries every outcome, the terminal additionally renders
+  // it — here in the same words, since there is only one sentence to say.
+  const announceExit = async (exit: TerminalExit): Promise<TerminalExit> => {
+    cleanupReason = exit.tag;
+    await runLogger.appendOrchestrator(`exit: ${exit.tag} — ${exit.reason}`);
+    return exit;
+  };
 
   // One Phase-4 pass. Called twice per cycle (#30): once for the agent
   // terminals before the merge, once for the merger's own outcomes after. The
@@ -585,16 +718,19 @@ export async function run(
             `swept ${cycleOrphans.removed.length} orphan(s) between cycles: ${cycleOrphans.removed.join(", ")}`,
           );
         }
-        reportSweepFailures(cycleOrphans);
+        await reportSweepFailures(cycleOrphans, (line) =>
+          runLogger.appendOrchestrator(line),
+        );
       }
   
       const budget = remainingBudget(runState);
       if (budget === 0) {
-        const reason = `issuesAttempted=${runState.issuesAttempted} >= maxTotalIssues=${runState.maxTotalIssues}`;
-        console.log(`Budget exhausted: ${reason}`);
-        await runLogger.appendOrchestrator(`exit: budget — ${reason}`);
-        cleanupReason = "budget";
-        exitCode = EXIT_CODE_BUDGET;
+        // The same `budgetExit` applyCycle returns, rather than the second
+        // hand-written copy of its reason this used to print in different
+        // words at the top of a cycle (#70).
+        terminalExit = await announceExit(
+          budgetExit(runState.issuesAttempted, runState.maxTotalIssues),
+        );
         break;
       }
   
@@ -806,9 +942,9 @@ export async function run(
       // strand a chunk a human explicitly asked for, on the one cycle where
       // there is nothing else to distract from it.
       if (issues.length === 0 && landRequests.length === 0) {
-        console.log("No unblocked issues to work on. Exiting.");
-        await runLogger.appendOrchestrator(`exit: success — plan empty`);
-        cleanupReason = "success";
+        // No line of its own: the `Exit (plan-empty): …` at the bottom says
+        // exactly this and is the line every other terminal prints too (#70).
+        terminalExit = await announceExit(planEmptyExit());
         break;
       }
 
@@ -822,8 +958,15 @@ export async function run(
       console.log(
         `Planning complete. ${issues.length} issue(s) to work in parallel:`,
       );
+      // Number and title only. The branch name is up to ~120 characters and
+      // was printed three times per issue per cycle — here, at the terminal
+      // line below, and again in the DONE list — which in a 3-issue cycle is a
+      // third of the content (#70). The terminal line is the one that keeps it:
+      // it is the only place a human is told a PARKED issue's branch, and
+      // nothing else in the run says it (the finalise line, the orchestrator
+      // log and the bot comment all named the issue and not the branch).
       for (const issue of issues) {
-        console.log(`  ${issue.id}: ${issue.title} → ${issue.branch}`);
+        console.log(`  #${issue.id}: ${issue.title}`);
       }
   
       // ---------------------------------------------------------------------
@@ -856,13 +999,17 @@ export async function run(
           outcomes.push(s.value);
           const issue = s.value.issue;
           const t = s.value.terminal;
-          console.log(`  ${issue.id} (${issue.branch}): ${t.type}`);
+          // The one place the branch name is printed (#70): a parked issue's
+          // branch is what a human needs to stand on, and it appears nowhere
+          // else — not in the finalise line, not in orchestrator.log, not in
+          // the bot comment before this issue changed them.
+          console.log(`  #${issue.id} (${issue.branch}): ${t.type}`);
           await runLogger.appendOrchestrator(
             `terminal #${issue.id} ${t.type}`,
           );
         } else {
           console.error(
-            `  ✗ ${issues[i]!.id} (${issues[i]!.branch}) failed: ${s.reason}`,
+            `  ✗ #${issues[i]!.id} (${issues[i]!.branch}) failed: ${s.reason}`,
           );
           await runLogger.appendOrchestrator(
             `terminal #${issues[i]!.id} REJECTED: ${s.reason instanceof Error ? s.reason.message : String(s.reason)}`,
@@ -875,10 +1022,10 @@ export async function run(
         .map((o) => o.issue);
   
       console.log(
-        `\nExecution complete. ${completedIssues.length} branch(es) with DONE:`,
+        `\nExecution complete. ${completedIssues.length} issue(s) DONE:`,
       );
       for (const issue of completedIssues) {
-        console.log(`  ${issue.branch}`);
+        console.log(`  #${issue.id}: ${issue.title}`);
       }
   
       // ---------------------------------------------------------------------
@@ -918,6 +1065,11 @@ export async function run(
       // MergerError.partial). Finalised even though the run is stopping.
       let haltPartial: MergerSummary | undefined;
       let halt = false;
+      // Why the run is stopping, in the short names the run log already uses.
+      // Declared up here rather than beside the reports that fill it because
+      // the merge phase's own halt is one of them, and the `Exit (halted): …`
+      // line has to be able to name it (#70).
+      const haltReasons: string[] = [];
       // Also for a land request alone (#64): a reviewed chunk merging onto the
       // source branch needs the same worktree, the same gate-2 stack and the
       // same resolve loop a DONE branch does, and a cycle can have one without
@@ -1081,6 +1233,7 @@ export async function run(
                 : "";
             console.error(`Merger halted: ${err.message}${trace}`);
             halt = true;
+            haltReasons.push("merger-halted");
             cleanupReason = "merger-halted";
             await runLogger.appendOrchestrator(
               `merger halted: ${err.message}${trace}`,
@@ -1156,6 +1309,10 @@ export async function run(
         // threw, and the pull request is where the outcome is readable anyway.
         for (const c of mergerOutcome.skippedChunks) {
           console.log(`  ⊘ ${c.target.branch} not landed (${c.reason})`);
+          await runLogger.appendOrchestrator(
+            `chunk parked: ${c.target.branch} not landed (${c.reason}); ` +
+              `\`${LAND_LABEL}\` removed`,
+          );
         }
         // Deferred, not parked (#61 + #64): the chunk grew this cycle, so the
         // label is still on and the next cycle lands it. Printed from here for
@@ -1166,6 +1323,11 @@ export async function run(
               `(${c.landedNow.map((m) => `#${m.number}`).join(", ")}); ` +
               `\`${LAND_LABEL}\` kept for the next one`,
           );
+          await runLogger.appendOrchestrator(
+            `chunk deferred: ${c.target.branch} grew this cycle ` +
+              `(${c.landedNow.map((m) => `#${m.number}`).join(", ")}); ` +
+              `\`${LAND_LABEL}\` kept`,
+          );
         }
         await runFinalize("merge outcomes", inputs);
       }
@@ -1175,8 +1337,8 @@ export async function run(
       // stayed quiet: they share a cause — a `gh` that is having a bad minute —
       // so a cycle that hits one hits the others more often than a cycle picked
       // at random does, and the report that lost would be the operator's only
-      // notice that some issue is closed-in-name-only.
-      const haltReasons: string[] = [];
+      // notice that some issue is closed-in-name-only. Both also reach the
+      // `Exit (halted): …` line, which names every cause rather than the first.
 
       // #64 — a landed chunk whose wrap-up did not entirely finish, in the same
       // two shapes the reconcile-side report above uses (`chunkResidue`) and
@@ -1274,18 +1436,19 @@ export async function run(
         haltReasons.push("merger-close-failed");
       }
 
-      if (haltReasons.length > 0) {
-        // Both, when both fired: this label is the run log's one handle on why
-        // the run stopped, and naming only the first would hide the other from
-        // exactly the archaeology it exists for. Guarded on `halt` so a merger
-        // that threw keeps `merger-halted` — a case neither report can reach
-        // anyway, since a throw leaves no `mergerSummary` to read.
-        if (!halt) cleanupReason = haltReasons.join("+");
-        halt = true;
-      }
+      if (haltReasons.length > 0) halt = true;
 
       if (halt) {
-        exitCode = 1;
+        // Both causes when both fired: naming only the first would hide the
+        // other from exactly the archaeology this line exists for. A merger
+        // that threw is in the list too, and is alone in it — neither report
+        // can reach that path, since a throw leaves no `mergerSummary` to read.
+        //
+        // `announceExit` overwrites `cleanupReason` with the TAG, and that is
+        // the point: `run-end (halted)` is uniform with every other terminal,
+        // and the causes it used to carry are on the `exit:` line above it and
+        // in the report that produced each of them.
+        terminalExit = await announceExit(haltedExit(haltReasons));
         break;
       }
   
@@ -1309,15 +1472,16 @@ export async function run(
             : 0,
       });
       if (decision.kind === "exit") {
-        console.log(`Exit (${decision.tag}): ${decision.reason}`);
-        await runLogger.appendOrchestrator(
-          `exit: ${decision.tag} — ${decision.reason}`,
-        );
-        cleanupReason = decision.tag;
-        exitCode = decision.exitCode;
+        terminalExit = await announceExit(decision);
         break;
       }
     }
+
+    // The defensive ceiling fired: MAX_ITERATIONS cycles and not one exit
+    // condition. Nothing has ever reached it, and its exit CODE is unchanged
+    // (success) — but it used to print "All done.", which is the one thing a
+    // run that ran out of iterations did not do (#70).
+    terminalExit ??= await announceExit(iterationCeilingExit(MAX_ITERATIONS));
   } catch (err) {
     // A sandbar-internal failure escaped a cycle (a required git/gh side-effect
     // that could not be completed, or an unexpected bug). FAIL LOUD: this is
@@ -1330,17 +1494,27 @@ export async function run(
     const banner = "═".repeat(72);
     const detail = faultDetail(err);
     console.error(`\n${banner}\nSANDBAR HALTED — internal failure\n${banner}\n${detail}\n${banner}`);
-    cleanupReason = "sandbar-internal-error";
     await runLogger.appendOrchestrator(`HALTED — internal failure: ${detail}`);
+    // The stderr box keeps its place as the last thing on THAT stream, and the
+    // stdout line follows it (#70). That does not contradict the "last thing
+    // printed" argument above, it restates it: the box is the detail, the line
+    // is the answer to "did this stop normally?", and a reader who has only one
+    // of the two streams still gets an answer.
+    const exit = haltedExit(["sandbar-internal-error"]);
+    cleanupReason = exit.tag;
+    console.log(`\n${formatExitLine(exit)}`);
     await runCleanup();
-    process.exit(1);
+    process.exit(exit.exitCode);
   }
 
-  // Reached only on a normal terminal (plan-empty / stuck / budget). The
-  // decision that ended the loop already printed its own "Exit (…)" line for
-  // the non-zero cases, so a success banner is right only at exit 0.
-  if (exitCode === 0) console.log("\nAll done.");
+  // EVERY terminal path ends here, and ends with exactly one line (#70) —
+  // plan-empty and halted included, which between them used to print a success
+  // banner and nothing at all. Every path out of the loop assigns
+  // `terminalExit`, including the ceiling; the `??` is for the type-checker,
+  // which cannot see that, and its fallback is the code the ceiling carries.
+  const finalExit = terminalExit ?? iterationCeilingExit(MAX_ITERATIONS);
+  console.log(`\n${formatExitLine(finalExit)}`);
 
   await runCleanup();
-  if (exitCode !== 0) process.exit(exitCode);
+  if (finalExit.exitCode !== 0) process.exit(finalExit.exitCode);
 }

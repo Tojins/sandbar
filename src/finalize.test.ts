@@ -437,6 +437,8 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.n).toBe(45);
     expect(calls.comments[0]!.body).toContain("Should X be Y?");
+    // #70 — the branch it was pushed to, named where the human is standing.
+    expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
@@ -628,6 +630,8 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.body).toContain("AssertionError: red");
     expect(calls.comments[0]!.body).toContain("without a green gate");
+    // #70 — "push a fix on this branch" used to never say which.
+    expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
@@ -656,6 +660,7 @@ describe("finalizeOne", () => {
     expect(body).toContain("Extract the duplicated lifecycle dispatch");
     expect(body).toContain("green gate");
     expect(body).toContain("CHANGES-REQUESTED");
+    expect(body).toContain(i.branch); // #70
     // Must NOT misreport the gate as the blocker.
     expect(body).not.toContain("without a green gate");
     expect(calls.labelEdits).toEqual([
@@ -688,6 +693,9 @@ describe("finalizeOne", () => {
     expect(body).toContain("no review at all");
     expect(body).toContain("harness or environment failure");
     expect(body).toContain("No reviewer has said anything about this branch at all");
+    // #70 — and this one is telling the reader to review it themselves, so it
+    // had better say what to check out.
+    expect(body).toContain(i.branch);
     // The claim the reviewer-blocked comment would have made, and it is false
     // here: that a standards complaint is what the human has to resolve.
     expect(body).not.toContain("the code reviewer's `CHANGES-REQUESTED` is the blocker");
@@ -736,6 +744,30 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
+  });
+
+  it("needs-human uncommittable-worktree: names the branch whose worktree stayed dirty (#70)", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "needs-human",
+        issue: i,
+        cause: "uncommittable-worktree",
+        failureTrace: "?? node_modules/.cache/foo",
+        latestReviewerProse: null,
+        strandedHead: null,
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    const body = calls.comments[0]!.body;
+    expect(body).toContain("?? node_modules/.cache/foo");
+    expect(body).toContain(i.branch);
+    // The gate never ran, so the reader must not be sent looking for a red one.
+    expect(body).not.toContain("without a green gate");
   });
 
   it("needs-human off-branch-head: names the branch, the stranded sha, and how to rescue it (#27)", async () => {
@@ -896,6 +928,8 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.n).toBe(45);
     expect(calls.comments[0]!.body).toContain("too much indirection");
+    // #70 — "Push a fix on this branch" is only actionable with a name on it.
+    expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
