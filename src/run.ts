@@ -23,7 +23,19 @@
 //                              same sandbox and consumes one of
 //                              config.maxReviewRounds. APPROVED → DONE;
 //                              CHANGES-REQUESTED loops back to a new impl
-//                              attempt carrying the reviewer's prose.
+//                              attempt carrying the reviewer's prose. The two
+//                              budgets are not independent (#71): a round is
+//                              only ever spent alongside an attempt, so the
+//                              budget an issue gets is at most
+//                              min(maxImplAttempts, maxReviewRounds), and it is
+//                              exactly that on the green-gate loop where every
+//                              attempt ends in a verdict. An attempt that ends
+//                              without one — a red gate, a re-prompt, or a
+//                              reviewer harness failure (#41) — spends no
+//                              round. The defaults are equal, 8 and 8, so both
+//                              exhaust on the same attempt and the issue parks
+//                              as NEEDS-HUMAN-REVIEW — the terminal that hands
+//                              the human the latest review.
 //   Phase 3 (Merge):           Procedural merger lands DONE branches into
 //                              the source branch and pushes once — directly,
 //                              or (config.mergeMode = verified, #22) only after

@@ -8,6 +8,21 @@
 // caller supplies the exhaustion verdict because only it knows which case
 // it's in.
 //
+// The two budgets bind together, not independently (#71). `reviewRoundsUsed`
+// only ever advances in `onReviewerResult`, which advances `attempt` too, so
+// it can never outrun `attempt` and the budget an issue actually gets is at
+// most min(maxAttempts, maxReviewRounds). It IS that minimum on the loop this
+// file is shaped around — a green gate and a reviewer that answers, where every
+// attempt ends in a verdict and the two counters move together. They come apart
+// wherever an attempt ends WITHOUT a verdict, which spends the attempt and no
+// round: gate-1 red, a NO-SIGNAL re-prompt, COMPLETE over a dirty tree (#24
+// D1), HEAD off the issue branch (#27), and — behind a GREEN gate — a reviewer
+// harness failure (#41, below). So min() is the ceiling, not a floor.
+// Which terminal a caller gets when the two are EQUAL — the configured default
+// — is decided here: `onReviewerResult` tests the review budget before it calls
+// advanceAttempt, so the last round ends the issue as NEEDS-HUMAN-REVIEW
+// carrying that round's prose, rather than as NEEDS-HUMAN/`reviewer-blocked`.
+//
 // A COMPLETE claim is routed on THREE inputs, not one: the promise token, a
 // clean worktree (#24 D1), and HEAD still being the issue branch (#27). The
 // branch check runs FIRST because it subsumes the other: commits on a

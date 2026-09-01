@@ -255,7 +255,7 @@ sits in).
 | `env` | `{}` |
 | `copyToWorktree` | `[]` |
 | `maxImplAttempts` | `8` |
-| `maxReviewRounds` | `5` |
+| `maxReviewRounds` | `8` — equal to `maxImplAttempts` on purpose; see below |
 | `maxTotalIssues` | `50` |
 | `labels` | `{ needsInfo: "needs-info", agentStuck: "agent-stuck" }` (override any subset) |
 | `requiresSandbar` | *(unset)* — no version check; see below |
@@ -297,6 +297,39 @@ place, so:
   run starts (a path an `onWorktreeReady` hook was creating is now too late),
   and a **relative** one is never checked, because the worktree it resolves
   against does not exist that early.
+
+### The two budgets — `maxImplAttempts` and `maxReviewRounds`
+
+An issue gets up to `maxImplAttempts` implementer attempts in one sandbox, and
+up to `maxReviewRounds` reviewer verdicts. The two look orthogonal and are not:
+a review round is never spent without an implementer attempt, so what an issue
+actually gets is at most `min(maxImplAttempts, maxReviewRounds)`. It is exactly
+that on the path that matters — a branch whose gate goes green and whose
+reviewer answers, where **every** attempt ends in a verdict and the counters
+advance in lockstep.
+
+They come apart wherever an attempt ends *without* a verdict, which spends the
+attempt and no round: a red gate, a re-prompt (the implementer emitted no
+promise token, left the worktree dirty, or moved HEAD off the issue branch), or
+a reviewer harness failure — that last one behind a green gate, where the
+reviewer ran and produced nothing. So `min(...)` is the ceiling; an issue that
+keeps failing its gate gets fewer rounds than attempts, never more.
+
+That is why the defaults are equal. Raise `maxImplAttempts` alone and the extra
+attempts buy nothing for an issue that is being reviewed — only the
+no-verdict routes above can reach them; lower `maxReviewRounds` alone and you
+have lowered the attempt budget too. Equal, both exhaust on the same
+attempt, and the issue is parked as `NEEDS-HUMAN-REVIEW` — the terminal that
+hands you the latest review, which is what you need to finish the branch by
+hand. Set `maxReviewRounds` **above** `maxImplAttempts` and you get
+`NEEDS-HUMAN` (`reviewer-blocked`) instead, with the review no longer the
+headline.
+
+Both budgets are per-issue and per **sandbox cycle**, not per run: a HARD-ERROR
+(an infrastructure failure, never a verdict about the code) retries the issue in
+a fresh sandbox up to two further times, and each retry starts both counters at
+zero. One issue in one run can therefore cost up to three full budgets. Neither
+counter carries across runs.
 
 ### `mergeMode` — who gets to say the merge result is good
 

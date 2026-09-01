@@ -77,10 +77,18 @@ an exit condition fires.
    planned issue runs in parallel in its own agent sandbox + per-issue gate
    stack, ralph-style: up to `maxImplAttempts` (default 8) attempts in the
    **same** sandbox so commits accumulate on the issue branch. All transitions
-   live in the pure state machine; `inner-loop.ts` is I/O glue. Two orthogonal
-   budgets: impl attempts and `maxReviewRounds` (default 5). The reviewer is
-   strictly advisory and read-only; `src/reviewer-run.ts` owns what a failed
-   reviewer run means (#41). Terminals: `DONE | NEEDS-INFO |
+   live in the pure state machine; `inner-loop.ts` is I/O glue. Two budgets,
+   impl attempts and `maxReviewRounds` (default 8, equal to `maxImplAttempts`),
+   and they are NOT independent (#71): a round is never spent without an
+   attempt, so the budget is at most the min of the two — exactly that on the
+   green-gate loop where every attempt ends in a verdict, and more attempts
+   than rounds wherever one ends without one (a red gate, a re-prompt, a
+   reviewer harness failure). Equal is what makes both
+   exhaust on the same attempt and park the issue with the terminal carrying
+   the latest review; `DEFAULT_MAX_REVIEW_ROUNDS`'s comment in `src/config.ts`
+   owns the number and the two dogfooding exhaustions behind it (#8, #66). The
+   reviewer is strictly advisory and read-only; `src/reviewer-run.ts` owns what
+   a failed reviewer run means (#41). Terminals: `DONE | NEEDS-INFO |
    NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | HARD-ERROR`
    (infra-only).
 
