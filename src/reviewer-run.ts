@@ -78,10 +78,20 @@ export type ReviewRoundDecision =
       readonly followup: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED";
     };
 
+export type FinishedReviewRoundDecision = Extract<
+  ReviewRoundDecision,
+  { readonly kind: "finished" }
+>;
+
 export function continueReviewerSession(pass: ReviewerPass, invocation: number): boolean {
   return pass === "followup" && invocation === 1;
 }
 
+export function decideReviewRound(correctness: ReviewerOutcome): ReviewRoundDecision;
+export function decideReviewRound(
+  correctness: ReviewerOutcome,
+  followup: ReviewerOutcome,
+): FinishedReviewRoundDecision;
 export function decideReviewRound(
   correctness: ReviewerOutcome,
   followup?: ReviewerOutcome,

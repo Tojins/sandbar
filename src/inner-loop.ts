@@ -811,6 +811,9 @@ async function runReviewer(
   );
 
   const transcripts = [`=== correctness pass ===\n${correctness.transcript}`];
+  // Every invocation's output, not just the reviewing one: the observed failure
+  // left a 73-byte log for a 15-minute run, and this file is the only offline
+  // artefact of what the reviewer did or did not say.
   const writeTranscript = async (): Promise<void> => {
     if (opts.attemptLogger) {
       await opts.attemptLogger.writeAttemptReviewer(
@@ -824,11 +827,13 @@ async function runReviewer(
   const logHarnessFailure = async (
     pass: "correctness" | "followup",
     outcome: Extract<Awaited<ReturnType<typeof runPass>>, { kind: "harness-failed" }>,
+    decision: Extract<ReturnType<typeof decideReviewRound>, { kind: "finished" }>,
   ): Promise<void> => {
     await writeTranscript();
     const line =
       `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-      `pass=${pass} harness-failed invocations=${outcome.invocations} (round not consumed)`;
+      `pass=${pass} harness-failed invocations=${outcome.invocations} ` +
+      `correctness=${decision.correctness} followup=${decision.followup} (round not consumed)`;
     console.error(`  ${line}`);
     if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
   };
@@ -836,7 +841,7 @@ async function runReviewer(
   const afterCorrectness = decideReviewRound(correctness);
   if (afterCorrectness.kind === "finished") {
     if (correctness.kind === "harness-failed") {
-      await logHarnessFailure("correctness", correctness);
+      await logHarnessFailure("correctness", correctness, afterCorrectness);
       return afterCorrectness.event;
     }
     await writeTranscript();
@@ -856,15 +861,9 @@ async function runReviewer(
   );
   transcripts.push(`=== follow-up pass ===\n${followup.transcript}`);
 
-  // Every invocation's output, not just the reviewing one: the observed failure
-  // left a 73-byte log for a 15-minute run, and this file is the only offline
-  // artefact of what the reviewer did or did not say.
   const decision = decideReviewRound(correctness, followup);
-  if (decision.kind !== "finished") {
-    throw new SandbarError("follow-up outcome did not finish review round");
-  }
   if (followup.kind === "harness-failed") {
-    await logHarnessFailure("followup", followup);
+    await logHarnessFailure("followup", followup, decision);
     return decision.event;
   }
   await writeTranscript();

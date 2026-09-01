@@ -318,6 +318,9 @@ describe("renderReviewerFollowupSlot", () => {
     expect(slot).toContain("`### Tests`");
     expect(slot).toContain("`### Spec`");
     expect(slot).toContain("`### Standards`");
+    expect(slot).toContain("`### Correctness`");
+    expect(slot).toMatch(/Do not search for correctness defects/);
+    expect(slot).toMatch(/independently notice a concrete correctness defect/);
     expect(slot).toContain("<verdict>APPROVED</verdict>");
     expect(slot).toContain("<verdict>CHANGES-REQUESTED</verdict>");
     expect(slot).toMatch(/Emit exactly one verdict/);
