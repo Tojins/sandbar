@@ -10,6 +10,7 @@ import {
   DEFAULT_AGENT_PROVIDER,
   PROVIDER_CREDENTIALS,
   assertRoleModelIdNamed,
+  billingPrecedenceWarnings,
   buildAgentProvider,
   parseAgentProviderName,
   requiredAgentProviders,
@@ -84,11 +85,104 @@ describe("PROVIDER_CREDENTIALS", () => {
     ]);
   });
 
-  it("asks codex for the API key, as a value rather than a seeded file (#38)", () => {
+  // #72 accepted only the API key here and said the subscription "will not
+  // work". #73 made it work without moving anything but data: the file's
+  // CONTENT is a value like any other credential (#38), so it is a second
+  // any-of entry rather than a mount or a path.
+  it("accepts either the API key or the ChatGPT session for codex (#73)", () => {
     expect(PROVIDER_CREDENTIALS.codex.map((c) => c.key)).toEqual([
       "OPENAI_API_KEY",
+      "CODEX_AUTH_JSON",
     ]);
-    expect(PROVIDER_CREDENTIALS.codex[0]!.note).toContain("auth.json");
+    const chatgpt = PROVIDER_CREDENTIALS.codex[1]!;
+    expect(chatgpt.note).toContain("auth.json");
+    // The note is what preflight quotes at an operator with no codex
+    // credential, so the two costs #73 named have to be IN it: they are the
+    // thin edge of this design and the operator is the one choosing it.
+    expect(chatgpt.note).toContain("concurrent");
+    expect(chatgpt.note).toContain("codex login");
+  });
+
+  // Every provider that accepts two kinds of credential has to say which one
+  // its CLI picks, or `billingPrecedenceWarnings` silently has nothing to warn
+  // about — the failure it exists to catch is itself silent.
+  it("names the preferred key and what each one bills, wherever there is a choice", () => {
+    for (const name of AGENT_PROVIDER_NAMES) {
+      const creds = PROVIDER_CREDENTIALS[name];
+      if (creds.length < 2) continue;
+      expect(creds.filter((c) => c.preferred === true)).toHaveLength(1);
+      for (const c of creds) expect(c.bills).toBeDefined();
+    }
+  });
+});
+
+describe("billingPrecedenceWarnings", () => {
+  const declared =
+    (...keys: string[]) =>
+    (key: string): string | undefined =>
+      keys.includes(key) ? "value" : undefined;
+
+  it("warns when the metered key will beat a declared subscription", () => {
+    const [warning, ...rest] = billingPrecedenceWarnings(
+      ["codex"],
+      declared("OPENAI_API_KEY", "CODEX_AUTH_JSON"),
+    );
+    expect(rest).toEqual([]);
+    expect(warning).toContain("OPENAI_API_KEY");
+    expect(warning).toContain("CODEX_AUTH_JSON");
+    expect(warning).toContain("codex");
+  });
+
+  // The same trap, the other vendor — which is the whole reason this is data
+  // over PROVIDER_CREDENTIALS rather than a codex special case.
+  it("warns for claude on the same rule", () => {
+    expect(
+      billingPrecedenceWarnings(
+        ["claude"],
+        declared("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("is quiet for either credential alone", () => {
+    for (const keys of [
+      ["OPENAI_API_KEY"],
+      ["CODEX_AUTH_JSON"],
+      ["CLAUDE_CODE_OAUTH_TOKEN"],
+      ["ANTHROPIC_API_KEY"],
+    ]) {
+      expect(
+        billingPrecedenceWarnings(["claude", "codex"], declared(...keys)),
+      ).toEqual([]);
+    }
+  });
+
+  // It is asked about the providers a run will INVOKE (`requiredAgentProviders`),
+  // so a key left in `config.env` from a routing the config no longer names
+  // costs nobody anything and says nothing.
+  it("says nothing about a provider this run does not route to", () => {
+    expect(
+      billingPrecedenceWarnings(
+        ["claude"],
+        declared("OPENAI_API_KEY", "CODEX_AUTH_JSON"),
+      ),
+    ).toEqual([]);
+  });
+
+  // One line per provider, not one for the pair: the two are separate accounts
+  // and separate edits to `config.env`.
+  it("warns per provider when both are routed and both are doubled", () => {
+    expect(
+      billingPrecedenceWarnings(
+        ["claude", "codex"],
+        declared(
+          "ANTHROPIC_API_KEY",
+          "CLAUDE_CODE_OAUTH_TOKEN",
+          "OPENAI_API_KEY",
+          "CODEX_AUTH_JSON",
+        ),
+      ),
+    ).toHaveLength(2);
   });
 });
 

@@ -251,7 +251,15 @@ and used to announce themselves in four different ways, the halt in none at all.
   idempotence latch flips (#55).
 - **Credentials are a value, not a path (#38).** `config.env` is an allowlist
   record (empty value ⇒ inherit from `process.env`); `readEnvFile` is the
-  opt-in loader. `src/env.ts`.
+  opt-in loader. `src/env.ts`. A credential whose vendor interface is a FILE is
+  not an exception (#73): codex's ChatGPT subscription IS
+  `codex login`'s `~/.codex/auth.json`, so `CODEX_AUTH_JSON` carries that file's
+  CONTENT — the config is a program and reads its own host copy — and the
+  provider writes it into the sandbox's `$HOME` **only if absent**, because
+  codex refreshes tokens in place and a re-seed would restore one the refresh
+  rotated away. Not a bind mount: that would be a writable channel from a
+  sandbox back onto the host's credential, with three parallel sandboxes as
+  concurrent writers on one file.
 - **A role names its CLI as well as its model (#72).** `implementerAgent` /
   `reviewerAgent`, both defaulting to `claude`, beside the model ids that were
   already per-role: the tiering knob and the vendor knob are independent, and
@@ -287,7 +295,12 @@ and used to announce themselves in four different ways, the halt in none at all.
   them). Both CLIs are in the one image (#39): which one a role runs is resolved
   per run, so the image cannot be a function of it — and codex is PINNED there,
   because `parsedOutputOnly` makes its stream format load-bearing in a way
-  claude-code's is not.
+  claude-code's is not. `PROVIDER_CREDENTIALS` is ANY-OF per provider, which is
+  what let #73 add codex's subscription as data; what a second accepted key
+  needed beyond data is `billingPrecedenceWarnings`, because a CLI handed both a
+  metered key and a subscription picks the metered one ITSELF (both vendors do)
+  and the only symptom is a bill. A warning, never a refusal — both configs run,
+  and sandbar cannot know which account the operator meant to spend.
 - **Token contracts.** Implementer: `<promise>COMPLETE|NEEDS-INFO|
   NEEDS-UI-PROTOTYPE</promise>`; resolve loop: `COMMITTED|ABANDON`; anything
   else re-prompts. Reviewer: `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`,

@@ -286,12 +286,34 @@ export default {
   //   implementerAgent: "codex",
   //   implementerModelId: "gpt-5.6-sol",   // the same field, the other vendor's id
   //
-  // plus `OPENAI_API_KEY` in `sandbar.env` — preflight refuses the run without
-  // it rather than letting the failure arrive as an implementer dying
+  // plus a codex credential in `env` below — preflight refuses the run without
+  // one rather than letting the failure arrive as an implementer dying
   // in-container — plus `requiresSandbar` raised to a release that HAS the
-  // field, in the same commit (#66). The first two are a pair the driver
-  // enforces rather than trusts: a model id left unset is the claude alias
-  // "opus", so a half-moved config would ask codex for it on every attempt.
+  // field, in the same commit (#66).
+  //
+  // WHICH credential is the money question, and for a ChatGPT Pro operator it
+  // is not the API key (#73). The included pool is the whole discount — top-up
+  // credits are priced at API parity — and `OPENAI_API_KEY` bills the API
+  // without touching it. The subscription is a FILE: `codex login` on this host
+  // writes `~/.codex/auth.json`, and `CODEX_AUTH_JSON` carries its content as a
+  // value, which this file is a program and can read for itself:
+  //
+  //   env: {
+  //     ...readEnvFile(new URL("sandbar.env", import.meta.url)),
+  //     CODEX_AUTH_JSON: readFileSync(join(homedir(), ".codex/auth.json"), "utf8"),
+  //   },
+  //
+  // (with `readFileSync`, `homedir` and `join` imported at the top beside
+  // `existsSync`). Not `sandbar.env`: that parser is line-based and `auth.json`
+  // is pretty JSON. Declare ONE of the two — codex prefers `OPENAI_API_KEY` when both are
+  // visible, so a config carrying both pays the subscription and bills the API
+  // anyway, which preflight warns about. Re-run `codex login` here if a series
+  // is ever refused for a stale token: the container's copy refreshes in place
+  // and this host's can be left behind.
+  //
+  // The agent/model pair is one the driver enforces rather than trusts: a model
+  // id left unset is the claude alias "opus", so a half-moved config would ask
+  // codex for it on every attempt.
   // The reviewer stays claude on purpose: it holds the verdict, and #72's
   // whole argument is that the strongest model belongs where the judgement
   // is, not where the tokens are.

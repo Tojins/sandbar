@@ -27,6 +27,22 @@
 // variant". It is absent from the union deliberately: it is not implemented,
 // and a config that could NAME it would be refused by the run it was written
 // for or, worse, silently fall back to claude.)
+//
+// WHAT A CREDENTIAL IS ALLOWED TO BE (#73): a value in `config.env`, and that
+// held even for the one whose interface is a FILE. codex's ChatGPT
+// subscription is `~/.codex/auth.json`, so `CODEX_AUTH_JSON` carries the file's
+// CONTENT and the provider materialises it in-container (`CODEX_AUTH_SEED`) —
+// the config reads its own host file, sandbar names none, and no host
+// credential is mounted writable into a sandbox (#38). Adding the key was
+// otherwise a data change: `PROVIDER_CREDENTIALS` was already any-of, so a
+// second accepted key needed no new mechanism, and an older driver handed a
+// config declaring only it refuses the run LOUDLY (it finds no accepted codex
+// credential) rather than silently — which is why this needed no
+// `requiresSandbar` move, unlike a config FIELD (#66).
+//
+// What the second key DID need is `billingPrecedenceWarnings`: any-of stops
+// being the whole story once two accepted keys bill differently and the CLI
+// picks between them by itself.
 
 import { type AgentProvider, claudeCode, codex } from "./agent-sandbox.js";
 import { SandbarError } from "./errors.js";
@@ -47,6 +63,16 @@ export const DEFAULT_AGENT_PROVIDER: AgentProviderName = "claude";
 export type ProviderCredential = {
   readonly key: string;
   readonly note: string;
+  // What spending this credential BILLS (#73). Only the distinction the
+  // warning below turns on: `subscription` is a flat plan the operator pays for
+  // whether a run uses it or not, `api` is metered per token.
+  readonly bills?: "api" | "subscription";
+  // The key this provider picks when more than one of its credentials is
+  // visible at once. At most one per provider carries it, and it is the CLI's
+  // own behaviour being recorded, not a preference sandbar imposes — nothing
+  // here reorders anything, because the choice is made inside the container by
+  // a program sandbar does not control.
+  readonly preferred?: true;
 };
 
 export const PROVIDER_CREDENTIALS: Record<
@@ -57,23 +83,81 @@ export const PROVIDER_CREDENTIALS: Record<
     {
       key: "CLAUDE_CODE_OAUTH_TOKEN",
       note: "Pro/Max/Team/Enterprise subscription; generate with `claude setup-token`",
+      bills: "subscription",
     },
     {
       key: "ANTHROPIC_API_KEY",
       note: "pay-as-you-go API; takes precedence if both are set",
+      bills: "api",
+      preferred: true,
     },
   ],
   codex: [
     {
       key: "OPENAI_API_KEY",
+      note: "pay-as-you-go API; takes precedence if both are set",
+      bills: "api",
+      preferred: true,
+    },
+    {
+      key: "CODEX_AUTH_JSON",
       note:
-        "pay-as-you-go API. A ChatGPT SUBSCRIPTION is not this and will not " +
-        "work: its OAuth flow writes `~/.codex/auth.json`, a file inside the " +
-        "container that nothing seeds — credentials reach a sandbox as a " +
-        "VALUE through `config.env` (#38), never as a path",
+        "ChatGPT Plus/Pro/Business subscription — the verbatim CONTENT of the " +
+        "`~/.codex/auth.json` (`$CODEX_HOME`) that `codex login` wrote on a " +
+        "host, as a value (#38, #73): `readFileSync(join(homedir(), " +
+        '".codex/auth.json"), "utf8")` in the config, which is a program. ' +
+        "The provider writes it into each sandbox's own `$HOME` on first use " +
+        "and never over a file already there, so in-container refreshes are " +
+        "kept. Two costs to have chosen knowingly: parallel sandboxes hold " +
+        "concurrent copies of one credential, which OpenAI's CI/CD guidance " +
+        "advises against, and a refresh can rotate the token away from the " +
+        "host's copy — after which a later series needs `codex login` again",
+      bills: "subscription",
     },
   ],
 };
+
+// The trap that a provider accepting BOTH kinds of credential creates, and the
+// only thing `bills`/`preferred` exist for (#73).
+//
+// A CLI handed a subscription credential and a metered key picks one of them,
+// inside the container, by its own rule — codex prefers `OPENAI_API_KEY` over a
+// ChatGPT session, claude prefers `ANTHROPIC_API_KEY` over an OAuth token. Both
+// configurations RUN, which is why this is a warning and not a refusal, and
+// both are silent: the sub is charged flat whether or not anything used it, so
+// the whole symptom is an API bill that arrives weeks later for tokens a plan
+// already covered. That asymmetry is the argument for warning at all — declared
+// together, the metered key wins every time and the subscription is paid for
+// twice.
+//
+// Data-driven over every provider rather than written for codex, because it is
+// the same trap in both vendors and the facts it needs were already in the
+// notes above. It reads the same resolved view of `config.env` the credential
+// check does, so a key declared empty and absent from the host environment is
+// not "declared" here either.
+export function billingPrecedenceWarnings(
+  providers: readonly AgentProviderName[],
+  env: (key: string) => string | undefined,
+): readonly string[] {
+  const out: string[] = [];
+  for (const provider of providers) {
+    const declared = PROVIDER_CREDENTIALS[provider].filter((c) => !!env(c.key));
+    const winner = declared.find((c) => c.preferred === true);
+    if (winner === undefined || winner.bills !== "api") continue;
+    const unused = declared.filter((c) => c.bills === "subscription");
+    if (unused.length === 0) continue;
+    const unusedKeys = unused.map((c) => c.key).join(" and ");
+    out.push(
+      `WARNING: \`config.env\` declares ${winner.key} as well as ${unusedKeys} ` +
+        `for ${provider}. ${provider} prefers ${winner.key} when both are ` +
+        "visible, so this run bills the metered API while the subscription " +
+        `${unusedKeys} authenticates goes unspent — a cost that shows up on a ` +
+        `bill and nowhere in a run. Drop ${winner.key} from \`config.env\` to ` +
+        "spend the subscription instead.",
+    );
+  }
+  return out;
+}
 
 // Validated at runtime even though the field is typed, for the reason every
 // other config field is: `sandbar.config.mjs` is a program and `.mjs` is not
