@@ -65,12 +65,13 @@
 //
 // IT EXISTS FROM THE MOMENT THE LOCK IS WON (#70), which is fifteen steps
 // earlier than it used to. Everything before `startRunLogger` is unrecorded by
-// construction, and that used to include preflight, both orphan sweeps, the
-// image builds and the uid check — so the single most operator-actionable
+// construction, and that used to include preflight, the three startup sweeps,
+// the image builds and the uid check — so the single most operator-actionable
 // thing sandbar produces, a preflight refusal, was the one class of stop that
 // left nothing to read afterwards. Every one of those now writes its complaint
-// into the tree before it dies (`stopAtStartup`), including the two that
-// escaped `run()` uncaught.
+// into the tree before it dies (`stopAtStartup`), the sweeps, the builds and
+// the uid check included: those three escaped `run()` uncaught altogether, so
+// they skipped cleanup as well as the record.
 //
 // THE BOUNDARY IS THE LOCK, and three exits sit outside it deliberately. Two
 // are pre-lock by construction: writing a log tree before the lock is won means
@@ -417,8 +418,13 @@ export async function run(
     cause: string,
     err: unknown,
   ): Promise<never> => {
-    const actionable = err instanceof SandbarError || err instanceof PreflightError;
-    const detail = actionable ? err.message : faultDetail(err);
+    // `faultDetail` already renders a SandbarError as its bare message and
+    // anything else as a stack — errors.ts owns that rule and all three places
+    // sandbar prints a fault share it. The one case it does not know about is
+    // PreflightError, which extends Error rather than SandbarError and whose
+    // message IS the operator-actionable report.
+    const detail =
+      err instanceof PreflightError ? err.message : faultDetail(err);
     await runLogger.appendOrchestrator(`stopped (${cause}): ${detail}`);
     console.error(detail);
     const exit = await recordExit(haltedExit([cause]));
@@ -445,12 +451,13 @@ export async function run(
     // the lock, because it writes into the state directory; before preflight,
     // because preflight fetches into it.
     //
-    // Inside preflight's catch, and `SandbarError` alongside `PreflightError`,
-    // because its failures are the same KIND of failure: `cwd` is not a repo,
-    // it has no `origin`, the clone did not work. Every one is a startup
-    // complaint an operator acts on, so it prints as its message alone and
-    // exits — and, unlike letting it escape to the bin, it runs cleanup first,
-    // which is what recovers the `run.pid` sidecar.
+    // Inside preflight's catch because its failures are the same KIND of
+    // failure: `cwd` is not a repo, it has no `origin`, the clone did not
+    // work. Every one is a startup complaint an operator acts on, so it prints
+    // as its message alone — a `SandbarError` by `faultDetail`'s own rule, a
+    // `PreflightError` by `stopAtStartup`'s one exception to it — and exits,
+    // and, unlike letting it escape to the bin, it runs cleanup first, which is
+    // what recovers the `run.pid` sidecar.
     await ensureRepoCache(layout);
     await runPreflight({
       layout,
@@ -492,56 +499,76 @@ export async function run(
   // acquireLock has already mkdirSync'd the directory, so this cannot ENOENT.
   const scope = runScope(realpathSync(lockPaths.workDir));
 
-  const orphans = await cleanupOrphanContainers(scope);
-  if (orphans.removed.length > 0) {
-    console.log(
-      `Removed ${orphans.removed.length} orphaned sandbar resource(s) from prior runs.`,
+  // ALL THREE SWEEPS IN ONE `try`, because all three THROW on a failed LIST
+  // and none of them used to sit inside anything (#70). The throw is right at
+  // the other end — `containers.ts` and `ensure-images.ts` both argue that a
+  // failed list is a blind sweep, which cannot know what it missed, so stopping
+  // beats asserting "no debris" on no evidence — but the stop it produced
+  // escaped `run()` to the bin, which is the exact shape this issue exists to
+  // end: no `stopped (…)` line, no `Exit (…)`, no cleanup, and nothing on disk
+  // in a window this run had already won the lock for. Preflight passed moments
+  // earlier, so what reaches here is a socket that dropped or a systemd session
+  // that went away between two podman calls — host state an operator can act
+  // on, and now host state they can still read afterwards.
+  //
+  // One `try` and one cause for the three: they are one step (take stock of
+  // what a previous run left behind), they fail for one reason, and the
+  // complaint recorded beside the cause names which podman call it was.
+  try {
+    const orphans = await cleanupOrphanContainers(scope);
+    if (orphans.removed.length > 0) {
+      console.log(
+        `Removed ${orphans.removed.length} orphaned sandbar resource(s) from prior runs.`,
+      );
+      await runLogger.appendOrchestrator(
+        `swept ${orphans.removed.length} orphan(s) from prior runs: ${orphans.removed.join(", ")}`,
+      );
+    }
+    await reportSweepFailures(orphans, (line) =>
+      runLogger.appendOrchestrator(line),
     );
-    await runLogger.appendOrchestrator(
-      `swept ${orphans.removed.length} orphan(s) from prior runs: ${orphans.removed.join(", ")}`,
-    );
-  }
-  await reportSweepFailures(orphans, (line) =>
-    runLogger.appendOrchestrator(line),
-  );
 
-  // The image half of the same sweep (#37). Per-branch gate images are removed
-  // at the end of a run, but that removal is an `onCleanup` action and so does
-  // not run on SIGKILL, a hard crash, or a `podman build` that outlived its
-  // parent — and these are the largest things sandbar creates. Startup only:
-  // within a run they are reused, and they carry this scope, so anything found
-  // here belongs to a predecessor of this workdir that is provably not running.
-  const staleImages = await sweepBranchImages(scope);
-  if (staleImages.removed.length > 0) {
-    console.log(
-      `Removed ${staleImages.removed.length} per-branch gate image(s) left by a prior run.`,
+    // The image half of the same sweep (#37). Per-branch gate images are
+    // removed at the end of a run, but that removal is an `onCleanup` action
+    // and so does not run on SIGKILL, a hard crash, or a `podman build` that
+    // outlived its parent — and these are the largest things sandbar creates.
+    // Startup only: within a run they are reused, and they carry this scope, so
+    // anything found here belongs to a predecessor of this workdir that is
+    // provably not running.
+    const staleImages = await sweepBranchImages(scope);
+    if (staleImages.removed.length > 0) {
+      console.log(
+        `Removed ${staleImages.removed.length} per-branch gate image(s) left by a prior run.`,
+      );
+      await runLogger.appendOrchestrator(
+        `swept ${staleImages.removed.length} stale per-branch gate image(s): ${staleImages.removed.join(", ")}`,
+      );
+    }
+    await reportSweepFailures(staleImages, (line) =>
+      runLogger.appendOrchestrator(line),
     );
-    await runLogger.appendOrchestrator(
-      `swept ${staleImages.removed.length} stale per-branch gate image(s): ${staleImages.removed.join(", ")}`,
-    );
-  }
-  await reportSweepFailures(staleImages, (line) =>
-    runLogger.appendOrchestrator(line),
-  );
 
-  // Debris no run's scope claims: from a build predating #28, or the sandcastle
-  // era. Reported rather than removed, because a bare-prefix match cannot tell
-  // it from a concurrently-running old sandbar's LIVE resources — which is the
-  // failure #28 exists to end. Nothing clears it but the operator, so this
-  // repeats every startup until they run the commands.
-  const unattributable = await findUnattributableResources();
-  if (unattributable.names.length > 0) {
-    console.warn(
-      `\n${unattributable.names.length} podman resource(s) carry a sandbar name from ` +
-        "before this version's per-run scoping and cannot be attributed to any " +
-        "run, so sandbar will not remove them. If no other sandbar is running, " +
-        "clear them with:\n" +
-        unattributable.removalCommands.map((c) => `  ${c}`).join("\n") +
-        "\n",
-    );
-    await runLogger.appendOrchestrator(
-      `unattributable podman resource(s), not removed: ${unattributable.names.join(", ")}`,
-    );
+    // Debris no run's scope claims: from a build predating #28, or the
+    // sandcastle era. Reported rather than removed, because a bare-prefix match
+    // cannot tell it from a concurrently-running old sandbar's LIVE resources —
+    // which is the failure #28 exists to end. Nothing clears it but the
+    // operator, so this repeats every startup until they run the commands.
+    const unattributable = await findUnattributableResources();
+    if (unattributable.names.length > 0) {
+      console.warn(
+        `\n${unattributable.names.length} podman resource(s) carry a sandbar name from ` +
+          "before this version's per-run scoping and cannot be attributed to any " +
+          "run, so sandbar will not remove them. If no other sandbar is running, " +
+          "clear them with:\n" +
+          unattributable.removalCommands.map((c) => `  ${c}`).join("\n") +
+          "\n",
+      );
+      await runLogger.appendOrchestrator(
+        `unattributable podman resource(s), not removed: ${unattributable.names.join(", ")}`,
+      );
+    }
+  } catch (err) {
+    return await stopAtStartup("startup-sweep-failed", err);
   }
 
   // Build the sandbar image in the runtime if missing. No-op when it already
@@ -562,12 +589,12 @@ export async function run(
   // the fingerprint recorded on each image is a true claim about a named tree.
   // #37's validation moves with it: `rebuildOn`'s must-exist check and
   // `checkWorktreeImageUids` both resolve against this root.
-  // Wrapped because these two used to be the only startup steps whose
-  // SandbarError `run()` never caught at all: it escaped to the bin, which
-  // printed it and exited without running cleanup and without the log tree
-  // ever hearing about it (#70). An unbuildable declared image and a bad uid
-  // are ordinary host-configuration faults, and they are now recorded like
-  // every other refusal.
+  // Wrapped because these two used to escape `run()` uncaught, exactly as the
+  // sweeps above did: the SandbarError went to the bin, which printed it and
+  // exited without running cleanup and without the log tree ever hearing about
+  // it (#70). An unbuildable declared image and a bad uid are ordinary
+  // host-configuration faults, and they are now recorded like every other
+  // refusal.
   let sourceWorktree: string;
   let baseFingerprints: ReadonlyMap<string, string>;
   try {
@@ -978,10 +1005,13 @@ export async function run(
       // Number and title only. The branch name is up to ~120 characters and
       // was printed three times per issue per cycle — here, at the terminal
       // line below, and again in the DONE list — which in a 3-issue cycle is a
-      // third of the content (#70). The terminal line is the one that keeps it:
-      // it is the only place a human is told a PARKED issue's branch, and
-      // nothing else in the run says it (the finalise line, the orchestrator
-      // log and the bot comment all named the issue and not the branch).
+      // third of the content (#70). The terminal line below is the one that
+      // keeps it: stdout should say a parked issue's branch once, and that is
+      // the line where the branch is attached to an OUTCOME rather than to a
+      // plan. Nothing else the run prints says it — the finalise line and
+      // orchestrator.log both name the issue — and the parking comment does,
+      // since this same issue put it there, but that is on the tracker and a
+      // human reading the run's own output should not have to go and find it.
       for (const issue of issues) {
         console.log(`  #${issue.id}: ${issue.title}`);
       }
@@ -1016,10 +1046,11 @@ export async function run(
           outcomes.push(s.value);
           const issue = s.value.issue;
           const t = s.value.terminal;
-          // The one place the branch name is printed (#70): a parked issue's
-          // branch is what a human needs to stand on, and it appears nowhere
-          // else — not in the finalise line, not in orchestrator.log, not in
-          // the bot comment before this issue changed them.
+          // The one place stdout prints the branch name (#70): a parked
+          // issue's branch is what a human needs to stand on, and it appears
+          // nowhere else in the run's output — not in the finalise line, not in
+          // orchestrator.log. The parking comment names it too, from this same
+          // issue, but that is on the tracker rather than here.
           console.log(`  #${issue.id} (${issue.branch}): ${t.type}`);
           await runLogger.appendOrchestrator(
             `terminal #${issue.id} ${t.type}`,

@@ -93,14 +93,21 @@ export const BOT_COMMENT_PREFIX = "**Sandbar:**";
 // may carry is one it was HANDED, which is a host issue number by
 // construction.
 //
-// EVERY PARKING TEMPLATE NAMES THE BRANCH (#70). These bodies are the place the
-// human is standing when they act — "push a fix on this branch" was in three of
-// them and none of them said which. The name is re-derivable in principle
-// (`issueBranchName` = number + `kebabSlug(title)`) but lossily: `operator's`
-// kebabs to `operator-s`, and a retitled issue gets a DIFFERENT branch next
-// cycle, so re-deriving a parked branch's name can simply be wrong. It is
-// handed in from `input.issue.branch`, which is the branch that was actually
-// pushed.
+// EVERY PARKING TEMPLATE WHOSE TERMINAL PUSHES THE BRANCH NAMES IT (#70).
+// These bodies are the place the human is standing when they act — "push a fix
+// on this branch" was in three of them and none of them said which. The name is
+// re-derivable in principle (`issueBranchName` = number + `kebabSlug(title)`)
+// but lossily: `operator's` kebabs to `operator-s`, and a retitled issue gets
+// a DIFFERENT branch next cycle, so re-deriving a parked branch's name can
+// simply be wrong. It is handed in from `input.issue.branch`, which is the
+// branch that was actually pushed.
+//
+// The qualifier is the whole rule, because two terminals leave no branch to
+// name and correctly say so instead. `NEEDS_UI_PROTOTYPE` normally escalates
+// before a line of code exists and `finalizeOne` deletes the local branch, so
+// it takes a nullable `branchPushed` and names one only on the late
+// escalation that did push. `SILENT_NOOP_EXHAUSTED` never has one: that
+// terminal discards the branch after every attempt, which its body says.
 //
 // What each of them names is the LOCATION, never what the push CARRIES. The
 // two are not the same claim: an off-branch run pushes the branch and moves
