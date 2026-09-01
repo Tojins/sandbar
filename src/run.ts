@@ -640,7 +640,9 @@ export async function run(
     hostUid: process.getuid?.() ?? 0,
   });
   onCleanup(async () => {
-    const tags = [...branchImages.builtTags(), ...agentImages.builtTags()];
+    // Augmented images are FROM-children of branch variants. Remove leaves
+    // first so podman can then remove their parents.
+    const tags = [...agentImages.builtTags(), ...branchImages.builtTags()];
     if (tags.length === 0) return;
     const failures = await removeBranchImages(tags);
     if (failures.length > 0) {

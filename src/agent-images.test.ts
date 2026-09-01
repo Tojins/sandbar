@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
-import { CLAUDE_CODE_VERSION, CODEX_VERSION } from "./agent-providers.js";
+import { AGENT_PROVIDER_PACKAGES } from "./agent-providers.js";
 import {
   type BuildOptions,
   agentToolsContainerfile,
@@ -25,42 +27,52 @@ describe("run-owned agent images", () => {
     });
     expect(builds).toHaveLength(1);
     expect(builds[0].argv.at(-1)).toBe("-");
-    expect(builds[0].content).toContain(`@openai/codex@${CODEX_VERSION}`);
+    expect(builds[0].content).toContain(AGENT_PROVIDER_PACKAGES.codex.spec);
     expect(builds[0].content).not.toContain("anthropic");
   });
 
   it("pins both providers and keeps claude lifecycle scripts enabled", () => {
     const file = agentToolsContainerfile("base", ["claude", "codex"]);
-    expect(file).toContain(`@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`);
+    expect(file).toContain(AGENT_PROVIDER_PACKAGES.claude.spec);
     expect(file).toContain("--allow-scripts=@anthropic-ai/claude-code");
-    expect(file).toContain(`@openai/codex@${CODEX_VERSION}`);
+    expect(file).toContain(AGENT_PROVIDER_PACKAGES.codex.spec);
   });
 
   it("rebuilds when the base provenance is unknown even if the derived tag exists", async () => {
     let builds = 0;
+    let reads = 0;
     await createAgentImages({
       declaredBaseTag: "base",
       providers: ["claude"],
       scope: runScope("/unknown-base"),
-      inputsLabel: async () => "apparently-present",
-      // First lookup is the base. Make it unknown; subsequent lookup may look
-      // present, and still must not be trusted.
-      build: async () => { builds += 1; },
-      probeUid: async () => 0,
-      log: () => {},
-    });
-    // The all-present seam above gives the base known provenance, so prove the
-    // complementary unknown case with a stateful reader.
-    let reads = 0;
-    await createAgentImages({
-      declaredBaseTag: "other",
-      providers: ["claude"],
-      scope: runScope("/unknown-base-2"),
       inputsLabel: async () => (++reads === 1 ? null : "apparently-present"),
-      build: async () => { builds += 1; },
+      build: async () => {
+        builds += 1;
+      },
       probeUid: async () => 0,
       log: () => {},
     });
-    expect(builds).toBe(2);
+    expect(builds).toBe(1);
+  });
+
+  it("reuses a derived image whose label matches a labelled base and toolset", async () => {
+    const toolset = `codex: ${AGENT_PROVIDER_PACKAGES.codex.spec}`;
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify(["base-fp", toolset]))
+      .digest("hex");
+    let reads = 0;
+    let builds = 0;
+    await createAgentImages({
+      declaredBaseTag: "base",
+      providers: ["codex"],
+      scope: runScope("/cached-agent-image"),
+      inputsLabel: async () => (++reads === 1 ? "base-fp" : fingerprint),
+      build: async () => {
+        builds += 1;
+      },
+      probeUid: async () => 0,
+      log: () => {},
+    });
+    expect(builds).toBe(0);
   });
 });

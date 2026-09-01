@@ -51,7 +51,7 @@ import { promisify } from "node:util";
 
 import { onCleanup } from "./cleanup.js";
 import {
-  AGENT_PROVIDER_VERSIONS,
+  AGENT_PROVIDER_PACKAGES,
   type AgentProviderName,
 } from "./agent-providers.js";
 import type { BuiltImage, ResolvedGateStack } from "./config.js";
@@ -463,19 +463,18 @@ export function agentToolsetSpec(
   providers: readonly AgentProviderName[],
 ): string {
   return providers
-    .map((provider) => `${provider}@${AGENT_PROVIDER_VERSIONS[provider]}`)
-    .join("\n");
+    .map((provider) => `${provider}: ${AGENT_PROVIDER_PACKAGES[provider].spec}`)
+    .join(", ");
 }
 
 export function agentToolsContainerfile(
   baseTag: string,
   providers: readonly AgentProviderName[],
 ): string {
-  const packages = providers.map((provider) =>
-    provider === "claude"
-      ? `--allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@${AGENT_PROVIDER_VERSIONS.claude}`
-      : `@openai/codex@${AGENT_PROVIDER_VERSIONS.codex}`,
-  );
+  const packages = providers.flatMap((provider) => {
+    const install = AGENT_PROVIDER_PACKAGES[provider];
+    return [...(install.npmFlags ?? []), install.spec];
+  });
   return `FROM ${baseTag}\nRUN npm install -g ${packages.join(" ")}\n`;
 }
 
@@ -518,7 +517,7 @@ export async function createAgentImages(opts: {
         if (baseInputs === null || (await inputsLabel(tag)) !== fingerprint) {
           log(
             `Augmenting '${baseTag}' as '${tag}' with agent tools ` +
-              `${toolset.replaceAll("\n", ", ")}...`,
+              `${toolset}...`,
           );
           await build(
             { tag, containerfile: "<generated-agent-tools>" },
@@ -537,7 +536,7 @@ export async function createAgentImages(opts: {
         pending.delete(baseTag);
         throw new SandbarError(
           `could not augment image '${baseTag}' with agent tools ` +
-            `${toolset.replaceAll("\n", ", ")}: ` +
+            `${toolset}: ` +
             `${err instanceof Error ? err.message : String(err)}`,
           { cause: err },
         );
@@ -765,9 +764,9 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
 // log and the operator's console at the call site.
 export async function resolveSandboxImage(opts: {
   readonly declaredTag: string;
-  // Present in real runs (#75). Kept optional for the resolver's narrow unit
-  // seam and consumers that do not construct run-owned tool layers.
-  readonly agentImages?: AgentImages;
+  // Required because no image may reach an agent without the run-owned tools
+  // selected by its role routing (#75).
+  readonly agentImages: AgentImages;
   readonly worktreePath: string;
   // Absent when the run has no per-branch resolver at all (tests, a host that
   // declares no `rebuildOn`) — the declared tag is then the only answer.
@@ -779,18 +778,18 @@ export async function resolveSandboxImage(opts: {
   readonly onFallback?: (line: string) => void | Promise<void>;
 }): Promise<string> {
   const { branchImages, declaredTag, worktreePath } = opts;
-  if (!branchImages) return opts.agentImages?.declaredTag ?? declaredTag;
+  if (!branchImages) return opts.agentImages.declaredTag;
   try {
     const map = await branchImages.resolve(
       worktreePath,
       new Set([declaredTag]),
     );
     const base = map.get(declaredTag) ?? declaredTag;
-    return opts.agentImages ? await opts.agentImages.augment(base) : base;
+    return await opts.agentImages.augment(base);
   } catch (err) {
     await opts.onFallback?.(
       `could not build a per-branch agent sandbox image from '${declaredTag}' ` +
-        `for ${worktreePath}; starting the sandbox on '${opts.agentImages?.declaredTag ?? declaredTag}' as ` +
+        `for ${worktreePath}; starting the sandbox on '${opts.agentImages.declaredTag}' as ` +
         "the augmented declared image, which carries the source branch's version of its declared " +
         "inputs. " +
         (opts.gateRunsSameImage
@@ -803,7 +802,7 @@ export async function resolveSandboxImage(opts: {
         " The agent's environment is a commit behind its own branch until it " +
         `installs for itself: ${err instanceof Error ? err.message : String(err)}`,
     );
-    return opts.agentImages?.declaredTag ?? declaredTag;
+    return opts.agentImages.declaredTag;
   }
 }
 

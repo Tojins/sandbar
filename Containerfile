@@ -66,9 +66,12 @@ RUN curl -fsSL https://github.com/containers/podman/releases/download/v4.9.3/pod
     && install -m0755 /tmp/bin/podman-remote-static-linux_amd64 /usr/bin/podman \
     && rm -rf /tmp/bin
 
-# Agent CLIs are deliberately absent. The driver appends the pinned providers
-# selected by this run after resolving this base (or a branch-specific variant),
-# so an old branch recipe cannot resurrect an image missing the routed CLI (#75).
+# The driver also appends its pinned, routed providers after resolving this
+# image (#75). Keep this host copy until sandbar.pin reaches a release carrying
+# that augmentation: the current pinned driver still runs this image directly
+# after a relaunch. Always-install makes the temporary overlap harmless.
+RUN npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.257
+RUN npm install -g @openai/codex@0.152.0
 
 # No `ENV HOME`: the sandbox provider sets HOME=/home/agent itself, and the
 # gate runner is root, whose /root is the right answer for it.

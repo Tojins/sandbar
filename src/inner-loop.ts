@@ -179,7 +179,7 @@ export type InnerLoopConfig = {
   readonly maxImplAttempts: number;
   readonly maxReviewRounds: number;
   readonly sandboxImage: string;
-  readonly agentImages?: AgentImages;
+  readonly agentImages: AgentImages;
   // This run's podman resource scope (#28) — see naming.ts. Both the agent
   // sandbox container and the gate stack are named under it.
   readonly scope: RunScope;

@@ -47,8 +47,6 @@ export type { SandboxHooks } from "./agent-sandbox.js";
 // this driver accepts rather than spell a string and find out at startup.
 export {
   AGENT_PROVIDER_NAMES,
-  CLAUDE_CODE_VERSION,
-  CODEX_VERSION,
   type AgentProviderName,
 } from "./agent-providers.js";
 // `config.defaultLane`'s type, and the label a host writes on the issues that

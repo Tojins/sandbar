@@ -16,6 +16,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import type { BuiltImage } from "./config.js";
 import {
+  type AgentImages,
   type BuildOptions,
   createBranchImages,
   parseInputsLabel,
@@ -63,6 +64,14 @@ function fp(root: string, image: BuiltImage = IMAGE): Promise<string | null> {
 // because the gate and the agent sandbox share one resolver and ask about
 // different containers.
 const runs = (...tags: string[]): ReadonlySet<string> => new Set(tags);
+
+const agentImages = (
+  augment: (baseTag: string) => Promise<string> = async (tag) => `agent:${tag}`,
+): AgentImages => ({
+  declaredTag: "agent:sandbox",
+  augment,
+  builtTags: () => [],
+});
 
 describe("fingerprintImageInputs", () => {
   it("is null for an image that declares no inputs — it does not participate", async () => {
@@ -533,12 +542,13 @@ describe("createBranchImages", () => {
 
     const sandbox = await resolveSandboxImage({
       declaredTag: "app",
+      agentImages: agentImages(),
       worktreePath: branch,
       branchImages,
       gateRunsSameImage: true,
     });
     const gate = await branchImages.resolve(branch, runs("app"));
-    expect(gate.get("app")).toBe(sandbox);
+    expect(sandbox).toBe(`agent:${gate.get("app")}`);
     expect(built).toHaveLength(1);
   });
 });
@@ -569,12 +579,13 @@ describe("resolveSandboxImage", () => {
     const base = new Map([["sandbox", (await fp(source, SANDBOX))!]]);
     const image = await resolveSandboxImage({
       declaredTag: "sandbox",
+      agentImages: agentImages(),
       worktreePath: branch,
       branchImages: harness(base, async () => {}),
       gateRunsSameImage: false,
     });
     expect(image).toBe(
-      variantImageTag("sandbox", scope, (await fp(branch, SANDBOX))!),
+      `agent:${variantImageTag("sandbox", scope, (await fp(branch, SANDBOX))!)}`,
     );
   });
 
@@ -585,22 +596,24 @@ describe("resolveSandboxImage", () => {
     await expect(
       resolveSandboxImage({
         declaredTag: "sandbox",
+        agentImages: agentImages(),
         worktreePath: source,
         branchImages: harness(base, async () => {
           builds += 1;
         }),
         gateRunsSameImage: false,
       }),
-    ).resolves.toBe("sandbox");
+    ).resolves.toBe("agent:sandbox");
     expect(builds).toBe(0);
     // A run with no per-branch resolver — a host that declares no `rebuildOn`.
     await expect(
       resolveSandboxImage({
         declaredTag: "sandbox",
+        agentImages: agentImages(),
         worktreePath: source,
         gateRunsSameImage: false,
       }),
-    ).resolves.toBe("sandbox");
+    ).resolves.toBe("agent:sandbox");
   });
 
   // A build that fails, in both configurations. The fallback direction is the
@@ -615,6 +628,7 @@ describe("resolveSandboxImage", () => {
     const reported: string[] = [];
     const image = await resolveSandboxImage({
       declaredTag: "sandbox",
+      agentImages: agentImages(),
       worktreePath: branch,
       branchImages: harness(base, async () => {
         throw new SandbarError("npm ci: ETARGET no matching version");
@@ -629,11 +643,38 @@ describe("resolveSandboxImage", () => {
 
   it("falls back to the declared tag when the build fails, and never silently", async () => {
     const { image, reported } = await fallback(false);
-    expect(image).toBe("sandbox");
+    expect(image).toBe("agent:sandbox");
     // The operator's only sign that the agent is working in an environment a
     // commit behind its own branch.
     expect(reported).toHaveLength(1);
     expect(reported[0]).toContain("ETARGET");
+  });
+
+  it("falls back to the augmented declared image when variant augmentation fails", async () => {
+    const source = await tree({
+      Containerfile: "FROM x",
+      "package-lock.json": "{}",
+    });
+    const branch = await tree({
+      Containerfile: "FROM x",
+      "package-lock.json": "b",
+    });
+    const base = new Map([["sandbox", (await fp(source, SANDBOX))!]]);
+    const attempted: string[] = [];
+    const image = await resolveSandboxImage({
+      declaredTag: "sandbox",
+      agentImages: agentImages(async (tag) => {
+        attempted.push(tag);
+        throw new SandbarError("registry unavailable");
+      }),
+      worktreePath: branch,
+      branchImages: harness(base, async () => {}),
+      gateRunsSameImage: false,
+    });
+    expect(attempted).toEqual([
+      variantImageTag("sandbox", scope, (await fp(branch, SANDBOX))!),
+    ]);
+    expect(image).toBe("agent:sandbox");
   });
 
   it("promises a second report only when a gate container runs the same image", async () => {
