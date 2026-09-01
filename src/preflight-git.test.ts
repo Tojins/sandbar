@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import type { AgentProviderName } from "./agent-providers.js";
 import { makeEnvReader } from "./env.js";
 import {
   type DeclaredMount,
@@ -101,6 +102,10 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     sourceBranch: "main",
     pulledImages: [] as readonly string[],
     mountSources: [] as readonly DeclaredMount[],
+    // The default routing (#72): claude for both roles, and claude for the
+    // merger, so the set the credential check walks is the one every
+    // pre-#72 config produces.
+    agentProviders: ["claude"] as readonly AgentProviderName[],
   });
 
   // The highest-stakes half, and the one that qualified #32's fix: #32 put this
@@ -497,6 +502,66 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     it("reports nothing when the stack declares no absolute sources", async () => {
       const state = await gatherState(cfg(layoutAt(target)));
       expect(state.missingMountSources).toEqual([]);
+    });
+
+    // #72 — the credential half, through the real EnvReader. The decision
+    // itself (which providers a routing needs, what each accepts) is
+    // agent-providers.test.ts's; what is checked here is that gatherState asks
+    // the reader for the right keys and treats them as ANY-OF.
+    it("finds a claude credential from either of its two keys (#72)", async () => {
+      for (const key of ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]) {
+        const state = await gatherState({
+          ...cfg(layoutAt(target)),
+          env: makeEnvReader({ [key]: "v" }),
+        });
+        expect(state.uncredentialledProviders).toEqual([]);
+      }
+    });
+
+    it("reports the provider a routed role has no key for (#72)", async () => {
+      const state = await gatherState({
+        ...cfg(layoutAt(target)),
+        agentProviders: ["claude", "codex"],
+        env: makeEnvReader({ ANTHROPIC_API_KEY: "v" }),
+      });
+      expect(state.uncredentialledProviders).toEqual(["codex"]);
+    });
+
+    // An empty value means INHERIT (#38), not "absent", so this key's answer is
+    // the HOST's — which is why the host half is set explicitly here rather
+    // than left to whatever the machine running the suite exports. Both
+    // directions, because the rule is one rule: nothing to inherit is no
+    // credential, and something to inherit is one, from the same declaration.
+    it("resolves an empty value from the host, and refuses when it is unset (#72)", async () => {
+      const KEY = "ANTHROPIC_API_KEY";
+      const saved = process.env[KEY];
+      try {
+        delete process.env[KEY];
+        const missing = await gatherState({
+          ...cfg(layoutAt(target)),
+          env: makeEnvReader({ [KEY]: "" }),
+        });
+        expect(missing.uncredentialledProviders).toEqual(["claude"]);
+
+        process.env[KEY] = "from-the-host";
+        const inherited = await gatherState({
+          ...cfg(layoutAt(target)),
+          env: makeEnvReader({ [KEY]: "" }),
+        });
+        expect(inherited.uncredentialledProviders).toEqual([]);
+      } finally {
+        if (saved === undefined) delete process.env[KEY];
+        else process.env[KEY] = saved;
+      }
+    });
+
+    it("asks only about the providers the run will invoke (#72)", async () => {
+      const state = await gatherState({
+        ...cfg(layoutAt(target)),
+        agentProviders: ["codex"],
+        env: makeEnvReader({ OPENAI_API_KEY: "v" }),
+      });
+      expect(state.uncredentialledProviders).toEqual([]);
     });
   });
 });

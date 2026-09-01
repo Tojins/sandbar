@@ -16,7 +16,7 @@ const cleanState: RepoState = {
   missingMountSources: [],
   ghAuthOk: true,
   sandboxGhTokenOk: true,
-  hasAgentCredential: true,
+  uncredentialledProviders: [],
   sourceBranch: "main",
   hasOriginBranch: true,
   unmergedIssueBranches: [],
@@ -197,7 +197,10 @@ describe("checkInvariants", () => {
   });
 
   it("flags missing agent credential and names both env-var options", () => {
-    const f = failures({ ...cleanState, hasAgentCredential: false });
+    const f = failures({
+      ...cleanState,
+      uncredentialledProviders: ["claude"],
+    });
     expect(
       f.some(
         (m) =>
@@ -205,6 +208,57 @@ describe("checkInvariants", () => {
           m.includes("ANTHROPIC_API_KEY"),
       ),
     ).toBe(true);
+  });
+
+  // #72 — the check is per ROUTED provider, so a run whose implementer is
+  // codex names OPENAI_API_KEY. Without this the failure surfaces as an
+  // implementer attempt dying inside its container, an attempt at a time.
+  it("names the codex credential when a role is routed to codex (#72)", () => {
+    const f = failures({
+      ...cleanState,
+      uncredentialledProviders: ["codex"],
+    });
+    expect(f.length).toBe(1);
+    expect(f[0]).toContain("OPENAI_API_KEY");
+    expect(f[0]).toContain("implementerAgent");
+    // The two vendors' keys are not interchangeable, so a codex-only failure
+    // must not read as if an Anthropic key would settle it.
+    expect(f[0]).not.toContain("ANTHROPIC_API_KEY");
+  });
+
+  // A ChatGPT subscription is a different mechanism, not a different value:
+  // its OAuth flow writes a FILE into the container's $HOME, and credentials
+  // reach a sandbox as values (#38). An operator who has one and no API key
+  // should learn that here rather than from an auth failure in-container.
+  it("says a ChatGPT subscription is not a substitute for the API key (#72)", () => {
+    const f = failures({
+      ...cleanState,
+      uncredentialledProviders: ["codex"],
+    });
+    expect(f[0]).toMatch(/subscription/i);
+    expect(f[0]).toContain("auth.json");
+  });
+
+  // Every run needs an Anthropic credential whatever the roles name, because
+  // the merger's resolve agent is hard-coded to claude and is out of #72's
+  // scope. An operator who routed BOTH roles to codex would otherwise read
+  // this refusal as a setting they had already changed.
+  it("explains why claude is required even when no role names it (#72)", () => {
+    const f = failures({
+      ...cleanState,
+      uncredentialledProviders: ["claude"],
+    });
+    expect(f[0]).toContain("merger");
+  });
+
+  it("reports each uncredentialled provider separately (#72)", () => {
+    const f = failures({
+      ...cleanState,
+      uncredentialledProviders: ["claude", "codex"],
+    });
+    expect(f.length).toBe(2);
+    expect(f.some((m) => m.includes("CLAUDE_CODE_OAUTH_TOKEN"))).toBe(true);
+    expect(f.some((m) => m.includes("OPENAI_API_KEY"))).toBe(true);
   });
 
   // The operator-state invariants ("not on <sourceBranch>", "an in-progress
@@ -284,7 +338,7 @@ describe("checkInvariants", () => {
       ...cleanState,
       hasGh: false,
       hasOriginBranch: false,
-      hasAgentCredential: false,
+      uncredentialledProviders: ["claude"],
     });
     expect(f.length).toBe(3);
   });
@@ -297,7 +351,7 @@ describe("checkInvariants", () => {
       missingImages: ["docker.io/library/mariadb:10.11"],
       ghAuthOk: false,
       sandboxGhTokenOk: false,
-      hasAgentCredential: false,
+      uncredentialledProviders: ["claude"],
       hasOriginBranch: false,
       unmergedIssueBranches: ["sandbar/issue-1-x"],
     };

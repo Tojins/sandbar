@@ -251,6 +251,63 @@ describe("resolveConfig", () => {
     expect(r.reviewerModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
   });
 
+  // #72 — the vendor knob beside the tiering one. Defaulting both to "claude"
+  // is what makes the field a no-op for every config written before it.
+  it("defaults both agent roles to claude (#72)", () => {
+    const r = resolveConfig(minimal);
+    expect(r.implementerAgent).toBe("claude");
+    expect(r.reviewerAgent).toBe("claude");
+  });
+
+  // #72's headline configuration: a cheaper implementer under an Opus reviewer.
+  it("routes each role's provider independently of the other's (#72)", () => {
+    const r = resolveConfig({
+      ...minimal,
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+    });
+    expect(r.implementerAgent).toBe("codex");
+    expect(r.implementerModelId).toBe("gpt-5.6-sol");
+    // The reviewer holds the verdict and is untouched by the implementer's
+    // routing — there is no global provider knob that could bleed across roles.
+    expect(r.reviewerAgent).toBe("claude");
+    expect(r.reviewerModelId).toBe("opus");
+  });
+
+  // The config is a PROGRAM (#66): the value can be computed, and a field
+  // written for a newer sandbar is otherwise spread through unread. `opencode`
+  // is the specific name worth pinning — #72 records it as the next provider,
+  // so it is the one an operator is most likely to write early.
+  it("refuses a provider name this driver cannot build (#72)", () => {
+    expect(() =>
+      resolveConfig({ ...minimal, implementerAgent: "opencode" as never }),
+    ).toThrow(/implementerAgent/);
+    expect(() =>
+      resolveConfig({ ...minimal, reviewerAgent: "gpt" as never }),
+    ).toThrow(/reviewerAgent/);
+  });
+
+  // The vendor knob and the tiering knob are independent, so a config can be
+  // moved half-way — and half-way is `codex exec --model opus` on every
+  // attempt, three sandbox bringups before a human sees NEEDS-HUMAN. Decidable
+  // ahead of the lock because the id it would inherit is a claude alias this
+  // repo wrote down; the ids themselves stay unvalidated, being aliases.
+  it("refuses a role routed off claude whose model id is still unset (#72)", () => {
+    expect(() =>
+      resolveConfig({ ...minimal, implementerAgent: "codex" }),
+    ).toThrow(/implementerModelId/);
+    expect(() => resolveConfig({ ...minimal, reviewerAgent: "codex" })).toThrow(
+      /reviewerModelId/,
+    );
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        reviewerAgent: "codex",
+        reviewerModelId: "gpt-5.6-sol",
+      }),
+    ).not.toThrow();
+  });
+
   it("merges a partial label override onto the default vocabulary", () => {
     const r = resolveConfig({ ...minimal, labels: { agentStuck: "blocked" } });
     expect(r.labels).toEqual({

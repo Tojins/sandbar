@@ -252,6 +252,42 @@ and used to announce themselves in four different ways, the halt in none at all.
 - **Credentials are a value, not a path (#38).** `config.env` is an allowlist
   record (empty value ⇒ inherit from `process.env`); `readEnvFile` is the
   opt-in loader. `src/env.ts`.
+- **A role names its CLI as well as its model (#72).** `implementerAgent` /
+  `reviewerAgent`, both defaulting to `claude`, beside the model ids that were
+  already per-role: the tiering knob and the vendor knob are independent, and
+  every provider takes whatever id its role's field holds — which is why a role
+  routed off claude must NAME its model (`assertRoleModelIdNamed`), the default
+  being a claude alias and a half-moved config otherwise asking codex for
+  "opus" on every attempt. `AgentProvider`
+  (`src/agent-sandbox.ts`) was already the whole seam — argv plus a line parser,
+  with the completion watch, the idle timeout and commit collection reading
+  parsed events and git — so `codex` is a second implementation of it and
+  nothing downstream knows which ran. `src/agent-providers.ts` owns the
+  NAME→factory map, each provider's credential and `requiredAgentProviders`;
+  its header owns why the set is CLOSED at what the driver can build (a config
+  is a program, so a name nothing implements is #66's silent failure) and why
+  there is no `mergerAgent` — that path stays Claude/Opus, and a field nothing
+  reads is the same failure. Preflight refuses per routed provider, with claude
+  unconditional because the merger's resolve agent is hard-coded to it. A
+  provider's parser answers in THREE registers and the rule no new one may break
+  is that they stay apart: `text`/`result` is the agent's SPEECH and the only
+  thing a run returns (#41 — "completed with output" is what `reviewer-run.ts`
+  reads as a verdict, so codex's `reasoning` is dropped and `parsedOutputOnly`
+  keeps raw JSONL out); `failure` is the provider naming a TERMINAL fault of its
+  own; everything else — including a fault it is still recovering from — is
+  transport. That last distinction is the sharp one, because `invokeAgent`
+  rejects on a `failure`: codex narrates its reconnects and a transport
+  downgrade over the same wire shape it uses for the fatal case, so only
+  `turn.failed` may be read, and a parser that spent a `failure` on a retry
+  would escalate a websocket blip to NEEDS-HUMAN. What the register buys is the
+  CAUSE leading the `AgentError` detail — a dead key exits 1 with the give-up
+  reason buried under a dozen tracing lines — and, since no CLI documents its
+  exit codes, #67's rule for a terminal failure under an exit-0 process: infra,
+  not an answer (read as an answer it is a nudge, an attempt, and eight more of
+  them). Both CLIs are in the one image (#39): which one a role runs is resolved
+  per run, so the image cannot be a function of it — and codex is PINNED there,
+  because `parsedOutputOnly` makes its stream format load-bearing in a way
+  claude-code's is not.
 - **Token contracts.** Implementer: `<promise>COMPLETE|NEEDS-INFO|
   NEEDS-UI-PROTOTYPE</promise>`; resolve loop: `COMMITTED|ABANDON`; anything
   else re-prompts. Reviewer: `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`,

@@ -135,6 +135,10 @@ import { stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 
+import {
+  type AgentProviderName,
+  PROVIDER_CREDENTIALS,
+} from "./agent-providers.js";
 import type { ResolvedStackContainer } from "./config.js";
 import type { EnvReader } from "./env.js";
 import {
@@ -183,6 +187,11 @@ export type PreflightConfig = {
   // passed an object and no file. Read for one soft warning and nothing else —
   // see `staleConfigWarning` (#66).
   readonly configPath: string | null;
+  // Every agent provider this run will invoke (#72), from
+  // `requiredAgentProviders`. Preflight checks a credential for each, so a
+  // role routed away from claude refuses HERE rather than as an implementer
+  // attempt dying in-container a cycle later.
+  readonly agentProviders: readonly AgentProviderName[];
 };
 
 // A gate-stack mount source, carrying the container that declared it. A stack
@@ -256,7 +265,11 @@ export type RepoState = {
   readonly missingMountSources: readonly MissingMountSource[];
   readonly ghAuthOk: boolean;
   readonly sandboxGhTokenOk: boolean;
-  readonly hasAgentCredential: boolean;
+  // Providers this run will invoke that have no credential declared for them
+  // (#72). Empty is the passing state. A LIST rather than a boolean because
+  // the roles can name two vendors and an operator who has declared one of
+  // them should be told which one is missing, not asked to guess.
+  readonly uncredentialledProviders: readonly AgentProviderName[];
   readonly sourceBranch: string;
   readonly hasOriginBranch: boolean;
   readonly unmergedIssueBranches: readonly string[];
@@ -349,13 +362,23 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
         "update whatever `config.env` is built from.",
     });
   }
-  if (!s.hasAgentCredential) {
+  for (const provider of s.uncredentialledProviders) {
+    const keys = PROVIDER_CREDENTIALS[provider]
+      .map((c) => `  - ${c.key}  (${c.note})`)
+      .join("\n");
+    // "claude" is required of every run even when neither role names it — the
+    // merger's resolve agent is hard-coded to it (#72) — so the message says
+    // so rather than leaving an operator who routed both roles to codex
+    // hunting for the setting that asked for this.
+    const why =
+      provider === "claude"
+        ? "Every run needs one: the merger's conflict-resolution agent is " +
+          "claude whatever `implementerAgent`/`reviewerAgent` name."
+        : `A role is routed to ${provider} by \`implementerAgent\`/\`reviewerAgent\`.`;
     out.push({
       ok: false,
       message:
-        "No agent credential in `config.env`. Declare one of:\n" +
-        "  - CLAUDE_CODE_OAUTH_TOKEN  (Pro/Max/Team/Enterprise subscription; generate with `claude setup-token`)\n" +
-        "  - ANTHROPIC_API_KEY        (pay-as-you-go API; takes precedence if both are set)",
+        `No ${provider} credential in \`config.env\`. ${why}\nDeclare one of:\n${keys}`,
     });
   }
   if (!s.hasOriginBranch) {
@@ -520,8 +543,9 @@ export async function gatherState(
   const sandboxGhTokenOk = hasGh
     ? await checkSandboxGhToken(repoDir, env)
     : false;
-  const hasAgentCredential =
-    !!env("CLAUDE_CODE_OAUTH_TOKEN") || !!env("ANTHROPIC_API_KEY");
+  const uncredentialledProviders = cfg.agentProviders.filter(
+    (provider) => !PROVIDER_CREDENTIALS[provider].some((c) => !!env(c.key)),
+  );
 
   const hasOriginBranch = await runOk(repoDir, "git", [
     "show-ref",
@@ -549,7 +573,7 @@ export async function gatherState(
     missingMountSources,
     ghAuthOk,
     sandboxGhTokenOk,
-    hasAgentCredential,
+    uncredentialledProviders,
     sourceBranch: cfg.sourceBranch,
     hasOriginBranch,
     unmergedIssueBranches: unmerged,

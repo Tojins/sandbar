@@ -31,11 +31,14 @@ import {
   type ProviderCreateOptions,
   type SandboxProvider,
   SANDBOX_REPO_DIR,
+  AgentError,
   agentPartialOutput,
   claudeCode,
+  codex,
   createSandbox,
   defaultImageName,
   killOnAbort,
+  parseCodexJsonLine,
   parseStreamJsonLine,
   prepareWorktree,
   registerShutdown,
@@ -179,6 +182,213 @@ describe("BoundedTail", () => {
     tail.push("<promise>COMPLETE</promise>");
     expect(tail.toString()).toContain("<promise>COMPLETE</promise>");
     expect(tail.toString().length).toBeLessThanOrEqual(1024 + 64);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// codex (#72) — line parser and command line
+// ---------------------------------------------------------------------------
+//
+// Fixtures are the real wire format of codex-cli 0.152.0 (its event union is
+// `@openai/codex-sdk`'s ThreadEvent), captured from a live `codex exec --json`
+// run rather than transcribed from the issue.
+
+describe("parseCodexJsonLine", () => {
+  const completed = (item: unknown) =>
+    JSON.stringify({ type: "item.completed", item });
+
+  it("returns [] for non-{ lines, malformed JSON and unknown events", () => {
+    expect(parseCodexJsonLine("")).toEqual([]);
+    expect(parseCodexJsonLine("Reading prompt from stdin...")).toEqual([]);
+    expect(parseCodexJsonLine("{bad json")).toEqual([]);
+    expect(parseCodexJsonLine('{"type":"turn.started"}')).toEqual([]);
+    expect(parseCodexJsonLine('{"type":"future.event","text":"x"}')).toEqual([]);
+  });
+
+  it("reads an agent message as text", () => {
+    expect(
+      parseCodexJsonLine(
+        completed({
+          id: "item_1",
+          type: "agent_message",
+          text: "<promise>COMPLETE</promise>",
+        }),
+      ),
+    ).toEqual([{ type: "text", text: "<promise>COMPLETE</promise>" }]);
+  });
+
+  it("reads thread.started as the session id", () => {
+    expect(
+      parseCodexJsonLine('{"type":"thread.started","thread_id":"01a05c69-362e"}'),
+    ).toEqual([{ type: "session_id", sessionId: "01a05c69-362e" }]);
+  });
+
+  // Reasoning is the model's own thinking, not its speech. Folded into the
+  // accumulated output it would let an agent that merely CONSIDERED emitting
+  // the completion tag end the run by talking about it — and that output is
+  // handed verbatim to the promise/verdict parsers.
+  it("drops reasoning, so deliberation cannot trip the completion signal", () => {
+    expect(
+      parseCodexJsonLine(
+        completed({
+          id: "item_0",
+          type: "reasoning",
+          text: "I should finish by emitting <promise>COMPLETE</promise>",
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  // Only `turn.failed` is terminal, and the difference decides whether a
+  // reconnect reaches a human. `invokeAgent` rejects on a `failure`, so a
+  // parser that spent one on a retry notice would turn a websocket blip into
+  // HARD-ERROR → NEEDS-HUMAN. These three lines are a live 0.152.0 run with no
+  // credential, in the order it printed them.
+  it("reads only turn.failed as a failure; retries and notices are transport", () => {
+    expect(
+      parseCodexJsonLine(
+        '{"type":"error","message":"Reconnecting... 2/5 (unexpected status 401)"}',
+      ),
+    ).toEqual([]);
+    expect(
+      parseCodexJsonLine(
+        completed({
+          id: "item_0",
+          type: "error",
+          message: "Falling back from WebSockets to HTTPS transport.",
+        }),
+      ),
+    ).toEqual([]);
+    expect(
+      parseCodexJsonLine(
+        '{"type":"turn.failed","error":{"message":"unexpected status 401"}}',
+      ),
+    ).toEqual([{ type: "failure", message: "unexpected status 401" }]);
+  });
+
+  // The give-up `error` event is shaped identically to the retries above it —
+  // same type, same field — so nothing at the line level tells them apart.
+  // Reading it would buy the false positive; dropping it costs nothing, since
+  // `turn.failed` follows it carrying the same message.
+  it("drops the fatal top-level error too, since turn.failed repeats it", () => {
+    expect(
+      parseCodexJsonLine('{"type":"error","message":"401 Unauthorized"}'),
+    ).toEqual([]);
+  });
+
+  // The message is the whole of the AgentError a human reads, so a turn.failed
+  // carrying no usable message must still say which half of the system failed
+  // rather than rejecting with a blank line.
+  it("names a failure whose message is missing or the wrong type", () => {
+    for (const line of [
+      '{"type":"turn.failed"}',
+      '{"type":"turn.failed","error":{}}',
+      '{"type":"turn.failed","error":{"message":42}}',
+      '{"type":"turn.failed","error":{"message":"   "}}',
+      '{"type":"turn.failed","error":"401 Unauthorized"}',
+    ]) {
+      expect(parseCodexJsonLine(line)).toEqual([
+        { type: "failure", message: "no message" },
+      ]);
+    }
+  });
+
+  it("reports command execution and web search as informational tool calls", () => {
+    expect(
+      parseCodexJsonLine(
+        completed({
+          id: "item_2",
+          type: "command_execution",
+          command: "bash -lc 'npm test'",
+          aggregated_output: "ok",
+          exit_code: 0,
+          status: "completed",
+        }),
+      ),
+    ).toEqual([
+      { type: "tool_call", name: "command_execution", args: "bash -lc 'npm test'" },
+    ]);
+    expect(
+      parseCodexJsonLine(
+        completed({ id: "item_3", type: "web_search", query: "podman keep-id" }),
+      ),
+    ).toEqual([{ type: "tool_call", name: "web_search", args: "podman keep-id" }]);
+  });
+
+  // started/updated arrive before the payload is whole; reading them too would
+  // double-count an agent message and truncate a command's output.
+  it("reads only item.completed, never item.started or item.updated", () => {
+    const item = { id: "item_1", type: "agent_message", text: "hi" };
+    expect(
+      parseCodexJsonLine(JSON.stringify({ type: "item.started", item })),
+    ).toEqual([]);
+    expect(
+      parseCodexJsonLine(JSON.stringify({ type: "item.updated", item })),
+    ).toEqual([]);
+  });
+
+  it("ignores items whose payload field is missing or the wrong type", () => {
+    expect(parseCodexJsonLine(completed({ id: "x", type: "agent_message" }))).toEqual([]);
+    expect(
+      parseCodexJsonLine(completed({ id: "x", type: "agent_message", text: 42 })),
+    ).toEqual([]);
+    expect(parseCodexJsonLine(completed(null))).toEqual([]);
+    expect(parseCodexJsonLine('{"type":"thread.started"}')).toEqual([]);
+  });
+});
+
+describe("codex command line", () => {
+  it("delivers the prompt on stdin with --json and the bypass flag", () => {
+    const cmd = codex("gpt-5.6-sol").buildPrintCommand({
+      prompt: "hello",
+      dangerouslySkipPermissions: true,
+    });
+    expect(cmd.command).toBe(
+      "codex exec --json --dangerously-bypass-approvals-and-sandbox --model 'gpt-5.6-sol'",
+    );
+    expect(cmd.stdin).toBe("hello");
+    expect(cmd.command).not.toContain("hello");
+  });
+
+  // NO positional argument, on either form, and that is the difference between
+  // the two subcommands rather than a style choice. `codex exec [PROMPT]`
+  // documents `-` as "read stdin", but `codex exec resume [SESSION_ID]
+  // [PROMPT]` binds the FIRST positional to the session id — so a `-` written
+  // for the prompt is swallowed as a thread NAME. Omitted, both fall through
+  // to the same documented stdin read (verified against 0.152.0).
+  it("passes no positional, so resume cannot read the prompt as a session id", () => {
+    for (const opts of [undefined, { continueSession: true }]) {
+      const cmd = codex("m", opts).buildPrintCommand({ prompt: "p" }).command;
+      expect(cmd.trimEnd().endsWith("--model 'm'")).toBe(true);
+      expect(cmd).not.toMatch(/(^| )-( |$)/);
+    }
+  });
+
+  it("continueSession becomes an exec-resume-last command; absent by default", () => {
+    expect(
+      codex("m", { continueSession: true }).buildPrintCommand({ prompt: "nudge" })
+        .command,
+    ).toContain("codex exec resume --last --json");
+    expect(codex("m").buildPrintCommand({ prompt: "p" }).command).toContain(
+      "codex exec --json",
+    );
+    expect(codex("m").buildPrintCommand({ prompt: "p" }).command).not.toContain(
+      "resume",
+    );
+  });
+
+  it("shell-escapes the model and omits the bypass flag when not requested", () => {
+    const cmd = codex("a'b").buildPrintCommand({ prompt: "p" });
+    expect(cmd.command).toContain("--model 'a'\\''b'");
+    expect(cmd.command).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+
+  // The evidence rule, declared on the provider: codex has no `result` event,
+  // so without this the raw JSONL of a failed turn would come back as a run's
+  // "output" and #41 would read it as a verdict.
+  it("declares parsedOutputOnly, which claudeCode does not", () => {
+    expect(codex("m").parsedOutputOnly).toBe(true);
+    expect(claudeCode("m").parsedOutputOnly).toBeUndefined();
   });
 });
 
@@ -609,6 +819,301 @@ describe("createSandbox integration (local provider)", () => {
       const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
       expect(run.stdout).toContain("raw output line with <promise>COMPLETE</promise>");
       expect(run.commits).toEqual([]);
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // #72 — a stream that is well-formed, exits 0, and carries no speech at all:
+  // codex's shape for a turn that ended on tool calls. The transport is not an
+  // answer, so a parsedOutputOnly provider returns nothing rather than its own
+  // JSONL — reviewer-run.ts (#41) reads "completed with output" as a verdict,
+  // and the verdict parser defaults a tokenless one to CHANGES-REQUESTED, a
+  // review of code no model looked at.
+  const toolCallOnly = JSON.stringify({
+    type: "item.completed",
+    item: { id: "item_1", type: "command_execution", command: "ls" },
+  });
+
+  it("returns nothing for a parsedOutputOnly run whose lines carried no speech (#72)", async () => {
+    await git(["branch", "sandbar/issue-4-codex-quiet"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-4-codex-quiet",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const agent: AgentProvider = {
+        name: "codex",
+        env: {},
+        parsedOutputOnly: true,
+        buildPrintCommand: () => ({
+          command: `printf '%s\\n' ${JSON.stringify(toolCallOnly)}`,
+          stdin: "",
+        }),
+        parseStreamLine: parseCodexJsonLine,
+      };
+      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      expect(run.stdout).toBe("");
+      expect(run.stdout).not.toContain("command_execution");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // The same run under the DEFAULT (fallback-allowed) rule, to pin that the
+  // difference is the flag and not the fixture.
+  it("still falls back to the raw stream for a provider that does not declare it (#72)", async () => {
+    await git(["branch", "sandbar/issue-5-fallback"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-5-fallback",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const agent: AgentProvider = {
+        name: "codex",
+        env: {},
+        buildPrintCommand: () => ({
+          command: `printf '%s\\n' ${JSON.stringify(toolCallOnly)}`,
+          stdin: "",
+        }),
+        parseStreamLine: parseCodexJsonLine,
+      };
+      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      expect(run.stdout).toContain("command_execution");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // The guard, not the credential path: a dead key makes codex print
+  // `turn.failed` and exit 1, which the non-zero branch above already catches.
+  // This is the residual — an exit code is not a contract the CLI states — and
+  // the two readings are not symmetrical. Read as an answer, a silent terminal
+  // failure has no promise tag: a nudge, a spent attempt, ×8 ×3 issues, each
+  // parked with empty transcripts. Read as infra it is a HARD-ERROR on a run
+  // that said nothing anyway (#67's rule).
+  it("rejects a run that reported a failed turn and said nothing (#72)", async () => {
+    await git(["branch", "sandbar/issue-7-codex-fail"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-7-codex-fail",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const failed = JSON.stringify({
+        type: "turn.failed",
+        error: { message: "401 Unauthorized" },
+      });
+      const agent: AgentProvider = {
+        name: "codex",
+        env: {},
+        parsedOutputOnly: true,
+        buildPrintCommand: () => ({
+          command: `printf '%s\\n' ${JSON.stringify(failed)}`,
+          stdin: "",
+        }),
+        parseStreamLine: parseCodexJsonLine,
+      };
+      const err = await sandbox
+        .run({ agent, prompt: "go", maxIterations: 1 })
+        .then(() => null)
+        .catch((e: unknown) => e);
+      // AgentError, not SandbarError: inner-loop.ts lets a SandbarError out to
+      // the top-level handler and converts everything else to HARD-ERROR.
+      expect(err).toBeInstanceOf(AgentError);
+      // The cause reaches the NEEDS-HUMAN trace, and the partial output stays
+      // empty — which is what keeps the REVIEWER path unchanged: no verdict
+      // token in "", so #41 classifies it harness-failed and the round is not
+      // consumed.
+      expect((err as Error).message).toContain("401 Unauthorized");
+      expect(agentPartialOutput(err)).toBe("");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // The path a dead key ACTUALLY takes, live: codex prints its retries, then
+  // `turn.failed`, then exits 1, with a dozen timestamped
+  // `ERROR codex_api::endpoint…` lines on stderr. Both halves are here, so the
+  // assertion is about which one a human is handed — the give-up cause leads
+  // the detail, and the tracing does not bury it.
+  it("leads the non-zero-exit detail with the reported cause, not stderr (#72)", async () => {
+    await git(["branch", "sandbar/issue-10-exit1"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-10-exit1",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const failed = JSON.stringify({
+        type: "turn.failed",
+        error: { message: "unexpected status 401 Unauthorized" },
+      });
+      const agent: AgentProvider = {
+        name: "codex",
+        env: {},
+        parsedOutputOnly: true,
+        buildPrintCommand: () => ({
+          command:
+            `printf '%s\\n' ${JSON.stringify(failed)}; ` +
+            `printf '%s\\n' 'ERROR codex_api::endpoint::responses_websocket: failed to connect' >&2; ` +
+            `exit 1`,
+          stdin: "",
+        }),
+        parseStreamLine: parseCodexJsonLine,
+      };
+      const err = await sandbox
+        .run({ agent, prompt: "go", maxIterations: 1 })
+        .then(() => null)
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(AgentError);
+      const message = (err as Error).message;
+      expect(message).toContain("exited with code 1");
+      expect(message).toContain("unexpected status 401 Unauthorized");
+      expect(message).not.toContain("responses_websocket");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // A provider that reports nothing in-band is untouched by that ordering:
+  // claudeCode never emits `failure`, so stderr still leads for it.
+  it("still leads with stderr for a provider that reports no failure (#72)", async () => {
+    await git(["branch", "sandbar/issue-11-stderr"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-11-stderr",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const agent = scriptedAgent(`printf '%s\\n' 'boom on stderr' >&2; exit 1`);
+      const err = await sandbox
+        .run({ agent, prompt: "go", maxIterations: 1 })
+        .then(() => null)
+        .catch((e: unknown) => e);
+      expect((err as Error).message).toContain("boom on stderr");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // The other side of that guard, and the reason the parser reads only
+  // `turn.failed`: a codex run that reconnects and downgrades its transport and
+  // then works is ORDINARY inside a container, and this is the stream it prints
+  // while doing it. Rejecting here would escalate a websocket blip to
+  // HARD-ERROR → NEEDS-HUMAN, where the pre-#72 behaviour was a cheap
+  // same-session nudge. Exit 0, no speech, no rejection — "" and on with the
+  // attempt.
+  it("does not reject a run whose only errors were recoverable notices (#72)", async () => {
+    await git(["branch", "sandbar/issue-9-reconnect"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-9-reconnect",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const retry = JSON.stringify({
+        type: "error",
+        message: "Reconnecting... 2/5 (unexpected status 401)",
+      });
+      const downgrade = JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "item_0",
+          type: "error",
+          message: "Falling back from WebSockets to HTTPS transport.",
+        },
+      });
+      const agent: AgentProvider = {
+        name: "codex",
+        env: {},
+        parsedOutputOnly: true,
+        buildPrintCommand: () => ({
+          command: `printf '%s\\n%s\\n' ${JSON.stringify(retry)} ${JSON.stringify(downgrade)}`,
+          stdin: "",
+        }),
+        parseStreamLine: parseCodexJsonLine,
+      };
+      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      expect(run.stdout).toBe("");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // Guarded on speech, not on the failure alone: an agent that said its piece
+  // and then hit a failure on the way out keeps what it said. Same rule #41
+  // already applies to a non-zero exit carrying partial output.
+  it("keeps the agent's speech when a failure follows it (#72)", async () => {
+    await git(["branch", "sandbar/issue-8-late-fail"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-8-late-fail",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const spoke = JSON.stringify({
+        type: "item.completed",
+        item: { id: "item_1", type: "agent_message", text: "<verdict>APPROVED</verdict>" },
+      });
+      const failed = JSON.stringify({ type: "turn.failed", error: { message: "boom" } });
+      const agent: AgentProvider = {
+        name: "codex",
+        env: {},
+        parsedOutputOnly: true,
+        buildPrintCommand: () => ({
+          command: `printf '%s\\n%s\\n' ${JSON.stringify(spoke)} ${JSON.stringify(failed)}`,
+          stdin: "",
+        }),
+        parseStreamLine: parseCodexJsonLine,
+      };
+      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      expect(run.stdout).toBe("<verdict>APPROVED</verdict>");
+      expect(run.stdout).not.toContain("boom");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // The two settle paths used to disagree about the same run: the completion
+  // grace timer returns `resultText || accumulatedOutput`, while a clean exit
+  // returned `resultText || <raw stream>`. A provider with no terminal result
+  // event — which codex is on every run — therefore got its parsed speech only
+  // when the timer happened to fire.
+  it("returns assembled text, not the raw stream, when there is no result event (#72)", async () => {
+    await git(["branch", "sandbar/issue-6-no-result"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-6-no-result",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const line = JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "the agent spoke" }] },
+      });
+      const agent = scriptedAgent(`printf '%s\\n' ${JSON.stringify(line)}`);
+      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      expect(run.stdout).toBe("the agent spoke");
+      expect(run.stdout).not.toContain("assistant");
     } finally {
       await sandbox.close();
     }
