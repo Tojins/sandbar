@@ -295,7 +295,10 @@ import {
   PROVIDER_CREDENTIALS,
   type AgentProviderName,
 } from "./agent-providers.js";
-import type { AgentProvider } from "./agent-sandbox.js";
+import {
+  createAgentSpeechAccumulator,
+  type AgentProvider,
+} from "./agent-sandbox.js";
 import { SandbarError } from "./errors.js";
 import { type PullRequestRef, ensurePullRequest } from "./forge-pr.js";
 import { dirtyWorktreePaths, fetchOriginChunkBranch } from "./git-ops.js";
@@ -2060,7 +2063,7 @@ export type RealAdapterDeps = {
   readonly runStackGate: () => Promise<GateResult>;
 };
 
-type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "providerFailure">;
+type CapturedAgentRun = Omit<ResolveAgentRun, "output">;
 
 // The default merge subject, and it names an ISSUE — which is why anything
 // that is not one issue's branch (a chunk, #64) carries its own
@@ -2205,24 +2208,16 @@ export function parseCapturedAgentRun(
   run: CapturedAgentRun,
   agent: AgentProvider,
 ): ResolveAgentRun {
-  let result = "";
-  let accumulated = "";
-  let failure: string | undefined;
+  const speech = createAgentSpeechAccumulator(agent);
   for (const line of run.stdout.split(/\r?\n/)) {
-    for (const event of agent.parseStreamLine(line)) {
-      if (event.type === "text") accumulated += event.text;
-      else if (event.type === "result") {
-        result = event.result;
-        accumulated += event.result;
-      } else if (event.type === "failure") failure = event.message;
-    }
+    speech.ingest(agent.parseStreamLine(line));
   }
-  const spoken = result || accumulated;
   return {
     ...run,
-    output: spoken || (agent.parsedOutputOnly === true ? "" : run.stdout),
-    ...(failure === undefined ? {} : { providerFailure: failure }),
-    ...(failure === undefined ? {} : { detail: failure }),
+    output: speech.output(run.stdout),
+    ...(run.detail !== undefined || speech.failure === undefined
+      ? {}
+      : { detail: speech.failure }),
   };
 }
 

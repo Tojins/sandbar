@@ -166,7 +166,20 @@ describe("parseCapturedAgentRun (#74)", () => {
     });
     const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("codex", "m"));
     expect(run.output).toBe("");
-    expect(run.providerFailure).toBe("pool spent");
+    expect(run.detail).toBe("pool spent");
+    expect(isInfraFailure(run)).toBe(true);
+  });
+
+  it("never falls back to a raw failure frame for an unmarked provider", () => {
+    const raw = JSON.stringify({
+      type: "turn.failed",
+      error: { message: "terminal fault" },
+    });
+    const codex = buildAgentProvider("codex", "m");
+    const { parsedOutputOnly: _parsedOutputOnly, ...unmarkedProvider } = codex;
+    const run = parseCapturedAgentRun(captured(raw), unmarkedProvider);
+    expect(run.output).toBe("");
+    expect(run.detail).toBe("terminal fault");
     expect(isInfraFailure(run)).toBe(true);
   });
 

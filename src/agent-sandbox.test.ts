@@ -1209,8 +1209,8 @@ describe("createSandbox integration (local provider)", () => {
   });
 
   // The two settle paths used to disagree about the same run: the completion
-  // grace timer returns `resultText || accumulatedOutput`, while a clean exit
-  // returned `resultText || <raw stream>`. A provider with no terminal result
+  // grace timer returns parsed speech, while a clean exit used to return the
+  // terminal result or raw stream. A provider with no terminal result
   // event — which codex is on every run — therefore got its parsed speech only
   // when the timer happened to fire.
   it("returns assembled text, not the raw stream, when there is no result event (#72)", async () => {

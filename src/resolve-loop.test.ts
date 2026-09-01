@@ -690,7 +690,7 @@ describe("isInfraFailure (#67)", () => {
   it("keeps speech as evidence when an in-band provider failure follows it", () => {
     expect(
       isInfraFailure(
-        agentRun({ output: "thinking...", providerFailure: "terminal fault" }),
+        agentRun({ output: "thinking...", detail: "terminal fault" }),
       ),
     ).toBe(false);
   });

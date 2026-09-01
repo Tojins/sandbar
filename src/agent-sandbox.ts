@@ -152,6 +152,55 @@ export type AgentProvider = {
   readonly parsedOutputOnly?: boolean;
 };
 
+// One implementation of the provider parser's three-register reduction.
+// Both the live sandbox invocation and the merger's run-to-completion capture
+// feed this accumulator, so speech, terminal failures and raw transport cannot
+// drift into different meanings on the two agent paths (#74).
+export type AgentSpeechAccumulator = {
+  ingest(events: readonly ParsedStreamEvent[]): void;
+  readonly accumulated: string;
+  readonly spoken: string;
+  readonly failure: string | undefined;
+  output(rawFallback: string): string;
+};
+
+export function createAgentSpeechAccumulator(
+  agent: AgentProvider,
+): AgentSpeechAccumulator {
+  let result = "";
+  let accumulated = "";
+  let failure: string | undefined;
+  return {
+    ingest(events) {
+      for (const event of events) {
+        if (event.type === "text") accumulated += event.text;
+        else if (event.type === "result") {
+          result = event.result;
+          accumulated += event.result;
+        } else if (event.type === "failure") failure = event.message;
+      }
+    },
+    get accumulated() {
+      return accumulated;
+    },
+    get spoken() {
+      return result || accumulated;
+    },
+    get failure() {
+      return failure;
+    },
+    output(rawFallback) {
+      const spoken = result || accumulated;
+      if (spoken) return spoken;
+      // A terminal failure is provider speech, never agent speech. Do not let
+      // its raw wire representation become an answer merely because a future
+      // provider omitted `parsedOutputOnly`.
+      if (failure !== undefined) return "";
+      return agent.parsedOutputOnly === true ? "" : rawFallback;
+    },
+  };
+}
+
 export type ClaudeCodeOptions = {
   effort?: "low" | "medium" | "high" | "max";
   env?: Record<string, string>;
@@ -338,8 +387,8 @@ export class AgentIdleTimeoutError extends Error {
 
 // What the agent had emitted when a run failed (#41).
 //
-// Every rejection out of `invokeAgent` discards `accumulatedOutput`, so from a
-// caller's side EVERY failure looks identical to a run that emitted nothing —
+// Every rejection out of `invokeAgent` discards the speech accumulator, so
+// from a caller's side EVERY failure looks identical to a run that emitted nothing —
 // which is exactly the distinction #41 needs to make: a reviewer that produced
 // no bytes at all is a harness fault, while one that produced a review and then
 // failed to exit cleanly has already said something about the code. Told apart
@@ -502,8 +551,8 @@ export const claudeCode = (
 // `@openai/codex-sdk`'s `ThreadEvent`.
 //
 // Only `agent_message` becomes `text`, and that is the load-bearing choice:
-// `accumulatedOutput` is what the completion-signal watcher scans and what the
-// `<promise>`/`<verdict>` parsers are handed, so it must hold the agent's
+// Parsed accumulated speech is what the completion-signal watcher scans and
+// what the `<promise>`/`<verdict>` parsers are handed, so it must hold the agent's
 // SPEECH and nothing else. `reasoning` is therefore dropped outright — it is a
 // summary of the model's own thinking, and folding it in would let a model that
 // merely CONSIDERED emitting the completion tag end the run by talking about
@@ -527,7 +576,7 @@ export const claudeCode = (
 //
 // `turn.failed` is the terminal one, arrives once, and carries the give-up
 // cause verbatim. It is the only `failure`, and the rest are transport: dropped
-// rather than degraded to text, because `accumulatedOutput` is the agent's
+// rather than degraded to text, because the accumulator holds the agent's
 // claim and a 401 read as a review defaults to CHANGES-REQUESTED (#41).
 //
 // That run exits 1, so a dead key lands on `invokeAgent`'s existing non-zero
@@ -1559,13 +1608,7 @@ const invokeAgent = (
   completionSignals: string[],
 ): Promise<{ result: string }> =>
   new Promise((resolveRun, rejectRun) => {
-    let resultText = "";
-    let accumulatedOutput = "";
-    // The LAST reported failure. A `failure` is by construction terminal for
-    // the turn that emitted it (a provider's recoverable notices are transport
-    // and never reach here), so a second one is a second turn and the last is
-    // the one the process ended on.
-    let reportedFailure: string | null = null;
+    const speech = createAgentSpeechAccumulator(agent);
     let completionDetected = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
@@ -1594,7 +1637,7 @@ const invokeAgent = (
       // caller cannot tell "the agent never produced a byte" from "the agent
       // produced a full review and then died", and #41 turns on that
       // distinction. Read back with `agentPartialOutput`.
-      rejectRun(withPartialOutput(err, resultText || accumulatedOutput));
+      rejectRun(withPartialOutput(err, speech.spoken));
     };
 
     // Two-phase: pre-signal → idle kill timer; post-signal → completion-grace
@@ -1617,7 +1660,7 @@ const invokeAgent = (
           // race with this one. The agent has already emitted its completion
           // signal and whatever is still holding the pipe open is producing
           // output nobody will read, so there is nothing here worth waiting on.
-          settleResolve({ result: resultText || accumulatedOutput });
+          settleResolve({ result: speech.spoken });
           abort.abort();
         }, completionTimeoutMs);
       } else {
@@ -1651,24 +1694,10 @@ const invokeAgent = (
         stdin: printCmd.stdin,
         signal: abort.signal,
         onLine: (line) => {
-          for (const parsed of agent.parseStreamLine(line)) {
-            if (parsed.type === "text") {
-              accumulatedOutput += parsed.text;
-            } else if (parsed.type === "result") {
-              resultText = parsed.result;
-              accumulatedOutput += parsed.result;
-            } else if (parsed.type === "failure") {
-              // Recorded, deliberately NOT accumulated: it is the provider
-              // speaking, not the agent, and everything downstream of
-              // `accumulatedOutput` — the completion watch, the promise and
-              // verdict parsers — treats what it holds as the agent's claim.
-              reportedFailure = parsed.message;
-            }
-            // tool_call / session_id are ignored on sandbar's path.
-          }
+          speech.ingest(agent.parseStreamLine(line));
           if (
             !completionDetected &&
-            completionSignals.some((sig) => accumulatedOutput.includes(sig))
+            completionSignals.some((sig) => speech.accumulated.includes(sig))
           ) {
             completionDetected = true;
           }
@@ -1677,7 +1706,7 @@ const invokeAgent = (
       })
       .then((execResult) => {
         if (execResult.exitCode !== 0) {
-          // Four-tier detail: the reported failure → stderr → resultText →
+          // Four-tier detail: the reported failure → stderr → parsed speech →
           // last 20 stdout lines. The reported failure leads because it is the
           // provider naming its own give-up cause, and this is the path a codex
           // credential failure actually takes (it exits 1) — whose stderr is a
@@ -1685,9 +1714,9 @@ const invokeAgent = (
           // one sentence a human needs. A provider that reports nothing in-band
           // is unaffected: claudeCode never emits `failure`, so stderr still
           // leads for it, exactly as before #72.
-          let detail = reportedFailure ?? "";
+          let detail = speech.failure ?? "";
           if (!detail.trim()) detail = execResult.stderr;
-          if (!detail.trim()) detail = resultText;
+          if (!detail.trim()) detail = speech.spoken;
           if (!detail.trim()) {
             detail = execResult.stdout
               .split("\n")
@@ -1700,15 +1729,15 @@ const invokeAgent = (
           );
           return;
         }
-        // `accumulatedOutput` sits between the two for #72. The grace path
-        // above already settles on `resultText || accumulatedOutput`, so
+        // Parsed accumulated speech sits between the two for #72. The grace
+        // path above already settles on the accumulator's speech, so
         // without it the two settle paths disagreed about the same run: a
         // provider that emits assistant text but no terminal `result` event
         // returned its PARSED speech when the completion timer fired and the
         // raw stream when the exec merely exited. Codex is that provider on
         // every run — it has no `result` event — and for it the raw stream is
         // not a degraded answer but a wrong one (see `parsedOutputOnly`).
-        const spoken = resultText || accumulatedOutput;
+        const spoken = speech.spoken;
         // A process that exited 0 having ANNOUNCED a terminal failure, and said
         // nothing else, did not answer — #67's rule for the resolve loop, held
         // here: an attempt that captured no answer is an infra failure, not an
@@ -1730,16 +1759,16 @@ const invokeAgent = (
         // the non-zero-exit path (`agentPartialOutput`), and the reason it is
         // the same rule: what the agent said is evidence whatever happened to
         // the process afterwards.
-        if (!spoken && reportedFailure !== null) {
+        if (!spoken && speech.failure !== undefined) {
           settleReject(
             new AgentError(
-              `${agent.name} reported a failed turn and produced no output:\n${reportedFailure}`,
+              `${agent.name} reported a failed turn and produced no output:\n${speech.failure}`,
             ),
           );
           return;
         }
         settleResolve({
-          result: spoken || (agent.parsedOutputOnly === true ? "" : execResult.stdout),
+          result: speech.output(execResult.stdout),
         });
       })
       .catch((err) => settleReject(err));

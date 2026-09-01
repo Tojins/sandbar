@@ -133,8 +133,6 @@ export type ResolveAgentRun = {
   // Agent speech parsed by the selected provider. Raw stdout remains above for
   // the byte-verbatim attempt log; promise tokens are read only from here.
   readonly output: string;
-  // A terminal failure reported in-band by the provider, never agent speech.
-  readonly providerFailure?: string;
   readonly end: ResolveAgentEnd;
   // The process's exit code, or null when it was killed before it had one.
   readonly exitCode: number | null;
@@ -147,7 +145,8 @@ export type ResolveAgentRun = {
   // can go and look at (`podman ps -a`, `podman logs`) rather than describing
   // an anonymous process that is already gone.
   readonly container: string;
-  // Why the runtime never started, when `end` is `spawn-error`.
+  // A runtime spawn error or terminal failure reported by the provider. The
+  // spawn error wins if both are ever present.
   readonly detail?: string;
 };
 
