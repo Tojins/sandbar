@@ -457,9 +457,9 @@ export async function ensureImages(
 // selected by resolved role routing, so they are appended AFTER the declared
 // image or a per-branch variant has been resolved. Base images must provide
 // node >= 20 and npm; the generated build is the executable enforcement of
-// that contract. Installation temporarily selects root, then restores the
-// base's effective uid so the augmentation preserves the environment's USER.
-// The completed image is re-probed against D3 before an agent can receive it.
+// that contract. Installation selects root because global npm installs must
+// not depend on the base's default user. That default is inert on the result:
+// both the sandbox and merger resolve container pass an explicit `--user`.
 
 export function agentToolsetSpec(
   providers: readonly AgentProviderName[],
@@ -472,18 +472,12 @@ export function agentToolsetSpec(
 export function agentToolsContainerfile(
   baseTag: string,
   providers: readonly AgentProviderName[],
-  baseUid: number,
 ): string {
   const packages = providers.flatMap((provider) => {
     const install = AGENT_PROVIDER_PACKAGES[provider];
     return [...(install.npmFlags ?? []), install.spec];
   });
-  return (
-    `FROM ${baseTag}\n` +
-    "USER 0\n" +
-    `RUN npm install -g ${packages.join(" ")}\n` +
-    `USER ${baseUid}\n`
-  );
+  return `FROM ${baseTag}\nUSER 0\nRUN npm install -g ${packages.join(" ")}\n`;
 }
 
 export type AgentImages = {
@@ -496,15 +490,12 @@ export async function createAgentImages(opts: {
   readonly declaredBaseTag: string;
   readonly providers: readonly AgentProviderName[];
   readonly scope: RunScope;
-  readonly hostUid?: number;
   readonly build?: (image: BuiltImage, opts: BuildOptions) => Promise<unknown>;
   readonly inputsLabel?: (tag: string) => Promise<string | null>;
-  readonly probeUid?: UidProbe;
   readonly log?: (line: string) => void;
 }): Promise<AgentImages> {
   const build = opts.build ?? buildImage;
   const inputsLabel = opts.inputsLabel ?? readInputsLabel;
-  const probeUid = opts.probeUid ?? effectiveUid;
   const log = opts.log ?? ((line: string) => console.log(line));
   const toolset = agentToolsetSpec(opts.providers);
   const pending = new Map<string, Promise<string>>();
@@ -515,12 +506,7 @@ export async function createAgentImages(opts: {
     if (promise === undefined) {
       promise = (async () => {
         const baseInputs = await inputsLabel(baseTag);
-        const baseUid = await probeUid(baseTag);
-        const containerfile = agentToolsContainerfile(
-          baseTag,
-          opts.providers,
-          baseUid,
-        );
+        const containerfile = agentToolsContainerfile(baseTag, opts.providers);
         const fingerprint = createHash("sha256")
           .update(JSON.stringify([baseInputs ?? "unknown", containerfile]))
           .digest("hex");
@@ -543,12 +529,6 @@ export async function createAgentImages(opts: {
             },
           );
         }
-        await checkVariantUid(
-          tag,
-          baseTag,
-          opts.hostUid ?? 0,
-          probeUid,
-        );
         order.push(tag);
         return tag;
       })().catch((err: unknown) => {
@@ -943,7 +923,10 @@ export async function sweepBranchImages(
   const tags = stdout
     .split("\n")
     .map((s) => s.trim())
-    .filter((t) => isVariantImageTagIn(scope, t));
+    .filter((t) => isVariantImageTagIn(scope, t))
+    // Agent-tool images are children of branch variants and carry one more
+    // variant suffix. Remove the more-derived (therefore longer) tags first.
+    .sort((a, b) => b.length - a.length);
   const removed: string[] = [];
   const failures: string[] = [];
   for (const tag of tags) {

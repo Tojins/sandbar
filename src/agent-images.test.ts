@@ -12,8 +12,9 @@ import {
   agentToolsContainerfile,
   buildArgv,
   createAgentImages,
+  sweepBranchImages,
 } from "./ensure-images.js";
-import { runScope } from "./naming.js";
+import { runScope, variantImageTag } from "./naming.js";
 
 describe("run-owned agent images", () => {
   it("generates a no-context build containing only the routed, pinned tools", async () => {
@@ -22,8 +23,6 @@ describe("run-owned agent images", () => {
       declaredBaseTag: "localhost/app:base",
       providers: ["codex"],
       scope: runScope("/agent-images"),
-      hostUid: 1000,
-      probeUid: async () => 1000,
       inputsLabel: async (tag) => (tag === "localhost/app:base" ? "base-fp" : null),
       build: async (image, opts: BuildOptions) => {
         builds.push({ content: opts.content ?? "", argv: buildArgv(image, opts) });
@@ -35,18 +34,20 @@ describe("run-owned agent images", () => {
     expect(builds[0].content).toContain(AGENT_PROVIDER_PACKAGES.codex.spec);
     expect(builds[0].content).not.toContain("anthropic");
     expect(builds[0].content).toContain("USER 0\nRUN npm install");
-    expect(builds[0].content).toContain("\nUSER 1000\n");
   });
 
   it("pins both providers and keeps claude lifecycle scripts enabled", () => {
-    const file = agentToolsContainerfile("base", ["claude", "codex"], 0);
+    const file = agentToolsContainerfile("base", ["claude", "codex"]);
     expect(file).toContain(AGENT_PROVIDER_PACKAGES.claude.spec);
     expect(file).toContain("--allow-scripts=@anthropic-ai/claude-code");
     expect(file).toContain(AGENT_PROVIDER_PACKAGES.codex.spec);
   });
 
   it("keeps the temporary host-image pins aligned with every provider", () => {
-    const containerfile = readFileSync("Containerfile", "utf8");
+    const containerfile = readFileSync(
+      new URL("../Containerfile", import.meta.url),
+      "utf8",
+    );
     for (const provider of AGENT_PROVIDER_NAMES) {
       expect(containerfile, provider).toContain(
         AGENT_PROVIDER_PACKAGES[provider].spec,
@@ -61,7 +62,6 @@ describe("run-owned agent images", () => {
       declaredBaseTag: "base",
       providers: ["claude"],
       scope: runScope("/unknown-base"),
-      probeUid: async () => 0,
       inputsLabel: async () => (++reads === 1 ? null : "apparently-present"),
       build: async () => {
         builds += 1;
@@ -72,7 +72,7 @@ describe("run-owned agent images", () => {
   });
 
   it("reuses a derived image whose label matches a labelled base and toolset", async () => {
-    const containerfile = agentToolsContainerfile("base", ["codex"], 0);
+    const containerfile = agentToolsContainerfile("base", ["codex"]);
     const fingerprint = createHash("sha256")
       .update(JSON.stringify(["base-fp", containerfile]))
       .digest("hex");
@@ -82,7 +82,6 @@ describe("run-owned agent images", () => {
       declaredBaseTag: "base",
       providers: ["codex"],
       scope: runScope("/cached-agent-image"),
-      probeUid: async () => 0,
       inputsLabel: async () => (++reads === 1 ? "base-fp" : fingerprint),
       build: async () => {
         builds += 1;
@@ -102,24 +101,38 @@ describe("run-owned agent images", () => {
       declaredBaseTag: "base",
       providers: ["codex"],
       scope: runScope("/deduplicated-agent-image"),
-      probeUid: async () => 0,
       inputsLabel: async () => null,
       build: async () => {
         builds += 1;
-        await buildStarted;
+        if (builds === 2) await buildStarted;
       },
       log: () => {},
     });
-    releaseBuild();
     const images = await imagesPromise;
-    const [first, second, third] = await Promise.all([
+    const augmentations = Promise.all([
       images.augment("variant"),
       images.augment("variant"),
       images.augment("variant"),
     ]);
+    releaseBuild();
+    const [first, second, third] = await augmentations;
     expect(first).toBe(second);
     expect(second).toBe(third);
     expect(builds).toBe(2);
+  });
+
+  it("sweeps augmented children before their branch-variant parents", async () => {
+    const scope = runScope("/nested-agent-images");
+    const parent = variantImageTag("base", scope, "a".repeat(64));
+    const child = variantImageTag(parent, scope, "b".repeat(64));
+    const removed: string[] = [];
+    const result = await sweepBranchImages(scope, async (args) => {
+      if (args[0] === "images") return { stdout: `${parent}\n${child}\n` };
+      removed.push(args.at(-1) ?? "");
+      return { stdout: "" };
+    });
+    expect(result.failures).toEqual([]);
+    expect(removed).toEqual([child, parent]);
   });
 
   it("names the base and routed toolset when augmentation fails", async () => {
@@ -128,7 +141,6 @@ describe("run-owned agent images", () => {
         declaredBaseTag: "broken-base",
         providers: ["codex"],
         scope: runScope("/failed-agent-image"),
-        probeUid: async () => 0,
         inputsLabel: async () => null,
         build: async () => {
           throw new Error("registry unavailable");
