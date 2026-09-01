@@ -686,6 +686,34 @@ describe("resolveSandboxImage", () => {
     expect(reported[0]).toContain("this line is the only report it gets");
   });
 
+  it("does not claim a gate runs the sandbox image when no gate container does", async () => {
+    const source = await tree({
+      Containerfile: "FROM x",
+      "package-lock.json": "{}",
+    });
+    const branch = await tree({
+      Containerfile: "FROM x",
+      "package-lock.json": "changed",
+    });
+    const base = new Map([["sandbox", (await fp(source, SANDBOX))!]]);
+    const reported: string[] = [];
+    await resolveSandboxImage({
+      declaredTag: "sandbox",
+      agentImages: agentImages(async () => {
+        throw new SandbarError("registry unavailable");
+      }),
+      worktreePath: branch,
+      branchImages: harness(base, async () => {}),
+      gateRunsSameImage: false,
+      onFallback: (line) => {
+        reported.push(line);
+      },
+    });
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toContain("No `gateStack` container runs the sandbox image");
+    expect(reported[0]).not.toContain("The gate runs the successfully resolved branch image");
+  });
+
   it("promises a second report only when a gate container runs the same image", async () => {
     // The compensating control for falling back is that the GATE resolves the
     // same entry and reds against the branch — and that exists only when a

@@ -616,6 +616,7 @@ export async function run(
       declaredBaseTag: config.sandboxImage,
       providers: requiredAgentProviders(config),
       scope,
+      hostUid: process.getuid?.() ?? 0,
     });
   } catch (err) {
     return await stopAtStartup("image-build-failed", err);

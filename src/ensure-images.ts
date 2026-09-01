@@ -457,7 +457,9 @@ export async function ensureImages(
 // selected by resolved role routing, so they are appended AFTER the declared
 // image or a per-branch variant has been resolved. Base images must provide
 // node >= 20 and npm; the generated build is the executable enforcement of
-// that contract.
+// that contract. Installation temporarily selects root, then restores the
+// base's effective uid so the augmentation preserves the environment's USER.
+// The completed image is re-probed against D3 before an agent can receive it.
 
 export function agentToolsetSpec(
   providers: readonly AgentProviderName[],
@@ -470,12 +472,18 @@ export function agentToolsetSpec(
 export function agentToolsContainerfile(
   baseTag: string,
   providers: readonly AgentProviderName[],
+  baseUid: number,
 ): string {
   const packages = providers.flatMap((provider) => {
     const install = AGENT_PROVIDER_PACKAGES[provider];
     return [...(install.npmFlags ?? []), install.spec];
   });
-  return `FROM ${baseTag}\nRUN npm install -g ${packages.join(" ")}\n`;
+  return (
+    `FROM ${baseTag}\n` +
+    "USER 0\n" +
+    `RUN npm install -g ${packages.join(" ")}\n` +
+    `USER ${baseUid}\n`
+  );
 }
 
 export type AgentImages = {
@@ -488,12 +496,15 @@ export async function createAgentImages(opts: {
   readonly declaredBaseTag: string;
   readonly providers: readonly AgentProviderName[];
   readonly scope: RunScope;
+  readonly hostUid?: number;
   readonly build?: (image: BuiltImage, opts: BuildOptions) => Promise<unknown>;
   readonly inputsLabel?: (tag: string) => Promise<string | null>;
+  readonly probeUid?: UidProbe;
   readonly log?: (line: string) => void;
 }): Promise<AgentImages> {
   const build = opts.build ?? buildImage;
   const inputsLabel = opts.inputsLabel ?? readInputsLabel;
+  const probeUid = opts.probeUid ?? effectiveUid;
   const log = opts.log ?? ((line: string) => console.log(line));
   const toolset = agentToolsetSpec(opts.providers);
   const pending = new Map<string, Promise<string>>();
@@ -504,7 +515,12 @@ export async function createAgentImages(opts: {
     if (promise === undefined) {
       promise = (async () => {
         const baseInputs = await inputsLabel(baseTag);
-        const containerfile = agentToolsContainerfile(baseTag, opts.providers);
+        const baseUid = await probeUid(baseTag);
+        const containerfile = agentToolsContainerfile(
+          baseTag,
+          opts.providers,
+          baseUid,
+        );
         const fingerprint = createHash("sha256")
           .update(JSON.stringify([baseInputs ?? "unknown", containerfile]))
           .digest("hex");
@@ -527,6 +543,12 @@ export async function createAgentImages(opts: {
             },
           );
         }
+        await checkVariantUid(
+          tag,
+          baseTag,
+          opts.hostUid ?? 0,
+          probeUid,
+        );
         order.push(tag);
         return tag;
       })().catch((err: unknown) => {
@@ -816,9 +838,14 @@ export async function resolveSandboxImage(opts: {
       `resolved the per-branch agent sandbox image '${base}' for ` +
         `${worktreePath}, but could not append the run-owned agent tools; ` +
         `starting the sandbox on '${opts.agentImages.declaredTag}', whose ` +
-        "environment is a commit behind its own branch. The gate runs the " +
-        "successfully resolved branch image, so it cannot report this tool-" +
-        "layer failure; this line is the only report it gets: " +
+        "environment is a commit behind its own branch. " +
+        (opts.gateRunsSameImage
+          ? "The gate runs the successfully resolved branch image, so it " +
+            "cannot report this tool-layer failure; this line is the only " +
+            "report it gets: "
+          : "No `gateStack` container runs the sandbox image, and nothing " +
+            "else resolves its tool layer; this line is the only report it " +
+            "gets: ") +
         `${err instanceof Error ? err.message : String(err)}`,
     );
     return opts.agentImages.declaredTag;
