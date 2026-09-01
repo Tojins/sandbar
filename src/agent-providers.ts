@@ -1,5 +1,6 @@
-// Which CLI a role's agent runs (#72, #74) — the NAME → provider mapping, and the
-// one place that says what credential each provider needs.
+// Which CLI a role's agent runs (#72, #74, #75) — the NAME → provider mapping,
+// the package and protocol-version pin the driver installs, and the one place
+// that says what credential each provider needs.
 //
 // The config already split the MODEL per role (`implementerModelId` /
 // `reviewerModelId` / `mergerModelId`); this is the vendor knob beside it. The

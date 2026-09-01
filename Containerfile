@@ -69,7 +69,8 @@ RUN curl -fsSL https://github.com/containers/podman/releases/download/v4.9.3/pod
 # The driver also appends its pinned, routed providers after resolving this
 # image (#75). Keep this host copy until sandbar.pin reaches a release carrying
 # that augmentation: the current pinned driver still runs this image directly
-# after a relaunch. Always-install makes the temporary overlap harmless.
+# after a relaunch. These temporary pins mirror AGENT_PROVIDER_PACKAGES in
+# src/agent-providers.ts; always-install makes the overlap harmless.
 RUN npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.257
 RUN npm install -g @openai/codex@0.152.0
 

@@ -488,15 +488,12 @@ export async function createAgentImages(opts: {
   readonly declaredBaseTag: string;
   readonly providers: readonly AgentProviderName[];
   readonly scope: RunScope;
-  readonly hostUid?: number;
   readonly build?: (image: BuiltImage, opts: BuildOptions) => Promise<unknown>;
   readonly inputsLabel?: (tag: string) => Promise<string | null>;
-  readonly probeUid?: UidProbe;
   readonly log?: (line: string) => void;
 }): Promise<AgentImages> {
   const build = opts.build ?? buildImage;
   const inputsLabel = opts.inputsLabel ?? readInputsLabel;
-  const probeUid = opts.probeUid ?? effectiveUid;
   const log = opts.log ?? ((line: string) => console.log(line));
   const toolset = agentToolsetSpec(opts.providers);
   const pending = new Map<string, Promise<string>>();
@@ -529,7 +526,6 @@ export async function createAgentImages(opts: {
               capture: true,
             },
           );
-          await checkVariantUid(tag, baseTag, opts.hostUid ?? 0, probeUid);
         }
         order.push(tag);
         return tag;
@@ -761,6 +757,14 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
 // cannot arrive, so `gateRunsSameImage` is a required parameter rather than an
 // assumption the message makes on their behalf.
 //
+// Appending the run-owned tools can fail after the branch variant itself built.
+// That also falls back, but specifically to the augmented declared tag: startup
+// either produced it or refused the run, so an unaugmented image can never
+// reach an agent. The gate still runs the successfully built branch variant and
+// cannot reproduce this augmentation failure, making this report the only one
+// the operator gets; it must name both that fact and the same stale-environment
+// cost as the branch-build fallback.
+//
 // The fallback is reported rather than swallowed: `onFallback` reaches the run
 // log and the operator's console at the call site.
 export async function resolveSandboxImage(opts: {
@@ -811,7 +815,10 @@ export async function resolveSandboxImage(opts: {
     await opts.onFallback?.(
       `resolved the per-branch agent sandbox image '${base}' for ` +
         `${worktreePath}, but could not append the run-owned agent tools; ` +
-        `starting the sandbox on '${opts.agentImages.declaredTag}': ` +
+        `starting the sandbox on '${opts.agentImages.declaredTag}', whose ` +
+        "environment is a commit behind its own branch. The gate runs the " +
+        "successfully resolved branch image, so it cannot report this tool-" +
+        "layer failure; this line is the only report it gets: " +
         `${err instanceof Error ? err.message : String(err)}`,
     );
     return opts.agentImages.declaredTag;

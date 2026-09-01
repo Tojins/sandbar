@@ -22,7 +22,6 @@ describe("run-owned agent images", () => {
       build: async (image, opts: BuildOptions) => {
         builds.push({ content: opts.content ?? "", argv: buildArgv(image, opts) });
       },
-      probeUid: async () => 0,
       log: () => {},
     });
     expect(builds).toHaveLength(1);
@@ -49,7 +48,6 @@ describe("run-owned agent images", () => {
       build: async () => {
         builds += 1;
       },
-      probeUid: async () => 0,
       log: () => {},
     });
     expect(builds).toBe(1);
@@ -70,7 +68,6 @@ describe("run-owned agent images", () => {
       build: async () => {
         builds += 1;
       },
-      probeUid: async () => 0,
       log: () => {},
     });
     expect(builds).toBe(0);
@@ -91,7 +88,6 @@ describe("run-owned agent images", () => {
         builds += 1;
         await buildStarted;
       },
-      probeUid: async () => 0,
       log: () => {},
     });
     releaseBuild();

@@ -681,7 +681,9 @@ describe("resolveSandboxImage", () => {
     expect(image).toBe("agent:sandbox");
     expect(reported).toHaveLength(1);
     expect(reported[0]).toContain("could not append the run-owned agent tools");
-    expect(reported[0]).not.toContain("gate");
+    expect(reported[0]).toContain("environment is a commit behind its own branch");
+    expect(reported[0]).toContain("The gate runs the successfully resolved branch image");
+    expect(reported[0]).toContain("this line is the only report it gets");
   });
 
   it("promises a second report only when a gate container runs the same image", async () => {
