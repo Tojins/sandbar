@@ -637,6 +637,20 @@ export async function run(
           "content-addressed and scoped, so a leftover is reused rather than " +
           `mistaken for something current:\n${failures.join("\n")}`,
       );
+      // The twin of `reportSweepFailures`, which is what removes these tags'
+      // predecessors at the NEXT startup and which takes a log writer for this
+      // exact reason (#70): a failed removal is an outcome, so it exists in the
+      // log whether or not anyone was watching the terminal. Leaving the
+      // end-of-run half unpaired while the start-of-run half is paired is the
+      // drift `logs.ts`'s invariant is written to stop — and it is the half
+      // that runs while an operator has most likely stopped reading.
+      //
+      // Safe to write from here: `runLogger.finalize` is registered above this
+      // handler and cleanup is LIFO, so the run-end marker is still to come.
+      await runLogger.appendOrchestrator(
+        `could not remove ${failures.length} per-branch gate image(s): ` +
+          failures.join("; "),
+      );
     }
   });
 
@@ -1361,15 +1375,22 @@ export async function run(
         // makes: parking writes to the pull request — a comment, and a human's
         // `land` label taken off it — so it rides `MergerError.partial` exactly
         // as `skipped` does, and a halt one issue later must not be the reason
-        // a reviewer never learns their label is gone. The line names the
-        // DECISION rather than the writes: `parkChunk` records before it makes
-        // them, so on the halt path this may be the entry whose own `gh` call
-        // threw, and the pull request is where the outcome is readable anyway.
+        // a reviewer never learns their label is gone. BOTH LINES NAME THE
+        // DECISION AND NEITHER NAMES THE WRITES, for the reason that ordering
+        // creates: `parkChunk` records before it makes them, so on the halt
+        // path this may be the very entry whose own `gh` call threw, and it
+        // skips both writes outright for a chunk with no pull request to make
+        // them against. A log line claiming "`land` removed" would therefore be
+        // false exactly when an operator is reading the log to find out what
+        // happened — a `land` still on the PR read back six weeks later as a
+        // human having re-applied it, which is the class of untrustworthy
+        // record #70 exists to end. What the writes did is the pull request's
+        // to say, and `chunk-land.ts`'s `emit` records the same decision from
+        // the other side.
         for (const c of mergerOutcome.skippedChunks) {
           console.log(`  ⊘ ${c.target.branch} not landed (${c.reason})`);
           await runLogger.appendOrchestrator(
-            `chunk parked: ${c.target.branch} not landed (${c.reason}); ` +
-              `\`${LAND_LABEL}\` removed`,
+            `chunk parked: ${c.target.branch} not landed (${c.reason})`,
           );
         }
         // Deferred, not parked (#61 + #64): the chunk grew this cycle, so the

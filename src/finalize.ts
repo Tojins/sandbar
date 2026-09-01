@@ -115,6 +115,14 @@ export const BOT_COMMENT_PREFIX = "**Sandbar:**";
 // off-branch arms below — is the one sentence entitled to say where the work
 // actually is. A template that also claimed "whatever it wrote is pushed here"
 // would contradict the paragraph directly beneath it in the same comment body.
+//
+// Nor does naming it predict what the NEXT attempt will do with it. The branch
+// is where the work is now; whether an attempt resumes on it is preflight's
+// business and the operator's — preflight offers deleting a merged issue branch,
+// and a parked branch deleted by hand seeds the next attempt from
+// `origin/<sourceBranch>` instead. #70 asks these bodies to say where the human
+// is standing, which is a fact about the present, and every clause past that is
+// a forecast the template cannot keep.
 
 export const NEEDS_INFO_COMMENT_TEMPLATE = (
   branch: string,
@@ -123,9 +131,9 @@ export const NEEDS_INFO_COMMENT_TEMPLATE = (
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} the agent paused with NEEDS-INFO. The branch is ` +
-  `\`${branch}\`, and the next attempt continues on it. Please answer the ` +
-  `questions below, then drop \`${needsInfoLabel}\` and re-apply ` +
-  `\`${readyLabel}\` when the answers are ready.\n\n---\n\n${questions}`;
+  `\`${branch}\`. Please answer the questions below, then drop ` +
+  `\`${needsInfoLabel}\` and re-apply \`${readyLabel}\` when the answers are ` +
+  `ready.\n\n---\n\n${questions}`;
 
 // #21 — the implementer stopped before writing code because the issue implies
 // non-trivial user-visible UI and carries no prototype. Same human round-trip
