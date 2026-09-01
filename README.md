@@ -255,7 +255,7 @@ sits in).
 | `env` | `{}` |
 | `copyToWorktree` | `[]` |
 | `maxImplAttempts` | `8` |
-| `maxReviewRounds` | `5` |
+| `maxReviewRounds` | `8` — equal to `maxImplAttempts` on purpose; see below |
 | `maxTotalIssues` | `50` |
 | `labels` | `{ needsInfo: "needs-info", agentStuck: "agent-stuck" }` (override any subset) |
 | `mergeMode` | `{ kind: "direct" }` — see below |
@@ -296,6 +296,26 @@ place, so:
   run starts (a path an `onWorktreeReady` hook was creating is now too late),
   and a **relative** one is never checked, because the worktree it resolves
   against does not exist that early.
+
+### The two budgets — `maxImplAttempts` and `maxReviewRounds`
+
+An issue gets up to `maxImplAttempts` implementer attempts in one sandbox, and
+up to `maxReviewRounds` reviewer verdicts. The two look orthogonal and are not,
+on the path that matters: once a branch's gate goes green, **every** attempt
+ends in a reviewer run, so the counters advance in lockstep and the effective
+budget is `min(maxImplAttempts, maxReviewRounds)`. They come apart only where
+the gate is red — a red gate spends an attempt and no round.
+
+That is why the defaults are equal. Raise `maxImplAttempts` alone and the extra
+attempts are unreachable on a green branch; lower `maxReviewRounds` alone and
+you have lowered the attempt budget too. Equal, both exhaust on the same
+attempt, and the issue is parked as `NEEDS-HUMAN-REVIEW` — the terminal that
+hands you the latest review, which is what you need to finish the branch by
+hand. Set `maxReviewRounds` **above** `maxImplAttempts` and you get
+`NEEDS-HUMAN` (`reviewer-blocked`) instead, with the review no longer the
+headline.
+
+Both budgets are per-issue and per-run; neither carries across runs.
 
 ### `mergeMode` — who gets to say the merge result is good
 

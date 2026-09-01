@@ -151,6 +151,18 @@ describe("resolveConfig", () => {
     expect(r.codingStandardsPath).toBeUndefined();
   });
 
+  it("defaults the two per-issue budgets to the same number (#71)", () => {
+    // Not decoration: on a green-gate branch every attempt ends in a reviewer
+    // run, so the effective budget is min(attempts, rounds). Equal is what
+    // keeps every attempt reachable AND parks an exhausted issue as
+    // NEEDS-HUMAN-REVIEW rather than reviewer-blocked. 8 is #71's number, from
+    // #66's five-round exhaustion on a converging branch.
+    expect(DEFAULT_MAX_REVIEW_ROUNDS).toBe(8);
+    expect(DEFAULT_MAX_REVIEW_ROUNDS).toBe(DEFAULT_MAX_IMPL_ATTEMPTS);
+    const r = resolveConfig(minimal);
+    expect(r.maxReviewRounds).toBe(r.maxImplAttempts);
+  });
+
   it("passes relaunchAfterLanding through when set (#65)", () => {
     const r = resolveConfig({ ...minimal, relaunchAfterLanding: true });
     expect(r.relaunchAfterLanding).toBe(true);

@@ -14,6 +14,10 @@ import {
   reviewerHarnessFailedReprompt,
   step,
 } from "./inner-loop-machine.js";
+import {
+  DEFAULT_MAX_IMPL_ATTEMPTS,
+  DEFAULT_MAX_REVIEW_ROUNDS,
+} from "./config.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";
 
@@ -535,6 +539,67 @@ describe("inner-loop-machine — review-round budget exhaustion", () => {
       gate1Ok,
       changes("r3"),
     ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN-REVIEW",
+      latestReviewerProse: "r3",
+    });
+  });
+
+  it("at the defaults a green-gate loop reaches round 8 before parking (#71)", () => {
+    // #66 was parked on round six of a five-round budget with a five-line
+    // header edit left to make: five attempts, gate-1 green on every one, five
+    // distinct findings, each fixed. The defaults are now equal — every round
+    // below the last dispatches another attempt, and the round the constants
+    // name is reached rather than being one past the budget.
+    const asReviewer = (a: LoopAction) =>
+      a as Extract<LoopAction, { kind: "run-reviewer" }>;
+    const script: LoopEvent[] = [];
+    for (let round = 1; round <= DEFAULT_MAX_REVIEW_ROUNDS; round++) {
+      script.push(impl(complete), gate1Ok, changes(`r${round}`));
+    }
+    const { actions, verdict } = drive(
+      {
+        maxAttempts: DEFAULT_MAX_IMPL_ATTEMPTS,
+        maxReviewRounds: DEFAULT_MAX_REVIEW_ROUNDS,
+      },
+      script,
+    );
+    const rounds = actions
+      .filter((a) => a.kind === "run-reviewer")
+      .map((a) => asReviewer(a).reviewRound);
+    expect(rounds).toEqual(
+      Array.from({ length: DEFAULT_MAX_REVIEW_ROUNDS }, (_, i) => i + 1),
+    );
+    // Both budgets exhaust on the same attempt because they are equal, and
+    // onReviewerResult tests the review budget first — so the human is handed
+    // the terminal that carries the latest review, not reviewer-blocked.
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN-REVIEW",
+      latestReviewerProse: `r${DEFAULT_MAX_REVIEW_ROUNDS}`,
+    });
+  });
+
+  it("the two budgets advance in lockstep once the gate is green (#71)", () => {
+    // The min(maxImplAttempts, maxReviewRounds) claim, shown: with the review
+    // budget one below the attempt budget, the last attempt is never
+    // dispatched — the rounds bind first.
+    const asImpl = (a: LoopAction) =>
+      a as Extract<LoopAction, { kind: "run-implementer" }>;
+    const { actions, verdict } = drive({ maxAttempts: 4, maxReviewRounds: 3 }, [
+      impl(complete),
+      gate1Ok,
+      changes("r1"),
+      impl(complete),
+      gate1Ok,
+      changes("r2"),
+      impl(complete),
+      gate1Ok,
+      changes("r3"),
+    ]);
+    const attempts = actions
+      .filter((a) => a.kind === "run-implementer")
+      .map((a) => asImpl(a).attempt);
+    expect(attempts).toEqual([1, 2, 3]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN-REVIEW",
       latestReviewerProse: "r3",

@@ -8,6 +8,16 @@
 // caller supplies the exhaustion verdict because only it knows which case
 // it's in.
 //
+// The two budgets bind together, not independently (#71): once a branch's gate
+// goes green every attempt ends in a reviewer run, so `attempt` and
+// `reviewRoundsUsed` advance in lockstep and the effective budget on that path
+// is min(maxAttempts, maxReviewRounds). Only a red gate spends an attempt
+// without a round. Which terminal a caller gets when the two are EQUAL — the
+// configured default — is decided here: `onReviewerResult` tests the review
+// budget before it calls advanceAttempt, so the last round ends the issue as
+// NEEDS-HUMAN-REVIEW carrying that round's prose, rather than as
+// NEEDS-HUMAN/`reviewer-blocked`.
+//
 // A COMPLETE claim is routed on THREE inputs, not one: the promise token, a
 // clean worktree (#24 D1), and HEAD still being the issue branch (#27). The
 // branch check runs FIRST because it subsumes the other: commits on a

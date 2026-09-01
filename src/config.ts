@@ -522,6 +522,14 @@ export type RunConfig = {
   // leaks wholesale. Default: {}.
   readonly env?: Record<string, string>;
 
+  // Two budgets, but on the common path only the smaller one binds (#71): a
+  // branch whose gate goes green ends every attempt in a reviewer run, so the
+  // two counters advance in lockstep and the effective attempt budget there is
+  // min(maxImplAttempts, maxReviewRounds). They come apart only where the gate
+  // is RED, which spends an attempt and no round. The defaults are equal — 8
+  // and 8, for the reason DEFAULT_MAX_REVIEW_ROUNDS gives — so a host that
+  // lowers either one lowers the green path's budget to it, and one that
+  // raises maxImplAttempts alone buys nothing on that path.
   readonly maxImplAttempts?: number;
   readonly maxReviewRounds?: number;
   readonly maxTotalIssues?: number;
@@ -659,10 +667,31 @@ export const DEFAULT_CLAUDE_MD_PATH = "CLAUDE.md";
 export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
 export const DEFAULT_ADR_DIR = "docs/adr";
 export const DEFAULT_MAX_IMPL_ATTEMPTS = 8;
-// 5, not 3: dogfooding surfaced a review-budget exhaustion on an issue making
-// monotonic progress (three rounds, three distinct real findings, each fixed;
-// the 4th round was APPROVED). 3 is marginal even for converging work (#8).
-export const DEFAULT_MAX_REVIEW_ROUNDS = 5;
+// 8, and equal to DEFAULT_MAX_IMPL_ATTEMPTS on purpose. Two dogfooding
+// exhaustions set this number, and both were issues that were CONVERGING:
+//   - 3 → 5 (#8): three rounds, three distinct real findings, each fixed; the
+//     4th round was APPROVED. 3 is marginal even for converging work.
+//   - 5 → 8 (#71, from run #66): five attempts, gate-1 green on every one,
+//     five rounds, five distinct and monotonically narrowing findings, each
+//     fixed and none re-raised. What parked the branch was a five-line header
+//     edit arriving on round six of a five-round budget.
+// The budget exists to bound a loop that is NOT converging — a reviewer and an
+// implementer that disagree permanently, or an implementer thrashing — and it
+// cannot tell that case from these two, because "the same finding again" is a
+// judgement about prose and nothing but the token contracts is allowed inside
+// the orchestrator's termination logic. So the only lever is the number, and
+// it was set below what this repo's reviewer costs to satisfy.
+// EQUAL to the attempt budget is the relation, not merely a bigger number. On
+// a branch whose gate goes green every attempt ends in a reviewer run, so the
+// two counters advance in lockstep and the effective budget is
+// min(maxImplAttempts, maxReviewRounds) — see RunConfig's doc. Below it, rounds
+// bind first and part of the attempt budget is unreachable; above it, attempts
+// bind first and the issue parks as NEEDS-HUMAN/`reviewer-blocked`, without the
+// reviewer's prose as the headline of what the human is handed. Equal, both
+// exhaust on the same attempt and `onReviewerResult` checks the review budget
+// first, so the issue is parked with the terminal that carries the latest
+// review — the thing a human needs to finish the branch by hand.
+export const DEFAULT_MAX_REVIEW_ROUNDS = 8;
 export const DEFAULT_MAX_TOTAL_ISSUES = 50;
 export const DEFAULT_INTEGRATION_BRANCH = "sandbar/integration";
 // 20 minutes. Covers a queued runner plus a browser suite; a repo whose CI is
