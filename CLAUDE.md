@@ -79,9 +79,11 @@ an exit condition fires.
    **same** sandbox so commits accumulate on the issue branch. All transitions
    live in the pure state machine; `inner-loop.ts` is I/O glue. Two budgets,
    impl attempts and `maxReviewRounds` (default 8, equal to `maxImplAttempts`),
-   and they are NOT independent (#71): once the gate is green every attempt
-   ends in a reviewer run, so the effective budget is the min of the two and
-   only a red gate spends an attempt without a round. Equal is what makes both
+   and they are NOT independent (#71): a round is never spent without an
+   attempt, so the budget is at most the min of the two — exactly that on the
+   green-gate loop where every attempt ends in a verdict, and more attempts
+   than rounds wherever one ends without one (a red gate, a re-prompt, a
+   reviewer harness failure). Equal is what makes both
    exhaust on the same attempt and park the issue with the terminal carrying
    the latest review; `DEFAULT_MAX_REVIEW_ROUNDS`'s comment in `src/config.ts`
    owns the number and the two dogfooding exhaustions behind it (#8, #66). The

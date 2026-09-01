@@ -522,14 +522,18 @@ export type RunConfig = {
   // leaks wholesale. Default: {}.
   readonly env?: Record<string, string>;
 
-  // Two budgets, but on the common path only the smaller one binds (#71): a
-  // branch whose gate goes green ends every attempt in a reviewer run, so the
-  // two counters advance in lockstep and the effective attempt budget there is
-  // min(maxImplAttempts, maxReviewRounds). They come apart only where the gate
-  // is RED, which spends an attempt and no round. The defaults are equal — 8
-  // and 8, for the reason DEFAULT_MAX_REVIEW_ROUNDS gives — so a host that
-  // lowers either one lowers the green path's budget to it, and one that
-  // raises maxImplAttempts alone buys nothing on that path.
+  // Two budgets, but only the smaller one binds (#71): a review round is never
+  // spent without an implementer attempt, so the budget an issue gets is at
+  // most min(maxImplAttempts, maxReviewRounds) — and it is exactly that on the
+  // path that matters, a branch whose gate goes green and whose reviewer
+  // answers, where every attempt ends in a verdict and the two counters advance
+  // in lockstep. They come apart wherever an attempt ends WITHOUT a verdict,
+  // spending the attempt and no round: a red gate, a re-prompt (NO-SIGNAL, a
+  // dirty tree, HEAD off the branch), or a reviewer harness failure (#41), that
+  // last one behind a green gate. The defaults are equal — 8 and 8, for the
+  // reason DEFAULT_MAX_REVIEW_ROUNDS gives — so a host that lowers either one
+  // lowers the reviewed path's budget to it, and one that raises
+  // maxImplAttempts alone buys attempts only for the unreviewed routes above.
   readonly maxImplAttempts?: number;
   readonly maxReviewRounds?: number;
   readonly maxTotalIssues?: number;
@@ -681,10 +685,11 @@ export const DEFAULT_MAX_IMPL_ATTEMPTS = 8;
 // judgement about prose and nothing but the token contracts is allowed inside
 // the orchestrator's termination logic. So the only lever is the number, and
 // it was set below what this repo's reviewer costs to satisfy.
-// EQUAL to the attempt budget is the relation, not merely a bigger number. On
-// a branch whose gate goes green every attempt ends in a reviewer run, so the
-// two counters advance in lockstep and the effective budget is
-// min(maxImplAttempts, maxReviewRounds) — see RunConfig's doc. Below it, rounds
+// EQUAL to the attempt budget is the relation, not merely a bigger number. A
+// round is never spent without an attempt, so the budget an issue gets is at
+// most min(maxImplAttempts, maxReviewRounds), and it is exactly that on the
+// green-gate-and-answering-reviewer loop where every attempt ends in a verdict
+// — see RunConfig's doc for where the two come apart. Below it, rounds
 // bind first and part of the attempt budget is unreachable; above it, attempts
 // bind first and the issue parks as NEEDS-HUMAN/`reviewer-blocked`, without the
 // reviewer's prose as the headline of what the human is handed. Equal, both

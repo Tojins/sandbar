@@ -107,6 +107,11 @@ const detached = (
 
 const defaultOpts = { maxAttempts: 8, maxReviewRounds: 3 } as const;
 
+const asImpl = (a: LoopAction) =>
+  a as Extract<LoopAction, { kind: "run-implementer" }>;
+const asReviewer = (a: LoopAction) =>
+  a as Extract<LoopAction, { kind: "run-reviewer" }>;
+
 describe("inner-loop-machine — happy paths", () => {
   it("attempt 1 COMPLETE → gate-1 green → APPROVED → DONE", () => {
     const { actions, verdict } = drive(defaultOpts, [
@@ -332,11 +337,6 @@ describe("inner-loop-machine — reviewer CHANGES-REQUESTED loop", () => {
 });
 
 describe("inner-loop-machine — reviewer harness failure (#41)", () => {
-  const asImpl = (a: LoopAction) =>
-    a as Extract<LoopAction, { kind: "run-implementer" }>;
-  const asReviewer = (a: LoopAction) =>
-    a as Extract<LoopAction, { kind: "run-reviewer" }>;
-
   it("spends NO review round: the next reviewer pass is still round 1", () => {
     const { actions } = drive(defaultOpts, [
       impl(complete),
@@ -551,8 +551,6 @@ describe("inner-loop-machine — review-round budget exhaustion", () => {
     // distinct findings, each fixed. The defaults are now equal — every round
     // below the last dispatches another attempt, and the round the constants
     // name is reached rather than being one past the budget.
-    const asReviewer = (a: LoopAction) =>
-      a as Extract<LoopAction, { kind: "run-reviewer" }>;
     const script: LoopEvent[] = [];
     for (let round = 1; round <= DEFAULT_MAX_REVIEW_ROUNDS; round++) {
       script.push(impl(complete), gate1Ok, changes(`r${round}`));
@@ -576,33 +574,6 @@ describe("inner-loop-machine — review-round budget exhaustion", () => {
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN-REVIEW",
       latestReviewerProse: `r${DEFAULT_MAX_REVIEW_ROUNDS}`,
-    });
-  });
-
-  it("the two budgets advance in lockstep once the gate is green (#71)", () => {
-    // The min(maxImplAttempts, maxReviewRounds) claim, shown: with the review
-    // budget one below the attempt budget, the last attempt is never
-    // dispatched — the rounds bind first.
-    const asImpl = (a: LoopAction) =>
-      a as Extract<LoopAction, { kind: "run-implementer" }>;
-    const { actions, verdict } = drive({ maxAttempts: 4, maxReviewRounds: 3 }, [
-      impl(complete),
-      gate1Ok,
-      changes("r1"),
-      impl(complete),
-      gate1Ok,
-      changes("r2"),
-      impl(complete),
-      gate1Ok,
-      changes("r3"),
-    ]);
-    const attempts = actions
-      .filter((a) => a.kind === "run-implementer")
-      .map((a) => asImpl(a).attempt);
-    expect(attempts).toEqual([1, 2, 3]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN-REVIEW",
-      latestReviewerProse: "r3",
     });
   });
 
@@ -756,6 +727,63 @@ describe("inner-loop-machine — interleaved budgets", () => {
       gate1Ok,
       changes("r2"),
     ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "reviewer-blocked",
+      failureTrace: "",
+      latestReviewerProse: "r2",
+      strandedHead: null,
+    });
+  });
+
+  it("the ROUNDS bind first when they are the smaller budget (#71)", () => {
+    // The mirror of the case above, and the min(maxImplAttempts,
+    // maxReviewRounds) claim from the review-rounds side: maxAttempts=4 but
+    // maxReviewRounds=3, every gate green, so the 4th attempt is never
+    // dispatched — one attempt of the configured budget is unreachable. This
+    // is the shape #71 removed from the defaults by making them equal.
+    const { actions, verdict } = drive({ maxAttempts: 4, maxReviewRounds: 3 }, [
+      impl(complete),
+      gate1Ok,
+      changes("r1"),
+      impl(complete),
+      gate1Ok,
+      changes("r2"),
+      impl(complete),
+      gate1Ok,
+      changes("r3"),
+    ]);
+    const attempts = actions
+      .filter((a) => a.kind === "run-implementer")
+      .map((a) => asImpl(a).attempt);
+    expect(attempts).toEqual([1, 2, 3]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN-REVIEW",
+      latestReviewerProse: "r3",
+    });
+  });
+
+  it("a GREEN gate can spend an attempt and no round (#41) — min() is a ceiling", () => {
+    // The header's claim that the two counters come apart behind a green gate,
+    // not only on a red one: maxAttempts=3, maxReviewRounds=3, and a reviewer
+    // harness failure on attempt 2 spends the attempt without a round. The
+    // attempt budget runs out having spent only two rounds, so the issue is
+    // NOT parked on the review budget.
+    const { actions, verdict } = drive({ maxAttempts: 3, maxReviewRounds: 3 }, [
+      impl(complete),
+      gate1Ok,
+      changes("r1"),
+      impl(complete),
+      gate1Ok,
+      harnessFailed(),
+      impl(complete),
+      gate1Ok,
+      changes("r2"),
+    ]);
+    const rounds = actions
+      .filter((a) => a.kind === "run-reviewer")
+      .map((a) => asReviewer(a).reviewRound);
+    expect(rounds).toEqual([1, 2, 2]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN",
       cause: "reviewer-blocked",
