@@ -8,6 +8,7 @@ import {
 import { sourceBranchBase } from "./git-ops.js";
 import {
   renderAttemptSlot,
+  renderReviewerFollowupSlot,
   renderReviewerSlot,
   renderSandboxStackSlot,
 } from "./prompt.js";
@@ -116,46 +117,47 @@ describe("renderAttemptSlot — commit-on-the-issue-branch rule (#27)", () => {
 });
 
 describe("renderReviewerSlot", () => {
-  it("embeds the built-in coding standards and references conventions", () => {
+  it("focuses only correctness and excludes standards boilerplate", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first\nb2 second",
       diff: "diff --git a/x b/x\n+hi",
     });
-    expect(slot).toContain("## Coding standards");
-    expect(slot).toContain("@CLAUDE.md");
+    expect(slot).toMatch(/correctness of logic only/i);
+    expect(slot).not.toContain("## Coding standards");
+    expect(slot).not.toContain("@CLAUDE.md");
   });
 
-  it("references the optional project standards file when provided", () => {
+  it("does not reference the optional project standards file", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first",
       diff: "diff",
     });
-    expect(slot).toContain("### Project standards");
-    expect(slot).toContain("@docs/CODING_STANDARDS.md");
+    expect(slot).not.toContain("### Project standards");
+    expect(slot).not.toContain("@docs/CODING_STANDARDS.md");
   });
 
-  it("emits only the built-in standards when no project standards file is provided", () => {
+  it("omits standards when no project standards file is provided", () => {
     const { codingStandardsPath: _omit, ...noStandards } = baseInputs;
     const slot = renderReviewerSlot({
       ...noStandards,
       commits: "a1 first",
       diff: "diff",
     });
-    expect(slot).toContain("## Coding standards");
+    expect(slot).not.toContain("## Coding standards");
     expect(slot).not.toContain("### Project standards");
     expect(slot).not.toContain("CODING_STANDARDS");
   });
 
-  it("includes the optional context-md reference when provided", () => {
+  it("does not spend pass-1 attention on the optional context reference", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       contextMdPath: "CONTEXT.md",
       commits: "a1 first",
       diff: "diff",
     });
-    expect(slot).toContain("@CONTEXT.md");
+    expect(slot).not.toContain("@CONTEXT.md");
   });
 
   it("omits the context-md reference when not provided", () => {
@@ -267,6 +269,41 @@ describe("renderReviewerSlot", () => {
     expect(slot).toContain("Issue #42: do the thing");
     expect(slot).toContain("`sandbar/issue-42-do-the-thing`");
     expect(slot).toContain("`main`");
+  });
+});
+
+describe("renderReviewerFollowupSlot", () => {
+  const renderFollowup = () =>
+    renderReviewerFollowupSlot({
+      ...baseInputs,
+      contextMdPath: "CONTEXT.md",
+      commits: "a1 first",
+      diff: "diff --git a/x b/x\n+hi",
+    });
+
+  it("is self-sufficient and carries all three ordered dimensions", () => {
+    const slot = renderFollowup();
+    expect(slot).toContain("## Commits on this branch");
+    expect(slot).toContain("## Branch diff");
+    expect(slot).toMatch(/1\. Test quality and coverage[\s\S]*2\. Spec conformance[\s\S]*3\. Project standards/);
+  });
+
+  it("puts standards and project references only in the follow-up", () => {
+    const slot = renderFollowup();
+    expect(slot).toContain("## Coding standards");
+    expect(slot).toContain("@docs/CODING_STANDARDS.md");
+    expect(slot).toContain("@CLAUDE.md");
+    expect(slot).toContain("@CONTEXT.md");
+  });
+
+  it("requires dimension headings and the existing single-verdict contract", () => {
+    const slot = renderFollowup();
+    expect(slot).toContain("`### Tests`");
+    expect(slot).toContain("`### Spec`");
+    expect(slot).toContain("`### Standards`");
+    expect(slot).toContain("<verdict>APPROVED</verdict>");
+    expect(slot).toContain("<verdict>CHANGES-REQUESTED</verdict>");
+    expect(slot).toMatch(/Emit exactly one verdict/);
   });
 });
 

@@ -79,6 +79,7 @@ import type { RepoRef } from "./repo-ref.js";
 import {
   type ProjectAnchorOptions,
   buildPrompt,
+  buildReviewerFollowupPrompt,
   buildReviewerPrompt,
 } from "./prompt.js";
 import { parseVerdict } from "./verdict-parser.js";
@@ -166,6 +167,7 @@ export type InnerLoopConfig = {
   readonly env: Record<string, string>;
   readonly implementerModelId: string;
   readonly reviewerModelId: string;
+  readonly reviewerFollowupModelId: string;
   // Which CLI each role runs (#72). Paired with the model id above rather than
   // folded into it: the two are independent choices, and every provider takes
   // whatever id it is handed. `agent-providers.ts` owns the set and the
@@ -750,8 +752,11 @@ async function runReviewer(
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
   });
-
-  const outcome = await runReviewerInvocations(
+  const runPass = async (
+    pass: "correctness" | "followup",
+    prompt: string,
+    modelId: string,
+  ) => runReviewerInvocations(
     async (invocation) => {
       // The retry is a fresh agent run in the SAME sandbox. The sandbox is not
       // what failed — in the observed case the implementer was working in it
@@ -761,11 +766,15 @@ async function runReviewer(
       try {
         const reviewerRun = await sandbox.run({
           name:
-            `reviewer-${issue.id}-round-${action.reviewRound}` +
+            `reviewer-${issue.id}-round-${action.reviewRound}-${pass}` +
             (invocation > 1 ? `-invocation-${invocation}` : ""),
           maxIterations: 1,
-          agent: buildAgentProvider(config.reviewerAgent, config.reviewerModelId),
-          prompt: reviewerPrompt,
+          agent: buildAgentProvider(config.reviewerAgent, modelId, {
+            // Only the first follow-up invocation resumes correctness. Any
+            // rerun is cold: a crashed follow-up may itself now be "last".
+            continueSession: pass === "followup" && invocation === 1,
+          }),
+          prompt,
         });
         return { output: reviewerRun.stdout, error: null };
       } catch (err) {
@@ -783,12 +792,91 @@ async function runReviewer(
       onRetry: async (invocation, detail) => {
         const line =
           `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-          `invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} no-review — retrying (${detail.split("\n")[0]})`;
+          `pass=${pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} no-review — ` +
+          `${pass === "followup" ? "retrying cold" : "retrying"} (${detail.split("\n")[0]})`;
         console.error(`  ${line}`);
         if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
       },
     },
   );
+
+  const correctness = await runPass(
+    "correctness",
+    reviewerPrompt,
+    config.reviewerModelId,
+  );
+
+  const transcripts = [`=== correctness pass ===\n${correctness.transcript}`];
+
+  const harnessFailure = async (
+    pass: "correctness" | "followup",
+    outcome: Extract<Awaited<ReturnType<typeof runPass>>, { kind: "harness-failed" }>,
+  ): Promise<LoopEvent> => {
+    if (opts.attemptLogger) {
+      await opts.attemptLogger.writeAttemptReviewer(
+        issue.id,
+        action.attempt,
+        transcripts.join("\n\n"),
+      );
+    }
+    const line =
+      `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
+      `pass=${pass} harness-failed invocations=${outcome.invocations} (round not consumed)`;
+    console.error(`  ${line}`);
+    if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
+    return { kind: "reviewer-harness-failed", detail: `${pass}: ${outcome.detail}` };
+  };
+
+  if (correctness.kind === "harness-failed") {
+    return harnessFailure("correctness", correctness);
+  }
+
+  const correctnessResult = parseVerdict(correctness.stdout);
+  if (correctnessResult.verdict === "CHANGES-REQUESTED") {
+    if (opts.attemptLogger) {
+      await opts.attemptLogger.writeAttemptReviewer(
+        issue.id,
+        action.attempt,
+        transcripts.join("\n\n"),
+      );
+    }
+    if (opts.onOrchestratorLog) {
+      await opts.onOrchestratorLog(
+        `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
+          `correctness=CHANGES-REQUESTED followup=SKIPPED`,
+      );
+    }
+    return {
+      kind: "reviewer-result",
+      verdict: "CHANGES-REQUESTED",
+      prose: `### Correctness\n\n${correctnessResult.prose}`,
+    };
+  }
+
+  // Build this only after correctness passes. Besides avoiding a redundant
+  // issue fetch on early exit, this keeps "skip pass 2" literal: none of its
+  // preparation runs against code that is about to be rewritten.
+  const followupPrompt = await buildReviewerFollowupPrompt({
+    issue,
+    repo: config.repo,
+    repoDir: config.layout.repoDir,
+    worktreePath: sandbox.worktreePath,
+    sourceBranch: config.sourceBranch,
+    base: ctx.base,
+    codingStandardsPath: config.codingStandardsPath,
+    claudeMdPath: config.claudeMdPath,
+    contextMdPath: config.contextMdPath,
+  });
+  const followup = await runPass(
+    "followup",
+    followupPrompt,
+    config.reviewerFollowupModelId,
+  );
+  transcripts.push(`=== follow-up pass ===\n${followup.transcript}`);
+
+  if (followup.kind === "harness-failed") {
+    return harnessFailure("followup", followup);
+  }
 
   // Every invocation's output, not just the reviewing one: the observed failure
   // left a 73-byte log for a 15-minute run, and this file is the only offline
@@ -797,27 +885,14 @@ async function runReviewer(
     await opts.attemptLogger.writeAttemptReviewer(
       issue.id,
       action.attempt,
-      outcome.transcript,
+      transcripts.join("\n\n"),
     );
   }
-
-  if (outcome.kind === "harness-failed") {
-    // Logged as its own thing, never as `verdict=CHANGES-REQUESTED` — the run
-    // log was the only place the two were distinguishable and it did not
-    // distinguish them either. The round number repeats on the next attempt
-    // because the round is not consumed, so the line says so.
-    const line =
-      `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-      `harness-failed invocations=${outcome.invocations} (round not consumed)`;
-    console.error(`  ${line}`);
-    if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
-    return { kind: "reviewer-harness-failed", detail: outcome.detail };
-  }
-
-  const { verdict, prose } = parseVerdict(outcome.stdout);
+  const { verdict, prose } = parseVerdict(followup.stdout);
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(
-      `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} verdict=${verdict}`,
+      `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
+        `correctness=APPROVED followup=${verdict}`,
     );
   }
   return { kind: "reviewer-result", verdict, prose };

@@ -2,7 +2,8 @@
 // project anchor (shared verbatim by both agents), issue anchor
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
 // branch diff, sandbox-stack report #44, gate trace, reviewer prose, UI-impact
-// check #21; reviewer: diff + commits + coding standards, stateless per pass).
+// check #21; reviewer: diff + commits, split into a correctness pass and a
+// self-sufficient checklist follow-up sharing one provider session (#19)).
 //
 // The issue anchor uses `--json`, NOT the human-readable `--comments` form —
 // that one is TTY-sensitive and, when piped, omits the body. A fetch failure
@@ -42,6 +43,7 @@ const exec = promisify(execFile);
 // below substitute into these in-memory strings and stay pure.
 const CODING_STANDARDS = loadTemplate("coding-standards");
 const REVIEWER_TPL = loadTemplate("reviewer");
+const REVIEWER_FOLLOWUP_TPL = loadTemplate("reviewer-followup");
 const REVIEWER_PROJECT_STANDARDS_TPL = loadTemplate("reviewer-project-standards");
 const IMPLEMENTER_TPL = loadTemplate("implementer");
 const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
@@ -243,6 +245,26 @@ export async function buildReviewerPrompt(
     ),
     await buildIssueAnchor(inputs.issue.id, inputs.repo),
     await buildReviewerSlot(inputs),
+  ];
+  return layers.join("\n\n---\n\n");
+}
+
+export async function buildReviewerFollowupPrompt(
+  inputs: ReviewerPromptInputs,
+): Promise<string> {
+  const layers = [
+    await buildProjectAnchor(
+      {
+        repo: inputs.repo,
+        repoDir: inputs.repoDir,
+        claudeMdPath: inputs.claudeMdPath,
+        contextMdPath: inputs.contextMdPath,
+        sourceBranch: inputs.sourceBranch,
+      },
+      inputs.worktreePath,
+    ),
+    await buildIssueAnchor(inputs.issue.id, inputs.repo),
+    await buildReviewerSlot(inputs, "followup"),
   ];
   return layers.join("\n\n---\n\n");
 }
@@ -456,7 +478,10 @@ export function renderSandboxStackSlot(
   });
 }
 
-async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> {
+async function buildReviewerSlot(
+  inputs: ReviewerPromptInputs,
+  pass: "correctness" | "followup" = "correctness",
+): Promise<string> {
   const { worktreePath } = inputs;
   const base = inputs.base.ref;
 
@@ -506,7 +531,10 @@ async function buildReviewerSlot(inputs: ReviewerPromptInputs): Promise<string> 
       ? inputs.codingStandardsPath
       : undefined;
 
-  return renderReviewerSlot({ ...inputs, codingStandardsPath, commits, diff });
+  const renderInputs = { ...inputs, codingStandardsPath, commits, diff };
+  return pass === "correctness"
+    ? renderReviewerSlot(renderInputs)
+    : renderReviewerFollowupSlot(renderInputs);
 }
 
 // Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
@@ -518,6 +546,18 @@ export type ReviewerSlotRender = ReviewerPromptInputs & {
 };
 
 export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
+  return renderReviewerTemplate(REVIEWER_TPL, inputs, false);
+}
+
+export function renderReviewerFollowupSlot(inputs: ReviewerSlotRender): string {
+  return renderReviewerTemplate(REVIEWER_FOLLOWUP_TPL, inputs, true);
+}
+
+function renderReviewerTemplate(
+  template: string,
+  inputs: ReviewerSlotRender,
+  includeStandards: boolean,
+): string {
   const { issue, base, sourceBranch, codingStandardsPath, claudeMdPath, contextMdPath, commits, diff } =
     inputs;
 
@@ -542,7 +582,7 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
     ? `## Branch diff\n\n\`\`\`diff\n${diff}\n\`\`\``
     : `## Branch diff\n\n(empty — no changes against \`${base.ref}\`)`;
 
-  const projectStandards = codingStandardsPath
+  const projectStandards = includeStandards && codingStandardsPath
     ? render(REVIEWER_PROJECT_STANDARDS_TPL, { codingStandardsPath })
     : "";
 
@@ -550,7 +590,7 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
     ? `@${claudeMdPath} (and @${contextMdPath} if it exists)`
     : `@${claudeMdPath}`;
 
-  return render(REVIEWER_TPL, {
+  return render(template, {
     branch: issue.branch,
     baseRef: base.ref,
     sourceBranch,
@@ -559,7 +599,7 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
     issueTitle: issue.title,
     commits: section(commitsBlock),
     diff: section(diffBlock),
-    codingStandards: CODING_STANDARDS,
+    codingStandards: includeStandards ? CODING_STANDARDS : "",
     projectStandards: section(projectStandards),
     conventionsRef,
   });

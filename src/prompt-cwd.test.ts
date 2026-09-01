@@ -40,6 +40,7 @@ import {
   buildPrompt,
   buildProjectAnchor,
   buildReviewerPrompt,
+  buildReviewerFollowupPrompt,
 } from "./prompt.js";
 
 const exec = promisify(execFile);
@@ -248,7 +249,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("points the reviewer at standards the BRANCH adds", async () => {
     await writeFile(join(launchedFrom, "CODING_STANDARDS.md"), "# std\n");
 
-    const prompt = await buildReviewerPrompt({
+    const prompt = await buildReviewerFollowupPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
@@ -267,7 +268,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     // review — so probing the wrong one emits an @ref the reviewer cannot open.
     await writeFile(join(target, "CODING_STANDARDS.md"), "# std\n");
 
-    const prompt = await buildReviewerPrompt({
+    const prompt = await buildReviewerFollowupPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,

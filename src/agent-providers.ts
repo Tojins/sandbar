@@ -222,10 +222,11 @@ export function assertRoleModelIdNamed(
   role: "implementer" | "reviewer" | "merger",
   provider: AgentProviderName,
   rawModelId: string | undefined,
+  modelField: string = `${role}ModelId`,
 ): void {
   if (provider === "claude" || rawModelId !== undefined) return;
   throw new SandbarError(
-    `config.${role}Agent is ${JSON.stringify(provider)}, so config.${role}ModelId ` +
+    `config.${role}Agent is ${JSON.stringify(provider)}, so config.${modelField} ` +
       `must name a ${provider} model. Left unset it defaults to a claude alias, ` +
       `which ${provider} would be asked for on every attempt.`,
   );

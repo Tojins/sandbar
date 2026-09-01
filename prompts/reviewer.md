@@ -8,20 +8,20 @@ does not resolve.)
 
 Issue #{{issueId}}: {{issueTitle}}
 
-{{chunkBase}}{{commits}}{{diff}}{{codingStandards}}
+{{chunkBase}}{{commits}}{{diff}}## Review process
 
-{{projectStandards}}## Review process
-
-Check the branch against the coding standards above, plus the conventions in
-{{conventionsRef}}. Your role is strictly advisory: you must not modify the branch,
-commit, push, or run gate commands. Read-only investigation only.
+Review correctness of logic only: does the implementation actually work? Look
+for edge cases, off-by-one errors, broken error handling, and state hazards.
+Explicitly exclude style, coding standards, test-quality, and test-coverage
+judgments from this pass. Your role is strictly advisory. You must not modify the branch.
+Do not commit, push, or run gate commands. Read-only investigation only.
 
 ## Verdict
 
 End your review with a single verdict token on its own:
 
 - `<verdict>APPROVED</verdict>` — branch meets the bar, ship it.
-- `<verdict>CHANGES-REQUESTED</verdict>` — list the standards violations above and
+- `<verdict>CHANGES-REQUESTED</verdict>` — list the correctness defects above and
   the implementer will address them in the next round.
 
 A missing verdict defaults to CHANGES-REQUESTED. Emit exactly one verdict.

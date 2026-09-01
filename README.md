@@ -247,6 +247,7 @@ sits in).
 | `images` | `[{ tag: sandboxImage, containerfile: "Containerfile" }]` — see below |
 | `implementerModelId` | `opus` |
 | `reviewerModelId` | `opus` |
+| `reviewerFollowupModelId` | `opus` |
 | `mergerModelId` | `opus` |
 | `implementerAgent` | `claude` |
 | `reviewerAgent` | `claude` |
@@ -266,6 +267,13 @@ sits in).
 | `relaunchAfterLanding` | `false` — see below |
 | `defaultLane` | `"auto"` — see below |
 | `codingStandardsPath` | *(unset)* — no conventional path; see below |
+
+Each review round runs correctness first on `reviewerModelId`. If correctness
+passes, a checklist pass resumes the same `reviewerAgent` session on
+`reviewerFollowupModelId` to assess tests, issue-spec conformance, and coding
+standards. A correctness failure skips the checklist pass. Both model ids must
+belong to the configured reviewer provider; when that provider is not `claude`,
+both ids must be set explicitly.
 
 `cwd` is resolved to an absolute path, and it must be a checkout of
 `ghOwner`/`ghRepo`, with an `origin` remote — sandbar pushes branches and merges

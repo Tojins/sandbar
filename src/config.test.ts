@@ -18,6 +18,7 @@ import {
   DEFAULT_MAX_TOTAL_ISSUES,
   DEFAULT_IMPLEMENTER_MODEL_ID,
   DEFAULT_REVIEWER_MODEL_ID,
+  DEFAULT_REVIEWER_FOLLOWUP_MODEL_ID,
   DEFAULT_MERGER_MODEL_ID,
   DEFAULT_SOURCE_BRANCH,
   DEFAULT_WORK_DIR,
@@ -128,6 +129,7 @@ describe("resolveConfig", () => {
     expect(r.sourceBranch).toBe(DEFAULT_SOURCE_BRANCH);
     expect(r.implementerModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
     expect(r.reviewerModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
+    expect(r.reviewerFollowupModelId).toBe(DEFAULT_REVIEWER_FOLLOWUP_MODEL_ID);
     expect(r.mergerModelId).toBe(DEFAULT_MERGER_MODEL_ID);
     expect(r.claudeMdPath).toBe(DEFAULT_CLAUDE_MD_PATH);
     expect(r.contextMdPath).toBe(DEFAULT_CONTEXT_MD_PATH);
@@ -230,10 +232,11 @@ describe("resolveConfig", () => {
     expect(r.copyToWorktree).toEqual([".npmrc"]);
   });
 
-  it("defaults every agent role to the version-agnostic opus alias", () => {
+  it("defaults every agent call to the version-agnostic opus alias", () => {
     const r = resolveConfig(minimal);
     expect(r.implementerModelId).toBe("opus");
     expect(r.reviewerModelId).toBe("opus");
+    expect(r.reviewerFollowupModelId).toBe("opus");
     expect(r.mergerModelId).toBe("opus");
   });
 
@@ -320,6 +323,14 @@ describe("resolveConfig", () => {
         ...minimal,
         reviewerAgent: "codex",
         reviewerModelId: "gpt-5.6-sol",
+      }),
+    ).toThrow(/reviewerFollowupModelId/);
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        reviewerAgent: "codex",
+        reviewerModelId: "gpt-5.6-sol",
+        reviewerFollowupModelId: "gpt-5.6-sol",
       }),
     ).not.toThrow();
   });
