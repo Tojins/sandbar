@@ -25,6 +25,7 @@ import {
   resolveConfig,
   type RunConfig,
 } from "./config.js";
+import { sandbarVersion } from "./version.js";
 
 // A deviations-only config: only the genuinely-required, no-sensible-default
 // fields. Everything else must fall through to a documented default.
@@ -156,6 +157,46 @@ describe("resolveConfig", () => {
     expect(r.relaunchAfterLanding).toBe(true);
   });
 
+  // The comparison itself is `requires-sandbar.test.ts`'s, which drives both
+  // versions directly. What is asserted HERE is only what wiring it into
+  // `resolveConfig` decides: that an absent floor checks nothing, that a
+  // satisfiable one is kept, and that an unsatisfiable one is refused BEFORE
+  // any other field is interpreted. The floors are written against the real
+  // driver version, since that is what the wiring reads.
+  describe("requiresSandbar (#66)", () => {
+    it("is unset by default and checks nothing", () => {
+      expect(resolveConfig(minimal).requiresSandbar).toBeUndefined();
+    });
+
+    it("passes a driver at or above the floor, and keeps the value", () => {
+      const r = resolveConfig({ ...minimal, requiresSandbar: "0.0.1" });
+      expect(r.requiresSandbar).toBe("0.0.1");
+    });
+
+    it("refuses a driver below the floor, naming both versions", () => {
+      expect(() =>
+        resolveConfig({ ...minimal, requiresSandbar: "9999.0.0" }),
+      ).toThrow(
+        new RegExp(
+          `requires sandbar 9999\\.0\\.0 or newer.*driver is ${sandbarVersion()}`,
+          "s",
+        ),
+      );
+    });
+
+    // Ahead of every other field: a config this driver cannot read must not
+    // first be complained about one field at a time.
+    it("is checked before the rest of the config is interpreted", () => {
+      expect(() =>
+        resolveConfig({
+          ...minimal,
+          requiresSandbar: "9999.0.0",
+          ghOwner: "not/a/name",
+        } as RunConfig),
+      ).toThrow(/requires sandbar 9999\.0\.0 or newer/);
+    });
+  });
+
   it("derives coauthorTrailer from bot identity when unset", () => {
     const r = resolveConfig(minimal);
     expect(r.coauthorTrailer).toBe("Co-authored-by: sandbar-bot <bot@acme.dev>");
@@ -283,6 +324,20 @@ describe("resolveMergeMode (#22)", () => {
       noChecksGraceMs: 50,
       openPullRequest: true,
     });
+  });
+
+  // Before #66 everything that was not "direct" was READ as verified, so a
+  // `kind` a newer sandbar defines — or a typo — silently ran the forge
+  // verification protocol against a config that never described one.
+  it("refuses a kind it does not recognise, rather than reading it as verified", () => {
+    for (const kind of ["Verified", "queued", ""]) {
+      expect(() =>
+        resolveConfig({
+          ...minimal,
+          mergeMode: { kind } as unknown as RunConfig["mergeMode"],
+        }),
+      ).toThrow(/must be "direct" or "verified"/);
+    }
   });
 
   it("refuses an integration branch equal to the source branch", () => {

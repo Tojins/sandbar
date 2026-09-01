@@ -275,20 +275,70 @@ default 50, exit 3).
   `max + 1` rule for when it does.
 - **A run opens by naming what is driving it (#69).** One line on stdout and in
   `orchestrator.log`: version, the tree `dist/` was built from, the config
-  file's path, and whether either tree is dirty — because both are read from the
-  operator's working tree (`npm run sandbar` = pull, build, run) and #66 has not
-  removed that coupling yet. A fact, never a warning, never a refusal, and every
-  field degrades to `unknown`. `src/driver-identity.ts` owns the two-tree
-  argument and the `check-ignore` guard that keeps a driver under `node_modules`
-  from being attributed to the host repo's HEAD; `run(config, { configPath })`
-  is how the bin tells it which file it loaded.
+  file's path, and whether either tree is dirty. Two trees because there are
+  two, and since #66 they differ in kind: the driver is an installed release
+  (gitignored, so it reports `unknown` and its VERSION is the identification),
+  while the config is still the operator's working-tree file and is the one that
+  can be dirty. A fact, never a warning, never a refusal, and every field
+  degrades to `unknown`. `src/driver-identity.ts` owns the two-tree argument and
+  the `check-ignore` guard that keeps a driver under `node_modules` from being
+  attributed to the host repo's HEAD; `run(config, { configPath })` is how the
+  bin tells it which file it loaded.
+- **A config declares the oldest driver that can read it (#66).**
+  `requiresSandbar`, a plain `X.Y.Z` minimum; a driver below it refuses the run
+  naming both versions, inside `resolveConfig` and ahead of every other field.
+  The failure it closes is silent by construction — the config is imported, not
+  parsed, so a field written for a newer sandbar is spread through and never
+  looked at — and an unknown-key allowlist is the wrong instrument for it: the
+  config is a PROGRAM and may carry extra data. Optional, because requiring it
+  would break every config already written. `src/requires-sandbar.ts` owns the
+  argument, including why an unidentifiable driver fails the check.
 
 ## This repo runs itself (#39)
 
 `sandbar.config.mjs` at the root is the host-side surface, `Containerfile`
-builds the one image, `sandbar.env` (gitignored) holds credentials, and
-`npm run sandbar` is the launcher — a loop (#65): pull, build, run, and around
-again only on exit 75.
+builds the one image, `sandbar.env` (gitignored) holds credentials, `sandbar.pin`
+names the release that drives a run, and `npm run sandbar`
+(`scripts/sandbar-launch.mjs`) is the launcher — a loop (#65): install the pin,
+run it, and around again only on exit 75.
+
+- **The driver is PINNED, not built from the checkout (#66).** The launcher
+  installs the tag `sandbar.pin` names into `.sandbar/driver/` and runs that, so
+  a series is driven by a release somebody chose and an operator may hold local
+  commits and uncommitted edits while it runs. It does not pull. An install that
+  fails stops the loop rather than falling back to what is on disk, and a
+  matching stamp is skipped, so a relaunch runs a byte-identical driver. The
+  price is that an orchestrator or PROMPT change takes effect only when the pin
+  moves — which is how every consumer already experiences sandbar; iterate
+  unlanded code with `npm run build && node dist/cli.js` by hand. The pin
+  therefore LAGS the checkout always: `auto-tag.yml` tags package.json's version
+  at the pushed head and the merger lands a whole pass in one push, so the
+  version being written here is not installable and may never be tagged at all.
+  Moving it is its own later commit; `launcher.test.ts` asserts the pin is
+  strictly older than package.json's version and satisfies the config's
+  `requiresSandbar`. `scripts/sandbar-launch.mjs`'s header owns the four
+  decisions, `sandbar.pin`'s the lag rule.
+- **What still comes from the checkout is the CONFIG** (and `sandbar.env` beside
+  it, and the launcher). It must: the config resolves against the process cwd
+  and `sandbar.env` against its own `import.meta.url`. So "driven by a pinned
+  commit" is true of the orchestrator and its prompts and NOT of `gateStack`;
+  `requiresSandbar` is the guard on the version seam that creates, and #69's
+  opening line is what shows a dirty one. `npm run driver` installs the pin
+  without starting a series — which the hand paths need, since the config
+  imports `readEnvFile` from the driver rather than from `./dist/`.
+- **Nothing refreshes that checkout, and that is the price of #66.** The
+  launcher's `git pull` is gone — which is what lets a series run while the
+  operator holds local commits — so a landed `gateStack` change starts judging
+  branches when a human pulls it, NOT one relaunch later; `relaunchAfterLanding`
+  survives for the images, not for the config (`exit-conditions.ts`,
+  `config.ts`). Unreported that is silent for an unbounded number of relaunches,
+  so preflight's `staleConfigWarning` counts the commits the checkout is behind
+  `origin/<sourceBranch>` that touch the config FILE — narrower than "behind" on
+  purpose, since after every landing a checkout is behind and a warning that
+  always fires is one nobody reads. Counted in the CACHE, whose origin refs
+  preflight has just fetched: an operator who has not pulled has not fetched
+  either, so their own `origin/<sourceBranch>` would answer for the run before
+  the landing. `preflight.ts`'s header owns both halves.
 
 - **One image, both roles** (agent sandbox and gate pod member): it defines an
   `agent` user at uid 1000 and keeps default `USER` root — `checkWorktreeImageUids`
@@ -304,8 +354,10 @@ again only on exit 75.
 - **`mergeMode` stays `direct` (#39)** — personal project; tests run on host
   machines, not hosted CI.
 - **Serialize issues touching `run.ts`/`inner-loop`/`merger`** (blocked-by
-  chains, not parallel): the orchestrator driving a cycle is whatever `dist/`
-  held at launch, so a merged regression mis-drives the very next cycle.
+  chains, not parallel). #66 softened the blast radius — a merged regression is
+  not the driver until the pin moves — but a queued chain still lands slice N+1
+  on top of slice N without either having driven anything, and the gate stack
+  judging both is this checkout's config either way.
 - **The suite must not depend on ambient git config** (the gate runner has no
   global identity) **nor on `process.cwd()` being a repository** (`/workspace/.git`
   is a broken gitlink inside gate containers — name the directory in every git

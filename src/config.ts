@@ -4,6 +4,8 @@ import type { SandboxHooks } from "./agent-sandbox.js";
 import { SandbarError } from "./errors.js";
 import { DEFAULT_LANE, type Lane } from "./lanes.js";
 import { ALL_BRANCH_INFIXES, BRANCH_PREFIX } from "./naming.js";
+import { checkRequiresSandbar } from "./requires-sandbar.js";
+import { sandbarVersion } from "./version.js";
 
 // The maximum a readiness probe may poll before its container counts as failed.
 export const DEFAULT_READINESS_TIMEOUT_MS = 60_000;
@@ -539,25 +541,60 @@ export type RunConfig = {
   // stable points at absolute paths outside the checkout. Default: [].
   readonly copyToWorktree?: readonly string[];
 
+  // The OLDEST sandbar that can read this file, as a plain `X.Y.Z` (#66). A
+  // driver older than this refuses the run, naming both versions, instead of
+  // reading the config half-way: unknown keys are spread through verbatim and
+  // never looked at, so a field written for a newer sandbar is dropped in
+  // silence. `requires-sandbar.ts` owns the argument — why a minimum rather
+  // than a range, why an unknown-key allowlist is the wrong instrument, and why
+  // an unidentifiable driver fails the check.
+  //
+  // Optional, because requiring it would break every config already written.
+  // Worth setting the moment config and driver can come from different commits
+  // — which for a consumer is "always", and is the normal state of a
+  // self-hosted repo since #66 pinned its driver. Default: unset, no check.
+  readonly requiresSandbar?: string;
+
   // How the merge result lands on the source branch. Default: {kind:"direct"}.
   // Turn on `verified` when anything downstream of the source branch trusts it
   // without re-checking (a deploy on push, a release job).
   readonly mergeMode?: MergeModeConfig;
 
   // Exit with EXIT_CODE_RELAUNCH (75) after any cycle in which the merger
-  // landed merges, instead of continuing on the launch-time build (#65). For a
-  // repo whose launcher is a pull → build → run LOOP that continues on exactly
-  // that code — the shape a self-hosted repo needs, because there the landed
-  // commits ARE the orchestrator, its gate-stack config and its Containerfile,
-  // and a run that keeps cycling drives slice N+1 of a queued series with a
-  // driver from before slice N. Judge and judged from different eras is the
-  // #37 genus of silent false verdict, arriving through the launcher.
+  // landed merges, instead of continuing on what the run resolved at launch
+  // (#65). For a repo whose launcher LOOPS on exactly that code — the shape a
+  // self-hosted repo needs, because there the landed commits are the
+  // orchestrator's own inputs, and a run that keeps cycling drives slice N+1 of
+  // a queued series against inputs from before slice N. Judge and judged from
+  // different eras is the #37 genus of silent false verdict, arriving through
+  // the launcher.
+  //
+  // #66 changed what a relaunch is worth, and the three objects it used to
+  // refresh no longer behave alike. `dist/` stopped moving: a self-hosted
+  // driver is an installed release the repo pins, so a relaunch re-runs the
+  // same bytes unless a human moves the pin between cycles — the launcher
+  // re-reads it every iteration on purpose, which is the one way a series can
+  // change drivers under itself, and it takes a deliberate edit to a committed
+  // file. IMAGES are why this flag survives — `ensureImages`
+  // runs once per run (run.ts) against a source worktree at
+  // `origin/<sourceBranch>`, so a landed `Containerfile` reaches a series
+  // through the relaunch and through nothing else.
+  //
+  // The CONFIG is the one to state carefully, because the obvious reading is
+  // wrong. It is `import()`ed once at launch (cli.ts), so a relaunch does
+  // re-read it — but out of the operator's CHECKOUT, and sandbar never pulls
+  // into that. A landed `gateStack` change therefore takes effect when a human
+  // pulls it, not when the run relaunches. Deliberate: the checkout is theirs
+  // to move, and #66 removed the launcher's `git pull` precisely so a series
+  // could run while they hold local commits. Preflight warns when the commits
+  // the checkout is missing touch the config file, so the gap is reported
+  // rather than silent.
   //
   // EXPLICIT config, not detection, and that is a decision: deriving
-  // self-hostedness (is `dist/cli.js` inside the operated repo?) false-
-  // positives for every consumer running the package from `node_modules`,
-  // whose non-looping launcher would then stop after the first landing cycle.
-  // A flag the host sets is one line and cannot misfire. Default: false.
+  // self-hostedness (is the driver inside the operated repo?) false-positives
+  // for every consumer running the package from `node_modules`, whose
+  // non-looping launcher would then stop after the first landing cycle. A flag
+  // the host sets is one line and cannot misfire. Default: false.
   readonly relaunchAfterLanding?: boolean;
 
   // Which landing lane an issue takes when it carries no `auto-land` label
@@ -630,18 +667,27 @@ export type RunConfig = {
   readonly defaultLane?: Lane;
 };
 
-// After resolution every defaultable field is concrete. `codingStandardsPath`
-// is the only one that stays optional (genuinely absent on most hosts). The
-// other three are re-declared rather than merely `Required<>`d because
-// resolution changes their TYPE, not just their presence: `labels` widens from
-// Partial to the fully-populated vocabulary, `gateStack` and `mergeMode` become
-// their resolved-and-validated forms.
+// After resolution every defaultable field is concrete. TWO stay optional, for
+// different reasons: `codingStandardsPath` is genuinely absent on most hosts
+// and has nothing to default to, while `requiresSandbar` is a gate on
+// `resolveConfig` itself (#66), spent by the time there is a resolved config —
+// and inventing a value for it here would make "this host declared a floor"
+// indistinguishable from "this host did not". The other three
+// are re-declared rather than merely `Required<>`d because resolution changes
+// their TYPE, not just their presence: `labels` widens from Partial to the
+// fully-populated vocabulary, `gateStack` and `mergeMode` become their
+// resolved-and-validated forms.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
-    "codingStandardsPath" | "labels" | "gateStack" | "mergeMode"
+    | "codingStandardsPath"
+    | "labels"
+    | "gateStack"
+    | "mergeMode"
+    | "requiresSandbar"
   >
 > & {
+  readonly requiresSandbar?: string;
   readonly codingStandardsPath?: string;
   readonly labels: LabelConfig;
   readonly gateStack: ResolvedGateStack;
@@ -735,6 +781,24 @@ export function resolveMergeMode(
   sourceBranch: string,
 ): ResolvedMergeMode {
   if (!mode || mode.kind === "direct") return { kind: "direct" };
+  // Everything that is not "direct" used to be READ as verified, which is the
+  // silent half-read #66 is about wearing its sharpest shape: a `kind` a newer
+  // sandbar defines — or a typo — would not be rejected, it would run the
+  // forge-verification protocol against a config that never described one, with
+  // `requiredChecks` undefined and the branch-name guards below tripping on a
+  // default the host never wrote. The narrowing is deliberately defeated
+  // (`kind: unknown`): the type says this is unreachable and `.mjs` is
+  // type-checked by nothing, which is the whole reason this file validates
+  // fields the compiler believes.
+  const kind: unknown = (mode as { readonly kind?: unknown }).kind;
+  if (kind !== "verified") {
+    throw new SandbarError(
+      `config.mergeMode.kind must be "direct" or "verified" (got ` +
+        `${JSON.stringify(kind)}). A config written for a newer sandbar than ` +
+        "the one reading it is the usual cause — declare `requiresSandbar` so " +
+        "that is refused by name rather than one field at a time.",
+    );
+  }
   const integrationBranch = (
     mode.integrationBranch ?? DEFAULT_INTEGRATION_BRANCH
   ).trim();
@@ -1497,6 +1561,16 @@ function requireLane(value: unknown): Lane {
 }
 
 export function resolveConfig(config: RunConfig): ResolvedConfig {
+  // FIRST, ahead of every other field (#66). Everything below reads the config
+  // as the driver understands it, so a config written for a newer sandbar has
+  // to be refused before any of it is interpreted — otherwise the first thing
+  // the operator sees is a complaint about a `gateStack` this driver simply
+  // cannot read, which sends them to look at the wrong file.
+  // The driver's own version is READ here rather than passed in: the decision
+  // is two strings and is table-tested as such in `requires-sandbar.test.ts`,
+  // so a parameter would widen a production signature to buy a test seam the
+  // decision already has.
+  checkRequiresSandbar(config.requiresSandbar, sandbarVersion());
   // Trimmed HERE, not just where it is compared. `resolveMergeMode` tests
   // `integrationBranch === sourceBranch.trim()`, so trimming only in the guard
   // made the guard describe a value that never existed: `" main "` would pass

@@ -9,7 +9,7 @@
 // again. Real git, not a fake exec, because the assertions are about refs that
 // did or did not move.
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -20,6 +20,7 @@ import {
   type DeclaredMount,
   deleteMergedSandbarBranches,
   gatherState,
+  readConfigStaleness,
 } from "./preflight.js";
 import { type RepoLayout, ensureRepoCache, repoLayout } from "./repo-cache.js";
 
@@ -497,5 +498,171 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const state = await gatherState(cfg(layoutAt(target)));
       expect(state.missingMountSources).toEqual([]);
     });
+  });
+});
+
+// #66 — the self-hosted launcher stopped pulling, so the config file a run
+// imports is whatever the operator's checkout holds, for as long as they leave
+// it there. Real git and three real directories, because the claim being made
+// is about WHICH repository answers: the checkout supplies the commit its
+// branch points at, and the freshly-fetched cache supplies origin. The operator
+// this check exists for has not fetched, so their own `origin/main` is a stale
+// ref that would report nothing.
+describe("readConfigStaleness — the config the checkout is missing (#66)", () => {
+  const CONFIG = "sandbar.config.mjs";
+  let origin: string;
+  let checkout: string;
+  let layout: RepoLayout;
+  let configPath: string;
+
+  const identify = async (repo: string) => {
+    await git(repo, "config", "user.email", "t@t");
+    await git(repo, "config", "user.name", "t");
+  };
+
+  beforeEach(async () => {
+    // An upstream two commits ahead of a checkout that has never fetched: one
+    // of the two changes the config, the other does not.
+    const seed = await mkdtemp(join(tmpdir(), "sandbar-upstream-"));
+    await git(seed, "init", "-q", "-b", "main");
+    await identify(seed);
+    await writeFile(join(seed, "a.txt"), "a\n");
+    await git(seed, "add", "-A");
+    await git(seed, "commit", "-qm", "init");
+
+    origin = await mkdtemp(join(tmpdir(), "sandbar-origin-"));
+    await git(seed, "init", "-q", "--bare", "-b", "main", origin);
+    await git(seed, "remote", "add", "origin", origin);
+    await git(seed, "push", "-q", "-u", "origin", "main");
+
+    checkout = await mkdtemp(join(tmpdir(), "sandbar-checkout-"));
+    await git(seed, "clone", "-q", origin, checkout);
+    await identify(checkout);
+    configPath = join(checkout, CONFIG);
+
+    await writeFile(join(seed, CONFIG), "export default { gateStack: 1 };\n");
+    await git(seed, "add", "-A");
+    await git(seed, "commit", "-qm", "config: a gate step");
+    await writeFile(join(seed, "b.txt"), "b\n");
+    await git(seed, "add", "-A");
+    await git(seed, "commit", "-qm", "unrelated");
+    await git(seed, "push", "-q", "origin", "main");
+    await rm(seed, { recursive: true, force: true });
+
+    // The cache, prepared exactly as a run prepares it — cloned from the
+    // checkout, remote retargeted to the checkout's own origin, fetched.
+    layout = repoLayout(checkout, ".sandbar");
+    await ensureRepoCache(layout);
+  });
+
+  afterEach(async () => {
+    await rm(origin, { recursive: true, force: true });
+    await rm(checkout, { recursive: true, force: true });
+  });
+
+  // The whole reason the counting runs in the cache: the checkout's own
+  // `origin/main` still says C1 here, so asking it would answer "0 behind" in
+  // precisely the case the warning exists for.
+  it("counts against the fetched cache, not the checkout's stale origin ref", async () => {
+    const checkoutSaysBehind = await exec(
+      "git",
+      ["rev-list", "--count", "main..origin/main"],
+      { cwd: checkout },
+    );
+    expect(checkoutSaysBehind.stdout.trim()).toBe("0");
+
+    expect(
+      await readConfigStaleness({ layout, sourceBranch: "main", configPath }),
+    ).toMatchObject({ behind: 2, touchingConfig: 1 });
+  });
+
+  it("counts no config commits when none of the missing ones touched it", async () => {
+    expect(
+      await readConfigStaleness({
+        layout,
+        sourceBranch: "main",
+        configPath: join(checkout, "other.config.mjs"),
+      }),
+    ).toMatchObject({ behind: 2, touchingConfig: 0 });
+  });
+
+  // `--config` may name a file outside the checkout entirely, and that history
+  // has nothing to say about it. Answered as zeros rather than as a pathspec
+  // git refuses.
+  it("says nothing about a config file outside the checkout", async () => {
+    expect(
+      await readConfigStaleness({
+        layout,
+        sourceBranch: "main",
+        configPath: join(tmpdir(), "sandbar-elsewhere.config.mjs"),
+      }),
+    ).toMatchObject({ behind: 0, touchingConfig: 0 });
+  });
+
+  // `config.cwd` is only USUALLY the repository root — a host may keep its
+  // config a directory down, or name one above the cwd — and a pathspec spent
+  // in the cache is relative to the work tree root either way.
+  it("resolves the config against the work tree root, not the run's cwd", async () => {
+    const sub = join(checkout, "tools");
+    await mkdir(sub);
+
+    expect(
+      await readConfigStaleness({
+        layout: { ...repoLayout(sub, ".sandbar"), repoDir: layout.repoDir },
+        sourceBranch: "main",
+        configPath,
+      }),
+    ).toMatchObject({ behind: 2, touchingConfig: 1 });
+  });
+
+  // `--show-toplevel` answers with symlinks resolved and `--config` does not
+  // (the bin `resolve()`s argv), so an operator whose checkout is reached
+  // through a symlinked parent would otherwise have this warning silently
+  // retired: `relative()` would compare the link against its target and the
+  // config would look like a file outside the repository.
+  it("sees a config named through a symlinked path to the checkout", async () => {
+    const link = join(await mkdtemp(join(tmpdir(), "sandbar-link-")), "repo");
+    await symlink(checkout, link);
+
+    expect(
+      await readConfigStaleness({
+        layout: { ...layout, hostCwd: link },
+        sourceBranch: "main",
+        configPath: join(link, CONFIG),
+      }),
+    ).toMatchObject({ behind: 2, touchingConfig: 1 });
+  });
+
+  it("asks git nothing when the run has no config file", async () => {
+    expect(
+      await readConfigStaleness({
+        layout,
+        sourceBranch: "main",
+        configPath: null,
+      }),
+    ).toMatchObject({ behind: 0, touchingConfig: 0 });
+  });
+
+  it("reports nothing for a source branch the checkout does not have", async () => {
+    expect(
+      await readConfigStaleness({
+        layout,
+        sourceBranch: "release",
+        configPath,
+      }),
+    ).toMatchObject({ behind: 0, touchingConfig: 0 });
+  });
+
+  // An UNPUSHED local commit is the ahead-warning's business, not this one's:
+  // the cache has never seen it, so there is no range to count and the answer
+  // is zeros rather than a number invented from a merge base.
+  it("reports nothing when the checkout's tip is unknown to the cache", async () => {
+    await writeFile(join(checkout, "local.txt"), "local\n");
+    await git(checkout, "add", "-A");
+    await git(checkout, "commit", "-qm", "operator's unpushed work");
+
+    expect(
+      await readConfigStaleness({ layout, sourceBranch: "main", configPath }),
+    ).toMatchObject({ behind: 0, touchingConfig: 0 });
   });
 });

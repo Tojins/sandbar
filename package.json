@@ -1,6 +1,6 @@
 {
   "name": "@offergeist/sandbar",
-  "version": "0.20.36",
+  "version": "0.21.10",
   "description": "Self-hosted issue-tracker-driven coding agent orchestrator.",
   "type": "module",
   "main": "dist/index.js",
@@ -26,7 +26,8 @@
     "build": "rm -rf dist && tsc",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "sandbar": "while :; do git pull --ff-only && npm run build && node dist/cli.js; c=$?; [ \"$c\" -eq 75 ] || exit \"$c\"; done",
+    "sandbar": "node scripts/sandbar-launch.mjs",
+    "driver": "node scripts/sandbar-launch.mjs --install-only",
     "prepare": "npm run build",
     "preversion": "npm run check && npm test",
     "postversion": "git push --follow-tags"

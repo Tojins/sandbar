@@ -3,7 +3,9 @@ import type { ResolvedStackContainer } from "./config.js";
 import {
   absoluteMountSources,
   checkInvariants,
+  type ConfigStaleness,
   type RepoState,
+  staleConfigWarning,
 } from "./preflight.js";
 
 const cleanState: RepoState = {
@@ -404,5 +406,48 @@ describe("absoluteMountSources (#51)", () => {
 
   it("is empty for a stack that mounts nothing but the worktree", () => {
     expect(absoluteMountSources([container("gate", [])])).toEqual([]);
+  });
+});
+
+// #66 — the launcher no longer pulls, so the config file the run imported is
+// whatever the checkout holds, for as long as the operator leaves it there.
+describe("staleConfigWarning — a landed config change that never arrived (#66)", () => {
+  const stale = (over: Partial<ConfigStaleness> = {}): ConfigStaleness => ({
+    configPath: "/home/op/app/sandbar.config.mjs",
+    sourceBranch: "main",
+    hostCwd: "/home/op/app",
+    behind: 4,
+    touchingConfig: 1,
+    ...over,
+  });
+
+  it("names the file, both counts and what to do about it", () => {
+    const message = staleConfigWarning(stale());
+    expect(message).toContain("/home/op/app/sandbar.config.mjs");
+    expect(message).toContain("4 commit(s) behind origin/main");
+    expect(message).toContain("1 of them change");
+    expect(message).toMatch(/gate stack/);
+    expect(message).toMatch(/Pull, then relaunch/);
+  });
+
+  // The narrowing that keeps it readable: after a landing the checkout is
+  // behind by construction, and a warning that fires on every relaunch teaches
+  // an operator to ignore the one that matters.
+  it("says nothing when the missing commits leave the config alone", () => {
+    expect(staleConfigWarning(stale({ touchingConfig: 0 }))).toBeNull();
+  });
+
+  it("says nothing when the checkout is level with origin", () => {
+    expect(
+      staleConfigWarning(stale({ behind: 0, touchingConfig: 0 })),
+    ).toBeNull();
+  });
+
+  // A programmatic host passed an object, so there is no file to name and
+  // nothing for them to pull.
+  it("says nothing when the run has no config file", () => {
+    expect(
+      staleConfigWarning(stale({ configPath: null, touchingConfig: 0 })),
+    ).toBeNull();
   });
 });

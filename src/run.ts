@@ -63,8 +63,12 @@
 // success, repeated-plan-with-zero-DONEs or two consecutive zero-DONE cycles
 // → stuck, issuesAttempted hits maxTotalIssues → budget — and, with
 // config.relaunchAfterLanding, any cycle that landed merges → exit
-// EXIT_CODE_RELAUNCH so a looping launcher can pull, rebuild and relaunch
-// (#65). MAX_ITERATIONS is a defensive ceiling — the conditions above
+// EXIT_CODE_RELAUNCH so a looping launcher can start the next cycle from
+// re-resolved inputs (#65). Which inputs those are narrowed with #66 and is
+// `exit-conditions.ts`'s to state: the driver is a pinned release and does not
+// move at all, images ARE re-resolved from origin/<sourceBranch>, and the
+// config file is re-imported from the operator's checkout, which nothing
+// refreshes. MAX_ITERATIONS is a defensive ceiling — the conditions above
 // terminate first.
 
 import { realpathSync } from "node:fs";
@@ -306,6 +310,9 @@ export async function run(
       // surface (#51), and a source podman cannot resolve is host state that
       // would otherwise redden the gate against the branch.
       mountSources: absoluteMountSources(config.gateStack.containers),
+      // For the one warning that is about the config FILE rather than its
+      // contents: nothing refreshes the checkout it was imported from (#66).
+      configPath: options.configPath ?? null,
     });
   } catch (err) {
     if (err instanceof PreflightError || err instanceof SandbarError) {
@@ -1279,8 +1286,11 @@ export async function run(
         // landed. A landed-but-unclosed cycle also broke out above (exit 1):
         // relaunching past an operator-actionable tracker mess would bury it.
         // A chunk landing counts (#64): it moves the source branch exactly as
-        // a merged issue does, so the `dist/` driving this process is just as
-        // stale afterwards — which is the whole of what #65 relaunches for.
+        // a merged issue does, so the inputs this process resolved at launch
+        // are just as stale afterwards — which is the whole of what #65
+        // relaunches for. Which inputs those still are is
+        // `exit-conditions.ts`'s to say, and since #66 the driver is not
+        // among them.
         landedMerges:
           mergerSummary && mergerSummary.pushed
             ? mergerSummary.merged.length + mergerSummary.mergedChunks.length

@@ -258,6 +258,7 @@ sits in).
 | `maxReviewRounds` | `5` |
 | `maxTotalIssues` | `50` |
 | `labels` | `{ needsInfo: "needs-info", agentStuck: "agent-stuck" }` (override any subset) |
+| `requiresSandbar` | *(unset)* — no version check; see below |
 | `mergeMode` | `{ kind: "direct" }` — see below |
 | `relaunchAfterLanding` | `false` — see below |
 | `defaultLane` | `"auto"` — see below |
@@ -379,16 +380,44 @@ differently-authored implementation of "does this work", which is the one thing
 expanding the local gate can never buy. Coverage gaps should still be closed in
 `gateStack.steps` — that is cheaper and faster than a CI round-trip.
 
+### `requiresSandbar` — the oldest driver that can read your config
+
+Your config file and the sandbar reading it are two separate things that move
+independently: you edit the config in your checkout, and the version of
+`@offergeist/sandbar` you have installed changes when you decide it does. The
+skew that matters is **config newer than driver**, and untreated it is silent.
+Sandbar imports the config as a program and never validates its shape, so a
+field written for a newer version is not rejected — it is simply never read. A
+`gateStack` step, a lane, a `mergeMode` knob: dropped without a word.
+
+`requiresSandbar: "1.4.0"` is the floor. A driver older than that refuses the
+run, naming both versions, before the lock or any container exists:
+
+```
+This config requires sandbar 1.4.0 or newer, and the driver is 1.2.7.
+```
+
+It is a **minimum, not a range** — one spelling, `X.Y.Z`, exactly as
+`package.json` writes it. No comparator, no leading `v`, no prerelease suffix. A
+range would invite an upper bound, which is a promise a config cannot keep. It
+is also **optional**: a config that omits it gets no check, which is what every
+config written before this field existed already gets. Set it, and raise it in
+the same commit as anything you start asking a newer sandbar for.
+
+Sandbar deliberately does *not* reject unknown config keys instead. The config
+is a program and may legitimately carry extra data — a computed tag, a table you
+map into `gateStack`, a note to the next reader — so an allowlist would outlaw
+the file's whole point to buy a check the file can just state.
+
 ### `relaunchAfterLanding` — self-hosted runs that stay current
 
-If the repo sandbar operates on is the repo sandbar's own driver is built from
-— sandbar itself is the motivating case, but any repo whose launcher runs a
-locally-built orchestrator qualifies — a run that keeps cycling goes stale
-mid-series: sandbar pushes merges to origin, but the process keeps driving with
-the `dist/`, the config (the gate stack that judges every branch!) and the
-Containerfile it loaded at launch. In a queued chain of orchestrator issues,
-slice N+1 is then built by a driver that predates slice N — judge and judged
-from different eras, the same genus of silent false verdict `rebuildOn` exists
+If the repo sandbar operates on is also where sandbar's own inputs come from —
+sandbar itself is the motivating case, but any repo whose landings change how
+its own runs behave qualifies — a run that keeps cycling goes stale mid-series:
+sandbar pushes merges to origin, but the process keeps driving with the config
+(the gate stack that judges every branch!) and the images it resolved at launch.
+In a queued chain of orchestrator issues, slice N+1 is then judged by inputs
+that predate slice N — the same genus of silent false verdict `rebuildOn` exists
 to prevent, arriving through the launcher.
 
 `relaunchAfterLanding: true` makes any cycle in which the merger landed merges
@@ -398,29 +427,43 @@ continue". The launcher becomes a loop:
 
 ```sh
 while :; do
-  git pull --ff-only && npm run build && node dist/cli.js
+  npx sandbar
   c=$?; [ "$c" -eq 75 ] || exit "$c"
 done
 ```
 
-The pull at the top closes the at-launch staleness window, the relaunch the
-mid-series one. The contract is: pull, build, run; loop **only** on the
-relaunch code; propagate every other exit. The semantics hold because:
+The contract is: loop **only** on the relaunch code; propagate every other exit.
+The semantics hold because:
 
 - **No spin.** The relaunch code requires a landing, i.e. progress. A cycle
   that lands nothing exits through the normal conditions, whose codes break
   the loop. A landing that also exhausts `maxTotalIssues` relaunches rather
   than stopping — budgets are per-run and reset across runs by design, so the
   relaunched process starts fresh exactly as a human re-launch would.
-- **Fail loud.** A dirty or diverged checkout makes `git pull --ff-only` fail
-  and the loop exit with git's own message. No stash, no merge, no guessing.
 - **State is already per-run.** The relaunched process re-acquires the lock
   (released on exit), same workdir, same podman scope.
-- Cost: one build per landing cycle, plus one extra launch at series end (the
-  relaunch that finds the plan empty and exits 0).
+- Cost: one extra launch at series end (the relaunch that finds the plan empty
+  and exits 0).
+
+What a relaunch re-reads is **your checkout, not origin**. Images are re-resolved
+from `origin/<sourceBranch>`, so a landed `Containerfile` change is picked up on
+its own; the config file is imported again from wherever you keep it, so a landed
+*config* change is picked up only once that file is in your checkout. Sandbar
+never pulls into your working tree — it is yours, and a run that moved your refs
+would be a worse bargain than a stale gate stack. Preflight makes the gap visible
+instead: when the commits your checkout is missing include ones that touch the
+config file, the run opens with a warning naming the file and both counts.
+
+What the relaunch does **not** buy you is a newer driver. If your launcher also
+upgrades sandbar in that loop — `git pull && npm run build`, or an unpinned
+install — then the code producing your verdicts is whatever was on disk at that
+instant, which for a working tree means uncommitted edits included. Sandbar's
+own launcher used to do exactly that and no longer does: it installs the
+release named in a committed `sandbar.pin` and runs that, so a series is driven
+by a version somebody chose. Pin your driver and move the pin deliberately.
 
 It is **explicit config, not detection**, on purpose: deriving self-hostedness
-(is `dist/cli.js` inside the operated repo?) false-positives for every consumer
+(is the driver inside the operated repo?) false-positives for every consumer
 running the package from `node_modules`, whose non-looping launcher would then
 stop after the first landing cycle. Leave it off unless your launcher loops.
 

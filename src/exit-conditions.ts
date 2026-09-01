@@ -31,15 +31,40 @@ export const EXIT_CODE_SUCCESS = 0;
 export const EXIT_CODE_STUCK = 2;
 export const EXIT_CODE_BUDGET = 3;
 // "Landed work; relaunch me to continue" (#65). A launcher that loops on
-// exactly this code — pull, rebuild, rerun — closes both staleness windows of a
-// self-hosted series: the checkout that fell behind origin between launches,
-// and the launch-time `dist/` (plus config and Containerfile) still driving
-// after a cycle landed orchestrator commits, where judge and judged come from
-// different eras. 75 is sysexits' EX_TEMPFAIL ("temporary failure; retry"),
-// which is the meaning, and it is clear of the run's own 0/1/2/3 and of the
-// shell's reserved 126+. The number is repeated by hand in the `sandbar`
-// script in package.json — a shell loop cannot import a constant — so a change
-// here must move that script (and the README's launcher example) with it.
+// exactly this code closes the staleness window a self-hosted series opens: a
+// cycle that lands orchestrator commits leaves the running process driving on
+// what it resolved at launch, where judge and judged come from different eras.
+//
+// What that covers narrowed with #66, in two different ways, and the flag
+// survives both — worth keeping straight, because the three objects it used to
+// refresh now behave differently from each other. Read the three as a
+// description of SANDBAR'S OWN launcher and not as a contract: this flag is
+// library config, it requires no pin, and a consumer whose loop is `git pull &&
+// npm run build` (README) still refreshes all three. That is why the exit
+// `reason` below names the two THIS run re-resolves and leaves the driver to
+// whoever wrote the loop.
+//
+//   - `dist/` no longer moves at all. The driver is an installed release the
+//     repo pins, so a landing does not become the driver until a human moves
+//     the pin.
+//   - IMAGES are still the reason this flag exists. `ensureImages` runs once
+//     per run against a source worktree reset to `origin/<sourceBranch>`, so a
+//     landed `Containerfile` reaches a series through the relaunch and through
+//     nothing else.
+//   - the CONFIG is `import()`ed once at launch (cli.ts), so a relaunch does
+//     re-read it — but from the operator's CHECKOUT, which nothing refreshes
+//     now that the launcher has stopped pulling. A landed `gateStack` change
+//     therefore arrives when a human pulls it and not when the run relaunches.
+//     That is the deliberate price of #66 (the checkout is the operator's, and
+//     a run that moved their refs would be the worse bargain); preflight's
+//     `staleConfigWarning` is what keeps it from being silent.
+//
+// 75 is sysexits' EX_TEMPFAIL ("temporary failure; retry"), which is the
+// meaning, and it is clear of the run's own 0/1/2/3 and of the shell's reserved
+// 126+. The number is repeated by hand in `scripts/sandbar-launch.mjs`, which
+// runs before the package it would import exists; `launcher.test.ts` asserts
+// the two spellings equal, and the README's launcher description moves with a
+// change here.
 export const EXIT_CODE_RELAUNCH = 75;
 
 export type ExitTag =
@@ -68,8 +93,10 @@ export type RunState = {
   silentNoopAttemptsByIssue: Map<string, number>;
   readonly maxTotalIssues: number;
   // Exit (e) after any cycle that lands merges, instead of continuing on the
-  // launch-time build (#65). Config rather than state, like maxTotalIssues —
-  // carried here so applyCycle stays the single owner of the exit ordering.
+  // inputs this run resolved at launch (#65). Which inputs those still are is
+  // EXIT_CODE_RELAUNCH's comment above, and since #66 it is not all three of
+  // them. Config rather than state, like maxTotalIssues — carried here so
+  // applyCycle stays the single owner of the exit ordering.
   readonly relaunchAfterLanding: boolean;
 };
 
@@ -80,8 +107,8 @@ export type CycleOutcome = {
   // Merges the merger pushed to origin this cycle; 0 when the merge phase did
   // not run, did not push, or the cycle was reset (verified mode). REQUIRED
   // rather than defaulted, because the one caller forgetting to thread it
-  // would disable relaunch silently — the run would just keep driving on the
-  // stale build, which is #65's own bug wearing the fix.
+  // would disable relaunch silently — the run would just keep cycling on the
+  // inputs it resolved at launch, which is #65's own bug wearing the fix.
   readonly landedMerges: number;
 };
 
@@ -128,17 +155,29 @@ export function applyCycle(state: RunState, cycle: CycleOutcome): ExitDecision {
   state.lastPlanFingerprint = cycle.planFingerprint;
 
   // (e) relaunch — the cycle landed merges, so the source branch has moved and
-  // this process is now driving with a `dist/`, a config and a Containerfile
-  // from before the landing. Checked FIRST (see the header for why it beats
-  // the budget): a landing is the one outcome that guarantees progress, so
-  // exiting here can never spin the launcher's loop.
+  // this process is still holding the inputs it resolved before the landing
+  // (the images above all; the constant's comment above owns how the three
+  // objects came to differ under #66). Checked FIRST (see the header for why
+  // it beats the budget): a landing is the one outcome that guarantees
+  // progress, so exiting here can never spin the launcher's loop.
   if (state.relaunchAfterLanding && cycle.landedMerges > 0) {
     return {
       kind: "exit",
       tag: "relaunch",
+      // What THIS run re-resolves at the next launch, and nothing more. It
+      // used to say "relaunching so the driver is what it just landed", which
+      // #66 made false for a pinned launcher: a landing does not become the
+      // driver until a human moves the pin. But the correction may not go the
+      // other way either — this flag is library config, and nothing about it
+      // requires a pin, so a message naming one would be equally false for the
+      // consumer README describes running `git pull && npm run build` in the
+      // same loop. What is true of EVERY launcher is the split: images and the
+      // config file are this run's to re-resolve, and which code does the
+      // driving is the launcher's answer, whatever shape it has.
       reason:
-        `landed ${cycle.landedMerges} merge(s); relaunching so the driver ` +
-        "is what it just landed",
+        `landed ${cycle.landedMerges} merge(s); relaunching so the next run ` +
+        "rebuilds its images from origin and re-imports the config file " +
+        "(which driver that run uses is the launcher's to decide)",
       exitCode: EXIT_CODE_RELAUNCH,
     };
   }

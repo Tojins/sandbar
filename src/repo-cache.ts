@@ -68,9 +68,11 @@ export const SOURCE_WORKTREE_NAME = "source";
 // confusion #34 spent a release removing.
 export type RepoLayout = {
   // The operator's checkout. Sandbar READS it (git identity, `copyToWorktree`
-  // sources, the one-time clone) and never writes to it. The soft
-  // local-ahead-of-origin warning is the only check that still looks here, and
-  // it looks here on purpose — see preflight.ts.
+  // sources, the one-time clone) and never writes to it — no fetch, no pull,
+  // which since #66 is also why nothing refreshes the config file living here.
+  // The two soft warnings preflight emits about this directory (ahead of
+  // origin, and behind it in the commits touching the config) are the only
+  // checks that still look, and they look on purpose — see preflight.ts.
   readonly hostCwd: string;
   // <hostCwd>/<workDir>. Holds everything below, plus the lock and the logs.
   readonly stateDir: string;
