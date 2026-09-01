@@ -33,8 +33,9 @@
 // the moment the single-instance lock is won and before anything else — a
 // refusal from preflight, from an image build or from the uid check is a
 // verdict this driver reached, and each of them used to leave nothing on disk
-// at all. run.ts's header owns the two exits that stay outside the record
-// (`GH_TOKEN`, which is checked before the lock, and losing the lock itself).
+// at all. The boundary is the LOCK, and run.ts's header owns the three exits
+// that stay outside it — a refused config and a missing `GH_TOKEN`, both
+// checked before the lock is won, and losing the lock itself.
 //
 // The ISO stamp has `:` and `.` swapped for `-` so the directory name is safe
 // on every filesystem we care about (including Windows under WSL).

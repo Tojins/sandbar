@@ -265,8 +265,9 @@ and used to announce themselves in four different ways, the halt in none at all.
   runs immediately after `acquireLock` — not fifteen steps later, after
   preflight and the image builds — so every startup refusal lands in
   `run-<stamp>/orchestrator.log` instead of only on a terminal; `run.ts` names
-  the two exits deliberately left outside it (`GH_TOKEN`, checked before the
-  lock, and losing the lock, whose answer is the other run's log). The
+  the three exits deliberately left outside it — a refused config and a missing
+  `GH_TOKEN`, both decided before the lock is won, and losing the lock, whose
+  answer is the other run's log. The
   invariant `logs.ts`'s header owns: every line reporting an OUTCOME or a
   REFUSAL exists in the log, and the terminal may additionally render it. Two
   streams, not one tee — the log keeps the per-attempt gate/reviewer trace

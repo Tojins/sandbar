@@ -101,6 +101,13 @@ export const BOT_COMMENT_PREFIX = "**Sandbar:**";
 // cycle, so re-deriving a parked branch's name can simply be wrong. It is
 // handed in from `input.issue.branch`, which is the branch that was actually
 // pushed.
+//
+// What each of them names is the LOCATION, never what the push CARRIES. The
+// two are not the same claim: an off-branch run pushes the branch and moves
+// nothing onto it, and `STRANDED_COMMITS_NOTE` — appended by the needs-info and
+// off-branch arms below — is the one sentence entitled to say where the work
+// actually is. A template that also claimed "whatever it wrote is pushed here"
+// would contradict the paragraph directly beneath it in the same comment body.
 
 export const NEEDS_INFO_COMMENT_TEMPLATE = (
   branch: string,
@@ -108,10 +115,10 @@ export const NEEDS_INFO_COMMENT_TEMPLATE = (
   needsInfoLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} the agent paused with NEEDS-INFO. Whatever it had ` +
-  `written is pushed to \`${branch}\`, and the next attempt continues on that ` +
-  `branch. Please answer the questions below, then drop \`${needsInfoLabel}\` ` +
-  `and re-apply \`${readyLabel}\` when the answers are ready.\n\n---\n\n${questions}`;
+  `${BOT_COMMENT_PREFIX} the agent paused with NEEDS-INFO. The branch is ` +
+  `\`${branch}\`, and the next attempt continues on it. Please answer the ` +
+  `questions below, then drop \`${needsInfoLabel}\` and re-apply ` +
+  `\`${readyLabel}\` when the answers are ready.\n\n---\n\n${questions}`;
 
 // #21 — the implementer stopped before writing code because the issue implies
 // non-trivial user-visible UI and carries no prototype. Same human round-trip

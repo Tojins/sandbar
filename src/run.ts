@@ -72,10 +72,15 @@
 // into the tree before it dies (`stopAtStartup`), including the two that
 // escaped `run()` uncaught.
 //
-// TWO EXITS STAY OUTSIDE THE RECORD, deliberately:
-//   - GH_TOKEN missing. Checked before the lock — writing a log tree there
-//     would mean writing one while a second launch may be racing us for the
-//     workdir — and its message needs no context to act on.
+// THE BOUNDARY IS THE LOCK, and three exits sit outside it deliberately. Two
+// are pre-lock by construction: writing a log tree before the lock is won means
+// writing one while a second launch may be racing us for the same workdir, and
+// neither of these two needs the tree to be actionable.
+//   - `resolveConfig` refusing the config, which since #66 includes a
+//     `requiresSandbar` minimum this driver is below. It names both versions,
+//     and the operator is standing at the config file it names.
+//   - GH_TOKEN missing. Its message is self-contained: declare the key.
+// The third is post-lock and leaves no record on purpose:
 //   - Losing the lock. The answer to "what happened" is the OTHER run's log,
 //     and one empty directory per turned-away launch is noise in the one tree
 //     an operator greps.
@@ -85,9 +90,10 @@
 // defensive iteration ceiling. There used to be five terminal shapes in four
 // spellings, one of which (the halt) printed nothing on stdout at all and one
 // of which (plan-empty) printed a success banner. `exit-conditions.ts` owns
-// the tags, the reasons and the line; `announceExit` below is the single site
-// that writes one to the log, and there is one `console.log` for it at the end
-// of the function.
+// the tags, the reasons and the line; `recordExit` below is the single site
+// that writes one to the log, reached by the startup stops as well as the
+// cycle loop so that `exit: <tag>` is greppable however far the run got, and
+// there is one `console.log` for it at the end of the function.
 //
 // Ahead of all of it, on stdout and then again as orchestrator.log's first
 // line, is the DRIVER IDENTITY (#69) — the version, the tree `dist/` was built
@@ -360,11 +366,39 @@ export async function run(
   let cleanupReason = "normal-exit";
   onCleanup(() => runLogger.finalize(cleanupReason));
 
+  // THE one site that writes a terminal to the log (#70), and it is declared up
+  // here because the startup stops below reach it as well as the cycle loop
+  // does: an operator greps `orchestrator.log` for how the run ended without
+  // knowing yet how far it got, so a run refused by preflight and a run that
+  // exhausted its budget must leave the same shape of line. It also owns
+  // `cleanupReason`, which makes `run-end (<tag>)` agree with it by
+  // construction rather than by two assignments kept in step by hand.
+  //
+  // It RETURNS the exit rather than assigning `terminalExit` itself, which
+  // would be shorter and is wrong: TypeScript does not track assignments made
+  // inside a closure, so the `terminalExit` at the bottom of this function
+  // would narrow to `null` and the one line #70 exists to guarantee would be
+  // dead code as far as the checker is concerned.
+  //
+  // The terminal gets the line too, from the caller. Two streams, one invariant
+  // (logs.ts): the log carries every outcome, and stdout additionally renders
+  // it — here in the same words, since there is only one sentence to say.
+  const recordExit = async (exit: TerminalExit): Promise<TerminalExit> => {
+    cleanupReason = exit.tag;
+    await runLogger.appendOrchestrator(`exit: ${exit.tag} — ${exit.reason}`);
+    return exit;
+  };
+
   // Every stop between here and the first cycle goes through this, so none of
   // them can be the silent one again (#70). It records the complaint verbatim,
-  // prints it, adds the same `Exit (halted): …` line every other terminal path
-  // ends with, and runs cleanup — which is what recovers the `run.pid`
-  // sidecar, since `process.exit` runs no handler.
+  // adds the same `exit:` line and the same `Exit (halted): …` line every other
+  // terminal path ends with, prints both, and runs cleanup — which is what
+  // recovers the `run.pid` sidecar, since `process.exit` runs no handler.
+  //
+  // Two log lines rather than one because they answer different questions and
+  // only one of them fits on a line: `stopped (<cause>)` carries the complaint
+  // — a preflight refusal is paragraphs — and `exit:` carries the verdict, in
+  // the shape a terminal is greppable by.
   //
   // An unexpected error takes the same route rather than escaping to the bin.
   // It still prints its stack (`faultDetail`'s rule, shared with the bin), so
@@ -385,10 +419,9 @@ export async function run(
   ): Promise<never> => {
     const actionable = err instanceof SandbarError || err instanceof PreflightError;
     const detail = actionable ? err.message : faultDetail(err);
-    cleanupReason = cause;
     await runLogger.appendOrchestrator(`stopped (${cause}): ${detail}`);
     console.error(detail);
-    const exit = haltedExit([cause]);
+    const exit = await recordExit(haltedExit([cause]));
     console.log(`\n${formatExitLine(exit)}`);
     await runCleanup();
     process.exit(exit.exitCode);
@@ -606,22 +639,6 @@ export async function run(
   // kept in step with the tag by hand.
   let terminalExit: TerminalExit | null = null;
 
-  // Writes a terminal to the LOG and hands it back for the caller to assign.
-  // Assigning `terminalExit` in here instead would be shorter and is wrong:
-  // TypeScript does not track assignments made inside a closure, so the
-  // `terminalExit` at the bottom of this function would narrow to `null` and
-  // the one line #70 exists to guarantee would be dead code as far as the
-  // checker is concerned.
-  //
-  // Both streams get it, because they are two streams with one invariant
-  // (logs.ts): the log carries every outcome, the terminal additionally renders
-  // it — here in the same words, since there is only one sentence to say.
-  const announceExit = async (exit: TerminalExit): Promise<TerminalExit> => {
-    cleanupReason = exit.tag;
-    await runLogger.appendOrchestrator(`exit: ${exit.tag} — ${exit.reason}`);
-    return exit;
-  };
-
   // One Phase-4 pass. Called twice per cycle (#30): once for the agent
   // terminals before the merge, once for the merger's own outcomes after. The
   // `label` is only there so the two are distinguishable in the console and the
@@ -728,7 +745,7 @@ export async function run(
         // The same `budgetExit` applyCycle returns, rather than the second
         // hand-written copy of its reason this used to print in different
         // words at the top of a cycle (#70).
-        terminalExit = await announceExit(
+        terminalExit = await recordExit(
           budgetExit(runState.issuesAttempted, runState.maxTotalIssues),
         );
         break;
@@ -944,7 +961,7 @@ export async function run(
       if (issues.length === 0 && landRequests.length === 0) {
         // No line of its own: the `Exit (plan-empty): …` at the bottom says
         // exactly this and is the line every other terminal prints too (#70).
-        terminalExit = await announceExit(planEmptyExit());
+        terminalExit = await recordExit(planEmptyExit());
         break;
       }
 
@@ -1234,6 +1251,11 @@ export async function run(
             console.error(`Merger halted: ${err.message}${trace}`);
             halt = true;
             haltReasons.push("merger-halted");
+            // `recordExit` overwrites this at the break below, so what this
+            // assignment covers is only the window in between — and that window
+            // is the post-merge finalise pass, which makes `gh` writes and can
+            // take a while. A signal arriving in it should not leave
+            // `run-end (normal-exit)` on a run whose merger has already thrown.
             cleanupReason = "merger-halted";
             await runLogger.appendOrchestrator(
               `merger halted: ${err.message}${trace}`,
@@ -1444,11 +1466,11 @@ export async function run(
         // that threw is in the list too, and is alone in it — neither report
         // can reach that path, since a throw leaves no `mergerSummary` to read.
         //
-        // `announceExit` overwrites `cleanupReason` with the TAG, and that is
+        // `recordExit` overwrites `cleanupReason` with the TAG, and that is
         // the point: `run-end (halted)` is uniform with every other terminal,
         // and the causes it used to carry are on the `exit:` line above it and
         // in the report that produced each of them.
-        terminalExit = await announceExit(haltedExit(haltReasons));
+        terminalExit = await recordExit(haltedExit(haltReasons));
         break;
       }
   
@@ -1472,7 +1494,7 @@ export async function run(
             : 0,
       });
       if (decision.kind === "exit") {
-        terminalExit = await announceExit(decision);
+        terminalExit = await recordExit(decision);
         break;
       }
     }
@@ -1481,7 +1503,7 @@ export async function run(
     // condition. Nothing has ever reached it, and its exit CODE is unchanged
     // (success) — but it used to print "All done.", which is the one thing a
     // run that ran out of iterations did not do (#70).
-    terminalExit ??= await announceExit(iterationCeilingExit(MAX_ITERATIONS));
+    terminalExit ??= await recordExit(iterationCeilingExit(MAX_ITERATIONS));
   } catch (err) {
     // A sandbar-internal failure escaped a cycle (a required git/gh side-effect
     // that could not be completed, or an unexpected bug). FAIL LOUD: this is
@@ -1500,8 +1522,7 @@ export async function run(
     // printed" argument above, it restates it: the box is the detail, the line
     // is the answer to "did this stop normally?", and a reader who has only one
     // of the two streams still gets an answer.
-    const exit = haltedExit(["sandbar-internal-error"]);
-    cleanupReason = exit.tag;
+    const exit = await recordExit(haltedExit(["sandbar-internal-error"]));
     console.log(`\n${formatExitLine(exit)}`);
     await runCleanup();
     process.exit(exit.exitCode);

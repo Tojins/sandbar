@@ -127,13 +127,23 @@ describe("issueNumberOf", () => {
 });
 
 describe("comment templates", () => {
-  it("NEEDS-INFO body includes bot prefix, the questions verbatim, and the configured labels", () => {
-    const body = NEEDS_INFO_COMMENT_TEMPLATE("Q1?\nQ2?", NEEDS_INFO, READY_FOR_AGENT);
+  it("NEEDS-INFO body includes bot prefix, the branch, the questions verbatim, and the configured labels", () => {
+    const body = NEEDS_INFO_COMMENT_TEMPLATE(
+      "sandbar/issue-45-t-45",
+      "Q1?\nQ2?",
+      NEEDS_INFO,
+      READY_FOR_AGENT,
+    );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
+    expect(body).toContain("sandbar/issue-45-t-45"); // #70
     expect(body).toContain("Q1?");
     expect(body).toContain("Q2?");
     expect(body).toContain(NEEDS_INFO);
     expect(body).toContain(READY_FOR_AGENT);
+    // The branch is a LOCATION here and nothing more. STRANDED_COMMITS_NOTE is
+    // appended to this same body when the run went off-branch, and it says none
+    // of the work is on the branch — so this template may not claim it is.
+    expect(body).not.toMatch(/written is pushed|whatever it (had )?wrote/i);
   });
   it("NEEDS-UI-PROTOTYPE body includes bot prefix, the impact prose, both unblock routes, and the configured labels", () => {
     const body = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
@@ -181,24 +191,36 @@ describe("comment templates", () => {
     expect(late).not.toContain("before writing any code");
     expect(late).toContain("sandbar/issue-45-t-45");
   });
-  it("NEEDS-HUMAN body includes bot prefix, the failure trace, and the configured labels", () => {
-    const body = NEEDS_HUMAN_COMMENT_TEMPLATE("E: boom\nstack…", AGENT_STUCK, READY_FOR_AGENT);
+  it("NEEDS-HUMAN body includes bot prefix, the branch, the failure trace, and the configured labels", () => {
+    const body = NEEDS_HUMAN_COMMENT_TEMPLATE(
+      "sandbar/issue-45-t-45",
+      "E: boom\nstack…",
+      AGENT_STUCK,
+      READY_FOR_AGENT,
+    );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
+    expect(body).toContain("sandbar/issue-45-t-45"); // #70
     expect(body).toContain("E: boom");
     expect(body).toContain("stack…");
     expect(body).toContain(AGENT_STUCK);
     expect(body).toContain(READY_FOR_AGENT);
   });
-  it("REVIEW_BUDGET_EXHAUSTED body includes bot prefix, the latest reviewer prose verbatim, and the configured labels", () => {
+  it("REVIEW_BUDGET_EXHAUSTED body includes bot prefix, the branch, the latest reviewer prose verbatim, and the configured labels", () => {
     const body = REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(
+      "sandbar/issue-45-t-45",
       "## Bar violations\n- foo not extracted\n- naming is unclear",
       AGENT_STUCK,
       READY_FOR_AGENT,
     );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
+    expect(body).toContain("sandbar/issue-45-t-45"); // #70
     expect(body).toContain("foo not extracted");
     expect(body).toContain("naming is unclear");
     expect(body).toContain(AGENT_STUCK);
+    // The LAST positional argument, which is what a signature shift silently
+    // drops off the end: without this the whole call could slide one slot and
+    // every other assertion here would still pass.
+    expect(body).toContain(READY_FOR_AGENT);
   });
 
   // A comment body is posted into the HOST repository, where `#64` is not this
