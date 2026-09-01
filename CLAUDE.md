@@ -255,7 +255,10 @@ and used to announce themselves in four different ways, the halt in none at all.
 - **A role names its CLI as well as its model (#72).** `implementerAgent` /
   `reviewerAgent`, both defaulting to `claude`, beside the model ids that were
   already per-role: the tiering knob and the vendor knob are independent, and
-  every provider takes whatever id its role's field holds. `AgentProvider`
+  every provider takes whatever id its role's field holds — which is why a role
+  routed off claude must NAME its model (`assertRoleModelIdNamed`), the default
+  being a claude alias and a half-moved config otherwise asking codex for
+  "opus" on every attempt. `AgentProvider`
   (`src/agent-sandbox.ts`) was already the whole seam — argv plus a line parser,
   with the completion watch, the idle timeout and commit collection reading
   parsed events and git — so `codex` is a second implementation of it and

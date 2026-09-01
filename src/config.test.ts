@@ -287,6 +287,27 @@ describe("resolveConfig", () => {
     ).toThrow(/reviewerAgent/);
   });
 
+  // The vendor knob and the tiering knob are independent, so a config can be
+  // moved half-way — and half-way is `codex exec --model opus` on every
+  // attempt, three sandbox bringups before a human sees NEEDS-HUMAN. Decidable
+  // ahead of the lock because the id it would inherit is a claude alias this
+  // repo wrote down; the ids themselves stay unvalidated, being aliases.
+  it("refuses a role routed off claude whose model id is still unset (#72)", () => {
+    expect(() =>
+      resolveConfig({ ...minimal, implementerAgent: "codex" }),
+    ).toThrow(/implementerModelId/);
+    expect(() => resolveConfig({ ...minimal, reviewerAgent: "codex" })).toThrow(
+      /reviewerModelId/,
+    );
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        reviewerAgent: "codex",
+        reviewerModelId: "gpt-5.6-sol",
+      }),
+    ).not.toThrow();
+  });
+
   it("merges a partial label override onto the default vocabulary", () => {
     const r = resolveConfig({ ...minimal, labels: { agentStuck: "blocked" } });
     expect(r.labels).toEqual({

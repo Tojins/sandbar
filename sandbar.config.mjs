@@ -289,9 +289,12 @@ export default {
   // plus `OPENAI_API_KEY` in `sandbar.env` — preflight refuses the run without
   // it rather than letting the failure arrive as an implementer dying
   // in-container — plus `requiresSandbar` raised to a release that HAS the
-  // field, in the same commit (#66). The reviewer stays claude on purpose: it
-  // holds the verdict, and #72's whole argument is that the strongest model
-  // belongs where the judgement is, not where the tokens are.
+  // field, in the same commit (#66). The first two are a pair the driver
+  // enforces rather than trusts: a model id left unset is the claude alias
+  // "opus", so a half-moved config would ask codex for it on every attempt.
+  // The reviewer stays claude on purpose: it holds the verdict, and #72's
+  // whole argument is that the strongest model belongs where the judgement
+  // is, not where the tokens are.
   //
   // Nothing here takes effect through the pin. This file comes from the
   // checkout, not from `.sandbar/driver/`, so an edit applies on the next run

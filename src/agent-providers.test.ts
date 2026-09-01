@@ -9,6 +9,7 @@ import {
   AGENT_PROVIDER_NAMES,
   DEFAULT_AGENT_PROVIDER,
   PROVIDER_CREDENTIALS,
+  assertRoleModelIdNamed,
   buildAgentProvider,
   parseAgentProviderName,
   requiredAgentProviders,
@@ -111,7 +112,8 @@ describe("requiredAgentProviders", () => {
   });
 
   // The headline configuration of #72 — codex implementer, Opus reviewer —
-  // needs both vendors' credentials, and so does its mirror image.
+  // needs both vendors' credentials, and so does its mirror image. The exact
+  // equality is also the dedupe: both roles name codex and it appears once.
   it("keeps claude even when NO role names it (the merger, #72)", () => {
     expect(
       requiredAgentProviders({
@@ -119,15 +121,6 @@ describe("requiredAgentProviders", () => {
         reviewerAgent: "codex",
       }),
     ).toEqual(["claude", "codex"]);
-  });
-
-  it("dedupes when both roles name the same provider", () => {
-    expect(
-      requiredAgentProviders({
-        implementerAgent: "codex",
-        reviewerAgent: "codex",
-      }).filter((n) => n === "codex").length,
-    ).toBe(1);
   });
 
   // The list feeds a refusal message; an order that moved with the config
@@ -142,6 +135,46 @@ describe("requiredAgentProviders", () => {
       reviewerAgent: "codex",
     });
     expect(a).toEqual(b);
+  });
+});
+
+describe("assertRoleModelIdNamed", () => {
+  // The two knobs are independent, which is what lets a config be moved
+  // half-way. Half-way runs `codex exec --model opus` on every attempt.
+  it("refuses a non-claude provider whose role left the model id unset", () => {
+    expect(() =>
+      assertRoleModelIdNamed("implementer", "codex", undefined),
+    ).toThrow(SandbarError);
+    try {
+      assertRoleModelIdNamed("implementer", "codex", undefined);
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      const msg = (err as Error).message;
+      // Both halves of the pair, so the reader is not left deducing which
+      // field the refusal is about.
+      expect(msg).toContain("config.implementerAgent");
+      expect(msg).toContain("config.implementerModelId");
+    }
+  });
+
+  it("names the role it was given", () => {
+    expect(() => assertRoleModelIdNamed("reviewer", "codex", undefined)).toThrow(
+      /config\.reviewerModelId/,
+    );
+  });
+
+  it("accepts a non-claude provider once the role names an id", () => {
+    expect(() =>
+      assertRoleModelIdNamed("implementer", "codex", "gpt-5.6-sol"),
+    ).not.toThrow();
+  });
+
+  // The default only has to be right for the provider it was written for, so
+  // claude keeps inheriting it — every config written before #72 is this case.
+  it("leaves claude's default alone", () => {
+    expect(() =>
+      assertRoleModelIdNamed("implementer", "claude", undefined),
+    ).not.toThrow();
   });
 });
 

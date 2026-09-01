@@ -122,6 +122,34 @@ export function requiredAgentProviders(roles: {
   return AGENT_PROVIDER_NAMES.filter((n) => named.has(n));
 }
 
+// The two knobs are independent, and that independence is exactly what lets a
+// config be half-moved: a role routed away from claude while its model id keeps
+// the default it was given for claude ("opus") runs `codex exec --model opus`
+// every attempt. The model-id fields cannot be validated in general — the
+// defaults are deliberately version-agnostic ALIASES, and no list of a vendor's
+// ids would stay true — but a role naming a non-claude provider and no id at
+// all is decidable without knowing any vendor's id space, because the value it
+// would inherit is a claude alias this repo wrote down.
+//
+// Refused here rather than survived: the failure is bounded (codex exits
+// non-zero on an id it does not know, so HARD-ERROR and NEEDS-HUMAN in three
+// attempts) but it is a whole issue's sandbox bringups spent on a field the
+// config could have been asked about ahead of the lock — and the same
+// half-moved config is what `sandbar.config.mjs`'s own comment tells a human to
+// hold by hand across three edits.
+export function assertRoleModelIdNamed(
+  role: "implementer" | "reviewer",
+  provider: AgentProviderName,
+  rawModelId: string | undefined,
+): void {
+  if (provider === "claude" || rawModelId !== undefined) return;
+  throw new SandbarError(
+    `config.${role}Agent is ${JSON.stringify(provider)}, so config.${role}ModelId ` +
+      `must name a ${provider} model. Left unset it defaults to a claude alias, ` +
+      `which ${provider} would be asked for on every attempt.`,
+  );
+}
+
 export type BuildAgentProviderOptions = {
   // Resume the container's most recent conversation instead of starting a fresh
   // one — `claude --continue`, `codex exec resume --last`. Sound only inside an

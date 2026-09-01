@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 
 import {
   type AgentProviderName,
+  assertRoleModelIdNamed,
   parseAgentProviderName,
 } from "./agent-providers.js";
 import type { SandboxHooks } from "./agent-sandbox.js";
@@ -492,7 +493,8 @@ export type RunConfig = {
   // agnostic "opus" alias, which the claude CLI resolves to the latest Opus —
   // so the defaults don't pin a version and don't need bumping per release.
   // A role routed to another provider (below) puts THAT vendor's id in the same
-  // field: the fields name the model, not the vendor.
+  // field: the fields name the model, not the vendor — and must then name it,
+  // since the default is a claude alias (`assertRoleModelIdNamed`).
   // Defaults: implementer/reviewer/merger all "opus".
   readonly implementerModelId?: string;
   readonly reviewerModelId?: string;
@@ -501,7 +503,9 @@ export type RunConfig = {
   // Which CLI each role runs (#72) — the vendor knob beside the tiering one.
   // `agent-providers.ts` owns the set, the credential each member needs, and
   // why the set is closed. Both default to "claude", so every config written
-  // before #72 resolves unchanged.
+  // before #72 resolves unchanged. Naming another one obliges the role's model
+  // id: the two knobs are independent, which is what lets a config be moved
+  // half-way, and half-way runs `codex exec --model opus` every attempt.
   //
   // There is deliberately no `mergerAgent`. The merger's resolve agent is a
   // separate path that spells its container's entrypoint directly
@@ -1667,6 +1671,16 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   // because THAT has to partition the host identically to proper-lockfile, which
   // resolves symlinks — two different jobs.
   const cwd = resolve(config.cwd ?? DEFAULT_CWD());
+  // Hoisted out of the literal below because the model ids are read against
+  // them: a role's CLI and a role's model are independent fields that have to
+  // agree, and the RAW id is what says whether the operator named one (#72).
+  const implementerAgent = parseAgentProviderName(
+    "implementerAgent",
+    config.implementerAgent,
+  );
+  const reviewerAgent = parseAgentProviderName("reviewerAgent", config.reviewerAgent);
+  assertRoleModelIdNamed("implementer", implementerAgent, config.implementerModelId);
+  assertRoleModelIdNamed("reviewer", reviewerAgent, config.reviewerModelId);
   return {
     ...config,
     ghOwner,
@@ -1678,11 +1692,8 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     implementerModelId: config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,
     reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
-    implementerAgent: parseAgentProviderName(
-      "implementerAgent",
-      config.implementerAgent,
-    ),
-    reviewerAgent: parseAgentProviderName("reviewerAgent", config.reviewerAgent),
+    implementerAgent,
+    reviewerAgent,
     coauthorTrailer:
       config.coauthorTrailer ??
       defaultCoauthorTrailer(config.botName, config.botEmail),
