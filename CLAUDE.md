@@ -260,8 +260,8 @@ and used to announce themselves in four different ways, the halt in none at all.
   rotated away. Not a bind mount: that would be a writable channel from a
   sandbox back onto the host's credential, with three parallel sandboxes as
   concurrent writers on one file.
-- **A role names its CLI as well as its model (#72).** `implementerAgent` /
-  `reviewerAgent`, both defaulting to `claude`, beside the model ids that were
+- **A role names its CLI as well as its model (#72, #74).** `implementerAgent` /
+  `reviewerAgent` / `mergerAgent`, all defaulting to `claude`, beside the model ids that were
   already per-role: the tiering knob and the vendor knob are independent, and
   every provider takes whatever id its role's field holds — which is why a role
   routed off claude must NAME its model (`assertRoleModelIdNamed`), the default
@@ -273,10 +273,10 @@ and used to announce themselves in four different ways, the halt in none at all.
   nothing downstream knows which ran. `src/agent-providers.ts` owns the
   NAME→factory map, each provider's credential and `requiredAgentProviders`;
   its header owns why the set is CLOSED at what the driver can build (a config
-  is a program, so a name nothing implements is #66's silent failure) and why
-  there is no `mergerAgent` — that path stays Claude/Opus, and a field nothing
-  reads is the same failure. Preflight refuses per routed provider, with claude
-  unconditional because the merger's resolve agent is hard-coded to it. A
+  is a program, so a name nothing implements is #66's silent failure).
+  Preflight refuses per routed provider across all three roles. The resolve
+  invocation uses the same provider boundary for argv, credential env and
+  parsed output while keeping its raw streams verbatim in attempt logs. A
   provider's parser answers in THREE registers and the rule no new one may break
   is that they stay apart: `text`/`result` is the agent's SPEECH and the only
   thing a run returns (#41 — "completed with output" is what `reviewer-run.ts`
@@ -327,8 +327,8 @@ and used to announce themselves in four different ways, the halt in none at all.
   `cycle-N/resolve-<key>-attempt-<k>.log`, keyed like the gate artefact beside
   it, and the merger log line carries the container, the exit code, the
   duration and which of timeout / clean exit / signal ended it. An attempt that
-  captured NO output is an infra failure, not an answer: the loop throws rather
-  than re-prompting, so an image that is gone or a refused socket cannot launder
+  captured NO agent speech is an infra failure, not an answer: the loop throws
+  rather than re-prompting, so an image that is gone or a refused socket cannot launder
   itself into "the agent tried and failed" and spend the budget doing it. The
   ONE exception is the ten-minute `RESOLVE_AGENT_TIMEOUT_MS`, which ran the
   whole budget in the container and is a spent attempt named as one. What a

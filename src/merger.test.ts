@@ -197,6 +197,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       }
       return {
         stdout: entry.stdout,
+        output: entry.stdout,
         stderr: entry.stderr ?? "",
         end: entry.end ?? "exit",
         exitCode: entry.exitCode ?? 0,

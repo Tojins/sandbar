@@ -38,8 +38,10 @@ type AgentResult = ResolveAgentRun;
 // test in this file wants, so that only the tests ABOUT the invocation have to
 // spell out an exit code or a signal.
 function agentRun(over: Partial<ResolveAgentRun> = {}): ResolveAgentRun {
+  const stdout = over.stdout ?? "";
   return {
-    stdout: "",
+    stdout,
+    output: stdout,
     stderr: "",
     end: "exit",
     exitCode: 0,
@@ -56,6 +58,7 @@ type GateResp =
 type Script = {
   agentRuns: {
     stdout: string;
+    output?: string;
     leavesConflict?: boolean;
     run?: Partial<ResolveAgentRun>;
   }[];
@@ -102,13 +105,14 @@ function makeAdapter(script: Script): { adapter: ResolveAdapter; calls: Calls } 
       if (!entry) throw new Error("agent run not scripted");
       calls.agentRuns++;
       calls.prompts.push(prompt);
-      const signal = parseResolveSignal(entry.stdout);
+      const output = entry.output ?? entry.stdout;
+      const signal = parseResolveSignal(output);
       if (signal.kind === "COMMITTED") {
         merging = entry.leavesConflict ?? false;
       } else if (signal.kind === "ABANDON") {
         if (entry.leavesConflict !== undefined) merging = entry.leavesConflict;
       }
-      return agentRun({ stdout: entry.stdout, ...entry.run });
+      return agentRun({ stdout: entry.stdout, output, ...entry.run });
     },
     async isMergeInProgress() {
       calls.isMergeInProgressCalls++;
@@ -204,6 +208,21 @@ describe("runResolveLoop — conflict mode", () => {
     expect(calls.agentRuns).toBe(1);
     expect(calls.installCalls).toBe(1);
     expect(calls.gateCalls).toBe(1);
+  });
+
+  it("reads the promise from parsed speech rather than raw provider JSONL", async () => {
+    const { adapter } = makeAdapter({
+      initiallyConflicted: true,
+      agentRuns: [{
+        stdout: JSON.stringify({ transport: "<promise>ABANDON</promise>" }),
+        output: "<promise>COMMITTED</promise>",
+      }],
+      gates: [{ ok: true }],
+    });
+    const out = await runResolveLoop(issue(42), [], conflictMode, adapter, {
+      projectAnchor,
+    });
+    expect(out).toEqual({ kind: "resolved" });
   });
 
   it("agent ABANDON in conflict state: returns abandon with mergeInProgress=true", async () => {
@@ -666,6 +685,14 @@ describe("isInfraFailure (#67)", () => {
     expect(isInfraFailure(agentRun({ stdout: "thinking...", exitCode: 1 }))).toBe(
       false,
     );
+  });
+
+  it("keeps speech as evidence when an in-band provider failure follows it", () => {
+    expect(
+      isInfraFailure(
+        agentRun({ output: "thinking...", detail: "terminal fault" }),
+      ),
+    ).toBe(false);
   });
 });
 

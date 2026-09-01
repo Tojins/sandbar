@@ -376,15 +376,12 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
     const keys = PROVIDER_CREDENTIALS[provider]
       .map((c) => `  - ${c.key}  (${c.note})`)
       .join("\n");
-    // "claude" is required of every run even when neither role names it — the
-    // merger's resolve agent is hard-coded to it (#72) — so the message says
-    // so rather than leaving an operator who routed both roles to codex
-    // hunting for the setting that asked for this.
+    // The provider is present only because at least one role resolved to it.
+    // Name every routing knob so an operator can find the one responsible even
+    // when the merger is the sole role routed away from the default (#74).
     const why =
-      provider === "claude"
-        ? "Every run needs one: the merger's conflict-resolution agent is " +
-          "claude whatever `implementerAgent`/`reviewerAgent` name."
-        : `A role is routed to ${provider} by \`implementerAgent\`/\`reviewerAgent\`.`;
+      `A role is routed to ${provider} by \`implementerAgent\`, ` +
+      "`reviewerAgent`, or `mergerAgent`.";
     out.push({
       ok: false,
       message:

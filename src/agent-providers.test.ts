@@ -192,6 +192,7 @@ describe("requiredAgentProviders", () => {
       requiredAgentProviders({
         implementerAgent: "claude",
         reviewerAgent: "claude",
+        mergerAgent: "claude",
       }),
     ).toEqual(["claude"]);
   });
@@ -201,6 +202,7 @@ describe("requiredAgentProviders", () => {
       requiredAgentProviders({
         implementerAgent: "codex",
         reviewerAgent: "claude",
+        mergerAgent: "claude",
       }),
     ).toEqual(["claude", "codex"]);
   });
@@ -208,13 +210,14 @@ describe("requiredAgentProviders", () => {
   // The headline configuration of #72 — codex implementer, Opus reviewer —
   // needs both vendors' credentials, and so does its mirror image. The exact
   // equality is also the dedupe: both roles name codex and it appears once.
-  it("keeps claude even when NO role names it (the merger, #72)", () => {
+  it("does not require claude when no role names it (#74)", () => {
     expect(
       requiredAgentProviders({
         implementerAgent: "codex",
         reviewerAgent: "codex",
+        mergerAgent: "codex",
       }),
-    ).toEqual(["claude", "codex"]);
+    ).toEqual(["codex"]);
   });
 
   // The list feeds a refusal message; an order that moved with the config
@@ -223,10 +226,12 @@ describe("requiredAgentProviders", () => {
     const a = requiredAgentProviders({
       implementerAgent: "codex",
       reviewerAgent: "claude",
+      mergerAgent: "claude",
     });
     const b = requiredAgentProviders({
       implementerAgent: "claude",
       reviewerAgent: "codex",
+      mergerAgent: "claude",
     });
     expect(a).toEqual(b);
   });

@@ -248,6 +248,9 @@ sits in).
 | `implementerModelId` | `opus` |
 | `reviewerModelId` | `opus` |
 | `mergerModelId` | `opus` |
+| `implementerAgent` | `claude` |
+| `reviewerAgent` | `claude` |
+| `mergerAgent` | `claude` |
 | `coauthorTrailer` | `Co-authored-by: <botName> <<botEmail>>` |
 | `claudeMdPath` | `CLAUDE.md` |
 | `contextMdPath` | `CONTEXT.md` (referenced only if the file exists) |
@@ -939,7 +942,7 @@ rather than spending the rest of its budget on it.
 The host project also supplies on disk:
 - A `Containerfile` for the sandbox image (or whatever `images` names)
 - Optionally, a `CODING_STANDARDS.md` (`codingStandardsPath`) — the reviewer ships with built-in default coding standards (`prompts/coding-standards.md`); this file *extends* them and is not required
-- `GH_TOKEN` and either `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, reachable through `config.env` — as literal values, as keys declared empty so they inherit from the launching environment, or read from a file of your choosing with `readEnvFile`
+- `GH_TOKEN` and a credential for every routed agent provider, reachable through `config.env` — as literal values, as keys declared empty so they inherit from the launching environment, or read from a file of your choosing with `readEnvFile`
 
 `verified` mode additionally uses the host's own `gh` auth (not the container's
 `GH_TOKEN`) for `gh api .../check-runs`, `gh api .../commits/<sha>/status`,

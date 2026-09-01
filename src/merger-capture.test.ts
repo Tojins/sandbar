@@ -13,7 +13,14 @@
 
 import { describe, expect, it } from "vitest";
 
-import { captureAgentRun } from "./merger.js";
+import { buildAgentProvider } from "./agent-providers.js";
+import {
+  buildResolveRunArgv,
+  captureAgentRun,
+  parseCapturedAgentRun,
+  resolveAgentCredentials,
+} from "./merger.js";
+import { isInfraFailure, parseResolveSignal } from "./resolve-loop.js";
 
 const opts = (timeoutMs = 30_000) => ({ container: "c-under-test", timeoutMs });
 
@@ -119,8 +126,148 @@ describe("captureAgentRun (#67)", () => {
   // would take the whole run down past every structured handler run.ts has.
   it("survives writing a prompt to a child that has already gone", async () => {
     const [file, args] = node(`process.exit(9);`);
-    const run = await captureAgentRun(file, args, "x".repeat(2_000_000), opts());
+    const run = await captureAgentRun(
+      file,
+      args,
+      "x".repeat(2_000_000),
+      opts(),
+    );
     expect(run.end).toBe("exit");
     expect(run.exitCode).toBe(9);
   });
+});
+
+describe("parseCapturedAgentRun (#74)", () => {
+  const captured = (stdout: string) => ({
+    stdout,
+    stderr: "raw stderr",
+    end: "exit" as const,
+    exitCode: 0,
+    signal: null,
+    durationMs: 1,
+    container: "resolve-1",
+  });
+
+  it("takes resolve promises from codex agent speech, not raw JSONL", () => {
+    const raw = [
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "reasoning", text: "<promise>ABANDON</promise>" },
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "<promise>COMMITTED</promise>" },
+      }),
+    ].join("\n");
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("codex", "m"));
+    expect(run.stdout).toBe(raw);
+    expect(parseResolveSignal(run.output ?? "")).toEqual({ kind: "COMMITTED" });
+  });
+
+  it("takes the default claude promise from its parsed result event", () => {
+    const raw = [
+      JSON.stringify({
+        type: "user",
+        message: { content: "<promise>ABANDON</promise>" },
+      }),
+      JSON.stringify({
+        type: "result",
+        result: "<promise>COMMITTED</promise>",
+      }),
+    ].join("\n");
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("claude", "m"));
+    expect(run.stdout).toBe(raw);
+    expect(parseResolveSignal(run.output)).toEqual({ kind: "COMMITTED" });
+  });
+
+  it("never reads a promise from a non-speech claude frame", () => {
+    const raw = JSON.stringify({
+      type: "user",
+      message: { content: "<promise>ABANDON</promise>" },
+    });
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("claude", "m"));
+    expect(run.stdout).toBe(raw);
+    expect(run.output).toBe("");
+    expect(isInfraFailure(run)).toBe(true);
+  });
+
+  it("treats a terminal provider failure without speech as infra", () => {
+    const raw = JSON.stringify({
+      type: "turn.failed",
+      error: { message: "pool spent" },
+    });
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("codex", "m"));
+    expect(run.output).toBe("");
+    expect(run.detail).toBe("pool spent");
+    expect(isInfraFailure(run)).toBe(true);
+  });
+
+  it("keeps agent speech when a terminal failure follows it", () => {
+    const raw = [
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "partial answer" },
+      }),
+      JSON.stringify({
+        type: "turn.failed",
+        error: { message: "terminal fault" },
+      }),
+    ].join("\n");
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("codex", "m"));
+    expect(run.output).toBe("partial answer");
+    expect(run.detail).toBe("terminal fault");
+    expect(isInfraFailure(run)).toBe(false);
+  });
+});
+
+describe("resolve provider invocation (#74)", () => {
+  const values: Record<string, string> = {
+    CLAUDE_CODE_OAUTH_TOKEN: "claude-oauth",
+    ANTHROPIC_API_KEY: "anthropic-key",
+    CODEX_AUTH_JSON: "codex-auth",
+    OPENAI_API_KEY: "openai-key",
+    GH_TOKEN: "github-key",
+  };
+
+  it.each([
+    [
+      "claude",
+      ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+      ["CODEX_AUTH_JSON", "OPENAI_API_KEY"],
+    ],
+    [
+      "codex",
+      ["CODEX_AUTH_JSON", "OPENAI_API_KEY"],
+      ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+    ],
+  ] as const)(
+    "routes only %s credentials into the resolve argv",
+    (provider, present, absent) => {
+      const credentials = resolveAgentCredentials(provider, (key) => values[key]);
+      const argv = buildResolveRunArgv({
+        container: "resolve-1",
+        cwd: "/worktree",
+        extraMounts: ["/git-common"],
+        image: "sandbox-image",
+        command: "agent --print",
+        credentials,
+        botName: "sandbar-bot",
+        botEmail: "bot@example.test",
+      });
+      const joined = argv.join(" ");
+      for (const key of present) {
+        expect(joined).toContain(`${key}=${values[key]}`);
+      }
+      for (const key of absent) expect(joined).not.toContain(`${key}=`);
+      expect(joined).toContain("GH_TOKEN=github-key");
+      expect(argv.slice(-5)).toEqual([
+        "--entrypoint",
+        "/bin/sh",
+        "sandbox-image",
+        "-c",
+        "agent --print",
+      ]);
+      expect(argv).toContain("/git-common:/git-common");
+    },
+  );
 });

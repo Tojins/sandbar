@@ -500,22 +500,15 @@ export type RunConfig = {
   readonly reviewerModelId?: string;
   readonly mergerModelId?: string;
 
-  // Which CLI each role runs (#72) — the vendor knob beside the tiering one.
+  // Which CLI each role runs (#72, #74) — the vendor knob beside the tiering one.
   // `agent-providers.ts` owns the set, the credential each member needs, and
-  // why the set is closed. Both default to "claude", so every config written
-  // before #72 resolves unchanged. Naming another one obliges the role's model
+  // why the set is closed. All default to "claude", so older configs resolve
+  // unchanged. Naming another one obliges the role's model
   // id: the two knobs are independent, which is what lets a config be moved
   // half-way, and half-way runs `codex exec --model opus` every attempt.
-  //
-  // There is deliberately no `mergerAgent`. The merger's resolve agent is a
-  // separate path that spells its container's entrypoint directly
-  // (`merger.ts`), and it stays Claude/Opus on purpose: it is rare, and
-  // conflict resolution is exactly where the strongest model earns its price.
-  // A field here that nothing read would be the same silent failure an unknown
-  // provider name is — a config asking for something the driver does not do,
-  // and never saying so.
   readonly implementerAgent?: AgentProviderName;
   readonly reviewerAgent?: AgentProviderName;
+  readonly mergerAgent?: AgentProviderName;
 
   // Trailer appended to merge commits. Default: a `Co-authored-by:` line built
   // from botName/botEmail.
@@ -1679,8 +1672,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     config.implementerAgent,
   );
   const reviewerAgent = parseAgentProviderName("reviewerAgent", config.reviewerAgent);
+  const mergerAgent = parseAgentProviderName("mergerAgent", config.mergerAgent);
   assertRoleModelIdNamed("implementer", implementerAgent, config.implementerModelId);
   assertRoleModelIdNamed("reviewer", reviewerAgent, config.reviewerModelId);
+  assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
   return {
     ...config,
     ghOwner,
@@ -1694,6 +1689,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     implementerAgent,
     reviewerAgent,
+    mergerAgent,
     coauthorTrailer:
       config.coauthorTrailer ??
       defaultCoauthorTrailer(config.botName, config.botEmail),

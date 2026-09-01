@@ -253,10 +253,11 @@ describe("resolveConfig", () => {
 
   // #72 — the vendor knob beside the tiering one. Defaulting both to "claude"
   // is what makes the field a no-op for every config written before it.
-  it("defaults both agent roles to claude (#72)", () => {
+  it("defaults all agent roles to claude (#72, #74)", () => {
     const r = resolveConfig(minimal);
     expect(r.implementerAgent).toBe("claude");
     expect(r.reviewerAgent).toBe("claude");
+    expect(r.mergerAgent).toBe("claude");
   });
 
   // #72's headline configuration: a cheaper implementer under an Opus reviewer.
@@ -272,6 +273,18 @@ describe("resolveConfig", () => {
     // routing — there is no global provider knob that could bleed across roles.
     expect(r.reviewerAgent).toBe("claude");
     expect(r.reviewerModelId).toBe("opus");
+  });
+
+  it("routes the merger independently (#74)", () => {
+    const r = resolveConfig({
+      ...minimal,
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+    });
+    expect(r.mergerAgent).toBe("codex");
+    expect(r.mergerModelId).toBe("gpt-5.6-sol");
+    expect(r.implementerAgent).toBe("claude");
+    expect(r.reviewerAgent).toBe("claude");
   });
 
   // The config is a PROGRAM (#66): the value can be computed, and a field
@@ -298,6 +311,9 @@ describe("resolveConfig", () => {
     ).toThrow(/implementerModelId/);
     expect(() => resolveConfig({ ...minimal, reviewerAgent: "codex" })).toThrow(
       /reviewerModelId/,
+    );
+    expect(() => resolveConfig({ ...minimal, mergerAgent: "codex" })).toThrow(
+      /mergerModelId/,
     );
     expect(() =>
       resolveConfig({

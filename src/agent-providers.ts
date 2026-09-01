@@ -1,4 +1,4 @@
-// Which CLI a role's agent runs (#72) — the NAME → provider mapping, and the
+// Which CLI a role's agent runs (#72, #74) — the NAME → provider mapping, and the
 // one place that says what credential each provider needs.
 //
 // The config already split the MODEL per role (`implementerModelId` /
@@ -184,21 +184,18 @@ export function parseAgentProviderName(
 // Every provider a run will actually invoke, deduped and in a stable order —
 // what preflight has to find a credential for.
 //
-// "claude" is unconditional, and that is a statement about the MERGER rather
-// than about the two roles: its resolve agent is hard-coded to claude and is
-// out of #72's scope, so an Anthropic credential is something every run needs
-// whatever the roles name. Requiring it up front is deliberate over discovering
-// it at the moment it is needed: the resolve loop runs mid-merge, on a conflict
-// nobody chose the timing of, and a run that has already landed work is the
-// worst possible place to learn the credential was never declared.
+// All three roles participate: no provider is unconditional. Requiring the
+// routed set up front is deliberate over discovering a missing credential in
+// the resolve loop, after a run may already have landed work.
 export function requiredAgentProviders(roles: {
   readonly implementerAgent: AgentProviderName;
   readonly reviewerAgent: AgentProviderName;
+  readonly mergerAgent: AgentProviderName;
 }): readonly AgentProviderName[] {
   const named = new Set<AgentProviderName>([
-    "claude",
     roles.implementerAgent,
     roles.reviewerAgent,
+    roles.mergerAgent,
   ]);
   // Ordered by the canonical list, not by insertion: the set feeds a refusal
   // message, and a message whose lines reorder with the config reads as two
@@ -222,7 +219,7 @@ export function requiredAgentProviders(roles: {
 // half-moved config is what `sandbar.config.mjs`'s own comment tells a human to
 // hold by hand across three edits.
 export function assertRoleModelIdNamed(
-  role: "implementer" | "reviewer",
+  role: "implementer" | "reviewer" | "merger",
   provider: AgentProviderName,
   rawModelId: string | undefined,
 ): void {

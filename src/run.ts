@@ -477,7 +477,7 @@ export async function run(
       // For the one warning that is about the config FILE rather than its
       // contents: nothing refreshes the checkout it was imported from (#66).
       configPath: options.configPath ?? null,
-      // Every CLI the roles route to, plus claude for the merger (#72). A
+      // Every CLI the three roles route to (#72, #74). A
       // missing key for one of them is a refusal here, where it costs a
       // startup, rather than an in-container death an attempt at a time.
       agentProviders: requiredAgentProviders(config),
@@ -792,7 +792,7 @@ export async function run(
           runLogger.appendOrchestrator(line),
         );
       }
-  
+
       const budget = remainingBudget(runState);
       if (budget === 0) {
         // The same `budgetExit` applyCycle returns, rather than the second
@@ -803,11 +803,11 @@ export async function run(
         );
         break;
       }
-  
+
       console.log(`\n=== Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
       await runLogger.appendOrchestrator(`cycle ${iteration} start`);
       const cycleLogger = runLogger.cycle(iteration);
-  
+
       // ---------------------------------------------------------------------
       // Phase 1: Plan
       // ---------------------------------------------------------------------
@@ -1024,7 +1024,7 @@ export async function run(
             `labelled \`${LAND_LABEL}\`. Running the merge phase for those alone.`,
         );
       }
-  
+
       console.log(
         `Planning complete. ${issues.length} issue(s) to work in parallel:`,
       );
@@ -1041,11 +1041,11 @@ export async function run(
       for (const issue of issues) {
         console.log(`  #${issue.id}: ${issue.title}`);
       }
-  
+
       // ---------------------------------------------------------------------
       // Phase 2: Execute (inner-loop ralph)
       // ---------------------------------------------------------------------
-  
+
       const settled = await Promise.allSettled(
         issues.map(async (issue) => ({
           issue,
@@ -1064,7 +1064,7 @@ export async function run(
           }),
         })),
       );
-  
+
       type IssueOutcome = { issue: typeof issues[number]; terminal: Terminal };
       const outcomes: IssueOutcome[] = [];
       for (const [i, s] of settled.entries()) {
@@ -1090,18 +1090,18 @@ export async function run(
           );
         }
       }
-  
+
       const completedIssues = outcomes
         .filter((o) => o.terminal.type === "DONE")
         .map((o) => o.issue);
-  
+
       console.log(
         `\nExecution complete. ${completedIssues.length} issue(s) DONE:`,
       );
       for (const issue of completedIssues) {
         console.log(`  #${issue.id}: ${issue.title}`);
       }
-  
+
       // ---------------------------------------------------------------------
       // Phase 4a: Finalise the agent terminals — BEFORE the merge (#30)
       //
@@ -1130,7 +1130,7 @@ export async function run(
       // once and nobody stored has no such fallback.
       // ---------------------------------------------------------------------
       await runFinalize("agent terminals", terminalFinalizeInputs(outcomes));
-  
+
       // ---------------------------------------------------------------------
       // Phase 3: Merge (procedural, in an isolated worktree off origin)
       // ---------------------------------------------------------------------
@@ -1187,7 +1187,8 @@ export async function run(
             botName: config.botName,
             botEmail: config.botEmail,
             coauthorTrailer: config.coauthorTrailer,
-            modelId: config.mergerModelId,
+            mergerAgent: config.mergerAgent,
+            mergerModelId: config.mergerModelId,
             sandboxImage: config.sandboxImage,
             env,
             runStackGate: () => stackForGate2.runGate(),
@@ -1342,7 +1343,7 @@ export async function run(
           if (mergerWorktree) await mergerWorktree.remove();
         }
       }
-  
+
       // ---------------------------------------------------------------------
       // Phase 4b: Finalise the merge outcomes
       // ---------------------------------------------------------------------
@@ -1537,7 +1538,7 @@ export async function run(
         terminalExit = await announceExit(haltedExit(haltReasons));
         break;
       }
-  
+
       const decision = applyCycle(runState, {
         planFingerprint: fingerprint,
         planSize: issues.length,

@@ -31,13 +31,22 @@
 //     paths, so the comment the merger posts can say what actually happened
 //     instead of "bailed after 4 attempts".
 //
-// And the case that motivated all of it: AN ATTEMPT THAT PRODUCED NO OUTPUT IS
-// AN INFRASTRUCTURE FAILURE, NOT AN ANSWER. `parseResolveSignal` reads empty
+// The provider boundary keeps two forms of output apart: raw stdout is written
+// byte-for-byte to the attempt log, while `output` is the provider parser's
+// agent-speech register and is the ONLY input to `parseResolveSignal`. This is
+// load-bearing for JSONL providers: transport and reasoning text can contain a
+// promise token without the agent having made that promise.
+//
+// And the case that motivated all of it: AN ATTEMPT THAT PRODUCED NO AGENT
+// SPEECH IS AN INFRASTRUCTURE FAILURE, NOT AN ANSWER. `parseResolveSignal` reads empty
 // output as NO-SIGNAL, which the loop otherwise treats exactly like a COMMITTED
 // that left the tree dirty — re-prompt, spend an attempt. So an image that is
 // gone, a refused podman socket, an OOM kill or a bad mount was laundered into
 // "the agent tried and failed", and burned three quarters of the budget doing
-// it in eleven seconds. `isInfraFailure` classes it and the loop THROWS: the
+// it in eleven seconds. A terminal failure reported in-band by a provider is
+// the same class only when no speech preceded it; once the agent spoke, the
+// loop verifies that answer against the tree and gate as usual. `isInfraFailure`
+// classes the silent cases and the loop THROWS: the
 // merger wraps that into a halt as it does every other internal failure (#33),
 // and the remaining attempts are not spent.
 //
@@ -109,18 +118,21 @@ export type ResolveMode =
       readonly failedChecks: string;
     };
 
-// How one `podman run … claude` invocation ended. `timeout` is sandbar's own
-// SIGTERM at RESOLVE_AGENT_TIMEOUT_MS and nothing else; `signal` is anything
+// How one resolve-provider `podman run` invocation ended. `timeout` is
+// sandbar's own SIGTERM at RESOLVE_AGENT_TIMEOUT_MS and nothing else; `signal` is anything
 // else that killed the process (an OOM kill, an operator's Ctrl-C reaching the
 // group); `spawn-error` is a runtime that never produced a process at all.
 export type ResolveAgentEnd = "exit" | "timeout" | "signal" | "spawn-error";
 
 // What one invocation actually did. The token parser only ever needed
-// `stdout`; every other field here exists so that an attempt which produced
+// `output`; every other field here exists so that an attempt which produced
 // nothing can be told apart from an agent that chose to say nothing (#67).
 export type ResolveAgentRun = {
   readonly stdout: string;
   readonly stderr: string;
+  // Agent speech parsed by the selected provider. Raw stdout remains above for
+  // the byte-verbatim attempt log; promise tokens are read only from here.
+  readonly output: string;
   readonly end: ResolveAgentEnd;
   // The process's exit code, or null when it was killed before it had one.
   readonly exitCode: number | null;
@@ -133,7 +145,8 @@ export type ResolveAgentRun = {
   // can go and look at (`podman ps -a`, `podman logs`) rather than describing
   // an anonymous process that is already gone.
   readonly container: string;
-  // Why the runtime never started, when `end` is `spawn-error`.
+  // A runtime spawn error or terminal failure reported by the provider. The
+  // spawn error wins if both are ever present.
   readonly detail?: string;
 };
 
@@ -195,10 +208,7 @@ export type ResolveAdapter = {
   // `attempt` is passed so the invocation can be NAMED after it — the
   // container name is the handle on a failure that produced nothing else, and
   // an anonymous one leaves an operator grepping `podman events` by timestamp.
-  runResolveAgent(
-    prompt: string,
-    attempt: number,
-  ): Promise<ResolveAgentRun>;
+  runResolveAgent(prompt: string, attempt: number): Promise<ResolveAgentRun>;
   isMergeInProgress(): Promise<boolean>;
   // `paths` is the unmerged set (`git diff --name-only --diff-filter=U`), kept
   // apart from the human-readable `status` because the abandon comment lists
@@ -349,7 +359,9 @@ export async function runResolveLoop(
       mode: trace,
     });
 
-    await log(`resolve-attempt ${attempt}/${RESOLVE_MAX_ATTEMPTS} mode=${trace.kind}`);
+    await log(
+      `resolve-attempt ${attempt}/${RESOLVE_MAX_ATTEMPTS} mode=${trace.kind}`,
+    );
     const run = await adapter.runResolveAgent(prompt, attempt);
     // Captured BEFORE anything is decided about the run, so the file exists
     // even on the path that throws — an infra failure whose output went
@@ -397,10 +409,12 @@ export async function runResolveLoop(
       // left the tree untouched — there is no honest verdict to file. Nothing
       // reads the journal on this path anyway: the throw is the report, and
       // the file the sink just wrote is the evidence behind it.
-      throw new SandbarError(buildInfraFailureMessage(issue, attempt, run, logPath));
+      throw new SandbarError(
+        buildInfraFailureMessage(issue, attempt, run, logPath),
+      );
     }
 
-    const signal = parseResolveSignal(run.stdout);
+    const signal = parseResolveSignal(run.output);
 
     if (signal.kind === "ABANDON") {
       const inProgress = await adapter.isMergeInProgress();
@@ -541,14 +555,16 @@ const VERDICT_PROSE: Record<ResolveAttemptVerdict, string> = {
   "silent-noop": "the agent left no merge and no commit",
 };
 
-// An attempt that produced NOTHING did not answer — it failed to run. See the
+// An attempt that produced NO AGENT SPEECH did not answer — it failed to run.
+// An in-band provider failure after speech does not erase that evidence; the
+// loop still verifies any promise against the worktree and gate. See the
 // header for why that is thrown rather than re-prompted, and why the timeout
 // is the one end that is exempt: it burned the whole budget in the container,
 // so it is a spent attempt whatever it printed.
 export function isInfraFailure(run: ResolveAgentRun): boolean {
   if (run.end === "spawn-error") return true;
   if (run.end === "timeout") return false;
-  return run.stdout.trim() === "";
+  return run.output.trim() === "";
 }
 
 // How much of stderr rides along in the halt message. The whole of it is on
@@ -570,9 +586,8 @@ export function buildInfraFailureMessage(
     `${attempt}/${RESOLVE_MAX_ATTEMPTS}. Container \`${run.container}\` ` +
     `${describeEndForHumans(run)}` +
     (run.detail ? ` (${run.detail})` : "") +
-    ". A container that never ran is an infrastructure failure — a missing or " +
-    "unbuildable sandbox image, a refused podman socket, an OOM kill, a bad " +
-    "mount — not an agent declining to answer, so the merge phase halts here " +
+    ". A silent provider or container failure is infrastructure, not an agent " +
+    "declining to answer, so the merge phase halts here " +
     `rather than spending the remaining ${remaining} resolve attempt` +
     `${remaining === 1 ? "" : "s"} on it. ` +
     (logPath
@@ -712,7 +727,9 @@ function buildDoneSignal(
   mode: AttemptTrace,
 ): string {
   const committedSignal =
-    mode.kind === "still-conflicted" ? COMMITTED_CONFLICT_TPL : COMMITTED_GATE_TPL;
+    mode.kind === "still-conflicted"
+      ? COMMITTED_CONFLICT_TPL
+      : COMMITTED_GATE_TPL;
   return render(DONE_SIGNAL_TPL, {
     attempt: String(attempt),
     maxAttempts: String(maxAttempts),
