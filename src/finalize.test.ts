@@ -143,7 +143,10 @@ describe("comment templates", () => {
     // The branch is a LOCATION here and nothing more. STRANDED_COMMITS_NOTE is
     // appended to this same body when the run went off-branch, and it says none
     // of the work is on the branch — so this template may not claim it is.
-    expect(body).not.toMatch(/written is pushed|whatever it (had )?wrote/i);
+    // Asserted as the absence of the WORD, not of the sentence that once said
+    // it: "push" is what a payload claim is built out of, and the note below
+    // this one in the composed comment is the only part entitled to use it.
+    expect(body).not.toMatch(/push/i);
   });
   it("NEEDS-UI-PROTOTYPE body includes bot prefix, the impact prose, both unblock routes, and the configured labels", () => {
     const body = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(

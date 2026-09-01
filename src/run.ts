@@ -91,10 +91,15 @@
 // defensive iteration ceiling. There used to be five terminal shapes in four
 // spellings, one of which (the halt) printed nothing on stdout at all and one
 // of which (plan-empty) printed a success banner. `exit-conditions.ts` owns
-// the tags, the reasons and the line; `recordExit` below is the single site
-// that writes one to the log, reached by the startup stops as well as the
-// cycle loop so that `exit: <tag>` is greppable however far the run got, and
-// there is one `console.log` for it at the end of the function.
+// the tags, the reasons and the line; `announceExit` below is the single site
+// that emits it, to BOTH streams — the log so `exit: <tag>` is greppable
+// however far the run got, stdout so a human reading a terminal gets the same
+// answer. It is reached by the startup stops as well as by the cycle loop, and
+// a terminal path that does not call it prints nothing, which is the failure
+// this issue is named after. Nothing else in this file may format that line: a
+// `console.log` per call site is the same hand-pairing `logs.ts`'s invariant
+// exists to end, reproduced for the one line it is about — and this is the one
+// claim in the file no test can make, since nothing calls `run()`.
 //
 // Ahead of all of it, on stdout and then again as orchestrator.log's first
 // line, is the DRIVER IDENTITY (#69) — the version, the tree `dist/` was built
@@ -347,13 +352,8 @@ export async function run(
   // Append writers are unbuffered, so the cleanup trap only needs to drop a
   // closing run-end marker — no in-memory state to flush.
   //
-  // TWO exits stay outside the record, deliberately. `GH_TOKEN` is checked
-  // before the lock, writes nothing to disk in any case, and its message is
-  // self-contained — recording it would mean creating a log tree a second
-  // launch could be racing us for. And a run that LOSES the lock leaves none
-  // on purpose: the answer to "what happened" is the other run's log, and a
-  // fresh empty directory per turned-away launch is noise in the one tree an
-  // operator greps.
+  // Which exits stay outside the record, and why, is the header's to say: it is
+  // one enumeration and it belongs in one place, where it can be counted.
   // -------------------------------------------------------------------------
   const runLogger = await startRunLogger({
     baseDir: layout.logsDir,
@@ -367,34 +367,39 @@ export async function run(
   let cleanupReason = "normal-exit";
   onCleanup(() => runLogger.finalize(cleanupReason));
 
-  // THE one site that writes a terminal to the log (#70), and it is declared up
-  // here because the startup stops below reach it as well as the cycle loop
-  // does: an operator greps `orchestrator.log` for how the run ended without
-  // knowing yet how far it got, so a run refused by preflight and a run that
-  // exhausted its budget must leave the same shape of line. It also owns
+  // THE one site that emits a terminal (#70), and it is declared up here
+  // because the startup stops below reach it as well as the cycle loop does:
+  // an operator greps `orchestrator.log` for how the run ended without knowing
+  // yet how far it got, so a run refused by preflight and a run that exhausted
+  // its budget must leave the same shape of line. It also owns
   // `cleanupReason`, which makes `run-end (<tag>)` agree with it by
   // construction rather than by two assignments kept in step by hand.
   //
+  // BOTH STREAMS FROM HERE, rather than a `console.log` at each call site.
+  // Two streams, one invariant (logs.ts): the log carries every outcome, stdout
+  // additionally renders it — here in the same words, since there is only one
+  // sentence to say. Doing it in one place is what makes "exactly one
+  // `Exit (…)` line, on every terminal path" structural, and structure is all
+  // there is: nothing calls `run()`, so no test can catch a path that prints
+  // none.
+  //
   // It RETURNS the exit rather than assigning `terminalExit` itself, which
   // would be shorter and is wrong: TypeScript does not track assignments made
-  // inside a closure, so the `terminalExit` at the bottom of this function
-  // would narrow to `null` and the one line #70 exists to guarantee would be
-  // dead code as far as the checker is concerned.
-  //
-  // The terminal gets the line too, from the caller. Two streams, one invariant
-  // (logs.ts): the log carries every outcome, and stdout additionally renders
-  // it — here in the same words, since there is only one sentence to say.
-  const recordExit = async (exit: TerminalExit): Promise<TerminalExit> => {
+  // inside a closure, so the `terminalExit` this function ends on would narrow
+  // to `null` and the exit CODE taken off it would be unreachable as far as
+  // the checker is concerned.
+  const announceExit = async (exit: TerminalExit): Promise<TerminalExit> => {
     cleanupReason = exit.tag;
     await runLogger.appendOrchestrator(`exit: ${exit.tag} — ${exit.reason}`);
+    console.log(`\n${formatExitLine(exit)}`);
     return exit;
   };
 
   // Every stop between here and the first cycle goes through this, so none of
   // them can be the silent one again (#70). It records the complaint verbatim,
-  // adds the same `exit:` line and the same `Exit (halted): …` line every other
-  // terminal path ends with, prints both, and runs cleanup — which is what
-  // recovers the `run.pid` sidecar, since `process.exit` runs no handler.
+  // prints it, then hands `announceExit` the same `Exit (halted): …` every
+  // other terminal path ends on, and runs cleanup — which is what recovers the
+  // `run.pid` sidecar, since `process.exit` runs no handler.
   //
   // Two log lines rather than one because they answer different questions and
   // only one of them fits on a line: `stopped (<cause>)` carries the complaint
@@ -427,8 +432,7 @@ export async function run(
       err instanceof PreflightError ? err.message : faultDetail(err);
     await runLogger.appendOrchestrator(`stopped (${cause}): ${detail}`);
     console.error(detail);
-    const exit = await recordExit(haltedExit([cause]));
-    console.log(`\n${formatExitLine(exit)}`);
+    const exit = await announceExit(haltedExit([cause]));
     await runCleanup();
     process.exit(exit.exitCode);
   };
@@ -659,11 +663,12 @@ export async function run(
     relaunchAfterLanding: config.relaunchAfterLanding,
   });
   // The one stop this run ends on (#70). Every break out of the loop below
-  // assigns it, the bottom of the function prints it, and the process exit code
-  // comes off it — so "did this stop normally?" is answered by one line in one
-  // place, on every path, instead of by four spellings of which one printed
-  // nothing at all. It also retires a second `exitCode` variable that had to be
-  // kept in step with the tag by hand.
+  // assigns it what `announceExit` has already emitted, and the process exit
+  // code comes off it at the bottom of the function — so "did this stop
+  // normally?" is answered by one line in one place, on every path, instead of
+  // by four spellings of which one printed nothing at all. It also retires a
+  // second `exitCode` variable that had to be kept in step with the tag by
+  // hand.
   let terminalExit: TerminalExit | null = null;
 
   // One Phase-4 pass. Called twice per cycle (#30): once for the agent
@@ -772,7 +777,7 @@ export async function run(
         // The same `budgetExit` applyCycle returns, rather than the second
         // hand-written copy of its reason this used to print in different
         // words at the top of a cycle (#70).
-        terminalExit = await recordExit(
+        terminalExit = await announceExit(
           budgetExit(runState.issuesAttempted, runState.maxTotalIssues),
         );
         break;
@@ -988,7 +993,7 @@ export async function run(
       if (issues.length === 0 && landRequests.length === 0) {
         // No line of its own: the `Exit (plan-empty): …` at the bottom says
         // exactly this and is the line every other terminal prints too (#70).
-        terminalExit = await recordExit(planEmptyExit());
+        terminalExit = await announceExit(planEmptyExit());
         break;
       }
 
@@ -1282,7 +1287,7 @@ export async function run(
             console.error(`Merger halted: ${err.message}${trace}`);
             halt = true;
             haltReasons.push("merger-halted");
-            // `recordExit` overwrites this at the break below, so what this
+            // `announceExit` overwrites this at the break below, so what this
             // assignment covers is only the window in between — and that window
             // is the post-merge finalise pass, which makes `gh` writes and can
             // take a while. A signal arriving in it should not leave
@@ -1497,11 +1502,11 @@ export async function run(
         // that threw is in the list too, and is alone in it — neither report
         // can reach that path, since a throw leaves no `mergerSummary` to read.
         //
-        // `recordExit` overwrites `cleanupReason` with the TAG, and that is
+        // `announceExit` overwrites `cleanupReason` with the TAG, and that is
         // the point: `run-end (halted)` is uniform with every other terminal,
         // and the causes it used to carry are on the `exit:` line above it and
         // in the report that produced each of them.
-        terminalExit = await recordExit(haltedExit(haltReasons));
+        terminalExit = await announceExit(haltedExit(haltReasons));
         break;
       }
   
@@ -1525,16 +1530,11 @@ export async function run(
             : 0,
       });
       if (decision.kind === "exit") {
-        terminalExit = await recordExit(decision);
+        terminalExit = await announceExit(decision);
         break;
       }
     }
 
-    // The defensive ceiling fired: MAX_ITERATIONS cycles and not one exit
-    // condition. Nothing has ever reached it, and its exit CODE is unchanged
-    // (success) — but it used to print "All done.", which is the one thing a
-    // run that ran out of iterations did not do (#70).
-    terminalExit ??= await recordExit(iterationCeilingExit(MAX_ITERATIONS));
   } catch (err) {
     // A sandbar-internal failure escaped a cycle (a required git/gh side-effect
     // that could not be completed, or an unexpected bug). FAIL LOUD: this is
@@ -1553,19 +1553,21 @@ export async function run(
     // printed" argument above, it restates it: the box is the detail, the line
     // is the answer to "did this stop normally?", and a reader who has only one
     // of the two streams still gets an answer.
-    const exit = await recordExit(haltedExit(["sandbar-internal-error"]));
-    console.log(`\n${formatExitLine(exit)}`);
+    const exit = await announceExit(haltedExit(["sandbar-internal-error"]));
     await runCleanup();
     process.exit(exit.exitCode);
   }
 
-  // EVERY terminal path ends here, and ends with exactly one line (#70) —
-  // plan-empty and halted included, which between them used to print a success
-  // banner and nothing at all. Every path out of the loop assigns
-  // `terminalExit`, including the ceiling; the `??` is for the type-checker,
-  // which cannot see that, and its fallback is the code the ceiling carries.
-  const finalExit = terminalExit ?? iterationCeilingExit(MAX_ITERATIONS);
-  console.log(`\n${formatExitLine(finalExit)}`);
+  // EVERY terminal path arrives here having announced itself exactly once
+  // (#70) — plan-empty and halted included, which between them used to print a
+  // success banner and nothing at all. The `??` is the DEFENSIVE CEILING and
+  // nothing else: falling out of the loop without a `break` means
+  // MAX_ITERATIONS cycles and not one exit condition, which nothing has ever
+  // reached. Its exit code is unchanged (success); what changed is that it used
+  // to print "All done.", the one thing a run that ran out of iterations did
+  // not do.
+  const finalExit =
+    terminalExit ?? (await announceExit(iterationCeilingExit(MAX_ITERATIONS)));
 
   await runCleanup();
   if (finalExit.exitCode !== 0) process.exit(finalExit.exitCode);
