@@ -502,11 +502,10 @@ export type RunConfig = {
 
   // Which CLI each role runs (#72, #74) — the vendor knob beside the tiering one.
   // `agent-providers.ts` owns the set, the credential each member needs, and
-  // why the set is closed. All default to "claude", so every config written
-  // before #72 resolves unchanged. Naming another one obliges the role's model
+  // why the set is closed. All default to "claude", so older configs resolve
+  // unchanged. Naming another one obliges the role's model
   // id: the two knobs are independent, which is what lets a config be moved
   // half-way, and half-way runs `codex exec --model opus` every attempt.
-  //
   readonly implementerAgent?: AgentProviderName;
   readonly reviewerAgent?: AgentProviderName;
   readonly mergerAgent?: AgentProviderName;

@@ -239,16 +239,18 @@ describe("checkInvariants", () => {
     expect(f[0]).toContain("auth.json");
   });
 
-  // Every run needs an Anthropic credential whatever the roles name, because
-  // the merger's resolve agent is hard-coded to claude and is out of #72's
-  // scope. An operator who routed BOTH roles to codex would otherwise read
-  // this refusal as a setting they had already changed.
-  it("explains why claude is required even when no role names it (#72)", () => {
+  // A provider can be required by the merger alone. The preflight state keeps
+  // the deduped providers rather than the role mapping, so the refusal points
+  // at all three knobs and does not send that operator to the other two only.
+  it("names mergerAgent among the routing knobs for a missing credential (#74)", () => {
     const f = failures({
       ...cleanState,
       uncredentialledProviders: ["claude"],
     });
-    expect(f[0]).toContain("merger");
+    expect(f[0]).toContain("implementerAgent");
+    expect(f[0]).toContain("reviewerAgent");
+    expect(f[0]).toContain("mergerAgent");
+    expect(f[0]).not.toContain("Every run needs one");
   });
 
   it("reports each uncredentialled provider separately (#72)", () => {

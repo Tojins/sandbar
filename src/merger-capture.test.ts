@@ -159,6 +159,33 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(parseResolveSignal(run.output ?? "")).toEqual({ kind: "COMMITTED" });
   });
 
+  it("takes the default claude promise from its parsed result event", () => {
+    const raw = [
+      JSON.stringify({
+        type: "user",
+        message: { content: "<promise>ABANDON</promise>" },
+      }),
+      JSON.stringify({
+        type: "result",
+        result: "<promise>COMMITTED</promise>",
+      }),
+    ].join("\n");
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("claude", "m"));
+    expect(run.stdout).toBe(raw);
+    expect(parseResolveSignal(run.output)).toEqual({ kind: "COMMITTED" });
+  });
+
+  it("never reads a promise from a non-speech claude frame", () => {
+    const raw = JSON.stringify({
+      type: "user",
+      message: { content: "<promise>ABANDON</promise>" },
+    });
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("claude", "m"));
+    expect(run.stdout).toBe(raw);
+    expect(run.output).toBe("");
+    expect(isInfraFailure(run)).toBe(true);
+  });
+
   it("treats a terminal provider failure without speech as infra", () => {
     const raw = JSON.stringify({
       type: "turn.failed",
