@@ -307,9 +307,10 @@ export default {
   //
   // The reviewer stays claude on purpose: it holds the verdict, and #72's
   // whole argument is that the strongest model belongs where the judgement is,
-  // not where the tokens are. The merger's resolve agent is not a knob at all
-  // — hard-coded claude, which is why preflight demands that credential
-  // unconditionally.
+  // not where the tokens are. The merger now has the same independent
+  // provider/model knobs; this config keeps its backward-compatible
+  // claude/opus defaults until self-host adoption raises requiresSandbar and
+  // the pinned driver together.
   //
   // Nothing here takes effect through the pin. This file comes from the
   // checkout, not from `.sandbar/driver/`, so an edit applies on the next run

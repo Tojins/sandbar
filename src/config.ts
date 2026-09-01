@@ -984,9 +984,7 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
   }
 
   const seen = new Set<string>();
-  const containers = stack.containers.map((c) =>
-    resolveStackContainer(c, seen),
-  );
+  const containers = stack.containers.map((c) => resolveStackContainer(c, seen));
 
   // A stack where nothing mounts the worktree gates the same bytes on every
   // attempt: it can go green while the branch under test is broken, which is
@@ -1153,7 +1151,7 @@ const RETIRED_READINESS: Readonly<Record<string, string>> = {
     "the temporary init server the log pattern was there to see past.",
   exec:
     '{ kind: "exec", argv: [...] } becomes ' +
-    '{ kind: "healthcheck", command: [...] } — the same argv, the same ' +
+    "{ kind: \"healthcheck\", command: [...] } — the same argv, the same " +
     "semantics, run through podman's healthcheck machinery instead of a bare " +
     "`podman exec`.",
 };
@@ -1380,8 +1378,7 @@ function resolveStackContainer(
       );
     }
   }
-  const readinessTimeoutMs =
-    c.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+  const readinessTimeoutMs = c.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
   if (!Number.isFinite(readinessTimeoutMs) || readinessTimeoutMs <= 0) {
     throw new SandbarError(
       `config.gateStack: container '${c.name}' has a non-positive or ` +
@@ -1577,10 +1574,7 @@ export function checkRebuildOnIsUsed(
   }
 }
 
-export function defaultCoauthorTrailer(
-  botName: string,
-  botEmail: string,
-): string {
+export function defaultCoauthorTrailer(botName: string, botEmail: string): string {
   return `Co-authored-by: ${botName} <${botEmail}>`;
 }
 
@@ -1678,16 +1672,9 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     "implementerAgent",
     config.implementerAgent,
   );
-  const reviewerAgent = parseAgentProviderName(
-    "reviewerAgent",
-    config.reviewerAgent,
-  );
+  const reviewerAgent = parseAgentProviderName("reviewerAgent", config.reviewerAgent);
   const mergerAgent = parseAgentProviderName("mergerAgent", config.mergerAgent);
-  assertRoleModelIdNamed(
-    "implementer",
-    implementerAgent,
-    config.implementerModelId,
-  );
+  assertRoleModelIdNamed("implementer", implementerAgent, config.implementerModelId);
   assertRoleModelIdNamed("reviewer", reviewerAgent, config.reviewerModelId);
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
   return {
@@ -1698,8 +1685,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     workDir: config.workDir ?? DEFAULT_WORK_DIR,
     sourceBranch,
     images,
-    implementerModelId:
-      config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,
+    implementerModelId: config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,
     reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     implementerAgent,

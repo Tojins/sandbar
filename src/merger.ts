@@ -212,9 +212,13 @@
 //
 // This file owns the two ENDS of that: the invocation, and the prose.
 //
-// `runResolveAgent` runs the configured provider in a NAMED, run-scoped container and answers
-// with a whole `ResolveAgentRun` — both streams, the exit code, the signal, the
-// duration and the container's name. Before, stderr was piped to a listener
+// `runResolveAgent` runs the configured provider in a NAMED, run-scoped
+// container. The same provider object owns its argv and line parser; credential
+// keys come from `PROVIDER_CREDENTIALS`, so no vendor detail is re-spelled here.
+// `captureAgentRun` keeps both raw streams for the byte-verbatim attempt log,
+// then `parseCapturedAgentRun` puts only parsed agent speech in the output
+// register that the resolve promise parser may read. It answers with the exit
+// code, signal, duration and container name too. Before, stderr was piped to a listener
 // that was never attached and stdout was returned to the token parser and
 // dropped, so a container that died at startup was indistinguishable from an
 // agent that said nothing, and the four attempts of one abandoned merge left
@@ -2056,6 +2060,8 @@ export type RealAdapterDeps = {
   readonly runStackGate: () => Promise<GateResult>;
 };
 
+type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "providerFailure">;
+
 // The default merge subject, and it names an ISSUE — which is why anything
 // that is not one issue's branch (a chunk, #64) carries its own
 // `MergeUnit.mergeMessage` instead of being described as one.
@@ -2107,9 +2113,9 @@ export function captureAgentRun(
   args: readonly string[],
   input: string,
   opts: { readonly container: string; readonly timeoutMs: number },
-): Promise<ResolveAgentRun> {
+): Promise<CapturedAgentRun> {
   const startedAt = Date.now();
-  return new Promise<ResolveAgentRun>((resolve) => {
+  return new Promise<CapturedAgentRun>((resolve) => {
     const child = spawn(file, [...args], { stdio: ["pipe", "pipe", "pipe"] });
     let out = "";
     let err = "";
@@ -2145,7 +2151,7 @@ export function captureAgentRun(
       settled = true;
       clearTimeout(timer);
       if (flushTimer) clearTimeout(flushTimer);
-      const end: ResolveAgentRun["end"] = spawnError
+      const end: CapturedAgentRun["end"] = spawnError
         ? "spawn-error"
         : timedOut
           ? "timeout"
@@ -2196,7 +2202,7 @@ export function captureAgentRun(
 // its command. Raw streams stay on the returned run for #67's attempt log;
 // only this parsed speech register is eligible to carry a resolve promise.
 export function parseCapturedAgentRun(
-  run: ResolveAgentRun,
+  run: CapturedAgentRun,
   agent: AgentProvider,
 ): ResolveAgentRun {
   let result = "";
@@ -2216,7 +2222,7 @@ export function parseCapturedAgentRun(
     ...run,
     output: spoken || (agent.parsedOutputOnly === true ? "" : run.stdout),
     ...(failure === undefined ? {} : { providerFailure: failure }),
-    ...(!spoken && failure !== undefined ? { detail: failure } : {}),
+    ...(failure === undefined ? {} : { detail: failure }),
   };
 }
 
@@ -2401,9 +2407,6 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         const v = deps.env(key);
         if (v) args.push("-e", `${key}=${v}`);
       }
-      for (const [key, value] of Object.entries(deps.agentProvider.env)) {
-        args.push("-e", `${key}=${value}`);
-      }
       args.push(
         "-e",
         `GIT_AUTHOR_NAME=${deps.botName}`,
@@ -2422,7 +2425,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         "--entrypoint",
         "/bin/sh",
         deps.sandboxImage,
-        "-lc",
+        "-c",
         command.command,
       );
       const run = await captureAgentRun(RUNTIME, args, command.stdin ?? "", {

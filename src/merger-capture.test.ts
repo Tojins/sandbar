@@ -154,10 +154,7 @@ describe("parseCapturedAgentRun (#74)", () => {
         item: { type: "agent_message", text: "<promise>COMMITTED</promise>" },
       }),
     ].join("\n");
-    const run = parseCapturedAgentRun(
-      rawCapture(raw),
-      buildAgentProvider("codex", "m"),
-    );
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("codex", "m"));
     expect(run.stdout).toBe(raw);
     expect(parseResolveSignal(run.output ?? "")).toEqual({ kind: "COMMITTED" });
   });
@@ -167,16 +164,13 @@ describe("parseCapturedAgentRun (#74)", () => {
       type: "turn.failed",
       error: { message: "pool spent" },
     });
-    const run = parseCapturedAgentRun(
-      rawCapture(raw),
-      buildAgentProvider("codex", "m"),
-    );
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("codex", "m"));
     expect(run.output).toBe("");
     expect(run.providerFailure).toBe("pool spent");
     expect(isInfraFailure(run)).toBe(true);
   });
 
-  it("does not spend a resolve attempt when failure follows agent speech", () => {
+  it("keeps agent speech when a terminal failure follows it", () => {
     const raw = [
       JSON.stringify({
         type: "item.completed",
@@ -187,15 +181,9 @@ describe("parseCapturedAgentRun (#74)", () => {
         error: { message: "terminal fault" },
       }),
     ].join("\n");
-    const run = parseCapturedAgentRun(
-      rawCapture(raw),
-      buildAgentProvider("codex", "m"),
-    );
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("codex", "m"));
     expect(run.output).toBe("partial answer");
-    expect(isInfraFailure(run)).toBe(true);
+    expect(run.detail).toBe("terminal fault");
+    expect(isInfraFailure(run)).toBe(false);
   });
-
-  function rawCapture(stdout: string) {
-    return captured(stdout);
-  }
 });

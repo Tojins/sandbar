@@ -20,9 +20,7 @@ import { SandbarError } from "./errors.js";
 describe("parseAgentProviderName", () => {
   // The default is what makes #72 a no-op for every config written before it.
   it("defaults to claude when the field is absent", () => {
-    expect(parseAgentProviderName("implementerAgent", undefined)).toBe(
-      "claude",
-    );
+    expect(parseAgentProviderName("implementerAgent", undefined)).toBe("claude");
     expect(DEFAULT_AGENT_PROVIDER).toBe("claude");
   });
 
@@ -36,9 +34,9 @@ describe("parseAgentProviderName", () => {
   // driver cannot build has to be refused where the config is read rather than
   // spread through and discovered as an implementer dying in-container.
   it("refuses an unknown name, quoting it and listing what is accepted", () => {
-    expect(() =>
-      parseAgentProviderName("implementerAgent", "opencode"),
-    ).toThrow(SandbarError);
+    expect(() => parseAgentProviderName("implementerAgent", "opencode")).toThrow(
+      SandbarError,
+    );
     try {
       parseAgentProviderName("implementerAgent", "opencode");
       expect.unreachable("should have thrown");
@@ -259,9 +257,9 @@ describe("assertRoleModelIdNamed", () => {
   });
 
   it("names the role it was given", () => {
-    expect(() =>
-      assertRoleModelIdNamed("reviewer", "codex", undefined),
-    ).toThrow(/config\.reviewerModelId/);
+    expect(() => assertRoleModelIdNamed("reviewer", "codex", undefined)).toThrow(
+      /config\.reviewerModelId/,
+    );
   });
 
   it("accepts a non-claude provider once the role names an id", () => {
@@ -328,9 +326,8 @@ describe("buildAgentProvider", () => {
   it("carries the prompt on stdin for every provider", () => {
     for (const name of AGENT_PROVIDER_NAMES) {
       expect(
-        buildAgentProvider(name, "m").buildPrintCommand({
-          prompt: "the prompt",
-        }).stdin,
+        buildAgentProvider(name, "m").buildPrintCommand({ prompt: "the prompt" })
+          .stdin,
       ).toBe("the prompt");
     }
   });

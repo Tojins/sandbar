@@ -605,8 +605,10 @@ function makeVerify(script: VerifyScript): {
       // A resolve attempt means the current round's verdict is spent; the next
       // listCheckRuns belongs to the next round.
       round += 1;
+      const output = script.agents?.[agents++] ?? "<promise>COMMITTED</promise>";
       return {
-        stdout: script.agents?.[agents++] ?? "<promise>COMMITTED</promise>",
+        stdout: output,
+        output,
         stderr: "",
         end: "exit",
         exitCode: 0,

@@ -123,11 +123,7 @@
 
 import { realpathSync } from "node:fs";
 
-import {
-  type ResolvedConfig,
-  type RunConfig,
-  resolveConfig,
-} from "./config.js";
+import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
 import {
   type SweepResult,
   cleanupOrphanContainers,
@@ -138,7 +134,10 @@ import {
   fileChunkReviewFollowUps,
   realAdapter as realChunkFollowUpAdapter,
 } from "./chunk-follow-up.js";
-import { formatDriverIdentity, readDriverIdentity } from "./driver-identity.js";
+import {
+  formatDriverIdentity,
+  readDriverIdentity,
+} from "./driver-identity.js";
 import {
   type BranchImages,
   checkWorktreeImageUids,
@@ -178,10 +177,7 @@ import {
 } from "./forge-verify.js";
 import { startKeepawake, stopKeepawake } from "./keepawake.js";
 import { runInnerLoop, type Terminal } from "./inner-loop.js";
-import {
-  buildAgentProvider,
-  requiredAgentProviders,
-} from "./agent-providers.js";
+import { buildAgentProvider, requiredAgentProviders } from "./agent-providers.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
 import { runScope } from "./naming.js";
 import { startRunLogger } from "./logs.js";
@@ -424,7 +420,10 @@ export async function run(
   // naming a pid that will be dead, which the next launch's takeover reads as a
   // crashed run and clears. Cheap, and it keeps every exit path in this file
   // uniform rather than one of them relying on a dependency's exit hook.
-  const stopAtStartup = async (cause: string, err: unknown): Promise<never> => {
+  const stopAtStartup = async (
+    cause: string,
+    err: unknown,
+  ): Promise<never> => {
     // `faultDetail` already renders a SandbarError as its bare message and
     // anything else as a stack — errors.ts owns that rule and all three places
     // sandbar prints a fault share it. The one case it does not know about is
@@ -1066,10 +1065,7 @@ export async function run(
         })),
       );
 
-      type IssueOutcome = {
-        issue: (typeof issues)[number];
-        terminal: Terminal;
-      };
+      type IssueOutcome = { issue: typeof issues[number]; terminal: Terminal };
       const outcomes: IssueOutcome[] = [];
       for (const [i, s] of settled.entries()) {
         if (s.status === "fulfilled") {
@@ -1082,7 +1078,9 @@ export async function run(
           // orchestrator.log. The parking comment names it too, from this same
           // issue, but that is on the tracker rather than here.
           console.log(`  #${issue.id} (${issue.branch}): ${t.type}`);
-          await runLogger.appendOrchestrator(`terminal #${issue.id} ${t.type}`);
+          await runLogger.appendOrchestrator(
+            `terminal #${issue.id} ${t.type}`,
+          );
         } else {
           console.error(
             `  ✗ #${issues[i]!.id} (${issues[i]!.branch}) failed: ${s.reason}`,
@@ -1189,10 +1187,7 @@ export async function run(
             botName: config.botName,
             botEmail: config.botEmail,
             coauthorTrailer: config.coauthorTrailer,
-            agentProvider: buildAgentProvider(
-              config.mergerAgent,
-              config.mergerModelId,
-            ),
+            agentProvider: buildAgentProvider(config.mergerAgent, config.mergerModelId),
             agentProviderName: config.mergerAgent,
             sandboxImage: config.sandboxImage,
             env,
@@ -1568,6 +1563,7 @@ export async function run(
         break;
       }
     }
+
   } catch (err) {
     // A sandbar-internal failure escaped a cycle (a required git/gh side-effect
     // that could not be completed, or an unexpected bug). FAIL LOUD: this is
@@ -1579,9 +1575,7 @@ export async function run(
     // rather than restated here (#45).
     const banner = "═".repeat(72);
     const detail = faultDetail(err);
-    console.error(
-      `\n${banner}\nSANDBAR HALTED — internal failure\n${banner}\n${detail}\n${banner}`,
-    );
+    console.error(`\n${banner}\nSANDBAR HALTED — internal failure\n${banner}\n${detail}\n${banner}`);
     await runLogger.appendOrchestrator(`HALTED — internal failure: ${detail}`);
     // The stderr box keeps its place as the last thing on THAT stream, and the
     // stdout line follows it (#70). That does not contradict the "last thing

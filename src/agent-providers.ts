@@ -174,9 +174,7 @@ export function parseAgentProviderName(
     return raw as AgentProviderName;
   }
   throw new SandbarError(
-    `config.${field} must be one of ${AGENT_PROVIDER_NAMES.map((n) =>
-      JSON.stringify(n),
-    ).join(
+    `config.${field} must be one of ${AGENT_PROVIDER_NAMES.map((n) => JSON.stringify(n)).join(
       ", ",
     )}, got ${JSON.stringify(raw)}. It names the CLI the role runs; the model ` +
       `it runs stays its own field.`,
