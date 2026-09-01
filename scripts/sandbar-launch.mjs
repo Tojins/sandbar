@@ -79,8 +79,16 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { constants } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// Signal NAME to number, for the `128 + signal` exit `main` reports a killed
+// driver with. `spawnSync` answers with the name and the shell convention is
+// written in the number, so the table has to be crossed somewhere; node ships
+// it, and a hand-written SIGKILL=9 would be a second statement of it that is
+// wrong on some platform.
+const SIGNALS = constants.signals;
 
 // Repeated by hand from `exit-conditions.ts` for the same reason the old shell
 // loop repeated it: this file runs before the package it would import exists.
@@ -148,6 +156,16 @@ export function driverPaths(root) {
 }
 
 // Pure: the two facts about what is on disk, against what is asked for.
+//
+// The identity compared is the SPEC STRING, never the installed package's own
+// `version`, and that is the exact sense in which "a relaunch runs a
+// byte-identical driver" is true: it rests on git tags being immutable. A tag
+// moved at origin leaves this stamp matching and the previous bytes running,
+// silently, until somebody deletes `.sandbar/driver/`. Reading the installed
+// version back would not close it either — a moved tag need not change the
+// version — so what stands behind the claim is the convention, stated here
+// rather than assumed. `sandbar.pin` refuses a branch or a sha for the same
+// reason: only a tag is a name that is supposed to stop moving.
 export function installNeeded(state, spec) {
   if (!state.cliPresent) return true;
   return state.installedSpec !== spec;
@@ -300,9 +318,11 @@ function repoRoot() {
 
 // The loop itself, and #65's contract is the whole of it: continue on
 // EXIT_CODE_RELAUNCH and on nothing else, propagate every other exit code
-// unchanged. `root` is a parameter so a test can point it at a temporary
-// directory holding a pin and a fake install; production passes neither it nor
-// the seams.
+// unchanged — and a driver killed by a signal as `128 + signal`, which is what
+// a shell would have propagated and is the one answer that is not an exit code
+// of the driver's own. `root` is a parameter so a test can point it at a
+// temporary directory holding a pin and a fake install; production passes
+// neither it nor the seams.
 export function main(argv, { root = repoRoot(), ...io } = {}) {
   const { run, log } = seams(io);
   // `--install-only` is for the hand paths — `sandbar gate`, or a config load —
@@ -336,10 +356,28 @@ export function main(argv, { root = repoRoot(), ...io } = {}) {
     if (child.error) {
       throw new LaunchError(`could not run ${cli}: ${child.error.message}`);
     }
+    // A driver killed by a signal is not a LaunchError: the launcher proceeded
+    // exactly as asked and the DRIVER died, which is the distinction that class
+    // exists to draw — printing it as one operator-addressed line and exiting 1
+    // makes an OOM-killed run indistinguishable from a pin that names nothing.
+    // So it is reported as a shell reports one, `128 + signal`, which is what
+    // the shell loop this file replaced already returned and what
+    // `cleanup.ts`'s own SIGINT/SIGTERM exits (130, 143) already look like. It
+    // stops the loop by construction: no signal maps onto 75.
     if (child.status === null) {
-      throw new LaunchError(
-        `the driver was killed by ${child.signal ?? "a signal"}.`,
-      );
+      const signal = child.signal ?? null;
+      const number = signal === null ? undefined : SIGNALS[signal];
+      if (number === undefined) {
+        // Nothing to encode — `spawnSync` answered neither a code nor a signal
+        // this platform names, so there is no verdict and no exit code that
+        // would mean one.
+        throw new LaunchError(
+          `the driver at ${cli} exited with neither a status nor a signal ` +
+            `this platform names (${JSON.stringify(signal)}).`,
+        );
+      }
+      log(`the driver was killed by ${signal} (exiting ${128 + number})`);
+      return 128 + number;
     }
     if (child.status !== EXIT_CODE_RELAUNCH) return child.status;
     log(`relaunching (exit ${EXIT_CODE_RELAUNCH})`);

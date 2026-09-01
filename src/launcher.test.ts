@@ -23,7 +23,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { constants, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -520,6 +520,11 @@ describe("main — the relaunch loop (#65, #66)", () => {
     expect(d.launches).toHaveLength(1);
     expect(d.launches[0]?.[0]).toBe(process.execPath);
     expect(d.launches[0]?.[1]).toEqual([paths.cli]);
+    // `cwd: root`, which the launcher argues for at length: the driver's cwd is
+    // what decides which repository a series operates on, and it must be the
+    // repo whose `sandbar.pin` chose the driver rather than wherever the
+    // launcher was invoked from.
+    expect(d.launches[0]?.[2]).toMatchObject({ cwd: root });
   });
 
   it("loops on 75 and stops on the first code that is not", () => {
@@ -561,16 +566,34 @@ describe("main — the relaunch loop (#65, #66)", () => {
     expect(d.launches).toHaveLength(0);
   });
 
-  // A driver that could not be started, and one killed by a signal, are not
-  // exit codes to propagate — there is no verdict behind either.
+  // A driver that could not be STARTED is the launcher's own failure: there is
+  // no verdict behind it and no exit code that would mean one.
   it("stops loudly when the driver cannot be spawned", () => {
     const d = driver({ error: new Error("spawn ENOENT") });
     expect(() => main([], io({ run: d.run }))).toThrow(/could not run .*cli\.js/);
   });
 
-  it("stops loudly when the driver is killed by a signal", () => {
+  // A driver KILLED is the other thing, and the distinction is the one
+  // `LaunchError` exists to draw: the launcher did its job and the run died, so
+  // it is reported the way a shell reports it — `128 + signal`, which is also
+  // the shape `cleanup.ts`'s own SIGINT/SIGTERM exits already have — rather
+  // than as the launcher's exit 1.
+  it("reports a signal-killed driver as 128 + the signal, not as its own fault", () => {
+    const logged: string[] = [];
     const d = driver({ status: null, signal: "SIGKILL" });
-    expect(() => main([], io({ run: d.run }))).toThrow(/killed by SIGKILL/);
+    expect(
+      main([], io({ run: d.run, log: (m: string) => void logged.push(m) })),
+    ).toBe(128 + constants.signals.SIGKILL);
+    expect(logged.join("\n")).toMatch(/killed by SIGKILL/);
+  });
+
+  // Neither a status nor a signal this platform names: there is nothing to
+  // encode, so it goes back to being the launcher saying it cannot proceed.
+  it("stops loudly when the driver answered with neither", () => {
+    const d = driver({ status: null, signal: "SIGNOTATHING" });
+    expect(() => main([], io({ run: d.run }))).toThrow(
+      /neither a status nor a signal/,
+    );
   });
 
   // Decision 4 reaching the loop: an install that fails stops it, rather than
