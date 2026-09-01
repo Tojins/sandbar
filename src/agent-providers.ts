@@ -51,6 +51,16 @@ export const AGENT_PROVIDER_NAMES = ["claude", "codex"] as const;
 
 export type AgentProviderName = (typeof AGENT_PROVIDER_NAMES)[number];
 
+// Driver-owned because these binaries implement the provider protocol this
+// release parses. A routed role must not inherit whichever CLI a host image (or
+// an old branch's image recipe) happened to bake (#75).
+export const CLAUDE_CODE_VERSION = "2.1.257";
+export const CODEX_VERSION = "0.152.0";
+export const AGENT_PROVIDER_VERSIONS: Readonly<Record<AgentProviderName, string>> = {
+  claude: CLAUDE_CODE_VERSION,
+  codex: CODEX_VERSION,
+};
+
 // Default for every role, so every config written before #72 resolves
 // unchanged. The reviewer holding the verdict is the role whose default matters
 // most: it is the strongest model available, and #72 moves the implementer

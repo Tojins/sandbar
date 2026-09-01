@@ -66,45 +66,9 @@ RUN curl -fsSL https://github.com/containers/podman/releases/download/v4.9.3/pod
     && install -m0755 /tmp/bin/podman-remote-static-linux_amd64 /usr/bin/podman \
     && rm -rf /tmp/bin
 
-# Unpinned on purpose: the image is rebuilt only when this file's bytes change
-# (it declares no `rebuildOn`, since it bakes no dependency of the repo), so a
-# pin here would be a version nobody revisits rather than a reproducible one.
-#
-# `--allow-scripts` is not optional hygiene. npm >= 11 blocks lifecycle scripts
-# by default and only WARNS, so the package's `postinstall` is skipped and the
-# build still succeeds — today's version happens to work without it, which is
-# exactly what would make a future version's silent breakage look like an agent
-# failure rather than an image one.
-RUN npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code
-
-# The second agent CLI, beside the first rather than in an image of its own
-# (#72): ONE image serves both roles (#39), and which CLI a role runs is a
-# config field the image cannot see — `implementerAgent` is resolved per run, so
-# an image that carried only the CLI its config named would have to be rebuilt
-# to change a role's vendor.
-#
-# PINNED, unlike the block above and for podman's reason rather than its own:
-# sandbar's reader is coupled to a stream format the CLI does not version. The
-# difference from claude-code is `parsedOutputOnly` (#72) — a claude schema
-# drift still degrades to raw stdout, which carries the `<promise>`/`<verdict>`
-# tokens and so keeps the loop working, while a codex drift returns an EMPTY
-# answer on every attempt: no tag, a nudge, a spent attempt, eight of them per
-# issue, and nothing in the transcripts to say why. That is silent, which is the
-# one failure class this repo pins against.
-#
-# The pin is therefore revisited exactly when `parseCodexJsonLine` is — its
-# header names the version its event union was verified against, and this is
-# that version. A yanked or unbuildable version is a gate red (#37, #46), not a
-# silent fallback.
-#
-# NOT `--allow-scripts`: `@openai/codex` declares no lifecycle scripts at all.
-# It resolves its platform binary through optionalDependencies, so npm's default
-# block has nothing to skip here and naming a package that runs nothing would
-# only suggest it does.
-#
-# Inert unless a role names it — an installed CLI nobody invokes costs disk and
-# nothing else, exactly like the podman remote client above in the sandbox role.
-RUN npm install -g @openai/codex@0.152.0
+# Agent CLIs are deliberately absent. The driver appends the pinned providers
+# selected by this run after resolving this base (or a branch-specific variant),
+# so an old branch recipe cannot resurrect an image missing the routed CLI (#75).
 
 # No `ENV HOME`: the sandbox provider sets HOME=/home/agent itself, and the
 # gate runner is root, whose /root is the right answer for it.

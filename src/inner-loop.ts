@@ -36,7 +36,11 @@ import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
 import type { ChunkTarget } from "./chunks.js";
 import type { ResolvedGateStack } from "./config.js";
-import { type BranchImages, resolveSandboxImage } from "./ensure-images.js";
+import {
+  type AgentImages,
+  type BranchImages,
+  resolveSandboxImage,
+} from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { summarizeGateFailure } from "./gate.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
@@ -175,6 +179,7 @@ export type InnerLoopConfig = {
   readonly maxImplAttempts: number;
   readonly maxReviewRounds: number;
   readonly sandboxImage: string;
+  readonly agentImages?: AgentImages;
   // This run's podman resource scope (#28) — see naming.ts. Both the agent
   // sandbox container and the gate stack are named under it.
   readonly scope: RunScope;
@@ -354,6 +359,7 @@ async function runSandboxCycle(
         // the container the fix would be written in. See resolveSandboxImage.
         const imageName = await resolveSandboxImage({
           declaredTag: config.sandboxImage,
+          agentImages: config.agentImages,
           worktreePath,
           branchImages,
           // What a failed build costs the operator turns on this, so it is

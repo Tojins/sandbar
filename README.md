@@ -132,8 +132,8 @@ export default {
   // Required — no sensible default exists:
   ghOwner: "your-org",
   ghRepo: "your-repo",
-  // The image the AGENT runs in (claude + your toolchain). Built from
-  // ./Containerfile unless you override `images` below.
+  // The image the AGENT runs in (your toolchain). Built from ./Containerfile
+  // unless you override `images` below; sandbar appends the routed agent CLIs.
   sandboxImage: "localhost/your-repo-sandbar:latest",
   botName: "your-bot",
   botEmail: "bot@your-org.dev",
@@ -616,6 +616,19 @@ dependency; relabelling the issue alone will not do it.
 ### `images` — what sandbar builds
 
 By default sandbar builds one image: `sandboxImage`, from `./Containerfile`.
+The sandbox base-image contract includes Node.js 20 or newer and npm. After
+resolving that image, sandbar adds a generated layer containing exactly the
+agent CLIs routed by `implementerAgent`, `reviewerAgent`, and `mergerAgent`, at
+versions pinned by the driver. The same happens after resolving a per-branch
+variant, so an older branch's Containerfile cannot remove a CLI selected by the
+current run. Gate containers keep using the unaugmented image: they judge the
+branch environment and run no agent CLI.
+
+Migration is deliberately order-independent: upgrade sandbar first, then remove
+`@anthropic-ai/claude-code` and `@openai/codex` install lines from your sandbox
+Containerfile whenever convenient. During the overlap the driver's pinned
+install wins, so a host-baked copy cannot drift the protocol parser.
+
 List `images` explicitly when the stack needs more than one:
 
 ```ts
