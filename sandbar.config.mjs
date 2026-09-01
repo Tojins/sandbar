@@ -83,14 +83,13 @@ export default {
   // floor below which it must not — but raise it in the same commit as anything
   // this file starts asking a newer sandbar for.
   //
-  // It is the PINNED release today, which is the most this file can honestly
-  // claim: that is the oldest driver it has ever been run by. Note what that
-  // makes of the field right now — 0.20.33 predates `requiresSandbar`, so the
-  // driver spreads it through and never looks at it, which is the very silence
-  // the field exists to end. Unavoidable and self-correcting rather than a
-  // hole: a check can only be made by a driver that has it, so the guard goes
-  // live for this repo the first time the pin moves to a release that carries
-  // it, and every consumer pinning a >=0.21 sandbar has it from the start.
+  // It is 0.20.33, the oldest driver this file has ever been run by — the most
+  // it can honestly claim — and it moves when this file starts asking a newer
+  // sandbar for something, not when the pin does. The check itself is live:
+  // 0.20.33 predated `requiresSandbar` and spread the field through unread,
+  // but the pin has since moved to a release that carries it, so a driver
+  // below this floor now refuses the run by name instead of silently dropping
+  // what it cannot read.
   requiresSandbar: "0.20.33",
 
   botName: "sandbar",

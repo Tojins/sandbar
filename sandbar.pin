@@ -52,4 +52,4 @@
 # was installed to read.
 #
 # Lines starting with `#` are comments; exactly one spec line must remain.
-github:Tojins/sandbar#v0.20.33
+github:Tojins/sandbar#v0.21.11
