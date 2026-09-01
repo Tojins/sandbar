@@ -292,6 +292,7 @@ import { chunkMembersOnBranch, chunkPullRequestContent } from "./chunk-pr.js";
 import type { ChunkMember, ChunkTarget } from "./chunks.js";
 import { type EnvReader } from "./env.js";
 import {
+  buildAgentProvider,
   PROVIDER_CREDENTIALS,
   type AgentProviderName,
 } from "./agent-providers.js";
@@ -2048,11 +2049,11 @@ export type RealAdapterDeps = {
   readonly botName: string;
   readonly botEmail: string;
   readonly coauthorTrailer: string;
-  // The provider owns the resolve invocation's argv and output parser (#74).
-  // It is built without resume semantics: each attempt is a fresh container
-  // whose prompt carries the whole state.
-  readonly agentProvider: AgentProvider;
-  readonly agentProviderName: AgentProviderName;
+  // The provider/model pair for the resolve invocation (#74). realAdapter
+  // builds the one provider object that owns both argv and output parsing, so
+  // credential routing cannot disagree with the command being invoked.
+  readonly mergerAgent: AgentProviderName;
+  readonly mergerModelId: string;
   // The image the resolve agent runs in — both supported CLIs are installed
   // there, not in any gate-stack image (#24 D7, #39).
   readonly sandboxImage: string;
@@ -2218,14 +2219,76 @@ export function parseCapturedAgentRun(
     // promises therefore have no raw fallback: only events their provider
     // parser classified as agent speech may reach parseResolveSignal (#74).
     output: speech.output(""),
-    ...(run.detail !== undefined || speech.failure === undefined
-      ? {}
-      : { detail: speech.failure }),
+    detail: run.detail ?? speech.failure,
   };
+}
+
+export function buildResolveRunArgv(args: {
+  readonly container: string;
+  readonly cwd: string;
+  readonly extraMounts: readonly string[];
+  readonly image: string;
+  readonly command: string;
+  readonly credentials: Readonly<Record<string, string | undefined>>;
+  readonly botName: string;
+  readonly botEmail: string;
+}): readonly string[] {
+  const argv = [
+    "run",
+    "--rm",
+    "-i",
+    "--name",
+    args.container,
+    "--userns=keep-id",
+    "--user",
+    "1000:1000",
+    "-v",
+    `${args.cwd}:/workspace`,
+    ...args.extraMounts.flatMap((mount) => ["-v", `${mount}:${mount}`]),
+    "-w",
+    "/workspace",
+    "-e",
+    "HOME=/tmp",
+    "--label",
+    "sandbar=true",
+  ];
+  for (const [key, value] of Object.entries(args.credentials)) {
+    if (value) argv.push("-e", `${key}=${value}`);
+  }
+  argv.push(
+    "-e",
+    `GIT_AUTHOR_NAME=${args.botName}`,
+    "-e",
+    `GIT_AUTHOR_EMAIL=${args.botEmail}`,
+    "-e",
+    `GIT_COMMITTER_NAME=${args.botName}`,
+    "-e",
+    `GIT_COMMITTER_EMAIL=${args.botEmail}`,
+    "--entrypoint",
+    "/bin/sh",
+    args.image,
+    "-c",
+    args.command,
+  );
+  return argv;
+}
+
+export function resolveAgentCredentials(
+  provider: AgentProviderName,
+  env: EnvReader,
+): Readonly<Record<string, string | undefined>> {
+  return Object.fromEntries(
+    [...PROVIDER_CREDENTIALS[provider].map(({ key }) => key), "GH_TOKEN"].map(
+      (key) => [key, env(key)],
+    ),
+  );
 }
 
 export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   const cwd = deps.cwd;
+  // No resume semantics: every resolve attempt is a fresh container whose
+  // prompt carries the complete state.
+  const agentProvider = buildAgentProvider(deps.mergerAgent, deps.mergerModelId);
   // The merger worktree is always detached, so every push it makes is HEAD to a
   // named ref on origin, and every one of them classifies its failure the same
   // way. ONE copy of that classification (#60): the race regex is the whole
@@ -2377,60 +2440,25 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // attempt number is in it so the name is greppable against the log line.
       const container = `${scopedResourcePrefix(deps.scope)}resolve-${attempt}-${randomUUID()}`;
       const extraMounts = await gitMountsForWorktree(cwd);
-      const args: string[] = [
-        "run",
-        "--rm",
-        "-i",
-        "--name",
-        container,
-        "--userns=keep-id",
-        "--user",
-        "1000:1000",
-        "-v",
-        `${cwd}:/workspace`,
-        ...extraMounts.flatMap((m) => ["-v", `${m}:${m}`]),
-        "-w",
-        "/workspace",
-        "-e",
-        "HOME=/tmp",
-        "--label",
-        "sandbar=true",
-      ];
-      for (const key of [
-        ...PROVIDER_CREDENTIALS[deps.agentProviderName].map(
-          (credential) => credential.key,
-        ),
-        "GH_TOKEN",
-      ]) {
-        const v = deps.env(key);
-        if (v) args.push("-e", `${key}=${v}`);
-      }
-      args.push(
-        "-e",
-        `GIT_AUTHOR_NAME=${deps.botName}`,
-        "-e",
-        `GIT_AUTHOR_EMAIL=${deps.botEmail}`,
-        "-e",
-        `GIT_COMMITTER_NAME=${deps.botName}`,
-        "-e",
-        `GIT_COMMITTER_EMAIL=${deps.botEmail}`,
-      );
-      const command = deps.agentProvider.buildPrintCommand({
+      const command = agentProvider.buildPrintCommand({
         prompt,
         dangerouslySkipPermissions: true,
       });
-      args.push(
-        "--entrypoint",
-        "/bin/sh",
-        deps.sandboxImage,
-        "-c",
-        command.command,
-      );
+      const args = buildResolveRunArgv({
+        container,
+        cwd,
+        extraMounts,
+        image: deps.sandboxImage,
+        command: command.command,
+        credentials: resolveAgentCredentials(deps.mergerAgent, deps.env),
+        botName: deps.botName,
+        botEmail: deps.botEmail,
+      });
       const run = await captureAgentRun(RUNTIME, args, command.stdin ?? "", {
         container,
         timeoutMs: RESOLVE_AGENT_TIMEOUT_MS,
       });
-      return parseCapturedAgentRun(run, deps.agentProvider);
+      return parseCapturedAgentRun(run, agentProvider);
     },
     async isMergeInProgress() {
       // NOT `<cwd>/.git/MERGE_HEAD`. Since #10 the merger always runs in a

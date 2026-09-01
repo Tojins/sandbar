@@ -310,7 +310,8 @@ export default {
   // not where the tokens are. The merger now has the same independent
   // provider/model knobs; this config keeps its backward-compatible
   // claude/opus defaults until self-host adoption raises requiresSandbar and
-  // the pinned driver together.
+  // the pinned driver together. The codex merger route is supported by the
+  // driver but has not yet been exercised by this self-host configuration.
   //
   // Nothing here takes effect through the pin. This file comes from the
   // checkout, not from `.sandbar/driver/`, so an edit applies on the next run

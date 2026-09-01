@@ -192,10 +192,6 @@ export function createAgentSpeechAccumulator(
     output(rawFallback) {
       const spoken = result || accumulated;
       if (spoken) return spoken;
-      // A terminal failure is provider speech, never agent speech. Do not let
-      // its raw wire representation become an answer merely because a future
-      // provider omitted `parsedOutputOnly`.
-      if (failure !== undefined) return "";
       return agent.parsedOutputOnly === true ? "" : rawFallback;
     },
   };

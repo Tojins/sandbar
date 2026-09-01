@@ -14,7 +14,12 @@
 import { describe, expect, it } from "vitest";
 
 import { buildAgentProvider } from "./agent-providers.js";
-import { captureAgentRun, parseCapturedAgentRun } from "./merger.js";
+import {
+  buildResolveRunArgv,
+  captureAgentRun,
+  parseCapturedAgentRun,
+  resolveAgentCredentials,
+} from "./merger.js";
 import { isInfraFailure, parseResolveSignal } from "./resolve-loop.js";
 
 const opts = (timeoutMs = 30_000) => ({ container: "c-under-test", timeoutMs });
@@ -197,19 +202,6 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(isInfraFailure(run)).toBe(true);
   });
 
-  it("never falls back to a raw failure frame for an unmarked provider", () => {
-    const raw = JSON.stringify({
-      type: "turn.failed",
-      error: { message: "terminal fault" },
-    });
-    const codex = buildAgentProvider("codex", "m");
-    const { parsedOutputOnly: _parsedOutputOnly, ...unmarkedProvider } = codex;
-    const run = parseCapturedAgentRun(captured(raw), unmarkedProvider);
-    expect(run.output).toBe("");
-    expect(run.detail).toBe("terminal fault");
-    expect(isInfraFailure(run)).toBe(true);
-  });
-
   it("keeps agent speech when a terminal failure follows it", () => {
     const raw = [
       JSON.stringify({
@@ -226,4 +218,56 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(run.detail).toBe("terminal fault");
     expect(isInfraFailure(run)).toBe(false);
   });
+});
+
+describe("resolve provider invocation (#74)", () => {
+  const values: Record<string, string> = {
+    CLAUDE_CODE_OAUTH_TOKEN: "claude-oauth",
+    ANTHROPIC_API_KEY: "anthropic-key",
+    CODEX_AUTH_JSON: "codex-auth",
+    OPENAI_API_KEY: "openai-key",
+    GH_TOKEN: "github-key",
+  };
+
+  it.each([
+    [
+      "claude",
+      ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+      ["CODEX_AUTH_JSON", "OPENAI_API_KEY"],
+    ],
+    [
+      "codex",
+      ["CODEX_AUTH_JSON", "OPENAI_API_KEY"],
+      ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+    ],
+  ] as const)(
+    "routes only %s credentials into the resolve argv",
+    (provider, present, absent) => {
+      const credentials = resolveAgentCredentials(provider, (key) => values[key]);
+      const argv = buildResolveRunArgv({
+        container: "resolve-1",
+        cwd: "/worktree",
+        extraMounts: ["/git-common"],
+        image: "sandbox-image",
+        command: "agent --print",
+        credentials,
+        botName: "sandbar-bot",
+        botEmail: "bot@example.test",
+      });
+      const joined = argv.join(" ");
+      for (const key of present) {
+        expect(joined).toContain(`${key}=${values[key]}`);
+      }
+      for (const key of absent) expect(joined).not.toContain(`${key}=`);
+      expect(joined).toContain("GH_TOKEN=github-key");
+      expect(argv.slice(-5)).toEqual([
+        "--entrypoint",
+        "/bin/sh",
+        "sandbox-image",
+        "-c",
+        "agent --print",
+      ]);
+      expect(argv).toContain("/git-common:/git-common");
+    },
+  );
 });

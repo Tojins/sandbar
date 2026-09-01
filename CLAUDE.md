@@ -327,8 +327,8 @@ and used to announce themselves in four different ways, the halt in none at all.
   `cycle-N/resolve-<key>-attempt-<k>.log`, keyed like the gate artefact beside
   it, and the merger log line carries the container, the exit code, the
   duration and which of timeout / clean exit / signal ended it. An attempt that
-  captured NO output is an infra failure, not an answer: the loop throws rather
-  than re-prompting, so an image that is gone or a refused socket cannot launder
+  captured NO agent speech is an infra failure, not an answer: the loop throws
+  rather than re-prompting, so an image that is gone or a refused socket cannot launder
   itself into "the agent tried and failed" and spend the budget doing it. The
   ONE exception is the ten-minute `RESOLVE_AGENT_TIMEOUT_MS`, which ran the
   whole budget in the container and is a spent attempt named as one. What a

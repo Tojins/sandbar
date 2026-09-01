@@ -177,7 +177,7 @@ import {
 } from "./forge-verify.js";
 import { startKeepawake, stopKeepawake } from "./keepawake.js";
 import { runInnerLoop, type Terminal } from "./inner-loop.js";
-import { buildAgentProvider, requiredAgentProviders } from "./agent-providers.js";
+import { requiredAgentProviders } from "./agent-providers.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
 import { runScope } from "./naming.js";
 import { startRunLogger } from "./logs.js";
@@ -1187,8 +1187,8 @@ export async function run(
             botName: config.botName,
             botEmail: config.botEmail,
             coauthorTrailer: config.coauthorTrailer,
-            agentProvider: buildAgentProvider(config.mergerAgent, config.mergerModelId),
-            agentProviderName: config.mergerAgent,
+            mergerAgent: config.mergerAgent,
+            mergerModelId: config.mergerModelId,
             sandboxImage: config.sandboxImage,
             env,
             runStackGate: () => stackForGate2.runGate(),
