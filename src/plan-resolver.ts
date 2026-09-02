@@ -500,7 +500,7 @@ export async function readChunkMembers(
         "--format=%s",
         ref,
       ],
-      { cwd: repoDir },
+      { cwd: repoDir, maxBuffer: 16 * 1024 * 1024 },
     );
     const members = new Set<number>();
     let foundRoot = false;

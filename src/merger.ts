@@ -559,7 +559,7 @@ export type MergeUnit = {
 // What one `attemptMerge` did to the worktree, with the tracker deliberately
 // untouched. `install-failed` and `abandon` have both already been reverted.
 type MergeAttempt =
-  | { readonly kind: "merged" }
+  | { readonly kind: "merged"; readonly preMergeSha: string }
   | { readonly kind: "install-failed" }
   | {
       readonly kind: "abandon";
@@ -642,7 +642,10 @@ export type MergerAdapter = ResolveAdapter & {
   // Ensure the commit just produced for a chunk member has sandbar's canonical
   // subject. A conflict agent can author the commit itself; membership must
   // not depend on text that agent happened to choose (#93).
-  canonicalizeChunkMemberMerge(unit: MergeUnit): Promise<void>;
+  canonicalizeChunkMemberMerge(
+    unit: MergeUnit,
+    preMergeSha: string,
+  ): Promise<void>;
   // --- chunk landing (#60) ---
   // The ref a chunk's members are merged onto: `origin/<chunkBranch>` when
   // origin has that branch, else `origin/<sourceBranch>` — which is where a
@@ -1152,7 +1155,7 @@ async function attemptMerge(
       };
     }
     await emit(`merged ${label} (via resolve-loop)`);
-    return { kind: "merged" };
+    return { kind: "merged", preMergeSha };
   }
 
   const inst = await adapter.npmInstall();
@@ -1209,11 +1212,11 @@ async function attemptMerge(
       };
     }
     await emit(`merged ${label} (gate-red recovered via resolve-loop)`);
-    return { kind: "merged" };
+    return { kind: "merged", preMergeSha };
   }
 
   await emit(`merged ${label}`);
-  return { kind: "merged" };
+  return { kind: "merged", preMergeSha };
 }
 
 export async function runMergerWithAdapter(
@@ -1367,13 +1370,14 @@ export async function runMergerWithAdapter(
     resolveSinkFor,
   };
 
-  // One DONE issue branch. TRUE when a commit for this issue is on HEAD; FALSE
-  // when it was skipped and HEAD is back where it was — with the issue told why
-  // and taken off the queue.
+  // One DONE issue branch. Returns the pre-merge SHA when this issue's commits
+  // are on HEAD, or null when it was skipped and HEAD is back where it started.
+  // Chunk membership validation uses that SHA to inspect the whole attempt,
+  // including a gate-fix commit above the merge.
   const mergeOne = async (
     issue: IssueRef,
     target: MergeTarget,
-  ): Promise<boolean> => {
+  ): Promise<string | null> => {
     try {
       const n = issueNumberOf(issue);
       const outcome = await attemptMerge(
@@ -1386,14 +1390,14 @@ export async function runMergerWithAdapter(
         },
         mergeDeps,
       );
-      if (outcome.kind === "merged") return true;
+      if (outcome.kind === "merged") return outcome.preMergeSha;
 
       if (outcome.kind === "install-failed") {
         await adapter.commentOnIssue(n, buildInstallFailedComment(target));
         await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
         skipped.push({ issue, reason: "install-failed" });
         await emit(`skip #${n} reason=install-failed`);
-        return false;
+        return null;
       }
       if (outcome.silent) {
         // Silent abandon: no comment, no label flip. The orchestrator's
@@ -1402,7 +1406,7 @@ export async function runMergerWithAdapter(
         // on the per-issue retry count it tracks in runState.
         skipped.push({ issue, reason: "silent-noop" });
         await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
-        return false;
+        return null;
       }
       await adapter.commentOnIssue(
         n,
@@ -1419,7 +1423,7 @@ export async function runMergerWithAdapter(
       await emit(
         `skip #${n} reason=${outcome.mode} resolve-abandon: ${outcome.reason}`,
       );
-      return false;
+      return null;
     } catch (err) {
       // Not a hypothetical throw site: `getIssueBody` throws by design when
       // `gh` fails (see realAdapter below), and `runGate` throws — rather than
@@ -1458,9 +1462,10 @@ export async function runMergerWithAdapter(
       asHalt(`Chunk landing failed to base ${branch}`)(err);
     }
     for (const member of group.members) {
-      if (await mergeOne(member, group.target)) {
+      const preMergeSha = await mergeOne(member, group.target);
+      if (preMergeSha !== null) {
         await adapter
-          .canonicalizeChunkMemberMerge(member)
+          .canonicalizeChunkMemberMerge(member, preMergeSha)
           .catch(asHalt(`Chunk membership commit failed for #${issueNumberOf(member)}`));
         landedMembers.push(member);
       }
@@ -2554,8 +2559,21 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         return { ok: false };
       }
     },
-    async canonicalizeChunkMemberMerge(unit) {
+    async canonicalizeChunkMemberMerge(unit, preMergeSha) {
       const expected = unit.mergeMessage ?? mergeMessageFor(unit);
+      const { stdout: canonicalSubjects } = await exec(
+        "git",
+        [
+          "log",
+          "--first-parent",
+          "--merges",
+          "--format=%s",
+          `${preMergeSha}..HEAD`,
+        ],
+        { cwd },
+      );
+      if (canonicalSubjects.split("\n").includes(expected)) return;
+
       const [{ stdout }, { stdout: parentsOut }] = await Promise.all([
         exec(
           "git",
