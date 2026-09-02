@@ -15,7 +15,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { type ChunkTarget, IN_CHUNK_LABEL } from "./chunks.js";
+import { type ChunkTarget, NEEDS_REVIEW_LABEL } from "./chunks.js";
 import { issueNumberFromBranch } from "./naming.js";
 
 const exec = promisify(execFile);
@@ -67,7 +67,7 @@ export class ChunkBaseMissingError extends Error {
         `would reject the result. The usual cause is the chunk RE-ROOTING: close ` +
         `a chunk's root issue and the surviving members re-derive under a new root ` +
         `and so a new branch name, while their commits stay on the old one. Look for ` +
-        `a recently closed issue carrying \`${IN_CHUNK_LABEL}\` and reopen it, or ` +
+        `a recently closed issue carrying \`${NEEDS_REVIEW_LABEL}\` and reopen it, or ` +
         `land the chunk's real branch and close every member on it — either way the ` +
         `chunk stops being half-visible to sandbar.`,
     );
@@ -200,7 +200,7 @@ export async function fetchOriginChunkBranch(
 //   - A chunk the cache can name no branch for, and this issue is NOT its root
 //     → `ChunkBaseMissingError`. The ordinary argument says this cannot happen:
 //     a non-root member plans only once a blocker of its own carries
-//     `in-chunk`, and finalise applies that label only after the chunk branch
+//     a merge commit on the chunk branch, written only after that branch
 //     carrying the commits is on origin. But the branch NAME is derived per
 //     cycle from the chunk's current root, and a chunk RE-ROOTS when that root
 //     leaves the graph — close it and the planner's two open-only listings
@@ -219,7 +219,7 @@ export async function fetchOriginChunkBranch(
 // — the window a run leaves behind if it dies between the chunk push and the
 // label flip — is re-planned and seeded from a tip that already contains it, so
 // its diff slot renders empty. That window ends in a loud halt (finalise's
-// `requireChunkFlip`) and an operator, and the alternative reading (seed from
+// git membership) and an operator, and the alternative reading (seed from
 // the source branch) would develop the retry against a tree the chunk has
 // already moved past, which is worse.
 export async function ensureIssueBranch(

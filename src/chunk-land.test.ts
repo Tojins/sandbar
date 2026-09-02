@@ -21,7 +21,7 @@ import {
   selectReconciliations,
   wrapUpLandedChunk,
 } from "./chunk-land.js";
-import { IN_CHUNK_LABEL, type LandedChunk } from "./chunks.js";
+import { NEEDS_REVIEW_LABEL, type LandedChunk } from "./chunks.js";
 import type { ResolveAttemptSummary } from "./resolve-loop.js";
 
 // One entry of the resolve loop's journal (#67), as the abandoned-chunk comment
@@ -264,9 +264,9 @@ describe("wrapUpLandedChunk (#64)", () => {
     expect(r.branchDeleted).toBe(true);
     expect(calls.map((c) => `${c.op} ${c.arg}`)).toEqual([
       "closeIssue 43",
-      `removeLabel 43:${IN_CHUNK_LABEL}`,
+      `removeLabel 43:${NEEDS_REVIEW_LABEL}`,
       "closeIssue 42",
-      `removeLabel 42:${IN_CHUNK_LABEL}`,
+      `removeLabel 42:${NEEDS_REVIEW_LABEL}`,
       "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
       "closePullRequest 9",
@@ -437,7 +437,7 @@ describe("the prose (#64)", () => {
     expect(body).toContain(LAND_LABEL);
     expect(body).toContain("sandbar/chunk-42-alpha");
     expect(body).toContain("#43");
-    expect(body).toContain(IN_CHUNK_LABEL);
+    expect(body).toContain(NEEDS_REVIEW_LABEL);
   });
 
   it("does not claim sandbar landed a chunk a human merged", () => {
@@ -632,7 +632,7 @@ describe("chunkResidue and the banners it feeds (#64)", () => {
     });
     expect(banner).toContain("knew no member issue");
     expect(banner).toContain("sandbar/chunk-4-unnamed");
-    expect(banner).toContain(IN_CHUNK_LABEL);
+    expect(banner).toContain(NEEDS_REVIEW_LABEL);
     expect(banner).toContain("no later run will find it");
   });
 

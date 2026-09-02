@@ -33,8 +33,9 @@
 //
 // It used to be one clause: a blocker is satisfied when it reads CLOSED, which
 // for an auto-lane blocker means its work is on the source branch. Chunks add
-// the second: a blocker is ALSO satisfied when it carries `IN_CHUNK_LABEL` and
-// sits in the SAME chunk as the issue it blocks.
+// the second: a blocker is ALSO satisfied when the exact derived chunk branch
+// contains its `Merge sandbar/issue-<n>: ...` commit and it sits in the SAME
+// chunk as the issue it blocks.
 //
 // The second clause exists because a chunk member never closes on its own. Its
 // branch lands on the chunk's branch, not on the source branch, and the issue
@@ -50,7 +51,7 @@
 // has ever meant here.
 //
 // CROSS-CHUNK dependencies stay strict, and nothing about them is relaxed. An
-// `in-chunk` blocker in a DIFFERENT chunk is on a different branch that has not
+// blocker present on a DIFFERENT chunk branch has not
 // reached the source branch, so its commits are not under the dependent at all;
 // treating it as satisfied would start work on a base that does not exist. The
 // dependent waits for that other chunk to land and its issues to close —
@@ -59,23 +60,18 @@
 // `chunks.ts` held back) fails the same test: `chunkOf` has no entry for it, and
 // undefined is never equal to a chunk root.
 //
-// Two consequences for what this module LISTS. First, blockers are not
-// necessarily candidates, so their labels cannot come from the candidate query
-// — which is why `fetchIssueStates` now returns an `IssueFacts` (state AND
-// labels) per issue rather than a bare state. Second, an issue that has landed
-// on a chunk branch has swapped `ready-for-agent` for `in-chunk` and so has
-// left the `fetchCandidates` query, yet it must stay in the graph this module
-// derives lanes and chunks from — hence `fetchChunkMembers`, whose result
-// `buildPlan` unions into the candidate list. Dropping those issues from the
+// One consequence for what this module LISTS: an issue that has landed on a
+// chunk branch has left the `ready-for-agent` query, yet it must stay in the
+// graph this module derives lanes and chunks from. `fetchChunkMembers` therefore
+// enumerates the issue numbers from the fetched chunk branches' merge history
+// and fetches those issues directly. Dropping those issues from the
 // graph would break the feature in two separate ways: a chunk that has landed
 // its root would re-derive itself around the members that are left, under a new
 // root and so under a branch name nothing is on; and a descendant of a landed
 // review-gated issue would read as AUTO (its gating ancestor having vanished
 // from the lane graph) and auto-land unreviewed chunk code onto the source
 // branch, which is the back door `lanes.ts` exists to shut. They are listed
-// back in and then dropped from the plan by the `in-chunk` label itself: the
-// label is the de-queue, and it de-queues here as explicitly as it does through
-// the query.
+// back in and dropped from the plan by the same git membership fact.
 //
 // All of this is doubly inert under `defaultLane: "auto"`, where no issue is
 // review-gated, no chunk is derived, and the second clause can never be
@@ -108,7 +104,7 @@
 //
 // Everything else plans. A chunk can now admit SEVERAL issues in one cycle —
 // every member whose blockers have landed — though never a chain: a member is
-// unblocked only by a blocker already carrying `in-chunk`, which no issue
+// unblocked only by a blocker already merged onto the chunk branch, which no issue
 // planned in the same cycle does. So same-cycle members of one chunk are always
 // siblings, which is what the merge phase's per-chunk grouping relies on.
 //
@@ -159,7 +155,6 @@ import {
   type ChunkIssue,
   type ChunkTarget,
   type LandedChunk,
-  IN_CHUNK_LABEL,
   deriveChunks,
   landedChunksOf,
 } from "./chunks.js";
@@ -171,6 +166,7 @@ import {
   laneOverrides,
 } from "./lanes.js";
 import { issueBranchName } from "./naming.js";
+import { rootIssueFromChunkBranch } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
 const exec = promisify(execFile);
@@ -226,8 +222,8 @@ export type PlanResolution = {
   // about the issue's labels, and a human wants it while the chain is still
   // being queued, not once it reaches the front.
   readonly overrides: readonly LaneOverride[];
-  // The chunks with work ON ORIGIN — those with at least one member carrying
-  // `in-chunk` — with everything each branch carries and the TIPS of it
+  // The chunks with work ON ORIGIN — those with at least one member named by
+  // the branch's sandbar merge commits — with everything each branch carries and the TIPS of it
   // (#63, #64). Empty for every host on the default lane, and empty before a
   // chunk's first landing.
   //
@@ -254,12 +250,13 @@ export function parseBlockedBy(body: string): readonly number[] {
 
 export function resolvePlan(
   // `candidates` is the whole graph, not just the queue: `buildPlan` unions the
-  // `in-chunk` members in (header), and the filter below drops them again.
+  // git-derived chunk members in (header), and the filter below drops them again.
   candidates: readonly IssueSummary[],
   issueFacts: ReadonlyMap<number, IssueFacts>,
   excluded: ReadonlySet<number> = new Set(),
   k: number = DEFAULT_K,
   defaultLane: Lane = DEFAULT_LANE,
+  chunkMembers: ReadonlyMap<string, ReadonlySet<number>> = new Map(),
 ): PlanResolution {
   // Parsed once and shared with the lane graph: the `## Blocked by` section is
   // the dependency gate below AND the edge set gating inherits along, and two
@@ -276,7 +273,7 @@ export function resolvePlan(
     defaultLane,
   );
   // The same graph again, one layer up: chunk assignment is what makes the
-  // in-chunk clause of `blockerSatisfied` a statement about ONE branch, and
+  // membership clause of `blockerSatisfied` a statement about ONE branch, and
   // since #60 it is also the landing target a planned review-gated issue
   // carries. `chunkOf` answers both "same chunk?" and "is this issue its
   // chunk's root?"; `chunks` names the branch.
@@ -288,22 +285,17 @@ export function resolvePlan(
   const { chunks, chunkOf } = deriveChunks(chunkIssues, lanes);
   const chunkByRoot = new Map(chunks.map((c) => [c.root, c] as const));
 
-  // `in-chunk` from either source, because neither invents a label and each can
-  // be missing one the other has: the authoritative batch may have skipped the
-  // issue entirely, and the lagging search index may predate the flip. For the
-  // de-queue below the union is the fail-safe reading outright — an issue named
-  // by either source stays out of the plan. For the satisfaction clause it is
-  // the permissive direction, and the case it could get wrong does not arise:
-  // the only way to disagree that way round is a label the tracker has since
-  // lost, and a member keeps `in-chunk` for as long as its commits sit on the
-  // chunk branch — it loses the label when the chunk lands and the issue
-  // closes, at which point the CLOSED clause above answers first anyway.
-  const listedLabels = new Map(
-    candidates.map((c) => [c.number, c.labels] as const),
-  );
-  const isInChunk = (n: number): boolean =>
-    (issueFacts.get(n)?.labels ?? []).includes(IN_CHUNK_LABEL) ||
-    (listedLabels.get(n) ?? []).includes(IN_CHUNK_LABEL);
+  // Membership is a strict git fact (#93): the issue must be named by a
+  // sandbar merge commit on the exact derived chunk branch. Labels are never
+  // consulted. Git's local remote-tracking refs have no search-index lag, so
+  // the old union of authoritative and lagging label reads is unnecessary;
+  // absence from this map is immediately and fail-safely "not on the branch".
+  const isInChunk = (n: number): boolean => {
+    const root = chunkOf.get(n);
+    if (root === undefined) return false;
+    const branch = chunkByRoot.get(root)?.branch;
+    return branch !== undefined && (chunkMembers.get(branch)?.has(n) ?? false);
+  };
 
   // The chunk an issue lands on, or null when it lands on the source branch.
   // Null covers both an auto-lane issue and a review-gated one `deriveChunks`
@@ -311,7 +303,7 @@ export function resolvePlan(
   // below), so a null here is always the auto lane by the time it is read.
   //
   // `landed` is the chunk PR's member list (#62): the members whose work is
-  // already ON the branch, which is exactly the ones carrying `in-chunk`. It is
+  // already ON the branch, as named by its merge commits. It is
   // computed here rather than in the merge phase because only this function has
   // the whole candidate graph — phase 3 sees the cycle's DONE branches and
   // nothing else, so a chunk growing by one member per cycle would otherwise
@@ -331,9 +323,9 @@ export function resolvePlan(
     return { root: chunk.root, branch: chunk.branch, landed };
   };
 
-  // CLOSED means the blocker's work is on the source branch. `in-chunk` in the
+  // CLOSED means the blocker's work is on the source branch. Membership in the
   // SAME chunk means it is on the branch this issue will be worked on. Nothing
-  // else counts — a cross-chunk `in-chunk` blocker, or a dependent with no
+  // else counts — a blocker on another chunk branch, or a dependent with no
   // chunk at all, leaves `theirs`/`ours` unequal (or undefined) and the issue
   // blocked. Header, "When is a blocker satisfied?" (#59).
   const blockerSatisfied = (blocker: number, dependent: number): boolean => {
@@ -462,8 +454,90 @@ export async function fetchCandidates(
 // left the graph reads as auto.
 export async function fetchChunkMembers(
   repo: RepoRef,
+  repoDir: string,
 ): Promise<readonly IssueSummary[]> {
-  return listOpenIssuesLabelled(repo, IN_CHUNK_LABEL);
+  const byBranch = await readChunkMembers(repoDir);
+  const numbers = [...new Set([...byBranch.values()].flatMap((ns) => [...ns]))];
+  return fetchIssueSummaries(numbers, repo);
+}
+
+/** Merge subjects are the durable membership record written by merger.ts. */
+export async function readChunkMembers(
+  repoDir: string,
+): Promise<ReadonlyMap<string, ReadonlySet<number>>> {
+  const { stdout: refsOut } = await exec(
+    "git",
+    [
+      "for-each-ref",
+      "--format=%(refname:short)",
+      "refs/remotes/origin/sandbar/chunk-*",
+    ],
+    { cwd: repoDir },
+  );
+  const result = new Map<string, ReadonlySet<number>>();
+  for (const ref of refsOut.split("\n").map((s) => s.trim()).filter(Boolean)) {
+    const branch = ref.replace(/^origin\//, "");
+    const root = rootIssueFromChunkBranch(branch);
+    if (root === null) continue;
+    const { stdout } = await exec(
+      "git",
+      [
+        "log",
+        "--first-parent",
+        "--merges",
+        "--format=%s",
+        ref,
+      ],
+      { cwd: repoDir },
+    );
+    const members = new Set<number>();
+    let foundRoot = false;
+    for (const subject of stdout.split("\n")) {
+      const match = subject.match(/^Merge sandbar\/issue-(\d+): /);
+      if (!match?.[1]) continue;
+      const number = Number(match[1]);
+      members.add(number);
+      // The root was necessarily the first member merged onto a derived chunk
+      // branch. Its first parent is the source snapshot the branch started at;
+      // stopping here excludes identical sandbar merge subjects inherited from
+      // source, including after that source later comes to contain the chunk.
+      if (number === root) {
+        foundRoot = true;
+        break;
+      }
+    }
+    result.set(branch, foundRoot ? members : new Set());
+  }
+  return result;
+}
+
+async function fetchIssueSummaries(
+  numbers: readonly number[],
+  repo: RepoRef,
+): Promise<readonly IssueSummary[]> {
+  if (numbers.length === 0) return [];
+  const fields = numbers
+    .map((n) => `i${n}: issue(number: ${n}) { number title body state labels(first: 100) { nodes { name } } }`)
+    .join("\n");
+  const query = `query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){${fields}}}`;
+  const { stdout } = await exec("gh", [
+    "api", "graphql", "-F", `owner=${repo.owner}`, "-F", `repo=${repo.name}`,
+    "-f", `query=${query}`,
+  ]);
+  const parsed = JSON.parse(stdout) as { data: { repository: Record<string, {
+    number: number; title: string; body: string; state: string;
+    labels?: { nodes?: ReadonlyArray<{ name?: string } | null> | null };
+  } | null> } };
+  return numbers.flatMap((n) => {
+    const issue = parsed.data.repository[`i${n}`];
+    if (!issue || issue.state === "CLOSED") return [];
+    return [{
+      number: issue.number,
+      title: issue.title,
+      body: issue.body,
+      labels: (issue.labels?.nodes ?? []).flatMap((l) => l?.name ? [l.name] : []),
+    }];
+  });
 }
 
 // Authoritative facts for a set of issue numbers, via a single GraphQL batch.
@@ -471,9 +545,8 @@ export async function fetchChunkMembers(
 // (the stale-search CLOSED guard, #16). GraphQL node lookups are strongly
 // consistent, unlike the search backend `fetchCandidates` lists through.
 //
-// LABELS as well as state since #59, and for blockers they are the only source
-// there is: a blocker need not be a candidate, so the listing may not carry it
-// at all, and `in-chunk` is now half of what "satisfied" means. `first: 100` is
+// Labels remain in this batch for the candidate facts shape and diagnostics;
+// chunk membership never reads them (#93). `first: 100` is
 // GitHub's own per-page maximum, so a truncated set would need an issue with
 // more than a hundred labels; were one to exist, the missing label reads as
 // "not in a chunk" and the dependent stays blocked, which is the harmless way
@@ -531,6 +604,7 @@ export async function fetchIssueStates(
 // read past. `resolvePlan` keeps its positional shape — it is the table-tested
 // pure function, and its tests state every argument anyway.
 export type BuildPlanOptions = {
+  readonly repoDir?: string;
   readonly excluded?: ReadonlySet<number>;
   readonly k?: number;
   readonly defaultLane?: Lane;
@@ -557,6 +631,15 @@ export async function buildPlan(
 ): Promise<PlanResolution> {
   const excluded = options.excluded ?? new Set<number>();
   const k = options.k ?? DEFAULT_K;
+  // Read once for both member enumeration and the pure resolver. A chunk can
+  // grow between two reads; one snapshot keeps the candidate graph and every
+  // membership decision about that graph coherent.
+  const chunkMembers = options.repoDir
+    ? await readChunkMembers(options.repoDir)
+    : new Map<string, ReadonlySet<number>>();
+  const chunkMemberNumbers = [
+    ...new Set([...chunkMembers.values()].flatMap((ns) => [...ns])),
+  ];
   // The queue plus the issues already landed on a chunk branch (#59). Two
   // queries because `gh issue list --label` ANDs its labels, and one graph
   // because lanes and chunks are only right over both sets. Deduped by number,
@@ -564,7 +647,7 @@ export async function buildPlan(
   // an issue mid-flip showing up under both labels at once.
   const listed = [
     ...(await fetchCandidates(repo)),
-    ...(await fetchChunkMembers(repo)),
+    ...(await fetchIssueSummaries(chunkMemberNumbers, repo)),
     ...(options.extraCandidates ?? []),
   ];
   const byNumber = new Map<number, IssueSummary>();
@@ -586,5 +669,6 @@ export async function buildPlan(
     excluded,
     k,
     options.defaultLane ?? DEFAULT_LANE,
+    chunkMembers,
   );
 }

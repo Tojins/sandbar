@@ -83,7 +83,7 @@
 //
 // A failure to open it HALTS, like every other tracker write in this loop. The
 // landing survives in the partial (those issues are on origin and still owe
-// `in-chunk`), so what the halt costs is the cycle, and what carrying on would
+// `needs-review`), so what the halt costs is the cycle, and what carrying on would
 // cost is a chunk branch growing under a human who was never shown it.
 //
 // ---------------------------------------------------------------------------
@@ -135,10 +135,10 @@
 // it; it is neither a landing nor a park.
 //
 // The WRAP-UP runs only after the source branch has moved: close every member
-// ON THE BRANCH explicitly (the `in-chunk` ones — a component member that was
+// ON THE BRANCH explicitly (the git-derived ones — a component member that was
 // never worked has no commits here and must not be closed; and no `Closes #N`
 // will ever fire, since GitHub honours those on its own merge of that pull
-// request and sandbar composed this one locally), drop `in-chunk`, close the
+// request and sandbar composed this one locally), drop `needs-review`, close the
 // PR, delete the chunk branch on origin. It cannot throw,
 // by construction: it is entirely inside the post-`landed` window, where a
 // wrapped throw would report `merged: []` against a source branch that moved.
@@ -735,7 +735,7 @@ type MergedChunkUnit = ChunkLandingUnit & { readonly ref: string };
 // (#60). Recorded only after the push, so the label finalise applies from it
 // never claims durability the commits do not have. Not `merged`: nothing of it
 // has reached the source branch, the issue stays OPEN, and what it earns is
-// `in-chunk` rather than a close.
+// `needs-review` rather than a close.
 export type ChunkLanding = {
   readonly issue: IssueRef;
   readonly chunkBranch: string;
@@ -879,7 +879,7 @@ export type ChunkGroup = {
 // Groups of more than one member are reachable since #61: a chunk whose root
 // has landed can hand this cycle every member blocked on it at once. Those
 // members are necessarily SIBLINGS rather than a chain — a member plans only
-// once its own blockers carry `in-chunk`, which no issue planned in the same
+// once its own blockers are on the chunk branch, which no issue planned in the same
 // cycle does — so the order within a group is not a dependency order and
 // ascending issue number (what `sortIssuesAsc` already gave) is simply
 // deterministic. Being siblings is also why they can conflict with each other
@@ -1271,7 +1271,7 @@ export async function runMergerWithAdapter(
   //
   // `chunkLanded` is the opposite and is carried VERBATIM: those commits really
   // are on origin (the entry is written after the push) and the issues really
-  // do need their `in-chunk` label. Landing a chunk does not move the source
+  // receive their `needs-review` display label. Landing a chunk does not move the source
   // branch, so it takes nothing away from the `merged: []` claim beside it —
   // the two answer different questions. `skipped` and `skippedChunks` are the
   // same: a tracker write already made, which is the whole reason a partial
@@ -1441,7 +1441,7 @@ export async function runMergerWithAdapter(
   // `attemptMerge`: it WRITES `chunkLanded`, and it has to write it before the
   // pull-request call below, which halts. Returning the landed members for a
   // caller to record instead would mean a halt on the PR left them out of the
-  // partial — and their commits are on origin by then, so `in-chunk` is owed
+  // partial — and their commits are on origin by then, so `needs-review` is owed
   // whether or not the review surface came up.
   const landChunkGroup = async (group: ChunkGroup): Promise<void> => {
     const branch = group.target.branch;
@@ -1510,14 +1510,15 @@ export async function runMergerWithAdapter(
       .catch(
         // Loud, like every other tracker write in this loop. The landing is
         // durable and the partial carries it, so the members still get
-        // `in-chunk`; what is missing is the thing a human reviews, and a run
+        // `needs-review`; what is missing is the thing a human reviews, and a run
         // that carried on would keep landing work onto a branch nobody had
         // been shown.
         asHalt(
           `Chunk branch ${branch} is on origin with ` +
             `${landedMembers.map((m) => `#${issueNumberOf(m)}`).join(", ")} landed on it, ` +
             `but its draft pull request could not be opened or updated. Those issues keep ` +
-            `their landing and are labelled in-chunk; open or update the PR by hand (or fix ` +
+            `their landing and are labelled needs-review when that display write succeeds; ` +
+            `open or update the PR by hand (or fix ` +
             `gh's permissions — the next cycle that lands a member on this chunk retries it)`,
         ),
       );
@@ -1561,7 +1562,7 @@ export async function runMergerWithAdapter(
   // Everything the resolve agent should be able to read about a chunk: the
   // member issues, all pointing at where their work actually is. Their own
   // issue branches are long since deleted (finalise reaps one when its member
-  // flips to `in-chunk`), so naming those would send an agent to a ref that is
+  // lands on the chunk), so naming those would send an agent to a ref that is
   // not there — and so, for the same reason, would naming the chunk branch:
   // only `origin/<chunk>` exists here, which is why the caller passes the ref
   // `fetchChunkRef` resolved rather than `request.branch`. See

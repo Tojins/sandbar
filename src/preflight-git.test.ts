@@ -202,7 +202,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
 
       const deleted = await deleteMergedSandbarBranches({
         ...cfg(layoutAt(target)),
-        inChunkIssues: new Set([7]),
+        chunkMemberIssues: new Set([7]),
       });
 
       expect([...deleted].sort()).toEqual([
@@ -231,7 +231,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
 
       const deleted = await deleteMergedSandbarBranches({
         ...cfg(layoutAt(target)),
-        inChunkIssues: new Set([7]),
+        chunkMemberIssues: new Set([7]),
       });
 
       expect(deleted).toEqual(["sandbar/issue-1-merged"]);
@@ -255,7 +255,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
 
       const deleted = await deleteMergedSandbarBranches({
         ...cfg(layoutAt(target)),
-        inChunkIssues: new Set([7]),
+        chunkMemberIssues: new Set([7]),
       });
 
       expect(deleted).toEqual(["sandbar/issue-1-merged"]);
@@ -354,25 +354,25 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // it). It exists only when a run died between the chunk push and the label
     // flip, and the delete pass reaps it as soon as it can verify containment.
     it("takes none of the three for the issue branch of an `in-chunk` member", async () => {
-      // A `gh` that answers the planner's two list queries by label, so
-      // `fetchChunkMembers` really returns #7 — the shim the other cases use
-      // fails every call, which is the "no chunks anywhere" default.
-      await writeFile(
-        join(shimBin, "gh"),
-        [
-          "#!/bin/sh",
-          'label=""; prev=""',
-          'for a in "$@"; do if [ "$prev" = "--label" ]; then label="$a"; fi; prev="$a"; done',
-          'if [ "$label" = "in-chunk" ]; then',
-          '  echo \'[{"number":7,"title":"t","body":"","labels":[{"name":"in-chunk"}]}]\'',
-          "else",
-          "  echo '[]'",
-          "fi",
-        ].join("\n"),
-        { mode: 0o755 },
-      );
       await git(target, "checkout", "-q", "-b", "sandbar/issue-7-member");
       await git(target, "commit", "-q", "--allow-empty", "-m", "member work");
+      await git(target, "checkout", "-q", "main");
+      await git(target, "checkout", "-q", "-b", "chunk");
+      await git(
+        target,
+        "merge",
+        "--no-ff",
+        "sandbar/issue-7-member",
+        "-m",
+        "Merge sandbar/issue-7: member",
+      );
+      const chunkTip = (await git(target, "rev-parse", "HEAD")).stdout.trim();
+      await git(
+        target,
+        "update-ref",
+        "refs/remotes/origin/sandbar/chunk-7-member",
+        chunkTip,
+      );
       await git(target, "checkout", "-q", "main");
 
       const state = await gatherState(cfg(layoutAt(target)));

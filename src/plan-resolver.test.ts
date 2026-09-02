@@ -1,13 +1,42 @@
 import { describe, expect, it } from "vitest";
-import { IN_CHUNK_LABEL } from "./chunks.js";
+import { NEEDS_REVIEW_LABEL } from "./chunks.js";
+const IN_CHUNK_LABEL = NEEDS_REVIEW_LABEL;
 import {
   type IssueFacts,
   type IssueState,
   type IssueSummary,
   type Plan,
   parseBlockedBy,
-  resolvePlan,
+  resolvePlan as resolvePlanCore,
 } from "./plan-resolver.js";
+
+const resolvePlan: typeof resolvePlanCore = (
+  candidates,
+  issueFacts,
+  excluded,
+  k,
+  defaultLane,
+  supplied,
+) => {
+  if (supplied) {
+    return resolvePlanCore(candidates, issueFacts, excluded, k, defaultLane, supplied);
+  }
+  const labelled = new Set<number>();
+  for (const candidate of candidates) {
+    if (candidate.labels.includes(NEEDS_REVIEW_LABEL)) labelled.add(candidate.number);
+    if ((issueFacts.get(candidate.number)?.labels ?? []).includes(NEEDS_REVIEW_LABEL)) {
+      labelled.add(candidate.number);
+    }
+  }
+  const membership = new Map<string, ReadonlySet<number>>();
+  for (const candidate of candidates) {
+    membership.set(
+      `sandbar/chunk-${candidate.number}-${candidate.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`,
+      labelled,
+    );
+  }
+  return resolvePlanCore(candidates, issueFacts, excluded, k, defaultLane, membership);
+};
 
 function issue(
   number: number,
@@ -612,9 +641,7 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
     expect(r.heldForReview).toEqual([]);
   });
 
-  it("drops an `in-chunk` candidate from the plan — the label is the de-queue", () => {
-    // Stated on the AUTO lane so nothing else can be the reason: without the
-    // in-chunk drop, #10 is an ordinary unblocked candidate and plans.
+  it("does not let a display label de-queue an auto-lane candidate", () => {
     const r = resolvePlan(
       [issue(10, "", inChunk), issue(11, "")],
       facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
@@ -623,7 +650,7 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
       "auto",
     );
 
-    expect(r.plan.map((p) => p.id)).toEqual(["11"]);
+    expect(r.plan.map((p) => p.id)).toEqual(["10", "11"]);
   });
 
   it("does not count an `in-chunk` candidate as held for review", () => {

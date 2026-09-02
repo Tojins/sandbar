@@ -13,7 +13,7 @@
 //      thing done to them.
 //   2. Which issues are on each of those branches? The plan's derivation
 //      answers that, and nothing else can: `LandedChunk` is built from the
-//      candidate graph, which lists `in-chunk` members back in precisely so
+//      candidate graph, which lists git-derived branch members back in so
 //      this question has an answer.
 //   3. Is there an open pull request for it? Asked per branch rather than by
 //      listing the repository's pull requests, because the branches here are

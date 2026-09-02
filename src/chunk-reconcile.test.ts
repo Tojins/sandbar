@@ -11,7 +11,7 @@ import {
   type ChunkWrapupAdapter,
   type PullRequestSummary,
 } from "./chunk-land.js";
-import { IN_CHUNK_LABEL, type LandedChunk } from "./chunks.js";
+import { NEEDS_REVIEW_LABEL, type LandedChunk } from "./chunks.js";
 import { reconcileLandedChunks } from "./chunk-reconcile.js";
 
 type Recorded = { readonly op: string; readonly arg: string };
@@ -121,9 +121,9 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(r.reconciled[0]?.residue).toEqual([]);
     expect(calls.map((c) => `${c.op} ${c.arg}`)).toEqual([
       "closeIssue 42",
-      `removeLabel 42:${IN_CHUNK_LABEL}`,
+      `removeLabel 42:${NEEDS_REVIEW_LABEL}`,
       "closeIssue 43",
-      `removeLabel 43:${IN_CHUNK_LABEL}`,
+      `removeLabel 43:${NEEDS_REVIEW_LABEL}`,
       "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
       "closePullRequest 9",
@@ -206,4 +206,3 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(r.closedIssues).toEqual([99]);
   });
 });
-

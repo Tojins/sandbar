@@ -113,7 +113,7 @@
 //   * it review-GATES the issue, by #57's downward inheritance, so no host
 //     default and no missing label can let review feedback auto-land;
 //   * it holds the issue until the work it comments on is really on origin —
-//     the tips carry `in-chunk`, which is the same-chunk satisfaction clause
+//     the tips are named by chunk-branch merge commits, the satisfaction clause
 //     the planner already has (#59); and
 //   * it puts the issue BEHIND everything on the branch, so the branch it is
 //     seeded from (the chunk tip, #61) contains the code the review is about.

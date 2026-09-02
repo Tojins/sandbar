@@ -110,7 +110,7 @@ an exit condition fires.
    **`land` label on that PR** (#64) makes the next cycle merge
    `origin/<chunk>` in the SAME source pass, ahead of the auto lane's branches,
    so one gate-2 and one landing cover both; the wrap-up then closes the
-   members on the branch, drops `in-chunk`, takes `land` back off the PR,
+   members named by its merge history, drops `needs-review`, takes `land` back off the PR,
    closes it and deletes the branch. `src/chunk-land.ts` owns the label, the
    selection, the wrap-up and — as `chunkForgeWrites` — the one spelling of the
    `gh`/`git` writes it makes, which the merge phase and the plan-time
@@ -118,7 +118,7 @@ an exit condition fires.
 
 4. **Finalise** (`src/finalize.ts` + `src/finalize-inputs.ts`) — per-issue
    branch lifecycle, bot comments, label flips (`ready-for-agent` ↔
-   `labels.needsInfo`/`labels.agentStuck`, plus `in-chunk` for a chunk-landed
+   `labels.needsInfo`/`labels.agentStuck`, plus display-only `needs-review` for a chunk-landed
    member, are the only labels sandbar applies — `land` (#64) it only ever
    REMOVES, from a pull request a human labelled).
    Runs in **two passes straddling the merge** (#30): Phase-2 terminals are
@@ -201,12 +201,13 @@ and used to announce themselves in four different ways, the halt in none at all.
   component of the *review-gated* issues under the `## Blocked by` graph,
   rooted at its parentless member; an issue straddling two chunks is blocked,
   never a reason to merge them. `src/chunks.ts` is the pure derivation and its
-  header owns the argument; `IN_CHUNK_LABEL` and `LAND_LABEL` (#59, #64) live
+  header owns the argument; `NEEDS_REVIEW_LABEL` and `LAND_LABEL` (#93, #64) live
   there too. **Origin owns the chunk branch** — every landing bases on
   `origin/<chunk>`, preflight fetches that namespace to reason about it, and
   the branch is deleted THERE when the chunk lands. What a chunk branch
   carries is `PlanResolution.landedChunks`, the only answer the whole
-  candidate graph can give: the `in-chunk` members, which is the set a landing
+  candidate graph can give: members named by `Merge sandbar/issue-<n>: ...`
+  commits on the exact chunk branch, which is the set a landing
   closes (#64) and whose tips a follow-up is blocked by (#63) — never the whole
   component, since a member that has never been worked has no commits
   anywhere. It also carries the ORDER those closes must go in, for the reason

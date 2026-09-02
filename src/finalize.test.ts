@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { IN_CHUNK_LABEL } from "./chunks.js";
+import { NEEDS_REVIEW_LABEL } from "./chunks.js";
 import { DEFAULT_LABELS, type LabelConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
 import {
@@ -235,12 +235,12 @@ describe("comment templates", () => {
   it("chunk-landed body cites no sandbar issue number, which would autolink in the host repo", () => {
     const body = CHUNK_LANDED_COMMENT_TEMPLATE(
       "sandbar/chunk-42-alpha",
-      IN_CHUNK_LABEL,
+      NEEDS_REVIEW_LABEL,
       READY_FOR_AGENT,
     );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("sandbar/chunk-42-alpha");
-    expect(body).toContain(IN_CHUNK_LABEL);
+    expect(body).toContain(NEEDS_REVIEW_LABEL);
     expect(body).not.toMatch(/#\d/);
   });
 });
@@ -307,7 +307,7 @@ describe("finalizeOne", () => {
     expect(action).toEqual({ kind: "deleted-local" });
     expect(calls.worktreeRemoves).toEqual([i.branch]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [IN_CHUNK_LABEL] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_REVIEW_LABEL] },
     ]);
     expect(calls.deletes).toEqual([i.branch]);
     // The branch is on origin under the chunk's name, so it is never pushed
@@ -315,7 +315,7 @@ describe("finalizeOne", () => {
     expect(calls.pushes).toEqual([]);
     expect(calls.comments).toHaveLength(1);
     expect(calls.comments[0]!.body).toContain("sandbar/chunk-45-x");
-    expect(calls.comments[0]!.body).toContain(IN_CHUNK_LABEL);
+    expect(calls.comments[0]!.body).toContain(NEEDS_REVIEW_LABEL);
   });
 
   it("chunk-landed with -d refusal: escalates to -D, on the merger's certainty", async () => {
@@ -335,10 +335,7 @@ describe("finalizeOne", () => {
     expect(calls.forceDeletes).toEqual(["sandbar/issue-45-t-45"]);
   });
 
-  it("chunk-landed with a failing label flip: throws, and has NOT deleted the branch", async () => {
-    // The flip is the de-queue. A branch deleted under an issue still carrying
-    // `ready-for-agent` is work the next cycle would write a second time, so
-    // the run stops with the branch intact instead.
+  it("chunk-landed with a failing display-label flip still deletes the branch", async () => {
     const { adapter, calls } = makeAdapter({
       labelEditOk: false,
       labelEditError: "label not found",
@@ -349,13 +346,10 @@ describe("finalizeOne", () => {
         adapter,
         LABELS,
       ),
-    ).rejects.toThrow(SandbarError);
-    expect(calls.deletes).toEqual([]);
-    expect(calls.forceDeletes).toEqual([]);
-    // And no comment: this arm's comment asserts the flip ("`ready-for-agent`
-    // has been replaced with `in-chunk`"), so posting it on a failed flip would
-    // contradict the issue's own labels — and the self-heal that re-plans this
-    // issue would post the same untrue comment again next cycle.
+    ).resolves.toEqual({ kind: "deleted-local" });
+    expect(calls.deletes).toEqual(["sandbar/issue-45-t-45"]);
+    // The label and its explanatory comment are display-only. Losing either
+    // cannot affect membership or landing, which are derived from git.
     expect(calls.comments).toEqual([]);
   });
 

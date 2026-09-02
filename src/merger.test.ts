@@ -4,7 +4,7 @@ import { SandbarError } from "./errors.js";
 import type { PushOutcome, VerifyAdapter } from "./forge-verify.js";
 import type { ChunkRefLookup, MergerGateOutput } from "./merger.js";
 import { LAND_LABEL, type ChunkLandTarget } from "./chunk-land.js";
-import { IN_CHUNK_LABEL } from "./chunks.js";
+import { NEEDS_REVIEW_LABEL } from "./chunks.js";
 import {
   SOURCE_TARGET,
   buildInstallFailedComment,
@@ -2292,8 +2292,8 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     // deleted.
     expect(calls.closes.map((c) => c.n)).toEqual([43, 42]);
     expect(calls.removedLabels).toEqual([
-      { n: 43, label: IN_CHUNK_LABEL },
-      { n: 42, label: IN_CHUNK_LABEL },
+      { n: 43, label: NEEDS_REVIEW_LABEL },
+      { n: 42, label: NEEDS_REVIEW_LABEL },
     ]);
     // `land` off before the close, so a pull request that would not close is
     // still not a request the next cycle honours.

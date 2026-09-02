@@ -28,11 +28,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { IN_CHUNK_LABEL } from "./chunks.js";
 import {
   buildPlan,
   fetchCandidates,
-  fetchChunkMembers,
 } from "./plan-resolver.js";
 
 const CONFIGURED = { owner: "acme", name: "app" };
@@ -134,20 +132,10 @@ describe("fetchCandidates names the configured repo (#34)", () => {
     expect(candidates[0]?.title).not.toBe("(no-remote)");
   });
 
-  // #59 — the two listings share every argument but `--label`, which is the
-  // whole difference between "the queue" and "what has already landed on a
-  // chunk branch". Pinned here rather than left to the union in `buildPlan`:
-  // a wrong label is an empty list, not an error, so the only symptom would be
-  // a feature that quietly does nothing.
-  it("lists the queue on `ready-for-agent` and chunk members on `in-chunk`", async () => {
+  it("lists the queue on `ready-for-agent`", async () => {
     const queue = await fetchCandidates(CONFIGURED);
-    const members = await fetchChunkMembers(CONFIGURED);
 
     expect(queue[0]?.body).toBe("ready-for-agent");
-    expect(members[0]?.body).toBe(IN_CHUNK_LABEL);
-    // And the chunk-member listing names the configured repo too — it is a
-    // second `gh issue list`, and #34 applies to it identically.
-    expect(members[0]?.title).toBe("acme/app");
   });
 });
 

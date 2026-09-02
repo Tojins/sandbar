@@ -60,4 +60,4 @@ export { AUTO_LAND_LABEL, type Lane } from "./lanes.js";
 // to create this one before its first chunk lands, and the run that discovers
 // otherwise stops mid-finalise. A host's setup script should spell it from
 // here rather than by hand.
-export { IN_CHUNK_LABEL } from "./chunks.js";
+export { NEEDS_REVIEW_LABEL } from "./chunks.js";
