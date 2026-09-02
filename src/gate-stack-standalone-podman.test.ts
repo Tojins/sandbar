@@ -52,47 +52,65 @@ afterAll(async () => {
   if (available) await cleanup();
 }, 120_000);
 
+async function standaloneFixture(
+  taskId: string,
+  onTestFinished: (fn: () => Promise<void>, timeout?: number) => void,
+) {
+  const stackId = podmanTestStackId("gate45", taskId);
+  const gName = (name: string): string =>
+    stackContainerNameFor(SCOPE, stackId, name);
+  const podName = podNameFor(SCOPE, stackId);
+  const networkName = networkNameFor(SCOPE, stackId);
+  const repo = await mkdtemp(join(tmpdir(), "sandbar-gate45-"));
+  const git = (...args: string[]) => exec("git", args, { cwd: repo });
+  const idOf = async (name: string): Promise<string | null> =>
+    await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", gName(name)])
+      .then((result) => result.stdout.trim())
+      .catch(() => null);
+  const spec = () =>
+    resolveGateStack({
+      containers: [
+        {
+          name: "db",
+          image: IMAGE,
+          lifecycle: "issue",
+          // Held so the test measures reuse, not mariadb bringup.
+          hold: true,
+          // A reused container deliberately does not repeat one-shot setup.
+          postReadyCommands: [["sh", "-c", "date +%s%N > /seeded"]],
+        },
+        { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+      ],
+      steps: [
+        { name: "read-marker", in: "runner", command: ["cat", "marker.txt"] },
+      ],
+    });
+
+  await git("init", "-q", "-b", "main");
+  await git("config", "user.email", "t@t");
+  await git("config", "user.name", "t");
+  await writeFile(join(repo, "marker.txt"), "committed\n");
+  await git("add", "-A");
+  await git("commit", "-qm", "init");
+  onTestFinished(async () => {
+    await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(
+      () => {},
+    );
+    await exec(RUNTIME, ["network", "rm", "-f", networkName]).catch(() => {});
+    await rm(repo, { recursive: true, force: true });
+  }, 120_000);
+
+  return { stackId, gName, repo, idOf, spec };
+}
+
 describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "keeps the stack up, then adopts its issue container on the same token and rebuilds it on a different one",
     async ({ expect, task, onTestFinished }) => {
-      const stackId = podmanTestStackId("gate45", task.id);
-      const gName = (name: string): string => stackContainerNameFor(SCOPE, stackId, name);
-      const podName = podNameFor(SCOPE, stackId);
-      const networkName = networkNameFor(SCOPE, stackId);
-      const repo = await mkdtemp(join(tmpdir(), "sandbar-gate45-"));
-      const git = (...args: string[]) => exec("git", args, { cwd: repo });
-      const idOf = async (name: string): Promise<string | null> => await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", gName(name)]).then((r) => r.stdout.trim()).catch(() => null);
-      const teardown = async (): Promise<void> => { await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(() => {}); await exec(RUNTIME, ["network", "rm", "-f", networkName]).catch(() => {}); };
-      const spec = () =>
-        resolveGateStack({
-          containers: [
-            {
-              name: "db",
-              image: IMAGE,
-              lifecycle: "issue",
-              // Held, so the container is `sleep infinity` and comes up in a
-              // second: what is under test is the reuse decision, not mariadb.
-              hold: true,
-              // One-shot setup, which a reused container deliberately does NOT
-              // re-run — so the file's CONTENTS are how a recreate is told from a
-              // reuse even if podman were to hand back an identical id.
-              postReadyCommands: [["sh", "-c", "date +%s%N > /seeded"]],
-            },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
-          ],
-          steps: [
-            { name: "read-marker", in: "runner", command: ["cat", "marker.txt"] },
-          ],
-        });
-
-      await git("init", "-q", "-b", "main");
-      await git("config", "user.email", "t@t");
-      await git("config", "user.name", "t");
-      await writeFile(join(repo, "marker.txt"), "committed\n");
-      await git("add", "-A");
-      await git("commit", "-qm", "init");
-      onTestFinished(async () => { await teardown(); await rm(repo, { recursive: true, force: true }); }, 120_000);
+      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
+        task.id,
+        onTestFinished,
+      );
 
       const first = await startStack({
         stackId: stackId,
@@ -167,43 +185,10 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "tears the stack down when keepAlive is not asked for, and reuses nothing without a token",
     async ({ expect, task, onTestFinished }) => {
-      const stackId = podmanTestStackId("gate45", task.id);
-      const gName = (name: string): string => stackContainerNameFor(SCOPE, stackId, name);
-      const podName = podNameFor(SCOPE, stackId);
-      const networkName = networkNameFor(SCOPE, stackId);
-      const repo = await mkdtemp(join(tmpdir(), "sandbar-gate45-"));
-      const git = (...args: string[]) => exec("git", args, { cwd: repo });
-      const idOf = async (name: string): Promise<string | null> => await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", gName(name)]).then((r) => r.stdout.trim()).catch(() => null);
-      const teardown = async (): Promise<void> => { await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(() => {}); await exec(RUNTIME, ["network", "rm", "-f", networkName]).catch(() => {}); };
-      const spec = () =>
-        resolveGateStack({
-          containers: [
-            {
-              name: "db",
-              image: IMAGE,
-              lifecycle: "issue",
-              // Held, so the container is `sleep infinity` and comes up in a
-              // second: what is under test is the reuse decision, not mariadb.
-              hold: true,
-              // One-shot setup, which a reused container deliberately does NOT
-              // re-run — so the file's CONTENTS are how a recreate is told from a
-              // reuse even if podman were to hand back an identical id.
-              postReadyCommands: [["sh", "-c", "date +%s%N > /seeded"]],
-            },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
-          ],
-          steps: [
-            { name: "read-marker", in: "runner", command: ["cat", "marker.txt"] },
-          ],
-        });
-
-      await git("init", "-q", "-b", "main");
-      await git("config", "user.email", "t@t");
-      await git("config", "user.name", "t");
-      await writeFile(join(repo, "marker.txt"), "committed\n");
-      await git("add", "-A");
-      await git("commit", "-qm", "init");
-      onTestFinished(async () => { await teardown(); await rm(repo, { recursive: true, force: true }); }, 120_000);
+      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
+        task.id,
+        onTestFinished,
+      );
 
       const stack = await startStack({
         stackId: stackId,
@@ -239,43 +224,10 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "gates the working tree when told to, and refuses it otherwise",
     async ({ expect, task, onTestFinished }) => {
-      const stackId = podmanTestStackId("gate45", task.id);
-      const gName = (name: string): string => stackContainerNameFor(SCOPE, stackId, name);
-      const podName = podNameFor(SCOPE, stackId);
-      const networkName = networkNameFor(SCOPE, stackId);
-      const repo = await mkdtemp(join(tmpdir(), "sandbar-gate45-"));
-      const git = (...args: string[]) => exec("git", args, { cwd: repo });
-      const idOf = async (name: string): Promise<string | null> => await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", gName(name)]).then((r) => r.stdout.trim()).catch(() => null);
-      const teardown = async (): Promise<void> => { await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(() => {}); await exec(RUNTIME, ["network", "rm", "-f", networkName]).catch(() => {}); };
-      const spec = () =>
-        resolveGateStack({
-          containers: [
-            {
-              name: "db",
-              image: IMAGE,
-              lifecycle: "issue",
-              // Held, so the container is `sleep infinity` and comes up in a
-              // second: what is under test is the reuse decision, not mariadb.
-              hold: true,
-              // One-shot setup, which a reused container deliberately does NOT
-              // re-run — so the file's CONTENTS are how a recreate is told from a
-              // reuse even if podman were to hand back an identical id.
-              postReadyCommands: [["sh", "-c", "date +%s%N > /seeded"]],
-            },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
-          ],
-          steps: [
-            { name: "read-marker", in: "runner", command: ["cat", "marker.txt"] },
-          ],
-        });
-
-      await git("init", "-q", "-b", "main");
-      await git("config", "user.email", "t@t");
-      await git("config", "user.name", "t");
-      await writeFile(join(repo, "marker.txt"), "committed\n");
-      await git("add", "-A");
-      await git("commit", "-qm", "init");
-      onTestFinished(async () => { await teardown(); await rm(repo, { recursive: true, force: true }); }, 120_000);
+      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
+        task.id,
+        onTestFinished,
+      );
 
       // Uncommitted, and untracked: the commonest shape of D1's refusal is a
       // forgotten `git add`, and it is also the shape the standalone gate most
@@ -316,43 +268,10 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "tees each step's output as it arrives without disturbing the capture",
     async ({ expect, task, onTestFinished }) => {
-      const stackId = podmanTestStackId("gate45", task.id);
-      const gName = (name: string): string => stackContainerNameFor(SCOPE, stackId, name);
-      const podName = podNameFor(SCOPE, stackId);
-      const networkName = networkNameFor(SCOPE, stackId);
-      const repo = await mkdtemp(join(tmpdir(), "sandbar-gate45-"));
-      const git = (...args: string[]) => exec("git", args, { cwd: repo });
-      const idOf = async (name: string): Promise<string | null> => await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", gName(name)]).then((r) => r.stdout.trim()).catch(() => null);
-      const teardown = async (): Promise<void> => { await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(() => {}); await exec(RUNTIME, ["network", "rm", "-f", networkName]).catch(() => {}); };
-      const spec = () =>
-        resolveGateStack({
-          containers: [
-            {
-              name: "db",
-              image: IMAGE,
-              lifecycle: "issue",
-              // Held, so the container is `sleep infinity` and comes up in a
-              // second: what is under test is the reuse decision, not mariadb.
-              hold: true,
-              // One-shot setup, which a reused container deliberately does NOT
-              // re-run — so the file's CONTENTS are how a recreate is told from a
-              // reuse even if podman were to hand back an identical id.
-              postReadyCommands: [["sh", "-c", "date +%s%N > /seeded"]],
-            },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
-          ],
-          steps: [
-            { name: "read-marker", in: "runner", command: ["cat", "marker.txt"] },
-          ],
-        });
-
-      await git("init", "-q", "-b", "main");
-      await git("config", "user.email", "t@t");
-      await git("config", "user.name", "t");
-      await writeFile(join(repo, "marker.txt"), "committed\n");
-      await git("add", "-A");
-      await git("commit", "-qm", "init");
-      onTestFinished(async () => { await teardown(); await rm(repo, { recursive: true, force: true }); }, 120_000);
+      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
+        task.id,
+        onTestFinished,
+      );
 
       const chunks: string[] = [];
       const stack = await startStack({
@@ -410,43 +329,10 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "does not keep — and so cannot adopt — a stack whose bringup never finished",
     async ({ expect, task, onTestFinished }) => {
-      const stackId = podmanTestStackId("gate45", task.id);
-      const gName = (name: string): string => stackContainerNameFor(SCOPE, stackId, name);
-      const podName = podNameFor(SCOPE, stackId);
-      const networkName = networkNameFor(SCOPE, stackId);
-      const repo = await mkdtemp(join(tmpdir(), "sandbar-gate45-"));
-      const git = (...args: string[]) => exec("git", args, { cwd: repo });
-      const idOf = async (name: string): Promise<string | null> => await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", gName(name)]).then((r) => r.stdout.trim()).catch(() => null);
-      const teardown = async (): Promise<void> => { await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(() => {}); await exec(RUNTIME, ["network", "rm", "-f", networkName]).catch(() => {}); };
-      const spec = () =>
-        resolveGateStack({
-          containers: [
-            {
-              name: "db",
-              image: IMAGE,
-              lifecycle: "issue",
-              // Held, so the container is `sleep infinity` and comes up in a
-              // second: what is under test is the reuse decision, not mariadb.
-              hold: true,
-              // One-shot setup, which a reused container deliberately does NOT
-              // re-run — so the file's CONTENTS are how a recreate is told from a
-              // reuse even if podman were to hand back an identical id.
-              postReadyCommands: [["sh", "-c", "date +%s%N > /seeded"]],
-            },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
-          ],
-          steps: [
-            { name: "read-marker", in: "runner", command: ["cat", "marker.txt"] },
-          ],
-        });
-
-      await git("init", "-q", "-b", "main");
-      await git("config", "user.email", "t@t");
-      await git("config", "user.name", "t");
-      await writeFile(join(repo, "marker.txt"), "committed\n");
-      await git("add", "-A");
-      await git("commit", "-qm", "init");
-      onTestFinished(async () => { await teardown(); await rm(repo, { recursive: true, force: true }); }, 120_000);
+      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
+        task.id,
+        onTestFinished,
+      );
 
       const seedFlag = join(repo, "seed-flag");
       const seeding = () =>
@@ -534,43 +420,10 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "does not recreate an adopted container because the image it runs is spelled differently",
     async ({ expect, task, onTestFinished }) => {
-      const stackId = podmanTestStackId("gate45", task.id);
-      const gName = (name: string): string => stackContainerNameFor(SCOPE, stackId, name);
-      const podName = podNameFor(SCOPE, stackId);
-      const networkName = networkNameFor(SCOPE, stackId);
-      const repo = await mkdtemp(join(tmpdir(), "sandbar-gate45-"));
-      const git = (...args: string[]) => exec("git", args, { cwd: repo });
-      const idOf = async (name: string): Promise<string | null> => await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", gName(name)]).then((r) => r.stdout.trim()).catch(() => null);
-      const teardown = async (): Promise<void> => { await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(() => {}); await exec(RUNTIME, ["network", "rm", "-f", networkName]).catch(() => {}); };
-      const spec = () =>
-        resolveGateStack({
-          containers: [
-            {
-              name: "db",
-              image: IMAGE,
-              lifecycle: "issue",
-              // Held, so the container is `sleep infinity` and comes up in a
-              // second: what is under test is the reuse decision, not mariadb.
-              hold: true,
-              // One-shot setup, which a reused container deliberately does NOT
-              // re-run — so the file's CONTENTS are how a recreate is told from a
-              // reuse even if podman were to hand back an identical id.
-              postReadyCommands: [["sh", "-c", "date +%s%N > /seeded"]],
-            },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
-          ],
-          steps: [
-            { name: "read-marker", in: "runner", command: ["cat", "marker.txt"] },
-          ],
-        });
-
-      await git("init", "-q", "-b", "main");
-      await git("config", "user.email", "t@t");
-      await git("config", "user.name", "t");
-      await writeFile(join(repo, "marker.txt"), "committed\n");
-      await git("add", "-A");
-      await git("commit", "-qm", "init");
-      onTestFinished(async () => { await teardown(); await rm(repo, { recursive: true, force: true }); }, 120_000);
+      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
+        task.id,
+        onTestFinished,
+      );
 
       const variantA = testImageTag("reuse-variant");
       const variantB = testImageTag("reuse-variant-alias");
