@@ -119,8 +119,8 @@
 // demonstrably on the source branch by then, so the branch is not a recovery
 // point for anything, and KEEPING it would make the reconciler pick the same
 // chunk up every cycle forever, name nothing again, and never resolve. What it
-// costs is the one case where the emptiness is wrong — a member carrying
-// merge commit that the derivation did not name, from a run that pushed the chunk
+// costs is the one case where the emptiness is wrong — a member merge commit
+// that the derivation did not name, from a run that pushed the chunk
 // branch and died before finalise labelled it — where the issue is left OPEN,
 // off the queue, with no branch left for anything to retry from. That is why
 // both the pull request and the orchestrator's console SAY the list was empty
@@ -766,8 +766,8 @@ export async function wrapUpLandedChunk(
     try {
       await adapter.removeLabel(member.number, NEEDS_REVIEW_LABEL);
     } catch (err) {
-      // Benign, and said so: `fetchChunkMembers` lists OPEN issues, so a
-      // closed one carrying the label is invisible to the planner either way.
+      // Benign, and said so: the planner never reads this display label, and
+      // the issue is already closed.
       residue.push(
         `#${member.number} is closed but kept its \`${NEEDS_REVIEW_LABEL}\` label (harmless): ${detail(err)}`,
       );

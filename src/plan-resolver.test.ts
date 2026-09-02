@@ -1,42 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { NEEDS_REVIEW_LABEL } from "./chunks.js";
-const IN_CHUNK_LABEL = NEEDS_REVIEW_LABEL;
+import { chunkBranchName } from "./naming.js";
 import {
   type IssueFacts,
   type IssueState,
   type IssueSummary,
   type Plan,
   parseBlockedBy,
-  resolvePlan as resolvePlanCore,
+  resolvePlan,
 } from "./plan-resolver.js";
 
-const resolvePlan: typeof resolvePlanCore = (
-  candidates,
-  issueFacts,
-  excluded,
-  k,
-  defaultLane,
-  supplied,
-) => {
-  if (supplied) {
-    return resolvePlanCore(candidates, issueFacts, excluded, k, defaultLane, supplied);
-  }
-  const labelled = new Set<number>();
-  for (const candidate of candidates) {
-    if (candidate.labels.includes(NEEDS_REVIEW_LABEL)) labelled.add(candidate.number);
-    if ((issueFacts.get(candidate.number)?.labels ?? []).includes(NEEDS_REVIEW_LABEL)) {
-      labelled.add(candidate.number);
-    }
-  }
-  const membership = new Map<string, ReadonlySet<number>>();
-  for (const candidate of candidates) {
-    membership.set(
-      `sandbar/chunk-${candidate.number}-${candidate.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`,
-      labelled,
-    );
-  }
-  return resolvePlanCore(candidates, issueFacts, excluded, k, defaultLane, membership);
-};
+const membersOn = (
+  root: number,
+  title: string,
+  ...members: number[]
+): ReadonlyMap<string, ReadonlySet<number>> =>
+  new Map([[chunkBranchName(root, title), new Set(members)]]);
 
 function issue(
   number: number,
@@ -59,8 +37,6 @@ const states = (
   new Map(
     Object.entries(o).map(([n, s]) => [Number(n), { state: s, labels: [] }]),
   );
-// The authoritative facts of a blocker that has landed on its chunk's branch:
-// still OPEN, carrying `in-chunk` and nothing else.
 const facts = (
   o: Record<number, { state?: IssueState; labels?: string[] }>,
 ): ReadonlyMap<number, IssueFacts> =>
@@ -340,11 +316,12 @@ describe("resolvePlan lanes (#57)", () => {
     // on #12's chunk rather than being held: the override is not a refusal to
     // work the issue, it is a redirection of where the work goes.
     const r = resolvePlan(
-      [issue(11, "## Blocked by\n- #12\n", { labels: ["auto-land"] }), issue(12, "", { labels: [IN_CHUNK_LABEL] })],
-      facts({ 12: { labels: [IN_CHUNK_LABEL] } }),
+      [issue(11, "## Blocked by\n- #12\n", { labels: ["auto-land"] }), issue(12, "")],
+      facts({ 12: {} }),
       new Set(),
       3,
       "review",
+      membersOn(12, "Issue 12", 12),
     );
 
     expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
@@ -439,6 +416,7 @@ describe("resolvePlan lanes (#57)", () => {
       "review",
     );
 
+    expect(r.plan).toEqual([]);
     expect(r.heldForReview).toEqual([]);
   });
 
@@ -483,20 +461,20 @@ describe("resolvePlan lanes (#57)", () => {
 // phase 2 to seed from the chunk tip where the blocker's commits actually are
 // (#61), so a member planned with `chunk: null` would be developed against a
 // tree missing its blocker's work.
-describe("resolvePlan in-chunk blockers (#59)", () => {
-  const inChunk = { labels: [IN_CHUNK_LABEL] };
+describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
 
-  it("satisfies a blocker that is `in-chunk` in the SAME chunk", () => {
+  it("satisfies a blocker named on the SAME derived chunk branch", () => {
     // #10 landed on the chunk branch; #11 is built on it and is in that same
     // chunk by construction, so #10's commits are already under its feet. The
     // chunk #11 carries is #10's, which is what makes that true: phase 2 seeds
     // #11's branch from that branch's tip (#61).
     const r = resolvePlan(
-      [issue(10, "", inChunk), issue(11, "## Blocked by\n- #10\n")],
-      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      [issue(10, ""), issue(11, "## Blocked by\n- #10\n")],
+      facts({ 10: {} }),
       new Set(),
       3,
       "review",
+      membersOn(10, "Issue 10", 10),
     );
 
     expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
@@ -529,34 +507,36 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
     expect(r.heldForReview).toEqual([]);
   });
 
-  it("keeps cross-chunk dependencies strict: two `in-chunk` parents, two chunks", () => {
+  it("keeps cross-chunk dependencies strict: two published parents, two chunks", () => {
     // #30 straddles two chunks, so `deriveChunks` gives it none — and a
     // dependent with no chunk shares one with nobody. Both its blockers have
     // landed, and it still waits, exactly as the two-chunk-parent rule says.
     const r = resolvePlan(
       [
-        issue(10, "", inChunk),
-        issue(20, "", inChunk),
+        issue(10, ""),
+        issue(20, ""),
         issue(30, "## Blocked by\n- #10\n- #20\n"),
       ],
-      facts({
-        10: { labels: [IN_CHUNK_LABEL] },
-        20: { labels: [IN_CHUNK_LABEL] },
-      }),
+      facts({ 10: {}, 20: {} }),
       new Set(),
       3,
       "review",
+      new Map([
+        ...membersOn(10, "Issue 10", 10),
+        ...membersOn(20, "Issue 20", 20),
+      ]),
     );
 
+    expect(r.plan).toEqual([]);
     expect(r.heldForReview).toEqual([]);
   });
 
-  it("does not satisfy an `in-chunk` blocker that is in no chunk sandbar can see", () => {
+  it("does not satisfy a blocker that is in no chunk sandbar can derive", () => {
     // #99 is not in the listing at all, so it has no lane and no chunk. The
     // label alone is not the criterion — the shared branch is.
     const r = resolvePlan(
       [issue(11, "## Blocked by\n- #99\n")],
-      facts({ 99: { labels: [IN_CHUNK_LABEL] } }),
+      facts({ 99: {} }),
       new Set(),
       3,
       "review",
@@ -585,18 +565,19 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
     // open and has not landed on the chunk branch. This is what bounds a chunk
     // to one layer per cycle and is why same-cycle members are always siblings
     // — #12 waits for the cycle AFTER the one that lands #11 and flips it to
-    // `in-chunk`, so it can never be planned alongside the very branch it
+    // branch, so it can never be planned alongside the very branch it
     // would have to be seeded from.
     const r = resolvePlan(
       [
-        issue(10, "", inChunk),
+        issue(10, ""),
         issue(11, "## Blocked by\n- #10\n"),
         issue(12, "## Blocked by\n- #11\n"),
       ],
-      facts({ 10: { labels: [IN_CHUNK_LABEL] }, 11: {}, 12: {} }),
+      facts({ 10: {}, 11: {}, 12: {} }),
       new Set(),
       3,
       "review",
+      membersOn(10, "Issue 10", 10),
     );
 
     expect(r.plan.map((p) => p.id)).toEqual(["11"]);
@@ -610,14 +591,15 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
   it("plans every member whose blockers have landed, as one layer", () => {
     const r = resolvePlan(
       [
-        issue(10, "", inChunk),
+        issue(10, ""),
         issue(11, "## Blocked by\n- #10\n"),
         issue(12, "## Blocked by\n- #10\n"),
       ],
-      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      facts({ 10: {} }),
       new Set(),
       3,
       "review",
+      membersOn(10, "Issue 10", 10),
     );
 
     expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
@@ -643,8 +625,8 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
 
   it("does not let a display label de-queue an auto-lane candidate", () => {
     const r = resolvePlan(
-      [issue(10, "", inChunk), issue(11, "")],
-      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      [issue(10, "", { labels: ["needs-review"] }), issue(11, "")],
+      facts({ 10: { labels: ["needs-review"] } }),
       new Set(),
       3,
       "auto",
@@ -654,32 +636,31 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
     expect(r.plan.map((p) => p.id)).toEqual(["10", "11"]);
   });
 
-  it("does not count an `in-chunk` candidate as held for review", () => {
+  it("does not count a git-derived member as held for review", () => {
     // It is review-gated and out of the plan, but it is not waiting on a human
     // to be worked — it has already been worked. Reporting it as held would
     // make the held list grow with every member a chunk lands.
     const r = resolvePlan(
-      [issue(10, "", inChunk)],
-      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      [issue(10, "")],
+      facts({ 10: {} }),
       new Set(),
       3,
       "review",
+      membersOn(10, "Issue 10", 10),
     );
 
     expect(r.plan).toEqual([]);
     expect(r.heldForReview).toEqual([]);
   });
 
-  it("reads the label from the authoritative facts when the listing lags", () => {
-    // The search index still shows #10 as it was before the flip. GraphQL is
-    // strongly consistent, so it decides — both that #10 is out of the plan and
-    // that #11's blocker is satisfied.
+  it("uses branch history even when tracker facts have no display label", () => {
     const r = resolvePlan(
       [issue(10, ""), issue(11, "## Blocked by\n- #10\n")],
-      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      facts({ 10: {} }),
       new Set(),
       3,
       "review",
+      membersOn(10, "Issue 10", 10),
     );
 
     expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
@@ -695,15 +676,14 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
     expect(r.heldForReview).toEqual([]);
   });
 
-  it("reads the label from the listing when the facts batch missed the issue", () => {
-    // The other direction of the same fail-safe: a state-fetch miss must not
-    // resurrect a landed member into the plan.
+  it("uses branch history when the facts batch missed the member", () => {
     const r = resolvePlan(
-      [issue(10, "", inChunk), issue(11, "## Blocked by\n- #10\n")],
+      [issue(10, ""), issue(11, "## Blocked by\n- #10\n")],
       new Map(),
       new Set(),
       3,
       "review",
+      membersOn(10, "Issue 10", 10),
     );
 
     expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
@@ -719,7 +699,7 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
     expect(r.heldForReview).toEqual([]);
   });
 
-  it("is inert with no `in-chunk` label anywhere, on either lane", () => {
+  it("is inert with no chunk membership anywhere, on either lane", () => {
     const candidates = [
       issue(10, ""),
       issue(11, "## Blocked by\n- #10\n"),
@@ -749,11 +729,9 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
 // graph, and phase 3 has this cycle's DONE branches and nothing else.
 //
 // Since #61 a planned issue with a landed sibling is the ORDINARY case: a
-// member plans once its blockers carry `in-chunk`, and a blocker carrying that
-// label is a member already on the chunk branch. The graph below is the mirror
-// of that shape — here the landed member is the one BEHIND, which only a
-// hand-applied label reaches — and the assertion is the same either way:
-// whatever holds `in-chunk` is what the plan hands the PR body.
+// member plans once its blockers are named by the exact chunk branch. The graph
+// below is the mirror of that shape: the already-landed member is behind the
+// root, and branch history is what the plan hands the PR body.
 describe("resolvePlan chunk PR members (#62)", () => {
   it("carries the chunk's already-landed members, with their titles", () => {
     const r = resolvePlan(
@@ -761,13 +739,13 @@ describe("resolvePlan chunk PR members (#62)", () => {
         issue(10, "", { title: "Root" }),
         issue(11, "## Blocked by\n- #10\n", {
           title: "Landed member",
-          labels: [IN_CHUNK_LABEL],
         }),
       ],
-      facts({ 11: { labels: [IN_CHUNK_LABEL] } }),
+      facts({ 11: {} }),
       new Set(),
       3,
       "review",
+      membersOn(10, "Root", 11),
     );
 
     expect(r.plan.map((p) => p.chunk?.landed)).toEqual([
@@ -799,20 +777,17 @@ describe("resolvePlan landed chunks (#63, #64)", () => {
   it("reports a chunk with work on origin: what its branch carries, and the tips", () => {
     const r = resolvePlan(
       [
-        issue(10, "", { title: "Root", labels: [IN_CHUNK_LABEL] }),
+        issue(10, "", { title: "Root" }),
         issue(11, "## Blocked by\n- #10\n", {
           title: "Second",
-          labels: [IN_CHUNK_LABEL],
         }),
         issue(12, "## Blocked by\n- #11\n", { title: "Queued" }),
       ],
-      facts({
-        10: { labels: [IN_CHUNK_LABEL] },
-        11: { labels: [IN_CHUNK_LABEL] },
-      }),
+      facts({ 10: {}, 11: {} }),
       new Set(),
       3,
       "review",
+      membersOn(10, "Root", 10, 11),
     );
 
     expect(r.landedChunks).toEqual([
@@ -837,16 +812,17 @@ describe("resolvePlan landed chunks (#63, #64)", () => {
     // #64's whole correctness: #12 above is in the chunk's COMPONENT and is
     // planned this very cycle, but no commit of it is anywhere. Closing it
     // when the chunk lands would destroy queued work and tell a human it had
-    // landed, so `members` is the `in-chunk` set and never `Chunk.members`.
+    // landed, so `members` is the branch-history set and never `Chunk.members`.
     const r = resolvePlan(
       [
-        issue(10, "", { title: "Root", labels: [IN_CHUNK_LABEL] }),
+        issue(10, "", { title: "Root" }),
         issue(11, "## Blocked by\n- #10\n", { title: "Queued" }),
       ],
-      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      facts({ 10: {} }),
       new Set(),
       3,
       "review",
+      membersOn(10, "Root", 10),
     );
 
     expect(r.plan.map((p) => p.id)).toEqual(["11"]);
@@ -864,8 +840,8 @@ describe("resolvePlan landed chunks (#63, #64)", () => {
 
   it("reports nothing on the default lane", () => {
     const r = resolvePlan(
-      [issue(10, "", { labels: [IN_CHUNK_LABEL] })],
-      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      [issue(10, "")],
+      facts({ 10: {} }),
       new Set(),
       3,
       "auto",
@@ -878,16 +854,17 @@ describe("resolvePlan landed chunks (#63, #64)", () => {
     // The end-to-end claim of #63, stated as the planner sees it: a follow-up
     // declaring the chunk's tip is review-gated by inheritance, lands in that
     // same chunk, and is eligible in the very cycle it was filed — its blocker
-    // already carries `in-chunk`.
+    // is already named by the exact chunk branch.
     const r = resolvePlan(
       [
-        issue(10, "", { title: "Root", labels: [IN_CHUNK_LABEL] }),
+        issue(10, "", { title: "Root" }),
         issue(50, "## Blocked by\n- #10\n", { title: "Chunk #10: address review feedback" }),
       ],
-      facts({ 10: { labels: [IN_CHUNK_LABEL] } }),
+      facts({ 10: {} }),
       new Set(),
       3,
       "review",
+      membersOn(10, "Root", 10),
     );
 
     expect(r.plan.map((p) => p.id)).toEqual(["50"]);

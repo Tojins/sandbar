@@ -147,6 +147,7 @@ describe("fetchCandidates names the configured repo (#34)", () => {
 // asserted is that the union reaches the real listing path at all.
 describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
   let shimBin: string;
+  let repoDir: string;
   let originalPath: string | undefined;
 
   const FILED = {
@@ -158,6 +159,8 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
 
   beforeEach(async () => {
     shimBin = await mkdtemp(join(tmpdir(), "sandbar-extra-"));
+    repoDir = await mkdtemp(join(tmpdir(), "sandbar-plan-repo-"));
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repoDir });
     // An EMPTY queue and an empty chunk-member listing — the state a
     // just-filed issue is invisible in — with authoritative facts that know
     // both it and its blocker, which is how the real GraphQL batch answers.
@@ -182,10 +185,11 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
     if (originalPath === undefined) delete process.env["PATH"];
     else process.env["PATH"] = originalPath;
     await rm(shimBin, { recursive: true, force: true });
+    await rm(repoDir, { recursive: true, force: true });
   });
 
   it("plans an issue the listing has not caught up with", async () => {
-    const r = await buildPlan(CONFIGURED, { extraCandidates: [FILED] });
+    const r = await buildPlan(CONFIGURED, { repoDir, extraCandidates: [FILED] });
     expect(r.plan.map((p) => p.id)).toEqual(["50"]);
   });
 
@@ -194,11 +198,53 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
     // plan is dropped like any other candidate. Modelled by asking for #10,
     // which the batch above reports CLOSED.
     const closed = { ...FILED, number: 10, body: "" };
-    const r = await buildPlan(CONFIGURED, { extraCandidates: [closed] });
+    const r = await buildPlan(CONFIGURED, { repoDir, extraCandidates: [closed] });
     expect(r.plan).toEqual([]);
   });
 
   it("plans nothing when nothing is handed in", async () => {
-    expect((await buildPlan(CONFIGURED)).plan).toEqual([]);
+    expect((await buildPlan(CONFIGURED, { repoDir })).plan).toEqual([]);
+  });
+});
+
+describe("buildPlan loads git-derived members into the candidate graph (#93)", () => {
+  let shimBin: string;
+  let repoDir: string;
+  let originalPath: string | undefined;
+
+  beforeEach(async () => {
+    shimBin = await mkdtemp(join(tmpdir(), "sandbar-member-shim-"));
+    repoDir = await mkdtemp(join(tmpdir(), "sandbar-member-repo-"));
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repoDir });
+    execFileSync("git", ["config", "user.email", "sandbar@example.test"], { cwd: repoDir });
+    execFileSync("git", ["config", "user.name", "Sandbar Test"], { cwd: repoDir });
+    execFileSync("git", ["commit", "--allow-empty", "-qm", "base"], { cwd: repoDir });
+    execFileSync("git", ["checkout", "-qb", "member"], { cwd: repoDir });
+    execFileSync("git", ["commit", "--allow-empty", "-qm", "work"], { cwd: repoDir });
+    execFileSync("git", ["checkout", "-q", "main"], { cwd: repoDir });
+    execFileSync("git", ["merge", "--no-ff", "member", "-m", "Merge sandbar/issue-60: Root"], { cwd: repoDir });
+    execFileSync("git", ["update-ref", "refs/remotes/origin/sandbar/chunk-60-root", "HEAD"], { cwd: repoDir });
+    await writeFile(join(shimBin, "gh"), [
+      "#!/bin/sh",
+      'case "$1 $2" in',
+      '  "issue list") printf "[]" ;;',
+      '  "api graphql") printf \'{"data":{"repository":{"i60":{"number":60,"title":"Root","body":"","state":"OPEN","labels":{"nodes":[]}}}}}\' ;;',
+      "esac",
+    ].join("\n") + "\n", { mode: 0o755 });
+    originalPath = process.env["PATH"];
+    process.env["PATH"] = `${shimBin}:${originalPath ?? ""}`;
+  });
+
+  afterEach(async () => {
+    if (originalPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = originalPath;
+    await rm(shimBin, { recursive: true, force: true });
+    await rm(repoDir, { recursive: true, force: true });
+  });
+
+  it("reports a member found only through origin chunk history", async () => {
+    const result = await buildPlan(CONFIGURED, { repoDir, defaultLane: "review" });
+    expect(result.plan).toEqual([]);
+    expect(result.landedChunks[0]?.members).toEqual([{ number: 60, title: "Root" }]);
   });
 });

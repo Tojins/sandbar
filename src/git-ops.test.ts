@@ -629,11 +629,11 @@ describe("ensureIssueBranch — a failed fetch falls back to the cached tip (#61
 // case that proves it is guarded rather than merely argued for.
 //
 // The argument said a non-root member can never find its chunk branch missing:
-// it plans only once a blocker carries `in-chunk`, which finalise applies only
+// it plans only once chunk history names its blocker, which can happen only
 // after the chunk branch is on origin. What that argument leaves out is that
 // `chunk.branch` is DERIVED per cycle from the chunk's current root, and a
 // chunk RE-ROOTS when its root leaves the graph. Close the root issue and both
-// of the planner's listings drop it (`fetchCandidates` and `fetchChunkMembers`
+// of the planner's inputs drop it (the queue and git-derived member batch
 // are open-only), so the survivors re-derive under a new root and a branch name
 // nobody has ever pushed — while their commits sit on the old one.
 //

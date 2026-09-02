@@ -51,8 +51,8 @@
 // has ever meant here.
 //
 // CROSS-CHUNK dependencies stay strict, and nothing about them is relaxed. An
-// blocker present on a DIFFERENT chunk branch has not
-// reached the source branch, so its commits are not under the dependent at all;
+// blocker present on a DIFFERENT chunk branch has not reached the source
+// branch, so its commits are not under the dependent at all;
 // treating it as satisfied would start work on a base that does not exist. The
 // dependent waits for that other chunk to land and its issues to close —
 // exactly what `chunks.ts`'s two-chunk-parent rule already says such an issue
@@ -62,7 +62,7 @@
 //
 // One consequence for what this module LISTS: an issue that has landed on a
 // chunk branch has left the `ready-for-agent` query, yet it must stay in the
-// graph this module derives lanes and chunks from. `fetchChunkMembers` therefore
+// graph this module derives lanes and chunks from. `readChunkMembers` therefore
 // enumerates the issue numbers from the fetched chunk branches' merge history
 // and fetches those issues directly. Dropping those issues from the
 // graph would break the feature in two separate ways: a chunk that has landed
@@ -322,7 +322,7 @@ export function resolvePlan(
   // nothing else, so a chunk growing by one member per cycle would otherwise
   // get a PR that forgets every member but the newest. Titles come from the
   // listing, which carries every chunk member by construction:
-  // `fetchChunkMembers` lists the landed ones back in, and `deriveChunks` only
+  // the git-derived member batch lists the landed ones back in, and `deriveChunks` only
   // ever names issues it was given.
   const titleOf = new Map(candidates.map((c) => [c.number, c.title] as const));
   const chunkTargetOf = (n: number): ChunkTarget | null => {
@@ -464,15 +464,6 @@ export async function fetchCandidates(
 // the two reasons the header spells out: a chunk re-rooted around its surviving
 // members names a branch nothing is on, and a descendant whose gating ancestor
 // left the graph reads as auto.
-export async function fetchChunkMembers(
-  repo: RepoRef,
-  repoDir: string,
-): Promise<readonly IssueSummary[]> {
-  const byBranch = await readChunkMembers(repoDir);
-  const numbers = [...new Set([...byBranch.values()].flatMap((ns) => [...ns]))];
-  return fetchIssueSummaries(numbers, repo);
-}
-
 /** Merge subjects are the durable membership record written by merger.ts. */
 export async function readChunkMembers(
   repoDir: string,
@@ -528,28 +519,49 @@ async function fetchIssueSummaries(
   repo: RepoRef,
 ): Promise<readonly IssueSummary[]> {
   if (numbers.length === 0) return [];
-  const fields = numbers
-    .map((n) => `i${n}: issue(number: ${n}) { number title body state labels(first: 100) { nodes { name } } }`)
+  const records = await ghIssueBatch(
+    numbers,
+    repo,
+    "number title body labels(first: 100) { nodes { name } }",
+  );
+  return numbers.flatMap((n) => {
+    const issue = records[`i${n}`];
+    if (!issue || typeof issue.number !== "number") return [];
+    return [{
+      number: issue.number,
+      title: issue.title ?? "",
+      body: issue.body ?? "",
+      labels: (issue.labels?.nodes ?? []).flatMap((l) => l?.name ? [l.name] : []),
+    }];
+  });
+}
+
+type GhIssueRecord = {
+  readonly number?: number;
+  readonly title?: string;
+  readonly body?: string;
+  readonly state?: string;
+  readonly labels?: {
+    readonly nodes?: ReadonlyArray<{ readonly name?: string } | null> | null;
+  };
+};
+
+async function ghIssueBatch(
+  numbers: readonly number[],
+  repo: RepoRef,
+  selection: string,
+): Promise<Record<string, GhIssueRecord | null>> {
+  const fields = [...new Set(numbers)]
+    .map((n) => `i${n}: issue(number: ${n}) { ${selection} }`)
     .join("\n");
   const query = `query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){${fields}}}`;
   const { stdout } = await exec("gh", [
     "api", "graphql", "-F", `owner=${repo.owner}`, "-F", `repo=${repo.name}`,
     "-f", `query=${query}`,
   ]);
-  const parsed = JSON.parse(stdout) as { data: { repository: Record<string, {
-    number: number; title: string; body: string; state: string;
-    labels?: { nodes?: ReadonlyArray<{ name?: string } | null> | null };
-  } | null> } };
-  return numbers.flatMap((n) => {
-    const issue = parsed.data.repository[`i${n}`];
-    if (!issue || issue.state === "CLOSED") return [];
-    return [{
-      number: issue.number,
-      title: issue.title,
-      body: issue.body,
-      labels: (issue.labels?.nodes ?? []).flatMap((l) => l?.name ? [l.name] : []),
-    }];
-  });
+  return (JSON.parse(stdout) as {
+    data: { repository: Record<string, GhIssueRecord | null> };
+  }).data.repository;
 }
 
 // Authoritative facts for a set of issue numbers, via a single GraphQL batch.
@@ -569,36 +581,13 @@ export async function fetchIssueStates(
 ): Promise<ReadonlyMap<number, IssueFacts>> {
   const result = new Map<number, IssueFacts>();
   if (numbers.length === 0) return result;
-  const fields = [...new Set(numbers)]
-    .map(
-      (n) =>
-        `i${n}: issue(number: ${n}) { state labels(first: 100) { nodes { name } } }`,
-    )
-    .join("\n");
-  const query = `query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){${fields}}}`;
-  const { stdout } = await exec("gh", [
-    "api",
-    "graphql",
-    "-F",
-    `owner=${repo.owner}`,
-    "-F",
-    `repo=${repo.name}`,
-    "-f",
-    `query=${query}`,
-  ]);
-  const parsed = JSON.parse(stdout) as {
-    data: {
-      repository: Record<
-        string,
-        {
-          state: string;
-          labels?: { nodes?: ReadonlyArray<{ name?: string } | null> | null };
-        } | null
-      >;
-    };
-  };
+  const records = await ghIssueBatch(
+    numbers,
+    repo,
+    "state labels(first: 100) { nodes { name } }",
+  );
   for (const n of numbers) {
-    const v = parsed.data.repository[`i${n}`];
+    const v = records[`i${n}`];
     if (!v) continue;
     result.set(n, {
       state: v.state === "CLOSED" ? "CLOSED" : "OPEN",
@@ -616,7 +605,7 @@ export async function fetchIssueStates(
 // read past. `resolvePlan` keeps its positional shape — it is the table-tested
 // pure function, and its tests state every argument anyway.
 export type BuildPlanOptions = {
-  readonly repoDir?: string;
+  readonly repoDir: string;
   readonly excluded?: ReadonlySet<number>;
   readonly k?: number;
   readonly defaultLane?: Lane;
@@ -639,16 +628,14 @@ export type BuildPlanOptions = {
 
 export async function buildPlan(
   repo: RepoRef,
-  options: BuildPlanOptions = {},
+  options: BuildPlanOptions,
 ): Promise<PlanResolution> {
   const excluded = options.excluded ?? new Set<number>();
   const k = options.k ?? DEFAULT_K;
   // Read once for both member enumeration and the pure resolver. A chunk can
   // grow between two reads; one snapshot keeps the candidate graph and every
   // membership decision about that graph coherent.
-  const chunkMembers = options.repoDir
-    ? await readChunkMembers(options.repoDir)
-    : new Map<string, ReadonlySet<number>>();
+  const chunkMembers = await readChunkMembers(options.repoDir);
   const chunkMemberNumbers = [
     ...new Set([...chunkMembers.values()].flatMap((ns) => [...ns])),
   ];

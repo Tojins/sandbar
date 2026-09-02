@@ -204,7 +204,7 @@ export async function fetchOriginChunkBranch(
 //     carrying the commits is on origin. But the branch NAME is derived per
 //     cycle from the chunk's current root, and a chunk RE-ROOTS when that root
 //     leaves the graph — close it and the planner's two open-only listings
-//     (`fetchCandidates`, `fetchChunkMembers`) both drop it, so the survivors
+//     (`fetchCandidates` plus the git-derived member batch) both drop it, so the survivors
 //     re-derive under a new root and `chunk.branch` names a branch nobody has
 //     ever pushed. Falling back there is the one outcome #61 exists to prevent,
 //     and unlike the merger's identical fallback nothing downstream catches it:
@@ -214,14 +214,11 @@ export async function fetchOriginChunkBranch(
 //     that justifies it rather than by a paragraph asserting the condition
 //     holds, and one issue with a broken premise goes to a human.
 //
-// The residual, stated rather than engineered around: a member whose commits
-// are ALREADY on the chunk branch while its issue still reads `ready-for-agent`
-// — the window a run leaves behind if it dies between the chunk push and the
-// label flip — is re-planned and seeded from a tip that already contains it, so
-// its diff slot renders empty. That window ends in a loud halt (finalise's
-// git membership) and an operator, and the alternative reading (seed from
-// the source branch) would develop the retry against a tree the chunk has
-// already moved past, which is worse.
+// A member whose commits are already on a fetched chunk branch is de-queued by
+// that git fact even if the display-label edit never happened. There is no
+// label-flip recovery window: the issue branch may remain briefly as duplicate
+// local state, and preflight removes it only after verifying that its tip is
+// reachable from the origin chunk branch.
 export async function ensureIssueBranch(
   repoDir: string,
   branch: string,

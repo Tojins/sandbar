@@ -177,10 +177,10 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     // #60 — the second ground for deleting an issue branch, and the crash
-    // window it exists for: a run that died between the chunk push and the
-    // label flip, or a flip whose delete failed, leaves a member's issue branch
-    // behind. Nothing will ever pick it up again (the planner drops `in-chunk`
-    // issues), so left alone it is one dead ref per member a chunk ever landed.
+    // window it exists for: a run that died between the chunk push and local
+    // issue-branch deletion leaves that branch behind. Nothing will ever pick
+    // it up again (the planner drops git-derived members), so left alone it is
+    // one dead ref per member a chunk ever landed.
     //
     // The set-up is what the merger produces: a member's commits on a branch
     // that is NOT on main, and origin's chunk branch carrying them.
@@ -197,7 +197,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       );
     };
 
-    it("deletes an `in-chunk` member's branch once origin's chunk branch carries it", async () => {
+    it("deletes a chunk member's branch once origin's chunk branch carries it", async () => {
       await landMemberOnChunk();
 
       const deleted = await deleteMergedSandbarBranches({
@@ -211,9 +211,10 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       ]);
     });
 
-    it("keeps it when the issue is not `in-chunk`, whatever origin carries", async () => {
-      // The label is the claim that the landing happened; without it this is
-      // an ordinary in-flight branch and deleting it would discard live work.
+    it("keeps it when chunk history does not name the issue, whatever origin carries", async () => {
+      // The merge-subject record is the claim that the landing happened;
+      // without it this is an ordinary in-flight branch whose deletion could
+      // discard live work.
       await landMemberOnChunk();
 
       const deleted = await deleteMergedSandbarBranches(cfg(layoutAt(target)));
@@ -350,10 +351,10 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // an issue that has landed on a chunk branch is neither: not `unmerged`
     // (its commits are published under the chunk's name, so refusing the run
     // over it would refuse over nothing) and not `resumable` (the planner
-    // drops `in-chunk` issues by label, so no inner loop will ever continue
+    // drops issues named by chunk history, so no inner loop will ever continue
     // it). It exists only when a run died between the chunk push and the label
     // flip, and the delete pass reaps it as soon as it can verify containment.
-    it("takes none of the three for the issue branch of an `in-chunk` member", async () => {
+    it("takes none of the three for a git-derived chunk member's issue branch", async () => {
       await git(target, "checkout", "-q", "-b", "sandbar/issue-7-member");
       await git(target, "commit", "-q", "--allow-empty", "-m", "member work");
       await git(target, "checkout", "-q", "main");

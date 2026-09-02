@@ -24,17 +24,42 @@ describe("chunk membership from git (#93)", () => {
     await writeFile(join(repo, "base"), "base\n");
     git(repo, "add", "base");
     git(repo, "commit", "-qm", "base");
+    git(repo, "checkout", "-qb", "auto-member");
+    await writeFile(join(repo, "auto"), "auto\n");
+    git(repo, "add", "auto");
+    git(repo, "commit", "-qm", "auto work");
+    git(repo, "checkout", "-q", "main");
+    git(repo, "merge", "--no-ff", "auto-member", "-m", "Merge sandbar/issue-99: auto work");
+    const chunkBase = git(repo, "rev-parse", "HEAD");
     git(repo, "checkout", "-qb", "member");
     await writeFile(join(repo, "member"), "member\n");
     git(repo, "add", "member");
     git(repo, "commit", "-qm", "member work");
     git(repo, "checkout", "-q", "main");
     git(repo, "merge", "--no-ff", "member", "-m", "Merge sandbar/issue-47: useful work");
-    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD~1");
+    git(repo, "update-ref", "refs/remotes/origin/main", chunkBase);
     git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-47-useful-work", "HEAD");
 
     expect(await readChunkMembers(repo)).toEqual(
       new Map([["sandbar/chunk-47-useful-work", new Set([47])]]),
+    );
+  });
+
+  it("discards a branch whose name-derived root has no membership merge", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "sandbar-chunk-no-root-"));
+    repos.push(repo);
+    git(repo, "init", "-q", "-b", "main");
+    git(repo, "config", "user.email", "sandbar@example.test");
+    git(repo, "config", "user.name", "Sandbar Test");
+    git(repo, "commit", "--allow-empty", "-qm", "base");
+    git(repo, "checkout", "-qb", "member");
+    git(repo, "commit", "--allow-empty", "-qm", "member work");
+    git(repo, "checkout", "-q", "main");
+    git(repo, "merge", "--no-ff", "member", "-m", "Merge sandbar/issue-61: member");
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-60-root", "HEAD");
+
+    expect(await readChunkMembers(repo)).toEqual(
+      new Map([["sandbar/chunk-60-root", new Set()]]),
     );
   });
 

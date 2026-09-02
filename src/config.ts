@@ -657,8 +657,8 @@ export type RunConfig = {
   // The `land` label must exist in the repo (sandbar never creates it and it is
   // not configurable — see chunks.ts). `needs-review` is a display-only label;
   // a missing or removed copy does not affect membership or landing. The `gh`
-  // credentials must be allowed to
-  // open, edit, comment on and close pull requests AND to delete branches on
+  // credentials must be allowed to open, edit, comment on and close pull
+  // requests AND to delete branches on
   // origin, and whoever reviews those branches has to know they are theirs to
   // land — the draft PR says as much on itself, but nothing notifies them.
   //
@@ -667,9 +667,9 @@ export type RunConfig = {
   // member whose blockers have all landed on the chunk branch is planned
   // together — same-cycle members are always siblings, never a chain — and a
   // member queued behind one of those waits for the cycle after it, because
-  // what unblocks it is the blocker's merge commit on the fetched chunk branch.
-  // So a chunk N edges deep
-  // takes N cycles to reach the human, and it reaches them whole. The one
+  // what unblocks it is the blocker's merge commit on the fetched chunk
+  // branch. So a chunk N edges deep takes N cycles to reach the human, and it
+  // reaches them whole. The one
   // review-gated issue sandbar will not work at all is one `chunks.ts` can
   // give no chunk — blockers straddling two chunks, an issue downstream of
   // that, or a `## Blocked by` cycle — which stays held, and reported as held,
