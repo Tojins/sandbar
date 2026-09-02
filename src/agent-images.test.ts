@@ -81,11 +81,30 @@ describe("run-owned agent images", () => {
     expect(builds[0].content).not.toContain("claude");
   });
 
+  it("stages only the libc variant selected from the base image", async () => {
+    let files: string[] = [];
+    await createAgentImages({
+      declaredBaseTag: "localhost/app:base",
+      providers: ["claude"],
+      scope: runScope("/agent-libc"),
+      prepareArtifacts: fakeAgentArtifacts,
+      detectLibc: async () => "musl",
+      inputsLabel: async (tag) => tag === "localhost/app:base" ? "base-fp" : null,
+      build: async (_image, opts) => {
+        files = (await readdir(opts.contextRoot!)).sort();
+        const recipe = await readFile(join(opts.contextRoot!, "Containerfile"), "utf8");
+        expect(recipe).toContain("claude-musl /usr/local/bin/claude");
+        expect(recipe).not.toContain("claude-glibc /usr/local/bin/claude");
+      },
+      log: () => {},
+    });
+    expect(files).toEqual(["Containerfile", "claude-musl"]);
+  });
+
   it("copies and probes both standalone provider binaries", () => {
     const file = agentToolsContainerfile("base", ["claude", "codex"]);
-    expect(file).toContain("COPY --chmod=0755 claude-glibc claude-musl /tmp/");
-    expect(file).toContain("cp /tmp/claude-musl /usr/local/bin/claude");
-    expect(file).toContain("cp /tmp/claude-glibc /usr/local/bin/claude");
+    expect(file).toContain("COPY --chmod=0755 claude-glibc /usr/local/bin/claude");
+    expect(file).not.toContain("claude-musl /usr/local/bin/claude");
     expect(file).toContain("COPY --chmod=0755 codex-static /usr/local/bin/codex");
     expect(file).toContain("claude --version && codex --version && git --version");
     expect(file).toContain("command -v git >/dev/null");
@@ -125,6 +144,7 @@ describe("run-owned agent images", () => {
       providers: ["claude"],
       scope: runScope("/unknown-base"),
       prepareArtifacts: fakeAgentArtifacts,
+      detectLibc: async () => "glibc",
       inputsLabel: async () => (++reads === 1 ? null : "apparently-present"),
       build: async () => {
         builds += 1;
@@ -211,8 +231,9 @@ describe("run-owned agent images", () => {
         },
       },
     };
-    const file = agentToolsContainerfile("base", ["codex"], "arm64", packages);
-    expect(file).toContain("codex-glibc codex-musl");
+    const file = agentToolsContainerfile("base", ["codex"], "arm64", packages, "musl");
+    expect(file).toContain("codex-musl /usr/local/bin/codex");
+    expect(file).not.toContain("codex-glibc /usr/local/bin/codex");
     expect(file).not.toContain("codex-static /usr/local/bin/codex");
   });
 
@@ -285,6 +306,42 @@ describe("run-owned agent images", () => {
       /staged artifact claude\/x64 failed re-verification/,
     );
     await prepared.dispose();
+  });
+
+  it("reuses a sha-addressed download across staging lifetimes", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "sandbar-agent-cache-test-"));
+    const bytes = "persistent standalone fixture";
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const packages = {
+      ...AGENT_PROVIDER_PACKAGES,
+      codex: {
+        version: "test",
+        artifacts: {
+          x64: [{ variant: "static" as const, url: "fixture", sha256 }],
+          arm64: [{ variant: "static" as const, url: "fixture", sha256 }],
+        },
+      },
+    };
+    let fetches = 0;
+    const adapters = {
+      arch: "x64",
+      cacheRoot,
+      packages,
+      fetch: async () => {
+        fetches += 1;
+        return new Response(bytes);
+      },
+    } as const;
+    try {
+      const first = await prepareAgentArtifacts(["codex"], () => {}, adapters);
+      await first.dispose();
+      const second = await prepareAgentArtifacts(["codex"], () => {}, adapters);
+      await second.verify("codex");
+      await second.dispose();
+      expect(fetches).toBe(1);
+    } finally {
+      await rm(cacheRoot, { recursive: true, force: true });
+    }
   });
 
   it("re-verifies staged tools before augmenting a later variant", async () => {

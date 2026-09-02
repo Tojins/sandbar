@@ -154,7 +154,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
           };
           await writeFile(
             join(context, "Containerfile"),
-            agentToolsContainerfile(base, ["codex"], "x64", packages),
+            agentToolsContainerfile(base, ["codex"], "x64", packages, selectedVariant),
           );
           await writeFile(
             join(context, "codex-glibc"),

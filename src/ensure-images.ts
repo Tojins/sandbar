@@ -50,7 +50,7 @@ import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
 import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, link, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, link, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -516,6 +516,7 @@ export function agentToolsContainerfile(
   providers: readonly AgentProviderName[],
   arch: "x64" | "arm64" = hostAgentArchitecture(),
   packages: typeof AGENT_PROVIDER_PACKAGES = AGENT_PROVIDER_PACKAGES,
+  libc: "glibc" | "musl" = "glibc",
 ): string {
   const pins = providers.map((provider) => {
     const pin = packages[provider];
@@ -531,10 +532,11 @@ export function agentToolsContainerfile(
     if (variants.length === 1 && variants[0]?.variant === "static") {
       return [`COPY --chmod=0755 ${provider}-static /usr/local/bin/${provider}`];
     }
-    return [
-      `COPY --chmod=0755 ${provider}-glibc ${provider}-musl /tmp/`,
-      `RUN if [ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ]; then cp /tmp/${provider}-musl /usr/local/bin/${provider}; else cp /tmp/${provider}-glibc /usr/local/bin/${provider}; fi && rm /tmp/${provider}-glibc /tmp/${provider}-musl`,
-    ];
+    const selected = variants.find((artifact) => artifact.variant === libc);
+    if (selected === undefined) {
+      throw new SandbarError(`${provider} has no ${arch}-${libc} artifact`);
+    }
+    return [`COPY --chmod=0755 ${provider}-${libc} /usr/local/bin/${provider}`];
   })
     .join("\n");
   const probes = providers
@@ -608,11 +610,29 @@ export function findAgentBinary(
   return binary;
 }
 
+export async function detectImageLibc(baseTag: string): Promise<"glibc" | "musl"> {
+  try {
+    await exec(RUNTIME, [
+      "run", "--rm", baseTag, "sh", "-c",
+      "[ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ]",
+    ]);
+    return "musl";
+  } catch (err) {
+    const exitCode = (err as { code?: unknown }).code;
+    if (exitCode === 1) {
+      return "glibc";
+    }
+    throw err;
+  }
+}
+
 export type ArtifactPreparationAdapters = {
   readonly arch?: string;
   readonly fetch?: typeof fetch;
   readonly extract?: (archive: string, destination: string) => Promise<void>;
   readonly packages?: typeof AGENT_PROVIDER_PACKAGES;
+  readonly cacheRoot?: string;
+  readonly variants?: ReadonlySet<"static" | "glibc" | "musl">;
 };
 
 export async function prepareAgentArtifacts(
@@ -623,46 +643,69 @@ export async function prepareAgentArtifacts(
   const arch = hostAgentArchitecture(adapters.arch);
   const fetchArtifact = adapters.fetch ?? fetch;
   const packages = adapters.packages ?? AGENT_PROVIDER_PACKAGES;
+  const selectedArtifacts = (provider: AgentProviderName) =>
+    packages[provider].artifacts[arch].filter((artifact) =>
+      adapters.variants === undefined || adapters.variants.has(artifact.variant)
+    );
   const extract = adapters.extract ?? (async (archive, destination) => {
     await exec("tar", ["-xzf", archive, "-C", destination]);
   });
-  const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-"));
+  const cacheRoot = adapters.cacheRoot ?? join(tmpdir(), "sandbar-agent-tools");
+  await mkdir(cacheRoot, { recursive: true });
+  // A disposable view gives callers the old flat file layout while the large
+  // verified bytes live in a persistent, content-addressed cache across runs.
+  const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-view-"));
   onCleanup(() => rm(root, { recursive: true, force: true }));
   const stagedSha256: Record<string, string> = {};
   try {
     for (const provider of providers) {
-      for (const artifact of packages[provider].artifacts[arch]) {
+      for (const artifact of selectedArtifacts(provider)) {
         const name = `${provider}-${artifact.variant}`;
-        const downloaded = join(root, `${name}.download`);
+        const artifactRoot = join(cacheRoot, artifact.sha256);
+        const downloaded = join(artifactRoot, "download");
+        await mkdir(artifactRoot, { recursive: true });
         const identity = `${provider}/${arch}-${artifact.variant} from ${artifact.url}`;
-        log(`Downloading agent tool ${identity}...`);
         try {
-          const response = await fetchArtifact(artifact.url, {
-            signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
-          });
-          if (!response.ok || response.body === null) {
-            throw new Error(`download returned HTTP ${response.status}`);
+          let cached = false;
+          try {
+            cached = await sha256File(downloaded) === artifact.sha256;
+          } catch {
+            // Missing and interrupted cache entries are ordinary cold misses.
           }
-          await pipeline(
-            Readable.fromWeb(response.body as never),
-            createWriteStream(downloaded),
-          );
-          const actual = await sha256File(downloaded);
-          if (actual !== artifact.sha256) {
-            throw new Error(
-              `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
+          if (!cached) {
+            await rm(downloaded, { force: true });
+            log(`Downloading agent tool ${identity}...`);
+            const partial = join(artifactRoot, `download-${process.pid}.partial`);
+            const response = await fetchArtifact(artifact.url, {
+              signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
+            });
+            if (!response.ok || response.body === null) {
+              throw new Error(`download returned HTTP ${response.status}`);
+            }
+            await pipeline(
+              Readable.fromWeb(response.body as never),
+              createWriteStream(partial),
             );
+            const actual = await sha256File(partial);
+            if (actual !== artifact.sha256) {
+              await rm(partial, { force: true });
+              throw new Error(
+                `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
+              );
+            }
+            await rename(partial, downloaded);
           }
           const destination = join(root, name);
           if (artifact.archive) {
+            // The archive digest is pinned; the extracted bytes are not. Derive
+            // them afresh from the verified cache instead of trusting a prior
+            // run's executable as though it were content-addressed itself.
             const extractRoot = await mkdtemp(join(root, `${provider}-extracted-`));
             await extract(downloaded, extractRoot);
             const binary = findAgentBinary(provider, await readdir(extractRoot));
             await rename(join(extractRoot, binary), destination);
           } else {
-            // The download is already the executable. Moving it avoids keeping
-            // a second copy of the large standalone binary in host temp space.
-            await rename(downloaded, destination);
+            await copyFile(downloaded, destination);
           }
           await chmod(destination, 0o755);
           stagedSha256[name] = await sha256File(destination);
@@ -677,16 +720,14 @@ export async function prepareAgentArtifacts(
     return {
       root,
       verify: async (provider) => {
-        for (const artifact of packages[provider].artifacts[arch]) {
+        for (const artifact of selectedArtifacts(provider)) {
           const name = `${provider}-${artifact.variant}`;
-          if (artifact.archive) {
-            const downloaded = await sha256File(join(root, `${name}.download`));
-            if (downloaded !== artifact.sha256) {
-              throw new Error(
-                `staged download ${provider}/${arch} failed pin re-verification ` +
-                  `(expected ${artifact.sha256}, got ${downloaded})`,
-              );
-            }
+          const downloaded = await sha256File(join(cacheRoot, artifact.sha256, "download"));
+          if (downloaded !== artifact.sha256) {
+            throw new Error(
+              `staged download ${provider}/${arch} failed pin re-verification ` +
+                `(expected ${artifact.sha256}, got ${downloaded})`,
+            );
           }
           const expected = stagedSha256[name];
           if (expected === undefined) {
@@ -728,6 +769,7 @@ export async function createAgentImages(opts: {
   readonly prepareArtifacts?: (
     providers: readonly AgentProviderName[],
   ) => Promise<PreparedAgentArtifacts>;
+  readonly detectLibc?: (baseTag: string) => Promise<"glibc" | "musl">;
 }): Promise<AgentImages> {
   const build = opts.build ?? buildImage;
   const inputsLabel = opts.inputsLabel ?? readInputsLabel;
@@ -736,23 +778,27 @@ export async function createAgentImages(opts: {
   const arch = hostAgentArchitecture();
   const pending = new Map<string, Promise<string>>();
   const order: string[] = [];
-  let artifactsPromise: Promise<PreparedAgentArtifacts> | undefined;
+  const artifactPromises = new Map<"glibc" | "musl", Promise<PreparedAgentArtifacts>>();
 
-  const artifacts = (): Promise<PreparedAgentArtifacts> => {
-    if (artifactsPromise === undefined) {
-      artifactsPromise = (
+  const artifacts = (libc: "glibc" | "musl"): Promise<PreparedAgentArtifacts> => {
+    let promise = artifactPromises.get(libc);
+    if (promise === undefined) {
+      promise = (
         opts.prepareArtifacts !== undefined
           ? opts.prepareArtifacts(opts.providers)
-          : prepareAgentArtifacts(opts.providers, log)
+          : prepareAgentArtifacts(opts.providers, log, {
+            variants: new Set(["static", libc]),
+          })
       ).then((prepared) => {
         onCleanup(prepared.dispose);
         return prepared;
       }).catch((err) => {
-        artifactsPromise = undefined;
+        artifactPromises.delete(libc);
         throw err;
       });
+      artifactPromises.set(libc, promise);
     }
-    return artifactsPromise;
+    return promise;
   };
 
   const augment = async (baseTag: string): Promise<string> => {
@@ -760,7 +806,17 @@ export async function createAgentImages(opts: {
     if (promise === undefined) {
       promise = (async () => {
         const baseInputs = await inputsLabel(baseTag);
-        const containerfile = agentToolsContainerfile(baseTag, opts.providers, arch);
+        const needsLibcChoice = opts.providers.some((provider) =>
+          AGENT_PROVIDER_PACKAGES[provider].artifacts[arch].some(
+            (artifact) => artifact.variant !== "static",
+          )
+        );
+        const libc = needsLibcChoice
+          ? await (opts.detectLibc ?? detectImageLibc)(baseTag)
+          : "glibc";
+        const containerfile = agentToolsContainerfile(
+          baseTag, opts.providers, arch, AGENT_PROVIDER_PACKAGES, libc,
+        );
         const fingerprint = createHash("sha256")
           .update(JSON.stringify([baseInputs ?? "unknown", containerfile]))
           .digest("hex");
@@ -780,11 +836,12 @@ export async function createAgentImages(opts: {
             () => rm(contextRoot, { recursive: true, force: true }),
           );
           try {
-            const prepared = await artifacts();
+            const prepared = await artifacts(libc);
             await writeFile(join(contextRoot, "Containerfile"), containerfile);
             for (const provider of opts.providers) {
               await prepared.verify(provider);
               for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
+                if (artifact.variant !== "static" && artifact.variant !== libc) continue;
                 const name = `${provider}-${artifact.variant}`;
                 await link(join(prepared.root, name), join(contextRoot, name));
               }
