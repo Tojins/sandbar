@@ -67,8 +67,8 @@ Of the `Sandbox` handle, sandbar uses only `run()`, `worktreePath`, and
   `baseBranch`. So the worktree-create path is "branch already exists →
   `git worktree add <path> <branch>`", never the `-b` fork path.
 - **One iteration, explicit completion contracts.** `run()` has no iteration
-  option. Every caller names its signal list: implementer calls watch
-  `</promise>` and reviewer calls pass `[]`, which makes grace unreachable.
+  option. Every caller names its signal list: implementer calls watch its three
+  full promise tokens and reviewer calls pass `[]`, which makes grace unreachable.
 - **No session capture.** `createSandbox().run()` never threads a
   `bindMountHandle` into the lifecycle, so session capture / resume / token-usage
   parsing never fire on our path (see [01](./01-sandbox-lifecycle.md)).

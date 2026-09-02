@@ -132,7 +132,7 @@ return { preservedWorktreePath: undefined }
 | Worktree-add flags | `-c branch.autoSetupMerge=false -c push.autoSetupRemote=false` |
 | Default image | `sandbar:<sanitised repo dir name>` |
 | podman run flags | `--user 1000:1000 --userns=keep-id:uid=1000,gid=1000 -w <wt> -e... -v host:sandbox:z --entrypoint sleep <img> infinity` |
-| Default completion signal | `<promise>COMPLETE</promise>` |
+| Completion signals | Required per call; implementer uses its three full tokens, reviewer uses `[]` |
 | Default idle timeout | 600 s (`DEFAULT_IDLE_TIMEOUT_SECONDS`) |
 | Default completion-grace timeout | 60 s (`DEFAULT_COMPLETION_TIMEOUT_SECONDS`) |
 | Output tail bound | 64 KiB (`MAX_TAIL_CHARS`), keep the **end** |
@@ -235,10 +235,9 @@ Tests for the load-bearing `0.7.0` baseline behaviours (history in doc
 13. **F1 bounded tail** — an `onLine` stream far larger than the tail bound
     returns without throwing, and a `<promise>COMPLETE</promise>` in the final
     lines is still present in the returned `stdout` (tail keeps the end).
-14. **F5 completion timer** — a stream that emits the completion signal and then
-    goes silent with no EOF resolves with the collected commits and does **not**
-    throw `AgentIdleTimeoutError`; a stream that never emits the signal and goes
-    silent still throws after the idle window.
+14. **F5 completion timer** — a stream that emits a named completion signal and
+    then goes silent with no EOF rejects with partial speech attached; a stream
+    with no configured signal still throws after the idle window.
 15. **F2 git-setup retry** — a git-setup exec that fails 126/137 then succeeds is
     retried and the run proceeds; a non-transient nonzero exit (e.g. 1) still
     fails fast without retry, and commit collection is **not** retried.

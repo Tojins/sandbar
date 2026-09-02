@@ -1296,6 +1296,46 @@ describe("createSandbox integration (local provider)", () => {
     }
   }, 15_000);
 
+  it("rejects one run when its provider parser throws, preserving prior speech", async () => {
+    await git(["branch", "sandbar/issue-83-parser"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-83-parser",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const agent: AgentProvider = {
+        name: "claude-code",
+        env: {},
+        buildPrintCommand: () => ({
+          command:
+            `printf '%s\\n%s\\n' ` +
+            `${JSON.stringify(JSON.stringify({ type: "speech" }))} ` +
+            `${JSON.stringify(JSON.stringify({ type: "broken" }))}`,
+          stdin: "",
+        }),
+        parseStreamLine: (line) => {
+          const parsed = JSON.parse(line) as { type: string };
+          if (parsed.type === "broken") throw new TypeError("invalid provider shape");
+          return [{ type: "text", text: "partial agent speech" }];
+        },
+      };
+      const err = await sandbox
+        .run({ agent, prompt: "go", completionSignal: [] })
+        .then(() => null, (e: unknown) => e);
+
+      expect(err).toBeInstanceOf(AgentError);
+      expect((err as Error).message).toContain(
+        "claude-code stream parse failed on a JSON line: invalid provider shape",
+      );
+      expect(agentPartialOutput(err)).toBe("partial agent speech");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
   it("the idle timeout carries out what the agent emitted, and kills the exec (#41)", async () => {
     await git(["branch", "sandbar/issue-41-idle"], dir);
     const live = new Set<ChildProcess>();

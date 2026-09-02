@@ -105,6 +105,11 @@ export const FAILURE_TAIL_LINES = 200;
 // The promise nudge (see runImplementer). Loaded at import time like every
 // other template; no placeholders.
 const PROMISE_NUDGE_TPL = loadTemplate("implementer-promise-nudge");
+const IMPLEMENTER_COMPLETION_SIGNALS = [
+  "<promise>COMPLETE</promise>",
+  "<promise>NEEDS-INFO</promise>",
+  "<promise>NEEDS-UI-PROTOTYPE</promise>",
+] as const;
 
 export type IssueRef = {
   readonly id: string;
@@ -694,7 +699,7 @@ async function runImplementer(
     name: `implementer-${issue.id}-attempt-${action.attempt}`,
     agent: buildAgentProvider(config.implementerAgent, config.implementerModelId),
     prompt,
-    completionSignal: ["</promise>"],
+    completionSignal: IMPLEMENTER_COMPLETION_SIGNALS,
   });
   if (opts.attemptLogger) {
     await opts.attemptLogger.writeAttempt(issue.id, action.attempt, run.stdout);
@@ -738,7 +743,7 @@ async function runImplementer(
       }),
       prompt: PROMISE_NUDGE_TPL,
       // Any of the three tags ends the wait, not just COMPLETE.
-      completionSignal: ["</promise>"],
+      completionSignal: IMPLEMENTER_COMPLETION_SIGNALS,
     });
     accumulated.push(...nudge.commits);
     const combined = `${run.stdout}\n${nudge.stdout}`;

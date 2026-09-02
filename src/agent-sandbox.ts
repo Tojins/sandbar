@@ -1746,7 +1746,16 @@ const invokeAgent = (
         signal: abort.signal,
         onLine: (line) => {
           gaps.line();
-          speech.ingest(agent.parseStreamLine(line));
+          try {
+            speech.ingest(agent.parseStreamLine(line));
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            settleReject(
+              new AgentError(`${agent.name} stream parse failed on a JSON line: ${detail}`),
+            );
+            abort.abort();
+            return;
+          }
           if (
             !completionDetected &&
             completionSignals.some((sig) => speech.accumulated.includes(sig))
@@ -2077,7 +2086,7 @@ export const createSandbox = async (
     );
 
     // Explicit-branch commit capture: fully-qualified ref, the cache repo,
-    // --reverse (oldest-first). Missing branch / zero commits → []. Never throw.
+    // --reverse (oldest-first). Zero commits is an empty list; git faults throw.
     const commits = await withTimeout(
       execGit(
         ["rev-list", `${baseHead}..refs/heads/${branch}`, "--reverse"],

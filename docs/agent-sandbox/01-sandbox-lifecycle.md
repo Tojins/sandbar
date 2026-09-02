@@ -26,7 +26,7 @@ interface SandboxRunOptions {
   agent: AgentProvider;           // sandbar: claudeCode(modelId)
   prompt?: string;                // sandbar: inline prompt
   name?: string;                  // sandbar: e.g. "implementer-<id>-attempt-N"
-  completionSignal: readonly string[];   // reviewer: []; implementer: ["</promise>"]
+  completionSignal: readonly string[];   // reviewer: []; implementer: full promise tokens
   idleTimeoutSeconds?: number;    // sandbar: unset → default 600
   logging?: LoggingOption;        // sandbar: unset → defaults to a file under .sandbar/logs
   signal?: AbortSignal;           // sandbar: unset
@@ -128,8 +128,8 @@ Two consequences for sandbar's path:
 
 With `iterations = 1` the loop body runs once:
 
-1. Resolve `completionSignals` — default `["<promise>COMPLETE</promise>"]` when
-   `completionSignal` is unset.
+1. Copy the caller's required `completionSignal` list. An empty list never
+   enters the completion-grace phase.
 2. `factory.withSandbox(...)` → for the reuse layer, just runs the work with the
    existing sandbox. Inside, wrap in `withSandboxLifecycle` (below).
 3. The work:

@@ -143,9 +143,9 @@ session capture), so the port may omit it.
 
 ## Completion signal
 
-Every caller supplies a signal list explicitly. Implementer calls watch
-`</promise>`; reviewer calls pass `[]`, so only process exit or idle timeout ends
-their runs. There is no default role contract.
+Every caller supplies a signal list explicitly. Implementer calls watch its
+three full promise tokens; reviewer calls pass `[]`, so only process exit or
+idle timeout ends their runs. There is no default role contract.
 
 ## Reimplementation notes
 
