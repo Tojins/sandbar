@@ -1366,10 +1366,8 @@ export async function runMergerWithAdapter(
     resolveSinkFor,
   };
 
-  // One DONE issue branch. Returns the successful merge attempt when this
-  // issue's commits are on HEAD, or null when it was skipped and HEAD is back
-  // where it started. Chunk membership validation uses the starting SHA to
-  // inspect the whole attempt, including a gate-fix commit above the merge.
+  // One DONE issue branch. True means its commits are on HEAD; false means it
+  // was skipped and HEAD is back where it started.
   const mergeOne = async (
     issue: IssueRef,
     target: MergeTarget,

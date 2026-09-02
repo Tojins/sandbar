@@ -669,7 +669,7 @@ async function fetchChunkMemberIssueNumbers(
   sourceBranch: string,
 ): Promise<ReadonlySet<number>> {
   try {
-    const members = await readChunkMembers(repoDir, sourceBranch, true);
+    const members = await readChunkMembers(repoDir, sourceBranch);
     return new Set([...members.values()].flatMap((ns) => [...ns]));
   } catch {
     return new Set();

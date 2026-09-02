@@ -831,10 +831,11 @@ export async function run(
       };
       let resolution = await buildPlan(repo, planOptions);
       for (const drift of resolution.chunkNameDrifts) {
-        console.warn(
+        const line =
           `Origin chunk branch ${drift.existing} no longer matches the name ` +
-            `derived for its root: ${drift.derived}`,
-        );
+          `derived for its root: ${drift.derived}`;
+        console.warn(line);
+        await runLogger.appendOrchestrator(line);
       }
 
       // The chunk-review scan (#63). Every chunk with work on origin is asked

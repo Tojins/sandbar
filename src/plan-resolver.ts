@@ -473,15 +473,26 @@ export async function fetchCandidates(
 }
 
 /**
- * Read membership by branch containment. Live planning excludes issue refs
- * already contained in source; reconciliation includes them after the chunk
- * itself has landed there.
+ * Read membership by branch containment relative to each chunk's base. For a
+ * live chunk that base is the current source tip; for a landed chunk it is the
+ * first parent of the source merge that incorporated the chunk.
  */
 export async function readChunkMembers(
   repoDir: string,
   sourceBranch = "main",
-  includeSourceMerged = false,
 ): Promise<ReadonlyMap<string, ReadonlySet<number>>> {
+  return (await readChunkMembership(repoDir, sourceBranch)).members;
+}
+
+type ChunkMembership = {
+  readonly members: ReadonlyMap<string, ReadonlySet<number>>;
+  readonly landedBranches: ReadonlySet<string>;
+};
+
+async function readChunkMembership(
+  repoDir: string,
+  sourceBranch: string,
+): Promise<ChunkMembership> {
   const { stdout: refsOut } = await exec(
     "git",
     [
@@ -492,14 +503,44 @@ export async function readChunkMembers(
     { cwd: repoDir },
   );
   const result = new Map<string, ReadonlySet<number>>();
+  const landedBranches = new Set<string>();
   for (const ref of refsOut.split("\n").map((s) => s.trim()).filter(Boolean)) {
     const branch = ref.replace(/^origin\//, "");
+    const sourceRef = `origin/${sourceBranch}`;
+    const landed = await exec(
+      "git",
+      ["merge-base", "--is-ancestor", ref, sourceRef],
+      { cwd: repoDir },
+    ).then(() => true, () => false);
+    let exclusionRef = sourceRef;
+    if (landed) {
+      landedBranches.add(branch);
+      const { stdout: mergesOut } = await exec(
+        "git",
+        [
+          "rev-list",
+          "--first-parent",
+          "--merges",
+          "--reverse",
+          "--ancestry-path",
+          `${ref}..${sourceRef}`,
+        ],
+        { cwd: repoDir },
+      );
+      const landingMerge = mergesOut.split("\n").find(Boolean);
+      if (landingMerge === undefined) {
+        throw new Error(
+          `Could not find the source merge that contains landed chunk ${branch}`,
+        );
+      }
+      exclusionRef = `${landingMerge}^1`;
+    }
     const { stdout } = await exec(
       "git",
       [
         "for-each-ref",
         `--merged=${ref}`,
-        ...(includeSourceMerged ? [] : [`--no-merged=origin/${sourceBranch}`]),
+        `--no-merged=${exclusionRef}`,
         "--format=%(refname)",
         ...ORIGIN_ISSUE_BRANCH_REFGLOBS,
       ],
@@ -513,7 +554,7 @@ export async function readChunkMembers(
     );
     result.set(branch, members);
   }
-  return result;
+  return { members: result, landedBranches };
 }
 
 async function fetchIssueSummaries(
@@ -626,17 +667,17 @@ export async function buildPlan(
 ): Promise<PlanResolution> {
   const excluded = options.excluded ?? new Set<number>();
   const k = options.k ?? DEFAULT_K;
-  // Keep the live and reconciliation readings explicit: the former excludes
-  // refs already in source, while the latter must still close their issues.
+  // One base-relative reading serves planning and reconciliation. Live chunks
+  // exclude the current source tip; landed chunks exclude the first parent of
+  // the merge that brought them into source, so inherited old issue refs never
+  // become members while real members remain de-queued until wrap-up succeeds.
   const sourceBranch = options.sourceBranch ?? "main";
-  const chunkMembers = await readChunkMembers(options.repoDir, sourceBranch);
-  const allChunkMembers = await readChunkMembers(
+  const { members: chunkMembers, landedBranches } = await readChunkMembership(
     options.repoDir,
     sourceBranch,
-    true,
   );
   const chunkMemberNumbers = [
-    ...new Set([...allChunkMembers.values()].flatMap((ns) => [...ns])),
+    ...new Set([...chunkMembers.values()].flatMap((ns) => [...ns])),
   ];
   // The queue plus issues found by fetched branch containment (#93), in one graph
   // because lane inheritance and chunk derivation need both sets. Deduped by
@@ -660,7 +701,7 @@ export async function buildPlan(
     for (const n of parseBlockedBy(c.body)) wanted.add(n);
   }
   const facts = await fetchIssueStates([...wanted], repo);
-  const live = resolvePlan(
+  const resolution = resolvePlan(
     candidates,
     facts,
     excluded,
@@ -668,13 +709,13 @@ export async function buildPlan(
     options.defaultLane ?? DEFAULT_LANE,
     chunkMembers,
   );
-  const inclusive = resolvePlan(
-    candidates,
-    facts,
-    excluded,
-    k,
-    options.defaultLane ?? DEFAULT_LANE,
-    allChunkMembers,
-  );
-  return { ...live, reconciliationChunks: inclusive.landedChunks };
+  return {
+    ...resolution,
+    landedChunks: resolution.landedChunks.filter(
+      (chunk) => !landedBranches.has(chunk.branch),
+    ),
+    reconciliationChunks: resolution.landedChunks.filter((chunk) =>
+      landedBranches.has(chunk.branch),
+    ),
+  };
 }

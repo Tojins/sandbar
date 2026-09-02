@@ -210,7 +210,7 @@ and used to announce themselves in four different ways, the halt in none at all.
   membership record; commit subjects are cosmetic. What a chunk branch
   carries is `PlanResolution.landedChunks`, the only answer the whole
   candidate graph can give: issue refs contained by the exact chunk branch but
-  not yet by the source branch, which is the set a landing
+  not by that chunk's pre-landing base, which is the set a landing
   closes (#64) and whose tips a follow-up is blocked by (#63) — never the whole
   component, since a member that has never been worked has no commits
   anywhere. De-queueing alone is broader and fail-safe: a member contained by any
