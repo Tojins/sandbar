@@ -32,7 +32,10 @@
 //
 // Agent bases need only /bin/sh, CA roots, and git or a supported package
 // manager (#76). The generated layer supplies git, uid 1000 and standalone
-// CLIs, then executes every binary as the contract probe.
+// CLIs, then executes every binary as the contract probe. Bare-container CLI
+// probes without credentials stop before an authenticated TLS request, so they
+// cannot prove an embedded trust store; CA roots remain a conservative base
+// requirement rather than setting a driver-owned SSL_CERT_FILE.
 //
 // The uid check (#24 D3): a container in a pod cannot use `--userns=keep-id`,
 // and `--user 1000:1000` maps to a SUBUID whose worktree writes fail EACCES;
@@ -244,6 +247,11 @@ export type BuildOptions = {
   readonly contextRoot?: string;
 };
 
+function buildUsesStdin(image: BuiltImage, opts?: BuildOptions): boolean {
+  return image.stdinContext === true || opts?.content !== undefined ||
+    opts?.contextRoot !== undefined;
+}
+
 // The `podman build` argv for one entry. Pure so the stdin-context, build-arg
 // and label wiring is table-testable — the real-adapter blind spot.
 export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
@@ -255,7 +263,7 @@ export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
   if (opts?.fingerprint) {
     args.push("--label", `${IMAGE_INPUTS_LABEL}=${opts.fingerprint}`);
   }
-  if (image.stdinContext || opts?.content !== undefined || opts?.contextRoot) {
+  if (buildUsesStdin(image, opts)) {
     // Stdin is either the Containerfile alone or a generated tar context. `-f`
     // would be redundant and podman rejects it alongside the `-` context.
     args.push("-");
@@ -297,10 +305,9 @@ export async function buildImage(
   let timedOut = false;
   await new Promise<void>((resolve, reject) => {
     let tar: ChildProcess | undefined;
-    let untrackTar: (() => void) | undefined;
     const child = spawn(RUNTIME, args, {
       stdio: [
-        image.stdinContext || opts.content !== undefined || opts.contextRoot ? "pipe" : "ignore",
+        buildUsesStdin(image, opts) ? "pipe" : "ignore",
         capture ? "pipe" : "inherit",
         capture ? "pipe" : "inherit",
       ],
@@ -361,15 +368,15 @@ export async function buildImage(
       tar = spawn("tar", ["-cf", "-", "-C", opts.contextRoot, "."], {
         stdio: ["ignore", "pipe", "pipe"],
       });
-      untrackTar = trackBuild(tar);
+      const untrackTar = trackBuild(tar);
       tar.stderr?.on("data", (c: Buffer) => { output = appendTail(output, c.toString()); });
       tar.on("error", (err) => {
-        untrackTar?.();
+        untrackTar();
         child.kill("SIGKILL");
         reject(err);
       });
       tar.on("exit", (code) => {
-        untrackTar?.();
+        untrackTar();
         if (code !== 0 && !timedOut) child.kill("SIGKILL");
       });
       child.stdin.on("error", () => {});
@@ -507,6 +514,7 @@ export function agentToolsetSpec(
 export function agentToolsContainerfile(
   baseTag: string,
   providers: readonly AgentProviderName[],
+  arch: "x64" | "arm64" = hostAgentArchitecture(),
 ): string {
   const pins = providers.map((provider) => {
     const pin = AGENT_PROVIDER_PACKAGES[provider];
@@ -518,7 +526,7 @@ export function agentToolsContainerfile(
     return `# ${provider} ${pin.version} ${digests.join(" ")}`;
   }).join("\n");
   const copies = providers.flatMap((provider) => {
-    const variants = AGENT_PROVIDER_PACKAGES[provider].artifacts.x64;
+    const variants = AGENT_PROVIDER_PACKAGES[provider].artifacts[arch];
     if (variants.length === 1 && variants[0]?.variant === "static") {
       return [`COPY --chmod=0755 ${provider}-static /usr/local/bin/${provider}`];
     }
@@ -546,29 +554,53 @@ async function sha256File(path: string): Promise<string> {
   return hash.digest("hex");
 }
 
-async function prepareAgentArtifacts(
+export function hostAgentArchitecture(arch: string = process.arch): "x64" | "arm64" {
+  if (arch === "x64" || arch === "arm64") return arch;
+  throw new SandbarError(
+    `agent tools have no pinned artifact for host architecture '${arch}'`,
+  );
+}
+
+export function findAgentBinary(
+  provider: AgentProviderName,
+  entries: readonly string[],
+): string {
+  const binary = entries.find((name) =>
+    name === provider || name.startsWith(`${provider}-`)
+  );
+  if (!binary) throw new Error(`archive contains no ${provider} binary`);
+  return binary;
+}
+
+export type ArtifactPreparationAdapters = {
+  readonly arch?: string;
+  readonly fetch?: typeof fetch;
+  readonly extract?: (archive: string, destination: string) => Promise<void>;
+  readonly packages?: typeof AGENT_PROVIDER_PACKAGES;
+};
+
+export async function prepareAgentArtifacts(
   providers: readonly AgentProviderName[],
   log: (line: string) => void,
+  adapters: ArtifactPreparationAdapters = {},
 ): Promise<PreparedAgentArtifacts> {
-  const arch = process.arch === "x64"
-    ? "x64"
-    : process.arch === "arm64" ? "arm64" : null;
-  if (arch === null) {
-    throw new SandbarError(
-      `agent tools have no pinned artifact for host architecture '${process.arch}'`,
-    );
-  }
+  const arch = hostAgentArchitecture(adapters.arch);
+  const fetchArtifact = adapters.fetch ?? fetch;
+  const packages = adapters.packages ?? AGENT_PROVIDER_PACKAGES;
+  const extract = adapters.extract ?? (async (archive, destination) => {
+    await exec("tar", ["-xzf", archive, "-C", destination]);
+  });
   const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-"));
   const stagedSha256: Record<string, string> = {};
   try {
     for (const provider of providers) {
-      for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
+      for (const artifact of packages[provider].artifacts[arch]) {
         const name = `${provider}-${artifact.variant}`;
         const downloaded = join(root, `${name}.download`);
         const identity = `${provider}/${arch}-${artifact.variant} from ${artifact.url}`;
         log(`Downloading agent tool ${identity}...`);
         try {
-          const response = await fetch(artifact.url, {
+          const response = await fetchArtifact(artifact.url, {
             signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
           });
           if (!response.ok || response.body === null) {
@@ -587,11 +619,8 @@ async function prepareAgentArtifacts(
           const destination = join(root, name);
           if (artifact.archive) {
             const extractRoot = await mkdtemp(join(root, `${provider}-extracted-`));
-            await exec("tar", ["-xzf", downloaded, "-C", extractRoot]);
-            const binary = (await readdir(extractRoot)).find(
-              (n) => n === provider || n.startsWith(`${provider}-`),
-            );
-            if (!binary) throw new Error(`archive contains no ${provider} binary`);
+            await extract(downloaded, extractRoot);
+            const binary = findAgentBinary(provider, await readdir(extractRoot));
             await rename(join(extractRoot, binary), destination);
           } else {
             // Keep the pinned download beside the staged executable so every
@@ -611,7 +640,7 @@ async function prepareAgentArtifacts(
     return {
       root,
       verify: async (provider) => {
-        for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
+        for (const artifact of packages[provider].artifacts[arch]) {
           const name = `${provider}-${artifact.variant}`;
           const downloaded = await sha256File(join(root, `${name}.download`));
           if (downloaded !== artifact.sha256) {
@@ -662,6 +691,7 @@ export async function createAgentImages(opts: {
   const inputsLabel = opts.inputsLabel ?? readInputsLabel;
   const log = opts.log ?? ((line: string) => console.log(line));
   const toolset = agentToolsetSpec(opts.providers);
+  const arch = hostAgentArchitecture();
   const pending = new Map<string, Promise<string>>();
   const order: string[] = [];
   let artifactsPromise: Promise<PreparedAgentArtifacts> | undefined;
@@ -688,7 +718,7 @@ export async function createAgentImages(opts: {
     if (promise === undefined) {
       promise = (async () => {
         const baseInputs = await inputsLabel(baseTag);
-        const containerfile = agentToolsContainerfile(baseTag, opts.providers);
+        const containerfile = agentToolsContainerfile(baseTag, opts.providers, arch);
         const fingerprint = createHash("sha256")
           .update(JSON.stringify([baseInputs ?? "unknown", containerfile]))
           .digest("hex");
@@ -709,9 +739,7 @@ export async function createAgentImages(opts: {
             await writeFile(join(contextRoot, "Containerfile"), containerfile);
             for (const provider of opts.providers) {
               await prepared.verify(provider);
-              for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[
-                process.arch as "x64" | "arm64"
-              ]) {
+              for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
                 const name = `${provider}-${artifact.variant}`;
                 await link(join(prepared.root, name), join(contextRoot, name));
               }

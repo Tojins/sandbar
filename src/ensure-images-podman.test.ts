@@ -88,6 +88,29 @@ describe.runIf(available)("ensureImages against real podman", () => {
     ).stdout.trim();
 
   it(
+    "builds a generated tar context and applies COPY --chmod",
+    async () => {
+      const context = await mkdtemp(join(tmpdir(), "sandbar-generated-context-"));
+      try {
+        await writeFile(join(context, "Containerfile"),
+          `FROM ${BASE}\nCOPY --chmod=0755 payload /usr/local/bin/payload\n`);
+        await writeFile(join(context, "payload"), "generated-context\n");
+        await buildImage({ tag: TAG, containerfile: "<generated>" }, {
+          root: "", contextRoot: context, capture: true,
+        });
+        const result = await exec(RUNTIME, [
+          "run", "--rm", TAG, "sh", "-c",
+          "test -x /usr/local/bin/payload && cat /usr/local/bin/payload",
+        ]);
+        expect(result.stdout).toContain("generated-context");
+      } finally {
+        await rm(context, { recursive: true, force: true });
+      }
+    },
+    600_000,
+  );
+
+  it(
     "records the fingerprint as a label, and rebuilds only when the declared inputs change",
     async () => {
       const first = await ensureImages([image], root);

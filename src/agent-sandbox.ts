@@ -217,7 +217,7 @@ export type Mount = {
   readonly readonly?: boolean;
 };
 
-type ExecOptions = {
+export type ExecOptions = {
   stdin?: string;
   cwd?: string;
   sudo?: boolean;
@@ -234,6 +234,19 @@ type ExecOptions = {
   // output buffer for a run whose result it has already discarded.
   signal?: AbortSignal;
 };
+
+export function sandboxExecArgs(
+  containerName: string,
+  command: string,
+  opts?: ExecOptions,
+): string[] {
+  const args = ["exec"];
+  if (opts?.stdin !== undefined) args.push("-i");
+  if (opts?.cwd) args.push("-w", opts.cwd);
+  if (opts?.sudo) args.push("--user", "0");
+  args.push(containerName, "sh", "-c", command);
+  return args;
+}
 
 type ExecResult = { stdout: string; stderr: string; exitCode: number };
 
@@ -1435,11 +1448,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
         worktreePath: sandboxWorktreePath,
         containerName,
         exec: (command, opts) => {
-          const args = ["exec"];
-          if (opts?.stdin !== undefined) args.push("-i");
-          if (opts?.cwd) args.push("-w", opts.cwd);
-          if (opts?.sudo) args.push("--user", "0");
-          args.push(containerName, "sh", "-c", command);
+          const args = sandboxExecArgs(containerName, command, opts);
           return new Promise<ExecResult>((resolveExec, rejectExec) => {
             const proc = spawn("podman", args, {
               stdio: [opts?.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],

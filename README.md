@@ -634,6 +634,11 @@ variant, so an older branch's Containerfile cannot remove a CLI selected by the
 current run. Gate containers keep using the unaugmented image: they judge the
 branch environment and run no agent CLI.
 
+CA certificates remain explicit because bare-container probes of both
+standalone CLIs stop at credential validation before making an authenticated
+TLS request; that experiment therefore cannot establish that either binary
+ships a usable trust store. Sandbar does not inject an `SSL_CERT_FILE`.
+
 Migration is deliberately order-independent: upgrade sandbar first, then remove
 `@anthropic-ai/claude-code` and `@openai/codex` install lines from your sandbox
 Containerfile whenever convenient. During the overlap the driver's pinned
@@ -690,7 +695,7 @@ would rebuild on every change and produce a byte-identical image, which is the
 silent no-op this whole feature exists to remove.
 
 Sandbar hashes those paths — plus the Containerfile's own bytes and the entry's
-`buildArgs` — and uses the hash, not the tag, as the cache key:
+`buildArgs` and `target` — and uses the hash, not the tag, as the cache key:
 
 - at startup the tag is rebuilt when the hash no longer matches your checkout,
   instead of being reused because the name exists (the hash is recorded as an

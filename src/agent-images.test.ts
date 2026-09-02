@@ -15,6 +15,9 @@ import {
   agentToolsContainerfile,
   buildArgv,
   createAgentImages,
+  findAgentBinary,
+  hostAgentArchitecture,
+  prepareAgentArtifacts,
   sweepBranchImages,
 } from "./ensure-images.js";
 import { runScope, variantImageTag } from "./naming.js";
@@ -149,6 +152,7 @@ describe("run-owned agent images", () => {
 
   it("deduplicates concurrent augmentation of the same base", async () => {
     let builds = 0;
+    let artifactPreparations = 0;
     let releaseBuild!: () => void;
     const buildStarted = new Promise<void>((resolve) => {
       releaseBuild = resolve;
@@ -157,7 +161,10 @@ describe("run-owned agent images", () => {
       declaredBaseTag: "base",
       providers: ["codex"],
       scope: runScope("/deduplicated-agent-image"),
-      prepareArtifacts: fakeAgentArtifacts,
+      prepareArtifacts: async (providers) => {
+        artifactPreparations += 1;
+        return fakeAgentArtifacts(providers);
+      },
       inputsLabel: async () => null,
       build: async () => {
         builds += 1;
@@ -176,6 +183,65 @@ describe("run-owned agent images", () => {
     expect(first).toBe(second);
     expect(second).toBe(third);
     expect(builds).toBe(2);
+    expect(artifactPreparations).toBe(1);
+  });
+
+  it("derives recipe file names from the selected architecture", () => {
+    const original = AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64;
+    (AGENT_PROVIDER_PACKAGES.codex.artifacts as Record<string, unknown>).arm64 = [{
+      ...original[0]!, variant: "glibc",
+    }, { ...original[0]!, variant: "musl" }];
+    try {
+      const file = agentToolsContainerfile("base", ["codex"], "arm64");
+      expect(file).toContain("codex-glibc codex-musl");
+      expect(file).not.toContain("codex-static /usr/local/bin/codex");
+    } finally {
+      (AGENT_PROVIDER_PACKAGES.codex.artifacts as Record<string, unknown>).arm64 = original;
+    }
+  });
+
+  it("selects extracted provider binaries and rejects unsupported hosts", () => {
+    expect(findAgentBinary("codex", ["README", "codex-aarch64"])).toBe("codex-aarch64");
+    expect(() => findAgentBinary("codex", ["README"])).toThrow(/no codex binary/);
+    expect(() => hostAgentArchitecture("riscv64")).toThrow(/riscv64/);
+  });
+
+  it("rejects non-OK and hash-mismatched pinned downloads", async () => {
+    await expect(prepareAgentArtifacts(["codex"], () => {}, {
+      arch: "x64",
+      fetch: async () => new Response("missing", { status: 503 }),
+    })).rejects.toThrow(/HTTP 503/);
+    await expect(prepareAgentArtifacts(["codex"], () => {}, {
+      arch: "x64",
+      fetch: async () => new Response("not the pinned artifact"),
+    })).rejects.toThrow(/sha256 mismatch/);
+  });
+
+  it("extracts, discovers, verifies, and disposes an archived pinned tool", async () => {
+    const bytes = "tiny archive fixture";
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const packages = {
+      ...AGENT_PROVIDER_PACKAGES,
+      codex: {
+        version: "test",
+        artifacts: {
+          x64: [{ variant: "static" as const, url: "fixture", sha256, archive: true as const }],
+          arm64: [{ variant: "static" as const, url: "fixture", sha256, archive: true as const }],
+        },
+      },
+    };
+    const prepared = await prepareAgentArtifacts(["codex"], () => {}, {
+      arch: "x64",
+      packages,
+      fetch: async () => new Response(bytes),
+      extract: async (_archive, destination) => {
+        await writeFile(join(destination, "codex-x86_64-unknown-linux-musl"), "binary");
+      },
+    });
+    await prepared.verify("codex");
+    expect(await readFile(join(prepared.root, "codex-static"), "utf8")).toBe("binary");
+    await prepared.dispose();
+    await expect(readdir(prepared.root)).rejects.toThrow();
   });
 
   it("re-verifies staged tools before augmenting a later variant", async () => {
