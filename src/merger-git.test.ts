@@ -238,6 +238,48 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     expect(await git(wt, "rev-parse", "HEAD^")).toBe(mergeSha);
   });
 
+  it("repairs a non-canonical member merge below a gate-recovery commit", async () => {
+    await git(seed, "checkout", "-b", "sandbar/issue-9-member");
+    await commit(seed, "member-9.txt", "member\n");
+    await git(seed, "push", "-q", "origin", "sandbar/issue-9-member");
+    await git(cache, "fetch", "origin", "--quiet");
+    const preMergeSha = await git(wt, "rev-parse", "HEAD");
+    await git(
+      wt,
+      "merge",
+      "--no-ff",
+      "-m",
+      "resolve conflicts",
+      "origin/sandbar/issue-9-member",
+    );
+    await commit(wt, "gate-fix-9.txt", "fixed\n");
+
+    await adapter().canonicalizeChunkMemberMerge({
+      id: "9",
+      title: "Member title",
+      branch: "sandbar/issue-9-member",
+    }, preMergeSha);
+
+    expect(await git(wt, "log", "-2", "--format=%s")).toBe(
+      "edit gate-fix-9.txt\nMerge sandbar/issue-9: Member title",
+    );
+    expect(await git(wt, "show", "HEAD:gate-fix-9.txt")).toBe("fixed");
+    expect((await git(wt, "rev-list", "--parents", "-n", "1", "HEAD^")).split(" ")).toHaveLength(3);
+  });
+
+  it("refuses an attempt that made no commit", async () => {
+    const preMergeSha = await git(wt, "rev-parse", "HEAD");
+
+    await expect(
+      adapter().canonicalizeChunkMemberMerge({
+        id: "10",
+        title: "Member title",
+        branch: "sandbar/issue-10-member",
+      }, preMergeSha),
+    ).rejects.toThrow("produced 0 first-parent merge commits");
+    expect(await git(wt, "rev-parse", "HEAD")).toBe(preMergeSha);
+  });
+
   it("refuses to turn an agent's replacement commit into a false membership record", async () => {
     const preMergeSha = await git(wt, "rev-parse", "HEAD");
     await commit(wt, "replacement.txt", "not a merge\n");
@@ -248,7 +290,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
         title: "Member title",
         branch: "sandbar/issue-7-member",
       }, preMergeSha),
-    ).rejects.toThrow("did not produce a two-parent merge commit");
+    ).rejects.toThrow("produced 0 first-parent merge commits");
     expect(await git(wt, "log", "-1", "--format=%s")).toBe(
       "edit replacement.txt",
     );

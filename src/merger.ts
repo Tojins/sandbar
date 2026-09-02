@@ -2561,28 +2561,33 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     },
     async canonicalizeChunkMemberMerge(unit, preMergeSha) {
       const expected = unit.mergeMessage ?? mergeMessageFor(unit);
-      const { stdout: canonicalSubjects } = await exec(
+      const { stdout: mergeShasOut } = await exec(
         "git",
         [
-          "log",
+          "rev-list",
           "--first-parent",
           "--merges",
-          "--format=%s",
           `${preMergeSha}..HEAD`,
         ],
         { cwd },
       );
-      if (canonicalSubjects.split("\n").includes(expected)) return;
-
-      const [{ stdout }, { stdout: parentsOut }] = await Promise.all([
+      const mergeShas = mergeShasOut.split("\n").filter(Boolean);
+      if (mergeShas.length !== 1) {
+        throw new SandbarError(
+          `Chunk member #${issueNumberOf(unit)} produced ${mergeShas.length} ` +
+            `first-parent merge commits; refusing to guess which commit records its membership`,
+        );
+      }
+      const mergeSha = mergeShas[0]!;
+      const [{ stdout: subject }, { stdout: parentsOut }] = await Promise.all([
         exec(
           "git",
-          ["log", "-1", "--format=%s", "HEAD"],
+          ["log", "-1", "--format=%s", mergeSha],
           { cwd },
         ),
         exec(
           "git",
-          ["rev-list", "--parents", "-n", "1", "HEAD"],
+          ["rev-list", "--parents", "-n", "1", mergeSha],
           { cwd },
         ),
       ]);
@@ -2591,20 +2596,46 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           `Chunk member #${issueNumberOf(unit)} did not produce a two-parent merge commit; refusing to publish a membership record for unrelated history`,
         );
       }
-      if (stdout.trim() === expected) return;
-      // Replace agent-authored prose with the protocol record. The canonical
-      // body is the same one mergeNoFf supplied on the clean path.
-      await exec(
+      if (subject.trim() === expected) return;
+
+      const parents = parentsOut.trim().split(/\s+/).slice(1);
+      const { stdout: authorOut } = await exec(
+        "git",
+        ["show", "-s", "--format=%aN%x00%aE%x00%aI", mergeSha],
+        { cwd },
+      );
+      const [authorName, authorEmail, authorDate] = authorOut.trim().split("\0");
+      const { stdout: rewrittenOut } = await exec(
         "git",
         [
-          "commit",
-          "--amend",
-          "--no-verify",
-          "-m",
-          expected,
-          "-m",
-          deps.coauthorTrailer,
+          "commit-tree",
+          `${mergeSha}^{tree}`,
+          "-p", parents[0]!,
+          "-p", parents[1]!,
+          "-m", expected,
+          "-m", deps.coauthorTrailer,
         ],
+        {
+          cwd,
+          env: {
+            ...gitAuthorEnv(deps),
+            GIT_AUTHOR_NAME: authorName!,
+            GIT_AUTHOR_EMAIL: authorEmail!,
+            GIT_AUTHOR_DATE: authorDate!,
+          },
+        },
+      );
+      const rewritten = rewrittenOut.trim();
+      if (mergeSha === (await this.getHeadSha())) {
+        await exec("git", ["reset", "--hard", rewritten], { cwd });
+        return;
+      }
+      // Gate recovery may have committed a fix above the agent-authored merge.
+      // Replay that linear tail onto the same merge tree with the protocol
+      // subject repaired; no completed work is discarded.
+      await exec(
+        "git",
+        ["rebase", "--onto", rewritten, mergeSha, "HEAD"],
         { cwd, env: gitAuthorEnv(deps) },
       );
     },
