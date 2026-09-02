@@ -298,11 +298,13 @@ describe("prompt anchors name their sources (#34, #38)", () => {
         repo: CONFIGURED,
         repoDir: target,
         claudeMdPath: "CLAUDE.md",
+        contextMdPath: "CONTEXT.md",
         sourceBranch: "main",
       },
     );
 
     expect(prompt).toContain("@CODING_STANDARDS.md");
+    expect(prompt).toContain("@CLAUDE.md (and @CONTEXT.md if it exists)");
   });
 
   it("drops the implementer's standards @ref when its worktree lacks the file", async () => {

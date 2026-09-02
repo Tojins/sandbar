@@ -356,11 +356,10 @@ async function buildAttemptSlot(
     `the work done so far on ${inputs.issue.branch}, anchored at ${base.ref}`,
   );
 
-  const codingStandardsPath =
-    inputs.codingStandardsPath &&
-    existsSync(resolve(worktreePath, inputs.codingStandardsPath))
-      ? inputs.codingStandardsPath
-      : undefined;
+  const codingStandardsPath = resolveCodingStandardsPath(
+    worktreePath,
+    inputs.codingStandardsPath,
+  );
 
   return renderAttemptSlot({
     ...inputs,
@@ -428,12 +427,6 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
         })
       : "";
 
-  const projectStandards = inputs.codingStandardsPath
-    ? render(REVIEWER_PROJECT_STANDARDS_TPL, {
-        codingStandardsPath: inputs.codingStandardsPath,
-      })
-    : "";
-
   return render(IMPLEMENTER_TPL, {
     attempt: String(attempt),
     maxAttempts: String(maxAttempts),
@@ -448,7 +441,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     orchestratorNote: section(orchestratorNote),
     escalation: section(escalation),
     codingStandards: CODING_STANDARDS,
-    projectStandards: section(projectStandards),
+    projectStandards: projectStandardsSlot(inputs.codingStandardsPath),
     conventionsRef: conventionsRef(inputs.claudeMdPath, inputs.contextMdPath),
     baseRef: base.ref,
   });
@@ -542,16 +535,10 @@ async function buildReviewerSlotInputs(
     )
   ).trim();
 
-  // Only point at the project standards file when it actually exists, so a
-  // configured-but-absent path doesn't send the reviewer chasing a dead @ref.
-  // Probed in the worktree UNDER REVIEW, which is where the reviewer will
-  // resolve the @ref — so the commit that adds the standards is reviewed
-  // against them (#34).
-  const codingStandardsPath =
-    inputs.codingStandardsPath &&
-    existsSync(resolve(worktreePath, inputs.codingStandardsPath))
-      ? inputs.codingStandardsPath
-      : undefined;
+  const codingStandardsPath = resolveCodingStandardsPath(
+    worktreePath,
+    inputs.codingStandardsPath,
+  );
 
   return { ...inputs, codingStandardsPath, commits, diff };
 }
@@ -600,10 +587,6 @@ function renderReviewerTemplate(
     ? `## Branch diff\n\n\`\`\`diff\n${diff}\n\`\`\``
     : `## Branch diff\n\n(empty — no changes against \`${base.ref}\`)`;
 
-  const projectStandards = codingStandardsPath
-    ? render(REVIEWER_PROJECT_STANDARDS_TPL, { codingStandardsPath })
-    : "";
-
   return render(template, {
     branch: issue.branch,
     baseRef: base.ref,
@@ -614,7 +597,7 @@ function renderReviewerTemplate(
     commits: section(commitsBlock),
     diff: section(diffBlock),
     codingStandards: CODING_STANDARDS,
-    projectStandards: section(projectStandards),
+    projectStandards: projectStandardsSlot(codingStandardsPath),
     conventionsRef: conventionsRef(claudeMdPath, contextMdPath),
   });
 }
@@ -625,4 +608,24 @@ function conventionsRef(claudeMdPath: string, contextMdPath?: string): string {
   return contextMdPath
     ? `@${claudeMdPath} (and @${contextMdPath} if it exists)`
     : `@${claudeMdPath}`;
+}
+
+// Only emit the host extension when the agent can resolve it in the issue
+// worktree. That lets a branch introduce its own standards while keeping a
+// configured-but-absent path out of both roles' prompts (#34, #78).
+function resolveCodingStandardsPath(
+  worktreePath: string,
+  configured?: string,
+): string | undefined {
+  return configured && existsSync(resolve(worktreePath, configured))
+    ? configured
+    : undefined;
+}
+
+function projectStandardsSlot(codingStandardsPath?: string): string {
+  return section(
+    codingStandardsPath
+      ? render(REVIEWER_PROJECT_STANDARDS_TPL, { codingStandardsPath })
+      : "",
+  );
 }
