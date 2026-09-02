@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,8 +13,10 @@ import {
   type BuildOptions,
   type PreparedAgentArtifacts,
   agentToolsContainerfile,
+  agentArtifactCacheRoot,
   buildArgv,
   createAgentImages,
+  detectImageLibcArgv,
   findAgentBinary,
   hostAgentArchitecture,
   prepareAgentArtifacts,
@@ -243,6 +245,20 @@ describe("run-owned agent images", () => {
     expect(() => hostAgentArchitecture("riscv64")).toThrow(/riscv64/);
   });
 
+  it("isolates the libc probe from image entrypoints and declared volumes", () => {
+    expect(detectImageLibcArgv("app:dev")).toEqual([
+      "run", "--rm", "--image-volume=ignore", "--entrypoint", "sh", "app:dev",
+      "-c", "[ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ]",
+    ]);
+  });
+
+  it("scopes the default artifact cache to the host uid", () => {
+    expect(agentArtifactCacheRoot(1234)).toBe(
+      join(tmpdir(), "sandbar-agent-tools-1234"),
+    );
+    expect(() => agentArtifactCacheRoot(-1)).toThrow(/numeric host uid/);
+  });
+
   it("rejects non-OK and hash-mismatched pinned downloads", async () => {
     await expect(prepareAgentArtifacts(["codex"], () => {}, {
       arch: "x64",
@@ -339,6 +355,37 @@ describe("run-owned agent images", () => {
       await second.verify("codex");
       await second.dispose();
       expect(fetches).toBe(1);
+    } finally {
+      await rm(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("removes a partial cache entry when a download stream fails", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "sandbar-agent-cache-failure-"));
+    const sha256 = "a".repeat(64);
+    const packages = {
+      ...AGENT_PROVIDER_PACKAGES,
+      codex: {
+        version: "test",
+        artifacts: {
+          x64: [{ variant: "static" as const, url: "fixture", sha256 }],
+          arm64: [{ variant: "static" as const, url: "fixture", sha256 }],
+        },
+      },
+    };
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("partial"));
+        controller.error(new Error("connection reset"));
+      },
+    });
+    try {
+      await expect(prepareAgentArtifacts(["codex"], () => {}, {
+        arch: "x64", cacheRoot, packages,
+        fetch: async () => new Response(body),
+      })).rejects.toThrow(/connection reset/);
+      expect(await readdir(join(cacheRoot, sha256))).toEqual([]);
+      expect((await stat(cacheRoot)).isDirectory()).toBe(true);
     } finally {
       await rm(cacheRoot, { recursive: true, force: true });
     }

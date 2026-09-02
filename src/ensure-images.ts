@@ -610,12 +610,18 @@ export function findAgentBinary(
   return binary;
 }
 
+export function detectImageLibcArgv(baseTag: string): string[] {
+  return [
+    "run", "--rm", "--image-volume=ignore", "--entrypoint", "sh", baseTag,
+    "-c", "[ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ]",
+  ];
+}
+
 export async function detectImageLibc(baseTag: string): Promise<"glibc" | "musl"> {
   try {
-    await exec(RUNTIME, [
-      "run", "--rm", baseTag, "sh", "-c",
-      "[ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ]",
-    ]);
+    await exec(RUNTIME, detectImageLibcArgv(baseTag), {
+      timeout: IMAGE_QUERY_TIMEOUT_MS,
+    });
     return "musl";
   } catch (err) {
     const exitCode = (err as { code?: unknown }).code;
@@ -635,6 +641,15 @@ export type ArtifactPreparationAdapters = {
   readonly variants?: ReadonlySet<"static" | "glibc" | "musl">;
 };
 
+export function agentArtifactCacheRoot(
+  uid: number | undefined = process.getuid?.(),
+): string {
+  if (uid === undefined || !Number.isSafeInteger(uid) || uid < 0) {
+    throw new SandbarError("agent artifact caching requires a numeric host uid");
+  }
+  return join(tmpdir(), `sandbar-agent-tools-${uid}`);
+}
+
 export async function prepareAgentArtifacts(
   providers: readonly AgentProviderName[],
   log: (line: string) => void,
@@ -650,8 +665,8 @@ export async function prepareAgentArtifacts(
   const extract = adapters.extract ?? (async (archive, destination) => {
     await exec("tar", ["-xzf", archive, "-C", destination]);
   });
-  const cacheRoot = adapters.cacheRoot ?? join(tmpdir(), "sandbar-agent-tools");
-  await mkdir(cacheRoot, { recursive: true });
+  const cacheRoot = adapters.cacheRoot ?? agentArtifactCacheRoot();
+  await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
   // A disposable view gives callers the old flat file layout while the large
   // verified bytes live in a persistent, content-addressed cache across runs.
   const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-view-"));
@@ -676,24 +691,27 @@ export async function prepareAgentArtifacts(
             await rm(downloaded, { force: true });
             log(`Downloading agent tool ${identity}...`);
             const partial = join(artifactRoot, `download-${process.pid}.partial`);
-            const response = await fetchArtifact(artifact.url, {
-              signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
-            });
-            if (!response.ok || response.body === null) {
-              throw new Error(`download returned HTTP ${response.status}`);
-            }
-            await pipeline(
-              Readable.fromWeb(response.body as never),
-              createWriteStream(partial),
-            );
-            const actual = await sha256File(partial);
-            if (actual !== artifact.sha256) {
-              await rm(partial, { force: true });
-              throw new Error(
-                `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
+            try {
+              const response = await fetchArtifact(artifact.url, {
+                signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
+              });
+              if (!response.ok || response.body === null) {
+                throw new Error(`download returned HTTP ${response.status}`);
+              }
+              await pipeline(
+                Readable.fromWeb(response.body as never),
+                createWriteStream(partial),
               );
+              const actual = await sha256File(partial);
+              if (actual !== artifact.sha256) {
+                throw new Error(
+                  `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
+                );
+              }
+              await rename(partial, downloaded);
+            } finally {
+              await rm(partial, { force: true });
             }
-            await rename(partial, downloaded);
           }
           const destination = join(root, name);
           if (artifact.archive) {
