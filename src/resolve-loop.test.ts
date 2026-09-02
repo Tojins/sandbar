@@ -636,6 +636,15 @@ describe("runResolveLoop — logging", () => {
     );
     expect(lines.some((l) => l.startsWith("resolve-attempt 1/"))).toBe(true);
     expect(lines.some((l) => l.includes("gate green"))).toBe(true);
+    // #82. The install and the re-gate are reported on the GREEN path too —
+    // they run on every recovered attempt, which is exactly the case whose cost
+    // nothing recorded. Rendered by the same `formatGateFields` the other three
+    // gate consumers use; this fake adapter carries no timings, and an absent
+    // measurement is absent rather than zero.
+    expect(lines.some((l) => l.startsWith("resolve-attempt 1 install ok=true"))).toBe(
+      true,
+    );
+    expect(lines).toContain("resolve-attempt 1 gate ok=true");
   });
 });
 

@@ -122,6 +122,26 @@ describe.runIf(available)(
         expect(green.stdout).toContain("v1");
         // Steps are labelled in the output so a multi-step trace is readable.
         expect(green.stdout).toContain("== read-marker (runner)");
+
+        // #82. The split is over what `runStackGate` actually ran: the
+        // sandbar-owned phases first, in execution order, then every consumer
+        // step. Asserted by running podman rather than by mocking it, because
+        // what is being claimed is that the numbers describe real work.
+        expect(green.steps.map((x) => x.name)).toEqual([
+          "worktree-clean",
+          "images",
+          "containers:issue",
+          "containers:attempt",
+          "read-marker",
+          "env",
+        ]);
+        expect(green.steps.every((x) => x.ok)).toBe(true);
+        expect(green.steps.every((x) => x.durationMs >= 0)).toBe(true);
+        // The whole run is at least as long as any one phase of it, and the
+        // phases do not sum past it either — a cheap check that all six are on
+        // the same clock.
+        const sum = green.steps.reduce((a, x) => a + x.durationMs, 0);
+        expect(green.durationMs).toBeGreaterThanOrEqual(sum - green.steps.length);
       },
       180_000,
     );
@@ -158,6 +178,18 @@ describe.runIf(available)(
         // test output.
         expect(red.containerLogs).toContain("--- container runner (last");
         expect(red.stderr).not.toContain("--- container runner");
+
+        // #82. A red gate's array is a PREFIX: the failing step is the last
+        // entry and carries `ok: false`, and the step that never ran is not
+        // fabricated into it — the same rule #67 states for an agent
+        // invocation.
+        const names = red.steps.map((x) => x.name);
+        expect(names).toContain("boom");
+        expect(names).not.toContain("never");
+        expect(red.steps[red.steps.length - 1]).toMatchObject({
+          name: "boom",
+          ok: false,
+        });
       },
       180_000,
     );
@@ -183,6 +215,11 @@ describe.runIf(available)(
         expect(refused.ok).toBe(false);
         expect(refused.failedStep).toBe("worktree-clean");
         expect(refused.stderr).toContain("forgotten.ts");
+        // #82. The refusal is timed too, and nothing after it is invented: no
+        // image was resolved and no container was touched, so `worktree-clean`
+        // is the only entry.
+        expect(refused.steps.map((x) => x.name)).toEqual(["worktree-clean"]);
+        expect(refused.steps[0]?.ok).toBe(false);
         // The forgotten file is REPORTED, never deleted — the whole reason the
         // design asserts rather than running `git clean -fd`.
         await expect(

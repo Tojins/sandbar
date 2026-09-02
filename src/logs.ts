@@ -27,6 +27,27 @@
 // where an operator has most likely stopped watching and so where the log is
 // the only reader left.
 //
+// DURATIONS (#82). Since #82 the per-attempt trace carries elapsed time on the
+// lines that report an outcome — setup, the implementer, gate-1 and its
+// per-step split, each reviewer pass, the whole review round, each merge unit,
+// both phases and every image build. All of it is here and none of it is on
+// stdout, which is the same split this header already describes: the log is
+// where a cost question is answered long after the fact, and a terminal
+// rendering of ~130 lines per cycle instead of ~50 would be unreadable.
+//
+// One spelling, `durationMs=<int>`, produced by `timing.ts`; the gate's
+// per-step numbers nest inside a single `steps=` field because step names are
+// the host's. Two rules a writer must not break: a duration is a REPORT and
+// nothing in sandbar may decide on one, and an absent measurement is ABSENT —
+// the field is omitted rather than written as `0`, because a zero meaning "not
+// measured" is what a stats reader averages.
+//
+// The terminal lines are written by the TASK that terminated rather than by the
+// reporting loop that collects the cohort, which is a coverage fix as much as a
+// timing one: an outcome reached eight minutes before the cohort settled used
+// to exist in this log only if every sibling also survived. run.ts's call site
+// owns that argument.
+//
 // The invariant is about coverage and NOT a licence to say more than the
 // terminal does. A log line is read long after the fact, by someone who has
 // only it, so it may only claim what the code reaching it actually knows: the

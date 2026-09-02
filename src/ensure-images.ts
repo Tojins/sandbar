@@ -7,6 +7,19 @@
 // Dockerfile path, which would tar the whole repo). `stdinContext` builds with
 // NO context at all (`podman build -t <tag> - < file`).
 //
+// EVERY build entry point RECORDS what it did (#82). All three of them —
+// `ensureImages`, `createAgentImages` and `createBranchImages` — hand an
+// `ImageBuildRecord` to an optional `onImage` seam: the tag, whether this call
+// built or reused, why, and how long deciding-plus-building took. Rebuilding a
+// declared image changes what every container in the run then executes, so it
+// is an outcome, and #70 says an outcome exists in the log rather than only on
+// a terminal. It used to be `console.log` alone, which is why a startup that
+// took 34 s instead of 7.7 s had to be explained from git history.
+//
+// The seam is SEPARATE from the existing `log` one on purpose. `log` is the
+// human prose that goes to stdout; `onImage` is the structured record that goes
+// to `orchestrator.log`. #82 adds nothing to stdout outside `sandbar gate`.
+//
 // Images that are a function of the BRANCH (#37): an entry declaring what it
 // is a function of (`rebuildOn`) gets a real cache key beyond the tag
 // (image-inputs.ts owns the failure in full), in two places — `ensureImages`
@@ -64,6 +77,7 @@ import {
   variantImageTag,
 } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
+import { durationField, startTimer } from "./timing.js";
 
 const exec = promisify(execFile);
 
@@ -398,14 +412,65 @@ export async function buildImage(
 // A MISSING tag is still built either way. There is nothing to clobber, and
 // refusing would mean `sandbar gate` could not run in CI from a fresh checkout,
 // which is most of the point of it existing.
+// What a build entry point DID, per tag (#82).
+//
+// Rebuilding a declared image changes what every container in the run then
+// executes, which is an outcome by any reading — and until #82 it was announced
+// by `console.log` and therefore reached a terminal and nothing else. One run
+// measured 34.196 s of startup against three at ~7.7 s, and establishing that
+// the difference was a 26 s image rebuild took reading git history, because
+// nothing in the run tree said so.
+//
+// "Reused" is as load-bearing as "built": a 0.3 s `ensureImages` and a 26 s one
+// differ only in that word, and an operator reading a slow startup needs the
+// line present in the fast case to know the slow one is unusual.
+//
+// `reason` is the deciding comparison's OWN answer, never a re-derivation. A
+// second computation of "did `rebuildOn` move" that disagreed with the one that
+// actually decided would be worse than no line at all.
+export type ImageBuildRecord = {
+  readonly tag: string;
+  readonly built: boolean;
+  readonly reason: string;
+  readonly durationMs: number;
+};
+
+export function formatImageRecord(r: ImageBuildRecord): string {
+  return (
+    `image ${r.tag} built=${r.built} reason=${r.reason} ` +
+    durationField(r.durationMs)
+  );
+}
+
+// Where an `ImageBuildRecord` goes. Separate from the existing `log` seam,
+// which is the TERMINAL rendering ("Building x in podman..."): #82 adds nothing
+// to stdout outside `sandbar gate`, so the record is the log tree's and the
+// prose stays the terminal's. Two streams, one invariant (#70).
+export type ImageRecorder = (r: ImageBuildRecord) => void | Promise<void>;
+
 export async function ensureImages(
   images: readonly BuiltImage[],
   contextRoot: string,
-  opts?: { readonly rebuildInPlace?: boolean },
+  opts?: {
+    readonly rebuildInPlace?: boolean;
+    readonly onImage?: ImageRecorder;
+  },
 ): Promise<ReadonlyMap<string, string>> {
   const rebuildInPlace = opts?.rebuildInPlace ?? true;
   const baseFingerprints = new Map<string, string>();
   for (const image of images) {
+    // Per tag, and started before the fingerprint: hashing the declared inputs
+    // is part of what deciding costs, and on a big `rebuildOn` set it is not
+    // nothing.
+    const elapsed = startTimer();
+    const record = async (built: boolean, reason: string): Promise<void> => {
+      await opts?.onImage?.({
+        tag: image.tag,
+        built,
+        reason,
+        durationMs: elapsed(),
+      });
+    };
     const fingerprint = await fingerprintImageInputs(contextRoot, image, {
       mustExist: true,
     });
@@ -419,6 +484,9 @@ export async function ensureImages(
           capture: false,
           timeoutMs: image.buildTimeoutMs,
         });
+        await record(true, "absent");
+      } else {
+        await record(false, "no-rebuild-inputs");
       }
       continue;
     }
@@ -431,10 +499,14 @@ export async function ensureImages(
       // would then mean "never rebuild" rather than "always". So it is recorded
       // as a fingerprint no tree can produce.
       baseFingerprints.set(image.tag, recorded ?? UNKNOWN_PROVENANCE);
+      await record(false, "rebuild-in-place-suspended");
       continue;
     }
     baseFingerprints.set(image.tag, fingerprint);
-    if (recorded === fingerprint) continue;
+    if (recorded === fingerprint) {
+      await record(false, "inputs-unchanged");
+      continue;
+    }
     console.log(
       recorded === null
         ? `Building ${image.tag} in ${RUNTIME} (declares rebuildOn; not present, or built before sandbar recorded its inputs)...`
@@ -446,6 +518,7 @@ export async function ensureImages(
       capture: false,
       timeoutMs: image.buildTimeoutMs,
     });
+    await record(true, recorded === null ? "inputs-unrecorded" : "inputs-changed");
   }
   return baseFingerprints;
 }
@@ -493,6 +566,7 @@ export async function createAgentImages(opts: {
   readonly build?: (image: BuiltImage, opts: BuildOptions) => Promise<unknown>;
   readonly inputsLabel?: (tag: string) => Promise<string | null>;
   readonly log?: (line: string) => void;
+  readonly onImage?: ImageRecorder;
 }): Promise<AgentImages> {
   const build = opts.build ?? buildImage;
   const inputsLabel = opts.inputsLabel ?? readInputsLabel;
@@ -505,6 +579,7 @@ export async function createAgentImages(opts: {
     let promise = pending.get(baseTag);
     if (promise === undefined) {
       promise = (async () => {
+        const elapsed = startTimer();
         const baseInputs = await inputsLabel(baseTag);
         const containerfile = agentToolsContainerfile(baseTag, opts.providers);
         const fingerprint = createHash("sha256")
@@ -514,6 +589,12 @@ export async function createAgentImages(opts: {
         // An unlabelled base has unknown provenance. Its derived tag can be a
         // cache hint, never proof, so rebuild it and let podman's layer cache
         // make the common case cheap.
+        // Since #75 this invokes a build on EVERY run — the end-of-run cleanup
+        // removes the tag unconditionally, so the next startup finds it gone —
+        // and the honest line says `built=true`. Whether podman's layer cache
+        // made that cheap is what `durationMs` is for; papering it over as
+        // "reused" would hide the one number that decides whether the
+        // unconditional `order.push` below deserves its own issue (#82).
         if (baseInputs === null || (await inputsLabel(tag)) !== fingerprint) {
           log(
             `Augmenting '${baseTag}' as '${tag}' with agent tools ` +
@@ -528,6 +609,19 @@ export async function createAgentImages(opts: {
               capture: true,
             },
           );
+          await opts.onImage?.({
+            tag,
+            built: true,
+            reason: baseInputs === null ? "base-unlabelled" : "variant-stale",
+            durationMs: elapsed(),
+          });
+        } else {
+          await opts.onImage?.({
+            tag,
+            built: false,
+            reason: "variant-current",
+            durationMs: elapsed(),
+          });
         }
         order.push(tag);
         return tag;
@@ -592,6 +686,7 @@ export type BranchImagesOptions = {
   readonly build?: (image: BuiltImage, opts: BuildOptions) => Promise<unknown>;
   readonly inputsLabel?: (tag: string) => Promise<string | null>;
   readonly log?: (line: string) => void;
+  readonly onImage?: ImageRecorder;
   // Declared tags behind a worktree-mounting container, and the host uid they
   // must run as. A freshly-built variant is re-probed against the D3 rule
   // before it is handed to a container (see `checkVariantUid`); an empty set
@@ -638,6 +733,7 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
       let pending = builds.get(tag);
       if (pending === undefined) {
         const attempt = (async () => {
+          const elapsed = startTimer();
           // The LABEL, not merely `image exists`. The variant tag carries only
           // the first 8 hex of the fingerprint, so the name alone is a 32-bit
           // cache key, and a leftover tag from a crashed run in this scope is
@@ -670,6 +766,19 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
             if (worktreeMountingTags.has(image.tag)) {
               await checkVariantUid(tag, image.tag, opts.hostUid ?? 0, probeUid);
             }
+            await opts.onImage?.({
+              tag,
+              built: true,
+              reason: "branch-inputs-changed",
+              durationMs: elapsed(),
+            });
+          } else {
+            await opts.onImage?.({
+              tag,
+              built: false,
+              reason: "variant-current",
+              durationMs: elapsed(),
+            });
           }
           // Recorded only once the tag EXISTS, whether this run built it or
           // found it. A tag recorded before the build would send cleanup after

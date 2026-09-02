@@ -62,6 +62,7 @@ import { onCleanup } from "./cleanup.js";
 import { resolveSandboxEnv } from "./env.js";
 import { RESOURCE_PREFIX } from "./naming.js";
 import type { RepoLayout } from "./repo-cache.js";
+import { startTimer } from "./timing.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -295,6 +296,21 @@ export type SandboxRunResult = {
   readonly commits: { sha: string }[];
   readonly iterations: unknown[];
   readonly completionSignal?: string;
+  // Milliseconds from the start of `run()` to the instant the completion signal
+  // was first seen in the agent's accumulated speech (#82). ABSENT when it was
+  // never seen — the run ended by exec exit or by the idle kill instead — which
+  // is the whole point of it being optional: a zero would read as "signalled
+  // immediately".
+  //
+  // What it buys: `DEFAULT_COMPLETION_TIMEOUT_SECONDS` is 60, re-armed on every
+  // output line, paid once per implementer attempt and up to twice per review
+  // round, and nobody knows whether that grace is worth twelve minutes an issue
+  // or nearly none. The caller's own `durationMs` minus this is the answer,
+  // over-reporting only by the per-run git-identity setup that precedes the
+  // invocation (two `git config` reads and up to three `git config --global`
+  // writes — milliseconds, and named here so a reader of the difference knows
+  // exactly what is in it).
+  readonly signalMs?: number;
 };
 
 export interface Sandbox {
@@ -1605,10 +1621,14 @@ const invokeAgent = (
   idleTimeoutMs: number,
   completionTimeoutMs: number,
   completionSignals: string[],
-): Promise<{ result: string }> =>
+  // Elapsed-since-`run()`, so the reported `signalMs` is on the same clock
+  // across iterations rather than restarting with each one (#82).
+  elapsed: () => number,
+): Promise<{ result: string; signalMs?: number }> =>
   new Promise((resolveRun, rejectRun) => {
     const speech = createAgentSpeechAccumulator(agent);
     let completionDetected = false;
+    let signalMs: number | undefined;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
     // Both timers stop waiting for the exec; this is how they also stop it
@@ -1622,7 +1642,7 @@ const invokeAgent = (
         timer = null;
       }
     };
-    const settleResolve = (val: { result: string }): void => {
+    const settleResolve = (val: { result: string; signalMs?: number }): void => {
       if (settled) return;
       settled = true;
       clearTimer();
@@ -1659,7 +1679,10 @@ const invokeAgent = (
           // race with this one. The agent has already emitted its completion
           // signal and whatever is still holding the pipe open is producing
           // output nobody will read, so there is nothing here worth waiting on.
-          settleResolve({ result: speech.spoken });
+          settleResolve({
+            result: speech.spoken,
+            ...(signalMs === undefined ? {} : { signalMs }),
+          });
           abort.abort();
         }, completionTimeoutMs);
       } else {
@@ -1699,6 +1722,9 @@ const invokeAgent = (
             completionSignals.some((sig) => speech.accumulated.includes(sig))
           ) {
             completionDetected = true;
+            // Read here rather than in the grace timer: this is the instant the
+            // agent said it was done, and the timer fires up to a minute later.
+            signalMs = elapsed();
           }
           resetTimer();
         },
@@ -1769,6 +1795,7 @@ const invokeAgent = (
         }
         settleResolve({
           result: speech.output(execResult.stdout),
+          ...(signalMs === undefined ? {} : { signalMs }),
         });
       })
       .catch((err) => settleReject(err));
@@ -1936,7 +1963,12 @@ export const createSandbox = async (
     idleTimeoutMs: number,
     completionTimeoutMs: number,
     completionSignals: string[],
-  ): Promise<{ result: string; commits: { sha: string }[] }> => {
+    elapsed: () => number,
+  ): Promise<{
+    result: string;
+    commits: { sha: string }[];
+    signalMs?: number;
+  }> => {
     // Read host git identity, then propagate into the sandbox. safe.directory
     // is set per-run (load-bearing: bind mount is owned by a different UID and
     // sandbar's common case has no onSandboxReady hooks).
@@ -1990,7 +2022,7 @@ export const createSandbox = async (
         .catch(() => execGit(["rev-parse", "HEAD"], worktreePath))
     ).trim();
 
-    const { result } = await invokeAgent(
+    const { result, signalMs } = await invokeAgent(
       providerHandle,
       sandboxRepoDir,
       prompt,
@@ -1998,6 +2030,7 @@ export const createSandbox = async (
       idleTimeoutMs,
       completionTimeoutMs,
       completionSignals,
+      elapsed,
     );
 
     // Explicit-branch commit capture: fully-qualified ref, the cache repo,
@@ -2018,7 +2051,7 @@ export const createSandbox = async (
         new Error(`Commit collection timed out after ${COMMIT_COLLECTION_TIMEOUT_MS}ms`),
     );
 
-    return { result, commits };
+    return { result, commits, ...(signalMs === undefined ? {} : { signalMs }) };
   };
 
   return {
@@ -2041,18 +2074,24 @@ export const createSandbox = async (
       const allCommits: { sha: string }[] = [];
       let allStdout = "";
       let matchedSignal: string | undefined;
+      // One clock for the whole call, so an iteration's `signalMs` is elapsed
+      // since `run()` began and not since that iteration did (#82).
+      const elapsed = startTimer();
+      let signalMs: number | undefined;
 
       for (let i = 1; i <= iterations; i++) {
-        const { result, commits } = await runOneIteration(
+        const iter = await runOneIteration(
           o.agent,
           o.prompt,
           idleTimeoutMs,
           completionTimeoutMs,
           completionSignals,
+          elapsed,
         );
-        allCommits.push(...commits);
-        allStdout += result;
-        const found = completionSignals.find((s) => result.includes(s));
+        allCommits.push(...iter.commits);
+        allStdout += iter.result;
+        if (iter.signalMs !== undefined) signalMs = iter.signalMs;
+        const found = completionSignals.find((s) => iter.result.includes(s));
         if (found !== undefined) {
           matchedSignal = found;
           break;
@@ -2064,6 +2103,7 @@ export const createSandbox = async (
         commits: allCommits,
         iterations: [],
         completionSignal: matchedSignal,
+        ...(signalMs === undefined ? {} : { signalMs }),
       };
     },
     async close() {

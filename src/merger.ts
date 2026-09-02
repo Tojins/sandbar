@@ -310,7 +310,7 @@ import {
   type VerifyAdapter,
   runVerifiedLanding,
 } from "./forge-verify.js";
-import type { GateResult } from "./gate.js";
+import { type GateResult, formatGateFields } from "./gate.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { gitMountsForWorktree } from "./merger-worktree.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
@@ -329,6 +329,11 @@ import {
   formatResolveAttempts,
   runResolveLoop,
 } from "./resolve-loop.js";
+import {
+  type Clock as TimingClock,
+  durationField,
+  startTimer,
+} from "./timing.js";
 import {
   isVersionConflictFile,
   planVersionCollision,
@@ -946,6 +951,9 @@ export type RunMergerOptions = {
   // multi-issue context when reasoning about an integration failure.
   readonly cycleIssues?: readonly IssueRef[];
   readonly projectAnchor?: string;
+  // Test seam for the duration fields this module logs (#82). Absent ⇒
+  // `performance.now`. See `timing.ts` for why the clock is injectable at all.
+  readonly clock?: TimingClock;
   // Overrides for the post-push close retry (issue #14). Default retries is
   // CLOSE_MAX_RETRIES; default sleep is real setTimeout-backed. Tests inject a
   // no-op sleep so the backoff doesn't slow the suite.
@@ -989,6 +997,11 @@ type MergeAttemptDeps = {
   // the gate artefact is filed under, so a resolve attempt lands beside the
   // gate output it was prompted from.
   readonly resolveSinkFor: (key: string) => ResolveAttemptSink | undefined;
+  // The timing clock (#82). Injectable for the same reason the verified mode's
+  // is: this module's log lines are asserted BY EXACT STRING, and a real clock
+  // would force every one of them to be loosened to a prefix match. Defaulted
+  // by `startTimer` when absent.
+  readonly clock?: TimingClock | undefined;
 };
 
 // The version collision, resolved before the agent is asked anything (#68).
@@ -1107,6 +1120,11 @@ async function attemptMerge(
   const { adapter, emit, projectAnchor, resolveLog, onGateRed } = deps;
   const { unit, target, label } = args;
   const onAttempt = deps.resolveSinkFor(args.gateKey);
+  // The whole unit — merge, install, gate-2 and any resolve loop. `#77 §1`'s
+  // "merge phase" row was hand-arithmetic off two adjacent log lines; this is
+  // the number, and §3.F42 (one gate-2 per pass instead of per branch) is worth
+  // exactly the per-branch gate minutes inside it (#82).
+  const unitTimer = startTimer(deps.clock);
   await emit(`merge-attempt ${label} ${unit.branch}`);
   const preMergeSha = await adapter.getHeadSha();
   const m = await adapter.mergeNoFf(unit);
@@ -1147,17 +1165,29 @@ async function attemptMerge(
         conflictPaths: outcome.conflictPaths,
       };
     }
-    await emit(`merged ${label} (via resolve-loop)`);
+    await emit(
+      `merged ${label} (via resolve-loop) ${durationField(unitTimer())}`,
+    );
     return { kind: "merged" };
   }
 
+  // `npm install` runs on every clean merge and on every resolve attempt, and
+  // whether that is seconds or a minute decides #77 §3.F43/F45. Reported on the
+  // green path too: the failing case already had a verdict, the succeeding one
+  // is the one that happens every time.
+  const installTimer = startTimer(deps.clock);
   const inst = await adapter.npmInstall();
+  await emit(`install ${label} ok=${inst.ok} ${durationField(installTimer())}`);
   if (!inst.ok) {
     await adapter.resetHardSha(preMergeSha);
     return { kind: "install-failed" };
   }
 
   const g = await adapter.runGate();
+  // On GREEN too. Until #82 gate-2 logged only on red, which is backwards for a
+  // cost question — the green gates are the ones that happen every time — and
+  // it left a verdict, which is an outcome, out of the log entirely (#70).
+  await emit(`gate-2 ${label} ${formatGateFields(g)}`);
   if (!g.ok) {
     if (onGateRed) {
       await onGateRed(args.gateKey, {
@@ -1204,11 +1234,14 @@ async function attemptMerge(
         conflictPaths: outcome.conflictPaths,
       };
     }
-    await emit(`merged ${label} (gate-red recovered via resolve-loop)`);
+    await emit(
+      `merged ${label} (gate-red recovered via resolve-loop) ` +
+        durationField(unitTimer()),
+    );
     return { kind: "merged" };
   }
 
-  await emit(`merged ${label}`);
+  await emit(`merged ${label} ${durationField(unitTimer())}`);
   return { kind: "merged" };
 }
 
@@ -1361,6 +1394,7 @@ export async function runMergerWithAdapter(
     resolveLog,
     onGateRed,
     resolveSinkFor,
+    clock: opts.clock,
   };
 
   // One DONE issue branch. TRUE when a commit for this issue is on HEAD; FALSE
@@ -2118,7 +2152,10 @@ export function captureAgentRun(
   input: string,
   opts: { readonly container: string; readonly timeoutMs: number },
 ): Promise<CapturedAgentRun> {
-  const startedAt = Date.now();
+  // The one duration sandbar had before #82, now measured the same way as the
+  // new ones rather than being the odd one out — and monotonically, which
+  // `Date.now()` was not.
+  const elapsed = startTimer();
   return new Promise<CapturedAgentRun>((resolve) => {
     const child = spawn(file, [...args], { stdio: ["pipe", "pipe", "pipe"] });
     let out = "";
@@ -2168,7 +2205,7 @@ export function captureAgentRun(
         end,
         exitCode: exit?.code ?? null,
         signal: exit?.signal ?? null,
-        durationMs: Date.now() - startedAt,
+        durationMs: elapsed(),
         container: opts.container,
         ...(spawnError ? { detail: spawnError } : {}),
       });
@@ -2620,7 +2657,11 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     },
     async runGate() {
       const r: GateResult = await deps.runStackGate();
-      if (r.ok) return { ok: true };
+      // The timings ride out on BOTH branches (#82). A green gate-2 narrows to
+      // `{ ok: true }` because there is no failure to describe, and that is
+      // exactly the gate whose cost the merge phase is made of.
+      const timings = { durationMs: r.durationMs, steps: r.steps };
+      if (r.ok) return { ok: true, ...timings };
       return {
         ok: false,
         stdout: r.stdout,
@@ -2628,6 +2669,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         failedStep: r.failedStep,
         containerLogs: r.containerLogs,
         exitCode: r.exitCode,
+        ...timings,
       };
     },
     async commentOnIssue(n, msg) {

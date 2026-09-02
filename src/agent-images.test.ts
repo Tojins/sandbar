@@ -12,6 +12,7 @@ import {
   agentToolsContainerfile,
   buildArgv,
   createAgentImages,
+  formatImageRecord,
   sweepBranchImages,
 } from "./ensure-images.js";
 import { runScope, variantImageTag } from "./naming.js";
@@ -34,6 +35,84 @@ describe("run-owned agent images", () => {
     expect(builds[0].content).toContain(AGENT_PROVIDER_PACKAGES.codex.spec);
     expect(builds[0].content).not.toContain("anthropic");
     expect(builds[0].content).toContain("USER 0\nRUN npm install");
+  });
+
+  // #82. The augment build happens on EVERY run since #75 — the end-of-run
+  // cleanup drops the tag unconditionally, so the next startup finds it gone —
+  // and its cost has never been measured on any run, because the last logged
+  // run predates #75. The record is what makes it measurable, and it says
+  // `built=true` rather than laundering a layer-cached build into "reused".
+  it("records what the augment build did, and why", async () => {
+    const records: Array<{ built: boolean; reason: string }> = [];
+    await createAgentImages({
+      declaredBaseTag: "localhost/app:base",
+      providers: ["codex"],
+      scope: runScope("/agent-images"),
+      inputsLabel: async (tag) => (tag === "localhost/app:base" ? "base-fp" : null),
+      build: async () => {},
+      log: () => {},
+      onImage: (r) => {
+        records.push({ built: r.built, reason: r.reason });
+      },
+    });
+    expect(records).toEqual([{ built: true, reason: "variant-stale" }]);
+  });
+
+  it("records a base of unknown provenance as its own reason", async () => {
+    const records: string[] = [];
+    await createAgentImages({
+      declaredBaseTag: "localhost/app:base",
+      providers: ["codex"],
+      scope: runScope("/agent-images"),
+      // Neither the base nor the variant carries a label.
+      inputsLabel: async () => null,
+      build: async () => {},
+      log: () => {},
+      onImage: (r) => {
+        records.push(r.reason);
+      },
+    });
+    expect(records).toEqual(["base-unlabelled"]);
+  });
+
+  it("records a current variant as reused, which is as load-bearing as built", async () => {
+    // A 0.3 s startup and a 26 s one differ only in that word, so the line has
+    // to exist in the fast case for the slow one to read as unusual.
+    const containerfile = agentToolsContainerfile("localhost/app:base", ["codex"]);
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify(["base-fp", containerfile]))
+      .digest("hex");
+    const records: Array<{ built: boolean; reason: string }> = [];
+    let built = 0;
+    await createAgentImages({
+      declaredBaseTag: "localhost/app:base",
+      providers: ["codex"],
+      scope: runScope("/agent-images"),
+      inputsLabel: async (tag) =>
+        tag === "localhost/app:base" ? "base-fp" : fingerprint,
+      build: async () => {
+        built++;
+      },
+      log: () => {},
+      onImage: (r) => {
+        records.push({ built: r.built, reason: r.reason });
+      },
+    });
+    expect(built).toBe(0);
+    expect(records).toEqual([{ built: false, reason: "variant-current" }]);
+  });
+
+  it("has one spelling of the record line", () => {
+    expect(
+      formatImageRecord({
+        tag: "localhost/app:gate",
+        built: true,
+        reason: "inputs-changed",
+        durationMs: 26400,
+      }),
+    ).toBe(
+      "image localhost/app:gate built=true reason=inputs-changed durationMs=26400",
+    );
   });
 
   it("pins both providers and keeps claude lifecycle scripts enabled", () => {

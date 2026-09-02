@@ -47,6 +47,15 @@
 // the first red). The one unbounded shell-out left is not podman:
 // `dirtyWorktreePaths`' `git status` (git-ops.ts).
 //
+// Every phase is TIMED and reported, never acted on (#82). `runStackGate` is
+// the only place a step runs, so it is the only place one is timed, and the
+// split lands on `GateResult.steps` where every consumer already holds the
+// result it logs — none of them grows a stopwatch. The pre-step phases are
+// timed too, because on this repo the image resolve can be a multi-minute
+// per-branch build and a gate whose time went there must not read as a slow
+// test suite. Nothing reads a duration back: there is no adaptive bound and no
+// warning threshold, and `step.timeoutMs` stays the one bound this module has.
+//
 // A step that exceeds its bound is a gate RED, not a HARD-ERROR — same
 // argument as D5. Killing the `podman exec` CLIENT does not touch the process
 // inside the container, so `reapKilledStep` removes the container itself
@@ -89,7 +98,8 @@ import type {
 } from "./config.js";
 import { type ImageMap, ImageBuildError } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
-import { type GateResult, stripAnsi } from "./gate.js";
+import { type GateResult, type GateStepTiming, stripAnsi } from "./gate.js";
+import { startTimer } from "./timing.js";
 import { dirtyWorktreePaths } from "./git-ops.js";
 import {
   type RunScope,
@@ -2010,9 +2020,36 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   // read itself is skipped rather than merely ignored: a tree handed to
   // `sandbar gate` need not be a git worktree at all, and `git status` throws
   // rather than shrugging when it is not.
-  const dirty = ctx.allowDirtyWorktree
-    ? []
-    : await dirtyWorktreePaths(ctx.worktreePath);
+  //
+  // The phases below are TIMED (#82). Four things happen before the first
+  // consumer step and each of them can be the whole of a slow gate — the D1
+  // dirty-tree read, the image resolve (which under #37/#46 can be a
+  // multi-minute per-branch build), the stale-`issue`-container recreate and
+  // the `attempt` bringup — so a gate that spent six minutes building an image
+  // and ninety seconds on steps must not read as a 7½-minute test suite. They
+  // are recorded under names that extend the `failedStep` vocabulary rather
+  // than replacing it, with one deliberate difference: a failure names the ONE
+  // thing that failed (`image:<tag>`, `container:<name>`, so the entry and
+  // `failedStep` agree), while a success names the PHASE (`images`,
+  // `containers:issue`, `containers:attempt`), because the resolve and both
+  // bringups are single batched calls over a whole set and there is no per-tag
+  // or per-container split to report honestly.
+  //
+  // A phase that THREW records nothing: `assertIssueContainersAlive` raises
+  // rather than returning a verdict, and an entry written for work that did not
+  // finish would be a fabricated measurement.
+  const total = startTimer();
+  const steps: GateStepTiming[] = [];
+  let dirty: readonly string[] = [];
+  if (!ctx.allowDirtyWorktree) {
+    const t = startTimer();
+    dirty = await dirtyWorktreePaths(ctx.worktreePath);
+    steps.push({
+      name: "worktree-clean",
+      ok: dirty.length === 0,
+      durationMs: t(),
+    });
+  }
   if (dirty.length > 0) {
     return {
       ok: false,
@@ -2023,6 +2060,8 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
         dirty.map((p) => `  ${p}`).join("\n"),
       exitCode: 1,
       failedStep: "worktree-clean",
+      durationMs: total(),
+      steps,
       containerLogs: "",
     };
   }
@@ -2038,10 +2077,17 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   // reproduce it exactly and then park the issue with a trace blaming the
   // environment for a dependency the agent chose.
   let images: ImageMap;
+  const tImages = startTimer();
   try {
     images = await ctx.images();
+    steps.push({ name: "images", ok: true, durationMs: tImages() });
   } catch (err) {
     if (err instanceof ImageBuildError) {
+      steps.push({
+        name: `image:${err.tag}`,
+        ok: false,
+        durationMs: tImages(),
+      });
       return {
         ok: false,
         stdout: "",
@@ -2053,6 +2099,8 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
           err.message,
         exitCode: 1,
         failedStep: `image:${err.tag}`,
+        durationMs: total(),
+        steps,
         // Deliberately empty. D9 collects container logs because the diagnosis
         // of a failing step is often in a container the step never touched;
         // here nothing has run yet and the build's own output is the whole
@@ -2083,6 +2131,11 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   // outcome the earlier guard exists to prevent arriving one comparison later.
   // The extra podman call is paid only where a recreate was already about to
   // be.
+  // Timed from the DETECTION rather than from the recreate: `sameImage` is a
+  // podman call per container that disagreed on its image string, so a gate
+  // that spent its time deciding nothing was stale would otherwise report
+  // nothing at all.
+  const tIssue = startTimer();
   const staleIssueContainers: ResolvedStackContainer[] = [];
   for (const c of ctx.issueContainers) {
     const wanted = imageFor(c, images);
@@ -2101,6 +2154,11 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
       });
     } catch (err) {
       if (err instanceof ContainerBringupError) {
+        steps.push({
+          name: `container:${err.containerName}`,
+          ok: false,
+          durationMs: tIssue(),
+        });
         return withContainerLogs(
           {
             ok: false,
@@ -2108,6 +2166,8 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
             stderr: err.message,
             exitCode: 1,
             failedStep: `container:${err.containerName}`,
+            durationMs: total(),
+            steps,
             containerLogs: "",
           },
           ctx,
@@ -2135,10 +2195,12 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   // again. What it still catches is unchanged: a container nothing here touched
   // that died on its own between gate runs.
   await assertIssueContainersAlive(ctx);
+  steps.push({ name: "containers:issue", ok: true, durationMs: tIssue() });
 
   // Recreated every gate run: they mount the worktree and run the branch's
   // code, so reusing one would gate an earlier attempt's process against a
   // later attempt's source.
+  const tAttempt = startTimer();
   try {
     await bringUpContainers(withImages(ctx.attemptContainers, images), {
       attach: ctx.attach,
@@ -2146,8 +2208,14 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
       worktreePath: ctx.worktreePath,
       nameOf: ctx.nameOf,
     });
+    steps.push({ name: "containers:attempt", ok: true, durationMs: tAttempt() });
   } catch (err) {
     if (err instanceof ContainerBringupError) {
+      steps.push({
+        name: `container:${err.containerName}`,
+        ok: false,
+        durationMs: tAttempt(),
+      });
       return withContainerLogs(
         {
           ok: false,
@@ -2155,6 +2223,8 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
           stderr: err.message,
           exitCode: 1,
           failedStep: `container:${err.containerName}`,
+          durationMs: total(),
+          steps,
           containerLogs: "",
         },
         ctx,
@@ -2179,11 +2249,13 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     // with its first byte: a step that produces nothing for minutes is exactly
     // the one whose name a watcher needs (#45).
     ctx.onStepOutput?.(banner);
+    const tStep = startTimer();
     const r = await boundedPodman(
       stepExecArgs(containerName, step.command),
       step.timeoutMs,
       ctx.onStepOutput,
     );
+    steps.push({ name: step.name, ok: boundedOk(r), durationMs: tStep() });
     if (boundedOk(r)) {
       stdout += banner + stripAnsi(r.stdout);
       stderr += stripAnsi(r.stderr);
@@ -2231,6 +2303,8 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
         // `1` is indistinguishable from a suite that ran and failed once.
         exitCode: r.timedOut ? 124 : (r.exitCode ?? 1),
         failedStep: step.name,
+        durationMs: total(),
+        steps,
         containerLogs: "",
       },
       ctx,
@@ -2250,6 +2324,8 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     stderr,
     exitCode: 0,
     failedStep: null,
+    durationMs: total(),
+    steps,
     containerLogs: "",
   };
 }

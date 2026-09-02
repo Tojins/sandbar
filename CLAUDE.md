@@ -334,6 +334,29 @@ and used to announce themselves in four different ways, the halt in none at all.
   streams, not one tee — the log keeps the per-attempt gate/reviewer trace
   stdout must never carry, and stdout keeps titled renderings that would make
   the log unreadable.
+- **Every outcome carries how long it took, and nothing decides on it (#82).**
+  `src/timing.ts` is the one measurement — `startTimer` on a MONOTONIC clock,
+  injectable because several suites assert log lines by exact string, and
+  `durationMs=<int>` as the one field spelling. It closes three defects the
+  first attempt to assemble a timing table found: a cohort's terminals all
+  carried the SETTLE instant in plan order (so "which issue held the cycle" and
+  "how long did the others idle" were unanswerable, and an outcome reached
+  eight minutes earlier existed in the log only if every sibling survived — a
+  #70 hole, fixed by having the task that terminated write its own line and
+  rethrow), the largest block of a cycle had nothing inside it (6m41s from
+  `plan:` to the first `gate-1` line), and an image rebuild — which changes what
+  every container in the run executes — was announced to a terminal and nowhere
+  else. `GateResult` carries `durationMs` plus a per-phase `steps` split filled
+  in `runStackGate`, the only place a step runs; `formatGateFields` is the one
+  rendering its four consumers share, and `sandbar gate` is the only one that
+  PRINTS it, because #45 suspends the log tree. All three image build entry
+  points hand an `ImageBuildRecord` to an `onImage` seam kept separate from the
+  human `log` one — #82 adds nothing to stdout outside `sandbar gate`. Two
+  rules: a duration is a REPORT (no budget, no threshold, no adaptive bound —
+  `step.timeoutMs` stays the one bound `gate-stack.ts` has), and an absent
+  measurement is ABSENT, never `0`, because a stats reader averages a zero.
+  `timing.ts`, `gate.ts`, `gate-stack.ts`, `ensure-images.ts` and `logs.ts`
+  headers own the rest.
 - **The resolve loop leaves a trace, and a container that never ran halts
   (#67).** Every attempt's stdout AND stderr go to
   `cycle-N/resolve-<key>-attempt-<k>.log`, keyed like the gate artefact beside
