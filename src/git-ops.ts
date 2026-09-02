@@ -135,7 +135,8 @@ export async function fetchOriginChunkBranch(
       { cwd },
     );
     return remoteRef;
-  } catch {
+  } catch (err) {
+    if (typeof (err as { code?: unknown }).code !== "number") throw err;
     // Fall through: what the cache already holds outranks what the fetch said.
   }
   try {

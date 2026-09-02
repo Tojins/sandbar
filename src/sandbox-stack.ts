@@ -322,7 +322,7 @@ export async function startSandboxStack(
           join(opts.logDir, `${c.name}.log`),
           `[sandbar] container '${c.name}' did not come up.\n\n${failure}\n`,
           "utf8",
-        ).catch(() => {});
+        );
       }
       // Followed whether or not it came up, and the degraded case is the one
       // that needs it: the commonest shape there is a container that STARTED
@@ -338,9 +338,9 @@ export async function startSandboxStack(
     await stop().catch((stopErr: unknown) => {
       // The bringup failure is the diagnosis; a teardown failure on top of it
       // is reported but must not replace it.
-      console.error(
-        stopErr instanceof Error ? stopErr.message : String(stopErr),
-      );
+      console.error("Failed to stop sandbox stack after bringup failed", {
+        cause: stopErr,
+      });
     });
     throw err;
   }
@@ -413,34 +413,30 @@ function startLogFollower(containerName: string, filePath: string): LogFollower 
   let stopped = false;
   let child: ChildProcess | null = null;
   let stream: WriteStream | null = null;
-  try {
-    stream = createWriteStream(filePath, { flags: "a" });
-    // An 'error' on the stream is otherwise an unhandled event, which takes the
-    // whole run down — a log follower must never be able to do that.
-    stream.on("error", () => {});
-    const ch = spawn(RUNTIME, logFollowArgs(containerName), {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    child = ch;
-    // `podman logs` writes podman's own diagnostics and the container's stderr
-    // to one fd, so both streams go to one file — which is what a reader of
-    // "the container's log" expects, and the ordering is podman's.
-    ch.stdout?.pipe(stream, { end: false });
-    ch.stderr?.pipe(stream, { end: false });
-    for (const s of [ch.stdout, ch.stderr]) s?.on("error", () => {});
-    ch.on("error", (err: Error) => {
-      stream?.write(`\n[sandbar] could not run ${RUNTIME} logs: ${err.message}\n`);
-    });
-    ch.on("close", (code: number | null) => {
-      if (stopped) return;
-      stream?.write(
-        `\n[sandbar] ${RUNTIME} logs -f exited ${String(code)}; this file is no ` +
-          `longer being updated. The container may have exited.\n`,
-      );
-    });
-  } catch {
-    // A follower that cannot start costs the agent a log, never the issue.
-  }
+  stream = createWriteStream(filePath, { flags: "a" });
+  // An 'error' on the stream is otherwise an unhandled event, which takes the
+  // whole run down — a log follower must never be able to do that.
+  stream.on("error", () => {});
+  const ch = spawn(RUNTIME, logFollowArgs(containerName), {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child = ch;
+  // `podman logs` writes podman's own diagnostics and the container's stderr
+  // to one fd, so both streams go to one file — which is what a reader of
+  // "the container's log" expects, and the ordering is podman's.
+  ch.stdout?.pipe(stream, { end: false });
+  ch.stderr?.pipe(stream, { end: false });
+  for (const s of [ch.stdout, ch.stderr]) s?.on("error", () => {});
+  ch.on("error", (err: Error) => {
+    stream?.write(`\n[sandbar] could not run ${RUNTIME} logs: ${err.message}\n`);
+  });
+  ch.on("close", (code: number | null) => {
+    if (stopped) return;
+    stream?.write(
+      `\n[sandbar] ${RUNTIME} logs -f exited ${String(code)}; this file is no ` +
+        `longer being updated. The container may have exited.\n`,
+    );
+  });
   return {
     stop: () => {
       stopped = true;

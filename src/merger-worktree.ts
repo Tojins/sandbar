@@ -136,19 +136,12 @@ export async function createMergerWorktree(opts: {
   const sweep = async (): Promise<void> => {
     try {
       await exec("git", ["worktree", "remove", "--force", path], { cwd });
-    } catch {
+    } catch (err) {
+      if ((err as { code?: unknown }).code !== 128) throw err;
       // Not registered (or already gone) — fall through to the dir sweep.
     }
-    try {
-      await rm(path, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
-    try {
-      await exec("git", ["worktree", "prune"], { cwd });
-    } catch {
-      /* best-effort */
-    }
+    await rm(path, { recursive: true, force: true });
+    await exec("git", ["worktree", "prune"], { cwd });
   };
 
   let removed = false;

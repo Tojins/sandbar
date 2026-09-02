@@ -3,9 +3,5 @@
 // therefore has a budget of zero.  Keep a decrement in the same commit as the
 // conversion it records.
 export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
-  "forge-verify.ts": 2,
-  "git-ops.ts": 1,
-  "merger-worktree.ts": 3,
   "merger.ts": 11,
-  "sandbox-stack.ts": 2,
 };
