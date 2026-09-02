@@ -163,11 +163,6 @@ function noReviewDetail(run: ReviewerRun): string {
   );
 }
 
-// Pure: does this invocation carry a verdict about the code?
-export function isReview(run: ReviewerRun): boolean {
-  return parseVerdict(run.output) !== null;
-}
-
 function transcriptEntry(n: number, run: ReviewerRun): string {
   const header = `=== reviewer invocation ${n} ===\n`;
   const body = run.output === "" ? "(no output)\n" : run.output.endsWith("\n") ? run.output : `${run.output}\n`;

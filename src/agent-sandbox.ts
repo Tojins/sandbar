@@ -468,15 +468,22 @@ const TOOL_ARG_FIELDS: Record<string, string> = {
   Agent: "description",
 };
 
-export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
-  if (!line.startsWith("{")) return [];
-  let obj: any;
+// A line that is not a complete JSON object is transport, not agent speech.
+// Once JSON parsing succeeds, provider-specific shape errors propagate from
+// the parser that understands that provider's contract (#83).
+const parseTransportJson = (line: string): any | undefined => {
+  if (!line.startsWith("{")) return undefined;
   try {
-    obj = JSON.parse(line);
+    return JSON.parse(line);
   } catch (err) {
-    if (err instanceof SyntaxError) return [];
+    if (err instanceof SyntaxError) return undefined;
     throw err;
   }
+};
+
+export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
+  const obj = parseTransportJson(line);
+  if (obj === undefined) return [];
   // JSON.parse yields `any`; the upstream parser is intentionally untyped.
   if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
     const events: ParsedStreamEvent[] = [];
@@ -612,14 +619,8 @@ const codexErrorMessage = (err: unknown): string => {
 };
 
 export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
-  if (!line.startsWith("{")) return [];
-  let obj: any;
-  try {
-    obj = JSON.parse(line);
-  } catch (err) {
-    if (err instanceof SyntaxError) return [];
-    throw err;
-  }
+  const obj = parseTransportJson(line);
+  if (obj === undefined) return [];
   // As in parseStreamJsonLine: the wire format is another process's, so it is
   // read as `any` and every field is checked before it is believed.
   if (obj.type === "thread.started" && typeof obj.thread_id === "string") {

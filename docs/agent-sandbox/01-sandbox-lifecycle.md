@@ -126,7 +126,7 @@ Two consequences for sandbar's path:
 
 ### Orchestrator loop (`Orchestrator.ts`, `orchestrate`)
 
-With `iterations = 1` the loop body runs once:
+`run()` performs exactly one invocation:
 
 1. Copy the caller's required `completionSignal` list. An empty list never
    enters the completion-grace phase.
@@ -135,15 +135,13 @@ With `iterations = 1` the loop body runs once:
 3. The work:
    - `fullPrompt = prompt` (skipPromptExpansion true).
    - `invokeAgent(...)` runs the agent (see
-     [03](./03-claude-agent-provider.md)) and returns `{ result, sessionId }`
-     where `result = resultText || stdout`.
-   - Completion check: `matchedSignal = completionSignals.find(s =>
-     agentOutput.includes(s))`. Sandbar ignores this (parses stdout itself).
-   - Returns `{ completionSignal, stdout: agentOutput, sessionId, ... }`.
-4. After the iteration: `allCommits.push(...lifecycleResult.commits)`,
-   `allStdout += result.stdout`. If a completion signal matched, return early;
-   otherwise loop. With one iteration it returns
-   `{ iterations, completionSignal, stdout: allStdout, commits: allCommits, ... }`.
+     [03](./03-claude-agent-provider.md)) once and returns parsed agent speech,
+     optional `signalMs`, and `maxGapMs`. Raw stream transport is never used as
+     output.
+   - Commit collection returns the branch commits made during that invocation.
+4. Return `{ stdout, commits, signalMs?, maxGapMs? }` for that single
+   invocation. A configured signal controls only the timeout phase; it is not a
+   result field.
 
 ### Lifecycle wrapper & commit capture (`SandboxLifecycle.ts`, `withSandboxLifecycle`)
 
@@ -152,8 +150,8 @@ depends on most. For an **explicit branch** (sandbar always), `branch` is
 truthy ⇒ `hostCurrentBranch = null` ⇒ the temp-branch / merge-to-host path is
 skipped entirely. Sequence:
 
-1. Read host git identity: `git config user.name` / `user.email` in `hostRepoDir`
-   (each defaulting to `""` on failure).
+1. Read host git identity: `git config user.name` / `user.email` in `hostRepoDir`.
+   Git exit 1 means the value is unset (`""`); every other failure propagates.
 2. "Setting up sandbox" task:
    - `git config --global --add safe.directory <sandboxRepoDir>` (bind mount is
      owned by a different UID; avoids "dubious ownership").

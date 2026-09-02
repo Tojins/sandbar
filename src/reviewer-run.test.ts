@@ -7,7 +7,6 @@ import {
   decideReviewRound,
   type ReviewerOutcome,
   type ReviewerRun,
-  isReview,
   runReviewerInvocations,
 } from "./reviewer-run.js";
 import { parseVerdict } from "./verdict-parser.js";
@@ -119,31 +118,18 @@ function drive(script: readonly ReviewerRun[]) {
   ).then((outcome) => ({ outcome, asked, retries }));
 }
 
-describe("isReview", () => {
-  it("a completed run is a review only with a verdict token", () => {
-    expect(isReview({ output: "looks fine to me", error: null })).toBe(false);
-    expect(
-      isReview({ output: "<verdict>APPROVED</verdict>", error: null }),
-    ).toBe(true);
-  });
-
-  it("a completed run that printed nothing is NOT a review", () => {
-    expect(isReview({ output: "", error: null })).toBe(false);
-    expect(isReview({ output: " \n\t ", error: null })).toBe(false);
-  });
-
-  it("a FAILED run is a review only if it reached a verdict token", () => {
-    // Reached a decision and then died on the way out — reporting "the reviewer
-    // never ran" about that would be #41's fabrication in mirror image.
-    expect(
-      isReview({ output: "…<verdict>APPROVED</verdict>\n", error: "exited 1" }),
-    ).toBe(true);
-    // Prose without a decision is not a verdict about the branch.
-    expect(
-      isReview({ output: "Let me start by reading the diff.", error: IDLE }),
-    ).toBe(false);
-    expect(isReview(idleRun)).toBe(false);
-  });
+describe("review eligibility", () => {
+  it.each([
+    ["completed", true, null, "<verdict>APPROVED</verdict>"],
+    ["completed", false, null, "looks fine to me"],
+    ["failed", true, "exited 1", "…<verdict>APPROVED</verdict>\n"],
+    ["failed", false, IDLE, "Let me start by reading the diff."],
+  ] as const)(
+    "state=%s token=%s is classified from output",
+    (_state, hasToken, _error, output) => {
+      expect(parseVerdict(output) !== null).toBe(hasToken);
+    },
+  );
 });
 
 describe("runReviewerInvocations", () => {

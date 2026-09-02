@@ -1535,6 +1535,54 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     }
   });
 
+  it("rejects reuse when the local issue branch diverged from origin", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-diverged-branch-"));
+    const origin = join(root, "origin.git");
+    const checkout = join(root, "checkout");
+    const other = join(root, "other");
+    try {
+      await git(["init", "--bare", origin], root);
+      await git(["clone", origin, checkout], root);
+      await git(["config", "user.name", "Test Host"], checkout);
+      await git(["config", "user.email", "host@test.com"], checkout);
+      await writeFile(join(checkout, "README.md"), "seed\n");
+      await git(["add", "."], checkout);
+      await git(["commit", "-m", "seed"], checkout);
+      await git(["push", "-u", "origin", "HEAD:main"], checkout);
+
+      const branch = "sandbar/issue-83-diverged";
+      await git(["branch", branch], checkout);
+      await git(["push", "origin", `${branch}:${branch}`], checkout);
+      const worktreePath = await prepareWorktree({
+        branch,
+        layout: layoutFor(checkout),
+        copyToWorktree: [],
+      });
+      await writeFile(join(worktreePath, "local.txt"), "local\n");
+      await git(["add", "."], worktreePath);
+      await git(["commit", "-m", "local"], worktreePath);
+
+      await git(["clone", origin, other], root);
+      await git(["config", "user.name", "Other Host"], other);
+      await git(["config", "user.email", "other@test.com"], other);
+      await git(["checkout", branch], other);
+      await writeFile(join(other, "remote.txt"), "remote\n");
+      await git(["add", "."], other);
+      await git(["commit", "-m", "remote"], other);
+      await git(["push", "origin", branch], other);
+
+      await expect(
+        prepareWorktree({
+          branch,
+          layout: layoutFor(checkout),
+          copyToWorktree: [],
+        }),
+      ).rejects.toThrow("could not fast-forward to origin");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("runs copy + onWorktreeReady exactly once — createSandbox must not repeat worktree-side setup", async () => {
     await git(["branch", "sandbar/issue-20-prep"], dir);
     const hookLog = join(dir, "hook.log");
