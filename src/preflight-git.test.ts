@@ -66,13 +66,23 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     target = await seedRepo("sandbar-target-");
     process.chdir(launchedFrom);
 
-    // A `gh` that fails instantly, so `gatherState` exercises its real code
-    // path (hasGh true, every gh call failing) without a network round-trip.
-    // The gh-dependent fields are not what this file asserts; the git-derived
-    // ones are, and they must not be hostage to whether the machine running
-    // the suite is logged in.
+    // A `gh` whose listing reads answer the factual empty set while auth still
+    // fails. Operational listing failures propagate since #99, so the fixture
+    // must state the tracker condition these git-focused tests need.
     shimBin = await mkdtemp(join(tmpdir(), "sandbar-shim-"));
-    await writeFile(join(shimBin, "gh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await writeFile(
+      join(shimBin, "gh"),
+      [
+        "#!/bin/sh",
+        'if [ "$1 $2" = "issue list" ]; then printf "[]"; exit 0; fi',
+        'if [ "$1 $2" = "api graphql" ]; then',
+        '  printf \'{"data":{"repository":{"i7":{"state":"CLOSED","labels":{"nodes":[]}}}}}\'',
+        "  exit 0",
+        "fi",
+        "exit 1",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
     originalPath = process.env["PATH"];
     process.env["PATH"] = `${shimBin}:${originalPath ?? ""}`;
   });
