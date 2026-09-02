@@ -566,24 +566,19 @@ describe("the prose (#64)", () => {
   });
 });
 
-describe("wrapUpLandedChunk never throws (#64)", () => {
-  it("finishes the wrap-up when the log sink throws", async () => {
-    // The merge phase hands it a sink that throws once the source branch has
-    // moved — `merger.ts` stops wrapping errors past that point on purpose. A
-    // failed log write must not abandon a member's close halfway through.
+describe("wrapUpLandedChunk error propagation (#99)", () => {
+  it("propagates a failed log write", async () => {
     const { adapter, calls } = makeWrapupAdapter();
-    const r = await wrapUpLandedChunk(target, adapter, {
-      sourceBranch: "main",
-      provenance: "sandbar",
-      log: () => {
-        throw new Error("ENOSPC");
-      },
-    });
-
-    expect(r.closed).toEqual([42, 43]);
-    expect(r.branchDeleted).toBe(true);
-    expect(r.residue).toEqual([]);
-    expect(calls.at(-1)?.op).toBe("deleteChunkBranch");
+    await expect(
+      wrapUpLandedChunk(target, adapter, {
+        sourceBranch: "main",
+        provenance: "sandbar",
+        log: () => {
+          throw new Error("ENOSPC");
+        },
+      }),
+    ).rejects.toThrow("ENOSPC");
+    expect(calls.some((call) => call.op === "deleteChunkBranch")).toBe(false);
   });
 });
 

@@ -289,7 +289,8 @@ function isEntrypoint(): boolean {
   if (argv1 === undefined) return false;
   try {
     return realpathSync(argv1) === realpathSync(fileURLToPath(import.meta.url));
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     return false;
   }
 }

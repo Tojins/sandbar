@@ -1048,7 +1048,8 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
           { cwd },
         );
         return true;
-      } catch {
+      } catch (err) {
+        if ((err as { code?: unknown }).code !== 1) throw err;
         return false;
       }
     },
@@ -1056,14 +1057,10 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       const path = worktreePathFor(deps.layout.worktreesDir, branch);
       try {
         await exec("git", ["worktree", "remove", "--force", path], { cwd });
-      } catch {
-        /* already removed by the sandbox close() in normal operation */
+      } catch (err) {
+        if ((err as { code?: unknown }).code !== 128) throw err;
       }
-      try {
-        await exec("git", ["worktree", "prune"], { cwd });
-      } catch {
-        /* best-effort */
-      }
+      await exec("git", ["worktree", "prune"], { cwd });
     },
     async postComment(issueNum, body) {
       // Required: the comment is the issue's handoff payload (questions, failure

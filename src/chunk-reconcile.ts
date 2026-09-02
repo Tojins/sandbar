@@ -95,7 +95,8 @@ async function capture(
   try {
     const { stdout } = await exec(file, [...args], cwd === undefined ? {} : { cwd });
     return { ok: true, stdout };
-  } catch {
+  } catch (err) {
+    if (typeof (err as { code?: unknown }).code !== "number") throw err;
     return { ok: false, stdout: "" };
   }
 }
@@ -225,7 +226,8 @@ function parsePullRequests(stdout: string): readonly PullRequestSummary[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout.trim() || "[]");
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     return [];
   }
   if (!Array.isArray(parsed)) return [];
@@ -290,18 +292,9 @@ export async function reconcileLandedChunks(cfg: {
   ) => Promise<readonly PullRequestSummary[]>;
 }): Promise<ReconcileResult> {
   const repoDir = cfg.repoDir;
-  // Swallowed, exactly as `wrapUpLandedChunk` swallows the sink handed to it,
-  // and for a sharper version of the same reason: a throw out of here between
-  // two targets discards the first one's result — issues already closed, branch
-  // already deleted — and takes the run down with no report of either. A run
-  // log that could not be written is not worth that.
-  const log = async (line: string): Promise<void> => {
-    try {
-      await cfg.log?.(line);
-    } catch {
-      /* the returned result is the record that matters */
-    }
-  };
+  // Logging is a required side effect: losing it would hide reconciliation
+  // writes from the durable run record (#99).
+  const log = async (line: string): Promise<void> => cfg.log?.(line);
   const landed = await (cfg.findLanded ?? findLandedChunkBranches)(
     repoDir,
     cfg.sourceBranch,

@@ -533,8 +533,8 @@ async function gate(
   // and what a narrowed one costs is the opposite trade: matching on git's
   // prose, and a fault exit for a tree the gate could have run against
   // perfectly well.
-  const dirty = await dirtyWorktreePaths(worktreePath).catch(() => null);
-  if (dirty !== null && dirty.length > 0) {
+  const dirty = await dirtyWorktreePaths(worktreePath);
+  if (dirty.length > 0) {
     out(
       `Gating the WORKING TREE at ${worktreePath}, which has ` +
         `${dirty.length} uncommitted change(s). Inside a run the gate refuses ` +

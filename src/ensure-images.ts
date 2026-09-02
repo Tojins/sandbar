@@ -183,7 +183,8 @@ async function imageExists(tag: string): Promise<boolean> {
       timeout: IMAGE_QUERY_TIMEOUT_MS,
     });
     return true;
-  } catch {
+  } catch (err) {
+    if ((err as { code?: unknown }).code !== 1) throw err;
     return false;
   }
 }
@@ -194,16 +195,11 @@ async function imageExists(tag: string): Promise<boolean> {
 // only safe direction, since the alternative is gating against an image whose
 // provenance is unknown.
 export async function readInputsLabel(tag: string): Promise<string | null> {
-  let stdout: string;
-  try {
-    ({ stdout } = await exec(
-      RUNTIME,
-      ["image", "inspect", tag, "--format", "{{json .Labels}}"],
-      { timeout: IMAGE_QUERY_TIMEOUT_MS },
-    ));
-  } catch {
-    return null;
-  }
+  const { stdout } = await exec(
+    RUNTIME,
+    ["image", "inspect", tag, "--format", "{{json .Labels}}"],
+    { timeout: IMAGE_QUERY_TIMEOUT_MS },
+  );
   return parseInputsLabel(stdout);
 }
 
@@ -216,7 +212,8 @@ export function parseInputsLabel(json: string): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     return null;
   }
   if (typeof parsed !== "object" || parsed === null) return null;

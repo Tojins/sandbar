@@ -503,7 +503,8 @@ function which(cmd: string): boolean {
   try {
     execFileSync("which", [cmd], { stdio: "ignore" });
     return true;
-  } catch {
+  } catch (err) {
+    if ((err as { status?: unknown }).status !== 1) throw err;
     return false;
   }
 }
@@ -529,7 +530,8 @@ async function runOk(
   try {
     await exec(file, [...args], { cwd });
     return true;
-  } catch {
+  } catch (err) {
+    if (typeof (err as { code?: unknown }).code !== "number") throw err;
     return false;
   }
 }
@@ -542,7 +544,8 @@ async function captureOk(
   try {
     const { stdout } = await exec(file, [...args], { cwd });
     return { ok: true, stdout };
-  } catch {
+  } catch (err) {
+    if (typeof (err as { code?: unknown }).code !== "number") throw err;
     return { ok: false, stdout: "" };
   }
 }
@@ -682,54 +685,35 @@ function statDetail(err: unknown): string {
 // The set of issue numbers currently in the planner queue (open +
 // `ready-for-agent`). Reuses the planner's own candidate query so the resume
 // classification can never desync from what the next cycle actually picks up.
-// Fail-closed to an empty set: a gh hiccup just means no branch is treated as
-// resumable (they fall back to the existing hard error), and the ghAuthOk /
-// sandboxGhTokenOk invariants report the real problem.
+// Tracker failures propagate: an empty set is a factual answer, not a default.
 async function fetchOpenReadyIssueNumbers(
   repo: RepoRef,
 ): Promise<ReadonlySet<number>> {
-  try {
-    const candidates = await fetchCandidates(repo);
-    return new Set(candidates.map((c) => c.number));
-  } catch {
-    return new Set();
-  }
+  const candidates = await fetchCandidates(repo);
+  return new Set(candidates.map((c) => c.number));
 }
 
 // Which of `numbers` are OPEN on the tracker, through the planner's own
-// strongly consistent batch lookup (#16). Fail-closed to an empty set like the
-// two listings above: a branch the tracker cannot vouch for as open is
-// classified `unmerged` and refused, which is what it was before this lookup
-// existed.
+// strongly consistent batch lookup (#16). Failures propagate rather than
+// classifying an unknown tracker state as no open issues.
 async function fetchOpenIssueNumbers(
   repo: RepoRef,
   numbers: readonly number[],
 ): Promise<ReadonlySet<number>> {
   if (numbers.length === 0) return new Set();
-  try {
-    const facts = await fetchIssueStates(numbers, repo);
-    return new Set(
-      [...facts].flatMap(([n, f]) => (f.state === "OPEN" ? [n] : [])),
-    );
-  } catch {
-    return new Set();
-  }
+  const facts = await fetchIssueStates(numbers, repo);
+  return new Set(
+    [...facts].flatMap(([n, f]) => (f.state === "OPEN" ? [n] : [])),
+  );
 }
 
 // The issues already landed on a chunk branch (#60), through the planner's own
-// query for the same reason as above. Fail-closed the same way, and the failure
-// costs the same nothing: a leftover member branch is then classified as it
-// would have been before chunks existed — a hard `unmerged` error — rather than
-// silently reaped on a query that did not answer.
+// query for the same reason as above. An unanswered query propagates.
 async function fetchInChunkIssueNumbers(
   repo: RepoRef,
 ): Promise<ReadonlySet<number>> {
-  try {
-    const members = await fetchChunkMembers(repo);
-    return new Set(members.map((c) => c.number));
-  } catch {
-    return new Set();
-  }
+  const members = await fetchChunkMembers(repo);
+  return new Set(members.map((c) => c.number));
 }
 
 async function checkSandboxGhToken(
@@ -744,7 +728,8 @@ async function checkSandboxGhToken(
       env: { ...process.env, GH_TOKEN: token, GH_HOST: "github.com" },
     });
     return true;
-  } catch {
+  } catch (err) {
+    if (typeof (err as { code?: unknown }).code !== "number") throw err;
     return false;
   }
 }
@@ -1249,7 +1234,8 @@ export function staleConfigWarning(s: ConfigStaleness): string | null {
 function realpathOr(path: string): string {
   try {
     return realpathSync(path);
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     return path;
   }
 }

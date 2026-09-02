@@ -585,7 +585,8 @@ export function parsePodLabel(json: string, key: string): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json.trim());
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     return null;
   }
   const one = Array.isArray(parsed) ? parsed[0] : parsed;
@@ -766,7 +767,8 @@ export function parseHealthLog(json: string): HealthLogEntry[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     return [];
   }
   if (typeof parsed !== "object" || parsed === null) return [];

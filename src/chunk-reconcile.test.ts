@@ -169,28 +169,22 @@ describe("reconcileLandedChunks (#64)", () => {
     );
   });
 
-  it("finishes every target when the log sink throws", async () => {
-    // A throw here would discard the FIRST target's result — its issues are
-    // closed and its branch is deleted — and take the run down with no report
-    // of either. Discovery runs before anything else in the cycle, so that is
-    // not a degraded reconciliation; it is a run that does not start.
+  it("propagates a failed log write", async () => {
     const { adapter } = fakeAdapter();
-    const r = await reconcileLandedChunks({
-      repoDir: REPO_DIR,
-      repo: REPO,
-      sourceBranch: "main",
-      chunks: [chunk(42, [42]), chunk(99, [99])],
-      adapter,
-      log: () => {
-        throw new Error("ENOSPC");
-      },
-      findLanded: async () => ["sandbar/chunk-42-c", "sandbar/chunk-99-c"],
-      findPullRequests: async () => [],
-    });
-
-    expect(r.closedIssues).toEqual([42, 99]);
-    expect(r.reconciled.map((x) => x.branchDeleted)).toEqual([true, true]);
-    expect(r.reconciled.flatMap((x) => x.residue)).toEqual([]);
+    await expect(
+      reconcileLandedChunks({
+        repoDir: REPO_DIR,
+        repo: REPO,
+        sourceBranch: "main",
+        chunks: [chunk(42, [42]), chunk(99, [99])],
+        adapter,
+        log: () => {
+          throw new Error("ENOSPC");
+        },
+        findLanded: async () => ["sandbar/chunk-42-c", "sandbar/chunk-99-c"],
+        findPullRequests: async () => [],
+      }),
+    ).rejects.toThrow("ENOSPC");
   });
 
   it("reconciles every landed chunk, in root order, and never stops on the first failure", async () => {
@@ -206,4 +200,3 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(r.closedIssues).toEqual([99]);
   });
 });
-
