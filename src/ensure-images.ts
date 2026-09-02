@@ -190,10 +190,8 @@ async function imageExists(tag: string): Promise<boolean> {
 }
 
 // The fingerprint an existing image was built from, or null when the image is
-// absent, carries no such label, or podman cannot be asked. Every one of those
-// means "cannot prove this image is current", and the caller rebuilds — the
-// only safe direction, since the alternative is gating against an image whose
-// provenance is unknown.
+// absent or carries no such label. Podman query failures propagate: they do not
+// establish either condition and cannot safely trigger a rebuild (#99).
 export async function readInputsLabel(tag: string): Promise<string | null> {
   const { stdout } = await exec(
     RUNTIME,

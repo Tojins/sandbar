@@ -2355,8 +2355,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   // agent reads (#67) and the mechanical version resolution that runs before it
   // (#68) — the second asks the same question twice per conflicted merge, and a
   // second copy of the flags is a chance for the two to come to disagree about
-  // what "still conflicted" means. An empty list on failure is honest for both
-  // readers. A failure is not an empty set and propagates (#99).
+  // what "still conflicted" means. A failure is not an empty set and
+  // propagates (#99).
   const unmergedPaths = async (): Promise<readonly string[]> => {
     const r = await exec("git", ["diff", "--name-only", "--diff-filter=U"], {
       cwd,

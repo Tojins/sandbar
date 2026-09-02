@@ -722,7 +722,6 @@ export async function wrapUpLandedChunk(
     readonly log?: (line: string) => void | Promise<void>;
   },
 ): Promise<ChunkWrapupResult> {
-  // Swallowed, unlike everything else here. The caller in the merge phase logs
   // A failed durable log write propagates; continuing would hide subsequent
   // forge writes from the run record (#99).
   const log = async (line: string): Promise<void> => opts.log?.(line);

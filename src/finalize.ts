@@ -507,14 +507,14 @@ export type FinalizeAdapter = {
   forceDeleteBranch(
     branch: string,
   ): Promise<{ readonly ok: boolean; readonly error?: string }>;
-  // Best-effort: sandbox.close() in the inner-loop usually has already removed
-  // the worktree. Adapter swallows errors.
+  // sandbox.close() in the inner-loop usually has already removed the
+  // worktree; that named absence is accepted and other failures propagate.
   removeWorktreeFor(branch: string): Promise<void>;
   // True iff every commit on `branch` is already contained in
   // origin/<sourceBranch> — i.e. deleting it destroys nothing. This is the
   // *verified* form of the certainty forceDeleteBranch requires; `-d` refusing
   // is NOT that certainty (it also refuses when the local source branch merely
-  // trails origin). Any error answers false: we never force-delete on a guess.
+  // trails origin). Git's exit 1 answers false; other failures propagate.
   branchIsContainedInOrigin(branch: string): Promise<boolean>;
   postComment(issueNum: number, body: string): Promise<void>;
   // Removes then adds, as SEPARATE `gh issue edit` calls (remove first). A
