@@ -636,18 +636,21 @@ export async function createAgentImages(opts: {
   const toolset = agentToolsetSpec(opts.providers);
   const pending = new Map<string, Promise<string>>();
   const order: string[] = [];
-  let artifacts: PreparedAgentArtifacts;
-  try {
-    artifacts = opts.prepareArtifacts !== undefined
-      ? await opts.prepareArtifacts(opts.providers)
-      : await prepareAgentArtifacts(opts.providers, log);
-  } catch (err) {
-    throw new SandbarError(
-      `could not augment image '${opts.declaredBaseTag}' with agent tools ${toolset}: ${err instanceof Error ? err.message : String(err)}`,
-      { cause: err },
-    );
-  }
-  onCleanup(artifacts.dispose);
+  let artifactsPromise: Promise<PreparedAgentArtifacts> | undefined;
+
+  const artifacts = (): Promise<PreparedAgentArtifacts> => {
+    if (artifactsPromise === undefined) {
+      artifactsPromise = (
+        opts.prepareArtifacts !== undefined
+          ? opts.prepareArtifacts(opts.providers)
+          : prepareAgentArtifacts(opts.providers, log)
+      ).then((prepared) => {
+        onCleanup(prepared.dispose);
+        return prepared;
+      });
+    }
+    return artifactsPromise;
+  };
 
   const augment = async (baseTag: string): Promise<string> => {
     let promise = pending.get(baseTag);
@@ -671,10 +674,11 @@ export async function createAgentImages(opts: {
             join(tmpdir(), "sandbar-agent-context-"),
           );
           try {
+            const prepared = await artifacts();
             await writeFile(join(contextRoot, "Containerfile"), containerfile);
             for (const provider of opts.providers) {
-              const staged = join(artifacts.root, provider);
-              await artifacts.verify(provider);
+              const staged = join(prepared.root, provider);
+              await prepared.verify(provider);
               await link(
                 staged,
                 join(contextRoot, provider),

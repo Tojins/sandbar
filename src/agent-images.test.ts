@@ -114,11 +114,15 @@ describe("run-owned agent images", () => {
       .digest("hex");
     let reads = 0;
     let builds = 0;
+    let artifactPreparations = 0;
     await createAgentImages({
       declaredBaseTag: "base",
       providers: ["codex"],
       scope: runScope("/cached-agent-image"),
-      prepareArtifacts: fakeAgentArtifacts,
+      prepareArtifacts: async (providers) => {
+        artifactPreparations += 1;
+        return fakeAgentArtifacts(providers);
+      },
       inputsLabel: async () => (++reads === 1 ? "base-fp" : fingerprint),
       build: async () => {
         builds += 1;
@@ -126,6 +130,7 @@ describe("run-owned agent images", () => {
       log: () => {},
     });
     expect(builds).toBe(0);
+    expect(artifactPreparations).toBe(0);
   });
 
   it("deduplicates concurrent augmentation of the same base", async () => {
