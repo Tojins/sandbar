@@ -183,6 +183,47 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     expect(await adapter().chunkBase("sandbar/chunk-1-c")).toBe("origin/main");
   });
 
+  it("replaces an agent-authored merge subject with the durable member record", async () => {
+    await git(seed, "checkout", "-b", "sandbar/issue-7-member");
+    await commit(seed, "member.txt", "member\n");
+    await git(seed, "push", "-q", "origin", "sandbar/issue-7-member");
+    await git(cache, "fetch", "origin", "--quiet");
+    await git(
+      wt,
+      "merge",
+      "--no-ff",
+      "-m",
+      "resolve conflicts",
+      "origin/sandbar/issue-7-member",
+    );
+
+    await adapter().canonicalizeChunkMemberMerge({
+      id: "7",
+      title: "Member title",
+      branch: "sandbar/issue-7-member",
+    });
+
+    expect(await git(wt, "log", "-1", "--format=%s")).toBe(
+      "Merge sandbar/issue-7: Member title",
+    );
+    expect((await git(wt, "rev-list", "--parents", "-n", "1", "HEAD")).split(" ")).toHaveLength(3);
+  });
+
+  it("refuses to turn an agent's replacement commit into a false membership record", async () => {
+    await commit(wt, "replacement.txt", "not a merge\n");
+
+    await expect(
+      adapter().canonicalizeChunkMemberMerge({
+        id: "7",
+        title: "Member title",
+        branch: "sandbar/issue-7-member",
+      }),
+    ).rejects.toThrow("did not produce a two-parent merge commit");
+    expect(await git(wt, "log", "-1", "--format=%s")).toBe(
+      "edit replacement.txt",
+    );
+  });
+
   // #64 — the three answers, and the one git fact that separates two of them:
   // `ls-remote --exit-code` exits 2 for "reached the remote, no matching ref"
   // and something else non-zero for "could not ask". No fake can assert that,

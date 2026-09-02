@@ -648,6 +648,7 @@ describe("resolvePlan in-chunk blockers (#59)", () => {
       new Set(),
       3,
       "auto",
+      new Map(),
     );
 
     expect(r.plan.map((p) => p.id)).toEqual(["10", "11"]);

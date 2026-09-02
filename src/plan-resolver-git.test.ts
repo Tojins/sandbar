@@ -51,7 +51,7 @@ describe("chunk membership from git (#93)", () => {
     expect(result.plan.map((p) => p.id)).toEqual(["47"]);
   });
 
-  it("does not satisfy membership recorded on a different chunk branch", () => {
+  it("de-queues work recorded on any chunk branch without satisfying a blocker from the wrong branch", () => {
     const issues = [
       { number: 47, title: "Root", body: "", labels: ["ready-for-agent"] },
       { number: 48, title: "Child", body: "## Blocked by\n- #47\n", labels: ["ready-for-agent"] },
@@ -64,6 +64,22 @@ describe("chunk membership from git (#93)", () => {
       "review",
       new Map([["sandbar/chunk-99-other", new Set([47])]]),
     );
-    expect(result.plan.map((p) => p.id)).toEqual(["47"]);
+    expect(result.plan.map((p) => p.id)).toEqual([]);
+    expect(result.landedChunks).toEqual([]);
+  });
+
+  it("does not re-plan a published root after its title changes the derived branch slug", () => {
+    const issue = { number: 47, title: "New title", body: "", labels: [] };
+    const result = resolvePlan(
+      [issue],
+      new Map([[47, { state: "OPEN" as const, labels: [] }]]),
+      new Set(),
+      3,
+      "review",
+      new Map([["sandbar/chunk-47-old-title", new Set([47])]]),
+    );
+
+    expect(result.plan).toEqual([]);
+    expect(result.landedChunks).toEqual([]);
   });
 });

@@ -210,7 +210,9 @@ and used to announce themselves in four different ways, the halt in none at all.
   commits on the exact chunk branch, which is the set a landing
   closes (#64) and whose tips a follow-up is blocked by (#63) — never the whole
   component, since a member that has never been worked has no commits
-  anywhere. It also carries the ORDER those closes must go in, for the reason
+  anywhere. De-queueing alone is broader and fail-safe: a member named on any
+  fetched chunk branch is never reimplemented after title drift or re-rooting.
+  It also carries the ORDER those closes must go in, for the reason
   the `land` bullet below states.
 - **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,
   created or updated after every landing push; sandbar never re-drafts a PR a

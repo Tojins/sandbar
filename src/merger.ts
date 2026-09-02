@@ -639,6 +639,10 @@ export type MergerAdapter = ResolveAdapter & {
   // throws: a merge that cannot be committed still has a resolve loop behind
   // it, and the staged resolution is visible to the agent as staged.
   commitMerge(): Promise<{ readonly ok: boolean }>;
+  // Ensure the commit just produced for a chunk member has sandbar's canonical
+  // subject. A conflict agent can author the commit itself; membership must
+  // not depend on text that agent happened to choose (#93).
+  canonicalizeChunkMemberMerge(unit: MergeUnit): Promise<void>;
   // --- chunk landing (#60) ---
   // The ref a chunk's members are merged onto: `origin/<chunkBranch>` when
   // origin has that branch, else `origin/<sourceBranch>` — which is where a
@@ -1454,7 +1458,12 @@ export async function runMergerWithAdapter(
       asHalt(`Chunk landing failed to base ${branch}`)(err);
     }
     for (const member of group.members) {
-      if (await mergeOne(member, group.target)) landedMembers.push(member);
+      if (await mergeOne(member, group.target)) {
+        await adapter
+          .canonicalizeChunkMemberMerge(member)
+          .catch(asHalt(`Chunk membership commit failed for #${issueNumberOf(member)}`));
+        landedMembers.push(member);
+      }
     }
     if (landedMembers.length === 0) {
       await emit(`chunk ${branch}: nothing landed`);
@@ -2544,6 +2553,42 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       } catch {
         return { ok: false };
       }
+    },
+    async canonicalizeChunkMemberMerge(unit) {
+      const expected = unit.mergeMessage ?? mergeMessageFor(unit);
+      const [{ stdout }, { stdout: parentsOut }] = await Promise.all([
+        exec(
+          "git",
+          ["log", "-1", "--format=%s", "HEAD"],
+          { cwd },
+        ),
+        exec(
+          "git",
+          ["rev-list", "--parents", "-n", "1", "HEAD"],
+          { cwd },
+        ),
+      ]);
+      if (parentsOut.trim().split(/\s+/).length !== 3) {
+        throw new SandbarError(
+          `Chunk member #${issueNumberOf(unit)} did not produce a two-parent merge commit; refusing to publish a membership record for unrelated history`,
+        );
+      }
+      if (stdout.trim() === expected) return;
+      // Replace agent-authored prose with the protocol record. The canonical
+      // body is the same one mergeNoFf supplied on the clean path.
+      await exec(
+        "git",
+        [
+          "commit",
+          "--amend",
+          "--no-verify",
+          "-m",
+          expected,
+          "-m",
+          deps.coauthorTrailer,
+        ],
+        { cwd, env: gitAuthorEnv(deps) },
+      );
     },
     async getIssueBody(issueId) {
       // Throws (SandbarError) on fetch failure: a resolve agent reasoning

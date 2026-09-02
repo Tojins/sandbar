@@ -54,8 +54,9 @@
 // closing the issue has not happened. So the issue stays OPEN, and sandbar
 // attempts to replace `ready-for-agent` with `needs-review` for humans.
 //
-// The swap is not authoritative. The merge commit on the exact fetched chunk
-// branch is the de-queue and blocker-satisfaction fact; labels are never read.
+// The swap is not authoritative. A merge commit on any fetched chunk branch is
+// the fail-safe de-queue fact; membership on the exact derived branch is the
+// stricter blocker-satisfaction fact. Labels are never read.
 // `fetchChunkMembers` lists those git-derived members back into the candidate
 // graph so the chunk cannot re-root around whatever remains queued.
 //

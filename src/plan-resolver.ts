@@ -71,7 +71,12 @@
 // review-gated issue would read as AUTO (its gating ancestor having vanished
 // from the lane graph) and auto-land unreviewed chunk code onto the source
 // branch, which is the back door `lanes.ts` exists to shut. They are listed
-// back in and dropped from the plan by the same git membership fact.
+// back in and dropped from the plan when ANY fetched chunk branch names them.
+// That de-queue reading is deliberately broader than blocker satisfaction:
+// title drift or re-rooting must not make durable work eligible to implement
+// again, while only membership on the exact derived branch can prove a
+// blocker's commits are under a dependent or may be reviewed and closed with
+// that branch. This is the fail-safe asymmetry #94 depends on.
 //
 // All of this is doubly inert under `defaultLane: "auto"`, where no issue is
 // review-gated, no chunk is derived, and the second clause can never be
@@ -166,7 +171,10 @@ import {
   laneOverrides,
 } from "./lanes.js";
 import { issueBranchName } from "./naming.js";
-import { rootIssueFromChunkBranch } from "./naming.js";
+import {
+  ORIGIN_CHUNK_BRANCH_REFGLOBS,
+  rootIssueFromChunkBranch,
+} from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
 const exec = promisify(execFile);
@@ -285,12 +293,17 @@ export function resolvePlan(
   const { chunks, chunkOf } = deriveChunks(chunkIssues, lanes);
   const chunkByRoot = new Map(chunks.map((c) => [c.root, c] as const));
 
-  // Membership is a strict git fact (#93): the issue must be named by a
-  // sandbar merge commit on the exact derived chunk branch. Labels are never
-  // consulted. Git's local remote-tracking refs have no search-index lag, so
-  // the old union of authoritative and lagging label reads is unnecessary;
-  // absence from this map is immediately and fail-safely "not on the branch".
-  const isInChunk = (n: number): boolean => {
+  // There are deliberately TWO git readings (#93). De-queueing is the
+  // conservative one: once any origin chunk branch names an issue, published
+  // work must never be implemented again merely because a title edit or graph
+  // change made today's derivation name a different branch. Every placement
+  // and safety decision stays strict: a blocker is satisfied, a PR names a
+  // member, and a landing closes it only when the EXACT derived branch names
+  // it. Labels are never consulted, and git has no search-index lag.
+  const publishedChunkMembers = new Set(
+    [...chunkMembers.values()].flatMap((members) => [...members]),
+  );
+  const isOnDerivedChunk = (n: number): boolean => {
     const root = chunkOf.get(n);
     if (root === undefined) return false;
     const branch = chunkByRoot.get(root)?.branch;
@@ -318,7 +331,7 @@ export function resolvePlan(
     const chunk = chunkByRoot.get(root);
     if (!chunk) return null;
     const landed = chunk.members
-      .filter((m) => m !== n && isInChunk(m))
+      .filter((m) => m !== n && isOnDerivedChunk(m))
       .map((m) => ({ number: m, title: titleOf.get(m) ?? "" }));
     return { root: chunk.root, branch: chunk.branch, landed };
   };
@@ -330,7 +343,7 @@ export function resolvePlan(
   // blocked. Header, "When is a blocker satisfied?" (#59).
   const blockerSatisfied = (blocker: number, dependent: number): boolean => {
     if (issueFacts.get(blocker)?.state === "CLOSED") return true;
-    if (!isInChunk(blocker)) return false;
+    if (!isOnDerivedChunk(blocker)) return false;
     const theirs = chunkOf.get(blocker);
     return theirs !== undefined && theirs === chunkOf.get(dependent);
   };
@@ -347,7 +360,7 @@ export function resolvePlan(
     // here only to hold its place in the two graphs above, and it is dropped
     // before the review-lane hold below so it is never reported as "held": it
     // is not waiting for anything this cycle can give it.
-    if (isInChunk(c.number)) return false;
+    if (publishedChunkMembers.has(c.number)) return false;
     if (c.labels.includes(WAITING_LABEL)) return false;
     const blockers = blockedBy.get(c.number) ?? [];
     if (!blockers.every((n) => blockerSatisfied(n, c.number))) return false;
@@ -389,13 +402,12 @@ export function resolvePlan(
     plan,
     heldForReview: heldForReview.sort((a, b) => a - b),
     overrides: laneOverrides(lanes),
-    // Over the SAME `isInChunk` the two clauses above are decided by, so what
-    // the scan and the landing are told is on a chunk branch is what the
-    // planner treated as landed — one reading of the label, not three.
+    // Strict to the derived branch: unlike de-queueing, neither review nor
+    // closure may claim work that is durable somewhere else.
     landedChunks: landedChunksOf(
       chunks,
       chunkIssues,
-      new Set(candidates.map((c) => c.number).filter(isInChunk)),
+      new Set(candidates.map((c) => c.number).filter(isOnDerivedChunk)),
     ),
   };
 }
@@ -470,7 +482,7 @@ export async function readChunkMembers(
     [
       "for-each-ref",
       "--format=%(refname:short)",
-      "refs/remotes/origin/sandbar/chunk-*",
+      ...ORIGIN_CHUNK_BRANCH_REFGLOBS,
     ],
     { cwd: repoDir },
   );

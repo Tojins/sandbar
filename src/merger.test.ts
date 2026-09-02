@@ -77,6 +77,7 @@ type Calls = {
   fileWrites: { path: string; contents: string }[];
   staged: string[];
   mergeCommits: number;
+  canonicalizedChunkMembers: string[];
 };
 
 type Script = {
@@ -152,6 +153,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     fileWrites: [],
     staged: [],
     mergeCommits: 0,
+    canonicalizedChunkMembers: [],
   };
   const closeAttemptsByIssue = new Map<number, number>();
   let mIdx = 0;
@@ -301,6 +303,10 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       const ok = script.mergeCommits?.[mcIdx++] ?? true;
       if (ok) merging = false;
       return { ok };
+    },
+    async canonicalizeChunkMemberMerge(unit) {
+      calls.canonicalizedChunkMembers.push(unit.id);
+      calls.order.push("canonicalize-chunk-member");
     },
     // #60. `chunkBases` scripts what origin has: a branch name mapped to its
     // remote-tracking ref, or nothing for a chunk that has never landed — in
@@ -1845,6 +1851,22 @@ describe("buildForgeUnverifiedComment", () => {
 // the cycle started, that a member is recorded only after the push, and that
 // the source-branch pass is untouched by any of it.
 describe("runMergerWithAdapter — chunk landing (#60)", () => {
+  it("canonicalizes a conflict-resolved member before publishing membership", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+    });
+
+    const summary = await runMergerWithAdapter([chunkIssue(42)], adapter);
+
+    expect(summary.chunkLanded.map((c) => c.issue.id)).toEqual(["42"]);
+    expect(calls.canonicalizedChunkMembers).toEqual(["42"]);
+    expect(calls.order.indexOf("canonicalize-chunk-member")).toBeLessThan(
+      calls.order.indexOf("chunk-push"),
+    );
+  });
+
   const chunkIssue = (n: number, root = n): IssueRef => ({
     ...issue(n),
     chunk: { root, branch: `sandbar/chunk-${root}-c` },
@@ -1866,6 +1888,7 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
       "merge",
       "install",
       "gate",
+      "canonicalize-chunk-member",
       "chunk-push",
       // The review surface comes after the push, never before it (#62).
       "chunk-pr",
