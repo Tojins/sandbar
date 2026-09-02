@@ -18,6 +18,7 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { BuiltImage } from "./config.js";
+import { AGENT_PROVIDER_PACKAGES } from "./agent-providers.js";
 import {
   ImageBuildError,
   agentToolsContainerfile,
@@ -43,6 +44,7 @@ const BASE = "docker.io/library/mariadb:10.11";
 const { scope: SCOPE, otherScope: OTHER_SCOPE, testImageTag, cleanup } =
   podmanTestScope("ensure-images");
 const TAG = testImageTag("probe");
+const UID_BASE_TAG = testImageTag("uid-base");
 
 // Collection time, not beforeAll: vitest evaluates `runIf` while building the
 // suite, so a flag set in a hook arrives too late and silently skips
@@ -71,10 +73,12 @@ describe.runIf(available)("ensureImages against real podman", () => {
     );
     await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
     await exec(RUNTIME, ["rmi", "-f", TAG]).catch(() => {});
+    await exec(RUNTIME, ["rmi", "-f", UID_BASE_TAG]).catch(() => {});
   }, 120_000);
 
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });
+    await exec(RUNTIME, ["rmi", "-f", UID_BASE_TAG]).catch(() => {});
   }, 60_000);
 
   // `cleanup` is the two production sweepers plus the tags they cannot see —
@@ -125,22 +129,40 @@ describe.runIf(available)("ensureImages against real podman", () => {
     120_000,
   );
 
-  for (const [base, packageManager] of [
-    ["docker.io/library/alpine:3.22", "apk"],
-    ["docker.io/library/debian:bookworm-slim", "apt-get"],
+  for (const [base, packageManager, selectedVariant] of [
+    ["docker.io/library/alpine:3.22", "apk", "musl"],
+    ["docker.io/library/debian:bookworm-slim", "apt-get", "glibc"],
   ] as const) {
     it(
-      `executes the generated git and agent-user contract over ${packageManager}`,
+      `executes the generated git, user, and ${selectedVariant} selection contract over ${packageManager}`,
       async () => {
         const context = await mkdtemp(join(tmpdir(), "sandbar-agent-recipe-"));
         try {
+          const artifact = AGENT_PROVIDER_PACKAGES.codex.artifacts.x64[0]!;
+          const packages = {
+            ...AGENT_PROVIDER_PACKAGES,
+            codex: {
+              ...AGENT_PROVIDER_PACKAGES.codex,
+              artifacts: {
+                x64: [
+                  { ...artifact, variant: "glibc" as const },
+                  { ...artifact, variant: "musl" as const },
+                ],
+                arm64: AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64,
+              },
+            },
+          };
           await writeFile(
             join(context, "Containerfile"),
-            agentToolsContainerfile(base, ["codex"]),
+            agentToolsContainerfile(base, ["codex"], "x64", packages),
           );
           await writeFile(
-            join(context, "codex-static"),
-            "#!/bin/sh\necho 'codex fixture'\n",
+            join(context, "codex-glibc"),
+            "#!/bin/sh\necho 'codex glibc fixture'\n",
+          );
+          await writeFile(
+            join(context, "codex-musl"),
+            "#!/bin/sh\necho 'codex musl fixture'\n",
           );
           await buildImage({ tag: TAG, containerfile: "<generated>" }, {
             root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
@@ -149,7 +171,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
             "run", "--rm", TAG, "sh", "-c",
             "git --version && codex --version && test $(id -u agent) = 1000 && test $(stat -c %u /home/agent) = 1000",
           ]);
-          expect(result.stdout).toContain("codex fixture");
+          expect(result.stdout).toContain(`codex ${selectedVariant} fixture`);
         } finally {
           await rm(context, { recursive: true, force: true });
         }
@@ -157,6 +179,36 @@ describe.runIf(available)("ensureImages against real podman", () => {
       600_000,
     );
   }
+
+  it(
+    "renames an existing uid-1000 user and preserves its writable home contract",
+    async () => {
+      await buildImage({ tag: UID_BASE_TAG, containerfile: "<generated>" }, {
+        root: "",
+        content: "FROM docker.io/library/alpine:3.22\nRUN adduser -D -u 1000 -h /home/node node\n",
+        capture: true,
+      });
+      const context = await mkdtemp(join(tmpdir(), "sandbar-agent-uid-recipe-"));
+      try {
+        await writeFile(
+          join(context, "Containerfile"),
+          agentToolsContainerfile(UID_BASE_TAG, ["codex"]),
+        );
+        await writeFile(join(context, "codex-static"), "#!/bin/sh\necho fixture\n");
+        await buildImage({ tag: TAG, containerfile: "<generated>" }, {
+          root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
+        });
+        const result = await exec(RUNTIME, [
+          "run", "--rm", TAG, "sh", "-c",
+          "test $(id -u agent) = 1000 && ! id node >/dev/null 2>&1 && test $(stat -c %u /home/agent) = 1000 && test -w /home/agent",
+        ]);
+        expect(result.stderr).toBe("");
+      } finally {
+        await rm(context, { recursive: true, force: true });
+      }
+    },
+    600_000,
+  );
 
   it(
     "records the fingerprint as a label, and rebuilds only when the declared inputs change",

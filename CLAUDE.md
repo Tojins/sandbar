@@ -301,12 +301,15 @@ and used to announce themselves in four different ways, the halt in none at all.
   not an answer (read as an answer it is a nudge, an attempt, and eight more of
   them). **The branch owns the environment; the run owns the tools (#75).**
   After resolving the declared sandbox image or a per-branch variant, the
-  driver appends exactly the routed CLIs at pins owned by
-  `AGENT_PROVIDER_PACKAGES`; an old branch recipe can therefore change its
-  dependencies but cannot remove this run's agent. The merger uses the same
-  augmented declared image, while gate containers keep the unaugmented base
-  because they run no agent. Both pins move with the driver, and codex's is
-  specifically co-versioned with its load-bearing `parsedOutputOnly` parser.
+  driver appends git, the uid-1000 agent user and exactly the routed standalone
+  CLIs. `AGENT_PROVIDER_PACKAGES` owns each release artifact and per-architecture
+  digest; an old branch recipe can therefore change its dependencies but cannot
+  remove or replace this run's agent. The augmentation enforces a base contract
+  of `/bin/sh`, CA roots, and git or apt/apk/dnf — no Node/npm runtime. The
+  merger uses the same augmented declared image, while gate containers keep the
+  unaugmented base because they run no agent. Both pins move with the driver,
+  and codex's is specifically co-versioned with its load-bearing
+  `parsedOutputOnly` parser.
   `PROVIDER_CREDENTIALS` is ANY-OF per provider, which is
   what let #73 add codex's subscription as data; what a second accepted key
   needed beyond data is `billingPrecedenceWarnings`, because a CLI handed both a
