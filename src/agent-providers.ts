@@ -58,6 +58,9 @@ export type AgentProviderName = (typeof AGENT_PROVIDER_NAMES)[number];
 // release parses. A routed role must not inherit whichever CLI a host image (or
 // an old branch's image recipe) happened to bake (#75).
 export type AgentArtifact = {
+  // Claude publishes libc-specific dynamic binaries; Codex's musl release is
+  // static. The augment recipe chooses the former inside the base image.
+  readonly variant: "static" | "glibc" | "musl";
   readonly url: string;
   readonly sha256: string;
   readonly archive?: true;
@@ -65,7 +68,7 @@ export type AgentArtifact = {
 
 export type AgentProviderPackage = {
   readonly version: string;
-  readonly artifacts: Readonly<Record<"x64" | "arm64", AgentArtifact>>;
+  readonly artifacts: Readonly<Record<"x64" | "arm64", readonly AgentArtifact[]>>;
 };
 
 // Both standalone releases and every architecture's digest are pinned here;
@@ -79,29 +82,47 @@ export const AGENT_PROVIDER_PACKAGES: Readonly<
   claude: {
     version: "2.1.257",
     artifacts: {
-      x64: {
-        url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-x64-musl/claude",
-        sha256: "51e08d1948c31d4ab386cd744ba633739236ac0cbedded05d0ef07f2d60e950e",
-      },
-      arm64: {
-        url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-arm64-musl/claude",
-        sha256: "c5c088fb49fb514f8df5af9840731bfbe38f74a2d85f21bbd233a6e7b6b8d2e2",
-      },
+      x64: [
+        {
+          variant: "glibc",
+          url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-x64/claude",
+          sha256: "9a64bda9d8722a1fa05bef9a5961d07e0331b99597eda9e2f6a732f3a0ff7f05",
+        },
+        {
+          variant: "musl",
+          url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-x64-musl/claude",
+          sha256: "51e08d1948c31d4ab386cd744ba633739236ac0cbedded05d0ef07f2d60e950e",
+        },
+      ],
+      arm64: [
+        {
+          variant: "glibc",
+          url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-arm64/claude",
+          sha256: "22f7d48f17193952c3c2d0b8bf2f31db2cd08fd5fb09a374fa321496b711d017",
+        },
+        {
+          variant: "musl",
+          url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-arm64-musl/claude",
+          sha256: "c5c088fb49fb514f8df5af9840731bfbe38f74a2d85f21bbd233a6e7b6b8d2e2",
+        },
+      ],
     },
   },
   codex: {
     version: "0.152.0",
     artifacts: {
-      x64: {
+      x64: [{
+        variant: "static",
         url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-x86_64-unknown-linux-musl.tar.gz",
         sha256: "05f942d3d3c5b5acd9edad56ce2797b6fe72dbb1462b24e5c9bf7dcec9a28a11",
         archive: true,
-      },
-      arm64: {
+      }],
+      arm64: [{
+        variant: "static",
         url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-aarch64-unknown-linux-musl.tar.gz",
         sha256: "37da6b486503c8a42cc4604d2a3d80d388df896dd251e9225f4f3d49b08c2e8c",
         archive: true,
-      },
+      }],
     },
   },
 };

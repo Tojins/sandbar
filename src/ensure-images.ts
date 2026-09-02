@@ -296,6 +296,8 @@ export async function buildImage(
   let output = "";
   let timedOut = false;
   await new Promise<void>((resolve, reject) => {
+    let tar: ChildProcess | undefined;
+    let untrackTar: (() => void) | undefined;
     const child = spawn(RUNTIME, args, {
       stdio: [
         image.stdinContext || opts.content !== undefined || opts.contextRoot ? "pipe" : "ignore",
@@ -309,6 +311,7 @@ export async function buildImage(
     // bound that cannot fail.
     const timer = setTimeout(() => {
       timedOut = true;
+      tar?.kill("SIGKILL");
       child.kill("SIGKILL");
     }, timeoutMs);
     // Tracked for the run's cleanup, because a signal during a build would
@@ -325,11 +328,13 @@ export async function buildImage(
       output = appendTail(output, c);
     });
     child.on("error", (err) => {
+      tar?.kill("SIGKILL");
       untrack();
       clearTimeout(timer);
       reject(err);
     });
     child.on("exit", (code) => {
+      tar?.kill("SIGKILL");
       untrack();
       clearTimeout(timer);
       if (code === 0 && !timedOut) {
@@ -353,13 +358,19 @@ export async function buildImage(
       );
     });
     if (opts.contextRoot !== undefined && child.stdin) {
-      const tar = spawn("tar", ["-cf", "-", "-C", opts.contextRoot, "."], {
+      tar = spawn("tar", ["-cf", "-", "-C", opts.contextRoot, "."], {
         stdio: ["ignore", "pipe", "pipe"],
       });
+      untrackTar = trackBuild(tar);
       tar.stderr?.on("data", (c: Buffer) => { output = appendTail(output, c.toString()); });
-      tar.on("error", (err) => { child.kill(); reject(err); });
+      tar.on("error", (err) => {
+        untrackTar?.();
+        child.kill("SIGKILL");
+        reject(err);
+      });
       tar.on("exit", (code) => {
-        if (code !== 0) child.kill();
+        untrackTar?.();
+        if (code !== 0 && !timedOut) child.kill("SIGKILL");
       });
       child.stdin.on("error", () => {});
       tar.stdout?.pipe(child.stdin);
@@ -481,8 +492,8 @@ export async function ensureImages(
 // The branch owns the environment; the run owns the tools. Agent CLIs are
 // selected by resolved role routing, so they are appended AFTER the declared
 // image or a per-branch variant has been resolved. Base images need no CLI
-// runtime: host-downloaded, driver-hash-verified musl binaries are copied from
-// a tar context. Installation selects root. The base's default is inert:
+// runtime: host-downloaded, driver-hash-verified standalone binaries are copied
+// from a tar context. Installation selects root. The base's default is inert:
 // both the sandbox and merger resolve container pass an explicit `--user`.
 
 export function agentToolsetSpec(
@@ -499,10 +510,23 @@ export function agentToolsContainerfile(
 ): string {
   const pins = providers.map((provider) => {
     const pin = AGENT_PROVIDER_PACKAGES[provider];
-    return `# ${provider} ${pin.version} x64:${pin.artifacts.x64.sha256} arm64:${pin.artifacts.arm64.sha256}`;
+    const digests = (["x64", "arm64"] as const).flatMap((arch) =>
+      pin.artifacts[arch].map((artifact) =>
+        `${arch}-${artifact.variant}:${artifact.sha256}`,
+      ),
+    );
+    return `# ${provider} ${pin.version} ${digests.join(" ")}`;
   }).join("\n");
-  const copies = providers
-    .map((provider) => `COPY --chmod=0755 ${provider} /usr/local/bin/${provider}`)
+  const copies = providers.flatMap((provider) => {
+    const variants = AGENT_PROVIDER_PACKAGES[provider].artifacts.x64;
+    if (variants.length === 1 && variants[0]?.variant === "static") {
+      return [`COPY --chmod=0755 ${provider}-static /usr/local/bin/${provider}`];
+    }
+    return [
+      `COPY --chmod=0755 ${provider}-glibc ${provider}-musl /tmp/`,
+      `RUN if [ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ]; then cp /tmp/${provider}-musl /usr/local/bin/${provider}; else cp /tmp/${provider}-glibc /usr/local/bin/${provider}; fi && rm /tmp/${provider}-glibc /tmp/${provider}-musl`,
+    ];
+  })
     .join("\n");
   const probes = providers
     .map((provider) => `${provider} --version`)
@@ -535,71 +559,75 @@ async function prepareAgentArtifacts(
     );
   }
   const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-"));
-  const stagedSha256: Partial<Record<AgentProviderName, string>> = {};
+  const stagedSha256: Record<string, string> = {};
   try {
     for (const provider of providers) {
-      const artifact = AGENT_PROVIDER_PACKAGES[provider].artifacts[arch];
-      const downloaded = join(root, `${provider}.download`);
-      const identity = `${provider}/${arch} from ${artifact.url}`;
-      log(`Downloading agent tool ${identity}...`);
-      try {
-        const response = await fetch(artifact.url, {
-          signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
-        });
-        if (!response.ok || response.body === null) {
-          throw new Error(`download returned HTTP ${response.status}`);
-        }
-        await pipeline(
-          Readable.fromWeb(response.body as never),
-          createWriteStream(downloaded),
-        );
-        const actual = await sha256File(downloaded);
-        if (actual !== artifact.sha256) {
+      for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
+        const name = `${provider}-${artifact.variant}`;
+        const downloaded = join(root, `${name}.download`);
+        const identity = `${provider}/${arch}-${artifact.variant} from ${artifact.url}`;
+        log(`Downloading agent tool ${identity}...`);
+        try {
+          const response = await fetch(artifact.url, {
+            signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
+          });
+          if (!response.ok || response.body === null) {
+            throw new Error(`download returned HTTP ${response.status}`);
+          }
+          await pipeline(
+            Readable.fromWeb(response.body as never),
+            createWriteStream(downloaded),
+          );
+          const actual = await sha256File(downloaded);
+          if (actual !== artifact.sha256) {
+            throw new Error(
+              `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
+            );
+          }
+          const destination = join(root, name);
+          if (artifact.archive) {
+            const extractRoot = await mkdtemp(join(root, `${provider}-extracted-`));
+            await exec("tar", ["-xzf", downloaded, "-C", extractRoot]);
+            const binary = (await readdir(extractRoot)).find(
+              (n) => n === provider || n.startsWith(`${provider}-`),
+            );
+            if (!binary) throw new Error(`archive contains no ${provider} binary`);
+            await rename(join(extractRoot, binary), destination);
+          } else {
+            // Keep the pinned download beside the staged executable so every
+            // later augmentation can re-check the driver-owned digest.
+            await copyFile(downloaded, destination);
+          }
+          await chmod(destination, 0o755);
+          stagedSha256[name] = await sha256File(destination);
+        } catch (err) {
           throw new Error(
-            `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
+            `could not download and stage ${identity}: ${err instanceof Error ? err.message : String(err)}`,
+            { cause: err },
           );
         }
-        const destination = join(root, provider);
-        if (artifact.archive) {
-          const extractRoot = await mkdtemp(join(root, `${provider}-extracted-`));
-          await exec("tar", ["-xzf", downloaded, "-C", extractRoot]);
-          const binary = (await readdir(extractRoot)).find(
-            (n) => n === provider || n.startsWith(`${provider}-`),
-          );
-          if (!binary) throw new Error(`archive contains no ${provider} binary`);
-          await rename(join(extractRoot, binary), destination);
-        } else {
-          // Keep the pinned download beside the staged executable so every
-          // later augmentation can re-check the driver-owned digest.
-          await copyFile(downloaded, destination);
-        }
-        await chmod(destination, 0o755);
-        stagedSha256[provider] = await sha256File(destination);
-      } catch (err) {
-        throw new Error(
-          `could not download and stage ${identity}: ${err instanceof Error ? err.message : String(err)}`,
-          { cause: err },
-        );
       }
     }
     return {
       root,
       verify: async (provider) => {
-        const artifact = AGENT_PROVIDER_PACKAGES[provider].artifacts[arch];
-        const downloaded = await sha256File(join(root, `${provider}.download`));
-        if (downloaded !== artifact.sha256) {
-          throw new Error(
-            `staged download ${provider}/${arch} failed pin re-verification ` +
-              `(expected ${artifact.sha256}, got ${downloaded})`,
-          );
-        }
-        const expected = stagedSha256[provider];
-        const actual = await sha256File(join(root, provider));
-        if (expected === undefined || actual !== expected) {
-          throw new Error(
-            `staged artifact ${provider}/${arch} failed re-verification ` +
-              `(expected ${expected}, got ${actual})`,
-          );
+        for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
+          const name = `${provider}-${artifact.variant}`;
+          const downloaded = await sha256File(join(root, `${name}.download`));
+          if (downloaded !== artifact.sha256) {
+            throw new Error(
+              `staged download ${provider}/${arch} failed pin re-verification ` +
+                `(expected ${artifact.sha256}, got ${downloaded})`,
+            );
+          }
+          const expected = stagedSha256[name];
+          const actual = await sha256File(join(root, name));
+          if (expected === undefined || actual !== expected) {
+            throw new Error(
+              `staged artifact ${provider}/${arch} failed re-verification ` +
+                `(expected ${expected}, got ${actual})`,
+            );
+          }
         }
       },
       dispose: () => rm(root, { recursive: true, force: true }),
@@ -647,6 +675,9 @@ export async function createAgentImages(opts: {
       ).then((prepared) => {
         onCleanup(prepared.dispose);
         return prepared;
+      }).catch((err) => {
+        artifactsPromise = undefined;
+        throw err;
       });
     }
     return artifactsPromise;
@@ -677,12 +708,13 @@ export async function createAgentImages(opts: {
             const prepared = await artifacts();
             await writeFile(join(contextRoot, "Containerfile"), containerfile);
             for (const provider of opts.providers) {
-              const staged = join(prepared.root, provider);
               await prepared.verify(provider);
-              await link(
-                staged,
-                join(contextRoot, provider),
-              );
+              for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[
+                process.arch as "x64" | "arm64"
+              ]) {
+                const name = `${provider}-${artifact.variant}`;
+                await link(join(prepared.root, name), join(contextRoot, name));
+              }
             }
             await build(
               { tag, containerfile: "<generated-agent-tools>" },

@@ -23,22 +23,29 @@ async function fakeAgentArtifacts(
   providers: readonly (typeof AGENT_PROVIDER_NAMES)[number][],
 ): Promise<PreparedAgentArtifacts> {
   const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-test-"));
-  const sha256: Partial<Record<(typeof AGENT_PROVIDER_NAMES)[number], string>> = {};
+  const sha256: Record<string, string> = {};
+  const arch = process.arch as "x64" | "arm64";
   for (const provider of providers) {
-    const content = `test ${provider}`;
-    await writeFile(join(root, provider), content);
-    sha256[provider] = createHash("sha256").update(content).digest("hex");
+    for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
+      const name = `${provider}-${artifact.variant}`;
+      const content = `test ${name}`;
+      await writeFile(join(root, name), content);
+      sha256[name] = createHash("sha256").update(content).digest("hex");
+    }
   }
   return {
     root,
     verify: async (provider) => {
-      const actual = createHash("sha256")
-        .update(await readFile(join(root, provider)))
-        .digest("hex");
-      if (actual !== sha256[provider]) {
-        throw new Error(
-          `staged artifact ${provider}/${process.arch} failed re-verification`,
-        );
+      for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
+        const name = `${provider}-${artifact.variant}`;
+        const actual = createHash("sha256")
+          .update(await readFile(join(root, name)))
+          .digest("hex");
+        if (actual !== sha256[name]) {
+          throw new Error(
+            `staged artifact ${provider}/${process.arch} failed re-verification`,
+          );
+        }
       }
     },
     dispose: () => rm(root, { recursive: true, force: true }),
@@ -66,18 +73,22 @@ describe("run-owned agent images", () => {
     });
     expect(builds).toHaveLength(1);
     expect(builds[0].argv.at(-1)).toBe("-");
-    expect(builds[0].files).toEqual(["Containerfile", "codex"]);
-    expect(builds[0].content).toContain("COPY --chmod=0755 codex");
+    expect(builds[0].files).toEqual(["Containerfile", "codex-static"]);
+    expect(builds[0].content).toContain("COPY --chmod=0755 codex-static");
     expect(builds[0].content).not.toContain("claude");
   });
 
   it("copies and probes both standalone provider binaries", () => {
     const file = agentToolsContainerfile("base", ["claude", "codex"]);
-    expect(file).toContain("COPY --chmod=0755 claude /usr/local/bin/claude");
-    expect(file).toContain("COPY --chmod=0755 codex /usr/local/bin/codex");
+    expect(file).toContain("COPY --chmod=0755 claude-glibc claude-musl /tmp/");
+    expect(file).toContain("cp /tmp/claude-musl /usr/local/bin/claude");
+    expect(file).toContain("cp /tmp/claude-glibc /usr/local/bin/claude");
+    expect(file).toContain("COPY --chmod=0755 codex-static /usr/local/bin/codex");
     expect(file).toContain("claude --version && codex --version && git --version");
-    expect(file).toContain(AGENT_PROVIDER_PACKAGES.claude.artifacts.x64.sha256);
-    expect(file).toContain(AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64.sha256);
+    for (const artifacts of Object.values(AGENT_PROVIDER_PACKAGES.claude.artifacts)) {
+      for (const artifact of artifacts) expect(file).toContain(artifact.sha256);
+    }
+    expect(file).toContain(AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64[0]!.sha256);
     expect(file).not.toContain("npm");
   });
 
@@ -85,8 +96,11 @@ describe("run-owned agent images", () => {
     for (const provider of AGENT_PROVIDER_NAMES) {
       const pin = AGENT_PROVIDER_PACKAGES[provider];
       expect(pin.version).toMatch(/^\d+\.\d+\.\d+$/);
-      expect(pin.artifacts.x64.sha256).toMatch(/^[a-f0-9]{64}$/);
-      expect(pin.artifacts.arm64.sha256).toMatch(/^[a-f0-9]{64}$/);
+      for (const arch of ["x64", "arm64"] as const) {
+        for (const artifact of pin.artifacts[arch]) {
+          expect(artifact.sha256).toMatch(/^[a-f0-9]{64}$/);
+        }
+      }
     }
   });
 
@@ -175,10 +189,41 @@ describe("run-owned agent images", () => {
       build: async () => {},
       log: () => {},
     });
-    await writeFile(join(artifacts.root, "codex"), "branch replacement");
+    await writeFile(join(artifacts.root, "codex-static"), "branch replacement");
     await expect(images.augment("variant")).rejects.toThrow(
       /staged artifact codex\/.+ failed re-verification/,
     );
+  });
+
+  it("retries artifact staging after a transient failure", async () => {
+    const containerfile = agentToolsContainerfile("base", ["codex"]);
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify(["base-fp", containerfile]))
+      .digest("hex");
+    const declaredTag = variantImageTag(
+      "base",
+      runScope("/artifact-retry"),
+      fingerprint,
+    );
+    let preparations = 0;
+    const images = await createAgentImages({
+      declaredBaseTag: "base",
+      providers: ["codex"],
+      scope: runScope("/artifact-retry"),
+      prepareArtifacts: async (providers) => {
+        preparations += 1;
+        if (preparations === 1) throw new Error("transient CDN failure");
+        return fakeAgentArtifacts(providers);
+      },
+      inputsLabel: async (tag) => tag === "base"
+        ? "base-fp"
+        : tag === declaredTag ? fingerprint : null,
+      build: async () => {},
+      log: () => {},
+    });
+    await expect(images.augment("variant")).rejects.toThrow(/transient CDN failure/);
+    await expect(images.augment("variant")).resolves.toMatch(/^variant:sb-/);
+    expect(preparations).toBe(2);
   });
 
   it("sweeps augmented children before their branch-variant parents", async () => {
