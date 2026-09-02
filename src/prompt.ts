@@ -312,22 +312,16 @@ export async function buildProjectAnchor(
   }
   lines.push("", `Last 10 commits on \`${opts.sourceBranch}\`:`, "```");
   try {
-    // `origin/<sourceBranch>`, not the bare name (#38). The cache deliberately
-    // holds no local copy of the source branch — `origin/<sourceBranch>` is
-    // what every worktree seeds from and what the merger lands on, so it is
-    // also the history the agent should be shown.
     const { stdout } = await exec(
       "git",
       ["log", `origin/${opts.sourceBranch}`, "-n", "10", "--format=%h %s"],
       { cwd: opts.repoDir },
     );
     lines.push(stdout.trim());
-  } catch {
-    // The one read in this module that degrades rather than throwing (#40), and
-    // the difference is that this failure is not silent: history is background
-    // colour, and "(unavailable)" says outright that it is missing. The slots
-    // below have no such marker available — their empty rendering is a claim
-    // about the branch, and a false one.
+  } catch (err) {
+    // A missing history ref is background context with an explicit unavailable
+    // rendering. Other git and process failures are infrastructure faults.
+    if ((err as { code?: unknown }).code !== 128) throw err;
     lines.push("(unavailable)");
   }
   lines.push("```");

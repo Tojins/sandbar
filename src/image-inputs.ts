@@ -71,7 +71,8 @@ async function hashPath(
   let stat;
   try {
     stat = await lstat(absolute);
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     // Not an error at this layer: a branch may add or delete a declared input,
     // and both are precisely the change the fingerprint is meant to notice.
     // `ensureImages` is where absence in the HOST checkout is rejected as a
@@ -144,7 +145,8 @@ export async function fingerprintImageInputs(
     if (opts.mustExist) {
       try {
         await lstat(join(root, path));
-      } catch {
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
         throw new SandbarError(
           `config.images: entry '${image.tag}' declares \`rebuildOn\` path ` +
             `'${path}', which does not exist in ${root}. The base image is ` +
@@ -152,6 +154,7 @@ export async function fingerprintImageInputs(
             "— and an unmatched path would make the whole declaration inert, " +
             "leaving every branch gated against the source branch's " +
             "dependencies.",
+          { cause: err },
         );
       }
     }

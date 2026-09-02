@@ -37,7 +37,8 @@ export function sandbarVersion(): string {
     const require = createRequire(import.meta.url);
     const pkg = require("../package.json") as { version?: string };
     return pkg.version ?? "unknown";
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "MODULE_NOT_FOUND") throw err;
     return "unknown";
   }
 }

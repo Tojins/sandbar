@@ -12,7 +12,8 @@ import { readFileSync } from "node:fs";
 function isWsl2(): boolean {
   try {
     return /microsoft/i.test(readFileSync("/proc/version", "utf8"));
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     return false;
   }
 }
@@ -43,10 +44,15 @@ export function startKeepawake(): void {
       stdio: "ignore",
       detached: false,
     });
-    child.on("error", () => {
-      child = null;
+    child.on("error", (err) => {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        child = null;
+        return;
+      }
+      throw err;
     });
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     child = null;
   }
 }
@@ -55,8 +61,8 @@ export function stopKeepawake(): void {
   if (!child) return;
   try {
     child.kill("SIGTERM");
-  } catch {
-    // ignore
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
   }
   child = null;
 }

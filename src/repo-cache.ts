@@ -118,7 +118,9 @@ async function gitOk(cwd: string, args: readonly string[]): Promise<boolean> {
   try {
     await git(cwd, args);
     return true;
-  } catch {
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    if (code !== 1 && code !== 128) throw err;
     return false;
   }
 }
@@ -131,7 +133,8 @@ function samePath(a: string, b: string): boolean {
   if (resolve(a) === resolve(b)) return true;
   try {
     return realpathSync(a) === realpathSync(b);
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     return false;
   }
 }
@@ -179,7 +182,9 @@ async function isPreparedCache(repoDir: string): Promise<boolean> {
       { cwd: repoDir, maxBuffer: 1024 * 1024 },
     );
     return marked.stdout.trim() === "1";
-  } catch {
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    if (code !== 1 && code !== 128) throw err;
     return false;
   }
 }
@@ -199,7 +204,9 @@ async function isWorktreeOfCache(
     const common = stdout.trim();
     // Relative, and relative to the worktree — `git rev-parse` says so.
     return common !== "" && samePath(resolve(dir, common), repoDir);
-  } catch {
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    if (code !== 1 && code !== 128) throw err;
     return false;
   }
 }

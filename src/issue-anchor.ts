@@ -85,9 +85,11 @@ export async function fetchIssueText(
   let parsed: IssueJson;
   try {
     parsed = JSON.parse(stdout) as IssueJson;
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     throw new SandbarError(
       `gh returned non-JSON for issue #${issueId} in ${repoSlug(repo)}: ${stdout.slice(0, 200)}`,
+      { cause: err },
     );
   }
   return renderIssueText(issueId, parsed);

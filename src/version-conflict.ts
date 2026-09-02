@@ -269,7 +269,8 @@ type Json = unknown;
 function parseJson(text: string): { ok: true; value: Json } | { ok: false } {
   try {
     return { ok: true, value: JSON.parse(text) as Json };
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     return { ok: false };
   }
 }

@@ -60,7 +60,8 @@ async function maybeReleaseStaleLock(paths: LockPaths): Promise<void> {
   let oldPid: number;
   try {
     oldPid = Number.parseInt(readFileSync(paths.pidPath, "utf8").trim(), 10);
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     return;
   }
   // Fail CLOSED on a sidecar we cannot read as a pid: a truncated or garbage
@@ -74,18 +75,14 @@ async function maybeReleaseStaleLock(paths: LockPaths): Promise<void> {
 
   try {
     rmSync(lockDirFor(paths.lockPath), { recursive: true, force: true });
-  } catch {
-    // Could not clear it — a permissions problem, or someone else got there
-    // first. Leave the sidecar ALONE: it is the only evidence the next launch
-    // has that the holder is dead, and deleting it here would demote the next
-    // attempt to proper-lockfile's 10s staleness for no reason. The acquire
-    // below will report the lock as held, which is the honest answer.
-    return;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    // A racing stale-lock cleanup already removed it.
   }
   try {
     unlinkSync(paths.pidPath);
-  } catch {
-    // already gone
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
 }
 
@@ -123,15 +120,21 @@ export async function acquireLock(paths: LockPaths): Promise<Release> {
   try {
     writeFileSync(paths.pidPath, String(process.pid));
   } catch (err) {
-    await release().catch(() => {});
+    try {
+      await release();
+    } catch (releaseErr) {
+      console.error("Failed to release lock after PID sidecar write failed", {
+        cause: releaseErr,
+      });
+    }
     throw err;
   }
 
   return async () => {
     try {
       unlinkSync(paths.pidPath);
-    } catch {
-      // ignore
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
     await release();
   };
