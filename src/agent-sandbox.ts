@@ -15,7 +15,7 @@
 // `config.env` VALUE — so the seam absorbs a file-shaped credential without
 // sandbar learning a path or mounting anything (`CODEX_AUTH_SEED`).
 //
-// A provider's parser answers in three registers and the difference between
+// A provider's parser answers in four registers and the difference between
 // them is load-bearing: `text`/`result` is the agent's SPEECH and is the only
 // thing a run returns, `failure` is the provider naming a TERMINAL fault of its
 // own, and everything else — including a recoverable one it merely reports — is
@@ -23,7 +23,9 @@
 // that narrates its own retries (`codex exec` does, over the same wire shape it
 // uses for the fatal case) will hand a naive parser a `failure` for a
 // reconnect, and `invokeAgent` rejects on a failure, so a blip would arrive at
-// a human as NEEDS-HUMAN. See `ParsedStreamEvent` and `parseCodexJsonLine`.
+// a human as NEEDS-HUMAN. The fourth, `usage`, is measurement only: it is
+// neither speech nor failure and cannot trip completion (#85). See
+// `ParsedStreamEvent` and `parseCodexJsonLine`.
 //
 // Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
@@ -116,6 +118,7 @@ export type ParsedStreamEvent =
   | { type: "result"; result: string }
   | { type: "tool_call"; name: string; args: string }
   | { type: "session_id"; sessionId: string }
+  | { type: "usage"; usage: AgentUsage }
   // The provider naming a TERMINAL fault of its own (#72) — its turn ended
   // without reaching an answer. Never folded into the run's output (it is not
   // the agent's speech, and #41 turns on that distinction) and never emitted
@@ -128,6 +131,14 @@ export type ParsedStreamEvent =
   // where a CLI's exit code does not answer the question, #67's rule that an
   // attempt which captured no answer is an infra failure rather than an answer.
   | { type: "failure"; message: string };
+
+export type AgentUsage = {
+  readonly inputTokens?: number;
+  readonly cachedInputTokens?: number;
+  readonly outputTokens?: number;
+  readonly apiMs?: number;
+  readonly reasoningTokens?: number;
+};
 
 export type AgentProvider = {
   readonly name: string;
@@ -153,7 +164,7 @@ export type AgentProvider = {
   readonly parsedOutputOnly?: boolean;
 };
 
-// One implementation of the provider parser's three-register reduction.
+// One implementation of the provider parser's four-register reduction.
 // Both the live sandbox invocation and the merger's run-to-completion capture
 // feed this accumulator, so speech, terminal failures and raw transport cannot
 // drift into different meanings on the two agent paths (#74).
@@ -162,6 +173,7 @@ export type AgentSpeechAccumulator = {
   readonly accumulated: string;
   readonly spoken: string;
   readonly failure: string | undefined;
+  readonly usage: AgentUsage | undefined;
   output(rawFallback: string): string;
 };
 
@@ -171,6 +183,7 @@ export function createAgentSpeechAccumulator(
   let result = "";
   let accumulated = "";
   let failure: string | undefined;
+  let usage: AgentUsage | undefined;
   return {
     ingest(events) {
       for (const event of events) {
@@ -179,6 +192,7 @@ export function createAgentSpeechAccumulator(
           result = event.result;
           accumulated += event.result;
         } else if (event.type === "failure") failure = event.message;
+        else if (event.type === "usage") usage = event.usage;
       }
     },
     get accumulated() {
@@ -189,6 +203,9 @@ export function createAgentSpeechAccumulator(
     },
     get failure() {
       return failure;
+    },
+    get usage() {
+      return usage;
     },
     output(rawFallback) {
       const spoken = result || accumulated;
@@ -311,6 +328,7 @@ export type SandboxRunResult = {
   // writes — milliseconds, and named here so a reader of the difference knows
   // exactly what is in it).
   readonly signalMs?: number;
+  readonly usage?: AgentUsage;
 };
 
 export interface Sandbox {
@@ -483,6 +501,16 @@ const TOOL_ARG_FIELDS: Record<string, string> = {
   Agent: "description",
 };
 
+const finiteNumber = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const usageEvent = (candidate: AgentUsage): ParsedStreamEvent | undefined => {
+  const usage = Object.fromEntries(
+    Object.entries(candidate).filter((entry) => entry[1] !== undefined),
+  ) as AgentUsage;
+  return Object.keys(usage).length === 0 ? undefined : { type: "usage", usage };
+};
+
 export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
   if (!line.startsWith("{")) return [];
   try {
@@ -516,7 +544,16 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
       return events;
     }
     if (obj.type === "result" && typeof obj.result === "string") {
-      return [{ type: "result", result: obj.result }];
+      const measurement = usageEvent({
+        inputTokens: finiteNumber(obj.usage?.input_tokens),
+        cachedInputTokens: finiteNumber(obj.usage?.cache_read_input_tokens),
+        outputTokens: finiteNumber(obj.usage?.output_tokens),
+        apiMs: finiteNumber(obj.duration_api_ms),
+      });
+      return [
+        { type: "result", result: obj.result },
+        ...(measurement === undefined ? [] : [measurement]),
+      ];
     }
     if (
       obj.type === "system" &&
@@ -640,6 +677,15 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
     // still trying.
     if (obj.type === "turn.failed") {
       return [{ type: "failure", message: codexErrorMessage(obj.error) }];
+    }
+    if (obj.type === "turn.completed") {
+      const measurement = usageEvent({
+        inputTokens: finiteNumber(obj.usage?.input_tokens),
+        cachedInputTokens: finiteNumber(obj.usage?.cached_input_tokens),
+        outputTokens: finiteNumber(obj.usage?.output_tokens),
+        reasoningTokens: finiteNumber(obj.usage?.reasoning_output_tokens),
+      });
+      return measurement === undefined ? [] : [measurement];
     }
     // Items are reported started → updated → completed; only the completed form
     // is read, so a command's `aggregated_output` and an agent message's text
@@ -1624,7 +1670,7 @@ const invokeAgent = (
   // Elapsed-since-`run()`, so the reported `signalMs` is on the same clock
   // across iterations rather than restarting with each one (#82).
   elapsed: () => number,
-): Promise<{ result: string; signalMs?: number }> =>
+): Promise<{ result: string; signalMs?: number; usage?: AgentUsage }> =>
   new Promise((resolveRun, rejectRun) => {
     const speech = createAgentSpeechAccumulator(agent);
     let completionDetected = false;
@@ -1642,7 +1688,11 @@ const invokeAgent = (
         timer = null;
       }
     };
-    const settleResolve = (val: { result: string; signalMs?: number }): void => {
+    const settleResolve = (val: {
+      result: string;
+      signalMs?: number;
+      usage?: AgentUsage;
+    }): void => {
       if (settled) return;
       settled = true;
       clearTimer();
@@ -1682,6 +1732,7 @@ const invokeAgent = (
           settleResolve({
             result: speech.spoken,
             ...(signalMs === undefined ? {} : { signalMs }),
+            ...(speech.usage === undefined ? {} : { usage: speech.usage }),
           });
           abort.abort();
         }, completionTimeoutMs);
@@ -1796,6 +1847,7 @@ const invokeAgent = (
         settleResolve({
           result: speech.output(execResult.stdout),
           ...(signalMs === undefined ? {} : { signalMs }),
+          ...(speech.usage === undefined ? {} : { usage: speech.usage }),
         });
       })
       .catch((err) => settleReject(err));
@@ -1968,6 +2020,7 @@ export const createSandbox = async (
     result: string;
     commits: { sha: string }[];
     signalMs?: number;
+    usage?: AgentUsage;
   }> => {
     // Read host git identity, then propagate into the sandbox. safe.directory
     // is set per-run (load-bearing: bind mount is owned by a different UID and
@@ -2022,7 +2075,7 @@ export const createSandbox = async (
         .catch(() => execGit(["rev-parse", "HEAD"], worktreePath))
     ).trim();
 
-    const { result, signalMs } = await invokeAgent(
+    const { result, signalMs, usage } = await invokeAgent(
       providerHandle,
       sandboxRepoDir,
       prompt,
@@ -2051,7 +2104,12 @@ export const createSandbox = async (
         new Error(`Commit collection timed out after ${COMMIT_COLLECTION_TIMEOUT_MS}ms`),
     );
 
-    return { result, commits, ...(signalMs === undefined ? {} : { signalMs }) };
+    return {
+      result,
+      commits,
+      ...(signalMs === undefined ? {} : { signalMs }),
+      ...(usage === undefined ? {} : { usage }),
+    };
   };
 
   return {
@@ -2078,6 +2136,7 @@ export const createSandbox = async (
       // since `run()` began and not since that iteration did (#82).
       const elapsed = startTimer();
       let signalMs: number | undefined;
+      let usage: AgentUsage | undefined;
 
       for (let i = 1; i <= iterations; i++) {
         const iter = await runOneIteration(
@@ -2091,6 +2150,7 @@ export const createSandbox = async (
         allCommits.push(...iter.commits);
         allStdout += iter.result;
         if (iter.signalMs !== undefined) signalMs = iter.signalMs;
+        if (iter.usage !== undefined) usage = iter.usage;
         const found = completionSignals.find((s) => iter.result.includes(s));
         if (found !== undefined) {
           matchedSignal = found;
@@ -2104,6 +2164,7 @@ export const createSandbox = async (
         iterations: [],
         completionSignal: matchedSignal,
         ...(signalMs === undefined ? {} : { signalMs }),
+        ...(usage === undefined ? {} : { usage }),
       };
     },
     async close() {

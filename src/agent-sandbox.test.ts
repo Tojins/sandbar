@@ -36,6 +36,7 @@ import {
   agentPartialOutput,
   claudeCode,
   codex,
+  createAgentSpeechAccumulator,
   createSandbox,
   defaultImageName,
   killOnAbort,
@@ -135,6 +136,40 @@ describe("parseStreamJsonLine", () => {
     ]);
   });
 
+  it("reads usage beside a Claude result without folding it into speech", () => {
+    const events = parseStreamJsonLine(JSON.stringify({
+      type: "result",
+      result: "done",
+      usage: {
+        input_tokens: 1200,
+        cache_read_input_tokens: 900,
+        output_tokens: 80,
+      },
+      duration_api_ms: 4321,
+    }));
+    expect(events).toEqual([
+      { type: "result", result: "done" },
+      {
+        type: "usage",
+        usage: {
+          inputTokens: 1200,
+          cachedInputTokens: 900,
+          outputTokens: 80,
+          apiMs: 4321,
+        },
+      },
+    ]);
+  });
+
+  it("keeps the result and omits malformed Claude usage fields", () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: "result",
+      result: "done",
+      usage: { input_tokens: "1200", output_tokens: null },
+      duration_api_ms: "4321",
+    }))).toEqual([{ type: "result", result: "done" }]);
+  });
+
   it("requires result to be a string", () => {
     expect(parseStreamJsonLine(JSON.stringify({ type: "result", result: 1 }))).toEqual([]);
   });
@@ -222,6 +257,71 @@ describe("parseCodexJsonLine", () => {
     expect(
       parseCodexJsonLine('{"type":"thread.started","thread_id":"01a05c69-362e"}'),
     ).toEqual([{ type: "session_id", sessionId: "01a05c69-362e" }]);
+  });
+
+  it("reads turn.completed usage and does not invent an API duration", () => {
+    expect(parseCodexJsonLine(JSON.stringify({
+      type: "turn.completed",
+      usage: {
+        input_tokens: 2000,
+        cached_input_tokens: 1750,
+        cache_write_input_tokens: 25,
+        output_tokens: 100,
+        reasoning_output_tokens: 60,
+      },
+    }))).toEqual([{
+      type: "usage",
+      usage: {
+        inputTokens: 2000,
+        cachedInputTokens: 1750,
+        outputTokens: 100,
+        reasoningTokens: 60,
+      },
+    }]);
+  });
+
+  it("drops a turn.completed event whose usage has no numeric fields", () => {
+    expect(parseCodexJsonLine(JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: "2000", output_tokens: null },
+    }))).toEqual([]);
+  });
+
+  it("keeps usage separate from speech, failure, and completion", () => {
+    const agent: AgentProvider = {
+      name: "test",
+      env: {},
+      buildPrintCommand: () => ({ command: "test" }),
+      parseStreamLine: parseCodexJsonLine,
+      parsedOutputOnly: true,
+    };
+    const speech = createAgentSpeechAccumulator(agent);
+    speech.ingest(parseCodexJsonLine(JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: 12 },
+    })));
+    expect(speech.accumulated).toBe("");
+    expect(speech.spoken).toBe("");
+    expect(speech.failure).toBeUndefined();
+    expect(speech.output("raw transport")).toBe("");
+    expect(speech.usage).toEqual({
+      inputTokens: 12,
+    });
+  });
+
+  it("replaces repeated usage measurements instead of summing them", () => {
+    const agent: AgentProvider = {
+      name: "test",
+      env: {},
+      buildPrintCommand: () => ({ command: "test" }),
+      parseStreamLine: parseCodexJsonLine,
+    };
+    const speech = createAgentSpeechAccumulator(agent);
+    speech.ingest([
+      { type: "usage", usage: { inputTokens: 12, outputTokens: 3 } },
+      { type: "usage", usage: { inputTokens: 5, outputTokens: 2 } },
+    ]);
+    expect(speech.usage).toEqual({ inputTokens: 5, outputTokens: 2 });
   });
 
   // Reasoning is the model's own thinking, not its speech. Folded into the

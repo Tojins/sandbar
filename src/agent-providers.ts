@@ -70,9 +70,12 @@ export type AgentProviderPackage = {
 //
 // Both packages are pinned because a generated RUN instruction would otherwise
 // remain byte-identical and freeze whichever version first entered the layer
-// cache. Codex's pin is additionally co-versioned with parseCodexJsonLine: its
-// JSONL dialect is load-bearing under parsedOutputOnly, so a parser change and
-// a CLI change belong to the same driver release.
+// cache. Codex's pin is additionally co-versioned with the load-bearing half of
+// parseCodexJsonLine: its agent-message dialect supplies all speech under
+// parsedOutputOnly, so a parser change and a CLI change belong to the same
+// driver release. Its `turn.completed` usage branch is deliberately softer: a
+// drift there loses a measurement but cannot change a verdict or spend a round
+// (#85).
 export const AGENT_PROVIDER_PACKAGES: Readonly<
   Record<AgentProviderName, AgentProviderPackage>
 > = {

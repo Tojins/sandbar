@@ -355,6 +355,11 @@ and used to announce themselves in four different ways, the halt in none at all.
   rules: a duration is a REPORT (no budget, no threshold, no adaptive bound —
   `step.timeoutMs` stays the one bound `gate-stack.ts` has), and an absent
   measurement is ABSENT, never `0`, because a stats reader averages a zero.
+  Agent invocations additionally record the provider-reported token usage
+  available on their terminal wire event (#85): input, cached input, output and
+  reasoning tokens, plus Claude's API duration. These occupy a fourth parser
+  register that never enters speech, failure or completion; malformed or
+  unavailable fields are omitted and invocation measurements are never summed.
   `timing.ts`, `gate.ts`, `gate-stack.ts`, `ensure-images.ts` and `logs.ts`
   headers own the rest.
 - **The resolve loop leaves a trace, and a container that never ran halts

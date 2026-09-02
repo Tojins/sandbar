@@ -37,7 +37,7 @@ import {
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
 import { agentPartialOutput, podman } from "./agent-sandbox.js";
-import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
+import type { AgentUsage, Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
 import type { ChunkTarget } from "./chunks.js";
 import type { ResolvedGateStack } from "./config.js";
@@ -96,6 +96,20 @@ import {
   buildPrompt,
   buildReviewerPrompts,
 } from "./prompt.js";
+
+const formatUsageFields = (usage: AgentUsage | undefined): string => {
+  if (usage === undefined) return "";
+  return [
+    ["inputTokens", usage.inputTokens],
+    ["cachedInputTokens", usage.cachedInputTokens],
+    ["outputTokens", usage.outputTokens],
+    ["apiMs", usage.apiMs],
+    ["reasoningTokens", usage.reasoningTokens],
+  ]
+    .filter((field): field is [string, number] => field[1] !== undefined)
+    .map(([name, value]) => ` ${name}=${value}`)
+    .join("");
+};
 
 export const FAILURE_TAIL_LINES = 200;
 
@@ -778,7 +792,9 @@ async function runImplementer(
     await opts.onOrchestratorLog(
       `issue=${issue.id} attempt=${action.attempt} implementer ` +
         `signal=${signal.kind} commits=${run.commits.length} ` +
+        `provider=${config.implementerAgent} model=${config.implementerModelId} ` +
         `${durationField(implementerMs)}` +
+        formatUsageFields(run.usage) +
         // Absent when the agent never emitted `<promise>COMPLETE</promise>` —
         // it escalated, it was killed idle, or the exec simply ended. Omitted
         // rather than zeroed (#82).
@@ -855,13 +871,17 @@ async function runReviewer(
       // the same reason — the number is meaningless without knowing which model
       // spent it, and both are per-call config a stats reader cannot recover.
       const passTimer = startTimer();
-      const logPass = async (signalMs: number | undefined): Promise<void> => {
+      const logPass = async (
+        signalMs: number | undefined,
+        usage: AgentUsage | undefined,
+      ): Promise<void> => {
         if (!opts.onOrchestratorLog) return;
         await opts.onOrchestratorLog(
           `issue=${issue.id} attempt=${action.attempt} reviewer ` +
             `round=${action.reviewRound} pass=${pass} invocation=${invocation} ` +
             `provider=${config.reviewerAgent} model=${modelId} ` +
             `${durationField(passTimer())}` +
+            formatUsageFields(usage) +
             (signalMs === undefined ? "" : ` signalMs=${signalMs}`),
         );
       };
@@ -878,13 +898,13 @@ async function runReviewer(
           }),
           prompt,
         });
-        await logPass(reviewerRun.signalMs);
+        await logPass(reviewerRun.signalMs, reviewerRun.usage);
         return { output: reviewerRun.stdout, error: null };
       } catch (err) {
         // A failed invocation is timed too: an invocation that burned the ten
         // minutes and died is the expensive case, and one that fell over in a
         // second is a different fault entirely.
-        await logPass(undefined);
+        await logPass(undefined, undefined);
         // The bytes the agent had emitted before it failed ride out on the
         // error (#41, agent-sandbox F9). Without them a reviewer that emitted
         // a verdict and then died is indistinguishable from one that emitted
