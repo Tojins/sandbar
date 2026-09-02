@@ -1033,9 +1033,8 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
     },
     async branchIsContainedInOrigin(branch) {
       // Exit 0 iff the branch tip is an ancestor of (or equal to) the origin
-      // tip — every commit on it is already published. Any failure, including
-      // a missing remote-tracking ref, answers false: the caller only ever
-      // force-deletes on a true, so guessing wrong must not destroy work.
+      // tip — every commit on it is already published. Exit 1 answers false;
+      // other failures propagate because they do not establish non-containment.
       try {
         await exec(
           "git",

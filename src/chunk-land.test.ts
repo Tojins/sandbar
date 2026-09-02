@@ -580,6 +580,37 @@ describe("wrapUpLandedChunk error propagation (#99)", () => {
     ).rejects.toThrow("ENOSPC");
     expect(calls.some((call) => call.op === "deleteChunkBranch")).toBe(false);
   });
+
+  it("does not report a log failure after closing the PR as a close failure", async () => {
+    const { adapter, calls } = makeWrapupAdapter();
+    await expect(
+      wrapUpLandedChunk(target, adapter, {
+        sourceBranch: "main",
+        provenance: "sandbar",
+        log: (line) => {
+          if (line.includes("closed PR")) throw new Error("ENOSPC after PR close");
+        },
+      }),
+    ).rejects.toThrow("ENOSPC after PR close");
+    expect(calls.filter((call) => call.op === "closePullRequest")).toHaveLength(1);
+    expect(calls.some((call) => call.op === "deleteChunkBranch")).toBe(false);
+  });
+
+  it("does not report a log failure after deleting the branch as a delete failure", async () => {
+    const { adapter, calls } = makeWrapupAdapter();
+    await expect(
+      wrapUpLandedChunk(target, adapter, {
+        sourceBranch: "main",
+        provenance: "sandbar",
+        log: (line) => {
+          if (line.includes("deleted on origin")) {
+            throw new Error("ENOSPC after branch delete");
+          }
+        },
+      }),
+    ).rejects.toThrow("ENOSPC after branch delete");
+    expect(calls.filter((call) => call.op === "deleteChunkBranch")).toHaveLength(1);
+  });
 });
 
 // #64 — reading the residue back. Both of `run.ts`'s reports are built from

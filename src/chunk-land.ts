@@ -591,9 +591,9 @@ export type ChunkWrapupAdapter = {
  * The one implementation of those writes — see the header for why there is
  * exactly one, and why `gitCwd` is its only parameter.
  *
- * Every method throws on failure rather than swallowing. That is not in tension
- * with `wrapUpLandedChunk` never throwing: the wrap-up is what catches these
- * and turns them into residue, and it can only do that if they are raised.
+ * Every method throws on failure rather than swallowing. The wrap-up catches
+ * these forge-write failures and turns them into residue; failures from its
+ * separate durable-log callback propagate.
  */
 export function chunkForgeWrites(deps: {
   readonly repo: RepoRef;
@@ -709,9 +709,9 @@ const detail = (err: unknown): string =>
 /**
  * Close the chunk out: members, labels, pull request, branch.
  *
- * Never throws. The source branch has already moved by the time this runs, so
- * every failure is residue the caller reports; see the header for the order and
- * for why the branch delete is conditional on the closes having worked.
+ * Forge-write failures become residue the caller reports; a failed durable-log
+ * callback propagates. See the header for the order and for why the branch
+ * delete is conditional on the closes having worked.
  */
 export async function wrapUpLandedChunk(
   target: ChunkLandTarget,
@@ -813,13 +813,17 @@ export async function wrapUpLandedChunk(
         `the pull request #${target.pullRequest} for ${target.branch} kept its \`${LAND_LABEL}\` label: ${detail(err)}`,
       );
     }
+    let pullRequestClosed = false;
     try {
       await adapter.closePullRequest(target.pullRequest);
-      await log(`chunk ${target.branch}: closed PR #${target.pullRequest}`);
+      pullRequestClosed = true;
     } catch (err) {
       residue.push(
         `the pull request #${target.pullRequest} for ${target.branch} could not be closed: ${detail(err)}`,
       );
+    }
+    if (pullRequestClosed) {
+      await log(`chunk ${target.branch}: closed PR #${target.pullRequest}`);
     }
   }
 
@@ -836,12 +840,12 @@ export async function wrapUpLandedChunk(
     try {
       await adapter.deleteChunkBranch(target.branch);
       branchDeleted = true;
-      await log(`chunk ${target.branch}: deleted on origin`);
     } catch (err) {
       residue.push(
         `the chunk branch ${target.branch} is landed but could not be deleted on origin: ${detail(err)}`,
       );
     }
+    if (branchDeleted) await log(`chunk ${target.branch}: deleted on origin`);
   } else {
     residue.push(
       `${target.branch} is kept on origin so the next run retries the ${

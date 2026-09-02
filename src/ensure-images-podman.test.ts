@@ -87,6 +87,10 @@ describe.runIf(available)("ensureImages against real podman", () => {
       await exec(RUNTIME, ["image", "inspect", TAG, "--format", "{{.Id}}"])
     ).stdout.trim();
 
+  it("classifies an absent image as having no inputs label", async () => {
+    expect(await readInputsLabel(`${TAG}-absent`)).toBeNull();
+  });
+
   it(
     "records the fingerprint as a label, and rebuilds only when the declared inputs change",
     async () => {

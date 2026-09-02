@@ -45,11 +45,8 @@ export function startKeepawake(): void {
       detached: false,
     });
     child.on("error", (err) => {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        child = null;
-        return;
-      }
-      throw err;
+      console.error("Failed to start WSL2 keepawake helper", { cause: err });
+      child = null;
     });
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;

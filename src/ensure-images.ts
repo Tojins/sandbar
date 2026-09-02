@@ -189,16 +189,21 @@ async function imageExists(tag: string): Promise<boolean> {
   }
 }
 
-// The fingerprint an existing image was built from, or null when it carries no
-// such label. Callers establish absence with `imageExists` before inspecting;
-// inspect failures do not establish either condition and propagate (#99).
-export async function readInputsLabel(tag: string): Promise<string | null> {
+// The fingerprint an existing image was built from, or null when it is absent
+// or carries no such label. `image exists` names absence; inspect failures do
+// not establish either condition and propagate (#99).
+async function readExistingInputsLabel(tag: string): Promise<string | null> {
   const { stdout } = await exec(
     RUNTIME,
     ["image", "inspect", tag, "--format", "{{json .Labels}}"],
     { timeout: IMAGE_QUERY_TIMEOUT_MS },
   );
   return parseInputsLabel(stdout);
+}
+
+export async function readInputsLabel(tag: string): Promise<string | null> {
+  if (!(await imageExists(tag))) return null;
+  return readExistingInputsLabel(tag);
 }
 
 // Pure half of the above, so the shape podman actually prints is table-tested
@@ -486,7 +491,7 @@ export async function ensureImages(
       continue;
     }
     const exists = await imageExists(image.tag);
-    const recorded = exists ? await readInputsLabel(image.tag) : null;
+    const recorded = exists ? await readExistingInputsLabel(image.tag) : null;
     if (!rebuildInPlace && exists) {
       // The baseline is what the image on disk was built from, not what this
       // context hashes to — see above. A null recording leaves the entry out,

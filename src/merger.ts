@@ -1793,11 +1793,10 @@ export async function runMergerWithAdapter(
 
   // Everything that has to happen once the source branch has moved, in one
   // place because both landing modes reach it and neither may skip half of it.
-  // Nothing here throws — `wrapUpLandedChunk` collects residue rather than
-  // raising (including from the `emit` handed to it, which by then throws on a
-  // failed log write), and `closeMergedIssues` is fault-tolerant by design.
-  // That is what keeps the post-`landed` window free of the wrapped-throw
-  // problem the whole of `asHalt` exists for.
+  // Forge-write failures become wrap-up residue and `closeMergedIssues` is
+  // fault-tolerant by design. A durable-log failure still propagates from
+  // `emit`: after the source branch moved, hiding it would make the run record
+  // disagree with the writes that followed.
   const settleLanding = async (): Promise<MergerSummary> => {
     const mergedChunks: ChunkWrapup[] = [];
     for (const { target, sourceBranch } of chunkMergesOnHead) {
