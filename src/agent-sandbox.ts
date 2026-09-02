@@ -471,7 +471,9 @@ const TOOL_ARG_FIELDS: Record<string, string> = {
 // A line that is not a complete JSON object is transport, not agent speech.
 // Once JSON parsing succeeds, provider-specific shape errors propagate from
 // the parser that understands that provider's contract (#83).
-const parseTransportJson = (line: string): any | undefined => {
+const parseTransportJson = (
+  line: string,
+): Record<string, unknown> | undefined => {
   if (!line.startsWith("{")) return undefined;
   try {
     return JSON.parse(line);
@@ -482,9 +484,10 @@ const parseTransportJson = (line: string): any | undefined => {
 };
 
 export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
-  const obj = parseTransportJson(line);
-  if (obj === undefined) return [];
+  const parsed = parseTransportJson(line);
+  if (parsed === undefined) return [];
   // JSON.parse yields `any`; the upstream parser is intentionally untyped.
+  const obj = parsed as any;
   if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
     const events: ParsedStreamEvent[] = [];
     const texts: string[] = [];
@@ -619,10 +622,11 @@ const codexErrorMessage = (err: unknown): string => {
 };
 
 export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
-  const obj = parseTransportJson(line);
-  if (obj === undefined) return [];
+  const parsed = parseTransportJson(line);
+  if (parsed === undefined) return [];
   // As in parseStreamJsonLine: the wire format is another process's, so it is
   // read as `any` and every field is checked before it is believed.
+  const obj = parsed as any;
   if (obj.type === "thread.started" && typeof obj.thread_id === "string") {
     // Claude-shaped, and knowingly approximate: a codex THREAD is the unit
     // `resume --last` reopens, which is what a session id is used for here.

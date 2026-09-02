@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   type RepoLayout,
@@ -78,6 +78,13 @@ describe("parseStreamJsonLine", () => {
 
   it("classifies malformed JSON that starts with { as transport", () => {
     expect(parseStreamJsonLine("{bad json")).toEqual([]);
+  });
+
+  it("propagates a non-syntax JSON parser failure", () => {
+    vi.spyOn(JSON, "parse").mockImplementationOnce(() => {
+      throw new TypeError("parser fault");
+    });
+    expect(() => parseStreamJsonLine("{}")).toThrow(TypeError);
   });
 
   it("concatenates multiple text blocks with NO separator", () => {
@@ -205,6 +212,13 @@ describe("parseCodexJsonLine", () => {
     expect(parseCodexJsonLine("{bad json")).toEqual([]);
     expect(parseCodexJsonLine('{"type":"turn.started"}')).toEqual([]);
     expect(parseCodexJsonLine('{"type":"future.event","text":"x"}')).toEqual([]);
+  });
+
+  it("propagates a non-syntax JSON parser failure", () => {
+    vi.spyOn(JSON, "parse").mockImplementationOnce(() => {
+      throw new TypeError("parser fault");
+    });
+    expect(() => parseCodexJsonLine("{}")).toThrow(TypeError);
   });
 
   it("reads an agent message as text", () => {

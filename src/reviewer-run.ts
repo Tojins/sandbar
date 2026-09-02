@@ -3,8 +3,8 @@
 //
 // A reviewer INVOCATION yields a verdict or it yields nothing, and this module
 // is the only place that decides which:
-//   - Completed or failed with a `<verdict>` token → a verdict.
-//     The run reached a decision and then died on the way out.
+//   - Completed or failed with a `<verdict>` token → a verdict; a failed run
+//     carrying the token reached a decision and then died on the way out.
 //   - Anything else → nothing. An unknown outcome must never read as APPROVED,
 //     but a fail-safe is not a licence to invent evidence: feeding a zero-byte
 //     run through the parser charges the issue review rounds for a harness

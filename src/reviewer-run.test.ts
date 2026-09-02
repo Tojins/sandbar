@@ -120,14 +120,22 @@ function drive(script: readonly ReviewerRun[]) {
 
 describe("review eligibility", () => {
   it.each([
-    ["completed", true, null, "<verdict>APPROVED</verdict>"],
-    ["completed", false, null, "looks fine to me"],
-    ["failed", true, "exited 1", "…<verdict>APPROVED</verdict>\n"],
-    ["failed", false, IDLE, "Let me start by reading the diff."],
+    ["completed", true, null, "<verdict>APPROVED</verdict>", "reviewed"],
+    ["completed", false, null, "looks fine to me", "harness-failed"],
+    ["failed", true, "exited 1", "…<verdict>APPROVED</verdict>\n", "reviewed"],
+    [
+      "failed",
+      false,
+      IDLE,
+      "Let me start by reading the diff.",
+      "harness-failed",
+    ],
   ] as const)(
     "state=%s token=%s is classified from output",
-    (_state, hasToken, _error, output) => {
-      expect(parseVerdict(output) !== null).toBe(hasToken);
+    async (_state, _hasToken, error, output, expectedKind) => {
+      const run = { output, error };
+      const { outcome } = await drive([run, run]);
+      expect(outcome.kind).toBe(expectedKind);
     },
   );
 });

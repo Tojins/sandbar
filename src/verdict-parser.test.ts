@@ -50,6 +50,12 @@ describe("parseVerdict", () => {
     expect(r.verdict).toBe("CHANGES-REQUESTED");
   });
 
+  it("answers consistently across repeated parses", () => {
+    const stdout = "x<verdict>APPROVED</verdict>";
+    parseVerdict(stdout);
+    expect(parseVerdict(stdout)?.verdict).toBe("APPROVED");
+  });
+
   it("accepts verdict tags interleaved with prose", () => {
     const r = parseVerdict(
       "## Findings\n- naming nit in foo.ts\n- missing test for bar\n\n<verdict>CHANGES-REQUESTED</verdict>\n\n(End of review.)",

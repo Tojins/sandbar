@@ -22,6 +22,8 @@ export type ParsedVerdict = {
   readonly prose: string;
 };
 
+// `matchAll` clones this shared global regex, so repeated parses cannot leak
+// `lastIndex` from one invocation into the next.
 const VERDICT_TOKEN_ALL = /<verdict>([\s\S]*?)<\/verdict>/g;
 
 export function parseVerdict(stdout: string): ParsedVerdict | null {
