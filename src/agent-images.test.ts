@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-import { AGENT_PROVIDER_PACKAGES } from "./agent-providers.js";
+import {
+  AGENT_PROVIDER_NAMES,
+  AGENT_PROVIDER_PACKAGES,
+} from "./agent-providers.js";
 import {
   type BuildOptions,
   agentToolsContainerfile,
@@ -37,6 +41,29 @@ describe("run-owned agent images", () => {
     expect(file).toContain(AGENT_PROVIDER_PACKAGES.claude.spec);
     expect(file).toContain("--allow-scripts=@anthropic-ai/claude-code");
     expect(file).toContain(AGENT_PROVIDER_PACKAGES.codex.spec);
+  });
+
+  // The inverse of the guard this used to be. While the host Containerfile still
+  // carried its own CLI installs, the test asserted the two pins AGREED; #75
+  // made the driver append the routed providers after resolving the image, and
+  // the pin move deleted the host copies — at which point an agreement test
+  // asserts the opposite of the rule. The rule the Containerfile now states in
+  // prose is "do not re-add a host copy": an unpinned one drifts from the
+  // parser the driver couples to (`parsedOutputOnly`), and the driver's install
+  // wins over it anyway, so the host copy is invisible until the day it is the
+  // one that ran. Asserting the ABSENCE is what keeps that prose enforced.
+  it("installs no agent CLI in the host image — the driver owns them (#75)", () => {
+    const containerfile = readFileSync(
+      new URL("../Containerfile", import.meta.url),
+      "utf8",
+    );
+    for (const provider of AGENT_PROVIDER_NAMES) {
+      const spec = AGENT_PROVIDER_PACKAGES[provider].spec;
+      // The spec is `<name>@<version>`; the name is what an install line has to
+      // mention at all, pinned or not, so it is the term to look for.
+      const packageName = spec.slice(0, spec.lastIndexOf("@"));
+      expect(containerfile, provider).not.toContain(packageName);
+    }
   });
 
   it("rebuilds when the base provenance is unknown even if the derived tag exists", async () => {
