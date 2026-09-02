@@ -17,8 +17,7 @@
 //                  even for the reviewer, whose worktree is its SUBJECT:
 //                  sourcing history from it would make the anchor a function
 //                  of the branch under review.
-//   probeWorktree  the tree the implementer and reviewer standards @refs are
-//                  RESOLVED in. This one is
+//   probeWorktree  the tree the emitted @refs are RESOLVED in. This one is
 //                  supposed to be a function of the branch, and was the last
 //                  to be got right: #38 pointed it at `worktrees/source`, a
 //                  clean tree at `origin/<sourceBranch>`, which is what an

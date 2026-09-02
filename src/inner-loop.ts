@@ -631,9 +631,7 @@ async function runImplementer(
       worktreePath: sandbox.worktreePath,
       lastFailureTrace: action.failureTrace,
       base: ctx.base,
-      ...(config.codingStandardsPath
-        ? { codingStandardsPath: config.codingStandardsPath }
-        : {}),
+      codingStandardsPath: config.codingStandardsPath,
       ...(action.extraReprompt !== null ? { extraReprompt: action.extraReprompt } : {}),
       ...(action.latestReviewerProse !== null
         ? { latestReviewerProse: action.latestReviewerProse }

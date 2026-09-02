@@ -13,6 +13,7 @@ import {
   renderSandboxStackSlot,
 } from "./prompt.js";
 import { parsePromise } from "./promise-parser.js";
+import { loadTemplate } from "./prompts.js";
 
 const baseInputs = {
   issue: { id: "42", title: "do the thing", branch: "sandbar/issue-42-do-the-thing" },
@@ -141,13 +142,10 @@ describe("renderAttemptSlot — implementer standards and pre-promise review (#7
       commits: "a1 first",
       diff: "diff",
     });
-    const standardsStart = "Gate-1 is green: every step this project defines";
-    const standardsEnd = "No vague disapproval, no\npadding.";
+    const codingStandards = loadTemplate("coding-standards");
 
-    expect(implementer).toContain(standardsStart);
-    expect(implementer).toContain(standardsEnd);
-    expect(reviewer).toContain(standardsStart);
-    expect(reviewer).toContain(standardsEnd);
+    expect(implementer).toContain(codingStandards);
+    expect(reviewer).toContain(codingStandards);
     expect(implementer).toContain("@docs/CODING_STANDARDS.md");
     expect(implementer).toContain("@CLAUDE.md (and @AGENTS.md if it exists)");
     expect(implementer).toContain("git diff origin/main...HEAD");
