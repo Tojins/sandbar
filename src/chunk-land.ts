@@ -202,7 +202,8 @@ import {
 import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
 import {
-  memberBranchName,
+  ORIGIN_MEMBER_BRANCH_REFGLOBS,
+  issueNumberFromMemberBranch,
   rootIssueFromChunkBranch,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
@@ -581,10 +582,7 @@ export type ChunkWrapupAdapter = {
   // merge — the label is the queue either way.
   removePullRequestLabel(pr: number, label: string): Promise<void>;
   closePullRequest(pr: number): Promise<void>;
-  deleteChunkBranch(
-    chunkBranch: string,
-    memberIssues: readonly number[],
-  ): Promise<void>;
+  deleteChunkBranch(chunkBranch: string): Promise<void>;
 };
 
 /**
@@ -662,15 +660,32 @@ export function chunkForgeWrites(deps: {
         ["pr", "close", String(pr), "--repo", slug()],
         `failed to close pull request #${pr}`,
       ),
-    async deleteChunkBranch(chunkBranch, memberIssues) {
+    async deleteChunkBranch(chunkBranch) {
       // Fully qualified, and not `--force`-anything: `git push --delete` has no
       // force to give. It is safe on the one precondition every caller
       // establishes first — the branch's commits are contained in
       // `origin/<sourceBranch>`, so nothing is lost with the ref.
       try {
-        const memberRefs = memberIssues.map(
-          (number) => `refs/heads/${memberBranchName(number)}`,
+        // The branch is authoritative here, not the derived issue graph. A
+        // title drift can leave wrap-up with no named members; enumerating the
+        // refs the retiring branch actually contains prevents those durable
+        // membership records leaking into later, unrelated chunks.
+        const { stdout } = await exec(
+          "git",
+          [
+            "for-each-ref",
+            `--merged=origin/${chunkBranch}`,
+            "--format=%(refname)",
+            ...ORIGIN_MEMBER_BRANCH_REFGLOBS,
+          ],
+          { cwd: deps.gitCwd },
         );
+        const containedMemberRefs = stdout.split("\n").flatMap((ref) => {
+          const trimmed = ref.trim();
+          return issueNumberFromMemberBranch(trimmed) === null
+            ? []
+            : [trimmed.replace(/^refs\/remotes\/origin\//, "refs/heads/")];
+        });
         await exec(
           "git",
           [
@@ -679,7 +694,7 @@ export function chunkForgeWrites(deps: {
             "origin",
             "--delete",
             `refs/heads/${chunkBranch}`,
-            ...memberRefs,
+            ...containedMemberRefs,
           ],
           { cwd: deps.gitCwd },
         );
@@ -853,10 +868,7 @@ export async function wrapUpLandedChunk(
   let branchDeleted = false;
   if (closesComplete) {
     try {
-      await adapter.deleteChunkBranch(
-        target.branch,
-        target.members.map((member) => member.number),
-      );
+      await adapter.deleteChunkBranch(target.branch);
       branchDeleted = true;
       await log(`chunk ${target.branch}: deleted on origin`);
     } catch (err) {

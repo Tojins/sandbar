@@ -258,7 +258,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(head);
     expect(await originHas("refs/heads/sandbar/member-1")).toBe(head);
     await git(wt, "push", "-q", "origin", "HEAD:main");
-    await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1]);
+    await adapter().deleteChunkBranch("sandbar/chunk-1-c");
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBeNull();
     expect(await originHas("refs/heads/sandbar/member-1")).toBeNull();
   });
@@ -279,6 +279,35 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     expect(result.kind).toBe("fatal");
     if (result.kind === "fatal") expect(result.reason).toContain("membership ref rejected");
     expect(await originHas("refs/heads/sandbar/chunk-2-c")).toBeNull();
+  });
+
+  it("reports a chunk race when member refs are rejected only as atomic collateral", async () => {
+    await commit(seed, "remote.txt", "remote chunk move\n");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-3-c");
+    await commit(wt, "local.txt", "local member\n");
+    await git(wt, "branch", "sandbar/issue-3-member", "HEAD");
+
+    const result = await adapter().pushChunkBranch("sandbar/chunk-3-c", [{
+      source: "sandbar/issue-3-member",
+      destination: "sandbar/member-3",
+    }]);
+
+    expect(result).toEqual({ kind: "race" });
+    expect(await originHas("refs/heads/sandbar/member-3")).toBeNull();
+  });
+
+  it("deletes every member ref contained by an unnamed retiring chunk", async () => {
+    await commit(wt, "member.txt", "member work\n");
+    const head = await git(wt, "rev-parse", "HEAD");
+    await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/chunk-4-old-title");
+    await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-4");
+    await git(wt, "update-ref", "refs/remotes/origin/sandbar/chunk-4-old-title", head);
+    await git(wt, "update-ref", "refs/remotes/origin/sandbar/member-4", head);
+
+    await adapter().deleteChunkBranch("sandbar/chunk-4-old-title");
+
+    expect(await originHas("refs/heads/sandbar/chunk-4-old-title")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-4")).toBeNull();
   });
 
   it("fast-forwards the chunk branch when the next member lands on it", async () => {

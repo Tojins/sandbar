@@ -681,10 +681,7 @@ export type MergerAdapter = ResolveAdapter & {
   // Delete the chunk branch on origin, once its commits are on the source
   // branch. The last step of the wrap-up and the one that stops the reconciler
   // seeing this chunk again.
-  deleteChunkBranch(
-    chunkBranch: string,
-    memberIssues: readonly number[],
-  ): Promise<void>;
+  deleteChunkBranch(chunkBranch: string): Promise<void>;
   commentOnPullRequest(pr: number, body: string): Promise<void>;
   // Takes `land` back off, which is what stops a request being honoured
   // again. The wrap-up drops it when a chunk lands; the merge loop drops it on
@@ -2736,7 +2733,11 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         const e = err as { stderr?: string; message?: string };
         const stderr = e.stderr ?? "";
         const memberRejected = members.some(({ destination }) =>
-          stderr.includes(destination),
+          stderr.split("\n").some(
+            (line) =>
+              line.includes(destination) &&
+              !/\(atomic push failed\)/i.test(line),
+          ),
         );
         if (memberRejected) {
           return {
