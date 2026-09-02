@@ -15,7 +15,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { type ChunkTarget, NEEDS_REVIEW_LABEL } from "./chunks.js";
+import { type ChunkTarget } from "./chunks.js";
 import { issueNumberFromBranch } from "./naming.js";
 
 const exec = promisify(execFile);
@@ -64,12 +64,12 @@ export class ChunkBaseMissingError extends Error {
         `sandbar's object cache has \`${chunk.branch}\` — the branch its blockers' ` +
         `commits are supposed to be on. Seeding it from the source branch would ` +
         `develop it against a tree missing that work (#61), and nothing downstream ` +
-        `would reject the result. The usual cause is the chunk RE-ROOTING: close ` +
-        `a chunk's root issue and the surviving members re-derive under a new root ` +
-        `and so a new branch name, while their commits stay on the old one. Look for ` +
-        `a recently closed issue carrying \`${NEEDS_REVIEW_LABEL}\` and reopen it, or ` +
-        `land the chunk's real branch and close every member on it — either way the ` +
-        `chunk stops being half-visible to sandbar.`,
+        `would reject the result. The usual cause is chunk re-rooting after ` +
+        `history no longer names the component's root, so the surviving graph ` +
+        `derives a new branch name while its commits remain on the old one. ` +
+        `Inspect origin's chunk ` +
+        `branches and their canonical member merge subjects; restore the missing ` +
+        `history or land the branch that actually carries the work.`,
     );
     this.name = "ChunkBaseMissingError";
   }

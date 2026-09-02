@@ -233,14 +233,10 @@ describe("comment templates", () => {
   // mechanism belongs in the module header, never in the prose. The only `#N`
   // any template here may carry is one it was HANDED — a host issue number.
   it("chunk-landed body cites no sandbar issue number, which would autolink in the host repo", () => {
-    const body = CHUNK_LANDED_COMMENT_TEMPLATE(
-      "sandbar/chunk-42-alpha",
-      NEEDS_REVIEW_LABEL,
-      READY_FOR_AGENT,
-    );
+    const body = CHUNK_LANDED_COMMENT_TEMPLATE("sandbar/chunk-42-alpha");
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("sandbar/chunk-42-alpha");
-    expect(body).toContain(NEEDS_REVIEW_LABEL);
+    expect(body).toContain("git history");
     expect(body).not.toMatch(/#\d/);
   });
 });
@@ -315,7 +311,7 @@ describe("finalizeOne", () => {
     expect(calls.pushes).toEqual([]);
     expect(calls.comments).toHaveLength(1);
     expect(calls.comments[0]!.body).toContain("sandbar/chunk-45-x");
-    expect(calls.comments[0]!.body).toContain(NEEDS_REVIEW_LABEL);
+    expect(calls.comments[0]!.body).toContain("git history");
   });
 
   it("chunk-landed with -d refusal: escalates to -D, on the merger's certainty", async () => {
@@ -348,9 +344,11 @@ describe("finalizeOne", () => {
       ),
     ).resolves.toEqual({ kind: "deleted-local" });
     expect(calls.deletes).toEqual(["sandbar/issue-45-t-45"]);
-    // The label and its explanatory comment are display-only. Losing either
-    // cannot affect membership or landing, which are derived from git.
-    expect(calls.comments).toEqual([]);
+    // The label is optional, but the comment remains the issue's durable route
+    // to the branch a human must review.
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.comments[0]!.body).toContain("sandbar/chunk-45-x");
+    expect(calls.comments[0]!.body).not.toContain(NEEDS_REVIEW_LABEL);
   });
 
   it("chunk-landed on an issue a human closed mid-run: still flips and deletes", async () => {

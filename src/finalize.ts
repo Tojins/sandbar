@@ -42,7 +42,9 @@
 //
 // `chunk-landed` (#60) applies the display-only `needs-review` label. Membership
 // and de-queueing come from the chunk branch's merge history (#93), so a missing
-// or hand-removed label costs only the human cue and never blocks landing.
+// or hand-removed label costs only the human cue and never blocks landing. The
+// issue comment is still required: it names the review branch even when that
+// optional display-label edit fails.
 //
 // Required side-effects fail loud, they don't swallow (#8). The original bug was
 // `editLabels` catching a "label doesn't exist" error, logging it, and returning
@@ -377,22 +379,18 @@ export const SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE = (attempts: number): string
 //
 // Three things a human needs and none of them is "done": where the work is (a
 // branch on origin, not the source branch), why the issue is still open (the
-// review that closes it is a review of the whole chunk), and what happened to
-// the label they applied. The last one matters most in practice — an issue
-// that silently loses `ready-for-agent` reads as sandbar having dropped it.
-export const CHUNK_LANDED_COMMENT_TEMPLATE = (
-  chunkBranch: string,
-  inChunkLabel: string,
-  readyLabel: string,
-): string =>
+// review that closes it is a review of the whole chunk), and why leaving the
+// agent queue did not lose it. The last one matters even when the optional
+// display label cannot be applied.
+export const CHUNK_LANDED_COMMENT_TEMPLATE = (chunkBranch: string): string =>
   `${BOT_COMMENT_PREFIX} this issue's work is merged and pushed to ` +
   `\`${chunkBranch}\`, the branch its review chunk lands on. The gate is green ` +
   `on the composed branch, and **nothing has reached the source branch** — this ` +
   `issue is review-gated, so a human reviews \`${chunkBranch}\` as one unit ` +
   `before any of it lands.\n\n` +
-  `The issue stays OPEN and \`${readyLabel}\` has been replaced with ` +
-  `\`${inChunkLabel}\`: it is out of the agent queue (its work is done and on ` +
-  `the branch) but not finished. It closes when the chunk lands, which a human ` +
+  `The issue stays OPEN but is out of the agent queue: the chunk branch's git ` +
+  `history records that its work is done and on the branch. It closes when the ` +
+  `chunk lands, which a human ` +
   `triggers by putting \`${LAND_LABEL}\` on the chunk's pull request — ` +
   `sandbar then merges \`${chunkBranch}\` into the source branch and closes every ` +
   `issue on it. The local issue branch was deleted — \`${chunkBranch}\` carries ` +
@@ -655,21 +653,15 @@ export async function finalizeOne(
       // prevent the branch and local issue branch lifecycle from completing.
       const n = issueNumberOf(input.issue);
       await adapter.removeWorktreeFor(input.issue.branch);
-      const display = await adapter.editLabels(
+      await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
         [NEEDS_REVIEW_LABEL],
       );
-      if (display.ok) {
-        await adapter.postComment(
-          n,
-          CHUNK_LANDED_COMMENT_TEMPLATE(
-            input.chunkBranch,
-            NEEDS_REVIEW_LABEL,
-            READY_FOR_AGENT_LABEL,
-          ),
-        );
-      }
+      await adapter.postComment(
+        n,
+        CHUNK_LANDED_COMMENT_TEMPLATE(input.chunkBranch),
+      );
       return deleteBranchForcing(adapter, input.issue.branch);
     }
     case "merge-conflict": {
