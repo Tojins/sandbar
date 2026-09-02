@@ -15,7 +15,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import { type Stack, startStack } from "./gate-stack.js";

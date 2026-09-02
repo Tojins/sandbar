@@ -2,7 +2,7 @@
 // bound on a healthcheck probe (#43). The family header — why these run against
 // a real podman and why tests run concurrently — is the test util's.
 
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,24 +10,13 @@ import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
-import {
-  containerState,
-  parseHealthLog,
-  type Stack,
-  startStack,
-} from "./gate-stack.js";
-import {
-  IMAGE,
-  initStackRepo,
-  runExit,
-} from "./gate-stack-podman.test-util.js";
+import { type Stack, startStack } from "./gate-stack.js";
+import { IMAGE, initStackRepo } from "./gate-stack-podman.test-util.js";
 import { stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   podmanTestScope,
   podmanTestStackId,
-  removeFixtureContainer,
-  runFixtureContainer,
 } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
