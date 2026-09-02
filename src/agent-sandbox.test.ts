@@ -827,6 +827,7 @@ describe("createSandbox integration (local provider)", () => {
 
       expect(run.stdout).toContain("<promise>COMPLETE</promise>");
       expect(run.commits).toHaveLength(1);
+      expect(typeof run.maxGapMs).toBe("number");
       expect(run.commits[0]!.sha).toMatch(/^[0-9a-f]{40}$/);
       // The captured commit is the one the agent made on the branch.
       const log = await git(["log", "-1", "--format=%H", "sandbar/issue-1-demo"], dir);

@@ -1639,7 +1639,7 @@ const invokeAgent = (
 ): Promise<{ result: string; signalMs?: number; maxGapMs: number }> =>
   new Promise((resolveRun, rejectRun) => {
     const speech = createAgentSpeechAccumulator();
-    let completionDetected = false;
+    let matchedSignal: string | undefined;
     let signalMs: number | undefined;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
@@ -1689,19 +1689,16 @@ const invokeAgent = (
       // waiting for" thought as the abort below.
       if (settled) return;
       clearTimer();
-      if (completionDetected) {
+      if (matchedSignal !== undefined) {
         timer = setTimeout(() => {
           // Settle FIRST, then abort: the abort makes the exec resolve, and
           // settling first is what makes that resolution a no-op instead of a
           // race with this one. The agent has already emitted its completion
           // signal and whatever is still holding the pipe open is producing
           // output nobody will read, so there is nothing here worth waiting on.
-          const matched = completionSignals.find((sig) =>
-            speech.accumulated.includes(sig),
-          );
           settleReject(
             new AgentError(
-              `${agent.name} emitted completion signal ${JSON.stringify(matched)} at ` +
+              `${agent.name} emitted completion signal ${JSON.stringify(matchedSignal)} at ` +
                 `${signalMs}ms, then produced no output for ${completionTimeoutMs}ms without exiting.`,
             ),
           );
@@ -1749,11 +1746,12 @@ const invokeAgent = (
             abort.abort();
             return;
           }
-          if (
-            !completionDetected &&
-            completionSignals.some((sig) => speech.accumulated.includes(sig))
-          ) {
-            completionDetected = true;
+          if (matchedSignal === undefined) {
+            matchedSignal = completionSignals.find((sig) =>
+              speech.accumulated.includes(sig),
+            );
+          }
+          if (matchedSignal !== undefined && signalMs === undefined) {
             // Read here rather than in the grace timer: this is the instant the
             // agent said it was done, and the timer fires up to a minute later.
             signalMs = elapsed();

@@ -866,17 +866,13 @@ async function runReviewer(
       // the same reason — the number is meaningless without knowing which model
       // spent it, and both are per-call config a stats reader cannot recover.
       const passTimer = startTimer();
-      const logPass = async (
-        signalMs: number | undefined,
-        maxGapMs: number | undefined,
-      ): Promise<void> => {
+      const logPass = async (maxGapMs: number | undefined): Promise<void> => {
         if (!opts.onOrchestratorLog) return;
         await opts.onOrchestratorLog(
           `issue=${issue.id} attempt=${action.attempt} reviewer ` +
             `round=${action.reviewRound} pass=${pass} invocation=${invocation} ` +
             `provider=${config.reviewerAgent} model=${modelId} ` +
             `${durationField(passTimer())}` +
-            (signalMs === undefined ? "" : ` signalMs=${signalMs}`) +
             (maxGapMs === undefined ? "" : ` maxGapMs=${maxGapMs}`),
         );
       };
@@ -895,13 +891,13 @@ async function runReviewer(
           // end of its single artefact; inherited role contracts are banned.
           completionSignal: [],
         });
-        await logPass(reviewerRun.signalMs, reviewerRun.maxGapMs);
+        await logPass(reviewerRun.maxGapMs);
         return { output: reviewerRun.stdout, error: null };
       } catch (err) {
         // A failed invocation is timed too: an invocation that burned the ten
         // minutes and died is the expensive case, and one that fell over in a
         // second is a different fault entirely.
-        await logPass(undefined, undefined);
+        await logPass(undefined);
         // The bytes the agent had emitted before it failed ride out on the
         // error (#41, agent-sandbox F9). Without them a reviewer that emitted
         // a verdict and then died is indistinguishable from one that emitted

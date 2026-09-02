@@ -18,12 +18,11 @@ const IDLE = "Agent idle for 600 seconds — no output received.";
 const idleRun: ReviewerRun = { output: "", error: IDLE };
 const blankRun: ReviewerRun = { output: "   \n", error: null };
 
-const reviewed = (stdout: string): ReviewerOutcome => ({
-  kind: "reviewed",
-  stdout,
-  transcript: stdout,
-  invocations: 1,
-});
+const reviewed = (stdout: string): ReviewerOutcome => {
+  const verdict = parseVerdict(stdout);
+  if (verdict === null) throw new Error("reviewed fixture requires a verdict token");
+  return { kind: "reviewed", verdict, transcript: stdout, invocations: 1 };
+};
 const failed = (detail: string): ReviewerOutcome => ({
   kind: "harness-failed",
   detail,
@@ -157,7 +156,7 @@ describe("runReviewerInvocations", () => {
     expect(outcome.kind).toBe("reviewed");
     if (outcome.kind !== "reviewed") throw new Error("unreachable");
     expect(outcome.invocations).toBe(1);
-    expect(parseVerdict(outcome.stdout).verdict).toBe("CHANGES-REQUESTED");
+    expect(outcome.verdict.verdict).toBe("CHANGES-REQUESTED");
   });
 
   it("zero output is retried once, and a review on the retry is the outcome", async () => {
@@ -175,8 +174,8 @@ describe("runReviewerInvocations", () => {
     // transcript to the parser would put the previous invocation's harness
     // error into the prose an implementer and a human both read as the
     // reviewer's own words.
-    expect(outcome.stdout).not.toContain(IDLE);
-    expect(parseVerdict(outcome.stdout).verdict).toBe("APPROVED");
+    expect(outcome.verdict.prose).not.toContain(IDLE);
+    expect(outcome.verdict.verdict).toBe("APPROVED");
   });
 
   it("two zero-output runs are a harness failure, never a verdict", async () => {
@@ -219,7 +218,7 @@ describe("runReviewerInvocations", () => {
     expect(asked).toEqual([1]);
     expect(outcome.kind).toBe("reviewed");
     if (outcome.kind !== "reviewed") throw new Error("unreachable");
-    expect(parseVerdict(outcome.stdout).verdict).toBe("APPROVED");
+    expect(outcome.verdict.verdict).toBe("APPROVED");
   });
 
   it("a failure with prose but no verdict is a harness failure that keeps the prose", async () => {
