@@ -50,13 +50,13 @@ import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
 import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, copyFile, link, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
-import { onCleanup } from "./cleanup.js";
+import { onCleanup, registerDisposable } from "./cleanup.js";
 import {
   AGENT_PROVIDER_PACKAGES,
   type AgentProviderName,
@@ -591,6 +591,7 @@ export async function prepareAgentArtifacts(
     await exec("tar", ["-xzf", archive, "-C", destination]);
   });
   const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-"));
+  onCleanup(() => rm(root, { recursive: true, force: true }));
   const stagedSha256: Record<string, string> = {};
   try {
     for (const provider of providers) {
@@ -623,9 +624,9 @@ export async function prepareAgentArtifacts(
             const binary = findAgentBinary(provider, await readdir(extractRoot));
             await rename(join(extractRoot, binary), destination);
           } else {
-            // Keep the pinned download beside the staged executable so every
-            // later augmentation can re-check the driver-owned digest.
-            await copyFile(downloaded, destination);
+            // The download is already the executable. Moving it avoids keeping
+            // a second copy of the large standalone binary in host temp space.
+            await rename(downloaded, destination);
           }
           await chmod(destination, 0o755);
           stagedSha256[name] = await sha256File(destination);
@@ -642,19 +643,22 @@ export async function prepareAgentArtifacts(
       verify: async (provider) => {
         for (const artifact of packages[provider].artifacts[arch]) {
           const name = `${provider}-${artifact.variant}`;
-          const downloaded = await sha256File(join(root, `${name}.download`));
-          if (downloaded !== artifact.sha256) {
-            throw new Error(
-              `staged download ${provider}/${arch} failed pin re-verification ` +
-                `(expected ${artifact.sha256}, got ${downloaded})`,
-            );
+          if (artifact.archive) {
+            const downloaded = await sha256File(join(root, `${name}.download`));
+            if (downloaded !== artifact.sha256) {
+              throw new Error(
+                `staged download ${provider}/${arch} failed pin re-verification ` +
+                  `(expected ${artifact.sha256}, got ${downloaded})`,
+              );
+            }
           }
           const expected = stagedSha256[name];
           const actual = await sha256File(join(root, name));
-          if (expected === undefined || actual !== expected) {
+          const pinned = artifact.archive ? expected : artifact.sha256;
+          if (pinned === undefined || actual !== pinned) {
             throw new Error(
               `staged artifact ${provider}/${arch} failed re-verification ` +
-                `(expected ${expected}, got ${actual})`,
+                `(expected ${pinned}, got ${actual})`,
             );
           }
         }
@@ -734,6 +738,9 @@ export async function createAgentImages(opts: {
           const contextRoot = await mkdtemp(
             join(tmpdir(), "sandbar-agent-context-"),
           );
+          const withdrawContextCleanup = registerDisposable(
+            () => rm(contextRoot, { recursive: true, force: true }),
+          );
           try {
             const prepared = await artifacts();
             await writeFile(join(contextRoot, "Containerfile"), containerfile);
@@ -750,6 +757,7 @@ export async function createAgentImages(opts: {
             );
           } finally {
             await rm(contextRoot, { recursive: true, force: true });
+            withdrawContextCleanup();
           }
         }
         order.push(tag);
