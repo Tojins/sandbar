@@ -34,8 +34,8 @@
 // It used to be one clause: a blocker is satisfied when it reads CLOSED, which
 // for an auto-lane blocker means its work is on the source branch. Chunks add
 // the second: a blocker is ALSO satisfied when the exact derived chunk branch
-// contains its `Merge sandbar/issue-<n>: ...` commit and it sits in the SAME
-// chunk as the issue it blocks.
+// contains its durable origin issue ref and it sits in the SAME chunk as the
+// issue it blocks.
 //
 // The second clause exists because a chunk member never closes on its own. Its
 // branch lands on the chunk's branch, not on the source branch, and the issue
@@ -63,7 +63,7 @@
 // One consequence for what this module LISTS: an issue that has landed on a
 // chunk branch has left the `ready-for-agent` query, yet it must stay in the
 // graph this module derives lanes and chunks from. `readChunkMembers` therefore
-// enumerates the issue numbers from the fetched chunk branches' merge history
+// enumerates the issue numbers from issue refs contained by fetched chunk branches
 // and fetches those issues directly. Dropping those issues from the
 // graph would break the feature in two separate ways: a chunk that has landed
 // its root would re-derive itself around the members that are left, under a new
@@ -173,6 +173,8 @@ import {
 import { issueBranchName } from "./naming.js";
 import {
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
+  ORIGIN_ISSUE_BRANCH_REFGLOBS,
+  issueNumberFromBranch,
   rootIssueFromChunkBranch,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
@@ -227,8 +229,8 @@ export type PlanResolution = {
   // about the issue's labels, and a human wants it while the chain is still
   // being queued, not once it reaches the front.
   readonly overrides: readonly LaneOverride[];
-  // The chunks with work ON ORIGIN — those with at least one member named by
-  // the branch's sandbar merge commits — with everything each branch carries and the TIPS of it
+  // The chunks with work ON ORIGIN — those containing at least one origin
+  // issue ref — with everything each branch carries and its TIPS
   // (#63, #64). Empty for every host on the default lane, and empty before a
   // chunk's first landing.
   //
@@ -242,6 +244,11 @@ export type PlanResolution = {
   // branches and nothing else — and which ones a reconciled chunk owes a
   // close to.
   readonly landedChunks: readonly LandedChunk[];
+  readonly reconciliationChunks: readonly LandedChunk[];
+  readonly chunkNameDrifts: readonly {
+    readonly existing: string;
+    readonly derived: string;
+  }[];
 };
 
 export function parseBlockedBy(body: string): readonly number[] {
@@ -313,7 +320,7 @@ export function resolvePlan(
   // below), so a null here is always the auto lane by the time it is read.
   //
   // `landed` is the chunk PR's member list (#62): the members whose work is
-  // already ON the branch, as named by its merge commits. It is
+  // already ON the branch, as proved by issue-ref containment. It is
   // computed here rather than in the merge phase because only this function has
   // the whole candidate graph — phase 3 sees the cycle's DONE branches and
   // nothing else, so a chunk growing by one member per cycle would otherwise
@@ -406,6 +413,15 @@ export function resolvePlan(
       chunkIssues,
       new Set(candidates.map((c) => c.number).filter(isOnDerivedChunk)),
     ),
+    reconciliationChunks: [],
+    chunkNameDrifts: [...chunkMembers.keys()].flatMap((existing) => {
+      const root = rootIssueFromChunkBranch(existing);
+      if (root === null) return [];
+      const derived = chunkByRoot.get(root)?.branch;
+      return derived !== undefined && derived !== existing
+        ? [{ existing, derived }]
+        : [];
+    }),
   };
 }
 
@@ -457,12 +473,14 @@ export async function fetchCandidates(
 }
 
 /**
- * Read the durable membership records written by merger.ts from each fetched
- * origin chunk branch. A branch is trusted only once its name-derived root's
- * merge is found; otherwise every apparent member is discarded.
+ * Read membership by branch containment. Live planning excludes issue refs
+ * already contained in source; reconciliation includes them after the chunk
+ * itself has landed there.
  */
 export async function readChunkMembers(
   repoDir: string,
+  sourceBranch = "main",
+  includeSourceMerged = false,
 ): Promise<ReadonlyMap<string, ReadonlySet<number>>> {
   const { stdout: refsOut } = await exec(
     "git",
@@ -476,36 +494,24 @@ export async function readChunkMembers(
   const result = new Map<string, ReadonlySet<number>>();
   for (const ref of refsOut.split("\n").map((s) => s.trim()).filter(Boolean)) {
     const branch = ref.replace(/^origin\//, "");
-    const root = rootIssueFromChunkBranch(branch);
-    if (root === null) continue;
     const { stdout } = await exec(
       "git",
       [
-        "log",
-        "--first-parent",
-        "--merges",
-        "--format=%s",
-        ref,
+        "for-each-ref",
+        `--merged=${ref}`,
+        ...(includeSourceMerged ? [] : [`--no-merged=origin/${sourceBranch}`]),
+        "--format=%(refname)",
+        ...ORIGIN_ISSUE_BRANCH_REFGLOBS,
       ],
-      { cwd: repoDir, maxBuffer: 16 * 1024 * 1024 },
+      { cwd: repoDir },
     );
-    const members = new Set<number>();
-    let foundRoot = false;
-    for (const subject of stdout.split("\n")) {
-      const match = subject.match(/^Merge sandbar\/issue-(\d+): /);
-      if (!match?.[1]) continue;
-      const number = Number(match[1]);
-      members.add(number);
-      // The root was necessarily the first member merged onto a derived chunk
-      // branch. Its first parent is the source snapshot the branch started at;
-      // stopping here excludes identical sandbar merge subjects inherited from
-      // source, including after that source later comes to contain the chunk.
-      if (number === root) {
-        foundRoot = true;
-        break;
-      }
-    }
-    result.set(branch, foundRoot ? members : new Set());
+    const members = new Set(
+      stdout.split("\n").flatMap((memberRef) => {
+        const number = issueNumberFromBranch(memberRef.trim());
+        return number === null ? [] : [number];
+      }),
+    );
+    result.set(branch, members);
   }
   return result;
 }
@@ -593,6 +599,7 @@ export async function fetchIssueStates(
 // pure function, and its tests state every argument anyway.
 export type BuildPlanOptions = {
   readonly repoDir: string;
+  readonly sourceBranch?: string;
   readonly excluded?: ReadonlySet<number>;
   readonly k?: number;
   readonly defaultLane?: Lane;
@@ -619,14 +626,19 @@ export async function buildPlan(
 ): Promise<PlanResolution> {
   const excluded = options.excluded ?? new Set<number>();
   const k = options.k ?? DEFAULT_K;
-  // Read once for both member enumeration and the pure resolver. A chunk can
-  // grow between two reads; one snapshot keeps the candidate graph and every
-  // membership decision about that graph coherent.
-  const chunkMembers = await readChunkMembers(options.repoDir);
+  // Keep the live and reconciliation readings explicit: the former excludes
+  // refs already in source, while the latter must still close their issues.
+  const sourceBranch = options.sourceBranch ?? "main";
+  const chunkMembers = await readChunkMembers(options.repoDir, sourceBranch);
+  const allChunkMembers = await readChunkMembers(
+    options.repoDir,
+    sourceBranch,
+    true,
+  );
   const chunkMemberNumbers = [
-    ...new Set([...chunkMembers.values()].flatMap((ns) => [...ns])),
+    ...new Set([...allChunkMembers.values()].flatMap((ns) => [...ns])),
   ];
-  // The queue plus issues named by fetched chunk history (#93), in one graph
+  // The queue plus issues found by fetched branch containment (#93), in one graph
   // because lane inheritance and chunk derivation need both sets. Deduped by
   // number with the queue entry winning if the search index still returns a
   // member whose `ready-for-agent` removal has not become visible yet.
@@ -648,7 +660,7 @@ export async function buildPlan(
     for (const n of parseBlockedBy(c.body)) wanted.add(n);
   }
   const facts = await fetchIssueStates([...wanted], repo);
-  return resolvePlan(
+  const live = resolvePlan(
     candidates,
     facts,
     excluded,
@@ -656,4 +668,13 @@ export async function buildPlan(
     options.defaultLane ?? DEFAULT_LANE,
     chunkMembers,
   );
+  const inclusive = resolvePlan(
+    candidates,
+    facts,
+    excluded,
+    k,
+    options.defaultLane ?? DEFAULT_LANE,
+    allChunkMembers,
+  );
+  return { ...live, reconciliationChunks: inclusive.landedChunks };
 }

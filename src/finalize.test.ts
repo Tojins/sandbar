@@ -236,7 +236,7 @@ describe("comment templates", () => {
     const body = CHUNK_LANDED_COMMENT_TEMPLATE("sandbar/chunk-42-alpha");
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("sandbar/chunk-42-alpha");
-    expect(body).toContain("git history");
+    expect(body).toContain("contained by the chunk branch");
     expect(body).not.toMatch(/#\d/);
   });
 });
@@ -311,7 +311,7 @@ describe("finalizeOne", () => {
     expect(calls.pushes).toEqual([]);
     expect(calls.comments).toHaveLength(1);
     expect(calls.comments[0]!.body).toContain("sandbar/chunk-45-x");
-    expect(calls.comments[0]!.body).toContain("git history");
+    expect(calls.comments[0]!.body).toContain("contained by the chunk branch");
   });
 
   it("chunk-landed with -d refusal: escalates to -D, on the merger's certainty", async () => {

@@ -549,8 +549,9 @@ dependency; relabelling the issue alone will not do it.
 > Its issues are merged onto `sandbar/chunk-<root>-<slug>`, which is pushed to
 > origin and opened as a **draft pull request** against your source branch —
 > that PR is what a human reviews, and nothing on the branch reaches the source
-> branch until they land it. A landed member keeps its issue open; its merge
-> commit on `origin/sandbar/chunk-*` is what takes it out of the queue and
+> branch until they land it. A landed member keeps its issue open; its origin
+> issue branch is pushed atomically with the chunk branch, and containment by
+> `origin/sandbar/chunk-*` is what takes it out of the queue and
 > unblocks whatever was queued behind it. Sandbar adds `needs-review` as a
 > display-only cue for humans, so a chunk grows one *layer* per cycle, and
 > the members worked in any one cycle are always siblings.

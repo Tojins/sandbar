@@ -273,6 +273,20 @@ export const ORIGIN_CHUNK_BRANCH_REFGLOBS: readonly string[] =
     (prefix) => `refs/remotes/origin/${prefix}${CHUNK_BRANCH_INFIX}*`,
   );
 
+// Issue branches are durable membership refs since #93. They are fetched and
+// pruned beside chunk refs so containment questions are answered from one
+// fresh remote-tracking namespace.
+export const ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS: readonly string[] =
+  ALL_BRANCH_PREFIXES.map(
+    (prefix) =>
+      `+refs/heads/${prefix}${ISSUE_BRANCH_INFIX}*:refs/remotes/origin/${prefix}${ISSUE_BRANCH_INFIX}*`,
+  );
+
+export const ORIGIN_ISSUE_BRANCH_REFGLOBS: readonly string[] =
+  ALL_BRANCH_PREFIXES.map(
+    (prefix) => `refs/remotes/origin/${prefix}${ISSUE_BRANCH_INFIX}*`,
+  );
+
 // The slug half of both shapes. It lives here rather than in the planner that
 // used to own it because it is half of a load-bearing identifier, and the two
 // builders below should be its only callers: a branch name assembled by
@@ -306,9 +320,10 @@ export function chunkBranchName(rootIssue: number, title: string): string {
 // hinge on slug presence, and a branch of the OTHER shape reads as null rather
 // than as a number of the wrong kind.
 function numberFromBranch(branch: string, infix: string): number | null {
+  const normalized = branch.replace(/^refs\/remotes\/origin\//, "").replace(/^origin\//, "");
   for (const prefix of ALL_BRANCH_PREFIXES) {
-    if (!branch.startsWith(prefix)) continue;
-    const rest = branch.slice(prefix.length);
+    if (!normalized.startsWith(prefix)) continue;
+    const rest = normalized.slice(prefix.length);
     if (!rest.startsWith(infix)) return null;
     const m = rest.slice(infix.length).match(/^(\d+)(?:-|$)/);
     return m ? Number(m[1]) : null;

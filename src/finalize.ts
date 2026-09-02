@@ -41,7 +41,7 @@
 // under the single `agentStuck` label; the *reason* lives in the bot comment.
 //
 // `chunk-landed` (#60) applies the display-only `needs-review` label. Membership
-// and de-queueing come from the chunk branch's merge history (#93), so a missing
+// and de-queueing come from issue-ref containment by the chunk branch (#93), so a missing
 // or hand-removed label costs only the human cue and never blocks landing. The
 // issue comment is still required: it names the review branch even when that
 // optional display-label edit fails.
@@ -388,8 +388,8 @@ export const CHUNK_LANDED_COMMENT_TEMPLATE = (chunkBranch: string): string =>
   `on the composed branch, and **nothing has reached the source branch** — this ` +
   `issue is review-gated, so a human reviews \`${chunkBranch}\` as one unit ` +
   `before any of it lands.\n\n` +
-  `The issue stays OPEN but is out of the agent queue: the chunk branch's git ` +
-  `history records that its work is done and on the branch. It closes when the ` +
+  `The issue stays OPEN but is out of the agent queue: git records its origin ` +
+  `issue branch as contained by the chunk branch. It closes when the ` +
   `chunk lands, which a human ` +
   `triggers by putting \`${LAND_LABEL}\` on the chunk's pull request — ` +
   `sandbar then merges \`${chunkBranch}\` into the source branch and closes every ` +

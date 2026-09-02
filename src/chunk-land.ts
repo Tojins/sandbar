@@ -119,9 +119,8 @@
 // demonstrably on the source branch by then, so the branch is not a recovery
 // point for anything, and KEEPING it would make the reconciler pick the same
 // chunk up every cycle forever, name nothing again, and never resolve. What it
-// costs is the one case where the emptiness is wrong — malformed or manually
-// rewritten branch history that no longer contains the canonical root member
-// merge — where the issue is left OPEN,
+// costs is the one case where the emptiness is wrong — a missing or manually
+// deleted origin issue ref that no longer records a member — where the issue is left OPEN,
 // off the queue, with no branch left for anything to retry from. That is why
 // both the pull request and the orchestrator's console SAY the list was empty
 // rather than reporting a clean landing: it is the only thing that can be done
@@ -202,7 +201,11 @@ import {
 } from "./chunks.js";
 import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
-import { rootIssueFromChunkBranch } from "./naming.js";
+import {
+  ORIGIN_ISSUE_BRANCH_REFGLOBS,
+  issueNumberFromBranch,
+  rootIssueFromChunkBranch,
+} from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 import {
   type ResolveAttemptSummary,
@@ -579,7 +582,10 @@ export type ChunkWrapupAdapter = {
   // merge — the label is the queue either way.
   removePullRequestLabel(pr: number, label: string): Promise<void>;
   closePullRequest(pr: number): Promise<void>;
-  deleteChunkBranch(chunkBranch: string): Promise<void>;
+  deleteChunkBranch(
+    chunkBranch: string,
+    memberIssues: readonly number[],
+  ): Promise<void>;
 };
 
 /**
@@ -657,15 +663,34 @@ export function chunkForgeWrites(deps: {
         ["pr", "close", String(pr), "--repo", slug()],
         `failed to close pull request #${pr}`,
       ),
-    async deleteChunkBranch(chunkBranch) {
+    async deleteChunkBranch(chunkBranch, memberIssues) {
       // Fully qualified, and not `--force`-anything: `git push --delete` has no
       // force to give. It is safe on the one precondition every caller
       // establishes first — the branch's commits are contained in
       // `origin/<sourceBranch>`, so nothing is lost with the ref.
       try {
+        const { stdout } = await exec(
+          "git",
+          ["for-each-ref", "--format=%(refname)", ...ORIGIN_ISSUE_BRANCH_REFGLOBS],
+          { cwd: deps.gitCwd },
+        );
+        const wanted = new Set(memberIssues);
+        const issueRefs = stdout.split("\n").flatMap((ref) => {
+          const number = issueNumberFromBranch(ref.trim());
+          return number !== null && wanted.has(number)
+            ? [ref.trim().replace(/^refs\/remotes\/origin\//, "refs/heads/")]
+            : [];
+        });
         await exec(
           "git",
-          ["push", "origin", "--delete", `refs/heads/${chunkBranch}`],
+          [
+            "push",
+            "--atomic",
+            "origin",
+            "--delete",
+            `refs/heads/${chunkBranch}`,
+            ...issueRefs,
+          ],
           { cwd: deps.gitCwd },
         );
       } catch (err) {
@@ -838,7 +863,10 @@ export async function wrapUpLandedChunk(
   let branchDeleted = false;
   if (closesComplete) {
     try {
-      await adapter.deleteChunkBranch(target.branch);
+      await adapter.deleteChunkBranch(
+        target.branch,
+        target.members.map((member) => member.number),
+      );
       branchDeleted = true;
       await log(`chunk ${target.branch}: deleted on origin`);
     } catch (err) {

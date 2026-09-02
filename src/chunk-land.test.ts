@@ -276,11 +276,10 @@ describe("wrapUpLandedChunk (#64)", () => {
 
   it("stops at the first close it cannot make, and never closes the root behind it", async () => {
     // THE invariant of the whole wrap-up. The branch is kept so the next
-    // cycle's reconciler retries it, and that reconciler finds it by NAME —
-    // `sandbar/chunk-<root>-<slug>`, re-derived from the open issues. Closing
-    // #42 here would take the root out of that graph, re-root the chunk under
-    // #43 on a branch origin has never had, and leave the kept branch matching
-    // nothing: deleted next cycle, with #43 open and no branch left to retry.
+    // cycle's reconciler retries it. Git-derived members are fetched by number
+    // without a state filter, so a successful root close would not by itself
+    // change the branch derivation; dependents-first remains the safe recovery
+    // order if refs are repaired or history is changed by hand.
     const { adapter, calls } = makeWrapupAdapter({ "closeIssue:43": "gh boom" });
     const r = await wrapUpLandedChunk(target, adapter, {
       sourceBranch: "main",
@@ -302,9 +301,8 @@ describe("wrapUpLandedChunk (#64)", () => {
   it("leaves everything behind a failed close untouched, the root included", async () => {
     // A chain: #42 ← #43 ← #44, so the order is #44, #43, #42. #44 closes,
     // #43 will not, and #42 is never asked — which is what the ORDER buys
-    // beyond simply holding the root back. Closing #42 now would re-root the
-    // chunk under #43 and rename its branch; the branch on origin is the one
-    // #44's commits are on, and it has to keep matching.
+    // beyond simply holding the root back: every still-open member retains all
+    // blockers needed to reconstruct the component if refs are repaired.
     const chain = {
       ...target,
       members: [...target.members, { number: 44, title: "gamma" }],

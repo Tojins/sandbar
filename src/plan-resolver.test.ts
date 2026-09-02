@@ -284,6 +284,7 @@ describe("resolvePlan lanes (#57)", () => {
       new Set(),
       3,
       "review",
+      new Map([["sandbar/chunk-99-x", new Set([99])]]),
     );
 
     expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
@@ -540,6 +541,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
       new Set(),
       3,
       "review",
+      new Map([["sandbar/chunk-99-x", new Set([99])]]),
     );
 
     expect(r.heldForReview).toEqual([]);
@@ -564,8 +566,8 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     // #10 landed, #11 can be worked, #12 cannot yet: its own blocker #11 is
     // open and has not landed on the chunk branch. This is what bounds a chunk
     // to one layer per cycle and is why same-cycle members are always siblings
-    // — #12 waits for the cycle AFTER the one that lands #11 and flips it to
-    // branch, so it can never be planned alongside the very branch it
+    // — #12 waits for the cycle AFTER the one that lands #11 and publishes its
+    // issue ref, so it can never be planned alongside the very branch it
     // would have to be seeded from.
     const r = resolvePlan(
       [
@@ -805,6 +807,10 @@ describe("resolvePlan git membership safety (#93)", () => {
     );
     expect(result.plan).toEqual([]);
     expect(result.landedChunks).toEqual([]);
+    expect(result.chunkNameDrifts).toEqual([{
+      existing: "sandbar/chunk-47-old-title",
+      derived: "sandbar/chunk-47-new-title",
+    }]);
   });
 });
 

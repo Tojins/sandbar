@@ -77,7 +77,6 @@ type Calls = {
   fileWrites: { path: string; contents: string }[];
   staged: string[];
   mergeCommits: number;
-  canonicalizedChunkMembers: string[];
 };
 
 type Script = {
@@ -92,8 +91,6 @@ type Script = {
   // means origin has no such branch and the base is the source branch.
   chunkBases?: Record<string, string>;
   chunkPushes?: PushResult[];
-  canonicalizeChunkMemberError?: Error;
-  canonicalizeChunkMemberErrorAt?: string;
   // #62: how the forge answers `ensureChunkPullRequest`. An Error is thrown.
   chunkPrs?: ({ number: number; url: string } | Error)[];
   // #64: what origin answers about a chunk branch being LANDED, by branch
@@ -155,7 +152,6 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     fileWrites: [],
     staged: [],
     mergeCommits: 0,
-    canonicalizedChunkMembers: [],
   };
   const closeAttemptsByIssue = new Map<number, number>();
   let mIdx = 0;
@@ -305,17 +301,6 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       const ok = script.mergeCommits?.[mcIdx++] ?? true;
       if (ok) merging = false;
       return { ok };
-    },
-    async canonicalizeChunkMemberMerge(unit) {
-      calls.canonicalizedChunkMembers.push(unit.id);
-      calls.order.push("canonicalize-chunk-member");
-      if (
-        script.canonicalizeChunkMemberError &&
-        (script.canonicalizeChunkMemberErrorAt === undefined ||
-          script.canonicalizeChunkMemberErrorAt === unit.id)
-      ) {
-        throw script.canonicalizeChunkMemberError;
-      }
     },
     // #60. `chunkBases` scripts what origin has: a branch name mapped to its
     // remote-tracking ref, or nothing for a chunk that has never landed — in
@@ -1865,41 +1850,6 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
     chunk: { root, branch: `sandbar/chunk-${root}-c` },
   });
 
-  it("canonicalizes a conflict-resolved member before publishing membership", async () => {
-    const { adapter, calls } = makeAdapter({
-      merges: ["conflict"],
-      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
-      gates: [{ ok: true }],
-    });
-
-    const summary = await runMergerWithAdapter([chunkIssue(42)], adapter);
-
-    expect(summary.chunkLanded.map((c) => c.issue.id)).toEqual(["42"]);
-    expect(calls.canonicalizedChunkMembers).toEqual(["42"]);
-    expect(calls.order.indexOf("canonicalize-chunk-member")).toBeLessThan(
-      calls.order.indexOf("chunk-push"),
-    );
-  });
-
-  it("halts without publishing any group member when membership canonicalization fails", async () => {
-    const { adapter, calls } = makeAdapter({
-      merges: ["ok", "ok"],
-      gates: [{ ok: true }, { ok: true }],
-      canonicalizeChunkMemberError: new Error("ambiguous membership merge"),
-      canonicalizeChunkMemberErrorAt: "43",
-    });
-
-    const err = await runMergerWithAdapter(
-      [chunkIssue(42), chunkIssue(43, 42)],
-      adapter,
-    ).catch((caught: unknown) => caught as MergerError);
-
-    expect(err).toBeInstanceOf(MergerError);
-    expect(err.message).toContain("Chunk membership commit failed for #43");
-    expect(err.partial?.chunkLanded).toEqual([]);
-    expect(calls.canonicalizedChunkMembers).toEqual(["42", "43"]);
-    expect(calls.chunkPushes).toEqual([]);
-  });
 
   it("bases a first landing on origin/<sourceBranch>, merges, gates, pushes the chunk branch", async () => {
     const { adapter, calls } = makeAdapter({
@@ -1917,7 +1867,6 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
       "merge",
       "install",
       "gate",
-      "canonicalize-chunk-member",
       "chunk-push",
       // The review surface comes after the push, never before it (#62).
       "chunk-pr",

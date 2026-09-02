@@ -110,7 +110,8 @@ an exit condition fires.
    **`land` label on that PR** (#64) makes the next cycle merge
    `origin/<chunk>` in the SAME source pass, ahead of the auto lane's branches,
    so one gate-2 and one landing cover both; the wrap-up then closes the
-   members named by its merge history, drops `needs-review`, takes `land` back off the PR,
+   members whose issue refs it contains, drops `needs-review`, takes `land`
+   back off the PR,
    closes it and deletes the branch. `src/chunk-land.ts` owns the label, the
    selection, the wrap-up and — as `chunkForgeWrites` — the one spelling of the
    `gh`/`git` writes it makes, which the merge phase and the plan-time
@@ -204,13 +205,15 @@ and used to announce themselves in four different ways, the halt in none at all.
   header owns the argument; `NEEDS_REVIEW_LABEL` and `LAND_LABEL` (#93, #64) live
   there too. **Origin owns the chunk branch** — every landing bases on
   `origin/<chunk>`, preflight fetches that namespace to reason about it, and
-  the branch is deleted THERE when the chunk lands. What a chunk branch
+  the branch is deleted THERE when the chunk lands. Each member's origin issue
+  ref is pushed atomically beside the chunk ref, and containment is the
+  membership record; commit subjects are cosmetic. What a chunk branch
   carries is `PlanResolution.landedChunks`, the only answer the whole
-  candidate graph can give: members named by `Merge sandbar/issue-<n>: ...`
-  commits on the exact chunk branch, which is the set a landing
+  candidate graph can give: issue refs contained by the exact chunk branch but
+  not yet by the source branch, which is the set a landing
   closes (#64) and whose tips a follow-up is blocked by (#63) — never the whole
   component, since a member that has never been worked has no commits
-  anywhere. De-queueing alone is broader and fail-safe: a member named on any
+  anywhere. De-queueing alone is broader and fail-safe: a member contained by any
   fetched chunk branch is never reimplemented after title drift or re-rooting.
   It also carries the ORDER those closes must go in, for the reason
   the `land` bullet below states.
@@ -239,9 +242,10 @@ and used to announce themselves in four different ways, the halt in none at all.
   the next quiet cycle lands it. Members are closed EXPLICITLY (a `Closes #N` trailer only
   fires on GitHub's own merge of that PR, and sandbar composes the merge
   locally), in `LandedChunk.closeOrder` — dependents first, ROOT LAST — and the
-  loop stops at the first failure: the reconciler finds a kept branch by its
-  NAME, which is re-derived from the open issues every cycle, so a closed root
-  re-roots the chunk and leaves that branch matching nothing. The chunk branch
+  loop stops at the first failure. Git-derived members are fetched by number
+  without a state filter, so closing the root does not remove it from the graph
+  or change the derived branch name; dependents-first still leaves the safest
+  retry set if refs are repaired or changed by hand. The chunk branch
   is deleted only once every close worked — a kept branch is what makes
   `src/chunk-reconcile.ts` retry the remainder next cycle, and therefore what
   `run.ts` halts on (`chunkResidue` splits a wrap-up's leftovers on exactly

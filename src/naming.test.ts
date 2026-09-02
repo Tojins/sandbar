@@ -23,6 +23,8 @@ import {
   RESOURCE_PREFIX,
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
+  ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
+  ORIGIN_ISSUE_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
   chunkBranchName,
   issueBranchName,
@@ -65,6 +67,11 @@ describe("issueNumberFromBranch", () => {
 
   it("matches a bare `issue-<n>` with no slug", () => {
     expect(issueNumberFromBranch("sandbar/issue-7")).toBe(7);
+  });
+
+  it("parses remote-tracking issue refs", () => {
+    expect(issueNumberFromBranch("origin/sandbar/issue-42-foo")).toBe(42);
+    expect(issueNumberFromBranch("refs/remotes/origin/sandbar/issue-42-foo")).toBe(42);
   });
 
   it("returns null for an unknown prefix", () => {
@@ -176,6 +183,15 @@ describe("branch names (#58)", () => {
     for (const spec of ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS) {
       expect(ORIGIN_CHUNK_BRANCH_REFGLOBS).toContain(spec.split(":")[1]);
     }
+  });
+
+  it("names origin's issue branches for membership containment", () => {
+    expect(ORIGIN_ISSUE_BRANCH_REFGLOBS).toContain(
+      "refs/remotes/origin/sandbar/issue-*",
+    );
+    expect(ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS).toContain(
+      "+refs/heads/sandbar/issue-*:refs/remotes/origin/sandbar/issue-*",
+    );
   });
 
   it("keeps origin's chunk refs out of the local branch globs", () => {

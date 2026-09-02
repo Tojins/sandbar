@@ -183,169 +183,6 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     expect(await adapter().chunkBase("sandbar/chunk-1-c")).toBe("origin/main");
   });
 
-  it("replaces an agent-authored merge subject with the durable member record", async () => {
-    await git(seed, "checkout", "-b", "sandbar/issue-7-member");
-    await commit(seed, "member.txt", "member\n");
-    await git(seed, "push", "-q", "origin", "sandbar/issue-7-member");
-    await git(cache, "fetch", "origin", "--quiet");
-    await git(
-      wt,
-      "merge",
-      "--no-ff",
-      "-m",
-      "resolve conflicts",
-      "origin/sandbar/issue-7-member",
-    );
-    const preMergeSha = await git(wt, "rev-parse", "HEAD^");
-
-    await adapter().canonicalizeChunkMemberMerge({
-      id: "7",
-      title: "Member title",
-      branch: "sandbar/issue-7-member",
-    }, preMergeSha, false);
-
-    expect(await git(wt, "log", "-1", "--format=%s")).toBe(
-      "Merge sandbar/issue-7: Member title",
-    );
-    expect((await git(wt, "rev-list", "--parents", "-n", "1", "HEAD")).split(" ")).toHaveLength(3);
-  });
-
-  it("finds the canonical member merge below a gate-recovery commit", async () => {
-    await git(seed, "checkout", "-b", "sandbar/issue-8-member");
-    await commit(seed, "member-8.txt", "member\n");
-    await git(seed, "push", "-q", "origin", "sandbar/issue-8-member");
-    await git(cache, "fetch", "origin", "--quiet");
-    const preMergeSha = await git(wt, "rev-parse", "HEAD");
-    await git(
-      wt,
-      "merge",
-      "--no-ff",
-      "-m",
-      "Merge sandbar/issue-8: Member title",
-      "origin/sandbar/issue-8-member",
-    );
-    const mergeSha = await git(wt, "rev-parse", "HEAD");
-    await commit(wt, "gate-fix.txt", "fixed\n");
-    const fixSha = await git(wt, "rev-parse", "HEAD");
-
-    await adapter().canonicalizeChunkMemberMerge({
-      id: "8",
-      title: "Member title",
-      branch: "sandbar/issue-8-member",
-    }, preMergeSha, false);
-
-    expect(await git(wt, "rev-parse", "HEAD")).toBe(fixSha);
-    expect(await git(wt, "rev-parse", "HEAD^")).toBe(mergeSha);
-  });
-
-  it("repairs a non-canonical member merge below a gate-recovery commit", async () => {
-    await git(seed, "checkout", "-b", "sandbar/issue-9-member");
-    await commit(seed, "member-9.txt", "member\n");
-    await git(seed, "push", "-q", "origin", "sandbar/issue-9-member");
-    await git(cache, "fetch", "origin", "--quiet");
-    const preMergeSha = await git(wt, "rev-parse", "HEAD");
-    await git(
-      wt,
-      "merge",
-      "--no-ff",
-      "-m",
-      "resolve conflicts",
-      "origin/sandbar/issue-9-member",
-    );
-    await commit(wt, "gate-fix-9.txt", "fixed\n");
-
-    await adapter().canonicalizeChunkMemberMerge({
-      id: "9",
-      title: "Member title",
-      branch: "sandbar/issue-9-member",
-    }, preMergeSha, false);
-
-    expect(await git(wt, "log", "-2", "--format=%s")).toBe(
-      "edit gate-fix-9.txt\nMerge sandbar/issue-9: Member title",
-    );
-    expect(await git(wt, "show", "HEAD:gate-fix-9.txt")).toBe("fixed");
-    expect((await git(wt, "rev-list", "--parents", "-n", "1", "HEAD^")).split(" ")).toHaveLength(3);
-  });
-
-  it("refuses an attempt that made no commit", async () => {
-    const preMergeSha = await git(wt, "rev-parse", "HEAD");
-
-    await expect(
-      adapter().canonicalizeChunkMemberMerge({
-        id: "10",
-        title: "Member title",
-        branch: "sandbar/issue-10-member",
-      }, preMergeSha, false),
-    ).rejects.toThrow("produced 0 first-parent merge commits");
-    expect(await git(wt, "rev-parse", "HEAD")).toBe(preMergeSha);
-  });
-
-  it("records an already-contained empty member as an unchanged-tree merge", async () => {
-    const preMergeSha = await git(wt, "rev-parse", "HEAD");
-    await git(wt, "branch", "sandbar/issue-10-empty", preMergeSha);
-    expect(await adapter().mergeNoFf({
-      id: "10",
-      title: "Empty member",
-      branch: "sandbar/issue-10-empty",
-    })).toEqual({ ok: true, alreadyContained: true });
-    expect(await git(wt, "rev-parse", "HEAD")).toBe(preMergeSha);
-
-    await adapter().canonicalizeChunkMemberMerge({
-      id: "10",
-      title: "Empty member",
-      branch: "sandbar/issue-10-empty",
-    }, preMergeSha, true);
-
-    expect(await git(wt, "log", "-1", "--format=%s")).toBe(
-      "Merge sandbar/issue-10: Empty member",
-    );
-    expect((await git(wt, "rev-list", "--parents", "-n", "1", "HEAD")).split(" ")).toHaveLength(3);
-    expect(await git(wt, "diff", "HEAD^1", "HEAD", "--stat")).toBe("");
-  });
-
-  it("refuses to guess when one attempt produces multiple first-parent merges", async () => {
-    const preMergeSha = await git(wt, "rev-parse", "HEAD");
-    for (const n of [10, 11]) {
-      await git(seed, "checkout", "-B", `sandbar/issue-${n}-member`, "main");
-      await commit(seed, `member-${n}.txt`, `member ${n}\n`);
-      await git(seed, "push", "-q", "origin", `sandbar/issue-${n}-member`);
-      await git(cache, "fetch", "origin", "--quiet");
-      await git(
-        wt,
-        "merge",
-        "--no-ff",
-        "-m",
-        `Merge sandbar/issue-${n}: Member ${n}`,
-        `origin/sandbar/issue-${n}-member`,
-      );
-    }
-
-    await expect(
-      adapter().canonicalizeChunkMemberMerge({
-        id: "10",
-        title: "Member 10",
-        branch: "sandbar/issue-10-member",
-      }, preMergeSha, false),
-    ).rejects.toThrow(
-      "produced 2 first-parent merge commits; refusing to guess which commit records its membership",
-    );
-  });
-
-  it("refuses to turn an agent's replacement commit into a false membership record", async () => {
-    const preMergeSha = await git(wt, "rev-parse", "HEAD");
-    await commit(wt, "replacement.txt", "not a merge\n");
-
-    await expect(
-      adapter().canonicalizeChunkMemberMerge({
-        id: "7",
-        title: "Member title",
-        branch: "sandbar/issue-7-member",
-      }, preMergeSha, false),
-    ).rejects.toThrow("produced 0 first-parent merge commits");
-    expect(await git(wt, "log", "-1", "--format=%s")).toBe(
-      "edit replacement.txt",
-    );
-  });
 
   // #64 — the three answers, and the one git fact that separates two of them:
   // `ls-remote --exit-code` exits 2 for "reached the remote, no matching ref"
@@ -407,23 +244,32 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     expect(await git(cache, "rev-parse", "--verify", base)).toBeTruthy();
   });
 
-  it("pushes a detached HEAD to a chunk branch, creating it on origin", async () => {
+  it("atomically pushes the chunk and member issue branch", async () => {
     await commit(wt, "b.txt", "member work\n");
+    await git(wt, "branch", "sandbar/issue-1-member", "HEAD");
     const head = await git(wt, "rev-parse", "HEAD");
 
-    const r = await adapter().pushChunkBranch("sandbar/chunk-1-c");
+    const r = await adapter().pushChunkBranch("sandbar/chunk-1-c", [
+      "sandbar/issue-1-member",
+    ]);
 
     expect(r).toEqual({ kind: "ok" });
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(head);
+    expect(await originHas("refs/heads/sandbar/issue-1-member")).toBe(head);
+    await git(wt, "update-ref", "refs/remotes/origin/sandbar/issue-1-member", head);
+    await git(wt, "push", "-q", "origin", "HEAD:main");
+    await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1]);
+    expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/issue-1-member")).toBeNull();
   });
 
   it("fast-forwards the chunk branch when the next member lands on it", async () => {
     await commit(wt, "b.txt", "first member\n");
-    await adapter().pushChunkBranch("sandbar/chunk-1-c");
+    await adapter().pushChunkBranch("sandbar/chunk-1-c", []);
     await commit(wt, "c.txt", "second member\n");
     const head = await git(wt, "rev-parse", "HEAD");
 
-    expect(await adapter().pushChunkBranch("sandbar/chunk-1-c")).toEqual({
+    expect(await adapter().pushChunkBranch("sandbar/chunk-1-c", [])).toEqual({
       kind: "ok",
     });
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(head);
@@ -437,7 +283,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     const theirs = (await originHas("refs/heads/sandbar/chunk-1-c"))!;
     await commit(wt, "b.txt", "our work\n");
 
-    expect(await adapter().pushChunkBranch("sandbar/chunk-1-c")).toEqual({
+    expect(await adapter().pushChunkBranch("sandbar/chunk-1-c", [])).toEqual({
       kind: "race",
     });
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(theirs);

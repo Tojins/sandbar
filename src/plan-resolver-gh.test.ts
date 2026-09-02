@@ -223,7 +223,9 @@ describe("buildPlan loads git-derived members into the candidate graph (#93)", (
     execFileSync("git", ["commit", "--allow-empty", "-qm", "work"], { cwd: repoDir });
     execFileSync("git", ["checkout", "-q", "main"], { cwd: repoDir });
     execFileSync("git", ["merge", "--no-ff", "member", "-m", "Merge sandbar/issue-60: Root"], { cwd: repoDir });
+    execFileSync("git", ["update-ref", "refs/remotes/origin/sandbar/issue-60-root", "member"], { cwd: repoDir });
     execFileSync("git", ["update-ref", "refs/remotes/origin/sandbar/chunk-60-root", "HEAD"], { cwd: repoDir });
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", "HEAD~1"], { cwd: repoDir });
     await writeFile(join(shimBin, "gh"), [
       "#!/bin/sh",
       'case "$1 $2" in',

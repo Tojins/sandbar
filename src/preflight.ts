@@ -153,6 +153,7 @@ import type { ResolvedStackContainer } from "./config.js";
 import type { EnvReader } from "./env.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+  ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
   issueNumberFromBranch,
@@ -566,7 +567,7 @@ export async function gatherState(
   const openReadyIssues = await fetchOpenReadyIssueNumbers(cfg.repo);
   const chunkMemberIssues =
     knownChunkMemberIssues ??
-    (await fetchChunkMemberIssueNumbers(repoDir));
+    (await fetchChunkMemberIssueNumbers(repoDir, cfg.sourceBranch));
   const { unmerged, discarded, resumable } = await classifySandbarBranches(
     repoDir,
     openReadyIssues,
@@ -665,9 +666,10 @@ async function fetchOpenReadyIssueNumbers(
 // silently reaped on a query that did not answer.
 async function fetchChunkMemberIssueNumbers(
   repoDir: string,
+  sourceBranch: string,
 ): Promise<ReadonlySet<number>> {
   try {
-    const members = await readChunkMembers(repoDir);
+    const members = await readChunkMembers(repoDir, sourceBranch, true);
     return new Set([...members.values()].flatMap((ns) => [...ns]));
   } catch {
     return new Set();
@@ -857,12 +859,12 @@ async function classifySandbarBranches(
 // branch whose commits are reachable from the source branch has said everything
 // it had to say, whether one issue wrote it or a whole chunk did.
 //
-// SECOND ground, for issue branches only (#60): the issue is named by a chunk
-// branch merge commit and its branch tip is reachable from that origin namespace. Such a
+// SECOND ground, for issue branches only (#60): the origin issue ref is
+// contained by a chunk branch. Such a
 // branch is published work under a different name, and nothing will ever pick
 // it up again — the planner drops git-derived members — so left alone it
-// accumulates one dead ref per member a chunk ever landed. The merge subject
-// selects the issue and the reachability check verifies its work; both are
+// accumulates one dead local ref per member a chunk ever landed. The remote
+// ref selects the issue and containment verifies its work; both are
 // required, because `-D` on a guess is the one thing this file
 // must never do. Chunk branches are excluded from that ground by construction:
 // every one of them is trivially reachable from itself.
@@ -943,6 +945,7 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
     "origin",
     "--prune",
     ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+    ...ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
     "--quiet",
   ]);
 
@@ -950,7 +953,10 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   // leftover branches are duplicates of published work, and `gatherState` uses
   // it to decide which are none of its three classifications. Asking twice
   // would also let the two disagree if a label moved in between.
-  const chunkMemberIssues = await fetchChunkMemberIssueNumbers(cfg.layout.repoDir);
+  const chunkMemberIssues = await fetchChunkMemberIssueNumbers(
+    cfg.layout.repoDir,
+    cfg.sourceBranch,
+  );
 
   const deleted = await deleteMergedSandbarBranches({
     layout: cfg.layout,

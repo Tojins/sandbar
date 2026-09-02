@@ -827,8 +827,15 @@ export async function run(
         excluded: mergedThisRun,
         defaultLane: config.defaultLane,
         repoDir: layout.repoDir,
+        sourceBranch: config.sourceBranch,
       };
       let resolution = await buildPlan(repo, planOptions);
+      for (const drift of resolution.chunkNameDrifts) {
+        console.warn(
+          `Origin chunk branch ${drift.existing} no longer matches the name ` +
+            `derived for its root: ${drift.derived}`,
+        );
+      }
 
       // The chunk-review scan (#63). Every chunk with work on origin is asked
       // whether a human has requested changes on its pull request, and each
@@ -881,7 +888,7 @@ export async function run(
         repoDir: layout.repoDir,
         repo,
         sourceBranch: config.sourceBranch,
-        chunks: resolution.landedChunks,
+        chunks: resolution.reconciliationChunks,
         log: (line) => runLogger.appendOrchestrator(line),
       });
       if (reconciliation.reconciled.length > 0) {

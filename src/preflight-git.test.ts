@@ -371,6 +371,12 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await git(
         target,
         "update-ref",
+        "refs/remotes/origin/sandbar/issue-7-member",
+        "sandbar/issue-7-member",
+      );
+      await git(
+        target,
+        "update-ref",
         "refs/remotes/origin/sandbar/chunk-7-member",
         chunkTip,
       );
