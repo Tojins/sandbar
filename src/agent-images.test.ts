@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -9,12 +11,39 @@ import {
 } from "./agent-providers.js";
 import {
   type BuildOptions,
+  type PreparedAgentArtifacts,
   agentToolsContainerfile,
   buildArgv,
   createAgentImages,
   sweepBranchImages,
 } from "./ensure-images.js";
 import { runScope, variantImageTag } from "./naming.js";
+
+async function fakeAgentArtifacts(
+  providers: readonly (typeof AGENT_PROVIDER_NAMES)[number][],
+): Promise<PreparedAgentArtifacts> {
+  const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-test-"));
+  const sha256: Partial<Record<(typeof AGENT_PROVIDER_NAMES)[number], string>> = {};
+  for (const provider of providers) {
+    const content = `test ${provider}`;
+    await writeFile(join(root, provider), content);
+    sha256[provider] = createHash("sha256").update(content).digest("hex");
+  }
+  return {
+    root,
+    verify: async (provider) => {
+      const actual = createHash("sha256")
+        .update(await readFile(join(root, provider)))
+        .digest("hex");
+      if (actual !== sha256[provider]) {
+        throw new Error(
+          `staged artifact ${provider}/${process.arch} failed re-verification`,
+        );
+      }
+    },
+    dispose: () => rm(root, { recursive: true, force: true }),
+  };
+}
 
 describe("run-owned agent images", () => {
   it("generates a no-context build containing only the routed, pinned tools", async () => {
@@ -23,6 +52,7 @@ describe("run-owned agent images", () => {
       declaredBaseTag: "localhost/app:base",
       providers: ["codex"],
       scope: runScope("/agent-images"),
+      prepareArtifacts: fakeAgentArtifacts,
       inputsLabel: async (tag) => (tag === "localhost/app:base" ? "base-fp" : null),
       build: async (image, opts: BuildOptions) => {
         const root = opts.contextRoot!;
@@ -67,6 +97,7 @@ describe("run-owned agent images", () => {
       declaredBaseTag: "base",
       providers: ["claude"],
       scope: runScope("/unknown-base"),
+      prepareArtifacts: fakeAgentArtifacts,
       inputsLabel: async () => (++reads === 1 ? null : "apparently-present"),
       build: async () => {
         builds += 1;
@@ -87,6 +118,7 @@ describe("run-owned agent images", () => {
       declaredBaseTag: "base",
       providers: ["codex"],
       scope: runScope("/cached-agent-image"),
+      prepareArtifacts: fakeAgentArtifacts,
       inputsLabel: async () => (++reads === 1 ? "base-fp" : fingerprint),
       build: async () => {
         builds += 1;
@@ -106,6 +138,7 @@ describe("run-owned agent images", () => {
       declaredBaseTag: "base",
       providers: ["codex"],
       scope: runScope("/deduplicated-agent-image"),
+      prepareArtifacts: fakeAgentArtifacts,
       inputsLabel: async () => null,
       build: async () => {
         builds += 1;
@@ -124,6 +157,23 @@ describe("run-owned agent images", () => {
     expect(first).toBe(second);
     expect(second).toBe(third);
     expect(builds).toBe(2);
+  });
+
+  it("re-verifies staged tools before augmenting a later variant", async () => {
+    const artifacts = await fakeAgentArtifacts(["codex"]);
+    const images = await createAgentImages({
+      declaredBaseTag: "base",
+      providers: ["codex"],
+      scope: runScope("/reverified-agent-image"),
+      prepareArtifacts: async () => artifacts,
+      inputsLabel: async () => null,
+      build: async () => {},
+      log: () => {},
+    });
+    await writeFile(join(artifacts.root, "codex"), "branch replacement");
+    await expect(images.augment("variant")).rejects.toThrow(
+      /staged artifact codex\/.+ failed re-verification/,
+    );
   });
 
   it("sweeps augmented children before their branch-variant parents", async () => {
@@ -146,6 +196,7 @@ describe("run-owned agent images", () => {
         declaredBaseTag: "broken-base",
         providers: ["codex"],
         scope: runScope("/failed-agent-image"),
+        prepareArtifacts: fakeAgentArtifacts,
         inputsLabel: async () => null,
         build: async () => {
           throw new Error("registry unavailable");

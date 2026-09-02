@@ -47,7 +47,7 @@ import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
 import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, link, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, link, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -92,6 +92,12 @@ const IMAGE_QUERY_TIMEOUT_MS = 30_000;
 // browser image do not want the same ceiling and only the consumer knows which
 // is which.
 export const DEFAULT_BUILD_TIMEOUT_MS = 45 * 60_000;
+
+// Standalone agent releases are large enough to need a generous transfer
+// window, but staging happens while the run owns the single-instance lock. A
+// trickling or stalled CDN response must therefore have a total deadline just
+// like the augment build it replaced.
+export const AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS = 45 * 60_000;
 
 // Images the gate stack references that sandbar does NOT build. Sandbar refuses
 // when one is missing rather than pulling it (#24 D7) — a startup must not do
@@ -504,8 +510,9 @@ export function agentToolsContainerfile(
   return `FROM ${baseTag}\n${pins}\nUSER 0\nRUN command -v git >/dev/null || if command -v apt-get >/dev/null; then apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*; elif command -v apk >/dev/null; then apk add --no-cache git; elif command -v dnf >/dev/null; then dnf install -y git && dnf clean all; else echo 'git is missing and no supported package manager (apt-get, apk, dnf) is available' >&2; exit 1; fi\nRUN uid_user=$(awk -F: '$3 == 1000 { print $1; exit }' /etc/passwd); if [ -n "$uid_user" ] && [ "$uid_user" != agent ]; then sed -i "s/^$uid_user:/agent:/" /etc/passwd; fi; if ! id agent >/dev/null 2>&1; then if command -v useradd >/dev/null; then useradd -u 1000 -m -d /home/agent agent; else adduser -D -u 1000 -h /home/agent agent; fi; fi; mkdir -p /home/agent && chown -R 1000:$(id -g agent) /home/agent\n${copies}\nRUN ${probes} && git --version && test -x /bin/sh && test "$(id -u agent)" = 1000 && test "$(stat -c %u /home/agent)" = 1000\n`;
 }
 
-type PreparedAgentArtifacts = {
+export type PreparedAgentArtifacts = {
   readonly root: string;
+  readonly verify: (provider: AgentProviderName) => Promise<void>;
   readonly dispose: () => Promise<void>;
 };
 
@@ -517,6 +524,7 @@ async function sha256File(path: string): Promise<string> {
 
 async function prepareAgentArtifacts(
   providers: readonly AgentProviderName[],
+  log: (line: string) => void,
 ): Promise<PreparedAgentArtifacts> {
   const arch = process.arch === "x64"
     ? "x64"
@@ -527,36 +535,75 @@ async function prepareAgentArtifacts(
     );
   }
   const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-"));
+  const stagedSha256: Partial<Record<AgentProviderName, string>> = {};
   try {
     for (const provider of providers) {
       const artifact = AGENT_PROVIDER_PACKAGES[provider].artifacts[arch];
       const downloaded = join(root, `${provider}.download`);
-      const response = await fetch(artifact.url);
-      if (!response.ok || response.body === null) {
-        throw new Error(`download returned HTTP ${response.status}`);
-      }
-      await pipeline(Readable.fromWeb(response.body as never), createWriteStream(downloaded));
-      const actual = await sha256File(downloaded);
-      if (actual !== artifact.sha256) {
+      const identity = `${provider}/${arch} from ${artifact.url}`;
+      log(`Downloading agent tool ${identity}...`);
+      try {
+        const response = await fetch(artifact.url, {
+          signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
+        });
+        if (!response.ok || response.body === null) {
+          throw new Error(`download returned HTTP ${response.status}`);
+        }
+        await pipeline(
+          Readable.fromWeb(response.body as never),
+          createWriteStream(downloaded),
+        );
+        const actual = await sha256File(downloaded);
+        if (actual !== artifact.sha256) {
+          throw new Error(
+            `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
+          );
+        }
+        const destination = join(root, provider);
+        if (artifact.archive) {
+          const extractRoot = await mkdtemp(join(root, `${provider}-extracted-`));
+          await exec("tar", ["-xzf", downloaded, "-C", extractRoot]);
+          const binary = (await readdir(extractRoot)).find(
+            (n) => n === provider || n.startsWith(`${provider}-`),
+          );
+          if (!binary) throw new Error(`archive contains no ${provider} binary`);
+          await rename(join(extractRoot, binary), destination);
+        } else {
+          // Keep the pinned download beside the staged executable so every
+          // later augmentation can re-check the driver-owned digest.
+          await copyFile(downloaded, destination);
+        }
+        await chmod(destination, 0o755);
+        stagedSha256[provider] = await sha256File(destination);
+      } catch (err) {
         throw new Error(
-          `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
+          `could not download and stage ${identity}: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
         );
       }
-      const destination = join(root, provider);
-      if (artifact.archive) {
-        const extractRoot = await mkdtemp(join(root, `${provider}-extracted-`));
-        await exec("tar", ["-xzf", downloaded, "-C", extractRoot]);
-        const binary = (await readdir(extractRoot)).find(
-          (n) => n === provider || n.startsWith(`${provider}-`),
-        );
-        if (!binary) throw new Error(`archive contains no ${provider} binary`);
-        await rename(join(extractRoot, binary), destination);
-      } else {
-        await rename(downloaded, destination);
-      }
-      await chmod(destination, 0o755);
     }
-    return { root, dispose: () => rm(root, { recursive: true, force: true }) };
+    return {
+      root,
+      verify: async (provider) => {
+        const artifact = AGENT_PROVIDER_PACKAGES[provider].artifacts[arch];
+        const downloaded = await sha256File(join(root, `${provider}.download`));
+        if (downloaded !== artifact.sha256) {
+          throw new Error(
+            `staged download ${provider}/${arch} failed pin re-verification ` +
+              `(expected ${artifact.sha256}, got ${downloaded})`,
+          );
+        }
+        const expected = stagedSha256[provider];
+        const actual = await sha256File(join(root, provider));
+        if (expected === undefined || actual !== expected) {
+          throw new Error(
+            `staged artifact ${provider}/${arch} failed re-verification ` +
+              `(expected ${expected}, got ${actual})`,
+          );
+        }
+      },
+      dispose: () => rm(root, { recursive: true, force: true }),
+    };
   } catch (err) {
     await rm(root, { recursive: true, force: true });
     throw new SandbarError(
@@ -593,13 +640,7 @@ export async function createAgentImages(opts: {
   try {
     artifacts = opts.prepareArtifacts !== undefined
       ? await opts.prepareArtifacts(opts.providers)
-      : opts.build === undefined
-        ? await prepareAgentArtifacts(opts.providers)
-        : await (async () => {
-          const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-test-"));
-          for (const provider of opts.providers) await writeFile(join(root, provider), "");
-          return { root, dispose: () => rm(root, { recursive: true, force: true }) };
-        })();
+      : await prepareAgentArtifacts(opts.providers, log);
   } catch (err) {
     throw new SandbarError(
       `could not augment image '${opts.declaredBaseTag}' with agent tools ${toolset}: ${err instanceof Error ? err.message : String(err)}`,
@@ -632,8 +673,10 @@ export async function createAgentImages(opts: {
           try {
             await writeFile(join(contextRoot, "Containerfile"), containerfile);
             for (const provider of opts.providers) {
+              const staged = join(artifacts.root, provider);
+              await artifacts.verify(provider);
               await link(
-                join(artifacts.root, provider),
+                staged,
                 join(contextRoot, provider),
               );
             }

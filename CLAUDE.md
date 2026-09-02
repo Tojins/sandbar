@@ -428,9 +428,10 @@ run it, and around again only on exit 75.
   either, so their own `origin/<sourceBranch>` would answer for the run before
   the landing. `preflight.ts`'s header owns both halves.
 
-- **One image, both roles** (agent sandbox and gate pod member): it defines an
-  `agent` user at uid 1000 and keeps default `USER` root — `checkWorktreeImageUids`
-  refuses the run if that changes. glibc, pinned to the host's node major,
+- **One image, both roles** (agent sandbox and gate pod member): the driver's
+  augmentation supplies the sandbox's uid-1000 `agent` user, while the base
+  keeps default `USER` root — `checkWorktreeImageUids` refuses the run if that
+  changes. glibc, pinned to the host's node major,
   because `node_modules` is installed on the host by the `onWorktreeReady` hook
   and shared through the bind mount.
 - **The gate runs the podman-layer tests over the host's socket (#48)** —
