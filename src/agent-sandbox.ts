@@ -140,6 +140,22 @@ export type AgentUsage = {
   readonly reasoningTokens?: number;
 };
 
+// The one spelling of provider usage fields in logs, kept beside the
+// measurement contract so every consumer preserves omission and field order.
+export const formatUsageFields = (usage: AgentUsage | undefined): string => {
+  if (usage === undefined) return "";
+  return [
+    ["inputTokens", usage.inputTokens],
+    ["cachedInputTokens", usage.cachedInputTokens],
+    ["outputTokens", usage.outputTokens],
+    ["apiMs", usage.apiMs],
+    ["reasoningTokens", usage.reasoningTokens],
+  ]
+    .filter((field): field is [string, number] => field[1] !== undefined)
+    .map(([name, value]) => ` ${name}=${value}`)
+    .join("");
+};
+
 export type AgentProvider = {
   readonly name: string;
   readonly env: Record<string, string>;
@@ -511,6 +527,20 @@ const usageEvent = (candidate: AgentUsage): ParsedStreamEvent | undefined => {
   return Object.keys(usage).length === 0 ? undefined : { type: "usage", usage };
 };
 
+const claudeReasoningTokens = (modelUsage: unknown): number | undefined => {
+  if (modelUsage === null || typeof modelUsage !== "object") return undefined;
+  const measurements = Object.values(modelUsage)
+    .map((entry) =>
+      entry !== null && typeof entry === "object"
+        ? finiteNumber(entry.thinkingTokens)
+        : undefined,
+    )
+    .filter((value): value is number => value !== undefined);
+  return measurements.length === 0
+    ? undefined
+    : measurements.reduce((sum, value) => sum + value, 0);
+};
+
 export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
   if (!line.startsWith("{")) return [];
   try {
@@ -544,11 +574,15 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
       return events;
     }
     if (obj.type === "result" && typeof obj.result === "string") {
+      // Top-level usage covers Claude's main loop, while modelUsage includes
+      // Task subagents, sidechains and internal calls. Its thinking-token sum
+      // therefore has deliberately broader scope than the other token fields.
       const measurement = usageEvent({
         inputTokens: finiteNumber(obj.usage?.input_tokens),
         cachedInputTokens: finiteNumber(obj.usage?.cache_read_input_tokens),
         outputTokens: finiteNumber(obj.usage?.output_tokens),
         apiMs: finiteNumber(obj.duration_api_ms),
+        reasoningTokens: claudeReasoningTokens(obj.modelUsage),
       });
       return [
         { type: "result", result: obj.result },

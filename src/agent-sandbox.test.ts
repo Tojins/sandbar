@@ -39,6 +39,7 @@ import {
   createAgentSpeechAccumulator,
   createSandbox,
   defaultImageName,
+  formatUsageFields,
   killOnAbort,
   parseCodexJsonLine,
   parseStreamJsonLine,
@@ -146,6 +147,11 @@ describe("parseStreamJsonLine", () => {
         output_tokens: 80,
       },
       duration_api_ms: 4321,
+      modelUsage: {
+        "claude-opus": { thinkingTokens: 40 },
+        "claude-haiku": { thinkingTokens: 5 },
+        "older-turn": { outputTokens: 10 },
+      },
     }));
     expect(events).toEqual([
       { type: "result", result: "done" },
@@ -156,9 +162,21 @@ describe("parseStreamJsonLine", () => {
           cachedInputTokens: 900,
           outputTokens: 80,
           apiMs: 4321,
+          reasoningTokens: 45,
         },
       },
     ]);
+  });
+
+  it("omits Claude reasoning tokens when no model usage entry reports them", () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: "result",
+      result: "done",
+      modelUsage: {
+        "older-turn": { outputTokens: 10 },
+        malformed: { thinkingTokens: "5" },
+      },
+    }))).toEqual([{ type: "result", result: "done" }]);
   });
 
   it("keeps the result and omits malformed Claude usage fields", () => {
@@ -183,6 +201,26 @@ describe("parseStreamJsonLine", () => {
 
   it("returns [] for an unknown top-level type", () => {
     expect(parseStreamJsonLine(JSON.stringify({ type: "future_event" }))).toEqual([]);
+  });
+});
+
+describe("formatUsageFields", () => {
+  it.each([
+    ["absent usage", undefined, ""],
+    ["partial usage", { cachedInputTokens: 0, outputTokens: 8 }, " cachedInputTokens=0 outputTokens=8"],
+    [
+      "full usage",
+      {
+        inputTokens: 10,
+        cachedInputTokens: 7,
+        outputTokens: 3,
+        apiMs: 250,
+        reasoningTokens: 2,
+      },
+      " inputTokens=10 cachedInputTokens=7 outputTokens=3 apiMs=250 reasoningTokens=2",
+    ],
+  ])("renders %s", (_name, usage, expected) => {
+    expect(formatUsageFields(usage)).toBe(expected);
   });
 });
 

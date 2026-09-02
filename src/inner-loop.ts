@@ -36,7 +36,7 @@ import {
   buildAgentProvider,
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
-import { agentPartialOutput, podman } from "./agent-sandbox.js";
+import { agentPartialOutput, formatUsageFields, podman } from "./agent-sandbox.js";
 import type { AgentUsage, Sandbox, SandboxHooks } from "./agent-sandbox.js";
 
 import type { ChunkTarget } from "./chunks.js";
@@ -96,20 +96,6 @@ import {
   buildPrompt,
   buildReviewerPrompts,
 } from "./prompt.js";
-
-const formatUsageFields = (usage: AgentUsage | undefined): string => {
-  if (usage === undefined) return "";
-  return [
-    ["inputTokens", usage.inputTokens],
-    ["cachedInputTokens", usage.cachedInputTokens],
-    ["outputTokens", usage.outputTokens],
-    ["apiMs", usage.apiMs],
-    ["reasoningTokens", usage.reasoningTokens],
-  ]
-    .filter((field): field is [string, number] => field[1] !== undefined)
-    .map(([name, value]) => ` ${name}=${value}`)
-    .join("");
-};
 
 export const FAILURE_TAIL_LINES = 200;
 
