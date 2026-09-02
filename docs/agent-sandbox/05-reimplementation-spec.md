@@ -47,7 +47,7 @@ export function createSandbox(options: {
 `RunOptions` needs `{ agent, prompt, name?, completionSignal,
 idleTimeoutSeconds?, completionTimeoutSeconds? }`. `completionSignal` is a
 required string list; `[]` means process exit or idle timeout ends the run.
-`SandboxRunResult` carries `stdout`, `commits`, optional `signalMs`, and optional
+`SandboxRunResult` carries `stdout`, `commits`, optional `signalMs`, and
 `maxGapMs`.
 
 ## Reduced control flow (sandbar's path only)
@@ -153,8 +153,7 @@ worktree create/remove/prune/dirty-check; copyToWorktree (Linux COW); the
 two-mount git resolution for worktrees; `.sandbar/.env` resolution; git
 identity propagation; `baseHead..refs/heads/<branch>` commit capture; the claude
 stream-json command + `parseStreamJsonLine`; the two-phase idle/completion
-timeout; the `result || stdout` fallback; the non-zero-exit error-detail
-ordering.
+timeout; parsed-speech-only output; the non-zero-exit error-detail ordering.
 
 ## Load-bearing 0.7.0 behaviours (the bug-fixed baseline — don't regress them)
 
@@ -170,9 +169,9 @@ history in [07](./07-upstream-fixes-since-0.5.12.md):
   and **takes down the whole `Promise.allSettled` cycle**.
 - 🔴 **F5 — two-phase timeout in `run`.** Beyond the 600 s idle timer, watch the
   stream for the completion signal; once seen, switch to a ~60 s completion-grace
-  timer that **resolves the run successfully with the collected commits** on
-  expiry (instead of a 10-minute `AgentIdleTimeoutError` that discards commits
-  when a `gh`/`git` child holds the pipe open).
+  timer that rejects on expiry with an `AgentError` naming the signal and carrying
+  the partial parsed speech. A process that announces completion but does not exit
+  is an infrastructure failure; a clean exit still succeeds with its commits.
 - 🟡 **F2 — retry git-setup on exit 126/137.** Carry `exitCode` on the exec
   error; retry only the `run`-phase git-setup commands (2×, 250 ms apart) on
   126/137 (transient container-exec races under parallelism). Not commit
@@ -213,9 +212,9 @@ Additional cases the upstream tests prove are necessary (see
    command in `run()`, *independent of whether hooks are present* (top-trap #1).
 6. **Idle timer resets on unparsed lines** — a stream of non-JSON noise within
    the window must NOT trip the idle timeout (top-trap #2).
-7. **`result || stdout` fallback** — a run with no `result` event still returns
-   the raw stdout (so the promise token is found there); a `result` event
-   overrides it (top-trap #3).
+7. **Parsed-speech-only output** — a run with no parsed `text` or `result` event
+   returns `""`, never raw JSONL transport; a `result` event overrides accumulated
+   text (top-trap #3).
 8. **Non-zero-exit error tiering** — stderr → resultText → stdout-tail, with the
    provider name and exit code in the message (gotcha B).
 9. **Worktree reuse** — a second `createSandbox` on the same branch reuses the

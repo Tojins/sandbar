@@ -86,8 +86,10 @@ short **completion-grace** timer (`DEFAULT_COMPLETION_TIMEOUT_SECONDS = 60`) tha
 on expiry, **resolves the run successfully** with `resultText || accumulatedOutput`
 and the commits. Resets on each later line; a clean exit wins the race, so healthy
 runs add zero latency. Iteration-count-independent, so `maxIterations: 1` did not
-dodge it. → baseline: [03 §two-phase timeout](./03-claude-agent-provider.md),
-[06 §B](./06-test-derived-gotchas.md).
+dodge it. This history records upstream's policy; the sandbar port instead
+rejects grace expiry as an infrastructure fault and preserves partial speech.
+→ baseline: [03 §two-phase timeout](./03-claude-agent-provider.md), [06
+§B](./06-test-derived-gotchas.md).
 
 ### F6 ⚪ `ff-only` refresh of a reused clean worktree · 0.7.0 `c6880a4`
 On the clean-reuse path, `0.7.0` runs `git fetch origin <branch>` +
@@ -117,14 +119,16 @@ CPU); `groups`/`devices` are irrelevant. → [02 §options](./02-podman-provider
 ## What the re-baseline did NOT change
 
 The consumed-surface behaviours below were identical in `0.5.12` and `0.7.0`, so
-the original reverse-engineering carried over unchanged — `parseStreamJsonLine`
-(the 4-tool allowlist, `result` event shape, `[]` on non-`{`/malformed; `0.7.0`
-adds a Codex-only `usage` variant Claude never emits), the `result || stdout`
-fallback, the non-zero-exit three-tier error detail, the
+the original reverse-engineering described both versions accurately —
+`parseStreamJsonLine` (the 4-tool allowlist, `result` event shape, `[]` on
+non-`{`/malformed; `0.7.0` adds a Codex-only `usage` variant Claude never emits),
+the `result || stdout` fallback, the non-zero-exit three-tier error detail, the
 `baseHead..refs/heads/<branch> --reverse` commit capture, the two-mount git
 resolution, `NO_CONFIG_LOCK_FLAGS` on `worktree add`, `pruneStale` realpath
 safety, the `.sandbar/.env` precedence rules, and all load-bearing
-names/layout in the [README](./README.md). The agent-run loop and stream-json
-parser remain the most likely to drift with the `claude` CLI — re-verify those
-first if the dependency is bumped again before the port lands (see
+names/layout in the [README](./README.md). Sandbar's current port deliberately
+removed the raw-output fallback; [03](./03-claude-agent-provider.md) records the
+parsed-speech-only contract. The agent-run loop and stream-json parser remain the
+most likely to drift with the `claude` CLI — re-verify those first if the
+dependency is bumped again before the port lands (see
 [06 §"How to keep these current"](./06-test-derived-gotchas.md)).
