@@ -22,6 +22,7 @@ import {
   deleteMergedSandbarBranches,
   gatherState,
   readConfigStaleness,
+  runPreflight,
 } from "./preflight.js";
 import { type RepoLayout, ensureRepoCache, repoLayout } from "./repo-cache.js";
 
@@ -106,6 +107,23 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // merger, so the set the credential check walks is the one every
     // pre-#72 config produces.
     agentProviders: ["claude"] as readonly AgentProviderName[],
+  });
+
+  it("fetches origin member refs before later preflight checks", async () => {
+    await git(target, "update-ref", "refs/heads/sandbar/member-7", "HEAD");
+
+    await runPreflight(
+      cfg(layoutAt(target)) as Parameters<typeof runPreflight>[0],
+    ).catch(() => undefined);
+
+    await expect(
+      git(
+        target,
+        "show-ref",
+        "--verify",
+        "refs/remotes/origin/sandbar/member-7",
+      ),
+    ).resolves.toBeDefined();
   });
 
   // The highest-stakes half, and the one that qualified #32's fix: #32 put this

@@ -858,7 +858,11 @@ describe("resolvePlan git membership safety (#93)", () => {
 // origin, what each branch carries or what is at its tip, and nothing that
 // lists issues could see one filed sixty seconds ago.
 describe("resolvePlan landed chunks (#63, #64)", () => {
-  it("attributes an inherited member only to its exact derived chunk", () => {
+  it("intersects inherited refs with each derived chunk's component", () => {
+    // Inheritance alone cannot make #10 a member of #20's edge-disjoint
+    // component: landedChunksOf provides that independent boundary. The title-
+    // drift case above is where exact derived-branch membership is the sole
+    // guard, because the old branch's member remains in the same component.
     const r = resolvePlan(
       [issue(10, "", { title: "Alpha" }), issue(20, "", { title: "Beta" })],
       facts({ 10: {}, 20: {} }),

@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { findLandedChunkBranches } from "./chunk-reconcile.js";
+import { readChunkMembers } from "./plan-resolver.js";
 
 const exec = promisify(execFile);
 
@@ -80,6 +81,24 @@ describe("findLandedChunkBranches (real git)", () => {
     expect(await findLandedChunkBranches(cache, "main")).toEqual([
       "sandbar/chunk-42-landed",
     ]);
+  });
+
+  it("fetches member refs beside chunk refs before deriving membership", async () => {
+    await git(
+      cache,
+      "push",
+      "origin",
+      "refs/heads/sandbar/chunk-42-landed:refs/heads/sandbar/member-42",
+    );
+
+    await findLandedChunkBranches(cache, "main");
+
+    expect(await readChunkMembers(cache)).toEqual(
+      new Map([
+        ["sandbar/chunk-42-landed", new Set([42])],
+        ["sandbar/chunk-77-open", new Set([42])],
+      ]),
+    );
   });
 
   it("says nothing has landed when the repository has no chunk branch at all", async () => {

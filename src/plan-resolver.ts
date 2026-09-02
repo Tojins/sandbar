@@ -575,7 +575,6 @@ async function ghIssueBatch(
 // Used for both blockers (the dependency gate) and the candidates themselves
 // (the stale-search CLOSED guard, #16). GraphQL node lookups are strongly
 // consistent, unlike the search backend `fetchCandidates` lists through.
-//
 export async function fetchIssueStates(
   numbers: readonly number[],
   repo: RepoRef,
@@ -630,10 +629,12 @@ export async function buildPlan(
 ): Promise<PlanResolution> {
   const excluded = options.excluded ?? new Set<number>();
   const k = options.k ?? DEFAULT_K;
-  // One containment reading serves planning and reconciliation. The member-ref
-  // namespace is written only by chunk landing and its refs are deleted with
-  // the chunk, so no source-history exclusion or landing-shape inference is
-  // needed here.
+  // One containment reading serves planning and reconciliation. A member ref
+  // retained with an older chunk after a failed close can also be inherited by
+  // every later chunk based on the landed source, so this intentionally does
+  // not exclude source history. The broad union is safe for de-queueing; exact
+  // derived-branch membership and `landedChunksOf`'s component intersection
+  // independently keep inherited refs out of another chunk's review and close.
   const chunkMembers = await readChunkMembers(options.repoDir);
   const chunkMemberNumbers = [
     ...new Set([...chunkMembers.values()].flatMap((ns) => [...ns])),

@@ -222,9 +222,13 @@ export function sandboxContainerNameFor(
 // The dedicated member namespace is deliberately narrower than preserving an
 // issue branch under its ordinary name. Issue refs can be parked or pushed by
 // other lifecycle paths, and their title-bearing names can drift; only a chunk
-// landing writes `member-<n>`, and wrap-up deletes it with that chunk. A
-// contained member ref is therefore an unambiguous landing record rather than
-// merely an issue branch that happens to point into the chunk.
+// landing writes `member-<n>`. A successful wrap-up deletes it with that chunk;
+// a chunk kept after a failed close retains it for recovery, so later chunks
+// based on the landed source may inherit the ref. A contained member ref is
+// nevertheless an unambiguous landing record rather than merely an issue
+// branch that happens to point into the chunk. Planning deliberately accepts
+// that broad containment for de-queueing, while exact derived-branch membership
+// plus component intersection guard review and closure (`plan-resolver.ts`).
 //
 // A chunk is a connected component of review-gated issues under the
 // `## Blocked by` graph (`chunks.ts`), and `<root>` is that component's

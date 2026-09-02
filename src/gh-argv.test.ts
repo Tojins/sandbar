@@ -257,6 +257,41 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
     });
   });
 
+  it("atomically deletes the chunk ref and its strict member refs", async () => {
+    await writeFile(
+      join(shimBin, "git"),
+      [
+        "#!/bin/sh",
+        `log='${argvLog}'`,
+        'printf "[" >> "$log"',
+        'sep=""',
+        'for a in "$@"; do',
+        '  printf \'%s"%s"\' "$sep" "$a" >> "$log"',
+        '  sep=","',
+        "done",
+        'printf "]\\n" >> "$log"',
+      ].join("\n") + "\n",
+      { mode: 0o755 },
+    );
+    const adapter = chunkForgeWrites({
+      repo: REPO,
+      gitCwd: shimBin,
+      errPrefix: "test",
+    });
+
+    await adapter.deleteChunkBranch("sandbar/chunk-42-root", [42, 43]);
+
+    expect(await calls()).toEqual([[
+      "push",
+      "--atomic",
+      "origin",
+      "--delete",
+      "refs/heads/sandbar/chunk-42-root",
+      "refs/heads/sandbar/member-42",
+      "refs/heads/sandbar/member-43",
+    ]]);
+  });
+
   // #64 — the two READS that decide which chunks are acted on at all. A wrong
   // repo here is SILENT: it answers "nothing to land, nothing to reconcile" and
   // the run simply never does either.
