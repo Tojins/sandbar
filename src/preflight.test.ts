@@ -3,6 +3,7 @@ import type { ResolvedStackContainer } from "./config.js";
 import {
   absoluteMountSources,
   checkInvariants,
+  classifySandbarBranches,
   type ConfigStaleness,
   type RepoState,
   staleConfigWarning,
@@ -22,6 +23,7 @@ const cleanState: RepoState = {
   unmergedIssueBranches: [],
   discardedIssueBranches: [],
   resumableIssueBranches: [],
+  parkedIssueBranches: [],
   configuredRepo: { owner: "acme", name: "app" },
   originUrl: "https://github.com/acme/app.git",
   originRepo: { owner: "acme", name: "app" },
@@ -324,6 +326,17 @@ describe("checkInvariants", () => {
     expect(f).toEqual([]);
   });
 
+  it("does not flag parked issue branches (open but not queued → kept, not refused)", () => {
+    // The branch is the resume copy a re-queue continues from; refusing over
+    // it forces the operator to delete exactly what finalise's parking comment
+    // told them to push a fix on.
+    const f = failures({
+      ...cleanState,
+      parkedIssueBranches: ["sandbar/issue-76-parked"],
+    });
+    expect(f).toEqual([]);
+  });
+
   it("flags genuinely-unmerged branches but not resumable ones alongside them", () => {
     const f = failures({
       ...cleanState,
@@ -505,5 +518,84 @@ describe("staleConfigWarning — a landed config change that never arrived (#66)
     expect(
       staleConfigWarning(stale({ configPath: null, touchingConfig: 0 })),
     ).toBeNull();
+  });
+});
+
+// The four-way split, table-tested on the pure function with every git and
+// tracker fact handed in. What each class MEANS is the module header's; what
+// this pins is which fact decides each branch and in what order.
+describe("classifySandbarBranches", () => {
+  const classify = (
+    branches: readonly string[],
+    over: Partial<Parameters<typeof classifySandbarBranches>[0]> = {},
+  ) =>
+    classifySandbarBranches({
+      branches,
+      upstreamTracks: new Map(),
+      openReadyIssues: new Set(),
+      chunkMemberIssues: new Set(),
+      openIssues: new Set(),
+      ...over,
+    });
+
+  it("resumable: an open `ready-for-agent` issue's branch", () => {
+    const r = classify(["sandbar/issue-5-a"], { openReadyIssues: new Set([5]) });
+    expect(r).toEqual({ unmerged: [], discarded: [], resumable: ["sandbar/issue-5-a"], parked: [] });
+  });
+
+  it("parked: an open issue that is not queued keeps its branch and is not refused", () => {
+    // `queued`, `needs-info`, `agent-stuck` — preflight does not read the
+    // label, only that the issue is still open.
+    const r = classify(["sandbar/issue-76-held", "sandbar/issue-93-stuck"], {
+      openIssues: new Set([76, 93]),
+    });
+    expect(r).toEqual({
+      unmerged: [],
+      discarded: [],
+      resumable: [],
+      parked: ["sandbar/issue-76-held", "sandbar/issue-93-stuck"],
+    });
+  });
+
+  it("unmerged: a closed issue's branch, and one the tracker could not vouch for", () => {
+    // Fail-closed: an issue absent from `openIssues` — closed, or a lookup that
+    // threw and left the set empty — is refused exactly as before the class
+    // existed.
+    const r = classify(["sandbar/issue-8-closed"]);
+    expect(r.unmerged).toEqual(["sandbar/issue-8-closed"]);
+    expect(r.parked).toEqual([]);
+  });
+
+  it("ready wins over open: the planner's set decides before the state lookup", () => {
+    const r = classify(["sandbar/issue-5-a"], {
+      openReadyIssues: new Set([5]),
+      openIssues: new Set([5]),
+    });
+    expect(r.resumable).toEqual(["sandbar/issue-5-a"]);
+    expect(r.parked).toEqual([]);
+  });
+
+  it("discarded: `[gone]` upstream is decided before any tracker fact", () => {
+    const r = classify(["sandbar/issue-5-a"], {
+      upstreamTracks: new Map([["sandbar/issue-5-a", "[gone]"]]),
+      openReadyIssues: new Set([5]),
+      openIssues: new Set([5]),
+    });
+    expect(r.discarded).toEqual(["sandbar/issue-5-a"]);
+    expect(r.resumable).toEqual([]);
+    expect(r.parked).toEqual([]);
+  });
+
+  it("chunk members and chunk branches are none of the four", () => {
+    const r = classify(["sandbar/issue-5-member", "sandbar/chunk-5-root"], {
+      chunkMemberIssues: new Set([5]),
+      openIssues: new Set([5]),
+    });
+    expect(r).toEqual({ unmerged: [], discarded: [], resumable: [], parked: [] });
+  });
+
+  it("an unparseable issue branch is unmerged even when nothing is closed", () => {
+    const r = classify(["sandbar/issue-notanumber"], { openIssues: new Set([1]) });
+    expect(r.unmerged).toEqual(["sandbar/issue-notanumber"]);
   });
 });

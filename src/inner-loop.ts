@@ -25,7 +25,9 @@
 // What a FAILED reviewer run means is reviewer-run.ts's policy (#41); this
 // file only adapts `sandbox.run`'s throw into the shape that policy
 // classifies, which is why the try/catch below returns a value instead of
-// substituting prose.
+// substituting prose. The implementer prompt also receives the configured
+// coding-standards path here; prompt.ts probes it in the issue worktree so a
+// branch can introduce the standards it is expected to follow (#78).
 
 import { join } from "node:path";
 
@@ -45,7 +47,7 @@ import {
   resolveSandboxImage,
 } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
-import { summarizeGateFailure } from "./gate.js";
+import { formatGateFields, summarizeGateFailure } from "./gate.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
 import {
   type HeadMismatch,
@@ -88,6 +90,7 @@ import {
 } from "./reviewer-run.js";
 import type { RepoLayout } from "./repo-cache.js";
 import type { RepoRef } from "./repo-ref.js";
+import { durationField, startTimer } from "./timing.js";
 import {
   type ProjectAnchorOptions,
   buildPrompt,
@@ -291,6 +294,16 @@ async function runSandboxCycle(
   let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
 
+  // Everything from here to a standing sandbox + gate stack is SETUP (#82), and
+  // until it was measured it was the largest block of a cycle with nothing
+  // inside it: six minutes and forty-one seconds between `plan:` and the first
+  // `gate-1` line, covering the branch seed, the worktree (with the host's
+  // `onWorktreeReady` hook), two container bringups, the implementer and the
+  // gate, reported as one gap. Six of #77's ideas bet on the setup half of that
+  // blob against an ESTIMATE of "under 2 min"; this is the number they need.
+  const setupTimer = startTimer();
+  let worktreeMs = 0;
+
   try {
     // Seed the issue branch off origin — never the host's local refs, so the
     // sandbox cannot inherit cwd's in-progress state. Idempotent. Off
@@ -328,6 +341,7 @@ async function runSandboxCycle(
     // Worktree first (fast git ops), then container bringups in parallel: the
     // stack's mounts resolve against this worktree and must see its files on
     // disk at container start (#20).
+    const worktreeTimer = startTimer();
     const worktreePath = await agentSandbox.prepareWorktree({
       branch: issue.branch,
       // Explicit, not `process.cwd()` (#34), and one object rather than two
@@ -339,6 +353,7 @@ async function runSandboxCycle(
       hooks: opts.hooks,
       copyToWorktree: [...opts.copyToWorktree],
     });
+    worktreeMs = worktreeTimer();
 
     // The sandbox's siblings (#44). Everything about them is derived from the
     // `inSandbox` subset, which is empty for every consumer that declares none
@@ -356,8 +371,24 @@ async function runSandboxCycle(
     if (sbxContainers.length > 0) await prepareSandboxLogDir(sandboxLogDir);
     const holder: { stack: SandboxStack | null } = { stack: null };
 
+    // Two timers, not one: the sandbox and the gate stack come up in PARALLEL,
+    // so a single number for the pair would say how long the slower one took
+    // and nothing about which it was — which is exactly the question §3.C's
+    // warm-pool ideas turn on.
+    let sandboxMs: number | null = null;
+    let stackMs: number | null = null;
+    // `.finally` rather than a `try`/`finally` around each arm's body: an
+    // `async` function's `finally` runs at the RETURN, before the implicit
+    // await of the promise it returns, so wrapping `return createSandbox(…)`
+    // that way would stop the clock the moment the call was made. On the
+    // promise it stops when the promise settles, which is what "how long did
+    // the bringup take" means.
+    const stamp = <T,>(pr: Promise<T>, set: (ms: number) => void): Promise<T> => {
+      const t = startTimer();
+      return pr.finally(() => set(t()));
+    };
     const [sandboxResult, stackResult] = await Promise.allSettled([
-      (async () => {
+      stamp((async () => {
         // The sandbox's own image is a function of the branch too (#46), and
         // the worktree above is what makes that answerable here: it is on disk
         // before this line, which is all the fingerprint needs. Resolved once
@@ -430,8 +461,10 @@ async function runSandboxCycle(
               }
             : {}),
         });
-      })(),
-      startStack({
+      })(), (ms) => {
+        sandboxMs = ms;
+      }),
+      stamp(startStack({
         stackId: issue.id,
         scope: config.scope,
         spec: config.gateStack,
@@ -442,6 +475,8 @@ async function runSandboxCycle(
         ...(branchImages
           ? { images: (only: ReadonlySet<string>) => branchImages.resolve(worktreePath, only) }
           : {}),
+      }), (ms) => {
+        stackMs = ms;
       }),
     ]);
     // Read out BEFORE the throw below, not after it. The callback runs inside
@@ -465,6 +500,15 @@ async function runSandboxCycle(
       throw sandboxResult.status === "rejected"
         ? sandboxResult.reason
         : (stackResult as PromiseRejectedResult).reason;
+    }
+
+    if (opts.onOrchestratorLog) {
+      await opts.onOrchestratorLog(
+        `issue=${issue.id} setup ${durationField(setupTimer())} ` +
+          `worktreeMs=${worktreeMs}` +
+          (sandboxMs === null ? "" : ` sandboxMs=${sandboxMs}`) +
+          (stackMs === null ? "" : ` stackMs=${stackMs}`),
+      );
     }
 
     // startStack already registered stack.stop with the cleanup registry before
@@ -629,6 +673,7 @@ async function runImplementer(
       worktreePath: sandbox.worktreePath,
       lastFailureTrace: action.failureTrace,
       base: ctx.base,
+      codingStandardsPath: config.codingStandardsPath,
       ...(action.extraReprompt !== null ? { extraReprompt: action.extraReprompt } : {}),
       ...(action.latestReviewerProse !== null
         ? { latestReviewerProse: action.latestReviewerProse }
@@ -638,6 +683,10 @@ async function runImplementer(
     anchorOpts,
   );
 
+  // Covers the nudge below too, when one runs: the whole cost of the attempt's
+  // agent leg, which is what every #77 idea trading implementer minutes for
+  // reviewer rounds is spending (#82).
+  const implementerTimer = startTimer();
   const run = await sandbox.run({
     name: `implementer-${issue.id}-attempt-${action.attempt}`,
     maxIterations: 1,
@@ -706,6 +755,11 @@ async function runImplementer(
       );
     }
   }
+  // Stopped BEFORE the two git reads below: they are the state machine's
+  // inputs, not the agent's cost, and folding them in would inflate every
+  // implementer number by work the agent never did.
+  const implementerMs = implementerTimer();
+
   // Read here, not in the gate: a COMPLETE claim over a dirty tree should never
   // cost a stack bringup, and the state machine wants the paths to re-prompt
   // with (#24 D1). Read on every signal so the SM stays the only place that
@@ -720,6 +774,17 @@ async function runImplementer(
     dirtyWorktreePaths(ctx.worktreePath),
     headMismatch(ctx.worktreePath, issue.branch),
   ]);
+  if (opts.onOrchestratorLog) {
+    await opts.onOrchestratorLog(
+      `issue=${issue.id} attempt=${action.attempt} implementer ` +
+        `signal=${signal.kind} commits=${run.commits.length} ` +
+        `${durationField(implementerMs)}` +
+        // Absent when the agent never emitted `<promise>COMPLETE</promise>` —
+        // it escalated, it was killed idle, or the exec simply ended. Omitted
+        // rather than zeroed (#82).
+        (run.signalMs === undefined ? "" : ` signalMs=${run.signalMs}`),
+    );
+  }
   return { kind: "implementer-result", signal, dirtyPaths, offBranch };
 }
 
@@ -730,8 +795,11 @@ async function runGate1(
   const { issue, opts, gateStack } = ctx;
   const gate1 = await gateStack.runGate();
   if (opts.onOrchestratorLog) {
+    // `formatGateFields` renders the three fields this line already carried, in
+    // the same order, then the timings (#82) — so the prefix is byte-identical
+    // and the new fields are appended.
     await opts.onOrchestratorLog(
-      `issue=${issue.id} attempt=${action.attempt} gate-1 ok=${gate1.ok} exitCode=${gate1.exitCode} failedStep=${gate1.failedStep ?? "-"}`,
+      `issue=${issue.id} attempt=${action.attempt} gate-1 ${formatGateFields(gate1)}`,
     );
   }
   return {
@@ -764,6 +832,10 @@ async function runReviewer(
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
   };
+  // The whole round — both passes and every retried invocation inside them.
+  // This is the unit every #77 §3.A idea removes, and at 10.2 minutes measured
+  // end to end it is ~60% of an issue.
+  const roundTimer = startTimer();
   const reviewerPrompts = await buildReviewerPrompts(reviewerPromptInputs);
   const runPass = async (
     pass: ReviewerPass,
@@ -776,6 +848,23 @@ async function runReviewer(
       // concurrently — and rebuilding it would restart the whole issue from
       // attempt 1 through the HARD-ERROR path, discarding a green gate to
       // re-run a reviewer.
+      // One line per INVOCATION, not per round (#82): a round is up to two
+      // sequential calls on two different models under one provider (#19), and
+      // §3.B's pass-order, parallel-pass and per-round-model ideas all need the
+      // two sets of minutes apart. `model=` and `provider=` are on the line for
+      // the same reason — the number is meaningless without knowing which model
+      // spent it, and both are per-call config a stats reader cannot recover.
+      const passTimer = startTimer();
+      const logPass = async (signalMs: number | undefined): Promise<void> => {
+        if (!opts.onOrchestratorLog) return;
+        await opts.onOrchestratorLog(
+          `issue=${issue.id} attempt=${action.attempt} reviewer ` +
+            `round=${action.reviewRound} pass=${pass} invocation=${invocation} ` +
+            `provider=${config.reviewerAgent} model=${modelId} ` +
+            `${durationField(passTimer())}` +
+            (signalMs === undefined ? "" : ` signalMs=${signalMs}`),
+        );
+      };
       try {
         const reviewerRun = await sandbox.run({
           name:
@@ -789,8 +878,13 @@ async function runReviewer(
           }),
           prompt,
         });
+        await logPass(reviewerRun.signalMs);
         return { output: reviewerRun.stdout, error: null };
       } catch (err) {
+        // A failed invocation is timed too: an invocation that burned the ten
+        // minutes and died is the expensive case, and one that fell over in a
+        // second is a different fault entirely.
+        await logPass(undefined);
         // The bytes the agent had emitted before it failed ride out on the
         // error (#41, agent-sandbox F9). Without them a reviewer that emitted
         // a verdict and then died is indistinguishable from one that emitted
@@ -857,7 +951,8 @@ async function runReviewer(
     (failed
       ? `pass=${failed.pass} harness-failed invocations=${failed.invocations} `
       : "") +
-    `correctness=${decision.correctness} followup=${decision.followup}` +
+    `correctness=${decision.correctness} followup=${decision.followup} ` +
+    durationField(roundTimer()) +
     (failed ? " (round not consumed)" : "");
   if (failed) console.error(`  ${line}`);
   if (opts.onOrchestratorLog) {

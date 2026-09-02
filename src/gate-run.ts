@@ -60,7 +60,8 @@ import {
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
 import { SandbarError, faultDetail } from "./errors.js";
-import { summarizeGateFailure } from "./gate.js";
+import { formatGateSteps, summarizeGateFailure } from "./gate.js";
+import { durationField } from "./timing.js";
 import {
   ContainerBringupError,
   type KeptStack,
@@ -580,6 +581,22 @@ async function gate(
   }
 
   const result = await stack.runGate();
+
+  // PRINTED, unlike the other three consumers of these timings (#82). This
+  // command suspends the lock and the log tree (#45), so if the split is not on
+  // stdout it exists nowhere — and this is the context where a human is tuning
+  // a step's `timeoutMs` and wants it now rather than in a file. Same #70
+  // reasoning as everywhere else, applied to a command that has only one
+  // stream.
+  //
+  // Built from the same two primitives `formatGateFields` renders the log lines
+  // with, rather than from `formatGateFields` itself: `ok=` beside the GREEN /
+  // RED verdict below would be the same fact twice. There is still exactly one
+  // spelling of `durationMs=` and one of the `steps=` value.
+  out(
+    `\ntimings: ${durationField(result.durationMs)} ` +
+      `steps=${formatGateSteps(result.steps)}\n`,
+  );
 
   if (result.ok) {
     out("\ngate: GREEN\n");

@@ -58,8 +58,13 @@
 // from.
 
 import { SandbarError } from "./errors.js";
-import { summarizeGateFailure } from "./gate.js";
+import {
+  type GateTimings,
+  formatGateFields,
+  summarizeGateFailure,
+} from "./gate.js";
 import type { MergerGateOutput } from "./merger.js";
+import { durationField, startTimer } from "./timing.js";
 import { loadTemplate, render } from "./prompts.js";
 
 export const RESOLVE_MAX_ATTEMPTS = 4;
@@ -220,8 +225,13 @@ export type ResolveAdapter = {
     readonly paths: readonly string[];
   }>;
   npmInstall(): Promise<{ readonly ok: boolean }>;
+  // The timings ride out on both branches (#82): a green re-gate is the one
+  // this loop pays for on every recovered attempt, and it has no failure to
+  // describe. Reported, never acted on — the loop's bound is
+  // `RESOLVE_MAX_ATTEMPTS` and nothing here reads a duration back.
   runGate(): Promise<
-    { readonly ok: true } | ({ readonly ok: false } & MergerGateOutput)
+    ({ readonly ok: true } | ({ readonly ok: false } & MergerGateOutput)) &
+      GateTimings
   >;
   getIssueBody(issueId: string): Promise<string>;
   getHeadSha(): Promise<string>;
@@ -441,7 +451,12 @@ export async function runResolveLoop(
       continue;
     }
 
+    const installTimer = startTimer();
     const install = await adapter.npmInstall();
+    await log(
+      `resolve-attempt ${attempt} install ok=${install.ok} ` +
+        durationField(installTimer()),
+    );
     if (!install.ok) {
       await log(`resolve-attempt ${attempt} npm install failed`);
       record("install-failed");
@@ -454,6 +469,9 @@ export async function runResolveLoop(
     }
 
     const gate = await adapter.runGate();
+    // The same one rendering the other three consumers use, on green and red
+    // alike; the verdict-specific lines below keep their own wording.
+    await log(`resolve-attempt ${attempt} gate ${formatGateFields(gate)}`);
     if (gate.ok) {
       // HEAD-advance invariant: a gate-green tree at the same sha as the
       // pre-merge HEAD means the agent walked away without producing a merge

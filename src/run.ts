@@ -141,16 +141,19 @@ import {
 import {
   type AgentImages,
   type BranchImages,
+  type ImageBuildRecord,
   checkWorktreeImageUids,
   createAgentImages,
   createBranchImages,
   ensureImages,
+  formatImageRecord,
   pulledImagesOf,
   removeBranchImages,
   sweepBranchImages,
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
 import { makeEnvReader } from "./env.js";
+import { durationField, startTimer } from "./timing.js";
 import { SandbarError, faultDetail } from "./errors.js";
 import {
   type TerminalExit,
@@ -606,16 +609,28 @@ export async function run(
   // it (#70). An unbuildable declared image and a bad uid are ordinary
   // host-configuration faults, and they are now recorded like every other
   // refusal.
+  // The three build entry points' record seam (#82). Rebuilding an image
+  // changes what every container in the run executes, which is an outcome —
+  // and it used to be announced by `console.log` alone, so a startup that cost
+  // 26 s of rebuild was indistinguishable in the run tree from one that cost
+  // 0.3 s. Log only: #82 adds nothing to stdout outside `sandbar gate`, and the
+  // human prose these functions already print keeps the terminal.
+  const recordImage = (r: ImageBuildRecord): Promise<void> =>
+    runLogger.appendOrchestrator(formatImageRecord(r));
+
   let sourceWorktree: string;
   let baseFingerprints: ReadonlyMap<string, string>;
   let agentImages: AgentImages;
   try {
     sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
-    baseFingerprints = await ensureImages(config.images, sourceWorktree);
+    baseFingerprints = await ensureImages(config.images, sourceWorktree, {
+      onImage: recordImage,
+    });
     agentImages = await createAgentImages({
       declaredBaseTag: config.sandboxImage,
       providers: requiredAgentProviders(config),
       scope,
+      onImage: recordImage,
     });
   } catch (err) {
     return await stopAtStartup("image-build-failed", err);
@@ -633,6 +648,7 @@ export async function run(
     images: config.images,
     scope,
     baseFingerprints,
+    onImage: recordImage,
     // D3, re-asked for anything the branch rebuilds. The startup check below
     // covers the declared images once; a variant is built from a Containerfile
     // the branch may have edited, so its uid is not the one that was probed.
@@ -1066,23 +1082,61 @@ export async function run(
       // Phase 2: Execute (inner-loop ralph)
       // ---------------------------------------------------------------------
 
+      // THE TERMINAL LINE IS WRITTEN BY THE TASK THAT TERMINATED (#82).
+      //
+      // It used to be appended by the reporting loop below, after
+      // `Promise.allSettled` — so every terminal in a cohort carried the
+      // cohort's SETTLE instant and appeared in PLAN order. One observed cycle
+      // logged an issue that finished at 19:46 and one that finished at 19:54
+      // as having both finished in the same millisecond, which destroys exactly
+      // the two questions #77 §3.E turns on: which issue held the cycle, and
+      // how long the others idled.
+      //
+      // It was also a #70 coverage hole. An issue reaching DONE at 19:46 had
+      // its outcome written at 19:54; a Ctrl-C or a sibling's throw in between
+      // and the record of that outcome never existed at all — for work sitting
+      // committed on a branch. The invariant is that every outcome is in the
+      // log, not that it is there if the whole cohort survives.
+      //
+      // The catch RETHROWS: the cohort still settles as a rejection and the
+      // reporting loop below is unchanged. And stdout does NOT move — a
+      // terminal reader wants one ordered block after the cohort settles, not
+      // three interleaved lines arriving over an hour. That is the two-stream
+      // split (#70) doing the job it exists for, which is why "just move the
+      // console.log too" is the wrong fix.
+      const phase2Timer = startTimer();
       const settled = await Promise.allSettled(
-        issues.map(async (issue) => ({
-          issue,
-          terminal: await runInnerLoop(issue, {
-            config: innerLoopCfg,
-            hooks: config.sandboxHooks,
-            copyToWorktree: config.copyToWorktree,
-            branchImages,
-            // Sandbox-sibling logs land beside this cycle's attempt
-            // transcripts (#44 D4), so the offline artefact of what the
-            // agent's stack was doing sits next to the transcript of what the
-            // agent did.
-            sandboxLogBaseDir: cycleLogger.cycleDir,
-            attemptLogger: cycleLogger,
-            onOrchestratorLog: (line) => runLogger.appendOrchestrator(line),
-          }),
-        })),
+        issues.map(async (issue) => {
+          const issueTimer = startTimer();
+          try {
+            const terminal = await runInnerLoop(issue, {
+              config: innerLoopCfg,
+              hooks: config.sandboxHooks,
+              copyToWorktree: config.copyToWorktree,
+              branchImages,
+              // Sandbox-sibling logs land beside this cycle's attempt
+              // transcripts (#44 D4), so the offline artefact of what the
+              // agent's stack was doing sits next to the transcript of what the
+              // agent did.
+              sandboxLogBaseDir: cycleLogger.cycleDir,
+              attemptLogger: cycleLogger,
+              onOrchestratorLog: (line) => runLogger.appendOrchestrator(line),
+            });
+            await runLogger.appendOrchestrator(
+              `terminal #${issue.id} ${terminal.type} ${durationField(issueTimer())}`,
+            );
+            return { issue, terminal };
+          } catch (err) {
+            await runLogger.appendOrchestrator(
+              `terminal #${issue.id} REJECTED ${durationField(issueTimer())}: ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            );
+            throw err;
+          }
+        }),
+      );
+      await runLogger.appendOrchestrator(
+        `phase-2 end issues=${issues.length} ${durationField(phase2Timer())}`,
       );
 
       type IssueOutcome = { issue: typeof issues[number]; terminal: Terminal };
@@ -1098,15 +1152,9 @@ export async function run(
           // orchestrator.log. The parking comment names it too, from this same
           // issue, but that is on the tracker rather than here.
           console.log(`  #${issue.id} (${issue.branch}): ${t.type}`);
-          await runLogger.appendOrchestrator(
-            `terminal #${issue.id} ${t.type}`,
-          );
         } else {
           console.error(
             `  ✗ #${issues[i]!.id} (${issues[i]!.branch}) failed: ${s.reason}`,
-          );
-          await runLogger.appendOrchestrator(
-            `terminal #${issues[i]!.id} REJECTED: ${s.reason instanceof Error ? s.reason.message : String(s.reason)}`,
           );
         }
       }
@@ -1253,6 +1301,9 @@ export async function run(
                 }
               : undefined;
 
+          // The whole merge phase — #77 §1's "merge phase, 3 branches" row,
+          // which was hand-arithmetic off two adjacent timestamps (#82).
+          const mergePhaseTimer = startTimer();
           mergerSummary = await runMergerWithAdapter(
             completedIssues,
             adapter,
@@ -1311,7 +1362,8 @@ export async function run(
               `chunks-landed-on-source=${mergerSummary.mergedChunks.length} ` +
               `chunks-parked=${mergerSummary.skippedChunks.length} ` +
               `chunks-deferred=${mergerSummary.deferredChunks.length} ` +
-              `skipped=${mergerSummary.skipped.length} pushed=${mergerSummary.pushed}`,
+              `skipped=${mergerSummary.skipped.length} pushed=${mergerSummary.pushed} ` +
+              durationField(mergePhaseTimer()),
           );
         } catch (err) {
           if (err instanceof MergerError) {

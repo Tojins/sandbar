@@ -1206,18 +1206,35 @@ describe("runMergerWithAdapter — post-push close retries (#14)", () => {
 });
 
 describe("runMergerWithAdapter — logging", () => {
+  // A clock that never advances, so every `durationMs=` this module writes is
+  // `0` and the log lines stay assertable by exact string (#82). That is the
+  // whole reason `startTimer` takes one.
+  const frozenClock = () => 0;
+
   it("emits expected log lines for clean-merge happy path", async () => {
     const { adapter } = makeAdapter({
       merges: ["ok"],
       gates: [{ ok: true }],
     });
     const lines: string[] = [];
-    await runMergerWithAdapter([issue(42)], adapter, (line) => {
-      lines.push(line);
-    });
+    await runMergerWithAdapter(
+      [issue(42)],
+      adapter,
+      (line) => {
+        lines.push(line);
+      },
+      undefined,
+      { clock: frozenClock },
+    );
     expect(lines).toContain("merge-attempt #42 sandbar/issue-42-t-42");
-    expect(lines).toContain("merged #42");
+    expect(lines).toContain("merged #42 durationMs=0");
     expect(lines).toContain("push attempt 1");
+    // The gate-2 verdict is logged on GREEN too since #82 — it used to be
+    // logged only on red, which left the gate that happens every time out of
+    // the record entirely (#70). The fake adapter's green gate carries no
+    // timings, and an absent measurement is absent rather than zero.
+    expect(lines).toContain("gate-2 #42 ok=true");
+    expect(lines).toContain("install #42 ok=true durationMs=0");
   });
 
   it("logs resolve-loop entry on conflict and gate-red", async () => {

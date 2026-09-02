@@ -1,4 +1,5 @@
-// Gate verdicts: the RESULT shape, and the diagnostics applied to a red one.
+// Gate verdicts: the RESULT shape, the diagnostics applied to a red one, and
+// the one rendering of a verdict's fields.
 //
 // Since #24 the gate is a stack of containers and an ordered list of steps, and
 // running it lives in `gate-stack.ts`. What stays here is everything that turns
@@ -6,24 +7,66 @@
 // attempt — can act on, which is pure text processing and therefore directly
 // table-testable.
 //
+// TIMINGS (#82). A gate run is ~1.6 min of a ~10 min review round and happens
+// about seven times per issue, and until #82 not one second of it was
+// observable from a run's own logs: the only wall-clock measurement anyone had
+// taken was by hand, once, off a stopwatch, and it found that 91% of this
+// repo's own gate is a single step. `GateResult` therefore carries the elapsed
+// time of the whole run and a per-phase split, and `formatGateFields` is the
+// ONE rendering of them — four consumers log a gate verdict (inner-loop's
+// gate-1, the merger's gate-2, the resolve loop's re-gate and `sandbar gate`),
+// and four hand-written formats would be four formats a later stats reader has
+// to parse. Same argument as `formatExitLine` (#70).
+//
+// The per-step numbers NEST inside one `steps=` field rather than being sprayed
+// as top-level `check=1120` keys, because step names are the HOST'S and
+// free-form since #24: a consumer step called `ok` or `durationMs` must not be
+// able to shadow a field. They are rendered verbatim, exactly as `failedStep=`
+// already renders the same host-owned name — a step name containing a comma or
+// a space makes an awkward log line, and that is all it makes, because nothing
+// reads these lines back to decide anything.
+//
 // `summarizeGateFailure` (#15) post-processes a failed run's output before it
 // reaches a human (NEEDS-HUMAN trace) or the resolve agent: it collapses
 // uninformative timeout cascades to the root failure + a count and a hint, so
 // an environment/setup failure doesn't read as N independent flaky tests.
 
-// `failedStep` names the step from the consumer's `gateStack.steps`, or one of
-// three sandbar-owned pseudo-steps: `worktree-clean` (the tree held uncommitted
-// changes, so no verdict about a commit was possible), `container:<name>` (an
-// attempt-lifecycle container failed to come up, which is the branch's fault —
-// see gate-stack.ts) and `image:<tag>` (an image the branch is a `rebuildOn`
-// input of would not build from this worktree, #37 — the branch's fault for the
-// same reason). `null` only when ok.
+import { durationField } from "./timing.js";
+
+// One timed phase of a gate run, in execution order. The name is either a
+// consumer step's own (`gateStack.steps[].name`) or one of the sandbar-owned
+// phases `runStackGate` runs before the first step — see `GateResult.steps`.
+export type GateStepTiming = {
+  readonly name: string;
+  readonly ok: boolean;
+  readonly durationMs: number;
+};
+
 export type GateResult = {
   readonly ok: boolean;
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number;
+  // Names the step from the consumer's `gateStack.steps`, or one of three
+  // sandbar-owned pseudo-steps: `worktree-clean` (the tree held uncommitted
+  // changes, so no verdict about a commit was possible), `container:<name>` (an
+  // attempt-lifecycle container failed to come up, which is the branch's fault —
+  // see gate-stack.ts) and `image:<tag>` (an image the branch is a `rebuildOn`
+  // input of would not build from this worktree, #37 — the branch's fault for
+  // the same reason). `null` only when ok.
   readonly failedStep: string | null;
+  // Wall time for the whole run, sandbar-owned pre-step phases included (#82).
+  readonly durationMs: number;
+  // Every phase that RAN, in execution order — never a fabricated entry for one
+  // that did not. Steps fail fast, so on a red gate this is a PREFIX whose last
+  // entry carries `ok: false`; the same rule #67 states for an agent
+  // invocation.
+  //
+  // A step killed by its `timeoutMs` records what it actually took, never its
+  // bound: `boundedPodman` decides `timedOut` from its own timer and never from
+  // an exit code (#26), and writing the bound would launder a step that died
+  // early into one that ran to its deadline.
+  readonly steps: readonly GateStepTiming[];
   // Labelled log tails for every container in the stack, on a red gate (#24 D9).
   // Empty on green.
   //
@@ -36,6 +79,46 @@ export type GateResult = {
   // append this.
   readonly containerLogs: string;
 };
+
+// The `steps=` value: `check:1120,test:6640,podman-test:88600`, in execution
+// order. Empty string when nothing was timed, so the caller can omit the field
+// entirely rather than write `steps=` (#82 — an absent measurement is absent).
+export function formatGateSteps(steps: readonly GateStepTiming[]): string {
+  return steps.map((s) => `${s.name}:${s.durationMs}`).join(",");
+}
+
+// What every consumer logging a gate verdict renders. Deliberately a PARTIAL
+// shape rather than `GateResult`: the merger and the resolve loop narrow a
+// green gate to `{ ok: true }` plus its timings and genuinely have no exit code
+// or failed step to report, and a renderer that demanded them would either
+// force those adapters to invent values or force a second format.
+//
+// Field order matches the line `inner-loop.ts` already wrote, so its prefix is
+// byte-identical and the new fields are appended.
+// The timing half of a `GateResult`, for the two adapters that narrow a green
+// gate to `{ ok: true }` and would otherwise drop it (#82).
+export type GateTimings = {
+  readonly durationMs: number;
+  readonly steps: readonly GateStepTiming[];
+};
+
+export type GateFields = {
+  readonly ok: boolean;
+  readonly exitCode?: number;
+  readonly failedStep?: string | null;
+  readonly durationMs?: number;
+  readonly steps?: readonly GateStepTiming[];
+};
+
+export function formatGateFields(g: GateFields): string {
+  const out = [`ok=${g.ok}`];
+  if (g.exitCode !== undefined) out.push(`exitCode=${g.exitCode}`);
+  if (g.failedStep !== undefined) out.push(`failedStep=${g.failedStep ?? "-"}`);
+  if (g.durationMs !== undefined) out.push(durationField(g.durationMs));
+  const steps = formatGateSteps(g.steps ?? []);
+  if (steps !== "") out.push(`steps=${steps}`);
+  return out.join(" ");
+}
 
 // Gate tools (vitest et al.) emit ANSI SGR colour codes even when their
 // stdout is piped — the in-container colour heuristics misfire despite CI=true.

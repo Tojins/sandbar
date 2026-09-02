@@ -292,8 +292,8 @@ place, so:
   inside its own sandbox — i.e. against the **issue worktree**. Sandbar's
   host-side "does this file exist" check is rooted at that same worktree, so a
   doc the branch itself adds is referenced from the attempt that adds it, and
-  the reviewer of a commit that introduces a `CODING_STANDARDS.md` is pointed
-  at it.
+  both the implementer and reviewer of a commit that introduces a
+  `CODING_STANDARDS.md` are pointed at it.
 - `copyToWorktree` entries resolve against `cwd`, your own checkout, because
   the cache is bare and has nothing to copy. That is the feature's intent
   (host-only files that are not in git), but it does make issue-worktree
@@ -954,7 +954,7 @@ rather than spending the rest of its budget on it.
 
 The host project also supplies on disk:
 - A `Containerfile` for the sandbox image (or whatever `images` names)
-- Optionally, a `CODING_STANDARDS.md` (`codingStandardsPath`) — the reviewer ships with built-in default coding standards (`prompts/coding-standards.md`); this file *extends* them and is not required
+- Optionally, a `CODING_STANDARDS.md` (`codingStandardsPath`) — the implementer and reviewer share built-in default coding standards (`prompts/coding-standards.md`); this file *extends* them and is not required
 - `GH_TOKEN` and a credential for every routed agent provider, reachable through `config.env` — as literal values, as keys declared empty so they inherit from the launching environment, or read from a file of your choosing with `readEnvFile`
 
 `verified` mode additionally uses the host's own `gh` auth (not the container's

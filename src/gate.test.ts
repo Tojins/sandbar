@@ -1,11 +1,75 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type GateStepTiming,
   analyzeTimeouts,
+  formatGateFields,
+  formatGateSteps,
   lastNLines,
   stripAnsi,
   summarizeGateFailure,
 } from "./gate.js";
+
+describe("formatGateSteps", () => {
+  const steps: readonly GateStepTiming[] = [
+    { name: "check", ok: true, durationMs: 1120 },
+    { name: "test", ok: true, durationMs: 6640 },
+    { name: "podman-test", ok: false, durationMs: 88600 },
+  ];
+
+  it("renders name:ms pairs in execution order", () => {
+    expect(formatGateSteps(steps)).toBe(
+      "check:1120,test:6640,podman-test:88600",
+    );
+  });
+
+  it("is empty for an empty array, so the caller can omit the field", () => {
+    expect(formatGateSteps([])).toBe("");
+  });
+
+  it("renders a host-owned name verbatim, exactly as failedStep does", () => {
+    expect(
+      formatGateSteps([{ name: "lint & fmt", ok: true, durationMs: 3 }]),
+    ).toBe("lint & fmt:3");
+  });
+});
+
+describe("formatGateFields", () => {
+  it("renders the full result in the order the gate-1 line already used", () => {
+    expect(
+      formatGateFields({
+        ok: true,
+        exitCode: 0,
+        failedStep: null,
+        durationMs: 97210,
+        steps: [{ name: "check", ok: true, durationMs: 1120 }],
+      }),
+    ).toBe("ok=true exitCode=0 failedStep=- durationMs=97210 steps=check:1120");
+  });
+
+  it("names the failing step", () => {
+    expect(
+      formatGateFields({
+        ok: false,
+        exitCode: 124,
+        failedStep: "podman-test",
+        durationMs: 1800000,
+        steps: [],
+      }),
+    ).toBe("ok=false exitCode=124 failedStep=podman-test durationMs=1800000");
+  });
+
+  it("omits every field it was not given — an absent measurement is absent", () => {
+    // The shape a green gate takes through the merger's and the resolve loop's
+    // adapters: no exit code and no failed step to report.
+    expect(formatGateFields({ ok: true, durationMs: 42, steps: [] })).toBe(
+      "ok=true durationMs=42",
+    );
+    // And an adapter that carries no timings at all still renders a verdict,
+    // rather than writing `durationMs=0` for something nobody measured.
+    expect(formatGateFields({ ok: true })).toBe("ok=true");
+  });
+});
 
 describe("stripAnsi", () => {
   it("removes SGR colour codes, leaving the text intact", () => {

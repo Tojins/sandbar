@@ -104,19 +104,36 @@
 // so `gateStack.containers[].mounts[]` is the whole class of consumer-supplied
 // host paths and this check is complete at that scope.
 //
-// Leftover `sandbar/issue-*` branches are classified three ways (#13):
+// Leftover `sandbar/issue-*` branches are classified four ways (#13):
 //   - resumable — the branch maps to a still-open `ready-for-agent` issue, i.e.
 //                 stranded work from an interrupted run (killed after the issue
 //                 agents finished but before/inside the merger). NOT an error:
 //                 the planner re-picks the issue and the inner loop continues
 //                 from the branch's existing commits (ensureIssueBranch keeps
 //                 them), so a killed run just restarts and finishes.
+//   - parked    — the branch maps to an issue that is still OPEN but not
+//                 `ready-for-agent`: parked by finalise (`needs-info`,
+//                 `agent-stuck`) or held back by a human with a label of their
+//                 own. NOT an error either, and the branch is KEPT, because it
+//                 is the resume copy. `ensureIssueBranch` reads only the
+//                 cache's local head — a missing one is seeded fresh from the
+//                 source branch, never from origin's copy of the issue branch —
+//                 so a preflight that refused over it forced the operator to
+//                 destroy exactly the branch finalise's parking comment told
+//                 them to push a fix on and re-queue. Announced every run so a
+//                 branch the operator has actually abandoned is not silent.
 //   - discarded — the branch's upstream is `[gone]` (PR merged+deleted upstream
 //                 while local is behind). Local commits would be orphaned.
-//   - unmerged  — everything else: maps to a closed/unknown issue, or an open
-//                 issue no longer queued. Stays a hard error as before.
+//   - unmerged  — everything else: maps to a CLOSED issue, or one the tracker
+//                 could not be asked about. Nothing will ever re-queue it, so
+//                 it stays a hard error.
+// The open/closed fact comes from `fetchIssueStates`, the same strongly
+// consistent GraphQL batch the planner uses for its CLOSED guard (#16), and it
+// fails CLOSED like the two listings beside it — the `ready-for-agent` label
+// and the git-derived chunk member set (#93): an unanswerable tracker turns a
+// parked branch back into an `unmerged` refusal, never into a silent pass.
 // `sandbar/chunk-*` branches (#58) are listed by the same globs — one shape
-// each of `SANDBAR_BRANCH_REFGLOBS` — but take none of those three: see
+// each of `SANDBAR_BRANCH_REFGLOBS` — but take none of those four: see
 // `classifySandbarBranches`. They are still DELETED once merged, which is the
 // one thing that is true of a chunk branch whatever else its lifecycle does.
 //
@@ -163,7 +180,11 @@ import {
 } from "./naming.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import { RUNTIME } from "./runtime.js";
-import { fetchCandidates, readChunkMembers } from "./plan-resolver.js";
+import {
+  fetchCandidates,
+  fetchIssueStates,
+  readChunkMembers,
+} from "./plan-resolver.js";
 import {
   parseRepoFromRemoteUrl,
   type RepoRef,
@@ -291,6 +312,10 @@ export type RepoState = {
   // failure (resumed, not refused). Carried on the state purely so runPreflight
   // can announce them; checkInvariants emits no Invariant for them.
   readonly resumableIssueBranches: readonly string[];
+  // Branches of OPEN issues that are not currently queued — the resume copy a
+  // re-queue continues from (see the header). Same treatment as resumable:
+  // announced by runPreflight, no Invariant.
+  readonly parkedIssueBranches: readonly string[];
   // The configured tracker, and what the cache's `origin` actually points at
   // (#34). `originRepo` is null when there is no readable origin URL or when it
   // is not a shape `parseRepoFromRemoteUrl` will commit to — see below, and see
@@ -570,11 +595,24 @@ export async function gatherState(
   const chunkMemberIssues =
     knownChunkMemberIssues ??
     (await fetchChunkMemberIssueNumbers(repoDir));
-  const { unmerged, discarded, resumable } = await classifySandbarBranches(
-    repoDir,
+  const branches = await listSandbarBranches(repoDir);
+  const upstreamTracks = await branchUpstreamTracks(repoDir);
+  // Only the branches the two listings above leave undecided need the tracker
+  // asked about state — the rest are already resumable or landed on a chunk.
+  const undecided = branches.flatMap((b) => {
+    const n = issueNumberFromBranch(b);
+    return n === null || openReadyIssues.has(n) || chunkMemberIssues.has(n)
+      ? []
+      : [n];
+  });
+  const openIssues = await fetchOpenIssueNumbers(cfg.repo, undecided);
+  const { unmerged, discarded, resumable, parked } = classifySandbarBranches({
+    branches,
+    upstreamTracks,
     openReadyIssues,
     chunkMemberIssues,
-  );
+    openIssues,
+  });
 
   return {
     hasGit,
@@ -590,6 +628,7 @@ export async function gatherState(
     unmergedIssueBranches: unmerged,
     discardedIssueBranches: discarded,
     resumableIssueBranches: resumable,
+    parkedIssueBranches: parked,
     configuredRepo: cfg.repo,
     originUrl,
     originRepo: parsedOrigin?.repo ?? null,
@@ -656,6 +695,26 @@ async function fetchOpenReadyIssueNumbers(
   try {
     const candidates = await fetchCandidates(repo);
     return new Set(candidates.map((c) => c.number));
+  } catch {
+    return new Set();
+  }
+}
+
+// Which of `numbers` are OPEN on the tracker, through the planner's own
+// strongly consistent batch lookup (#16). Fail-closed to an empty set like the
+// two listings above: a branch the tracker cannot vouch for as open is
+// classified `unmerged` and refused, which is what it was before this lookup
+// existed.
+async function fetchOpenIssueNumbers(
+  repo: RepoRef,
+  numbers: readonly number[],
+): Promise<ReadonlySet<number>> {
+  if (numbers.length === 0) return new Set();
+  try {
+    const facts = await fetchIssueStates(numbers, repo);
+    return new Set(
+      [...facts].flatMap(([n, f]) => (f.state === "OPEN" ? [n] : [])),
+    );
   } catch {
     return new Set();
   }
@@ -786,21 +845,38 @@ async function branchUpstreamTracks(
   return out;
 }
 
-async function classifySandbarBranches(
-  cwd: string,
-  openReadyIssues: ReadonlySet<number>,
-  chunkMemberIssues: ReadonlySet<number>,
-): Promise<{
-  unmerged: readonly string[];
-  discarded: readonly string[];
-  resumable: readonly string[];
-}> {
-  const all = await listSandbarBranches(cwd);
-  const tracks = await branchUpstreamTracks(cwd);
+// Pure: every git and tracker fact is handed in, so the four-way split is
+// table-tested directly rather than through a fixture repo and a live `gh`.
+export type BranchClassificationInputs = {
+  readonly branches: readonly string[];
+  // `%(upstream:track)` per branch — `[gone]` is the one value read.
+  readonly upstreamTracks: ReadonlyMap<string, string>;
+  readonly openReadyIssues: ReadonlySet<number>;
+  // Issues whose commits an origin chunk branch carries (#93) — read from git,
+  // never from a label.
+  readonly chunkMemberIssues: ReadonlySet<number>;
+  // Issues the tracker confirmed OPEN. Need only cover the numbers the two
+  // sets above do not already decide; a number absent here reads as closed.
+  readonly openIssues: ReadonlySet<number>;
+};
+
+export type BranchClassification = {
+  readonly unmerged: readonly string[];
+  readonly discarded: readonly string[];
+  readonly resumable: readonly string[];
+  readonly parked: readonly string[];
+};
+
+export function classifySandbarBranches(
+  inputs: BranchClassificationInputs,
+): BranchClassification {
+  const { branches, upstreamTracks: tracks, openReadyIssues, chunkMemberIssues } =
+    inputs;
   const unmerged: string[] = [];
   const discarded: string[] = [];
   const resumable: string[] = [];
-  for (const branch of all) {
+  const parked: string[] = [];
+  for (const branch of branches) {
     // A CHUNK branch (#58) is none of the three. It is unmerged for as long as
     // the human reviewing it takes, which is the entire point of the review
     // lane — classifying it `unmerged` would turn every open review into a
@@ -843,11 +919,18 @@ async function classifySandbarBranches(
     // from this branch's accumulated commits.
     if (issueNum !== null && openReadyIssues.has(issueNum)) {
       resumable.push(branch);
-    } else {
-      unmerged.push(branch);
+      continue;
     }
+    // The resume copy of an issue that is open but not queued — parked by
+    // finalise or held by a human. Kept and announced; the header owns why a
+    // refusal here destroys the very branch the parking comment points at.
+    if (issueNum !== null && inputs.openIssues.has(issueNum)) {
+      parked.push(branch);
+      continue;
+    }
+    unmerged.push(branch);
   }
-  return { unmerged, discarded, resumable };
+  return { unmerged, discarded, resumable, parked };
 }
 
 // The destructive step, and the reason every other call site in this module
@@ -974,6 +1057,14 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
         `${state.resumableIssueBranches.join(", ")}. The planner will re-pick ` +
         "the matching open `ready-for-agent` issue(s) and the inner loop " +
         "continues from each branch's existing commits.",
+    );
+  }
+  if (state.parkedIssueBranches.length > 0) {
+    console.log(
+      `Keeping ${state.parkedIssueBranches.length} parked issue branch(es): ` +
+        `${state.parkedIssueBranches.join(", ")}. Each maps to an open issue ` +
+        "that is not `ready-for-agent`; re-applying the label resumes from " +
+        "the branch's commits, `git branch -D` in the cache abandons them.",
     );
   }
   // The other half of the #34 agreement check, and it is emitted BEFORE the
