@@ -248,6 +248,7 @@ export const MEMBER_BRANCH_INFIX = "member-";
 export const ALL_BRANCH_INFIXES: readonly string[] = [
   ISSUE_BRANCH_INFIX,
   CHUNK_BRANCH_INFIX,
+  MEMBER_BRANCH_INFIX,
 ];
 
 // Every ref pattern that can name a branch sandbar created. Callers hand these

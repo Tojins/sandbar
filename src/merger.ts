@@ -681,7 +681,10 @@ export type MergerAdapter = ResolveAdapter & {
   // Delete the chunk branch on origin, once its commits are on the source
   // branch. The last step of the wrap-up and the one that stops the reconciler
   // seeing this chunk again.
-  deleteChunkBranch(chunkBranch: string): Promise<void>;
+  deleteChunkBranch(
+    chunkBranch: string,
+    memberIssues: readonly number[],
+  ): Promise<void>;
   commentOnPullRequest(pr: number, body: string): Promise<void>;
   // Takes `land` back off, which is what stops a request being honoured
   // again. The wrap-up drops it when a chunk lands; the merge loop drops it on
@@ -2718,6 +2721,21 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // exist on origin yet, and git only creates a ref from an unambiguous
       // destination.
       try {
+        for (const member of members) {
+          const contained = await exec(
+            "git",
+            ["merge-base", "--is-ancestor", member.source, "HEAD"],
+            { cwd },
+          ).then(() => true, () => false);
+          if (!contained) {
+            return {
+              kind: "fatal",
+              reason:
+                `membership source ${member.source} is not contained in ` +
+                `the composed chunk branch ${chunkBranch}`,
+            };
+          }
+        }
         await exec("git", [
           "push",
           "--atomic",

@@ -15,11 +15,13 @@ import {
   sandboxContainerNameFor,
   scopedResourcePrefix,
   stackContainerNameFor,
+  ALL_BRANCH_INFIXES,
   ALL_BRANCH_PREFIXES,
   ALL_RESOURCE_PREFIXES,
   BRANCH_PREFIX,
   LEGACY_BRANCH_PREFIXES,
   LEGACY_RESOURCE_PREFIXES,
+  MEMBER_BRANCH_INFIX,
   RESOURCE_PREFIX,
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
@@ -155,8 +157,10 @@ describe("branch names (#58)", () => {
       [
         "refs/heads/sandbar/issue-*",
         "refs/heads/sandbar/chunk-*",
+        "refs/heads/sandbar/member-*",
         "refs/heads/sandcastle/issue-*",
         "refs/heads/sandcastle/chunk-*",
+        "refs/heads/sandcastle/member-*",
       ].sort(),
     );
   });
@@ -191,6 +195,13 @@ describe("branch names (#58)", () => {
     );
     expect(ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS).toContain(
       "+refs/heads/sandbar/member-*:refs/remotes/origin/sandbar/member-*",
+    );
+  });
+
+  it("reserves member refs with every sandbar-owned branch shape", () => {
+    expect(ALL_BRANCH_INFIXES).toContain(MEMBER_BRANCH_INFIX);
+    expect(SANDBAR_BRANCH_REFGLOBS).toContain(
+      "refs/heads/sandbar/member-*",
     );
   });
 
