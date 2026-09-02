@@ -100,7 +100,7 @@ async function standaloneFixture(
     await rm(repo, { recursive: true, force: true });
   }, 120_000);
 
-  return { stackId, gName, repo, idOf, spec };
+  return { stackId, gName, podName, repo, idOf, spec };
 }
 
 describe.runIf(available)("standalone gate accommodations (#45)", () => {
@@ -329,10 +329,8 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "does not keep — and so cannot adopt — a stack whose bringup never finished",
     async ({ expect, task, onTestFinished }) => {
-      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
-        task.id,
-        onTestFinished,
-      );
+      const { stackId, gName, podName, repo, idOf, spec } =
+        await standaloneFixture(task.id, onTestFinished);
 
       const seedFlag = join(repo, "seed-flag");
       const seeding = () =>
