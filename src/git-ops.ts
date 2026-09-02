@@ -135,8 +135,12 @@ export async function fetchOriginChunkBranch(
       { cwd },
     );
     return remoteRef;
-  } catch {
+  } catch (err) {
     // Fall through: what the cache already holds outranks what the fetch said.
+    console.error(
+      `Could not fetch origin/${chunkBranch} (using the cached ref):`,
+      err,
+    );
   }
   try {
     await exec("git", ["show-ref", "--verify", "--quiet", remoteRef], { cwd });
