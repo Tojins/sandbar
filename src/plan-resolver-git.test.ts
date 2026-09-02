@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { readChunkMembers, resolvePlan } from "./plan-resolver.js";
+import { readChunkMembers } from "./plan-resolver.js";
+
+// These tests execute git to pin the history boundary behind chunk membership:
+// only canonical first-parent merge subjects on fetched origin chunk refs count.
+// A ref whose name-derived root has no matching merge is wholly untrusted and
+// therefore contributes no members, even when other subjects look canonical.
 
 const repos: string[] = [];
 const git = (cwd: string, ...args: string[]): string =>
@@ -63,48 +68,4 @@ describe("chunk membership from git (#93)", () => {
     );
   });
 
-  it("ignores needs-review labels when git does not name the member", () => {
-    const issue = { number: 47, title: "Useful work", body: "", labels: ["ready-for-agent", "needs-review"] };
-    const result = resolvePlan(
-      [issue],
-      new Map([[47, { state: "OPEN" as const, labels: ["needs-review"] }]]),
-      new Set(),
-      3,
-      "review",
-      new Map(),
-    );
-    expect(result.plan.map((p) => p.id)).toEqual(["47"]);
-  });
-
-  it("de-queues work recorded on any chunk branch without satisfying a blocker from the wrong branch", () => {
-    const issues = [
-      { number: 47, title: "Root", body: "", labels: ["ready-for-agent"] },
-      { number: 48, title: "Child", body: "## Blocked by\n- #47\n", labels: ["ready-for-agent"] },
-    ];
-    const result = resolvePlan(
-      issues,
-      new Map(issues.map((i) => [i.number, { state: "OPEN" as const, labels: [] }])),
-      new Set(),
-      3,
-      "review",
-      new Map([["sandbar/chunk-99-other", new Set([47])]]),
-    );
-    expect(result.plan.map((p) => p.id)).toEqual([]);
-    expect(result.landedChunks).toEqual([]);
-  });
-
-  it("does not re-plan a published root after its title changes the derived branch slug", () => {
-    const issue = { number: 47, title: "New title", body: "", labels: [] };
-    const result = resolvePlan(
-      [issue],
-      new Map([[47, { state: "OPEN" as const, labels: [] }]]),
-      new Set(),
-      3,
-      "review",
-      new Map([["sandbar/chunk-47-old-title", new Set([47])]]),
-    );
-
-    expect(result.plan).toEqual([]);
-    expect(result.landedChunks).toEqual([]);
-  });
 });

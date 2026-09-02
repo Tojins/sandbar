@@ -30,20 +30,20 @@ function issue(
 }
 
 const closed = (...ns: number[]): ReadonlyMap<number, IssueFacts> =>
-  new Map(ns.map((n) => [n, { state: "CLOSED" as IssueState, labels: [] }]));
+  new Map(ns.map((n) => [n, { state: "CLOSED" as IssueState }]));
 const states = (
   o: Record<number, IssueState>,
 ): ReadonlyMap<number, IssueFacts> =>
   new Map(
-    Object.entries(o).map(([n, s]) => [Number(n), { state: s, labels: [] }]),
+    Object.entries(o).map(([n, s]) => [Number(n), { state: s }]),
   );
 const facts = (
-  o: Record<number, { state?: IssueState; labels?: string[] }>,
+  o: Record<number, { state?: IssueState }>,
 ): ReadonlyMap<number, IssueFacts> =>
   new Map(
     Object.entries(o).map(([n, f]) => [
       Number(n),
-      { state: f.state ?? "OPEN", labels: f.labels ?? [] },
+      { state: f.state ?? "OPEN" },
     ]),
   );
 
@@ -626,7 +626,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
   it("does not let a display label de-queue an auto-lane candidate", () => {
     const r = resolvePlan(
       [issue(10, "", { labels: ["needs-review"] }), issue(11, "")],
-      facts({ 10: { labels: ["needs-review"] } }),
+      facts({ 10: {} }),
       new Set(),
       3,
       "auto",
@@ -765,6 +765,46 @@ describe("resolvePlan chunk PR members (#62)", () => {
     const r = resolvePlan([issue(10, "")], new Map(), new Set(), 3, "auto");
 
     expect(r.plan[0]!.chunk).toBeNull();
+  });
+});
+
+describe("resolvePlan git membership safety (#93)", () => {
+  it("ignores needs-review when git does not name the member", () => {
+    const candidate = issue(47, "", { labels: ["ready-for-agent", "needs-review"] });
+    const result = resolvePlan(
+      [candidate], facts({ 47: {} }), new Set(), 3, "review", new Map(),
+    );
+    expect(result.plan.map((p) => p.id)).toEqual(["47"]);
+  });
+
+  it("de-queues membership on any branch but does not satisfy from the wrong branch", () => {
+    const candidates = [
+      issue(47, "", { title: "Root" }),
+      issue(48, "## Blocked by\n- #47\n", { title: "Child" }),
+    ];
+    const result = resolvePlan(
+      candidates,
+      facts({ 47: {}, 48: {} }),
+      new Set(),
+      3,
+      "review",
+      new Map([["sandbar/chunk-99-other", new Set([47])]]),
+    );
+    expect(result.plan).toEqual([]);
+    expect(result.landedChunks).toEqual([]);
+  });
+
+  it("does not re-plan published work after title drift changes the branch slug", () => {
+    const result = resolvePlan(
+      [issue(47, "", { title: "New title" })],
+      facts({ 47: {} }),
+      new Set(),
+      3,
+      "review",
+      new Map([["sandbar/chunk-47-old-title", new Set([47])]]),
+    );
+    expect(result.plan).toEqual([]);
+    expect(result.landedChunks).toEqual([]);
   });
 });
 

@@ -119,9 +119,9 @@
 // demonstrably on the source branch by then, so the branch is not a recovery
 // point for anything, and KEEPING it would make the reconciler pick the same
 // chunk up every cycle forever, name nothing again, and never resolve. What it
-// costs is the one case where the emptiness is wrong — a member merge commit
-// that the derivation did not name, from a run that pushed the chunk
-// branch and died before finalise labelled it — where the issue is left OPEN,
+// costs is the one case where the emptiness is wrong — malformed or manually
+// rewritten branch history that no longer contains the canonical root member
+// merge — where the issue is left OPEN,
 // off the queue, with no branch left for anything to retry from. That is why
 // both the pull request and the orchestrator's console SAY the list was empty
 // rather than reporting a clean landing: it is the only thing that can be done
@@ -136,12 +136,11 @@
 // `CHUNK_LANDED_PR_COMMENT`) is that the next cycle's reconciler finds the
 // branch and retries exactly the closes that failed. The reconciler matches a
 // branch to a chunk BY NAME, and the name is `sandbar/chunk-<root>-<slug>` —
-// derived every cycle from a graph of OPEN issues. Close the root and it
-// leaves that graph; the survivors re-root under a different member, on a
-// branch nothing on origin is called, and the kept branch matches no chunk at
-// all: it is reconciled as a chunk with no members, which closes nothing and
-// deletes it. The member that would not close is then OPEN, still carrying
-// `needs-review`, on no queue, with nothing left to find it through.
+// derived every cycle from the queue plus the issues named by fetched chunk
+// history. Closing the root therefore no longer removes it immediately, but
+// dependents-first remains the recovery-safe order: if history is repaired,
+// lost, or the root is closed manually before a later run, every member left
+// open still includes the root and re-derives the same branch name.
 //
 // Closing dependents first and stopping leaves a set that cannot degrade that
 // way: everything still open is the failed member plus every member it is

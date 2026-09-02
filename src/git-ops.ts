@@ -202,11 +202,10 @@ export async function fetchOriginChunkBranch(
 //     a non-root member plans only once a blocker of its own carries
 //     a merge commit on the chunk branch, written only after that branch
 //     carrying the commits is on origin. But the branch NAME is derived per
-//     cycle from the chunk's current root, and a chunk RE-ROOTS when that root
-//     leaves the graph — close it and the planner's two open-only listings
-//     (`fetchCandidates` plus the git-derived member batch) both drop it, so the survivors
-//     re-derive under a new root and `chunk.branch` names a branch nobody has
-//     ever pushed. Falling back there is the one outcome #61 exists to prevent,
+//     cycle from the chunk's current root. Git-derived members normally keep a
+//     closed root in the graph, but missing or repaired history can still make
+//     the graph re-root and name a branch nobody has ever pushed. Falling back
+//     there is the one outcome #61 exists to prevent,
 //     and unlike the merger's identical fallback nothing downstream catches it:
 //     the landing CREATES the branch, so there is no non-fast-forward push to
 //     be rejected, and the member merges cleanly onto a base its ancestors'

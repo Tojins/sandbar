@@ -92,6 +92,8 @@ type Script = {
   // means origin has no such branch and the base is the source branch.
   chunkBases?: Record<string, string>;
   chunkPushes?: PushResult[];
+  canonicalizeChunkMemberError?: Error;
+  canonicalizeChunkMemberErrorAt?: string;
   // #62: how the forge answers `ensureChunkPullRequest`. An Error is thrown.
   chunkPrs?: ({ number: number; url: string } | Error)[];
   // #64: what origin answers about a chunk branch being LANDED, by branch
@@ -307,6 +309,13 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     async canonicalizeChunkMemberMerge(unit) {
       calls.canonicalizedChunkMembers.push(unit.id);
       calls.order.push("canonicalize-chunk-member");
+      if (
+        script.canonicalizeChunkMemberError &&
+        (script.canonicalizeChunkMemberErrorAt === undefined ||
+          script.canonicalizeChunkMemberErrorAt === unit.id)
+      ) {
+        throw script.canonicalizeChunkMemberError;
+      }
     },
     // #60. `chunkBases` scripts what origin has: a branch name mapped to its
     // remote-tracking ref, or nothing for a chunk that has never landed — in
@@ -1851,6 +1860,11 @@ describe("buildForgeUnverifiedComment", () => {
 // the cycle started, that a member is recorded only after the push, and that
 // the source-branch pass is untouched by any of it.
 describe("runMergerWithAdapter — chunk landing (#60)", () => {
+  const chunkIssue = (n: number, root = n): IssueRef => ({
+    ...issue(n),
+    chunk: { root, branch: `sandbar/chunk-${root}-c` },
+  });
+
   it("canonicalizes a conflict-resolved member before publishing membership", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["conflict"],
@@ -1867,9 +1881,24 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
     );
   });
 
-  const chunkIssue = (n: number, root = n): IssueRef => ({
-    ...issue(n),
-    chunk: { root, branch: `sandbar/chunk-${root}-c` },
+  it("halts without publishing any group member when membership canonicalization fails", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      canonicalizeChunkMemberError: new Error("ambiguous membership merge"),
+      canonicalizeChunkMemberErrorAt: "43",
+    });
+
+    const err = await runMergerWithAdapter(
+      [chunkIssue(42), chunkIssue(43, 42)],
+      adapter,
+    ).catch((caught: unknown) => caught as MergerError);
+
+    expect(err).toBeInstanceOf(MergerError);
+    expect(err.message).toContain("Chunk membership commit failed for #43");
+    expect(err.partial?.chunkLanded).toEqual([]);
+    expect(calls.canonicalizedChunkMembers).toEqual(["42", "43"]);
+    expect(calls.chunkPushes).toEqual([]);
   });
 
   it("bases a first landing on origin/<sourceBranch>, merges, gates, pushes the chunk branch", async () => {
@@ -1989,7 +2018,7 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
   it("halts on a rejected chunk push, carrying the chunks that DID land in the partial", async () => {
     // The rejection means the branch moved under this cycle, so the
     // composition is not built on it — never force-pushed, never retried. The
-    // earlier chunk's members are on origin and still owe their `in-chunk`
+    // earlier chunk's members are on origin and still owe their `needs-review`
     // label, which is what the partial carries to Phase 4.
     const { adapter, calls } = makeAdapter({
       merges: ["ok", "ok"],
@@ -2117,7 +2146,7 @@ describe("runMergerWithAdapter — the chunk PR (#62)", () => {
 
   it("halts when the PR cannot be opened, keeping the landing in the partial", async () => {
     // The push already happened: those commits are on origin and their issues
-    // still owe `in-chunk`, so the partial has to carry them. What is lost is
+    // still owe `needs-review`, so the partial has to carry them. What is lost is
     // the cycle, not the work.
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
@@ -2261,7 +2290,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     expect(calls.prComments[0]?.pr).toBe(542);
     expect(calls.prComments[0]?.body).toContain("#43 — t-43");
     // The chunk landing itself is untouched: #43 is on the branch and owed its
-    // `in-chunk` label.
+    // `needs-review` display label.
     expect(summary.chunkLanded.map((c) => c.issue.id)).toEqual(["43"]);
   });
 
@@ -2311,7 +2340,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     expect(calls.pushes).toBe(1);
     expect(summary.pushed).toBe(true);
     // …and only then the wrap-up: every member closed — deepest first, the
-    // root last — `in-chunk` dropped, the pull request closed, the branch
+    // root last — `needs-review` dropped, the pull request closed, the branch
     // deleted.
     expect(calls.closes.map((c) => c.n)).toEqual([43, 42]);
     expect(calls.removedLabels).toEqual([

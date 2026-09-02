@@ -1450,8 +1450,8 @@ export async function run(
       //
       // WHAT DOES NOT HALT is a chunk that retired cleanly and left a cosmetic
       // line behind: a `needs-review` label that would not come off a CLOSED issue
-      // (the wrap-up calls that harmless itself, and the planner lists open
-      // issues only), or a pull request that would not close. Neither leaves an
+      // (the wrap-up calls that harmless itself, and the planner never reads
+      // that display label), or a pull request that would not close. Neither leaves an
       // issue on no queue, and halting on one would abandon the rest of the
       // run's budget over a label — while promising a next-run repair that
       // cannot happen, since the branch those lines came with is gone.

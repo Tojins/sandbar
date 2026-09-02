@@ -108,7 +108,7 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(prQueries).toBe(0);
   });
 
-  it("closes the members, drops in-chunk, closes the PR and deletes the branch", async () => {
+  it("closes the members, drops needs-review, closes the PR and deletes the branch", async () => {
     const { adapter, calls } = fakeAdapter();
     const r = await run(
       ["sandbar/chunk-42-c"],

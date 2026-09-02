@@ -251,7 +251,7 @@ const target = {
 };
 
 describe("wrapUpLandedChunk (#64)", () => {
-  it("closes every member in dependency order, drops in-chunk, closes the PR, deletes the branch", async () => {
+  it("closes every member in dependency order, drops needs-review, closes the PR, deletes the branch", async () => {
     const { adapter, calls } = makeWrapupAdapter();
     const r = await wrapUpLandedChunk(target, adapter, {
       sourceBranch: "main",
@@ -280,7 +280,7 @@ describe("wrapUpLandedChunk (#64)", () => {
     // `sandbar/chunk-<root>-<slug>`, re-derived from the open issues. Closing
     // #42 here would take the root out of that graph, re-root the chunk under
     // #43 on a branch origin has never had, and leave the kept branch matching
-    // nothing: deleted next cycle, with #43 open, `in-chunk`, on no queue.
+    // nothing: deleted next cycle, with #43 open and no branch left to retry.
     const { adapter, calls } = makeWrapupAdapter({ "closeIssue:43": "gh boom" });
     const r = await wrapUpLandedChunk(target, adapter, {
       sourceBranch: "main",
@@ -292,8 +292,8 @@ describe("wrapUpLandedChunk (#64)", () => {
       "43",
     ]);
     expect(calls.some((c) => c.op === "deleteChunkBranch")).toBe(false);
-    // And the un-closed member KEEPS `in-chunk`: an open issue that lost it
-    // would be on no queue at all.
+    // The unclosed member keeps its display cue; wrap-up changes labels only
+    // after the corresponding close succeeds.
     expect(calls.some((c) => c.op === "removeLabel")).toBe(false);
     expect(r.residue.join("\n")).toContain("#43 could not be closed");
     expect(r.residue.join("\n")).toContain("kept on origin");
@@ -618,9 +618,8 @@ describe("chunkResidue and the banners it feeds (#64)", () => {
 
   it("calls a chunk that retired having named no member its own thing", () => {
     // Every write worked, so there is no residue to split — and the chunk is
-    // still news: its branch is gone, so if any member was open under
-    // `in-chunk` and the graph had lost it, this line is the last mention of
-    // it anywhere.
+    // still news: its branch is gone, so if malformed history hid an open
+    // member from the graph, this line is the last mention of it anywhere.
     const unnamed = wrapup("sandbar/chunk-4-unnamed", true, [], []);
     const split = chunkResidue([unnamed]);
 

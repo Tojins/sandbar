@@ -185,14 +185,11 @@ const DEFAULT_K = 3;
 
 export type IssueState = "OPEN" | "CLOSED";
 
-// What the authoritative (GraphQL) batch knows about one issue. The labels are
-// carried for blockers, which are not necessarily candidates and so have no
-// entry in the listing this module filters — see the header. An issue absent
+// What the authoritative (GraphQL) batch knows about one issue. An issue absent
 // from the batch has no facts at all, and every read below treats that miss the
 // safe way round.
 export type IssueFacts = {
   readonly state: IssueState;
-  readonly labels: readonly string[];
 };
 
 export type IssueSummary = {
@@ -459,12 +456,11 @@ export async function fetchCandidates(
   return listOpenIssuesLabelled(repo, READY_LABEL);
 }
 
-// The issues already landed on a chunk branch (#59). Not queue members — they
-// are never planned — but the lane and chunk graphs are wrong without them, for
-// the two reasons the header spells out: a chunk re-rooted around its surviving
-// members names a branch nothing is on, and a descendant whose gating ancestor
-// left the graph reads as auto.
-/** Merge subjects are the durable membership record written by merger.ts. */
+/**
+ * Read the durable membership records written by merger.ts from each fetched
+ * origin chunk branch. A branch is trusted only once its name-derived root's
+ * merge is found; otherwise every apparent member is discarded.
+ */
 export async function readChunkMembers(
   repoDir: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<number>>> {
@@ -569,12 +565,6 @@ async function ghIssueBatch(
 // (the stale-search CLOSED guard, #16). GraphQL node lookups are strongly
 // consistent, unlike the search backend `fetchCandidates` lists through.
 //
-// Labels remain in this batch for the candidate facts shape and diagnostics;
-// chunk membership never reads them (#93). `first: 100` is
-// GitHub's own per-page maximum, so a truncated set would need an issue with
-// more than a hundred labels; were one to exist, the missing label reads as
-// "not in a chunk" and the dependent stays blocked, which is the harmless way
-// to be wrong.
 export async function fetchIssueStates(
   numbers: readonly number[],
   repo: RepoRef,
@@ -584,16 +574,13 @@ export async function fetchIssueStates(
   const records = await ghIssueBatch(
     numbers,
     repo,
-    "state labels(first: 100) { nodes { name } }",
+    "state",
   );
   for (const n of numbers) {
     const v = records[`i${n}`];
     if (!v) continue;
     result.set(n, {
       state: v.state === "CLOSED" ? "CLOSED" : "OPEN",
-      labels: (v.labels?.nodes ?? [])
-        .map((l) => l?.name)
-        .filter((name): name is string => typeof name === "string"),
     });
   }
   return result;
@@ -639,11 +626,10 @@ export async function buildPlan(
   const chunkMemberNumbers = [
     ...new Set([...chunkMembers.values()].flatMap((ns) => [...ns])),
   ];
-  // The queue plus the issues already landed on a chunk branch (#59). Two
-  // queries because `gh issue list --label` ANDs its labels, and one graph
-  // because lanes and chunks are only right over both sets. Deduped by number,
-  // queue entry winning, for the one case the lagging search index can produce:
-  // an issue mid-flip showing up under both labels at once.
+  // The queue plus issues named by fetched chunk history (#93), in one graph
+  // because lane inheritance and chunk derivation need both sets. Deduped by
+  // number with the queue entry winning if the search index still returns a
+  // member whose `ready-for-agent` removal has not become visible yet.
   const listed = [
     ...(await fetchCandidates(repo)),
     ...(await fetchIssueSummaries(chunkMemberNumbers, repo)),

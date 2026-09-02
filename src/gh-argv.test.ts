@@ -220,13 +220,13 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
     // The same call the auto lane drops `ready-for-agent` with, which is why it
     // is not spelled twice either.
     it("drops a label in the configured repo", async () => {
-      await adapter().removeLabel(7, "in-chunk");
+      await adapter().removeLabel(7, "needs-review");
 
       const [argv] = await calls();
       expect(argv?.slice(0, 3)).toEqual(["issue", "edit", "7"]);
       expect(repoFlagOf(argv ?? [])).toBe("acme/app");
       expect(argv).toContain("--remove-label");
-      expect(argv).toContain("in-chunk");
+      expect(argv).toContain("needs-review");
     });
 
     // `land` is the chunk's queue, so the wrong repository here is a request

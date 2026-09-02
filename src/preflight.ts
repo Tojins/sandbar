@@ -831,8 +831,8 @@ async function classifySandbarBranches(
     // drops a member named by chunk history, so nothing will ever pick it up
     // again. The delete pass reaps it once it can VERIFY containment; until
     // then it is simply not the operator's problem. It
-    // only exists at all if a run died between the chunk push and the label
-    // flip, or if that delete failed.
+    // only exists at all if a run died between the chunk push and local issue-
+    // branch deletion, or if that delete failed.
     if (issueNum !== null && chunkMemberIssues.has(issueNum)) continue;
     // Stranded work from an interrupted run: the branch belongs to an issue the
     // planner is still queued to work. Resume it rather than refusing to start

@@ -295,7 +295,7 @@ describe("finalizeOne", () => {
   // #60 — the third success shape. Everything here is deliberately NOT what
   // `merged` does: the issue is not closed, it is not left carrying the queue
   // label, and it gets a comment.
-  it("chunk-landed: swaps ready-for-agent for in-chunk, comments the branch, deletes the local branch", async () => {
+  it("chunk-landed: swaps ready-for-agent for needs-review, comments the branch, deletes the local branch", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(

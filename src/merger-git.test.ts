@@ -280,6 +280,34 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     expect(await git(wt, "rev-parse", "HEAD")).toBe(preMergeSha);
   });
 
+  it("refuses to guess when one attempt produces multiple first-parent merges", async () => {
+    const preMergeSha = await git(wt, "rev-parse", "HEAD");
+    for (const n of [10, 11]) {
+      await git(seed, "checkout", "-B", `sandbar/issue-${n}-member`, "main");
+      await commit(seed, `member-${n}.txt`, `member ${n}\n`);
+      await git(seed, "push", "-q", "origin", `sandbar/issue-${n}-member`);
+      await git(cache, "fetch", "origin", "--quiet");
+      await git(
+        wt,
+        "merge",
+        "--no-ff",
+        "-m",
+        `Merge sandbar/issue-${n}: Member ${n}`,
+        `origin/sandbar/issue-${n}-member`,
+      );
+    }
+
+    await expect(
+      adapter().canonicalizeChunkMemberMerge({
+        id: "10",
+        title: "Member 10",
+        branch: "sandbar/issue-10-member",
+      }, preMergeSha),
+    ).rejects.toThrow(
+      "produced 2 first-parent merge commits; refusing to guess which commit records its membership",
+    );
+  });
+
   it("refuses to turn an agent's replacement commit into a false membership record", async () => {
     const preMergeSha = await git(wt, "rev-parse", "HEAD");
     await commit(wt, "replacement.txt", "not a merge\n");

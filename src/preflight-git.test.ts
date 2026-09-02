@@ -352,8 +352,8 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // (its commits are published under the chunk's name, so refusing the run
     // over it would refuse over nothing) and not `resumable` (the planner
     // drops issues named by chunk history, so no inner loop will ever continue
-    // it). It exists only when a run died between the chunk push and the label
-    // flip, and the delete pass reaps it as soon as it can verify containment.
+    // it). It exists only when a run died between the chunk push and local
+    // branch deletion, and the delete pass reaps it after verifying containment.
     it("takes none of the three for a git-derived chunk member's issue branch", async () => {
       await git(target, "checkout", "-q", "-b", "sandbar/issue-7-member");
       await git(target, "commit", "-q", "--allow-empty", "-m", "member work");
