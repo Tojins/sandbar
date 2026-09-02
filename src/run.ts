@@ -827,7 +827,6 @@ export async function run(
         excluded: mergedThisRun,
         defaultLane: config.defaultLane,
         repoDir: layout.repoDir,
-        sourceBranch: config.sourceBranch,
       };
       let resolution = await buildPlan(repo, planOptions);
       for (const drift of resolution.chunkNameDrifts) {

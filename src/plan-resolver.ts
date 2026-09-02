@@ -476,9 +476,7 @@ export async function fetchCandidates(
  */
 export async function readChunkMembers(
   repoDir: string,
-  sourceBranch = "main",
 ): Promise<ReadonlyMap<string, ReadonlySet<number>>> {
-  void sourceBranch;
   const { stdout: refsOut } = await exec(
     "git",
     [
@@ -595,7 +593,6 @@ export async function fetchIssueStates(
 // pure function, and its tests state every argument anyway.
 export type BuildPlanOptions = {
   readonly repoDir: string;
-  readonly sourceBranch?: string;
   readonly excluded?: ReadonlySet<number>;
   readonly k?: number;
   readonly defaultLane?: Lane;
@@ -626,8 +623,7 @@ export async function buildPlan(
   // namespace is written only by chunk landing and its refs are deleted with
   // the chunk, so no source-history exclusion or landing-shape inference is
   // needed here.
-  const sourceBranch = options.sourceBranch ?? "main";
-  const chunkMembers = await readChunkMembers(options.repoDir, sourceBranch);
+  const chunkMembers = await readChunkMembers(options.repoDir);
   const chunkMemberNumbers = [
     ...new Set([...chunkMembers.values()].flatMap((ns) => [...ns])),
   ];

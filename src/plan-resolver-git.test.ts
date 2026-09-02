@@ -31,7 +31,7 @@ describe("chunk membership from branch containment (#93)", () => {
     git(repo, "update-ref", "refs/remotes/origin/sandbar/issue-48-parked", "HEAD");
     git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-47-useful-work", "HEAD");
     git(repo, "update-ref", "refs/remotes/origin/main", "HEAD~1");
-    expect(await readChunkMembers(repo, "main")).toEqual(
+    expect(await readChunkMembers(repo)).toEqual(
       new Map([["sandbar/chunk-47-useful-work", new Set([47])]]),
     );
   });
@@ -53,7 +53,7 @@ describe("chunk membership from branch containment (#93)", () => {
     git(repo, "merge", "--no-ff", "origin/sandbar/chunk-60-root", "-m", "land chunk");
     git(repo, "update-ref", "refs/remotes/origin/main", "HEAD");
 
-    expect(await readChunkMembers(repo, "main")).toEqual(
+    expect(await readChunkMembers(repo)).toEqual(
       new Map([["sandbar/chunk-60-root", new Set([60])]]),
     );
   });

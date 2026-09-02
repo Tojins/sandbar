@@ -567,7 +567,7 @@ export async function gatherState(
   const openReadyIssues = await fetchOpenReadyIssueNumbers(cfg.repo);
   const chunkMemberIssues =
     knownChunkMemberIssues ??
-    (await fetchChunkMemberIssueNumbers(repoDir, cfg.sourceBranch));
+    (await fetchChunkMemberIssueNumbers(repoDir));
   const { unmerged, discarded, resumable } = await classifySandbarBranches(
     repoDir,
     openReadyIssues,
@@ -666,10 +666,9 @@ async function fetchOpenReadyIssueNumbers(
 // silently reaped on a query that did not answer.
 async function fetchChunkMemberIssueNumbers(
   repoDir: string,
-  sourceBranch: string,
 ): Promise<ReadonlySet<number>> {
   try {
-    const members = await readChunkMembers(repoDir, sourceBranch);
+    const members = await readChunkMembers(repoDir);
     return new Set([...members.values()].flatMap((ns) => [...ns]));
   } catch {
     return new Set();
@@ -955,7 +954,6 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   // would also let the two disagree if a label moved in between.
   const chunkMemberIssues = await fetchChunkMemberIssueNumbers(
     cfg.layout.repoDir,
-    cfg.sourceBranch,
   );
 
   const deleted = await deleteMergedSandbarBranches({
