@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   type ChunkDerivation,
   type ChunkIssue,
-  IN_CHUNK_LABEL,
+  NEEDS_REVIEW_LABEL,
   deriveChunks,
   landedChunksOf,
 } from "./chunks.js";
@@ -307,9 +307,9 @@ describe("deriveChunks — determinism", () => {
 // #59 — the spelling is protocol: a later issue writes this label onto the
 // tracker and `plan-resolver.ts` reads it back, so a typo on either side is a
 // chunk that never advances rather than a failure anyone sees.
-describe("IN_CHUNK_LABEL (#59)", () => {
-  it("is spelled `in-chunk`", () => {
-    expect(IN_CHUNK_LABEL).toBe("in-chunk");
+describe("NEEDS_REVIEW_LABEL (#93)", () => {
+  it("is spelled `needs-review`", () => {
+    expect(NEEDS_REVIEW_LABEL).toBe("needs-review");
   });
 });
 

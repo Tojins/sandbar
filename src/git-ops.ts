@@ -11,11 +11,15 @@
 // `DIRTY_STATUS_ARGV` is exported on the same grounds and for the same kind of
 // second caller (`driver-identity.ts`, #69): the `-c` flag on it is the whole
 // reason `git status --porcelain` may not be typed out anywhere else.
+//
+// A re-queued chunk member (#94) is seeded from the chunk tip under the same
+// issue-branch name. Its next atomic landing therefore fast-forwards the
+// durable origin member ref, preserving containment across rework.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { type ChunkTarget, IN_CHUNK_LABEL } from "./chunks.js";
+import { type ChunkTarget } from "./chunks.js";
 import { issueNumberFromBranch } from "./naming.js";
 
 const exec = promisify(execFile);
@@ -68,12 +72,12 @@ export class ChunkBaseMissingError extends Error {
         `sandbar's object cache has \`${chunk.branch}\` — the branch its blockers' ` +
         `commits are supposed to be on. Seeding it from the source branch would ` +
         `develop it against a tree missing that work (#61), and nothing downstream ` +
-        `would reject the result. The usual cause is the chunk RE-ROOTING: close ` +
-        `a chunk's root issue and the surviving members re-derive under a new root ` +
-        `and so a new branch name, while their commits stay on the old one. Look for ` +
-        `a recently closed issue carrying \`${IN_CHUNK_LABEL}\` and reopen it, or ` +
-        `land the chunk's real branch and close every member on it — either way the ` +
-        `chunk stops being half-visible to sandbar.`,
+        `would reject the result. The usual cause is chunk re-rooting after ` +
+        `history no longer names the component's root, so the surviving graph ` +
+        `derives a new branch name while its commits remain on the old one. ` +
+        `Inspect origin's chunk ` +
+        `branches and their contained origin member refs; restore the missing ` +
+        `ref or land the branch that actually carries the work.`,
     );
     this.name = "ChunkBaseMissingError";
   }
@@ -205,13 +209,12 @@ export async function fetchOriginChunkBranch(
 //   - A chunk the cache can name no branch for, and this issue is NOT its root
 //     → `ChunkBaseMissingError`. The ordinary argument says this cannot happen:
 //     a non-root member plans only once a blocker of its own carries
-//     `in-chunk`, and finalise applies that label only after the chunk branch
+//     its origin member ref contained by the chunk branch, published atomically as that branch
 //     carrying the commits is on origin. But the branch NAME is derived per
-//     cycle from the chunk's current root, and a chunk RE-ROOTS when that root
-//     leaves the graph — close it and the planner's two open-only listings
-//     (`fetchCandidates`, `fetchChunkMembers`) both drop it, so the survivors
-//     re-derive under a new root and `chunk.branch` names a branch nobody has
-//     ever pushed. Falling back there is the one outcome #61 exists to prevent,
+//     cycle from the chunk's current root. Git-derived members normally keep a
+//     closed root in the graph, but missing or repaired history can still make
+//     the graph re-root and name a branch nobody has ever pushed. Falling back
+//     there is the one outcome #61 exists to prevent,
 //     and unlike the merger's identical fallback nothing downstream catches it:
 //     the landing CREATES the branch, so there is no non-fast-forward push to
 //     be rejected, and the member merges cleanly onto a base its ancestors'
@@ -219,14 +222,11 @@ export async function fetchOriginChunkBranch(
 //     that justifies it rather than by a paragraph asserting the condition
 //     holds, and one issue with a broken premise goes to a human.
 //
-// The residual, stated rather than engineered around: a member whose commits
-// are ALREADY on the chunk branch while its issue still reads `ready-for-agent`
-// — the window a run leaves behind if it dies between the chunk push and the
-// label flip — is re-planned and seeded from a tip that already contains it, so
-// its diff slot renders empty. That window ends in a loud halt (finalise's
-// `requireChunkFlip`) and an operator, and the alternative reading (seed from
-// the source branch) would develop the retry against a tree the chunk has
-// already moved past, which is worse.
+// A member whose commits are already on a fetched chunk branch is de-queued by
+// that git fact even if the display-label edit never happened. There is no
+// label-flip recovery window: the issue branch may remain briefly as duplicate
+// local state, and preflight removes it only after verifying that its tip is
+// reachable from the origin chunk branch.
 export async function ensureIssueBranch(
   repoDir: string,
   branch: string,

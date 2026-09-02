@@ -28,7 +28,7 @@
 // answers which issues share a landing target and what that target is called,
 // and since #60 the merge phase acts on the answer — a DONE review-gated issue
 // is merged onto `chunk.branch` instead of onto the source branch, and finalise
-// then puts `IN_CHUNK_LABEL` on it.
+// then puts the display-only `needs-review` label on it.
 //
 // A whole chunk is WORKED, one layer at a time. `plan-resolver.ts` plans any
 // member whose blockers are satisfied, root or not (#61): the root seeds from
@@ -36,38 +36,35 @@
 // absent, so the two agree — and every member behind it seeds from the chunk's
 // TIP, which is where its blockers' commits actually are. A chunk therefore
 // grows one LAYER per cycle rather than one member: a member is unblocked by a
-// blocker carrying `in-chunk`, and that label is applied in the cycle AFTER the
-// one that landed it, so every member planned together is a set of siblings.
+// blocker whose origin member ref is contained by the chunk branch, visible in the
+// cycle AFTER the one that landed it, so every member planned together is a
+// set of siblings.
 //
 // The one thing still held is a review-gated issue with NO chunk — the output
 // of `blocked` below. There is no branch to name and no tip to seed from, so
 // working it could only end in auto-landing unreviewed code.
 //
 // ---------------------------------------------------------------------------
-// `in-chunk`, the label a landed member carries (#59, §3 of #54)
+// `needs-review`, the display label a landed member carries (#93)
 // ---------------------------------------------------------------------------
 //
 // A review-gated issue whose branch has landed on its chunk's branch is done as
 // far as sandbar is concerned, and not done at all as far as a human is:
 // nothing has reached the source branch yet, and the review that would justify
-// closing the issue has not happened. So the issue stays OPEN, and `in-chunk`
-// REPLACES `ready-for-agent` on it.
+// closing the issue has not happened. So the issue stays OPEN, and sandbar
+// attempts to replace `ready-for-agent` with `needs-review` for humans.
 //
-// That swap is the de-queue. `fetchCandidates` lists on `ready-for-agent`, so
-// dropping that label is what stops the planner picking the same developed
-// issue again next cycle — a landed member that kept it would be re-planned
-// every cycle, each time rebuilding work already sitting on the chunk branch.
-// And ADDING a label rather than merely removing one is what keeps the issue
-// findable: `plan-resolver.ts` lists these back in (its header says why at
-// length) because a chunk that forgets its landed members re-derives itself
-// around whatever is left, under a different root, and therefore under a
-// different branch name than the one its members are already on.
+// The swap is not authoritative. Containment by any fetched chunk branch is
+// the fail-safe de-queue fact; membership on the exact derived branch is the
+// stricter blocker-satisfaction fact. Membership is never read from a label.
+// The planner reads those members from git and fetches their issues back into
+// the candidate graph so the chunk cannot re-root around whatever remains queued.
 //
-// Hardcoded, not a `LabelConfig` knob, on the same grounds as `AUTO_LAND_LABEL`
-// in `lanes.ts`: the configurable labels name a HOST's handoff conventions,
-// and this one names sandbar's own internal state. Both ends of it — the write
-// in a later issue, the read in the planner — are sandbar's, so a knob could
-// only let the two spellings drift. The declaration is below the imports.
+// Hardcoded, not a `LabelConfig` knob: configurability is outside #93's scope,
+// and the name is embedded in human-facing prose across finalise, chunk
+// wrap-up, and the pull-request flow. This declaration is also exported for
+// host setup scripts, so one protocol spelling keeps all of those surfaces in
+// step. The declaration is below the imports.
 //
 // ---------------------------------------------------------------------------
 // The two-chunk-parent rule
@@ -144,16 +141,13 @@
 import type { Lane } from "./lanes.js";
 import { chunkBranchName } from "./naming.js";
 
-// The label a review-gated issue carries once its branch has landed on its
-// chunk's branch: OPEN, out of the queue, and still to be reviewed. See the
-// header for why it replaces `ready-for-agent` rather than joining it, and why
-// it is hardcoded. Applied by finalise (#60), once the chunk branch carrying
-// the member's commits is on origin — never before, so the label is only ever
-// read as "these commits are somewhere durable".
-export const IN_CHUNK_LABEL = "in-chunk";
+// The display label a review-gated issue carries once its work is on its chunk
+// branch: OPEN and still to be reviewed. Sandbar writes and later removes it,
+// but never reads it; git history is the membership source of truth (#93).
+export const NEEDS_REVIEW_LABEL = "needs-review";
 
 // The label a HUMAN puts on a chunk's pull request to land it (#64). The other
-// end of the same lifecycle: `in-chunk` says the work is on the branch,
+// end of the same lifecycle: `needs-review` tells a human review is pending,
 // `land` says a reviewer is done with it and the next run should merge the
 // branch into the source branch and close every member on it.
 //
@@ -183,7 +177,7 @@ export type ChunkTarget = {
   readonly root: number;
   readonly branch: string;
   // The chunk's members that were ALREADY on `branch` when the plan was built
-  // — the ones carrying `IN_CHUNK_LABEL` (#62). Ascending, and never including
+  // — the ones whose origin member refs it contains (#62, #93). Ascending, and never including
   // the issue carrying this target, which is on its way there and not there
   // yet.
   //
@@ -226,7 +220,7 @@ export type Chunk = {
 
 // A chunk that has WORK ON ORIGIN, and what the consumers of the review
 // surface need to know about it (#63, #64). Derived after the fact from a
-// `Chunk` and the set of members carrying `IN_CHUNK_LABEL` — see
+// `Chunk` and the set of members read from the chunk branch — see
 // `landedChunksOf`. Only the PLAN can build one: the titles come from the
 // candidate listing and the membership from the graph that listing carries.
 export type LandedChunk = {
@@ -240,7 +234,7 @@ export type LandedChunk = {
   // Every LANDED member, ascending: the issues whose commits are on the branch.
   //
   // This is the list a landing CLOSES (#64), which is the whole reason it is
-  // the `in-chunk` members rather than `Chunk.members`. A component holds
+  // the git-derived members rather than `Chunk.members`. A component holds
   // members that have never been worked — a chained member waits for its
   // blockers to land — and closing one of those would destroy a queued issue
   // while telling a human its commits were on the source branch, and would
@@ -442,9 +436,8 @@ export function deriveChunks(
 /**
  * The chunks whose work is on origin: what each carries, and the tips of it.
  *
- * `landed` is the caller's set of members carrying `IN_CHUNK_LABEL` — a label
- * applied only once the chunk branch carrying a member's commits has been
- * pushed, so it means exactly "this member's work is on the branch". `issues`
+ * `landed` is the caller's set of member refs contained by the exact
+ * fetched chunk branch, so it means "this member's work is on the branch". `issues`
  * is the same list `deriveChunks` was given, and is where the titles and the
  * blocked-by edges come from; a member missing from it contributes an empty
  * title rather than dropping out, because the number is the part anything acts

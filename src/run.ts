@@ -842,8 +842,16 @@ export async function run(
       const planOptions = {
         excluded: mergedThisRun,
         defaultLane: config.defaultLane,
+        repoDir: layout.repoDir,
       };
       let resolution = await buildPlan(repo, planOptions);
+      for (const drift of resolution.chunkNameDrifts) {
+        const line =
+          `Origin chunk branch ${drift.existing} no longer matches the name ` +
+          `derived for its root: ${drift.derived}`;
+        console.warn(line);
+        await runLogger.appendOrchestrator(line);
+      }
 
       // The chunk-review scan (#63). Every chunk with work on origin is asked
       // whether a human has requested changes on its pull request, and each
@@ -852,7 +860,7 @@ export async function run(
       // `landedChunks` is empty, and the scan makes no call at all.
       //
       // RE-PLANNED when it files anything, because the follow-up is blocked
-      // only by members already carrying `in-chunk` — it is eligible in this
+      // only by members already on the chunk branch — it is eligible in this
       // very cycle, and a cycle that filed the issue and then found the plan
       // empty would exit with a review nobody had answered. The created issues
       // are handed back in rather than re-listed: `gh issue list` is the
@@ -882,7 +890,7 @@ export async function run(
       // one step whose whole job is to make the tracker agree with git before
       // anything reads either. It needs the derivation the plan just built
       // (only that graph knows which issues are on a chunk branch), and what
-      // it does — closing members, dropping `in-chunk` — changes the answer to
+      // it does — closing members, dropping `needs-review` — changes the answer to
       // every question the plan asked, so the plan is REBUILT when it acted.
       //
       // Rebuilt rather than left stale for the next cycle: closing a member
@@ -937,7 +945,7 @@ export async function run(
       // same reason: a branch already on the source branch that no chunk
       // claims is deleted having closed nothing, and the only trace of it left
       // afterwards is this line. Ordinary when a human closed the members out
-      // by hand; the one thing it can also be is a member whose `in-chunk` the
+      // by hand; the one thing it can also be is a member whose merge commit the
       // derivation lost, which is a repair nothing else will ever offer.
       if (reconcileResidue.unnamed.length > 0) {
         console.warn(
@@ -1389,7 +1397,7 @@ export async function run(
             // filtering on `agent-stuck`. Nothing here lands code ON THE SOURCE
             // BRANCH: `merged` is always empty on this path. `chunkLanded`
             // (#60) may not be, and that is not a contradiction — those commits
-            // are on origin's chunk branch and the issues owe their `in-chunk`
+            // are on origin's chunk branch and the issues receive `needs-review`
             // label whether the cycle went on to halt or not.
             haltPartial = err.partial;
             if (haltPartial && haltPartial.merged.length > 0) {
@@ -1425,10 +1433,7 @@ export async function run(
         }
         // Merged-and-closed only. A chunk landing (#60) is deliberately NOT
         // added: `excluded` means "this run already merged it to the source
-        // branch", and what de-queues a chunk member is its `in-chunk` label,
-        // which the planner reads from the strongly-consistent facts batch and
-        // from `fetchChunkMembers` — so the lag this set exists to paper over
-        // cannot reach it.
+        // branch". Git membership de-queues a chunk member without tracker lag.
         for (const m of mergerOutcome.merged) {
           mergedThisRun.add(issueNumberOf(m));
         }
@@ -1503,9 +1508,9 @@ export async function run(
       // repair whose next attempt is a whole cycle away.
       //
       // WHAT DOES NOT HALT is a chunk that retired cleanly and left a cosmetic
-      // line behind: an `in-chunk` label that would not come off a CLOSED issue
-      // (the wrap-up calls that harmless itself, and the planner lists open
-      // issues only), or a pull request that would not close. Neither leaves an
+      // line behind: a `needs-review` label that would not come off a CLOSED issue
+      // (the wrap-up calls that harmless itself, and the planner never reads
+      // that display label), or a pull request that would not close. Neither leaves an
       // issue on no queue, and halting on one would abandon the rest of the
       // run's budget over a label — while promising a next-run repair that
       // cannot happen, since the branch those lines came with is gone.
@@ -1516,7 +1521,7 @@ export async function run(
       // such a request on purpose — a human labelled a branch that origin has,
       // and refusing would leave them holding a label nothing reads — and the
       // usual reason for it is benign: every member was closed by hand already.
-      // But the wrap-up cannot tell that from a member whose `in-chunk` label
+      // But the wrap-up cannot tell that from a member whose merge commit
       // the derivation never saw, and it deletes the branch either way (see
       // `chunk-land.ts`), so nothing will ever look at this chunk again. That
       // is a warning rather than a halt: the commits are on the source branch

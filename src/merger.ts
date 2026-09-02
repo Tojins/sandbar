@@ -83,7 +83,7 @@
 //
 // A failure to open it HALTS, like every other tracker write in this loop. The
 // landing survives in the partial (those issues are on origin and still owe
-// `in-chunk`), so what the halt costs is the cycle, and what carrying on would
+// `needs-review`), so what the halt costs is the cycle, and what carrying on would
 // cost is a chunk branch growing under a human who was never shown it.
 //
 // ---------------------------------------------------------------------------
@@ -135,10 +135,10 @@
 // it; it is neither a landing nor a park.
 //
 // The WRAP-UP runs only after the source branch has moved: close every member
-// ON THE BRANCH explicitly (the `in-chunk` ones — a component member that was
+// ON THE BRANCH explicitly (the git-derived ones — a component member that was
 // never worked has no commits here and must not be closed; and no `Closes #N`
 // will ever fire, since GitHub honours those on its own merge of that pull
-// request and sandbar composed this one locally), drop `in-chunk`, close the
+// request and sandbar composed this one locally), drop `needs-review`, close the
 // PR, delete the chunk branch on origin. It cannot throw,
 // by construction: it is entirely inside the post-`landed` window, where a
 // wrapped throw would report `merged: []` against a source branch that moved.
@@ -313,7 +313,11 @@ import {
 import { type GateResult, formatGateFields } from "./gate.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { gitMountsForWorktree } from "./merger-worktree.js";
-import { type RunScope, scopedResourcePrefix } from "./naming.js";
+import {
+  memberBranchName,
+  type RunScope,
+  scopedResourcePrefix,
+} from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 import { RUNTIME } from "./runtime.js";
 import {
@@ -657,7 +661,10 @@ export type MergerAdapter = ResolveAdapter & {
   // Push HEAD to `refs/heads/<chunkBranch>` on origin. Never forcing: a
   // rejected push means the chunk branch moved under us, so this composition
   // is not built on what is there and overwriting it would drop a member.
-  pushChunkBranch(chunkBranch: string): Promise<PushResult>;
+  pushChunkBranch(
+    chunkBranch: string,
+    members: readonly { readonly source: string; readonly destination: string }[],
+  ): Promise<PushResult>;
   // Create-or-update the chunk's DRAFT pull request against the source branch
   // (#62) — the review surface the whole review lane exists to produce. Called
   // once per chunk per cycle, AFTER the push, because a PR is a handle on
@@ -679,7 +686,10 @@ export type MergerAdapter = ResolveAdapter & {
   // Delete the chunk branch on origin, once its commits are on the source
   // branch. The last step of the wrap-up and the one that stops the reconciler
   // seeing this chunk again.
-  deleteChunkBranch(chunkBranch: string): Promise<void>;
+  deleteChunkBranch(
+    chunkBranch: string,
+    memberIssues: readonly number[],
+  ): Promise<void>;
   commentOnPullRequest(pr: number, body: string): Promise<void>;
   // Takes `land` back off, which is what stops a request being honoured
   // again. The wrap-up drops it when a chunk lands; the merge loop drops it on
@@ -740,7 +750,7 @@ type MergedChunkUnit = ChunkLandingUnit & { readonly ref: string };
 // (#60). Recorded only after the push, so the label finalise applies from it
 // never claims durability the commits do not have. Not `merged`: nothing of it
 // has reached the source branch, the issue stays OPEN, and what it earns is
-// `in-chunk` rather than a close.
+// `needs-review` rather than a close.
 export type ChunkLanding = {
   readonly issue: IssueRef;
   readonly chunkBranch: string;
@@ -884,7 +894,7 @@ export type ChunkGroup = {
 // Groups of more than one member are reachable since #61: a chunk whose root
 // has landed can hand this cycle every member blocked on it at once. Those
 // members are necessarily SIBLINGS rather than a chain — a member plans only
-// once its own blockers carry `in-chunk`, which no issue planned in the same
+// once its own blockers are on the chunk branch, which no issue planned in the same
 // cycle does — so the order within a group is not a dependency order and
 // ascending issue number (what `sortIssuesAsc` already gave) is simply
 // deterministic. Being siblings is also why they can conflict with each other
@@ -1304,7 +1314,7 @@ export async function runMergerWithAdapter(
   //
   // `chunkLanded` is the opposite and is carried VERBATIM: those commits really
   // are on origin (the entry is written after the push) and the issues really
-  // do need their `in-chunk` label. Landing a chunk does not move the source
+  // receive their `needs-review` display label. Landing a chunk does not move the source
   // branch, so it takes nothing away from the `merged: []` claim beside it —
   // the two answer different questions. `skipped` and `skippedChunks` are the
   // same: a tracker write already made, which is the whole reason a partial
@@ -1397,9 +1407,8 @@ export async function runMergerWithAdapter(
     clock: opts.clock,
   };
 
-  // One DONE issue branch. TRUE when a commit for this issue is on HEAD; FALSE
-  // when it was skipped and HEAD is back where it was — with the issue told why
-  // and taken off the queue.
+  // One DONE issue branch. True means its commits are on HEAD; false means it
+  // was skipped and HEAD is back where it started.
   const mergeOne = async (
     issue: IssueRef,
     target: MergeTarget,
@@ -1475,7 +1484,7 @@ export async function runMergerWithAdapter(
   // `attemptMerge`: it WRITES `chunkLanded`, and it has to write it before the
   // pull-request call below, which halts. Returning the landed members for a
   // caller to record instead would mean a halt on the PR left them out of the
-  // partial — and their commits are on origin by then, so `in-chunk` is owed
+  // partial — and their commits are on origin by then, so `needs-review` is owed
   // whether or not the review surface came up.
   const landChunkGroup = async (group: ChunkGroup): Promise<void> => {
     const branch = group.target.branch;
@@ -1498,7 +1507,13 @@ export async function runMergerWithAdapter(
     // is merged before it: a member is only ever recorded as landed once the
     // commits carrying it are on origin.
     const push = await adapter
-      .pushChunkBranch(branch)
+      .pushChunkBranch(
+        branch,
+        landedMembers.map((member) => ({
+          source: member.branch,
+          destination: memberBranchName(issueNumberOf(member)),
+        })),
+      )
       .catch(asHalt(`Chunk push failed for ${branch}`));
     if (push.kind !== "ok") {
       // Not force-pushed and not retried. A rejected push means the chunk
@@ -1544,14 +1559,15 @@ export async function runMergerWithAdapter(
       .catch(
         // Loud, like every other tracker write in this loop. The landing is
         // durable and the partial carries it, so the members still get
-        // `in-chunk`; what is missing is the thing a human reviews, and a run
+        // `needs-review`; what is missing is the thing a human reviews, and a run
         // that carried on would keep landing work onto a branch nobody had
         // been shown.
         asHalt(
           `Chunk branch ${branch} is on origin with ` +
             `${landedMembers.map((m) => `#${issueNumberOf(m)}`).join(", ")} landed on it, ` +
             `but its draft pull request could not be opened or updated. Those issues keep ` +
-            `their landing and are labelled in-chunk; open or update the PR by hand (or fix ` +
+            `their landing and are labelled needs-review when that display write succeeds; ` +
+            `open or update the PR by hand (or fix ` +
             `gh's permissions — the next cycle that lands a member on this chunk retries it)`,
         ),
       );
@@ -1595,7 +1611,7 @@ export async function runMergerWithAdapter(
   // Everything the resolve agent should be able to read about a chunk: the
   // member issues, all pointing at where their work actually is. Their own
   // issue branches are long since deleted (finalise reaps one when its member
-  // flips to `in-chunk`), so naming those would send an agent to a ref that is
+  // lands on the chunk), so naming those would send an agent to a ref that is
   // not there — and so, for the same reason, would naming the chunk branch:
   // only `origin/<chunk>` exists here, which is why the caller passes the ref
   // `fetchChunkRef` resolved rather than `request.branch`. See
@@ -2335,20 +2351,23 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   // retry", which both landing targets rest on — a second copy is a git version
   // or a server phrasing a rejection differently, patched in one place and
   // silently reclassified as `fatal` in the other.
+  const classifyPushError = (err: unknown): PushResult => {
+    const e = err as { stderr?: string; message?: string };
+    const stderr = e.stderr ?? "";
+    if (/rejected|non-fast-forward|fetch first|stale info/i.test(stderr)) {
+      return { kind: "race" };
+    }
+    return {
+      kind: "fatal",
+      reason: stderr.trim() || e.message || "unknown push error",
+    };
+  };
   const pushHeadTo = async (dest: string): Promise<PushResult> => {
     try {
       await exec("git", ["push", "origin", `HEAD:${dest}`], { cwd });
       return { kind: "ok" };
     } catch (err) {
-      const e = err as { stderr?: string; message?: string };
-      const stderr = e.stderr ?? "";
-      if (/rejected|non-fast-forward|fetch first|stale info/i.test(stderr)) {
-        return { kind: "race" };
-      }
-      return {
-        kind: "fatal",
-        reason: stderr.trim() || e.message || "unknown push error",
-      };
+      return classifyPushError(err);
     }
   };
   // The unmerged set. One spelling, shared by the conflict digest the resolve
@@ -2744,11 +2763,55 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // halt; forcing would delete it.
       await exec("git", ["checkout", "--detach", ref], { cwd });
     },
-    async pushChunkBranch(chunkBranch) {
+    async pushChunkBranch(chunkBranch, members) {
       // Fully qualified, unlike the source branch's: a chunk branch may not
       // exist on origin yet, and git only creates a ref from an unambiguous
       // destination.
-      return pushHeadTo(`refs/heads/${chunkBranch}`);
+      try {
+        for (const member of members) {
+          const contained = await exec(
+            "git",
+            ["merge-base", "--is-ancestor", member.source, "HEAD"],
+            { cwd },
+          ).then(() => true, () => false);
+          if (!contained) {
+            return {
+              kind: "fatal",
+              reason:
+                `membership source ${member.source} is not contained in ` +
+                `the composed chunk branch ${chunkBranch}`,
+            };
+          }
+        }
+        await exec("git", [
+          "push",
+          "--atomic",
+          "origin",
+          `HEAD:refs/heads/${chunkBranch}`,
+          ...members.map(
+            ({ source, destination }) =>
+              `${source}:refs/heads/${destination}`,
+          ),
+        ], { cwd });
+        return { kind: "ok" };
+      } catch (err) {
+        const e = err as { stderr?: string; message?: string };
+        const stderr = e.stderr ?? "";
+        const memberRejected = members.some(({ destination }) =>
+          stderr.split("\n").some(
+            (line) =>
+              line.includes(destination) &&
+              !/\(atomic push failed\)/i.test(line),
+          ),
+        );
+        if (memberRejected) {
+          return {
+            kind: "fatal",
+            reason: `membership ref rejected: ${stderr.trim() || e.message || "unknown push error"}`,
+          };
+        }
+        return classifyPushError(err);
+      }
     },
     async ensureChunkPullRequest({ chunkBranch, title, body }) {
       // DRAFT, which is the whole mechanism (#54 Q14): it disables GitHub's

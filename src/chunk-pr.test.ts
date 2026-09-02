@@ -23,8 +23,8 @@ describe("chunkMembersOnBranch", () => {
   });
 
   it("lists an issue once, with the title read this cycle", () => {
-    // Reachable only if a member landed and its `in-chunk` flip failed, so it
-    // is planned again; double-listing it would make the body a wrong record.
+    // Defensive against overlapping snapshots: the current cycle's tracker
+    // title wins, and the body must never list a member twice.
     expect(
       chunkMembersOnBranch([member(42, "old title")], [member(42, "new title")]),
     ).toEqual([member(42, "new title")]);

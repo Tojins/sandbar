@@ -533,7 +533,7 @@ describe("classifySandbarBranches", () => {
       branches,
       upstreamTracks: new Map(),
       openReadyIssues: new Set(),
-      inChunkIssues: new Set(),
+      chunkMemberIssues: new Set(),
       openIssues: new Set(),
       ...over,
     });
@@ -586,9 +586,9 @@ describe("classifySandbarBranches", () => {
     expect(r.parked).toEqual([]);
   });
 
-  it("in-chunk members and chunk branches are none of the four", () => {
+  it("chunk members and chunk branches are none of the four", () => {
     const r = classify(["sandbar/issue-5-member", "sandbar/chunk-5-root"], {
-      inChunkIssues: new Set([5]),
+      chunkMemberIssues: new Set([5]),
       openIssues: new Set([5]),
     });
     expect(r).toEqual({ unmerged: [], discarded: [], resumable: [], parked: [] });
