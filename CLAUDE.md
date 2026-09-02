@@ -42,8 +42,8 @@ from the package root beside `run`.
 A host repo supplies one committed `sandbar.config.mjs` at its root, its own
 `Containerfile`(s), anchor docs (`CLAUDE.md`, `CONTEXT.md`, optional ADR dir),
 and a **gate stack** (`config.gateStack`, #24) — the containers and steps that
-produce a verdict about a commit. Reviewer coding standards ship built-in
-(`prompts/coding-standards.md`); a host may extend them via
+produce a verdict about a commit. Coding standards for the implementer and
+reviewer ship built-in (`prompts/coding-standards.md`); a host may extend them via
 `config.codingStandardsPath`. Sandbar then drives a GitHub-Issues-driven
 coding-agent loop against that host.
 

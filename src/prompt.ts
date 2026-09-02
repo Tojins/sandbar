@@ -2,8 +2,10 @@
 // project anchor (shared verbatim by both agents), issue anchor
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
 // branch diff, sandbox-stack report #44, gate trace, reviewer prose, UI-impact
-// check #21; reviewer: diff + commits, split into a correctness pass and a
-// self-sufficient checklist follow-up sharing one provider session (#19)).
+// check #21, and the same coding standards the reviewer applies plus a live
+// pre-promise diff checklist (#78); reviewer: diff + commits, split into a
+// correctness pass and a self-sufficient checklist follow-up sharing one
+// provider session (#19)).
 //
 // The issue anchor uses `--json`, NOT the human-readable `--comments` form —
 // that one is TTY-sensitive and, when piped, omits the body. A fetch failure
@@ -167,6 +169,10 @@ export type PromptInputs = {
   readonly base: IssueBranchBase;
   readonly extraReprompt?: string;
   readonly latestReviewerProse?: string;
+  // Optional host extension to the built-in coding standards. Its existence is
+  // probed in `worktreePath`, because a branch may add the file it asks the
+  // implementer (and later the reviewer) to follow (#78).
+  readonly codingStandardsPath?: string;
   // What came up beside the agent this sandbox cycle (#44 D8). Absent for a
   // consumer that declares no `inSandbox` container, and an empty array is the
   // same thing — the slot renders to "" either way.
@@ -224,7 +230,7 @@ export async function buildPrompt(
     // branch itself adds.
     await buildProjectAnchor(anchor, inputs.worktreePath),
     await buildIssueAnchor(inputs.issue.id, anchor.repo),
-    await buildAttemptSlot(inputs),
+    await buildAttemptSlot(inputs, anchor),
   ];
   return layers.join("\n\n---\n\n");
 }
@@ -335,7 +341,10 @@ async function buildIssueAnchor(
   return `# Issue anchor\n\n${await fetchIssueText(issueId, repo)}`;
 }
 
-async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
+async function buildAttemptSlot(
+  inputs: PromptInputs,
+  anchor: ProjectAnchorOptions,
+): Promise<string> {
   const { worktreePath, base } = inputs;
 
   // Empty is a legitimate answer HERE and only here: attempt 1 has no commits.
@@ -347,13 +356,29 @@ async function buildAttemptSlot(inputs: PromptInputs): Promise<string> {
     `the work done so far on ${inputs.issue.branch}, anchored at ${base.ref}`,
   );
 
-  return renderAttemptSlot({ ...inputs, diff });
+  const codingStandardsPath =
+    inputs.codingStandardsPath &&
+    existsSync(resolve(worktreePath, inputs.codingStandardsPath))
+      ? inputs.codingStandardsPath
+      : undefined;
+
+  return renderAttemptSlot({
+    ...inputs,
+    codingStandardsPath,
+    claudeMdPath: anchor.claudeMdPath,
+    ...(anchor.contextMdPath ? { contextMdPath: anchor.contextMdPath } : {}),
+    diff,
+  });
 }
 
 // Pure renderer for the implementer slot, separated from the git I/O above so
 // the prompt's shape is table-testable. Optional sections collapse to "" when
 // their input is absent; `section()` supplies the trailing blank line.
-export type AttemptSlotRender = PromptInputs & { readonly diff: string };
+export type AttemptSlotRender = PromptInputs & {
+  readonly claudeMdPath: string;
+  readonly contextMdPath?: string;
+  readonly diff: string;
+};
 
 export function renderAttemptSlot(inputs: AttemptSlotRender): string {
   const {
@@ -403,6 +428,12 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
         })
       : "";
 
+  const projectStandards = inputs.codingStandardsPath
+    ? render(REVIEWER_PROJECT_STANDARDS_TPL, {
+        codingStandardsPath: inputs.codingStandardsPath,
+      })
+    : "";
+
   return render(IMPLEMENTER_TPL, {
     attempt: String(attempt),
     maxAttempts: String(maxAttempts),
@@ -416,6 +447,10 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     reviewerFeedback: section(reviewerFeedback),
     orchestratorNote: section(orchestratorNote),
     escalation: section(escalation),
+    codingStandards: CODING_STANDARDS,
+    projectStandards: section(projectStandards),
+    conventionsRef: conventionsRef(inputs.claudeMdPath, inputs.contextMdPath),
+    baseRef: base.ref,
   });
 }
 
@@ -569,10 +604,6 @@ function renderReviewerTemplate(
     ? render(REVIEWER_PROJECT_STANDARDS_TPL, { codingStandardsPath })
     : "";
 
-  const conventionsRef = contextMdPath
-    ? `@${claudeMdPath} (and @${contextMdPath} if it exists)`
-    : `@${claudeMdPath}`;
-
   return render(template, {
     branch: issue.branch,
     baseRef: base.ref,
@@ -584,6 +615,14 @@ function renderReviewerTemplate(
     diff: section(diffBlock),
     codingStandards: CODING_STANDARDS,
     projectStandards: section(projectStandards),
-    conventionsRef,
+    conventionsRef: conventionsRef(claudeMdPath, contextMdPath),
   });
+}
+
+// One spelling shared by both roles: the conventions are the same documents,
+// even though each prompt tells its agent when and how to consult them (#78).
+function conventionsRef(claudeMdPath: string, contextMdPath?: string): string {
+  return contextMdPath
+    ? `@${claudeMdPath} (and @${contextMdPath} if it exists)`
+    : `@${claudeMdPath}`;
 }

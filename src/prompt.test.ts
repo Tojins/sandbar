@@ -38,6 +38,7 @@ describe("renderAttemptSlot — UI-prototype escalation contract", () => {
     worktreePath: "/tmp/wt",
     lastFailureTrace: "",
     base: sourceBranchBase("main"),
+    claudeMdPath: "CLAUDE.md",
     diff: "",
   });
 
@@ -90,6 +91,7 @@ describe("renderAttemptSlot — commit-on-the-issue-branch rule (#27)", () => {
     worktreePath: "/tmp/wt",
     lastFailureTrace: "",
     base: sourceBranchBase("main"),
+    claudeMdPath: "CLAUDE.md",
     diff: "",
   });
 
@@ -112,6 +114,72 @@ describe("renderAttemptSlot — commit-on-the-issue-branch rule (#27)", () => {
   it("warns that the correction is a single one", () => {
     expect(slot).toContain(
       "a second attempt still off the branch hands the issue to a human",
+    );
+  });
+});
+
+describe("renderAttemptSlot — implementer standards and pre-promise review (#78)", () => {
+  const renderImplementer = (codingStandardsPath?: string) =>
+    renderAttemptSlot({
+      issue: baseInputs.issue,
+      attempt: 1,
+      maxAttempts: 8,
+      worktreePath: "/tmp/wt",
+      lastFailureTrace: "",
+      base: sourceBranchBase("main"),
+      claudeMdPath: "CLAUDE.md",
+      contextMdPath: "AGENTS.md",
+      ...(codingStandardsPath ? { codingStandardsPath } : {}),
+      diff: "",
+    });
+
+  it("carries the reviewer's built-in standards verbatim and host extension", () => {
+    const implementer = renderImplementer("docs/CODING_STANDARDS.md");
+    const reviewer = renderReviewerFollowupSlot({
+      ...baseInputs,
+      contextMdPath: "AGENTS.md",
+      commits: "a1 first",
+      diff: "diff",
+    });
+    const standardsStart = "Gate-1 is green: every step this project defines";
+    const standardsEnd = "No vague disapproval, no\npadding.";
+
+    expect(implementer).toContain(standardsStart);
+    expect(implementer).toContain(standardsEnd);
+    expect(reviewer).toContain(standardsStart);
+    expect(reviewer).toContain(standardsEnd);
+    expect(implementer).toContain("@docs/CODING_STANDARDS.md");
+    expect(implementer).toContain("@CLAUDE.md (and @AGENTS.md if it exists)");
+    expect(implementer).toContain("git diff origin/main...HEAD");
+    expect(implementer).toContain("git log origin/main..HEAD");
+    expect(implementer).toContain("module headers, architecture documents, and READMEs");
+    expect(implementer).toMatch(/version\s+bumps and changelog entries/);
+    expect(implementer).toContain("list its stated requirements");
+  });
+
+  it("keeps built-in standards without an optional host extension", () => {
+    const slot = renderImplementer();
+    expect(slot).toContain("## Coding standards");
+    expect(slot).not.toContain("### Project standards");
+    expect(slot).not.toContain("CODING_STANDARDS.md");
+  });
+
+  it("does not bake this host's ritual wording into the shipped prompt", () => {
+    const slot = renderImplementer();
+    expect(slot).not.toContain("npm version");
+    expect(slot).not.toContain("package.json");
+  });
+
+  it("places standards and self-review between commit discipline and done signal", () => {
+    const slot = renderImplementer();
+    expect(slot.indexOf("## Commit discipline")).toBeLessThan(
+      slot.indexOf("## Coding standards"),
+    );
+    expect(slot.indexOf("## Coding standards")).toBeLessThan(
+      slot.indexOf("## Pre-promise review"),
+    );
+    expect(slot.indexOf("## Pre-promise review")).toBeLessThan(
+      slot.indexOf("## Done signal"),
     );
   });
 });

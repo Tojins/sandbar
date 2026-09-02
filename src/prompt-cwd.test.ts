@@ -17,7 +17,8 @@
 //                  even for the reviewer, whose worktree is its SUBJECT:
 //                  sourcing history from it would make the anchor a function
 //                  of the branch under review.
-//   probeWorktree  the tree the emitted @refs are RESOLVED in. This one is
+//   probeWorktree  the tree the implementer and reviewer standards @refs are
+//                  RESOLVED in. This one is
 //                  supposed to be a function of the branch, and was the last
 //                  to be got right: #38 pointed it at `worktrees/source`, a
 //                  clean tree at `origin/<sourceBranch>`, which is what an
@@ -277,6 +278,54 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       claudeMdPath: "CLAUDE.md",
       codingStandardsPath: "CODING_STANDARDS.md",
     })).followup;
+
+    expect(prompt).not.toContain("@CODING_STANDARDS.md");
+  });
+
+  it("points the implementer at standards the branch under work adds", async () => {
+    await writeFile(join(launchedFrom, "CODING_STANDARDS.md"), "# std\n");
+
+    const prompt = await buildPrompt(
+      {
+        issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
+        attempt: 1,
+        maxAttempts: 8,
+        worktreePath: launchedFrom,
+        lastFailureTrace: "",
+        base: sourceBranchBase("main"),
+        codingStandardsPath: "CODING_STANDARDS.md",
+      },
+      {
+        repo: CONFIGURED,
+        repoDir: target,
+        claudeMdPath: "CLAUDE.md",
+        sourceBranch: "main",
+      },
+    );
+
+    expect(prompt).toContain("@CODING_STANDARDS.md");
+  });
+
+  it("drops the implementer's standards @ref when its worktree lacks the file", async () => {
+    await writeFile(join(target, "CODING_STANDARDS.md"), "# std\n");
+
+    const prompt = await buildPrompt(
+      {
+        issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
+        attempt: 1,
+        maxAttempts: 8,
+        worktreePath: launchedFrom,
+        lastFailureTrace: "",
+        base: sourceBranchBase("main"),
+        codingStandardsPath: "CODING_STANDARDS.md",
+      },
+      {
+        repo: CONFIGURED,
+        repoDir: target,
+        claudeMdPath: "CLAUDE.md",
+        sourceBranch: "main",
+      },
+    );
 
     expect(prompt).not.toContain("@CODING_STANDARDS.md");
   });

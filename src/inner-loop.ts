@@ -25,7 +25,9 @@
 // What a FAILED reviewer run means is reviewer-run.ts's policy (#41); this
 // file only adapts `sandbox.run`'s throw into the shape that policy
 // classifies, which is why the try/catch below returns a value instead of
-// substituting prose.
+// substituting prose. The implementer prompt also receives the configured
+// coding-standards path here; prompt.ts probes it in the issue worktree so a
+// branch can introduce the standards it is expected to follow (#78).
 
 import { join } from "node:path";
 
@@ -629,6 +631,9 @@ async function runImplementer(
       worktreePath: sandbox.worktreePath,
       lastFailureTrace: action.failureTrace,
       base: ctx.base,
+      ...(config.codingStandardsPath
+        ? { codingStandardsPath: config.codingStandardsPath }
+        : {}),
       ...(action.extraReprompt !== null ? { extraReprompt: action.extraReprompt } : {}),
       ...(action.latestReviewerProse !== null
         ? { latestReviewerProse: action.latestReviewerProse }
