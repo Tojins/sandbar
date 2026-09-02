@@ -13,6 +13,7 @@ import {
   renderSandboxStackSlot,
 } from "./prompt.js";
 import { parsePromise } from "./promise-parser.js";
+import { loadTemplate } from "./prompts.js";
 
 const baseInputs = {
   issue: { id: "42", title: "do the thing", branch: "sandbar/issue-42-do-the-thing" },
@@ -26,20 +27,23 @@ const baseInputs = {
   claudeMdPath: "CLAUDE.md",
 } as const;
 
+const implementerInputs = {
+  issue: baseInputs.issue,
+  attempt: 1,
+  maxAttempts: 8,
+  worktreePath: "/tmp/wt",
+  lastFailureTrace: "",
+  base: sourceBranchBase("main"),
+  claudeMdPath: "CLAUDE.md",
+  diff: "",
+} as const;
+
 // The escalation contract is split across two files — the token/block names
 // live as prose in prompts/implementer.md and as regexes in promise-parser.ts.
 // These pin them together so a rename on one side can't silently make the
 // signal unemittable (#21).
 describe("renderAttemptSlot — UI-prototype escalation contract", () => {
-  const slot = renderAttemptSlot({
-    issue: baseInputs.issue,
-    attempt: 1,
-    maxAttempts: 8,
-    worktreePath: "/tmp/wt",
-    lastFailureTrace: "",
-    base: sourceBranchBase("main"),
-    diff: "",
-  });
+  const slot = renderAttemptSlot(implementerInputs);
 
   it("instructs the agent to assess UI impact before implementing", () => {
     expect(slot).toContain("## UI impact check — do this first");
@@ -83,15 +87,7 @@ describe("renderAttemptSlot — UI-prototype escalation contract", () => {
 // instruction to the branch the orchestrator actually compares against — a
 // prompt that names the wrong ref, or names none, is worse than no prompt.
 describe("renderAttemptSlot — commit-on-the-issue-branch rule (#27)", () => {
-  const slot = renderAttemptSlot({
-    issue: baseInputs.issue,
-    attempt: 1,
-    maxAttempts: 8,
-    worktreePath: "/tmp/wt",
-    lastFailureTrace: "",
-    base: sourceBranchBase("main"),
-    diff: "",
-  });
+  const slot = renderAttemptSlot(implementerInputs);
 
   it("names the issue branch as the ref to commit on", () => {
     expect(slot).toContain("Commit on `sandbar/issue-42-do-the-thing`");
@@ -112,6 +108,68 @@ describe("renderAttemptSlot — commit-on-the-issue-branch rule (#27)", () => {
   it("warns that the correction is a single one", () => {
     expect(slot).toContain(
       "a second attempt still off the branch hands the issue to a human",
+    );
+  });
+});
+
+describe("renderAttemptSlot — implementer standards and pre-promise review (#78)", () => {
+  const renderImplementer = (codingStandardsPath?: string) =>
+    renderAttemptSlot({
+      ...implementerInputs,
+      contextMdPath: "AGENTS.md",
+      ...(codingStandardsPath ? { codingStandardsPath } : {}),
+    });
+
+  it("carries the reviewer's built-in standards verbatim and host extension", () => {
+    const implementer = renderImplementer("docs/CODING_STANDARDS.md");
+    const reviewer = renderReviewerFollowupSlot({
+      ...baseInputs,
+      contextMdPath: "AGENTS.md",
+      commits: "a1 first",
+      diff: "diff",
+    });
+    const codingStandards = loadTemplate("coding-standards");
+
+    expect(implementer).toContain(codingStandards);
+    expect(reviewer).toContain(codingStandards);
+    expect(implementer).toContain(
+      "The following is the text handed verbatim to the reviewer that will judge this",
+    );
+    expect(implementer).toMatch(
+      /You are the party\s+these standards are applied to, not the reviewer instructed to apply them\./,
+    );
+    expect(implementer).toContain("@docs/CODING_STANDARDS.md");
+    expect(implementer).toContain("@CLAUDE.md (and @AGENTS.md if it exists)");
+    expect(implementer).toContain("git diff origin/main...HEAD");
+    expect(implementer).toContain("git log origin/main..HEAD");
+    expect(implementer).toContain("module headers, architecture documents, and READMEs");
+    expect(implementer).toMatch(/version\s+bumps and changelog entries/);
+    expect(implementer).toContain("list its stated requirements");
+  });
+
+  it("keeps built-in standards without an optional host extension", () => {
+    const slot = renderImplementer();
+    expect(slot).toContain("## Coding standards");
+    expect(slot).not.toContain("### Project standards");
+    expect(slot).not.toContain("CODING_STANDARDS.md");
+  });
+
+  it("does not bake this host's ritual wording into the shipped prompt", () => {
+    const slot = renderImplementer();
+    expect(slot).not.toContain("npm version");
+    expect(slot).not.toContain("package.json");
+  });
+
+  it("places standards and self-review between commit discipline and done signal", () => {
+    const slot = renderImplementer();
+    expect(slot.indexOf("## Commit discipline")).toBeLessThan(
+      slot.indexOf("## Coding standards"),
+    );
+    expect(slot.indexOf("## Coding standards")).toBeLessThan(
+      slot.indexOf("## Pre-promise review"),
+    );
+    expect(slot.indexOf("## Pre-promise review")).toBeLessThan(
+      slot.indexOf("## Done signal"),
     );
   });
 });
@@ -423,13 +481,7 @@ describe("renderSandboxStackSlot (#44)", () => {
 describe("renderAttemptSlot — the sandbox slot reaches the prompt", () => {
   const slotWith = (sandboxStack: Parameters<typeof renderSandboxStackSlot>[0]) =>
     renderAttemptSlot({
-      issue: baseInputs.issue,
-      attempt: 1,
-      maxAttempts: 8,
-      worktreePath: "/tmp/wt",
-      lastFailureTrace: "",
-      base: sourceBranchBase("main"),
-      diff: "",
+      ...implementerInputs,
       sandboxStack,
     });
 
@@ -470,13 +522,8 @@ describe("the chunk-base slots (#61)", () => {
 
   const implementerSlot = (base: { ref: string; chunkBranch: string | null }) =>
     renderAttemptSlot({
-      issue: baseInputs.issue,
-      attempt: 1,
-      maxAttempts: 8,
-      worktreePath: "/tmp/wt",
-      lastFailureTrace: "",
+      ...implementerInputs,
       base,
-      diff: "",
     });
 
   const reviewerSlot = (base: { ref: string; chunkBranch: string | null }) =>

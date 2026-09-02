@@ -281,6 +281,56 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     expect(prompt).not.toContain("@CODING_STANDARDS.md");
   });
 
+  it("points the implementer at standards the branch under work adds", async () => {
+    await writeFile(join(launchedFrom, "CODING_STANDARDS.md"), "# std\n");
+
+    const prompt = await buildPrompt(
+      {
+        issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
+        attempt: 1,
+        maxAttempts: 8,
+        worktreePath: launchedFrom,
+        lastFailureTrace: "",
+        base: sourceBranchBase("main"),
+        codingStandardsPath: "CODING_STANDARDS.md",
+      },
+      {
+        repo: CONFIGURED,
+        repoDir: target,
+        claudeMdPath: "CLAUDE.md",
+        contextMdPath: "CONTEXT.md",
+        sourceBranch: "main",
+      },
+    );
+
+    expect(prompt).toContain("@CODING_STANDARDS.md");
+    expect(prompt).toContain("@CLAUDE.md (and @CONTEXT.md if it exists)");
+  });
+
+  it("drops the implementer's standards @ref when its worktree lacks the file", async () => {
+    await writeFile(join(target, "CODING_STANDARDS.md"), "# std\n");
+
+    const prompt = await buildPrompt(
+      {
+        issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
+        attempt: 1,
+        maxAttempts: 8,
+        worktreePath: launchedFrom,
+        lastFailureTrace: "",
+        base: sourceBranchBase("main"),
+        codingStandardsPath: "CODING_STANDARDS.md",
+      },
+      {
+        repo: CONFIGURED,
+        repoDir: target,
+        claudeMdPath: "CLAUDE.md",
+        sourceBranch: "main",
+      },
+    );
+
+    expect(prompt).not.toContain("@CODING_STANDARDS.md");
+  });
+
   // History is the half that must NOT follow the branch.
   it("builds the reviewer's history from the repo, not from the worktree under review", async () => {
     const prompt = (await buildReviewerPrompts({

@@ -69,6 +69,27 @@ branch's commits as its "work done so far" diff, while uncommitted changes are
 left behind unexplained. Small, frequent commits make an interrupted attempt
 cheap to resume.
 
+The following is the text handed verbatim to the reviewer that will judge this
+branch; read it before writing as well as before promising. You are the party
+these standards are applied to, not the reviewer instructed to apply them.
+
+{{codingStandards}}
+
+{{projectStandards}}## Pre-promise review
+
+Before emitting the done signal, inspect everything you are about to promise
+with `git diff {{baseRef}}...HEAD` and `git log {{baseRef}}..HEAD`, then:
+
+1. Check the diff against every coding standard above.
+2. Re-read {{conventionsRef}} and update prose your commits falsified, including
+   module headers, architecture documents, and READMEs.
+3. Check every per-commit ritual those conventions require, including version
+   bumps and changelog entries.
+4. Check that the diff does not contradict settled choices recorded in those
+   conventions.
+5. Re-read the issue, list its stated requirements, tick each against the diff,
+   and delete anything the issue did not ask for.
+
 ## Done signal
 
 When the implementation is complete and committed, emit
