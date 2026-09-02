@@ -8,7 +8,7 @@
 // Convergence relies on each pass having a sharp bar. The correctness prompt
 // requires a located, concrete defect and otherwise APPROVES; the follow-up
 // receives sandbar's built-in prompts/coding-standards.md plus any project
-// standards file that extends it. That keeps either verdict deterministic, so
+// standards file that extends it. That keeps either verdict deterministic.
 // Missing tokens are absence, not a fabricated verdict. The reviewer harness
 // filters those runs before parsing. Last token wins when several are emitted.
 // A catch may only classify one named expected condition checked explicitly,
@@ -34,8 +34,8 @@ const VERDICT_TOKEN_ALL = new RegExp(VERDICT_TOKEN, "g");
 // judged the code, so it is a verdict and not a harness fault, while a run that
 // died before emitting one has said nothing about the branch whatever prose it
 // left behind. Deliberately not a check on the token's VALUE — a malformed
-// token is still a decision the reviewer reached, and parseVerdict's
-// default-to-CHANGES-REQUESTED is the right handling for it.
+// token is still a decision the reviewer reached, and parseVerdict classifies
+// an unknown value as CHANGES-REQUESTED.
 export function containsVerdictToken(stdout: string): boolean {
   return VERDICT_TOKEN.test(stdout);
 }

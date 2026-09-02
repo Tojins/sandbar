@@ -476,8 +476,14 @@ const TOOL_ARG_FIELDS: Record<string, string> = {
 
 export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
   if (!line.startsWith("{")) return [];
+  let obj: any;
+  try {
+    obj = JSON.parse(line);
+  } catch (err) {
+    if (err instanceof SyntaxError) return [];
+    throw err;
+  }
   // JSON.parse yields `any`; the upstream parser is intentionally untyped.
-  const obj = JSON.parse(line) as any;
   if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
     const events: ParsedStreamEvent[] = [];
     const texts: string[] = [];
@@ -613,9 +619,15 @@ const codexErrorMessage = (err: unknown): string => {
 
 export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
   if (!line.startsWith("{")) return [];
+  let obj: any;
+  try {
+    obj = JSON.parse(line);
+  } catch (err) {
+    if (err instanceof SyntaxError) return [];
+    throw err;
+  }
   // As in parseStreamJsonLine: the wire format is another process's, so it is
   // read as `any` and every field is checked before it is believed.
-  const obj = JSON.parse(line) as any;
   if (obj.type === "thread.started" && typeof obj.thread_id === "string") {
     // Claude-shaped, and knowingly approximate: a codex THREAD is the unit
     // `resume --last` reopens, which is what a session id is used for here.
@@ -1024,6 +1036,13 @@ const fastForwardFromOrigin = async (
   try {
     await execGit([...NO_CONFIG_LOCK_FLAGS, "fetch", "origin", branch], worktreePath);
   } catch (err) {
+    if (
+      err instanceof WorktreeError &&
+      err.exitCode === 128 &&
+      err.message.includes(`couldn't find remote ref ${branch}`)
+    ) {
+      return;
+    }
     throw new WorktreeError(
       `Could not fetch origin/${branch} while reusing ${worktreePath}: ${(err as Error).message}`,
     );

@@ -75,8 +75,8 @@ describe("parseStreamJsonLine", () => {
     expect(parseStreamJsonLine('"str"')).toEqual([]);
   });
 
-  it("propagates malformed JSON that starts with {", () => {
-    expect(() => parseStreamJsonLine("{bad json")).toThrow(SyntaxError);
+  it("classifies malformed JSON that starts with { as transport", () => {
+    expect(parseStreamJsonLine("{bad json")).toEqual([]);
   });
 
   it("concatenates multiple text blocks with NO separator", () => {
@@ -198,10 +198,10 @@ describe("parseCodexJsonLine", () => {
   const completed = (item: unknown) =>
     JSON.stringify({ type: "item.completed", item });
 
-  it("classifies non-{ lines and unknown events, but propagates malformed JSON", () => {
+  it("classifies non-{ lines, malformed JSON, and unknown events as transport", () => {
     expect(parseCodexJsonLine("")).toEqual([]);
     expect(parseCodexJsonLine("Reading prompt from stdin...")).toEqual([]);
-    expect(() => parseCodexJsonLine("{bad json")).toThrow(SyntaxError);
+    expect(parseCodexJsonLine("{bad json")).toEqual([]);
     expect(parseCodexJsonLine('{"type":"turn.started"}')).toEqual([]);
     expect(parseCodexJsonLine('{"type":"future.event","text":"x"}')).toEqual([]);
   });
@@ -1454,6 +1454,38 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
   });
   afterAll(async () => {
     await rm(dir, { recursive: true, force: true });
+  });
+
+  it("reuses a clean worktree when its local issue branch is absent from origin", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-local-branch-"));
+    const origin = join(root, "origin.git");
+    const checkout = join(root, "checkout");
+    try {
+      await git(["init", "--bare", origin], root);
+      await git(["clone", origin, checkout], root);
+      await git(["config", "user.name", "Test Host"], checkout);
+      await git(["config", "user.email", "host@test.com"], checkout);
+      await writeFile(join(checkout, "README.md"), "seed\n");
+      await git(["add", "."], checkout);
+      await git(["commit", "-m", "seed"], checkout);
+      await git(["push", "-u", "origin", "HEAD:main"], checkout);
+      const branch = "sandbar/issue-83-local-only";
+      await git(["branch", branch], checkout);
+
+      const first = await prepareWorktree({
+        branch,
+        layout: layoutFor(checkout),
+        copyToWorktree: [],
+      });
+      const reused = await prepareWorktree({
+        branch,
+        layout: layoutFor(checkout),
+        copyToWorktree: [],
+      });
+      expect(reused).toBe(first);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("runs copy + onWorktreeReady exactly once — createSandbox must not repeat worktree-side setup", async () => {

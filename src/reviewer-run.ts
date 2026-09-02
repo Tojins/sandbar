@@ -170,7 +170,13 @@ function tail(s: string, max: number): string {
 // matters — did any byte come back? — survives into the log and the handoff.
 function noReviewDetail(run: ReviewerRun): string {
   if (run.error === null) {
-    return "the run completed and emitted no output at all";
+    if (run.output.trim() === "") {
+      return "the run completed and emitted no output at all";
+    }
+    return (
+      "the run completed but emitted no verdict token\n" +
+      `output:\n${tail(run.output, REVIEWER_DETAIL_TAIL_CHARS)}`
+    );
   }
   if (run.output.trim() === "") {
     return `the run failed and emitted no output at all: ${run.error}`;

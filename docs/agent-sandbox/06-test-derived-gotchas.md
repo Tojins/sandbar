@@ -150,10 +150,8 @@ Source: `Orchestrator.ts`, `invokeAgent`.
   prompts; only `--model` is shell-escaped). Tests: *"invokes claude with
   stream-json and verbose flags"* (1770), *"buildPrintCommand delivers prompt via
   stdin, not argv"* (AgentProvider.test.ts:31).
-- ⚪ **Completion match is a plain substring `includes`** of the `result||stdout`
-  value against default `"<promise>COMPLETE</promise>"`. Moot for sandbar
-  (`maxIterations:1`, own parser) but explains why the default signal matches
-  sandbar's promise contract.
+- ⚪ **Completion match is a plain substring `includes`** of parsed speech
+  against the caller's explicit signal list. An empty list never enters grace.
 
 ## (C) Commit capture & git setup (`withSandboxLifecycle`)
 

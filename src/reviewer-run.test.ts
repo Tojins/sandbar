@@ -199,6 +199,19 @@ describe("runReviewerInvocations", () => {
     expect(outcome.detail).toContain("the run completed and emitted no output at all");
   });
 
+  it("a completed tokenless review is reported with its output", async () => {
+    const prose = "I found a concrete problem but forgot the contract token.";
+    const { outcome } = await drive([
+      { output: prose, error: null },
+      { output: prose, error: null },
+    ]);
+    expect(outcome.kind).toBe("harness-failed");
+    if (outcome.kind !== "harness-failed") throw new Error("unreachable");
+    expect(outcome.detail).toContain("completed but emitted no verdict token");
+    expect(outcome.detail).toContain(prose);
+    expect(outcome.detail).not.toContain("emitted no output at all");
+  });
+
   it("a failure that reached a verdict is taken at its word, with no retry", async () => {
     const { outcome, asked } = await drive([
       { output: "findings\n<verdict>APPROVED</verdict>\n", error: "exited with code 1" },
