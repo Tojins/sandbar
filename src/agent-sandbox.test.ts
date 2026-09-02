@@ -9,7 +9,7 @@
 // and the two-phase completion timer (F5).
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { appendFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -43,6 +43,7 @@ import {
   parseCodexJsonLine,
   parseStreamJsonLine,
   prepareWorktree,
+  pruneStaleWorktrees,
   registerShutdown,
   sandboxRemoveArgs,
   sandboxRunArgs,
@@ -1493,6 +1494,69 @@ describe("createSandbox integration (local provider)", () => {
     const env = provider.capturedEnv ?? {};
     expect(env.GH_TOKEN).toBe("from-config");
     expect(env.GH_TOKEN).not.toBe("stale-default");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pruneStaleWorktrees — the run's sweep, not the worktree's (#83)
+// ---------------------------------------------------------------------------
+
+describe("pruneStaleWorktrees (#83)", () => {
+  let root: string;
+  let repo: string;
+  let layout: RepoLayout;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "asb-prune-"));
+    repo = join(root, "repo");
+    await mkdir(repo);
+    await git(["init", "-b", "main"], repo);
+    await git(["config", "user.name", "Test Host"], repo);
+    await git(["config", "user.email", "host@test.com"], repo);
+    await writeFile(join(repo, "README.md"), "seed\n");
+    await git(["add", "."], repo);
+    await git(["commit", "-m", "seed"], repo);
+    layout = layoutFor(repo);
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("removes only directories git no longer lists as a worktree, and reports them", async () => {
+    await mkdir(layout.worktreesDir, { recursive: true });
+    const active = join(layout.worktreesDir, "active");
+    await git(["worktree", "add", "-b", "sandbar/issue-83-active", active], repo);
+    // A registered worktree stays even when dirty: preserved-on-dirty (F4,
+    // close()) relies on the sweep never reaching a registered path.
+    await writeFile(join(active, "dirty.txt"), "uncommitted\n");
+    const orphan = join(layout.worktreesDir, "orphan");
+    await mkdir(join(orphan, "node_modules", "pkg"), { recursive: true });
+    await writeFile(join(orphan, "node_modules", "pkg", "index.js"), "");
+    const stray = join(layout.worktreesDir, "notes.txt");
+    await writeFile(stray, "a file, not a worktree\n");
+
+    const removed = await pruneStaleWorktrees(layout);
+
+    expect(removed).toEqual([join(await realpath(layout.worktreesDir), "orphan")]);
+    expect(existsSync(orphan)).toBe(false);
+    expect(existsSync(join(active, "dirty.txt"))).toBe(true);
+    expect(existsSync(stray)).toBe(true);
+    // Idempotent: a second sweep finds nothing to do.
+    expect(await pruneStaleWorktrees(layout)).toEqual([]);
+  });
+
+  it("classifies a missing worktrees directory as nothing to sweep", async () => {
+    expect(existsSync(layout.worktreesDir)).toBe(false);
+    await expect(pruneStaleWorktrees(layout)).resolves.toEqual([]);
+  });
+
+  it("rejects on any other failure to read the directory", async () => {
+    // ENOTDIR, not ENOENT: the one classified absence is the directory not
+    // existing. A path that exists but cannot be listed is a fault the run
+    // stops on, never a swallowed sweep.
+    await mkdir(layout.stateDir, { recursive: true });
+    await writeFile(layout.worktreesDir, "not a directory\n");
+    await expect(pruneStaleWorktrees(layout)).rejects.toThrow(/ENOTDIR/);
   });
 });
 

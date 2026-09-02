@@ -65,7 +65,7 @@
 //
 // IT EXISTS FROM THE MOMENT THE LOCK IS WON (#70), which is fifteen steps
 // earlier than it used to. Everything before `startRunLogger` is unrecorded by
-// construction, and that used to include preflight, the three startup sweeps,
+// construction, and that used to include preflight, the startup sweeps,
 // the image builds and the uid check — so the single most operator-actionable
 // thing sandbar produces, a preflight refusal, was the one class of stop that
 // left nothing to read afterwards. Every one of those now writes its complaint
@@ -182,6 +182,7 @@ import {
 } from "./forge-verify.js";
 import { startKeepawake, stopKeepawake } from "./keepawake.js";
 import { runInnerLoop, type Terminal } from "./inner-loop.js";
+import { pruneStaleWorktrees } from "./agent-sandbox.js";
 import { requiredAgentProviders } from "./agent-providers.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
 import { runScope } from "./naming.js";
@@ -513,8 +514,8 @@ export async function run(
   // acquireLock has already mkdirSync'd the directory, so this cannot ENOENT.
   const scope = runScope(realpathSync(lockPaths.workDir));
 
-  // ALL THREE SWEEPS IN ONE `try`, because all three THROW on a failed LIST
-  // and none of them used to sit inside anything (#70). The throw is right at
+  // ALL THE SWEEPS IN ONE `try`, because every one of them THROWS on a failed
+  // LIST and none of them used to sit inside anything (#70). The throw is right at
   // the other end — `containers.ts` and `ensure-images.ts` both argue that a
   // failed list is a blind sweep, which cannot know what it missed, so stopping
   // beats asserting "no debris" on no evidence — but the stop it produced
@@ -525,9 +526,9 @@ export async function run(
   // that went away between two podman calls — host state an operator can act
   // on, and now host state they can still read afterwards.
   //
-  // One `try` and one cause for the three: they are one step (take stock of
+  // One `try` and one cause for all of them: they are one step (take stock of
   // what a previous run left behind), they fail for one reason, and the
-  // complaint recorded beside the cause names which podman call it was.
+  // complaint recorded beside the cause names which podman or git call it was.
   try {
     const orphans = await cleanupOrphanContainers(scope);
     if (orphans.removed.length > 0) {
@@ -541,6 +542,25 @@ export async function run(
     await reportSweepFailures(orphans, (line) =>
       runLogger.appendOrchestrator(line),
     );
+
+    // The worktree half (#83): directories under `worktrees/` that git no
+    // longer lists as a worktree — a crashed run's leftover, a `close()` that
+    // died mid-removal. This used to run per issue at the top of every
+    // `prepareWorktree`, under a swallowed catch; once the catch went it was
+    // a fault over a directory the whole cohort shares, charged to every
+    // issue at once and repeated on each retry. Here it is one sweep, before
+    // any worktree of this run exists, and its failure is this run's stop.
+    // Registered worktrees — the source worktree, a preserved dirty one — are
+    // never in the set it removes.
+    const staleWorktrees = await pruneStaleWorktrees(layout);
+    if (staleWorktrees.length > 0) {
+      console.log(
+        `Removed ${staleWorktrees.length} orphaned worktree director${staleWorktrees.length === 1 ? "y" : "ies"} left by a prior run.`,
+      );
+      await runLogger.appendOrchestrator(
+        `swept ${staleWorktrees.length} orphaned worktree dir(s) from prior runs: ${staleWorktrees.join(", ")}`,
+      );
+    }
 
     // The image half of the same sweep (#37). Per-branch gate images are
     // removed at the end of a run, but that removal is an `onCleanup` action
@@ -807,7 +827,11 @@ export async function run(
       // BEFORE creating any podman resource — but a signal in the window where
       // the pod exists and the process is already unwinding can still leave a
       // pod, its invisible infra container or a network behind, which would
-      // then collide with the next cycle's create. Cheap insurance.
+      // then collide with the next cycle's create. Cheap insurance. The
+      // worktree sweep runs here for the same reason (#83): a worktree
+      // directory whose registration died with the previous cycle would
+      // refuse the next `worktree add` of that branch. A throw from either is
+      // the run's halt below — one loud stop, not a HARD-ERROR per issue.
       // -----------------------------------------------------------------------
       if (iteration > 1) {
         const cycleOrphans = await cleanupOrphanContainers(scope);
@@ -819,6 +843,12 @@ export async function run(
         await reportSweepFailures(cycleOrphans, (line) =>
           runLogger.appendOrchestrator(line),
         );
+        const cycleWorktrees = await pruneStaleWorktrees(layout);
+        if (cycleWorktrees.length > 0) {
+          await runLogger.appendOrchestrator(
+            `swept ${cycleWorktrees.length} orphaned worktree dir(s) between cycles: ${cycleWorktrees.join(", ")}`,
+          );
+        }
       }
 
       const budget = remainingBudget(runState);

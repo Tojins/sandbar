@@ -61,7 +61,9 @@ on disk — see the note after step 11):
 1. **Resolve cwd** → `hostRepoDir` (`resolveCwd`, defaults `process.cwd()`).
 2. **Prune stale worktrees** — `WorktreeManager.pruneStale(hostRepoDir)`,
    best-effort (`catchAll`). Removes orphaned dirs under
-   `.sandbar/worktrees/`. See [04](./04-worktree-and-mounts.md).
+   `.sandbar/worktrees/`. See [04](./04-worktree-and-mounts.md). *In-house
+   (#83): not a step of `prepareWorktree` any more — `pruneStaleWorktrees` is
+   the run's, called by `run.ts` at startup and between cycles, and it throws.*
 3. **Create the worktree** — `WorktreeManager.create(hostRepoDir, { branch, baseBranch })`
    → `{ path, branch }`. For an existing branch: `git worktree add <path> <branch>`.
    `path = <hostRepoDir>/.sandbar/worktrees/<branch with "/"→"-">`. 30 s timeout.

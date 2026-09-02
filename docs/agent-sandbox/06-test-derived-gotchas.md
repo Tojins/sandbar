@@ -354,7 +354,7 @@ podman.test.ts, boundedTail.test.ts, mountUtils.test.ts.
   sandbox so commits accumulate) depends on this — do **not** respawn the
   container per run, and keep the worktree alive between runs (uncommitted state
   persists: *"state persists between runs"*).
-- 🟡 **Setup order is locked in:** resolveCwd → `pruneStale` (errors swallowed) →
+- 🟡 **Setup order is locked in:** resolveCwd → `pruneStale` (errors swallowed; in-house since #83 the sweep is `run.ts`'s, not this path's) →
   `WorktreeManager.create` → `copyToWorktree` → **`host.onWorktreeReady`** (files
   present, container NOT yet up) → start container → **`onSandboxReady`** →
   `registerShutdown` → return. The `create`→`onSandboxReady` span is wrapped in

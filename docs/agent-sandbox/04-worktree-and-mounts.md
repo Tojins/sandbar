@@ -87,6 +87,9 @@ Derives `repoDir = join(worktreePath, "..", "..", "..")` (relies on the
    canonicalised `git worktree list --porcelain` output).
 4. For each entry dir not in the active-worktree set: `rm -rf`.
 5. 30 s timeout. Called best-effort (`catchAll`) at `createSandbox` start.
+   *In-house (#83): `pruneStaleWorktrees(layout)` is called by `run.ts` once at
+   startup and once between cycles, never per worktree, and its failure stops
+   the run rather than being swallowed. It returns the paths it removed.*
 
 > Sandbar additionally has its own preflight/orphan cleanup in
 > `src/preflight.ts` and `src/containers.ts` — `pruneStale` is the agent-sandbox

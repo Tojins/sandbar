@@ -53,6 +53,16 @@
 // A catch may only classify one named expected condition checked explicitly,
 // or clean up on failure: log the secondary failure with its cause, then
 // rethrow the original (#83).
+//
+// The stale-worktree sweep (`pruneStaleWorktrees`) belongs to the RUN, not to
+// a worktree (#83). It used to open every `prepareWorktree` under a swallowed
+// catch, and dropping the catch made a hygiene fault over a SHARED directory —
+// one leftover `node_modules`-sized orphan past the 30 s budget, or two
+// parallel sweeps racing on one `rm` — a HARD-ERROR charged to every issue in
+// the cycle, deterministically on retry. A sweep's failure says nothing about
+// an issue, so it is not an issue's to report: `run.ts` calls it once at
+// startup beside the podman sweeps and once between cycles, where a failure is
+// the run's own loud stop. Same classification inside it, same throw.
 
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -1149,20 +1159,26 @@ const worktreeRemove = (
     () => undefined,
   );
 
-// Best-effort hygiene run at createSandbox start: prune metadata, then sweep
-// orphaned dirs under the worktrees directory. realPath-canonicalises the dir
-// so a symlinked workDir does not make active worktrees look orphaned (#470).
-// Takes the directory rather than composing it from `repoDir` + `workDir`,
-// which stopped being the same place in #38.
-const pruneStale = (repoDir: string, worktreesDir: string): Promise<void> =>
-  withTimeout(
+// The run's stale-worktree sweep (see the header, #83): prune metadata, then
+// remove orphaned DIRECTORIES under the worktrees directory — entries git no
+// longer lists as a worktree. Registered worktrees are never touched, however
+// dirty, which is what keeps a preserved worktree (F4's uninspectable case,
+// `close()`'s dirty case) out of it. realPath-canonicalises the dir so a
+// symlinked workDir does not make active worktrees look orphaned (#470). Takes
+// the layout rather than composing the directory from `repoDir` + `workDir`,
+// which stopped being the same place in #38. Returns what it removed. Rejects
+// on anything but a missing worktrees directory, the one classified absence.
+export const pruneStaleWorktrees = (layout: RepoLayout): Promise<readonly string[]> => {
+  const { repoDir, worktreesDir } = layout;
+  return withTimeout(
     (async () => {
+      const removed: string[] = [];
       await execGit(["worktree", "prune"], repoDir);
       let entries: string[];
       try {
         entries = await readdir(worktreesDir);
       } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return removed;
         throw new WorktreeError((e as Error).message);
       }
       const realWorktreesDir = await realpath(worktreesDir);
@@ -1193,12 +1209,15 @@ const pruneStale = (repoDir: string, worktreesDir: string): Promise<void> =>
           await rm(entryPath, { recursive: true, force: true }).catch((err) => {
             throw new WorktreeError(`Failed to remove ${entryPath}: ${err.message}`);
           });
+          removed.push(entryPath);
         }
       }
+      return removed;
     })(),
     WORKTREE_TIMEOUT_MS,
     () => new WorktreeError(`Worktree prune timed out after ${WORKTREE_TIMEOUT_MS}ms`),
   );
+};
 
 // ---------------------------------------------------------------------------
 // copyToWorktree — Linux COW with plain `cp -R` fallback; skip missing sources
@@ -1833,18 +1852,18 @@ const invokeAgent = (
 // prepareWorktree / createSandbox — orchestration, lifecycle, commit capture
 // ---------------------------------------------------------------------------
 
-// Worktree-only setup: prune stale entries, create (or reuse) the branch's
-// managed worktree, copy host paths in, run host.onWorktreeReady hooks.
-// Returns the worktree path. Split out of createSandbox (#20) so callers can
-// know the path — with its files on disk — before container bringup, and hand
-// it to work that must bind-mount from it (the gate stack's mounts, #24).
-// A failure after creation removes the worktree before rethrowing (F4).
+// Worktree-only setup: create (or reuse) the branch's managed worktree, copy
+// host paths in, run host.onWorktreeReady hooks. Returns the worktree path.
+// Split out of createSandbox (#20) so callers can know the path — with its
+// files on disk — before container bringup, and hand it to work that must
+// bind-mount from it (the gate stack's mounts, #24). A failure after creation
+// removes the worktree before rethrowing (F4). The stale-worktree sweep is
+// NOT here (#83, header): it ran per issue over a directory the whole cohort
+// shares, and it is the run's now.
 export const prepareWorktree = async (
   options: PrepareWorktreeOptions,
 ): Promise<string> => {
   const { repoDir, worktreesDir, hostCwd } = options.layout;
-
-  await pruneStale(repoDir, worktreesDir);
 
   const { path: worktreePath } = await worktreeCreate(
     repoDir,
