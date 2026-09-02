@@ -245,13 +245,14 @@ export type PlanResolution = {
   // branches and nothing else — and which ones a reconciled chunk owes a
   // close to.
   readonly landedChunks: readonly LandedChunk[];
-  // Fetched chunks whose root still derives under a different title slug. The
-  // broad union de-queues their members while exact-branch safety refuses to
-  // work or land them, so this is the plan-time repair signal. A root absent
-  // from the graph has no derived name and is intentionally not reported here.
+  // Fetched chunks that no current derivation produces. The broad union
+  // de-queues their members while exact-branch safety refuses to work or land
+  // them, so this is the plan-time repair signal. `derived` names the current
+  // chunk containing the old root (including after re-rooting), or is null when
+  // that root is absent from the graph and no replacement name can be derived.
   readonly chunkNameDrifts: readonly {
     readonly existing: string;
-    readonly derived: string;
+    readonly derived: string | null;
   }[];
 };
 
@@ -420,8 +421,11 @@ export function resolvePlan(
     chunkNameDrifts: [...chunkMembers.keys()].flatMap((existing) => {
       const root = rootIssueFromChunkBranch(existing);
       if (root === null) return [];
-      const derived = chunkByRoot.get(root)?.branch;
-      return derived !== undefined && derived !== existing
+      const currentRoot = chunkOf.get(root);
+      const derived = currentRoot === undefined
+        ? null
+        : (chunkByRoot.get(currentRoot)?.branch ?? null);
+      return derived !== existing
         ? [{ existing, derived }]
         : [];
     }),

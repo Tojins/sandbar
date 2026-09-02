@@ -794,7 +794,10 @@ describe("resolvePlan git membership safety (#93)", () => {
     );
     expect(result.plan).toEqual([]);
     expect(result.landedChunks).toEqual([]);
-    expect(result.chunkNameDrifts).toEqual([]);
+    expect(result.chunkNameDrifts).toEqual([{
+      existing: "sandbar/chunk-99-other",
+      derived: null,
+    }]);
   });
 
   it("does not re-plan published work after title drift changes the branch slug", () => {
@@ -811,6 +814,40 @@ describe("resolvePlan git membership safety (#93)", () => {
     expect(result.chunkNameDrifts).toEqual([{
       existing: "sandbar/chunk-47-old-title",
       derived: "sandbar/chunk-47-new-title",
+    }]);
+  });
+
+  it("reports the new branch name when the old root becomes a member", () => {
+    const result = resolvePlan(
+      [
+        issue(40, "", { title: "New prerequisite" }),
+        issue(47, "## Blocked by\n- #40\n", { title: "Root" }),
+        issue(48, "## Blocked by\n- #47\n", { title: "Child" }),
+      ],
+      facts({ 40: {}, 47: {}, 48: {} }),
+      new Set(),
+      3,
+      "review",
+      new Map([["sandbar/chunk-47-root", new Set([47])]]),
+    );
+    expect(result.chunkNameDrifts).toEqual([{
+      existing: "sandbar/chunk-47-root",
+      derived: "sandbar/chunk-40-new-prerequisite",
+    }]);
+  });
+
+  it("reports an origin chunk whose root has left the graph", () => {
+    const result = resolvePlan(
+      [],
+      new Map(),
+      new Set(),
+      3,
+      "review",
+      new Map([["sandbar/chunk-47-root", new Set([47])]]),
+    );
+    expect(result.chunkNameDrifts).toEqual([{
+      existing: "sandbar/chunk-47-root",
+      derived: null,
     }]);
   });
 });

@@ -846,9 +846,10 @@ export async function run(
       };
       let resolution = await buildPlan(repo, planOptions);
       for (const drift of resolution.chunkNameDrifts) {
+        const derived = drift.derived ?? "no chunk branch can be derived";
         const line =
           `Origin chunk branch ${drift.existing} no longer matches the name ` +
-          `derived for its root: ${drift.derived}`;
+          `derived for its root: ${derived}`;
         console.warn(line);
         await runLogger.appendOrchestrator(line);
       }
