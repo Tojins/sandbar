@@ -156,7 +156,7 @@ export type ResolveAgentRun = {
   // spawn error wins if both are ever present.
   readonly detail?: string;
   readonly usage?: AgentUsage;
-  readonly toolCalls?: number;
+  readonly toolCalls: number;
 };
 
 // Which prompt the attempt was answering — the same three shapes the loop's

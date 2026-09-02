@@ -15,7 +15,7 @@
 // `config.env` VALUE — so the seam absorbs a file-shaped credential without
 // sandbar learning a path or mounting anything (`CODEX_AUTH_SEED`).
 //
-// A provider's parser answers in four registers and the difference between
+// A provider's parser answers in five registers and the difference between
 // them is load-bearing: `text`/`result` is the agent's SPEECH and is the only
 // thing a run returns, `failure` is the provider naming a TERMINAL fault of its
 // own, and everything else — including a recoverable one it merely reports — is
@@ -23,9 +23,9 @@
 // that narrates its own retries (`codex exec` does, over the same wire shape it
 // uses for the fatal case) will hand a naive parser a `failure` for a
 // reconnect, and `invokeAgent` rejects on a failure, so a blip would arrive at
-// a human as NEEDS-HUMAN. The fourth, `usage`, is measurement only: it is
-// neither speech nor failure and cannot trip completion (#85). See
-// `ParsedStreamEvent` and `parseCodexJsonLine`.
+// a human as NEEDS-HUMAN. The fourth and fifth, `usage` and the additive tool
+// count, are measurements only: neither is speech or failure and neither can
+// trip completion (#85). See `ParsedStreamEvent` and `parseCodexJsonLine`.
 //
 // Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
@@ -161,7 +161,7 @@ export type AgentProvider = {
   readonly parsedOutputOnly?: boolean;
 };
 
-// One implementation of the provider parser's four-register reduction.
+// One implementation of the provider parser's five-register reduction.
 // Both the live sandbox invocation and the merger's run-to-completion capture
 // feed this accumulator, so speech, terminal failures and raw transport cannot
 // drift into different meanings on the two agent paths (#74).
@@ -332,7 +332,7 @@ export type SandboxRunResult = {
   // exactly what is in it).
   readonly signalMs?: number;
   readonly usage?: AgentUsage;
-  readonly toolCalls?: number;
+  readonly toolCalls: number;
 };
 
 export interface Sandbox {
@@ -433,13 +433,18 @@ export class AgentIdleTimeoutError extends Error {
 // EPIPE on stdin) and those must carry the output too. Nothing is mutated and
 // no property name can collide with one the thrown error already has.
 const AGENT_PARTIAL_OUTPUT = new WeakMap<object, string>();
-const AGENT_PARTIAL_USAGE = new WeakMap<object, { usage?: AgentUsage; toolCalls?: number }>();
+const AGENT_PARTIAL_USAGE = new WeakMap<object, { usage?: AgentUsage; toolCalls: number }>();
 
-const withPartialOutput = (err: unknown, partial: string, usage?: AgentUsage, toolCalls?: number): unknown => {
+const withPartialOutput = (
+  err: unknown,
+  partial: string,
+  usage: AgentUsage | undefined,
+  toolCalls: number,
+): unknown => {
   if (partial !== "" && typeof err === "object" && err !== null) {
     AGENT_PARTIAL_OUTPUT.set(err, partial);
   }
-  if (typeof err === "object" && err !== null && (usage !== undefined || toolCalls !== undefined)) {
+  if (typeof err === "object" && err !== null) {
     AGENT_PARTIAL_USAGE.set(err, { usage, toolCalls });
   }
   return err;
@@ -452,8 +457,12 @@ export const agentPartialOutput = (err: unknown): string => {
   if (typeof err !== "object" || err === null) return "";
   return AGENT_PARTIAL_OUTPUT.get(err) ?? "";
 };
-export const agentPartialUsage = (err: unknown): { usage?: AgentUsage; toolCalls?: number } =>
-  typeof err === "object" && err !== null ? AGENT_PARTIAL_USAGE.get(err) ?? {} : {};
+export const agentPartialUsage = (
+  err: unknown,
+): { usage?: AgentUsage; toolCalls?: number } =>
+  typeof err === "object" && err !== null
+    ? AGENT_PARTIAL_USAGE.get(err) ?? {}
+    : {};
 
 class WorktreeError extends Error {}
 
@@ -522,26 +531,17 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
       for (const block of obj.message.content) {
         if (block.type === "text" && typeof block.text === "string") {
           texts.push(block.text);
-        } else if (
-          block.type === "tool_use" &&
-          typeof block.name === "string" &&
-          block.input !== undefined
-        ) {
+        } else if (block.type === "tool_use") {
+          events.push({ type: "tool_calls", count: 1 });
+          if (typeof block.name !== "string" || block.input === undefined) continue;
           const argField = TOOL_ARG_FIELDS[block.name];
-          if (argField === undefined) {
-            events.push({ type: "tool_calls", count: 1 });
-            continue;
-          }
+          if (argField === undefined) continue;
           const argValue = block.input[argField];
-          if (typeof argValue !== "string") {
-            events.push({ type: "tool_calls", count: 1 });
-            continue;
-          }
+          if (typeof argValue !== "string") continue;
           if (texts.length > 0) {
             events.push({ type: "text", text: texts.join("") });
             texts.length = 0;
           }
-          events.push({ type: "tool_calls", count: 1 });
           events.push({ type: "tool_call", name: block.name, args: argValue });
         }
       }
@@ -1674,7 +1674,7 @@ const invokeAgent = (
   // Elapsed-since-`run()`, so the reported `signalMs` is on the same clock
   // across iterations rather than restarting with each one (#82).
   elapsed: () => number,
-): Promise<{ result: string; signalMs?: number; usage?: AgentUsage; toolCalls?: number }> =>
+): Promise<{ result: string; signalMs?: number; usage?: AgentUsage; toolCalls: number }> =>
   new Promise((resolveRun, rejectRun) => {
     const speech = createAgentSpeechAccumulator(agent);
     let completionDetected = false;
@@ -1696,7 +1696,7 @@ const invokeAgent = (
       result: string;
       signalMs?: number;
       usage?: AgentUsage;
-      toolCalls?: number;
+      toolCalls: number;
     }): void => {
       if (settled) return;
       settled = true;
@@ -1711,7 +1711,7 @@ const invokeAgent = (
       // caller cannot tell "the agent never produced a byte" from "the agent
       // produced a full review and then died", and #41 turns on that
       // distinction. Read back with `agentPartialOutput`.
-      rejectRun(withPartialOutput(err, speech.spoken, speech.usage, speech.toolCalls || undefined));
+      rejectRun(withPartialOutput(err, speech.spoken, speech.usage, speech.toolCalls));
     };
 
     // Two-phase: pre-signal → idle kill timer; post-signal → completion-grace
@@ -1738,7 +1738,7 @@ const invokeAgent = (
             result: speech.spoken,
             ...(signalMs === undefined ? {} : { signalMs }),
             ...(speech.usage === undefined ? {} : { usage: speech.usage }),
-            ...(speech.toolCalls === 0 ? {} : { toolCalls: speech.toolCalls }),
+            toolCalls: speech.toolCalls,
           });
           abort.abort();
         }, completionTimeoutMs);
@@ -1854,7 +1854,7 @@ const invokeAgent = (
           result: speech.output(execResult.stdout),
           ...(signalMs === undefined ? {} : { signalMs }),
           ...(speech.usage === undefined ? {} : { usage: speech.usage }),
-          ...(speech.toolCalls === 0 ? {} : { toolCalls: speech.toolCalls }),
+          toolCalls: speech.toolCalls,
         });
       })
       .catch((err) => settleReject(err));
@@ -2028,7 +2028,7 @@ export const createSandbox = async (
     commits: { sha: string }[];
     signalMs?: number;
     usage?: AgentUsage;
-    toolCalls?: number;
+    toolCalls: number;
   }> => {
     // Read host git identity, then propagate into the sandbox. safe.directory
     // is set per-run (load-bearing: bind mount is owned by a different UID and
@@ -2117,7 +2117,7 @@ export const createSandbox = async (
       commits,
       ...(signalMs === undefined ? {} : { signalMs }),
       ...(usage === undefined ? {} : { usage }),
-      ...(toolCalls === undefined ? {} : { toolCalls }),
+      toolCalls,
     };
   };
 
@@ -2176,7 +2176,7 @@ export const createSandbox = async (
         completionSignal: matchedSignal,
         ...(signalMs === undefined ? {} : { signalMs }),
         ...(usage === undefined ? {} : { usage }),
-        ...(toolCalls === 0 ? {} : { toolCalls }),
+        toolCalls,
       };
     },
     async close() {

@@ -2098,7 +2098,7 @@ export type RealAdapterDeps = {
   readonly runStackGate: () => Promise<GateResult>;
 };
 
-type CapturedAgentRun = Omit<ResolveAgentRun, "output">;
+type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "usage" | "toolCalls">;
 
 // The default merge subject, and it names an ISSUE — which is why anything
 // that is not one issue's branch (a chunk, #64) carries its own
@@ -2258,7 +2258,7 @@ export function parseCapturedAgentRun(
     output: speech.output(""),
     detail: run.detail ?? speech.failure,
     ...(speech.usage === undefined ? {} : { usage: speech.usage }),
-    ...(speech.toolCalls === 0 ? {} : { toolCalls: speech.toolCalls }),
+    toolCalls: speech.toolCalls,
   };
 }
 

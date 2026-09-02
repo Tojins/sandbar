@@ -78,34 +78,67 @@ export function normalizeCodexUsage(value: unknown): AgentUsage | undefined {
   });
 }
 
-export function sumAgentUsage(...items: readonly (AgentUsage | undefined)[]): AgentUsage | undefined {
+export function sumAgentUsage(
+  ...items: readonly (AgentUsage | undefined)[]
+): AgentUsage | undefined {
   const values = items.filter((item): item is AgentUsage => item !== undefined);
   if (values.length === 0) return undefined;
   const sum = (field: keyof AgentUsage): number | undefined => {
-    const numbers = values.map((item) => item[field]).filter((v): v is number => typeof v === "number");
+    const numbers = values
+      .map((item) => item[field])
+      .filter((v): v is number => typeof v === "number");
     return numbers.length === 0 ? undefined : numbers.reduce((a, b) => a + b, 0);
   };
-  const models = [...new Set(values.map((item) => item.resolvedModel).filter((v): v is string => v !== undefined))];
+  const resolvedModels = [
+    ...new Set(
+      values
+        .map((item) => item.resolvedModel)
+        .filter((v): v is string => v !== undefined),
+    ),
+  ];
+  const largestOutputModel = values
+    .filter((item) => item.resolvedModel !== undefined)
+    .sort((a, b) => (b.outputTokens ?? 0) - (a.outputTokens ?? 0))[0]
+    ?.resolvedModel;
+  const reportedModels = values
+    .map((item) => item.models)
+    .filter((value): value is number => value !== undefined);
+  const modelCount = Math.max(
+    resolvedModels.length,
+    reportedModels.length === 0 ? 0 : Math.max(...reportedModels),
+  );
   return present({
-    inputTokens: sum("inputTokens"), cachedInputTokens: sum("cachedInputTokens"),
-    cacheWriteInputTokens: sum("cacheWriteInputTokens"), outputTokens: sum("outputTokens"),
-    reasoningTokens: sum("reasoningTokens"), apiMs: sum("apiMs"),
-    resolvedModel: models.length === 1 ? models[0] : undefined,
-    models: values.reduce((total, item) => total + (item.models ?? (item.resolvedModel ? 1 : 0)), 0) || undefined,
+    inputTokens: sum("inputTokens"),
+    cachedInputTokens: sum("cachedInputTokens"),
+    cacheWriteInputTokens: sum("cacheWriteInputTokens"),
+    outputTokens: sum("outputTokens"),
+    reasoningTokens: sum("reasoningTokens"),
+    apiMs: sum("apiMs"),
+    resolvedModel: largestOutputModel,
+    models: modelCount > 1 ? modelCount : undefined,
     terminalReason: values.at(-1)?.terminalReason,
   });
 }
 
-export function formatUsageFields(usage: AgentUsage | undefined, toolCalls?: number): string {
+export function formatUsageFields(
+  usage: AgentUsage | undefined,
+  toolCalls?: number,
+): string {
   const tokens = usage === undefined ? [] : [
-    ["in", usage.inputTokens], ["cached", usage.cachedInputTokens],
-    ["write", usage.cacheWriteInputTokens], ["out", usage.outputTokens],
+    ["in", usage.inputTokens],
+    ["cached", usage.cachedInputTokens],
+    ["write", usage.cacheWriteInputTokens],
+    ["out", usage.outputTokens],
     ["reasoning", usage.reasoningTokens],
   ].filter((field): field is [string, number] => field[1] !== undefined);
-  return (tokens.length === 0 ? "" : ` tokens=${tokens.map(([name, value]) => `${name}:${value}`).join(",")}`) +
+  return (tokens.length === 0
+    ? ""
+    : ` tokens=${tokens.map(([name, value]) => `${name}:${value}`).join(",")}`) +
     (toolCalls === undefined ? "" : ` toolCalls=${toolCalls}`) +
     (usage?.apiMs === undefined ? "" : ` apiMs=${usage.apiMs}`) +
     (usage?.resolvedModel === undefined ? "" : ` resolvedModel=${usage.resolvedModel}`) +
     (usage?.models === undefined || usage.models <= 1 ? "" : ` models=${usage.models}`) +
-    (usage?.terminalReason === undefined ? "" : ` terminalReason=${usage.terminalReason}`);
+    (usage?.terminalReason === undefined
+      ? ""
+      : ` terminalReason=${usage.terminalReason}`);
 }

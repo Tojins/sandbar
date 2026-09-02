@@ -284,7 +284,7 @@ and used to announce themselves in four different ways, the halt in none at all.
   Preflight refuses per routed provider across all three roles. The resolve
   invocation uses the same provider boundary for argv, credential env and
   parsed output while keeping its raw streams verbatim in attempt logs. A
-  provider's parser answers in THREE registers and the rule no new one may break
+  provider's parser answers in FIVE registers and the rule no new one may break
   is that they stay apart: `text`/`result` is the agent's SPEECH and the only
   thing a run returns (#41 — "completed with output" is what `reviewer-run.ts`
   reads as a verdict, so codex's `reasoning` is dropped and `parsedOutputOnly`
@@ -356,9 +356,10 @@ and used to announce themselves in four different ways, the halt in none at all.
   `step.timeoutMs` stays the one bound `gate-stack.ts` has), and an absent
   measurement is ABSENT, never `0`, because a stats reader averages a zero.
   Agent invocations additionally record the provider-reported token usage
-  available on their terminal wire event (#85): input, cached input, output and
-  reasoning tokens, plus Claude's API duration and tool-call count. Usage and
-  tool counts occupy independent parser registers that never enter speech,
+  available on their terminal wire event (#85): fresh, cached and cache-write
+  input, output and reasoning tokens, plus Claude's API duration, resolved
+  model metadata, terminal reason and tool-call count. Usage and tool counts
+  occupy independent parser registers that never enter speech,
   failure or completion; malformed or unavailable fields are omitted. A line
   spanning multiple fresh CLI invocations sums like buckets across invocations,
   while cached/fresh/output/reasoning buckets are never collapsed together.

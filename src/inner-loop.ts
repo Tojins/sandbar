@@ -742,8 +742,7 @@ async function runImplementer(
     });
     accumulated.push(...nudge.commits);
     attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
-    attemptToolCalls = attemptToolCalls === undefined && nudge.toolCalls === undefined
-      ? undefined : (attemptToolCalls ?? 0) + (nudge.toolCalls ?? 0);
+    attemptToolCalls += nudge.toolCalls;
     const combined = `${run.stdout}\n${nudge.stdout}`;
     signal = parsePromise(combined, {
       commitsAccumulated: accumulated.length,

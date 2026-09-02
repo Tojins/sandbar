@@ -102,8 +102,8 @@ describe("parseStreamJsonLine", () => {
       },
     });
     expect(parseStreamJsonLine(line)).toEqual([
-      { type: "text", text: "before" },
       { type: "tool_calls", count: 1 },
+      { type: "text", text: "before" },
       { type: "tool_call", name: "Bash", args: "ls" },
       { type: "text", text: "after" },
     ]);
