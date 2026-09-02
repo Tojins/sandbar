@@ -149,12 +149,9 @@ export type AgentSpeechAccumulator = {
   readonly accumulated: string;
   readonly spoken: string;
   readonly failure: string | undefined;
-  output(): string;
 };
 
-export function createAgentSpeechAccumulator(
-  agent: AgentProvider,
-): AgentSpeechAccumulator {
+export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
   let result = "";
   let accumulated = "";
   let failure: string | undefined;
@@ -176,9 +173,6 @@ export function createAgentSpeechAccumulator(
     },
     get failure() {
       return failure;
-    },
-    output() {
-      return result || accumulated;
     },
   };
 }
@@ -1644,7 +1638,7 @@ const invokeAgent = (
   elapsed: () => number,
 ): Promise<{ result: string; signalMs?: number; maxGapMs: number }> =>
   new Promise((resolveRun, rejectRun) => {
-    const speech = createAgentSpeechAccumulator(agent);
+    const speech = createAgentSpeechAccumulator();
     let completionDetected = false;
     let signalMs: number | undefined;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1792,14 +1786,6 @@ const invokeAgent = (
           );
           return;
         }
-        // Parsed accumulated speech sits between the two for #72. The grace
-        // path above already settles on the accumulator's speech, so
-        // without it the two settle paths disagreed about the same run: a
-        // provider that emits assistant text but no terminal `result` event
-        // returned its PARSED speech when the completion timer fired and the
-        // raw stream when the exec merely exited. Codex is that provider on
-        // every run — it has no `result` event — and for it the raw stream is
-        // not a degraded answer but a wrong one.
         const spoken = speech.spoken;
         // A process that exited 0 having ANNOUNCED a terminal failure, and said
         // nothing else, did not answer — #67's rule for the resolve loop, held
@@ -1832,7 +1818,7 @@ const invokeAgent = (
           return;
         }
         settleResolve({
-          result: speech.output(),
+          result: speech.spoken,
           maxGapMs: gaps.finish(),
           ...(signalMs === undefined ? {} : { signalMs }),
         });
