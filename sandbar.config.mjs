@@ -178,9 +178,9 @@ export default {
     // vitest invocation: on the overwhelmingly green path this avoids paying
     // transform/import twice and lets quick unit files fill idle workers.
     //
-    // The exclude glob deliberately misses `gate-stack-hostpodman.test.ts`,
-    // which self-skips: it holds only for a LOCAL client, and this one is
-    // remote. `sandbox-stack-podman.test.ts` (#44) is excluded and not named
+    // The runner explicitly excludes `gate-stack-hostpodman.test.ts`: it holds
+    // only for a LOCAL client, and this one is remote.
+    // `sandbox-stack-podman.test.ts` (#44) is excluded too
     // below for the same kind of reason — it builds its anchor with the
     // production sandbox run args and then execs into it as the agent, so "the
     // invoking user" has to be whoever runs the test rather than whoever owns
@@ -211,10 +211,11 @@ export default {
           "src/gate-stack-hostpodman.test.ts",
           "--exclude",
           "src/sandbox-stack-podman.test.ts",
-          // Three gates share one 12-core host. Keep their combined fork count
-          // predictable; intra-file concurrency supplies the podman overlap.
+          // Pin the fork count instead of inheriting Vitest's cpus-1 default.
+          // Together with maxConcurrency=3 this admits twelve podman waits per
+          // gate; three simultaneous gates therefore have a known ceiling.
           "--maxWorkers",
-          "2",
+          "4",
         ],
         // `gate-run-podman.test.ts` (#45) is named here rather than staying
         // host-only: it drives `runGateCommand` end to end, and every podman

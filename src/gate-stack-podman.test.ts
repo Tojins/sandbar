@@ -60,9 +60,9 @@ const available = podmanTestsEnabled({
 // `startStack` force-removes a namesake before creating one — so each would
 // tear down the other's live stack mid-test.
 //
-// `stackId` stays a literal on purpose: the scope already separates the two
-// processes, and a readable stack id is what makes leftover debris
-// identifiable.
+// The scope separates processes; each concurrent test also derives a readable,
+// bounded stack id from its task id so siblings cannot remove one another's
+// namesake pod.
 const { scope: SCOPE, cleanup } = podmanTestScope("gate-stack");
 
 // One file-level sweep, covering every `describe` below rather than only the
