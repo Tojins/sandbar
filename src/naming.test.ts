@@ -28,6 +28,7 @@ import {
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
   ORIGIN_MEMBER_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
+  branchNameFromOriginRef,
   chunkBranchName,
   issueBranchName,
   issueNumberFromBranch,
@@ -69,11 +70,6 @@ describe("issueNumberFromBranch", () => {
 
   it("matches a bare `issue-<n>` with no slug", () => {
     expect(issueNumberFromBranch("sandbar/issue-7")).toBe(7);
-  });
-
-  it("parses remote-tracking issue refs", () => {
-    expect(issueNumberFromBranch("origin/sandbar/issue-42-foo")).toBe(42);
-    expect(issueNumberFromBranch("refs/remotes/origin/sandbar/issue-42-foo")).toBe(42);
   });
 
   it("returns null for an unknown prefix", () => {
@@ -120,6 +116,12 @@ describe("kebabSlug", () => {
 // reserved-namespace check on `integrationBranch` are the same statement made
 // three times if they don't.
 describe("branch names (#58)", () => {
+  it("strips the remote from a short origin ref", () => {
+    expect(branchNameFromOriginRef("origin/sandbar/member-42")).toBe(
+      "sandbar/member-42",
+    );
+  });
+
   it("builds the issue shape exactly as the planner always spelled it", () => {
     expect(issueBranchName(296, "Keyword escape")).toBe(
       "sandbar/issue-296-keyword-escape",

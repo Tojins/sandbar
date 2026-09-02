@@ -173,6 +173,7 @@ import {
 import {
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
   ORIGIN_MEMBER_BRANCH_REFGLOBS,
+  branchNameFromOriginRef,
   issueBranchName,
   issueNumberFromMemberBranch,
   rootIssueFromChunkBranch,
@@ -492,20 +493,22 @@ export async function readChunkMembers(
   );
   const result = new Map<string, ReadonlySet<number>>();
   for (const ref of refsOut.split("\n").map((s) => s.trim()).filter(Boolean)) {
-    const branch = ref.replace(/^origin\//, "");
+    const branch = branchNameFromOriginRef(ref);
     const { stdout } = await exec(
       "git",
       [
         "for-each-ref",
         `--merged=${ref}`,
-        "--format=%(refname)",
+        "--format=%(refname:short)",
         ...ORIGIN_MEMBER_BRANCH_REFGLOBS,
       ],
       { cwd: repoDir },
     );
     const members = new Set(
       stdout.split("\n").flatMap((memberRef) => {
-        const number = issueNumberFromMemberBranch(memberRef.trim());
+        const number = issueNumberFromMemberBranch(
+          branchNameFromOriginRef(memberRef.trim()),
+        );
         return number === null ? [] : [number];
       }),
     );

@@ -26,11 +26,12 @@
 // branch (`forge-pr.ts`), so the PR is a unique handle on the chunk — which an
 // issue is not.
 //
-// `land` is HARDCODED, on the same ground as `AUTO_LAND_LABEL` in `lanes.ts`
-// and `NEEDS_REVIEW_LABEL` in `chunks.ts`: the configurable labels (`LabelConfig`)
-// name a host's own handoff conventions, and this one is protocol — a human
-// addressing sandbar. The SPELLING is declared in `chunks.ts` beside
-// `NEEDS_REVIEW_LABEL` and re-exported below: the PR body that invites the label,
+// `land` is HARDCODED on the same ground as `AUTO_LAND_LABEL` in `lanes.ts`:
+// the configurable labels (`LabelConfig`) name a host's own handoff conventions,
+// while this one is protocol — a human addressing sandbar. Its SPELLING is
+// declared in `chunks.ts` beside the display-only `NEEDS_REVIEW_LABEL`, which
+// remains hardcoded because making it configurable is outside #93's scope, and
+// re-exported below: the PR body that invites the label,
 // the code that reads it and the code that takes it off again are three
 // modules, and finalise names it in prose as well — one declaration is what
 // stops those four coming to disagree. (It also keeps the import graph a DAG:

@@ -296,6 +296,14 @@ export const ORIGIN_MEMBER_BRANCH_REFGLOBS: readonly string[] =
     (prefix) => `refs/remotes/origin/${prefix}${MEMBER_BRANCH_INFIX}*`,
   );
 
+// `git for-each-ref --format=%(refname:short)` renders the remote-tracking
+// namespaces above as `origin/<branch>`. Membership consumers need the branch
+// half; keeping that conversion here leaves the shape parsers below strict to
+// the local short names every other caller supplies.
+export function branchNameFromOriginRef(ref: string): string {
+  return ref.replace(/^origin\//, "");
+}
+
 export function memberBranchName(issue: number): string {
   return `${BRANCH_PREFIX}${MEMBER_BRANCH_INFIX}${issue}`;
 }
@@ -333,10 +341,9 @@ export function chunkBranchName(rootIssue: number, title: string): string {
 // hinge on slug presence, and a branch of the OTHER shape reads as null rather
 // than as a number of the wrong kind.
 function numberFromBranch(branch: string, infix: string): number | null {
-  const normalized = branch.replace(/^refs\/remotes\/origin\//, "").replace(/^origin\//, "");
   for (const prefix of ALL_BRANCH_PREFIXES) {
-    if (!normalized.startsWith(prefix)) continue;
-    const rest = normalized.slice(prefix.length);
+    if (!branch.startsWith(prefix)) continue;
+    const rest = branch.slice(prefix.length);
     if (!rest.startsWith(infix)) return null;
     const m = rest.slice(infix.length).match(/^(\d+)(?:-|$)/);
     return m ? Number(m[1]) : null;

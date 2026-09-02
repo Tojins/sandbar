@@ -552,9 +552,9 @@ dependency; relabelling the issue alone will not do it.
 > branch until they land it. A landed member keeps its issue open; a dedicated
 > `sandbar/member-<n>` ref is pushed atomically with the chunk branch, and containment by
 > `origin/sandbar/chunk-*` is what takes it out of the queue and
-> unblocks whatever was queued behind it. Sandbar adds `needs-review` as a
-> display-only cue for humans, so a chunk grows one *layer* per cycle, and
-> the members worked in any one cycle are always siblings.
+> unblocks whatever was queued behind it, so a chunk grows one *layer* per
+> cycle and the members worked in any one cycle are always siblings. Sandbar
+> adds `needs-review` only as a display cue for humans.
 >
 > **You land a chunk by putting the `land` label on its pull request.** The next
 > run merges the chunk branch into your source branch — in the same pass, under
