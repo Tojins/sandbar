@@ -202,7 +202,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
       id: "7",
       title: "Member title",
       branch: "sandbar/issue-7-member",
-    }, preMergeSha);
+    }, preMergeSha, false);
 
     expect(await git(wt, "log", "-1", "--format=%s")).toBe(
       "Merge sandbar/issue-7: Member title",
@@ -232,7 +232,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
       id: "8",
       title: "Member title",
       branch: "sandbar/issue-8-member",
-    }, preMergeSha);
+    }, preMergeSha, false);
 
     expect(await git(wt, "rev-parse", "HEAD")).toBe(fixSha);
     expect(await git(wt, "rev-parse", "HEAD^")).toBe(mergeSha);
@@ -258,7 +258,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
       id: "9",
       title: "Member title",
       branch: "sandbar/issue-9-member",
-    }, preMergeSha);
+    }, preMergeSha, false);
 
     expect(await git(wt, "log", "-2", "--format=%s")).toBe(
       "edit gate-fix-9.txt\nMerge sandbar/issue-9: Member title",
@@ -275,9 +275,32 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
         id: "10",
         title: "Member title",
         branch: "sandbar/issue-10-member",
-      }, preMergeSha),
+      }, preMergeSha, false),
     ).rejects.toThrow("produced 0 first-parent merge commits");
     expect(await git(wt, "rev-parse", "HEAD")).toBe(preMergeSha);
+  });
+
+  it("records an already-contained empty member as an unchanged-tree merge", async () => {
+    const preMergeSha = await git(wt, "rev-parse", "HEAD");
+    await git(wt, "branch", "sandbar/issue-10-empty", preMergeSha);
+    expect(await adapter().mergeNoFf({
+      id: "10",
+      title: "Empty member",
+      branch: "sandbar/issue-10-empty",
+    })).toEqual({ ok: true, alreadyContained: true });
+    expect(await git(wt, "rev-parse", "HEAD")).toBe(preMergeSha);
+
+    await adapter().canonicalizeChunkMemberMerge({
+      id: "10",
+      title: "Empty member",
+      branch: "sandbar/issue-10-empty",
+    }, preMergeSha, true);
+
+    expect(await git(wt, "log", "-1", "--format=%s")).toBe(
+      "Merge sandbar/issue-10: Empty member",
+    );
+    expect((await git(wt, "rev-list", "--parents", "-n", "1", "HEAD")).split(" ")).toHaveLength(3);
+    expect(await git(wt, "diff", "HEAD^1", "HEAD", "--stat")).toBe("");
   });
 
   it("refuses to guess when one attempt produces multiple first-parent merges", async () => {
@@ -302,7 +325,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
         id: "10",
         title: "Member 10",
         branch: "sandbar/issue-10-member",
-      }, preMergeSha),
+      }, preMergeSha, false),
     ).rejects.toThrow(
       "produced 2 first-parent merge commits; refusing to guess which commit records its membership",
     );
@@ -317,7 +340,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
         id: "7",
         title: "Member title",
         branch: "sandbar/issue-7-member",
-      }, preMergeSha),
+      }, preMergeSha, false),
     ).rejects.toThrow("produced 0 first-parent merge commits");
     expect(await git(wt, "log", "-1", "--format=%s")).toBe(
       "edit replacement.txt",

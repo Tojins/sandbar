@@ -559,7 +559,13 @@ export type MergeUnit = {
 // What one `attemptMerge` did to the worktree, with the tracker deliberately
 // untouched. `install-failed` and `abandon` have both already been reverted.
 type MergeAttempt =
-  | { readonly kind: "merged"; readonly preMergeSha: string }
+  | {
+      readonly kind: "merged";
+      readonly preMergeSha: string;
+      // True only when a clean `git merge --no-ff` returned success without
+      // moving HEAD: the member branch was already contained in the chunk tip.
+      readonly alreadyContained: boolean;
+    }
   | { readonly kind: "install-failed" }
   | {
       readonly kind: "abandon";
@@ -611,7 +617,10 @@ export type ChunkRefLookup =
 // Adapter shape. Split into the merger's own primitives and the resolve-loop
 // primitives (which the merger forwards). The real adapter implements both.
 export type MergerAdapter = ResolveAdapter & {
-  mergeNoFf(unit: MergeUnit): Promise<{ readonly ok: boolean }>;
+  mergeNoFf(unit: MergeUnit): Promise<{
+    readonly ok: boolean;
+    readonly alreadyContained?: boolean;
+  }>;
   abortMerge(): Promise<void>;
   getHeadSha(): Promise<string>;
   resetHardSha(sha: string): Promise<void>;
@@ -645,6 +654,7 @@ export type MergerAdapter = ResolveAdapter & {
   canonicalizeChunkMemberMerge(
     unit: MergeUnit,
     preMergeSha: string,
+    alreadyContained: boolean,
   ): Promise<void>;
   // --- chunk landing (#60) ---
   // The ref a chunk's members are merged onto: `origin/<chunkBranch>` when
@@ -1117,6 +1127,7 @@ async function attemptMerge(
   await emit(`merge-attempt ${label} ${unit.branch}`);
   const preMergeSha = await adapter.getHeadSha();
   const m = await adapter.mergeNoFf(unit);
+  const alreadyContained = m.alreadyContained === true;
 
   // The version collision is settled mechanically first (#68); only what it
   // could not finish reaches the agent. `completed` falls through to the clean
@@ -1155,7 +1166,7 @@ async function attemptMerge(
       };
     }
     await emit(`merged ${label} (via resolve-loop)`);
-    return { kind: "merged", preMergeSha };
+    return { kind: "merged", preMergeSha, alreadyContained: false };
   }
 
   const inst = await adapter.npmInstall();
@@ -1212,11 +1223,11 @@ async function attemptMerge(
       };
     }
     await emit(`merged ${label} (gate-red recovered via resolve-loop)`);
-    return { kind: "merged", preMergeSha };
+    return { kind: "merged", preMergeSha, alreadyContained };
   }
 
   await emit(`merged ${label}`);
-  return { kind: "merged", preMergeSha };
+  return { kind: "merged", preMergeSha, alreadyContained };
 }
 
 export async function runMergerWithAdapter(
@@ -1370,14 +1381,14 @@ export async function runMergerWithAdapter(
     resolveSinkFor,
   };
 
-  // One DONE issue branch. Returns the pre-merge SHA when this issue's commits
-  // are on HEAD, or null when it was skipped and HEAD is back where it started.
-  // Chunk membership validation uses that SHA to inspect the whole attempt,
-  // including a gate-fix commit above the merge.
+  // One DONE issue branch. Returns the successful merge attempt when this
+  // issue's commits are on HEAD, or null when it was skipped and HEAD is back
+  // where it started. Chunk membership validation uses the starting SHA to
+  // inspect the whole attempt, including a gate-fix commit above the merge.
   const mergeOne = async (
     issue: IssueRef,
     target: MergeTarget,
-  ): Promise<string | null> => {
+  ): Promise<Extract<MergeAttempt, { kind: "merged" }> | null> => {
     try {
       const n = issueNumberOf(issue);
       const outcome = await attemptMerge(
@@ -1390,7 +1401,7 @@ export async function runMergerWithAdapter(
         },
         mergeDeps,
       );
-      if (outcome.kind === "merged") return outcome.preMergeSha;
+      if (outcome.kind === "merged") return outcome;
 
       if (outcome.kind === "install-failed") {
         await adapter.commentOnIssue(n, buildInstallFailedComment(target));
@@ -1462,10 +1473,14 @@ export async function runMergerWithAdapter(
       asHalt(`Chunk landing failed to base ${branch}`)(err);
     }
     for (const member of group.members) {
-      const preMergeSha = await mergeOne(member, group.target);
-      if (preMergeSha !== null) {
+      const attempt = await mergeOne(member, group.target);
+      if (attempt !== null) {
         await adapter
-          .canonicalizeChunkMemberMerge(member, preMergeSha)
+          .canonicalizeChunkMemberMerge(
+            member,
+            attempt.preMergeSha,
+            attempt.alreadyContained,
+          )
           .catch(asHalt(`Chunk membership commit failed for #${issueNumberOf(member)}`));
         landedMembers.push(member);
       }
@@ -2414,6 +2429,11 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     // difference. See `chunk-land.ts`.
     ...chunkForgeWrites({ repo: deps.repo, gitCwd: cwd, errPrefix: "merger" }),
     async mergeNoFf(unit) {
+      const { stdout: beforeOut } = await exec(
+        "git",
+        ["rev-parse", "HEAD"],
+        { cwd },
+      );
       try {
         await exec(
           "git",
@@ -2429,7 +2449,14 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           ],
           { cwd, env: gitAuthorEnv(deps) },
         );
-        return { ok: true };
+        const { stdout: afterOut } = await exec(
+          "git",
+          ["rev-parse", "HEAD"],
+          { cwd },
+        );
+        return afterOut.trim() === beforeOut.trim()
+          ? { ok: true, alreadyContained: true }
+          : { ok: true };
       } catch {
         return { ok: false };
       }
@@ -2559,7 +2586,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         return { ok: false };
       }
     },
-    async canonicalizeChunkMemberMerge(unit, preMergeSha) {
+    async canonicalizeChunkMemberMerge(unit, preMergeSha, alreadyContained) {
       const expected = unit.mergeMessage ?? mergeMessageFor(unit);
       const { stdout: mergeShasOut } = await exec(
         "git",
@@ -2572,6 +2599,62 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         { cwd },
       );
       const mergeShas = mergeShasOut.split("\n").filter(Boolean);
+      if (mergeShas.length === 0 && alreadyContained) {
+        // `git merge --no-ff` legitimately makes no commit when the member ref
+        // is already below HEAD. Membership still needs a durable record, so
+        // add an unchanged-tree merge commit. The clean merge's exit status
+        // and unchanged HEAD are what authorize this path; resolve-loop
+        // attempts never receive `alreadyContained` and cannot turn a plain
+        // replacement commit into a false record.
+        const head = await this.getHeadSha();
+        const { stdout: memberShaOut } = await exec(
+          "git",
+          ["rev-parse", "--verify", `${unit.branch}^{commit}`],
+          { cwd },
+        );
+        const memberSha = memberShaOut.trim();
+        const contained = await exec(
+          "git",
+          ["merge-base", "--is-ancestor", memberSha, preMergeSha],
+          { cwd },
+        ).then(() => true, () => false);
+        if (!contained) {
+          throw new SandbarError(
+            `Chunk member #${issueNumberOf(unit)} reported an up-to-date merge, ` +
+              `but ${unit.branch} is not contained in the pre-merge tip`,
+          );
+        }
+        // A genuinely empty issue branch can point at HEAD itself. Git drops a
+        // duplicate parent, so give that case a synthetic unchanged-tree side
+        // commit whose parent is the issue tip; the membership record remains
+        // a real two-parent merge and introduces no file changes.
+        let secondParent = memberSha;
+        if (memberSha === head) {
+          const { stdout: markerOut } = await exec(
+            "git",
+            [
+              "commit-tree", `${head}^{tree}`,
+              "-p", memberSha,
+              "-m", `Record empty chunk member #${issueNumberOf(unit)}`,
+            ],
+            { cwd, env: gitAuthorEnv(deps) },
+          );
+          secondParent = markerOut.trim();
+        }
+        const { stdout: recordOut } = await exec(
+          "git",
+          [
+            "commit-tree", `${head}^{tree}`,
+            "-p", head,
+            "-p", secondParent,
+            "-m", expected,
+            "-m", deps.coauthorTrailer,
+          ],
+          { cwd, env: gitAuthorEnv(deps) },
+        );
+        await exec("git", ["reset", "--hard", recordOut.trim()], { cwd });
+        return;
+      }
       if (mergeShas.length !== 1) {
         throw new SandbarError(
           `Chunk member #${issueNumberOf(unit)} produced ${mergeShas.length} ` +
