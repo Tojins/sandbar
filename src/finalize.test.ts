@@ -351,10 +351,10 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).not.toContain(NEEDS_REVIEW_LABEL);
   });
 
-  it("chunk-landed on an issue a human closed mid-run: still flips and deletes", async () => {
+  it("chunk-landed on an issue a human closed mid-run: still records and cleans up", async () => {
     // Not a handoff, so not guarded on issue state (#16): the comment is a
-    // statement of fact that stays true, and the label flip keeps the chunk
-    // graph honest whatever the issue's state.
+    // statement of fact that stays true, containment already records the
+    // membership, and the optional display-label edit remains harmless.
     const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
     const action = await finalizeOne(
       { kind: "chunk-landed", issue: issue(45), chunkBranch: "sandbar/chunk-45-x" },

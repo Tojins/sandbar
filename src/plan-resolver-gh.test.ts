@@ -50,8 +50,8 @@ describe("fetchCandidates names the configured repo (#34)", () => {
     // directory's `origin` — which is what real gh does when the flag is
     // absent. Modelling the fallback rather than printing a sentinel is what
     // lets the assertions below be about the WRONG repo instead of about the
-    // absence of a right one. `body` carries the `--label` it was asked for,
-    // which is the only thing that distinguishes the two listings (#59).
+    // absence of a right one. `body` carries the `--label` it was asked for so
+    // the assertion also pins the queue selector.
     await writeFile(
       join(shimBin, "gh"),
       [
@@ -61,9 +61,8 @@ describe("fetchCandidates names the configured repo (#34)", () => {
         "while [ $# -gt 0 ]; do",
         '  case "$1" in',
         '    --repo) seen="$2"; shift 2 ;;',
-        "    # Captured for #59: the two listings differ in this flag alone, and",
-        "    # a wrong label returns an empty list rather than an error — the",
-        "    # feature would simply be off, with nothing to notice.",
+        "    # Capture the queue selector: a wrong label returns an empty list",
+        "    # rather than an error, so the queue would silently disappear.",
         '    --label) label="$2"; shift 2 ;;',
         "    *) shift ;;",
         "  esac",

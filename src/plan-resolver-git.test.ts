@@ -50,7 +50,7 @@ describe("chunk membership from branch containment (#93)", () => {
     git(repo, "merge", "--no-ff", "sandbar/issue-60-root", "-m", "chunk work");
     git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-60-root", "HEAD");
     git(repo, "checkout", "-qb", "source", "HEAD~1");
-    git(repo, "merge", "--no-ff", "origin/sandbar/chunk-60-root", "-m", "land chunk");
+    git(repo, "merge", "--ff-only", "origin/sandbar/chunk-60-root");
     git(repo, "update-ref", "refs/remotes/origin/main", "HEAD");
 
     expect(await readChunkMembers(repo)).toEqual(

@@ -165,8 +165,10 @@ export function mergeFinalizeInputs(
     }
     inputs.push({ kind: finalizeKindForSkip(s.reason), issue: s.issue });
   }
-  // #60. Kept after ordinary outcomes for stable ordering. Since #93 its label
-  // edit is display-only; git membership has already de-queued the issue.
+  // #60, and LAST. The display-label edit is best-effort since #93, but the
+  // required issue comment can still throw. `finalizeAll` is fail-fast, so a
+  // chunk-landed input must not abandon an ordinary handoff after the merger
+  // has already stripped that issue's queue label (#8, #33).
   for (const c of summary.chunkLanded) {
     inputs.push({
       kind: "chunk-landed",

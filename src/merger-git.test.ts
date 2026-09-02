@@ -332,6 +332,18 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     expect(await originHas("refs/heads/sandbar/member-3")).toBe(head);
   });
 
+  it("atomically deletes real refs when a snapshotted member ref is already absent", async () => {
+    await commit(wt, "member.txt", "member work\n");
+    await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/chunk-1-c");
+    await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-1");
+
+    await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1, 9]);
+
+    expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-1")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-9")).toBeNull();
+  });
+
   it("accumulates members and fast-forwards a reworked member ref", async () => {
     await commit(wt, "b.txt", "first member\n");
     await git(wt, "branch", "sandbar/issue-1-member", "HEAD");

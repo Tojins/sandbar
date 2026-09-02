@@ -2351,15 +2351,18 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   // retry", which both landing targets rest on — a second copy is a git version
   // or a server phrasing a rejection differently, patched in one place and
   // silently reclassified as `fatal` in the other.
-  const classifyPushError = (err: unknown): PushResult => {
+  const pushErrorDetail = (err: unknown): string => {
     const e = err as { stderr?: string; message?: string };
-    const stderr = e.stderr ?? "";
+    return e.stderr?.trim() || e.message || "unknown push error";
+  };
+  const classifyPushError = (err: unknown): PushResult => {
+    const stderr = (err as { stderr?: string }).stderr ?? "";
     if (/rejected|non-fast-forward|fetch first|stale info/i.test(stderr)) {
       return { kind: "race" };
     }
     return {
       kind: "fatal",
-      reason: stderr.trim() || e.message || "unknown push error",
+      reason: pushErrorDetail(err),
     };
   };
   const pushHeadTo = async (dest: string): Promise<PushResult> => {
@@ -2795,8 +2798,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         ], { cwd });
         return { kind: "ok" };
       } catch (err) {
-        const e = err as { stderr?: string; message?: string };
-        const stderr = e.stderr ?? "";
+        const stderr = (err as { stderr?: string }).stderr ?? "";
         const memberRejected = members.some(({ destination }) =>
           stderr.split("\n").some(
             (line) =>
@@ -2807,7 +2809,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         if (memberRejected) {
           return {
             kind: "fatal",
-            reason: `membership ref rejected: ${stderr.trim() || e.message || "unknown push error"}`,
+            reason: `membership ref rejected: ${pushErrorDetail(err)}`,
           };
         }
         return classifyPushError(err);

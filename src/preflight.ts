@@ -702,7 +702,7 @@ async function fetchOpenReadyIssueNumbers(
 
 // Which of `numbers` are OPEN on the tracker, through the planner's own
 // strongly consistent batch lookup (#16). Fail-closed to an empty set like the
-// two listings above: a branch the tracker cannot vouch for as open is
+// sibling lookups above: a branch the tracker cannot vouch for as open is
 // classified `unmerged` and refused, which is what it was before this lookup
 // existed.
 async function fetchOpenIssueNumbers(

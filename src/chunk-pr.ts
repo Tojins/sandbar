@@ -54,9 +54,8 @@ export type ChunkPullRequestContent = {
  *
  * Ascending and deduped by issue number, with the LANDING side's title winning
  * a collision — it was read from the tracker this cycle, and the snapshot's
- * copy is a cycle older. The two lists are disjoint in practice (an issue
- * landing now is not yet in that snapshot); the tie-break is here so that a
- * re-run over a member whose label flip failed cannot double-list it.
+ * copy is a cycle older. The two lists are disjoint in practice, but the
+ * tie-break keeps overlapping snapshots from listing a member twice.
  */
 export function chunkMembersOnBranch(
   alreadyOnBranch: readonly ChunkMember[],
