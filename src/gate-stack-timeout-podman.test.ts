@@ -11,8 +11,7 @@ import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import { type Stack, startStack } from "./gate-stack.js";
-import { IMAGE, initStackRepo } from "./gate-stack-podman.test-util.js";
-import { stackContainerNameFor } from "./naming.js";
+import { gateStackFixture, IMAGE } from "./gate-stack-podman.test-util.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   podmanTestScope,
@@ -39,7 +38,6 @@ afterAll(async () => {
 }, 120_000);
 
 describe.runIf(available)("step timeouts and their reaps (#26)", () => {
-
   // #26. Before this, a step that hung hung the issue, the outer loop and the
   // single-instance lock forever, and the operator's only signal was a run
   // that had printed nothing for hours. A red gate at least spends an attempt
@@ -47,15 +45,13 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
   it.concurrent(
     "a step that exceeds its timeout is a red gate naming the step and the bound",
     async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
       let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+      const { repo, stackId, cName } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+        () => stack,
+      );
 
       stack = await startStack({
         stackId: stackId,
@@ -63,7 +59,12 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
         worktreePath: repo,
         spec: resolveGateStack({
           containers: [
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
           ],
           steps: [
             {
@@ -74,7 +75,11 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
               command: ["sh", "-c", "echo about-to-hang; sleep 600"],
               timeoutMs: 3_000,
             },
-            { name: "never", in: "runner", command: ["sh", "-c", "echo RAN-ANYWAY"] },
+            {
+              name: "never",
+              in: "runner",
+              command: ["sh", "-c", "echo RAN-ANYWAY"],
+            },
           ],
         }),
       });
@@ -106,15 +111,13 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
   it.concurrent(
     "the timed-out work is reaped: an issue container is recreated, only the step's container touched",
     async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
       let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+      const { repo, stackId, cName } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+        () => stack,
+      );
 
       stack = await startStack({
         stackId: stackId,
@@ -129,16 +132,31 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
               name: "held",
               image: IMAGE,
               lifecycle: "issue",
-              mounts: [{ hostPath: "marker.txt", containerPath: "/fixture/marker.txt" }],
+              mounts: [
+                {
+                  hostPath: "marker.txt",
+                  containerPath: "/fixture/marker.txt",
+                },
+              ],
               hold: true,
             },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
           ],
           steps: [
             // Satisfies the #29 reachability rule; also proves the timeout
             // stops the run rather than the run never getting that far.
             { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
-            { name: "hangs-in-held", in: "held", command: ["sleep", "601"], timeoutMs: 2_000 },
+            {
+              name: "hangs-in-held",
+              in: "held",
+              command: ["sleep", "601"],
+              timeoutMs: 2_000,
+            },
           ],
         }),
       });
@@ -159,7 +177,13 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
       const heldAfter = await idOf("held");
       expect(heldAfter).not.toBeNull();
       expect(heldAfter).not.toBe(heldBefore);
-      const { stdout } = await exec(RUNTIME, ["exec", cName("held"), "ps", "-eo", "args"]);
+      const { stdout } = await exec(RUNTIME, [
+        "exec",
+        cName("held"),
+        "ps",
+        "-eo",
+        "args",
+      ]);
       expect(stdout).not.toContain("sleep 601");
       // Only the step's own container is touched: the reap is not a stack
       // teardown, so the bystander is still there. (Its id is NOT compared —
@@ -180,15 +204,13 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
   it.concurrent(
     "a timeout in an attempt container removes it, so the runaway cannot outlive the attempt",
     async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
       let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+      const { repo, stackId, cName } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+        () => stack,
+      );
 
       stack = await startStack({
         stackId: stackId,
@@ -196,10 +218,20 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
         worktreePath: repo,
         spec: resolveGateStack({
           containers: [
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
           ],
           steps: [
-            { name: "hangs", in: "runner", command: ["sleep", "607"], timeoutMs: 2_000 },
+            {
+              name: "hangs",
+              in: "runner",
+              command: ["sleep", "607"],
+              timeoutMs: 2_000,
+            },
           ],
         }),
       });

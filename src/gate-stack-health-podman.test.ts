@@ -9,23 +9,14 @@ import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
-import {
-  ContainerBringupError,
-  type Stack,
-  startStack,
-} from "./gate-stack.js";
+import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
 import {
   buildVariantImage,
+  gateStackFixture,
   IMAGE,
-  initStackRepo,
 } from "./gate-stack-podman.test-util.js";
-import { stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
-import {
-  podmanTestScope,
-  podmanTestStackId,
-  removeFixtureContainer,
-} from "./podman-test-scope.test-util.js";
+import { podmanTestScope } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -38,9 +29,11 @@ const available = podmanTestsEnabled({
 });
 
 // Per PROCESS, not per file (#47) — see gate-stack-podman.test.ts.
-const { scope: SCOPE, testImageTag, cleanup } = podmanTestScope(
-  "gate-stack-health",
-);
+const {
+  scope: SCOPE,
+  testImageTag,
+  cleanup,
+} = podmanTestScope("gate-stack-health");
 
 // One file-level sweep; nothing reaps this scope on SIGKILL — the recovery
 // command is in `podman-test-scope.test-util.ts`.
@@ -61,7 +54,6 @@ afterAll(async () => {
 describe.runIf(available)(
   "pre-gate health of a running issue container (#49)",
   () => {
-
     const WEDGE = "out/wedge";
     const WEDGE_PROBE = [
       "sh",
@@ -111,15 +103,13 @@ describe.runIf(available)(
     it.concurrent(
       "a running, healthy issue container is left exactly where it is",
       async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
-      let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+        let stack: Stack | null = null;
+        const { repo, stackId, cName } = await gateStackFixture(
+          SCOPE,
+          task.id,
+          onTestFinished,
+          () => stack,
+        );
 
         stack = await startStack({
           stackId: stackId,
@@ -156,15 +146,13 @@ describe.runIf(available)(
     it.concurrent(
       "waits out a transiently unhealthy issue container instead of escalating",
       async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
-      let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+        let stack: Stack | null = null;
+        const { repo, stackId, cName } = await gateStackFixture(
+          SCOPE,
+          task.id,
+          onTestFinished,
+          () => stack,
+        );
 
         stack = await startStack({
           stackId: stackId,
@@ -203,15 +191,13 @@ describe.runIf(available)(
     it.concurrent(
       "a persistently unhealthy issue container is recreated on its running image, then throws",
       async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
-      let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+        let stack: Stack | null = null;
+        const { repo, stackId, cName } = await gateStackFixture(
+          SCOPE,
+          task.id,
+          onTestFinished,
+          () => stack,
+        );
 
         // A built image, not a `podman tag` alias — see `buildVariantImage`.
         // Since #45 an alias is not a changed image: the staleness check
@@ -249,7 +235,9 @@ describe.runIf(available)(
         // The whole sequence, because none of it is recoverable afterwards.
         expect(e.message).toMatch(/was healthy when it came up/);
         expect(e.message).toMatch(/did not recover within 4000ms/);
-        expect(e.message).toMatch(/did not come back when sandbar recreated it/);
+        expect(e.message).toMatch(
+          /did not come back when sandbar recreated it/,
+        );
         // What the OLD container's probe said, read at the deadline BEFORE the
         // recreate removed it — that container is gone by the time anyone reads
         // this, so nothing else can ever recover it.
@@ -281,15 +269,13 @@ describe.runIf(available)(
     it.concurrent(
       "a stopped issue container reports its state, not its health, even when probed",
       async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
-      let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+        let stack: Stack | null = null;
+        const { repo, stackId, cName } = await gateStackFixture(
+          SCOPE,
+          task.id,
+          onTestFinished,
+          () => stack,
+        );
 
         stack = await startStack({
           stackId: stackId,
@@ -332,15 +318,13 @@ describe.runIf(available)(
     it.concurrent(
       "healthcheck readiness goes green on the image's own probe",
       async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
-      let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+        let stack: Stack | null = null;
+        const { repo, stackId, cName } = await gateStackFixture(
+          SCOPE,
+          task.id,
+          onTestFinished,
+          () => stack,
+        );
 
         stack = await startStack({
           stackId: stackId,
@@ -348,7 +332,12 @@ describe.runIf(available)(
           worktreePath: repo,
           spec: resolveGateStack({
             containers: [
-              { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
               {
                 name: "db",
                 image: IMAGE,
@@ -372,7 +361,14 @@ describe.runIf(available)(
               {
                 name: "query",
                 in: "runner",
-                command: ["mariadb", "-h", "127.0.0.1", "-uroot", "-e", "SELECT 1"],
+                command: [
+                  "mariadb",
+                  "-h",
+                  "127.0.0.1",
+                  "-uroot",
+                  "-e",
+                  "SELECT 1",
+                ],
               },
             ],
           }),
@@ -392,19 +388,22 @@ describe.runIf(available)(
     it.concurrent(
       "a readiness timeout quotes the probe's own output, not podman's `unhealthy`",
       async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
-      let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+        let stack: Stack | null = null;
+        const { repo, stackId, cName } = await gateStackFixture(
+          SCOPE,
+          task.id,
+          onTestFinished,
+          () => stack,
+        );
 
         const spec = resolveGateStack({
           containers: [
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
             {
               name: "svc",
               image: IMAGE,

@@ -7,7 +7,10 @@
 
 import { describe, expect, it } from "vitest";
 
-import { podmanTestScope } from "./podman-test-scope.test-util.js";
+import {
+  podmanTestScope,
+  podmanTestStackId,
+} from "./podman-test-scope.test-util.js";
 
 describe("podmanTestScope", () => {
   it("gives every call its own scope and its own fixture tags", () => {
@@ -24,5 +27,12 @@ describe("podmanTestScope", () => {
     // from the same token rather than hardcoded.
     expect(a.otherScope).not.toBe(a.scope);
     expect(a.otherScope).not.toBe(b.otherScope);
+  });
+
+  it("keeps stack ids readable, stable per task, and distinct between tasks", () => {
+    const first = podmanTestStackId("podmantest", "task-a");
+    expect(first).toBe(podmanTestStackId("podmantest", "task-a"));
+    expect(first).not.toBe(podmanTestStackId("podmantest", "task-b"));
+    expect(first).toMatch(/^podmantest-/);
   });
 });

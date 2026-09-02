@@ -183,7 +183,10 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     "leaks a zombie per orphan when pid 1 is the sleep entrypoint",
     async ({ expect, onTestFinished }) => {
       const name = await start("without-init");
-      onTestFinished(() => removeFixtureContainer(name).catch(() => {}));
+      onTestFinished(
+        () => removeFixtureContainer(name).catch(() => {}),
+        60_000,
+      );
       // The control's own premise: without --init, `sleep infinity` is pid 1.
       expect(await pid1Comm(name)).toBe("sleep");
 
@@ -197,7 +200,10 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     "reaps the same orphan under --init",
     async ({ expect, onTestFinished }) => {
       const name = await start("with-init");
-      onTestFinished(() => removeFixtureContainer(name).catch(() => {}));
+      onTestFinished(
+        () => removeFixtureContainer(name).catch(() => {}),
+        60_000,
+      );
       // podman's init takes pid 1 and the entrypoint becomes its child; the
       // binary's comm has been both `catatonit` and `podman-init` across
       // versions, so what is asserted is that `sleep` is no longer pid 1.

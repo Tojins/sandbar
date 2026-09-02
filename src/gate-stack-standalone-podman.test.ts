@@ -19,17 +19,13 @@ import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import { type Stack, startStack } from "./gate-stack.js";
-import {
-  buildVariantImage,
-  IMAGE,
-} from "./gate-stack-podman.test-util.js";
-import {
-  networkNameFor,
-  podNameFor,
-  stackContainerNameFor,
-} from "./naming.js";
+import { buildVariantImage, IMAGE } from "./gate-stack-podman.test-util.js";
+import { networkNameFor, podNameFor, stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
-import { podmanTestScope, podmanTestStackId } from "./podman-test-scope.test-util.js";
+import {
+  podmanTestScope,
+  podmanTestStackId,
+} from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -42,9 +38,11 @@ const available = podmanTestsEnabled({
 });
 
 // Per PROCESS, not per file (#47) — see gate-stack-podman.test.ts.
-const { scope: SCOPE, testImageTag, cleanup } = podmanTestScope(
-  "gate-stack-standalone",
-);
+const {
+  scope: SCOPE,
+  testImageTag,
+  cleanup,
+} = podmanTestScope("gate-stack-standalone");
 
 // One file-level sweep; nothing reaps this scope on SIGKILL — the recovery
 // command is in `podman-test-scope.test-util.ts`.
@@ -107,7 +105,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "keeps the stack up, then adopts its issue container on the same token and rebuilds it on a different one",
     async ({ expect, task, onTestFinished }) => {
-      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
+      const { stackId, repo, spec } = await standaloneFixture(
         task.id,
         onTestFinished,
       );
@@ -152,7 +150,9 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       expect(second.reused).toEqual(["db"]);
       expect(await idOf("db")).toBe(dbId);
       expect(
-        (await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])).stdout.trim(),
+        (
+          await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
+        ).stdout.trim(),
       ).toBe(seeded);
       // And it still gates: the `attempt` container is recreated as always,
       // so an adopted stack is not a half-built one.
@@ -175,7 +175,9 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       expect(third.reused).toEqual([]);
       expect(await idOf("db")).not.toBe(dbId);
       expect(
-        (await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])).stdout.trim(),
+        (
+          await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
+        ).stdout.trim(),
       ).not.toBe(seeded);
       await third.stop();
     },
@@ -185,7 +187,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "tears the stack down when keepAlive is not asked for, and reuses nothing without a token",
     async ({ expect, task, onTestFinished }) => {
-      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
+      const { stackId, repo } = await standaloneFixture(
         task.id,
         onTestFinished,
       );
@@ -280,7 +282,12 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
         worktreePath: repo,
         spec: resolveGateStack({
           containers: [
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
           ],
           steps: [
             {
@@ -346,10 +353,19 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
                 ["sh", "-c", "grep -q ok /seed-flag && date +%s%N > /seeded"],
               ],
             },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
           ],
           steps: [
-            { name: "read-marker", in: "runner", command: ["cat", "marker.txt"] },
+            {
+              name: "read-marker",
+              in: "runner",
+              command: ["cat", "marker.txt"],
+            },
           ],
         });
 
@@ -392,7 +408,9 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       // what `reused: []` is worth asserting FOR: an adopted container would
       // have skipped it and gated against an unseeded database.
       expect(
-        (await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])).stdout.trim(),
+        (
+          await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
+        ).stdout.trim(),
       ).not.toBe("");
       await fixed.stop();
     },
@@ -462,7 +480,9 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       // The id alone would be satisfied by podman handing an identical one
       // back; the seed is what says the container was never recreated.
       expect(
-        (await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])).stdout.trim(),
+        (
+          await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
+        ).stdout.trim(),
       ).toBe(seeded);
       await second.stop();
     },

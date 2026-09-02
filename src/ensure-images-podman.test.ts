@@ -39,9 +39,12 @@ const BASE = "docker.io/library/mariadb:10.11";
 // tag concurrent bodies destroy and
 // rebuild each other's fixture image mid-assertion, with no pod involved. A
 // scope fix alone would leave that exactly as broken as it was.
-const { scope: SCOPE, otherScope: OTHER_SCOPE, testImageTag, cleanup } =
-  podmanTestScope("ensure-images");
-const TAG = testImageTag("probe");
+const {
+  scope: SCOPE,
+  otherScope: OTHER_SCOPE,
+  testImageTag,
+  cleanup,
+} = podmanTestScope("ensure-images");
 
 // Collection time, not beforeAll: vitest evaluates `runIf` while building the
 // suite, so a flag set in a hook arrives too late and silently skips
@@ -60,21 +63,38 @@ describe.runIf(available)("ensureImages against real podman", () => {
   // command is in `podman-test-scope.test-util.ts`.
   afterAll(cleanup, 120_000);
 
-  const idOf = async (): Promise<string> =>
+  const fixture = async (
+    taskId: string,
+    onTestFinished: (cleanup: () => Promise<void>, timeout?: number) => void,
+  ) => {
+    const root = await mkdtemp(join(tmpdir(), "sandbar-ensure-images-"));
+    const tag = testImageTag(`probe-${taskId}`);
+    const image: BuiltImage = {
+      tag,
+      containerfile: "Containerfile",
+      rebuildOn: ["package-lock.json"],
+    };
+    await writeFile(
+      join(root, "Containerfile"),
+      `FROM ${BASE}\nCOPY package-lock.json /lock.json\n`,
+    );
+    await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
+    onTestFinished(
+      async () => rm(root, { recursive: true, force: true }),
+      60_000,
+    );
+    return { root, tag, image };
+  };
+
+  const imageId = async (tag: string): Promise<string> =>
     (
-      await exec(RUNTIME, ["image", "inspect", TAG, "--format", "{{.Id}}"])
+      await exec(RUNTIME, ["image", "inspect", tag, "--format", "{{.Id}}"])
     ).stdout.trim();
 
   it.concurrent(
     "records the fingerprint as a label, and rebuilds only when the declared inputs change",
     async ({ expect, task, onTestFinished }) => {
-      const root = await mkdtemp(join(tmpdir(), "sandbar-ensure-images-"));
-      const TAG = testImageTag(`probe-${task.id}`);
-      const image: BuiltImage = { tag: TAG, containerfile: "Containerfile", rebuildOn: ["package-lock.json"] };
-      const idOf = async (): Promise<string> => (await exec(RUNTIME, ["image", "inspect", TAG, "--format", "{{.Id}}"])) .stdout.trim();
-      await writeFile(join(root, "Containerfile"), `FROM ${BASE}\nCOPY package-lock.json /lock.json\n`);
-      await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
-      onTestFinished(async () => { await rm(root, { recursive: true, force: true }); }, 60_000);
+      const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
 
       const first = await ensureImages([image], root);
       const fingerprint = first.get(TAG);
@@ -84,10 +104,10 @@ describe.runIf(available)("ensureImages against real podman", () => {
 
       // Warm: same inputs, so no build at all. Asserted on the image ID rather
       // than on timing — a fully-cached rebuild is fast enough to be invisible.
-      const id = await idOf();
+      const id = await imageId(TAG);
       const second = await ensureImages([image], root);
       expect(second.get(TAG)).toBe(fingerprint);
-      expect(await idOf()).toBe(id);
+      expect(await imageId(TAG)).toBe(id);
 
       // A change to a declared input rebuilds, which is the whole point: the
       // pre-#37 policy was "the tag exists, therefore this image is current".
@@ -95,7 +115,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       const third = await ensureImages([image], root);
       expect(third.get(TAG)).not.toBe(fingerprint);
       expect(await readInputsLabel(TAG)).toBe(third.get(TAG));
-      expect(await idOf()).not.toBe(id);
+      expect(await imageId(TAG)).not.toBe(id);
 
       // A change to the RECIPE counts too — an image is a function of its own
       // Containerfile, and that also never entered the tag-only cache key.
@@ -121,24 +141,18 @@ describe.runIf(available)("ensureImages against real podman", () => {
   it.concurrent(
     "leaves a stale declared tag alone and reports the image's own fingerprint",
     async ({ expect, task, onTestFinished }) => {
-      const root = await mkdtemp(join(tmpdir(), "sandbar-ensure-images-"));
-      const TAG = testImageTag(`probe-${task.id}`);
-      const image: BuiltImage = { tag: TAG, containerfile: "Containerfile", rebuildOn: ["package-lock.json"] };
-      const idOf = async (): Promise<string> => (await exec(RUNTIME, ["image", "inspect", TAG, "--format", "{{.Id}}"])) .stdout.trim();
-      await writeFile(join(root, "Containerfile"), `FROM ${BASE}\nCOPY package-lock.json /lock.json\n`);
-      await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
-      onTestFinished(async () => { await rm(root, { recursive: true, force: true }); }, 60_000);
+      const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
 
       const first = await ensureImages([image], root);
       const fingerprint = first.get(TAG);
-      const id = await idOf();
+      const id = await imageId(TAG);
 
       await writeFile(join(root, "package-lock.json"), '{"v":9}\n');
       const held = await ensureImages([image], root, { rebuildInPlace: false });
 
       // Not rebuilt, and not re-tagged: this is the process that must not
       // clobber a tag someone else is relying on.
-      expect(await idOf()).toBe(id);
+      expect(await imageId(TAG)).toBe(id);
       expect(await readInputsLabel(TAG)).toBe(fingerprint);
       // And the baseline describes the IMAGE, not this tree — hand back the
       // tree's own fingerprint here and the per-branch resolver compares equal,
@@ -148,7 +162,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       // The default is unchanged, which is what a run still gets.
       const rebuilt = await ensureImages([image], root);
       expect(rebuilt.get(TAG)).not.toBe(fingerprint);
-      expect(await idOf()).not.toBe(id);
+      expect(await imageId(TAG)).not.toBe(id);
     },
     600_000,
   );
@@ -159,15 +173,11 @@ describe.runIf(available)("ensureImages against real podman", () => {
   it.concurrent(
     "still builds a declared tag that does not exist yet",
     async ({ expect, task, onTestFinished }) => {
-      const root = await mkdtemp(join(tmpdir(), "sandbar-ensure-images-"));
-      const TAG = testImageTag(`probe-${task.id}`);
-      const image: BuiltImage = { tag: TAG, containerfile: "Containerfile", rebuildOn: ["package-lock.json"] };
-      const idOf = async (): Promise<string> => (await exec(RUNTIME, ["image", "inspect", TAG, "--format", "{{.Id}}"])) .stdout.trim();
-      await writeFile(join(root, "Containerfile"), `FROM ${BASE}\nCOPY package-lock.json /lock.json\n`);
-      await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
-      onTestFinished(async () => { await rm(root, { recursive: true, force: true }); }, 60_000);
+      const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
 
-      const built = await ensureImages([image], root, { rebuildInPlace: false });
+      const built = await ensureImages([image], root, {
+        rebuildInPlace: false,
+      });
       expect(await readInputsLabel(TAG)).toBe(built.get(TAG));
       expect(built.get(TAG)).toEqual(expect.any(String));
     },
@@ -177,13 +187,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
   it.concurrent(
     "reports a failing CAPTURED build with the build's own output — the diagnosis a gate red has to carry",
     async ({ expect, task, onTestFinished }) => {
-      const root = await mkdtemp(join(tmpdir(), "sandbar-ensure-images-"));
-      const TAG = testImageTag(`probe-${task.id}`);
-      const image: BuiltImage = { tag: TAG, containerfile: "Containerfile", rebuildOn: ["package-lock.json"] };
-      const idOf = async (): Promise<string> => (await exec(RUNTIME, ["image", "inspect", TAG, "--format", "{{.Id}}"])) .stdout.trim();
-      await writeFile(join(root, "Containerfile"), `FROM ${BASE}\nCOPY package-lock.json /lock.json\n`);
-      await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
-      onTestFinished(async () => { await rm(root, { recursive: true, force: true }); }, 60_000);
+      const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
 
       // The per-branch path captures rather than inheriting, and this is why:
       // its failure travels into a red gate's trace and on to an implementer,
@@ -211,13 +215,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
   it.concurrent(
     "halts a failing BASE build rather than leaving a stale tag in place",
     async ({ expect, task, onTestFinished }) => {
-      const root = await mkdtemp(join(tmpdir(), "sandbar-ensure-images-"));
-      const TAG = testImageTag(`probe-${task.id}`);
-      const image: BuiltImage = { tag: TAG, containerfile: "Containerfile", rebuildOn: ["package-lock.json"] };
-      const idOf = async (): Promise<string> => (await exec(RUNTIME, ["image", "inspect", TAG, "--format", "{{.Id}}"])) .stdout.trim();
-      await writeFile(join(root, "Containerfile"), `FROM ${BASE}\nCOPY package-lock.json /lock.json\n`);
-      await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
-      onTestFinished(async () => { await rm(root, { recursive: true, force: true }); }, 60_000);
+      const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
 
       await writeFile(
         join(root, "Containerfile"),
@@ -233,13 +231,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
   it.concurrent(
     "sweeps this scope's leftover per-branch images and leaves another scope's alone",
     async ({ expect, task, onTestFinished }) => {
-      const root = await mkdtemp(join(tmpdir(), "sandbar-ensure-images-"));
-      const TAG = testImageTag(`probe-${task.id}`);
-      const image: BuiltImage = { tag: TAG, containerfile: "Containerfile", rebuildOn: ["package-lock.json"] };
-      const idOf = async (): Promise<string> => (await exec(RUNTIME, ["image", "inspect", TAG, "--format", "{{.Id}}"])) .stdout.trim();
-      await writeFile(join(root, "Containerfile"), `FROM ${BASE}\nCOPY package-lock.json /lock.json\n`);
-      await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
-      onTestFinished(async () => { await rm(root, { recursive: true, force: true }); }, 60_000);
+      const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
 
       // The run-end removal is an `onCleanup` action, so it does not run on
       // SIGKILL or a hard crash — and these are the largest things sandbar
@@ -275,13 +267,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
   it.concurrent(
     "refuses a declared path that is not in the build context, instead of going inert",
     async ({ expect, task, onTestFinished }) => {
-      const root = await mkdtemp(join(tmpdir(), "sandbar-ensure-images-"));
-      const TAG = testImageTag(`probe-${task.id}`);
-      const image: BuiltImage = { tag: TAG, containerfile: "Containerfile", rebuildOn: ["package-lock.json"] };
-      const idOf = async (): Promise<string> => (await exec(RUNTIME, ["image", "inspect", TAG, "--format", "{{.Id}}"])) .stdout.trim();
-      await writeFile(join(root, "Containerfile"), `FROM ${BASE}\nCOPY package-lock.json /lock.json\n`);
-      await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
-      onTestFinished(async () => { await rm(root, { recursive: true, force: true }); }, 60_000);
+      const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
 
       // A typo here would otherwise make the whole declaration a no-op: the
       // path is absent from every tree, so it compares equal everywhere and the

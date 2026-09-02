@@ -56,14 +56,13 @@ const available = podmanTestsEnabled({
 });
 
 const { testImageTag, cleanup } = podmanTestScope("gate-run-fixtures");
-afterAll(cleanup, 120_000);
+afterAll(async () => {
+  if (available) await cleanup();
+}, 120_000);
 
-// No `podmanTestScope` here, and that is the point rather than an omission:
-// the scope under test is the one `gateScope` derives from the worktree, and
-// substituting a per-process one would test a scope the command never
-// computes. Concurrency safety comes from the worktree instead — `mkdtemp`
-// gives every process its own, so every process gets its own scope, which is
-// the same guarantee by the production route.
+// The test scope above partitions fixture image tags only. The STACK scope
+// under test remains the one `gateScope` derives from the worktree; `mkdtemp`
+// gives every concurrent case a different production scope.
 
 async function gateRunFixture(
   taskId: string,
@@ -101,8 +100,15 @@ async function gateRunFixture(
 
   await writeFile(join(repo, "marker.txt"), "uncommitted\n");
   onTestFinished(async () => {
-    await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(() => {});
-    await exec(RUNTIME, ["network", "rm", "-f", networkNameFor(gateScope(repo), GATE_STACK_ID)]).catch(() => {});
+    await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(
+      () => {},
+    );
+    await exec(RUNTIME, [
+      "network",
+      "rm",
+      "-f",
+      networkNameFor(gateScope(repo), GATE_STACK_ID),
+    ]).catch(() => {});
     await rm(repo, { recursive: true, force: true });
   }, 120_000);
   return { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId };
@@ -112,14 +118,21 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "exits green, then red, and leaves no pod behind either time",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } = await gateRunFixture(task.id, onTestFinished);
+      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+        await gateRunFixture(task.id, onTestFinished);
 
       const out: string[] = [];
-      const sink = { out: (t: string) => out.push(t), err: (t: string) => out.push(t) };
+      const sink = {
+        out: (t: string) => out.push(t),
+        err: (t: string) => out.push(t),
+      };
 
-      const green = await runGateCommand(config([
-        { name: "read", in: "runner", command: ["cat", "marker.txt"] },
-      ]), { worktree: repo, keep: false, ...sink });
+      const green = await runGateCommand(
+        config([
+          { name: "read", in: "runner", command: ["cat", "marker.txt"] },
+        ]),
+        { worktree: repo, keep: false, ...sink },
+      );
       expect(green).toBe(GATE_EXIT_GREEN);
       // It gated the tree as it stands — uncommitted, and in no repository at
       // all — which is the whole difference from the gate inside a run.
@@ -130,9 +143,16 @@ describe.runIf(available)("sandbar gate against real podman", () => {
       // routed through the process-wide cleanup registry would have run once,
       // here, and left this stack up while still reporting a verdict.
       out.length = 0;
-      const red = await runGateCommand(config([
-        { name: "boom", in: "runner", command: ["sh", "-c", "echo NOPE >&2; exit 3"] },
-      ]), { worktree: repo, keep: false, ...sink });
+      const red = await runGateCommand(
+        config([
+          {
+            name: "boom",
+            in: "runner",
+            command: ["sh", "-c", "echo NOPE >&2; exit 3"],
+          },
+        ]),
+        { worktree: repo, keep: false, ...sink },
+      );
       expect(red).toBe(GATE_EXIT_RED);
       expect(out.join("")).toContain("NOPE");
       // The step name, so a CI log says which one — and the D9 container logs,
@@ -147,10 +167,14 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "keeps a stack when asked, and the next invocation reuses the pod rather than a second one",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } = await gateRunFixture(task.id, onTestFinished);
+      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+        await gateRunFixture(task.id, onTestFinished);
 
       const out: string[] = [];
-      const sink = { out: (t: string) => out.push(t), err: (t: string) => out.push(t) };
+      const sink = {
+        out: (t: string) => out.push(t),
+        err: (t: string) => out.push(t),
+      };
       const cfg = config([
         { name: "read", in: "runner", command: ["cat", "marker.txt"] },
       ]);
@@ -200,11 +224,19 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "keeps an adopted stack whose re-probe fails, and does not call it a half-built bringup",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } = await gateRunFixture(task.id, onTestFinished);
+      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+        await gateRunFixture(task.id, onTestFinished);
 
       const out: string[] = [];
-      const sink = { out: (t: string) => out.push(t), err: (t: string) => out.push(t) };
-      const dbName = stackContainerNameFor(gateScope(repo), GATE_STACK_ID, "db");
+      const sink = {
+        out: (t: string) => out.push(t),
+        err: (t: string) => out.push(t),
+      };
+      const dbName = stackContainerNameFor(
+        gateScope(repo),
+        GATE_STACK_ID,
+        "db",
+      );
       const cfg = config([
         { name: "read", in: "runner", command: ["cat", "marker.txt"] },
       ]);
@@ -270,7 +302,9 @@ describe.runIf(available)("sandbar gate against real podman", () => {
       expect(await podId()).toBe(keptPod);
       expect(await dbId()).toBe(keptDb);
       expect(
-        (await exec(RUNTIME, ["exec", dbName, "cat", "/tmp/seeded"])).stdout.trim(),
+        (
+          await exec(RUNTIME, ["exec", dbName, "cat", "/tmp/seeded"])
+        ).stdout.trim(),
       ).toBe(seeded);
 
       // …and it is described as what it is. Both negatives are the assertion:
@@ -302,7 +336,8 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "refuses up front when a referenced image is missing, naming the pull",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } = await gateRunFixture(task.id, onTestFinished);
+      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+        await gateRunFixture(task.id, onTestFinished);
 
       const cfg = config([
         { name: "read", in: "runner", command: ["cat", "marker.txt"] },
@@ -352,7 +387,8 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "reports no verdict rather than a red when an issue container will not come up, and does not keep the wreckage",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } = await gateRunFixture(task.id, onTestFinished);
+      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+        await gateRunFixture(task.id, onTestFinished);
 
       const cfg = config([
         { name: "read", in: "runner", command: ["cat", "marker.txt"] },
@@ -429,7 +465,8 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "does not build a declared image no gateStack container runs",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } = await gateRunFixture(task.id, onTestFinished);
+      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+        await gateRunFixture(task.id, onTestFinished);
 
       await rmi(SANDBOX_ONLY_TAG);
       await writeFile(join(repo, "Containerfile.broken"), BROKEN_CONTAINERFILE);
@@ -472,7 +509,8 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "reds — not 2 — when an image the stack DOES run will not build",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } = await gateRunFixture(task.id, onTestFinished);
+      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+        await gateRunFixture(task.id, onTestFinished);
 
       await rmi(SANDBOX_ONLY_TAG);
       await writeFile(join(repo, "Containerfile.broken"), BROKEN_CONTAINERFILE);

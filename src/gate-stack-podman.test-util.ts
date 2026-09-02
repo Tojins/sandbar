@@ -16,14 +16,15 @@
 //      — gate-stack-podman.test.ts;
 //   3. an `issue` container keeps its id and its state across gate runs while
 //      the `attempt` container gets a new one, which no `ok`-only assertion
-//      can see — gate-stack-podman.test.ts;
+//      can see — gate-stack-podman.test.ts.
+//
 // Podman's own healthcheck quirks are documented in #43 and git history, not
 // recurring tests: editing sandbar cannot change them, so they belong to the
 // delete-on-red development record rather than every gate run.
 //
 // Since #48 these files run IN THE GATE, against the host's podman over a
-// mounted socket, so every fact above is exercised per attempt rather than by a
-// human remembering to. What a remote client cannot pin — the local client's
+// mounted socket, so those three facts are exercised per attempt rather than
+// by a human remembering to. What a remote client cannot pin — the local client's
 // signal semantics, and whether podman created a transient systemd timer on the
 // HOST — lives in gate-stack-hostpodman.test.ts, which states why.
 //
@@ -61,6 +62,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import type { Stack } from "./gate-stack.js";
+import { stackContainerNameFor } from "./naming.js";
+import { podmanTestStackId } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -129,4 +133,30 @@ export const initStackRepo = async (): Promise<string> => {
   await git("add", "-A");
   await git("commit", "-qm", "init");
   return repo;
+};
+
+type FinishedHook = (cleanup: () => Promise<void>, timeout?: number) => void;
+
+// Per-test state for concurrent gate-stack cases. The getter lets cleanup
+// observe a stack assigned after this helper returns.
+export const gateStackFixture = async (
+  scope: string,
+  taskId: string,
+  onTestFinished: FinishedHook,
+  heldStack: () => Stack | null,
+): Promise<{
+  repo: string;
+  stackId: string;
+  cName: (name: string) => string;
+}> => {
+  const repo = await initStackRepo();
+  const stackId = podmanTestStackId("podmantest", taskId);
+  const cName = (name: string): string =>
+    stackContainerNameFor(scope, stackId, name);
+  onTestFinished(async () => {
+    const stack = heldStack();
+    if (stack) await stack.stop();
+    await rm(repo, { recursive: true, force: true });
+  }, 120_000);
+  return { repo, stackId, cName };
 };

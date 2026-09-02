@@ -83,8 +83,8 @@
 // All four lines are load-bearing, and the middle two are the ones easily
 // dropped as redundant. `pod rm -f` takes its member containers and the pod's
 // unreachably-named infra container, but it reaches neither the fixture
-// containers these files start outside a pod (`killprobe`, `hcprobe`,
-// `portprobe`, `hctimer`, `hcnotimer`, `initprobe` — and `killprobe` is a
+// containers these files start outside a pod (`killprobe`, `hctimer`,
+// `hcnotimer`, `initprobe` — and `killprobe` is a
 // `sleep infinity`, i.e. a container left RUNNING forever) nor
 // the network sandbar created for the pod, which outlives it. Under the old fixed scope both classes reaped
 // themselves, because the next run recomputed the same names and the fixtures'
@@ -125,11 +125,11 @@
 // host-only facts out to gate-stack-hostpodman.test.ts, and #43 deleted the
 // `log` follower's tests, handed one of those three back — an in-container port
 // probe needs no local client — and added the `healthcheck run` layer).
-// Those figures describe the file before it was sharded for wall-clock
-// parallelism (slice map in gate-stack-podman.test-util.ts); the name above
-// now denotes the core shard, which still brings stacks up under the
-// hardcoded ids and so still discriminates — as, indeed, does every shard,
-// which is precisely what the per-process scope licenses.
+// Those figures describe the file before it was split by subject. The core
+// file above still discriminates: each process mints its own file scope, while
+// each concurrent body derives a stable stack id from its task id. Replacing
+// either token with a constant makes sibling processes or sibling tests tear
+// down namesake stacks.
 //
 // The same pair over `ensure-images-podman.test.ts` proves nothing on its own
 // and must not be recorded as evidence: it passes pre-#47 too, 0 failures in 6

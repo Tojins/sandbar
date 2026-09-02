@@ -14,15 +14,11 @@ import { ImageBuildError } from "./ensure-images.js";
 import { type Stack, startStack } from "./gate-stack.js";
 import {
   buildVariantImage,
+  gateStackFixture,
   IMAGE,
-  initStackRepo,
 } from "./gate-stack-podman.test-util.js";
-import { stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
-import {
-  podmanTestScope,
-  podmanTestStackId,
-} from "./podman-test-scope.test-util.js";
+import { podmanTestScope } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -35,9 +31,11 @@ const available = podmanTestsEnabled({
 });
 
 // Per PROCESS, not per file (#47) — see gate-stack-podman.test.ts.
-const { scope: SCOPE, testImageTag, cleanup } = podmanTestScope(
-  "gate-stack-images",
-);
+const {
+  scope: SCOPE,
+  testImageTag,
+  cleanup,
+} = podmanTestScope("gate-stack-images");
 
 // One file-level sweep; nothing reaps this scope on SIGKILL — the recovery
 // command is in `podman-test-scope.test-util.ts`.
@@ -46,7 +44,6 @@ afterAll(async () => {
 }, 120_000);
 
 describe.runIf(available)("per-branch images between gate runs (#37)", () => {
-
   // #37. An image that bakes a lockfile is a function of the branch, so the
   // stack has to be able to change which image it runs BETWEEN gate runs —
   // the branch grows under the loop, and an attempt that adds a dependency
@@ -59,15 +56,13 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   it.concurrent(
     "a changed image recreates the issue container, and an unchanged one leaves it alone",
     async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
       let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+      const { repo, stackId, cName } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+        () => stack,
+      );
 
       // A built image, not a `podman tag` alias — see `buildVariantImage`.
       // Since #45 an alias is not a changed image: same ID, so the staleness
@@ -92,7 +87,12 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
         spec: resolveGateStack({
           containers: [
             { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
           ],
           steps: [
             { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
@@ -100,10 +100,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
         }),
       });
 
-      const inspectOf = async (
-        name: string,
-        field: string,
-      ): Promise<string> =>
+      const inspectOf = async (name: string, field: string): Promise<string> =>
         (
           await exec(RUNTIME, ["inspect", "--format", field, cName(name)])
         ).stdout.trim();
@@ -148,15 +145,13 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   it.concurrent(
     "a reaped issue container comes back on the image the branch put it on, not the declared one",
     async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
       let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+      const { repo, stackId, cName } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+        () => stack,
+      );
 
       const ALIAS = testImageTag("reap-image");
       await buildVariantImage(ALIAS);
@@ -168,11 +163,21 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
         spec: resolveGateStack({
           containers: [
             { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
           ],
           steps: [
             { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
-            { name: "hangs-in-held", in: "held", command: ["sleep", "613"], timeoutMs: 2_000 },
+            {
+              name: "hangs-in-held",
+              in: "held",
+              command: ["sleep", "613"],
+              timeoutMs: 2_000,
+            },
           ],
         }),
       });
@@ -209,15 +214,13 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   it.concurrent(
     "a failing issue-container recreate reds, and the next gate run retries it instead of reporting infra death",
     async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
       let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+      const { repo, stackId, cName } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+        () => stack,
+      );
 
       stack = await startStack({
         stackId: stackId,
@@ -232,7 +235,12 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
         spec: resolveGateStack({
           containers: [
             { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
           ],
           steps: [
             { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
@@ -264,15 +272,13 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   it.concurrent(
     "an image that will not build is a gate RED naming the image, not a throw",
     async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
       let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+      const { repo, stackId, cName } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+        () => stack,
+      );
 
       stack = await startStack({
         stackId: stackId,
@@ -287,7 +293,12 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
         },
         spec: resolveGateStack({
           containers: [
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
           ],
           steps: [
             { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
@@ -312,15 +323,13 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   it.concurrent(
     "does not resolve images for a worktree it is going to refuse anyway",
     async ({ expect, task, onTestFinished }) => {
-      const repo = await initStackRepo();
       let stack: Stack | null = null;
-      const stackId = podmanTestStackId("podmantest", task.id);
-      const cName = (name: string): string =>
-        stackContainerNameFor(SCOPE, stackId, name);
-      onTestFinished(async () => {
-        if (stack) await stack.stop();
-        await rm(repo, { recursive: true, force: true });
-      }, 120_000);
+      const { repo, stackId, cName } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+        () => stack,
+      );
 
       let asked = 0;
       stack = await startStack({
@@ -333,7 +342,12 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
         },
         spec: resolveGateStack({
           containers: [
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
           ],
           steps: [
             { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
