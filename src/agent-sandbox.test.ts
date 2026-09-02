@@ -1244,6 +1244,69 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
+  it("classifies an unset host git identity and still marks safe.directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-no-identity-"));
+    const isolatedGlobal = join(root, "empty.gitconfig");
+    const previousGlobal = process.env.GIT_CONFIG_GLOBAL;
+    const previousSystem = process.env.GIT_CONFIG_SYSTEM;
+    await writeFile(isolatedGlobal, "");
+    try {
+      await git(["init", "-b", "main"], root);
+      await writeFile(join(root, "README.md"), "seed\n");
+      await git(["add", "."], root);
+      await git(
+        ["-c", "user.name=Fixture", "-c", "user.email=fixture@test.com", "commit", "-m", "seed"],
+        root,
+      );
+      const branch = "sandbar/issue-83-no-identity";
+      await git(["branch", branch], root);
+      process.env.GIT_CONFIG_GLOBAL = isolatedGlobal;
+      process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+
+      const sandbox = await createSandbox({
+        env: {},
+        branch,
+        sandbox: makeLocalProvider(),
+        layout: layoutFor(root),
+      });
+      try {
+        await sandbox.run({
+          agent: scriptedAgent(`printf '%s\\n' 'ok'`),
+          prompt: "go",
+          completionSignal: [],
+        });
+        const configEnv = {
+          cwd: root,
+          env: {
+            ...process.env,
+            GIT_CONFIG_GLOBAL: isolatedGlobal,
+            GIT_CONFIG_SYSTEM: "/dev/null",
+          },
+        };
+        const safe = await execFileP(
+          "git",
+          ["config", "--global", "--get-all", "safe.directory"],
+          configEnv,
+        );
+        expect(safe.stdout).toContain(sandbox.worktreePath);
+        await expect(
+          execFileP("git", ["config", "--global", "user.name"], configEnv),
+        ).rejects.toMatchObject({ code: 1 });
+        await expect(
+          execFileP("git", ["config", "--global", "user.email"], configEnv),
+        ).rejects.toMatchObject({ code: 1 });
+      } finally {
+        await sandbox.close();
+      }
+    } finally {
+      if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = previousGlobal;
+      if (previousSystem === undefined) delete process.env.GIT_CONFIG_SYSTEM;
+      else process.env.GIT_CONFIG_SYSTEM = previousSystem;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects via the completion-grace timer when the pipe is held open (F5)", async () => {
     await git(["branch", "sandbar/issue-4-grace"], dir);
     const provider = makeLocalProvider();

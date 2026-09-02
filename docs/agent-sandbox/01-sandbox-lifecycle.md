@@ -36,7 +36,7 @@ interface SandboxRunResult {
   stdout: string;                 // ← sandbar reads this
   commits: { sha: string }[];     // ← sandbar reads this
   signalMs?: number;
-  maxGapMs?: number;
+  maxGapMs: number;
   logFilePath?: string;
 }
 
@@ -139,7 +139,7 @@ Two consequences for sandbar's path:
      optional `signalMs`, and `maxGapMs`. Raw stream transport is never used as
      output.
    - Commit collection returns the branch commits made during that invocation.
-4. Return `{ stdout, commits, signalMs?, maxGapMs? }` for that single
+4. Return `{ stdout, commits, signalMs?, maxGapMs }` for that single
    invocation. A configured signal controls only the timeout phase; it is not a
    result field.
 

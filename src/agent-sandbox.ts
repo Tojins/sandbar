@@ -290,7 +290,7 @@ export type SandboxRunResult = {
   // writes — milliseconds, and named here so a reader of the difference knows
   // exactly what is in it).
   readonly signalMs?: number;
-  readonly maxGapMs?: number;
+  readonly maxGapMs: number;
 };
 
 export interface Sandbox {

@@ -761,7 +761,7 @@ async function runImplementer(
       await opts.onOrchestratorLog(
         `issue=${issue.id} attempt=${action.attempt} promise-nudge signal=${signal.kind} ` +
           `${durationField(nudgeTimer())}` +
-          (nudge.maxGapMs === undefined ? "" : ` maxGapMs=${nudge.maxGapMs}`),
+          ` maxGapMs=${nudge.maxGapMs}`,
       );
     }
   }
@@ -793,7 +793,7 @@ async function runImplementer(
         // it escalated, it was killed idle, or the exec simply ended. Omitted
         // rather than zeroed (#82).
         (run.signalMs === undefined ? "" : ` signalMs=${run.signalMs}`) +
-        (run.maxGapMs === undefined ? "" : ` maxGapMs=${run.maxGapMs}`),
+        ` maxGapMs=${run.maxGapMs}`,
     );
   }
   return { kind: "implementer-result", signal, dirtyPaths, offBranch };
