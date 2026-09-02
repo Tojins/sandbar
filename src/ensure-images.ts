@@ -739,8 +739,8 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
           // the first 8 hex of the fingerprint, so the name alone is a 32-bit
           // cache key, and a leftover tag from a crashed run in this scope is
           // accepted on it. Reading back the full fingerprint the build
-          // recorded costs the same one podman call and makes the check the
-          // same one the base path already makes — "unknown provenance means
+          // recorded costs an existence probe plus an inspect and makes the
+          // check the same one the base path already makes — "unknown provenance means
           // rebuild" is this module's own rule.
           if ((await inputsLabel(tag)) !== fingerprint) {
             log(

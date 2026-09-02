@@ -9,7 +9,14 @@
 // again. Real git, not a fake exec, because the assertions are about refs that
 // did or did not move.
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -336,11 +343,12 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("reports failed gh auth before making tracker queries", async () => {
+      const authCalls = join(shimBin, "auth-calls");
       await writeFile(
         join(shimBin, "gh"),
         [
           "#!/bin/sh",
-          'if [ "$1 $2" = "auth status" ]; then exit 1; fi',
+          `if [ "$1 $2" = "auth status" ]; then echo x >> '${authCalls}'; exit 1; fi`,
           'if [ "$1 $2" = "issue list" ]; then exit 73; fi',
           "exit 1",
         ].join("\n"),
@@ -352,6 +360,9 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
           err instanceof PreflightError &&
           err.failures.some((failure) => failure.includes("gh auth status")),
       );
+      expect(
+        (await readFile(authCalls, "utf8")).trim().split("\n"),
+      ).toHaveLength(1);
     });
 
     it("withholds tracker-backed classifications when gh auth fails", async () => {
@@ -414,8 +425,8 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // flip, and the delete pass reaps it as soon as it can verify containment.
     it("takes none of the three for the issue branch of an `in-chunk` member", async () => {
       // A `gh` that answers the planner's two list queries by label, so
-      // `fetchChunkMembers` really returns #7 — the shim the other cases use
-      // fails every call, which is the "no chunks anywhere" default.
+      // `fetchChunkMembers` really returns #7 — the shared shim answers the
+      // other cases with an explicit empty issue list.
       await writeFile(
         join(shimBin, "gh"),
         [

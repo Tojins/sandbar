@@ -6,6 +6,9 @@
 // directions. Every case below is either "this must tear the stack down" or
 // "this must not", and each of the second kind is a warm database somebody
 // would otherwise lose to an unrelated edit.
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -14,7 +17,22 @@ import {
   type ResolvedGateStack,
   resolveGateStack,
 } from "./config.js";
-import { gateReuseToken, gateStackImagesOf } from "./gate-run.js";
+import {
+  gateDirtyWorktreePaths,
+  gateReuseToken,
+  gateStackImagesOf,
+} from "./gate-run.js";
+
+describe("standalone gate worktree classification (real git)", () => {
+  it("accepts an ordinary directory as having no Git changes to report", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbar-gate-plain-"));
+    try {
+      await expect(gateDirtyWorktreePaths(dir)).resolves.toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 const WT = "/wt";
 const V = "1.2.3";

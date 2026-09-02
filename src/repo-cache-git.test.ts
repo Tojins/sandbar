@@ -278,6 +278,22 @@ describe("ensureSourceWorktree (real git)", () => {
 // valid cache cannot see the bug: every assertion above passes with the
 // discovering probe restored.
 describe("a directory is not a repository just because git finds one above it", () => {
+  it("pins Git's missing-config and explicit non-repository exit codes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandbar-git-exits-"));
+    dirs.push(root);
+    const bare = join(root, "bare.git");
+    const plain = join(root, "plain");
+    await exec("git", ["init", "--bare", "-q", bare]);
+    await mkdir(plain);
+
+    await expect(
+      exec("git", ["--git-dir", bare, "config", "--get", "sandbar.cache"]),
+    ).rejects.toMatchObject({ code: 1 });
+    await expect(
+      exec("git", ["--git-dir", plain, "rev-parse", "--is-bare-repository"]),
+    ).rejects.toMatchObject({ code: 128 });
+  });
+
   it("does not mistake a non-repo `repo.git` inside the checkout for the cache", async () => {
     const { checkout } = await setup();
     await git(checkout, "branch", "my-wip");

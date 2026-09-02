@@ -90,6 +90,19 @@ export const GATE_EXIT_GREEN = 0;
 export const GATE_EXIT_RED = 1;
 export const GATE_EXIT_NO_VERDICT = 2;
 
+// `sandbar gate` also accepts an ordinary directory. Git names that condition
+// with status exit 128; every other failure leaves the tree state unknown.
+export async function gateDirtyWorktreePaths(
+  worktreePath: string,
+): Promise<readonly string[]> {
+  try {
+    return await dirtyWorktreePaths(worktreePath);
+  } catch (err) {
+    if (!isExitCode(err, 128)) throw err;
+    return [];
+  }
+}
+
 // How much of a red gate's captured step output is recapped after the run.
 // Everything was already streamed, so this is a scrollback aid, not the
 // diagnosis — but `summarizeGateFailure` leads a timeout cascade with its root
@@ -527,13 +540,7 @@ async function gate(
   // A non-repository has no Git working-tree state to report; this command is
   // also deliberately usable against an ordinary directory. Other status
   // failures propagate because they do not establish that named condition.
-  let dirty: readonly string[];
-  try {
-    dirty = await dirtyWorktreePaths(worktreePath);
-  } catch (err) {
-    if (!isExitCode(err, 128)) throw err;
-    dirty = [];
-  }
+  const dirty = await gateDirtyWorktreePaths(worktreePath);
   if (dirty.length > 0) {
     out(
       `Gating the WORKING TREE at ${worktreePath}, which has ` +

@@ -563,11 +563,15 @@ export async function gatherState(
   // — `runPreflight`, which needs the same set for the delete pass — pays for
   // the query once instead of twice; omitted, it is fetched here.
   knownInChunkIssues?: ReadonlySet<number>,
+  knownTrackerPrerequisites?: {
+    readonly hasGh: boolean;
+    readonly ghAuthOk: boolean;
+  },
 ): Promise<RepoState> {
   const repoDir = cfg.layout.repoDir;
   const env = cfg.env;
   const hasGit = which("git");
-  const hasGh = which("gh");
+  const hasGh = knownTrackerPrerequisites?.hasGh ?? which("gh");
   const hasContainerRuntime = which(RUNTIME);
 
   const missingImages: string[] = [];
@@ -581,7 +585,8 @@ export async function gatherState(
 
   const missingMountSources = await findMissingMountSources(cfg.mountSources);
 
-  const ghAuthOk = hasGh ? await runOk(repoDir, "gh", ["auth", "status"]) : false;
+  const ghAuthOk = knownTrackerPrerequisites?.ghAuthOk ??
+    (hasGh ? await runOk(repoDir, "gh", ["auth", "status"]) : false);
   const sandboxGhTokenOk = hasGh
     ? await checkSandboxGhToken(repoDir, env)
     : false;
@@ -1029,8 +1034,8 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   // it to decide which are none of its three classifications. Asking twice
   // would also let the two disagree if a label moved in between.
   // Do not ask the tracker before the checks whose tailored failures explain
-  // why it cannot answer. `gatherState` repeats these cheap probes so it can
-  // preserve the same contract when called independently.
+  // why it cannot answer. These results are also handed to `gatherState`, so
+  // one preflight run observes one prerequisite state.
   const hasGh = which("gh");
   const ghAuthOk = hasGh
     ? await runOk(cfg.layout.repoDir, "gh", ["auth", "status"])
@@ -1048,7 +1053,7 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   if (deleted.length > 0) {
     console.log(`Cleaned up merged issue branches: ${deleted.join(", ")}`);
   }
-  const state = await gatherState(cfg, inChunkIssues);
+  const state = await gatherState(cfg, inChunkIssues, { hasGh, ghAuthOk });
   if (state.resumableIssueBranches.length > 0) {
     console.log(
       `Resuming ${state.resumableIssueBranches.length} stranded issue ` +

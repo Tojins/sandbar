@@ -318,11 +318,20 @@ export async function startSandboxStack(
         // issue, so on a HARD-ERROR retry this file may already hold the
         // previous sandbox's log, and truncating it would throw away the only
         // record of what the run did before it restarted.
-        await appendFile(
-          join(opts.logDir, `${c.name}.log`),
-          `[sandbar] container '${c.name}' did not come up.\n\n${failure}\n`,
-          "utf8",
-        );
+        try {
+          await appendFile(
+            join(opts.logDir, `${c.name}.log`),
+            `[sandbar] container '${c.name}' did not come up.\n\n${failure}\n`,
+            "utf8",
+          );
+        } catch (err) {
+          // The bringup failure remains in `statuses` and therefore in the
+          // prompt. This file is a redundant copy; its failure must not turn a
+          // branch-owned attempt failure into an infrastructure retry.
+          console.error("Failed to write sandbox sibling failure log", {
+            cause: err,
+          });
+        }
       }
       // Followed whether or not it came up, and the degraded case is the one
       // that needs it: the commonest shape there is a container that STARTED
