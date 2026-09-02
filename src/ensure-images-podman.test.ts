@@ -23,6 +23,7 @@ import {
   ImageBuildError,
   agentToolsContainerfile,
   buildImage,
+  detectImageLibc,
   ensureImages,
   readInputsLabel,
   sweepBranchImages,
@@ -154,7 +155,9 @@ describe.runIf(available)("ensureImages against real podman", () => {
           };
           await writeFile(
             join(context, "Containerfile"),
-            agentToolsContainerfile(base, ["codex"], "x64", packages, selectedVariant),
+            agentToolsContainerfile(base, ["codex"], {
+              arch: "x64", packages, libc: selectedVariant,
+            }),
           );
           await writeFile(
             join(context, "codex-glibc"),
@@ -179,6 +182,13 @@ describe.runIf(available)("ensureImages against real podman", () => {
       600_000,
     );
   }
+
+  it("detects musl and glibc bases and rethrows runtime failures", async () => {
+    expect(await detectImageLibc("docker.io/library/alpine:3.22")).toBe("musl");
+    expect(await detectImageLibc("docker.io/library/debian:bookworm-slim")).toBe("glibc");
+    await expect(detectImageLibc("localhost/sandbar-missing-libc-base:test"))
+      .rejects.toThrow();
+  }, 600_000);
 
   it(
     "renames an existing uid-1000 user and preserves its writable home contract",

@@ -20,6 +20,7 @@ import {
   findAgentBinary,
   hostAgentArchitecture,
   prepareAgentArtifacts,
+  selectedAgentArtifacts,
   sweepBranchImages,
 } from "./ensure-images.js";
 import { runScope, variantImageTag } from "./naming.js";
@@ -83,7 +84,7 @@ describe("run-owned agent images", () => {
     expect(builds[0].content).not.toContain("claude");
   });
 
-  it("stages only the libc variant selected from the base image", async () => {
+  it("links only the libc variant selected from the base image", async () => {
     let files: string[] = [];
     await createAgentImages({
       declaredBaseTag: "localhost/app:base",
@@ -233,7 +234,9 @@ describe("run-owned agent images", () => {
         },
       },
     };
-    const file = agentToolsContainerfile("base", ["codex"], "arm64", packages, "musl");
+    const file = agentToolsContainerfile("base", ["codex"], {
+      arch: "arm64", packages, libc: "musl",
+    });
     expect(file).toContain("codex-musl /usr/local/bin/codex");
     expect(file).not.toContain("codex-glibc /usr/local/bin/codex");
     expect(file).not.toContain("codex-static /usr/local/bin/codex");
@@ -243,6 +246,19 @@ describe("run-owned agent images", () => {
     expect(findAgentBinary("codex", ["README", "codex-aarch64"])).toBe("codex-aarch64");
     expect(() => findAgentBinary("codex", ["README"])).toThrow(/no codex binary/);
     expect(() => hostAgentArchitecture("riscv64")).toThrow(/riscv64/);
+  });
+
+  it("selects static artifacts before libc-specific artifacts", () => {
+    const artifact = AGENT_PROVIDER_PACKAGES.codex.artifacts.x64[0]!;
+    const pin = {
+      version: "test",
+      artifacts: {
+        x64: [artifact, { ...artifact, variant: "glibc" as const }],
+        arm64: [artifact],
+      },
+    };
+    expect(selectedAgentArtifacts(pin, "x64", "glibc").map((a) => a.variant))
+      .toEqual(["static"]);
   });
 
   it("isolates the libc probe from image entrypoints and declared volumes", () => {
@@ -322,6 +338,40 @@ describe("run-owned agent images", () => {
       /staged artifact claude\/x64 failed re-verification/,
     );
     await prepared.dispose();
+  });
+
+  it("downloads and stages only the selected libc variant", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "sandbar-agent-libc-cache-"));
+    const glibc = "glibc fixture";
+    const musl = "musl fixture";
+    const packages = {
+      ...AGENT_PROVIDER_PACKAGES,
+      claude: {
+        version: "test",
+        artifacts: {
+          x64: [
+            { variant: "glibc" as const, url: "glibc", sha256: createHash("sha256").update(glibc).digest("hex") },
+            { variant: "musl" as const, url: "musl", sha256: createHash("sha256").update(musl).digest("hex") },
+          ],
+          arm64: AGENT_PROVIDER_PACKAGES.claude.artifacts.arm64,
+        },
+      },
+    };
+    const fetched: string[] = [];
+    try {
+      const prepared = await prepareAgentArtifacts(["claude"], () => {}, {
+        arch: "x64", packages, libc: "musl", cacheRoot,
+        fetch: async (url) => {
+          fetched.push(String(url));
+          return new Response(musl);
+        },
+      });
+      expect(fetched).toEqual(["musl"]);
+      expect(await readdir(prepared.root)).toEqual(["claude-musl"]);
+      await prepared.dispose();
+    } finally {
+      await rm(cacheRoot, { recursive: true, force: true });
+    }
   });
 
   it("reuses a sha-addressed download across staging lifetimes", async () => {

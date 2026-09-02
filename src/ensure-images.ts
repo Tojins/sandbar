@@ -36,6 +36,17 @@
 // probes without credentials stop before an authenticated TLS request, so they
 // cannot prove an embedded trust store; CA roots remain a conservative base
 // requirement rather than setting a driver-owned SSL_CERT_FILE.
+// Dynamic CLI releases require a libc choice, so each augmentation probes its
+// resolved base with an entrypoint-neutral `podman run`; one artifact selector
+// then owns recipe generation, host staging, and build-context linking.
+//
+// Large pinned downloads are cached across runs and workdirs at
+// `<tmpdir>/sandbar-agent-tools-<uid>/<sha256>/download`. The driver's digest is
+// the content address and every reuse is re-hashed before staging. The cache is
+// deliberately not swept: concurrent sandbar runs on one host share it, and a
+// pin change leaves the old entry available rather than racing another run.
+// This durable, reproducible cache is the sole exception here to the usual
+// rule that sandbar state lives below `<cwd>/<workDir>`.
 //
 // The uid check (#24 D3): a container in a pod cannot use `--userns=keep-id`,
 // and `--user 1000:1000` maps to a SUBUID whose worktree writes fail EACCES;
@@ -59,6 +70,8 @@ import { promisify } from "node:util";
 import { onCleanup, registerDisposable } from "./cleanup.js";
 import {
   AGENT_PROVIDER_PACKAGES,
+  type AgentArtifact,
+  type AgentProviderPackage,
   type AgentProviderName,
 } from "./agent-providers.js";
 import type { BuiltImage, ResolvedGateStack } from "./config.js";
@@ -494,7 +507,7 @@ export async function ensureImages(
 }
 
 // ---------------------------------------------------------------------------
-// Run-owned agent tools (#75)
+// Run-owned agent tools and host artifact cache (#75, #76)
 // ---------------------------------------------------------------------------
 // The branch owns the environment; the run owns the tools. Agent CLIs are
 // selected by resolved role routing, so they are appended AFTER the declared
@@ -514,10 +527,15 @@ export function agentToolsetSpec(
 export function agentToolsContainerfile(
   baseTag: string,
   providers: readonly AgentProviderName[],
-  arch: "x64" | "arm64" = hostAgentArchitecture(),
-  packages: typeof AGENT_PROVIDER_PACKAGES = AGENT_PROVIDER_PACKAGES,
-  libc: "glibc" | "musl" = "glibc",
+  options: {
+    readonly arch?: "x64" | "arm64";
+    readonly packages?: typeof AGENT_PROVIDER_PACKAGES;
+    readonly libc?: "glibc" | "musl";
+  } = {},
 ): string {
+  const arch = options.arch ?? hostAgentArchitecture();
+  const packages = options.packages ?? AGENT_PROVIDER_PACKAGES;
+  const libc = options.libc ?? "glibc";
   const pins = providers.map((provider) => {
     const pin = packages[provider];
     const digests = (["x64", "arm64"] as const).flatMap((arch) =>
@@ -528,15 +546,11 @@ export function agentToolsContainerfile(
     return `# ${provider} ${pin.version} ${digests.join(" ")}`;
   }).join("\n");
   const copies = providers.flatMap((provider) => {
-    const variants = packages[provider].artifacts[arch];
-    if (variants.length === 1 && variants[0]?.variant === "static") {
-      return [`COPY --chmod=0755 ${provider}-static /usr/local/bin/${provider}`];
-    }
-    const selected = variants.find((artifact) => artifact.variant === libc);
-    if (selected === undefined) {
+    const selected = selectedAgentArtifacts(packages[provider], arch, libc);
+    if (selected.length !== 1) {
       throw new SandbarError(`${provider} has no ${arch}-${libc} artifact`);
     }
-    return [`COPY --chmod=0755 ${provider}-${libc} /usr/local/bin/${provider}`];
+    return [`COPY --chmod=0755 ${provider}-${selected[0]!.variant} /usr/local/bin/${provider}`];
   })
     .join("\n");
   const probes = providers
@@ -599,6 +613,19 @@ export function hostAgentArchitecture(arch: string = process.arch): "x64" | "arm
   );
 }
 
+export function selectedAgentArtifacts(
+  pin: AgentProviderPackage,
+  arch: "x64" | "arm64",
+  libc: "glibc" | "musl",
+): readonly AgentArtifact[] {
+  const staticArtifacts = pin.artifacts[arch].filter(
+    (artifact) => artifact.variant === "static",
+  );
+  return staticArtifacts.length > 0
+    ? staticArtifacts
+    : pin.artifacts[arch].filter((artifact) => artifact.variant === libc);
+}
+
 export function findAgentBinary(
   provider: AgentProviderName,
   entries: readonly string[],
@@ -638,7 +665,7 @@ export type ArtifactPreparationAdapters = {
   readonly extract?: (archive: string, destination: string) => Promise<void>;
   readonly packages?: typeof AGENT_PROVIDER_PACKAGES;
   readonly cacheRoot?: string;
-  readonly variants?: ReadonlySet<"static" | "glibc" | "musl">;
+  readonly libc?: "glibc" | "musl";
 };
 
 export function agentArtifactCacheRoot(
@@ -658,10 +685,9 @@ export async function prepareAgentArtifacts(
   const arch = hostAgentArchitecture(adapters.arch);
   const fetchArtifact = adapters.fetch ?? fetch;
   const packages = adapters.packages ?? AGENT_PROVIDER_PACKAGES;
+  const libc = adapters.libc ?? "glibc";
   const selectedArtifacts = (provider: AgentProviderName) =>
-    packages[provider].artifacts[arch].filter((artifact) =>
-      adapters.variants === undefined || adapters.variants.has(artifact.variant)
-    );
+    selectedAgentArtifacts(packages[provider], arch, libc);
   const extract = adapters.extract ?? (async (archive, destination) => {
     await exec("tar", ["-xzf", archive, "-C", destination]);
   });
@@ -740,22 +766,16 @@ export async function prepareAgentArtifacts(
       verify: async (provider) => {
         for (const artifact of selectedArtifacts(provider)) {
           const name = `${provider}-${artifact.variant}`;
-          const downloaded = await sha256File(join(cacheRoot, artifact.sha256, "download"));
-          if (downloaded !== artifact.sha256) {
-            throw new Error(
-              `staged download ${provider}/${arch} failed pin re-verification ` +
-                `(expected ${artifact.sha256}, got ${downloaded})`,
-            );
-          }
           const expected = stagedSha256[name];
           if (expected === undefined) {
             throw new Error(`missing staged sha256 for ${provider}/${arch}-${artifact.variant}`);
           }
           const actual = await sha256File(join(root, name));
-          if (actual !== expected) {
+          const verified = artifact.archive ? expected : artifact.sha256;
+          if (actual !== verified) {
             throw new Error(
               `staged artifact ${provider}/${arch} failed re-verification ` +
-                `(expected ${expected}, got ${actual})`,
+                `(expected ${verified}, got ${actual})`,
             );
           }
         }
@@ -805,7 +825,7 @@ export async function createAgentImages(opts: {
         opts.prepareArtifacts !== undefined
           ? opts.prepareArtifacts(opts.providers)
           : prepareAgentArtifacts(opts.providers, log, {
-            variants: new Set(["static", libc]),
+            libc,
           })
       ).then((prepared) => {
         onCleanup(prepared.dispose);
@@ -824,17 +844,18 @@ export async function createAgentImages(opts: {
     if (promise === undefined) {
       promise = (async () => {
         const baseInputs = await inputsLabel(baseTag);
-        const needsLibcChoice = opts.providers.some((provider) =>
-          AGENT_PROVIDER_PACKAGES[provider].artifacts[arch].some(
-            (artifact) => artifact.variant !== "static",
-          )
-        );
+        const needsLibcChoice = opts.providers.some((provider) => {
+          const pin = AGENT_PROVIDER_PACKAGES[provider];
+          const variants = (libc: "glibc" | "musl") =>
+            selectedAgentArtifacts(pin, arch, libc).map((a) => a.variant).join();
+          return variants("glibc") !== variants("musl");
+        });
         const libc = needsLibcChoice
           ? await (opts.detectLibc ?? detectImageLibc)(baseTag)
           : "glibc";
-        const containerfile = agentToolsContainerfile(
-          baseTag, opts.providers, arch, AGENT_PROVIDER_PACKAGES, libc,
-        );
+        const containerfile = agentToolsContainerfile(baseTag, opts.providers, {
+          arch, libc,
+        });
         const fingerprint = createHash("sha256")
           .update(JSON.stringify([baseInputs ?? "unknown", containerfile]))
           .digest("hex");
@@ -858,8 +879,9 @@ export async function createAgentImages(opts: {
             await writeFile(join(contextRoot, "Containerfile"), containerfile);
             for (const provider of opts.providers) {
               await prepared.verify(provider);
-              for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
-                if (artifact.variant !== "static" && artifact.variant !== libc) continue;
+              for (const artifact of selectedAgentArtifacts(
+                AGENT_PROVIDER_PACKAGES[provider], arch, libc,
+              )) {
                 const name = `${provider}-${artifact.variant}`;
                 await link(join(prepared.root, name), join(contextRoot, name));
               }
