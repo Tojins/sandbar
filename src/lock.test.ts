@@ -92,26 +92,14 @@ function childSource(workDir: string, mode: "crash" | "hold"): string {
   `;
 }
 
-// Plain `node`, importing lock.ts's SOURCE — node strips the types itself.
-// The small loader maps its ESM `.js` import back to errors.ts, just as the
-// test runner does. Deliberately not dist/: a test that pins the module under
-// test must not be able to pass against a stale compile of it.
+// Plain `node`, importing lock.ts's SOURCE — node strips the types itself
+// (lock.ts has no relative imports, so nothing needs resolving through the
+// build). Deliberately not dist/: a test that pins the module under test must
+// not be able to pass against a stale compile of it.
 function spawnHolder(workDir: string, mode: "crash" | "hold"): Promise<void> {
   const file = join(dir, `holder-${mode}.mts`);
-  const loader = join(dir, "source-loader.mjs");
-  const errorsJs = new URL("./errors.js", import.meta.url).href;
-  const errorsTs = new URL("./errors.ts", import.meta.url).href;
-  writeFileSync(
-    loader,
-    `export async function resolve(specifier, context, nextResolve) {
-      if (specifier === "./errors.js" || specifier === ${JSON.stringify(errorsJs)}) {
-        return { url: ${JSON.stringify(errorsTs)}, shortCircuit: true };
-      }
-      return nextResolve(specifier, context);
-    }`,
-  );
   writeFileSync(file, childSource(workDir, mode));
-  const child = spawn(process.execPath, ["--loader", loader, file], {
+  const child = spawn(process.execPath, [file], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   children.push(() => child.kill("SIGKILL"));

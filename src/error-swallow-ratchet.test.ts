@@ -6,7 +6,11 @@ import { describe, expect, it } from "vitest";
 import { ERROR_SWALLOW_BASELINE } from "./error-swallow-baseline.test-util.js";
 
 const SRC = dirname(fileURLToPath(import.meta.url));
-const SWALLOW_PATTERNS = [/\.catch\(\(\) =>/g, /catch \{/g];
+const SWALLOW_PATTERNS = [
+  /\.catch\(\([^)]*\)\s*=>/g,
+  /catch\s*\([^)]*\)\s*\{(?![^{}]*\bthrow\b)/g,
+  /catch\s*\{/g,
+];
 
 export function countSwallowPatterns(source: string): number {
   return SWALLOW_PATTERNS.reduce(
@@ -27,12 +31,14 @@ export function swallowPatternGrowth(
 }
 
 describe("production error-swallow ratchet", () => {
-  it("counts only the two banned swallow forms", () => {
+  it("counts swallow forms while excluding an explicit rethrow", () => {
     expect(
       countSwallowPatterns(
-        "task.catch(() => fallback); try {} catch { fallback(); } try {} catch (err) { throw err; }",
+        "task.catch(() => fallback); task.catch((err) => fallback(err)); " +
+          "try {} catch { fallback(); } try {} catch (err) { return null; } " +
+          "try {} catch (err) { throw err; }",
       ),
-    ).toBe(2);
+    ).toBe(4);
   });
 
   it("reports files whose count exceeds their baseline", () => {

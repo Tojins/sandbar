@@ -139,12 +139,11 @@
 // never worked has no commits here and must not be closed; and no `Closes #N`
 // will ever fire, since GitHub honours those on its own merge of that pull
 // request and sandbar composed this one locally), drop `in-chunk`, close the
-// PR, delete the chunk branch on origin. It cannot throw,
-// by construction: it is entirely inside the post-`landed` window, where a
-// wrapped throw would report `merged: []` against a source branch that moved.
-// What it could not finish comes back as `ChunkWrapup.residue`, the chunk branch
-// is kept when it is non-empty, and the next run's reconciler picks up exactly
-// the writes that failed.
+// PR, delete the chunk branch on origin. Forge-write failures come back as
+// `ChunkWrapup.residue`; a durable-log failure propagates because continuing
+// would hide the writes that follow it. The chunk branch is kept when residue
+// is non-empty, and the next run's reconciler picks up exactly the writes that
+// failed.
 //
 // After all branches processed, the cycle's merge result is LANDED. Two modes
 // (config.mergeMode, #22):
@@ -2174,11 +2173,7 @@ export function captureAgentRun(
 
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        child.kill("SIGTERM");
-      } catch (err) {
-        if (!isErrno(err, "ESRCH")) throw err;
-      }
+      child.kill("SIGTERM");
     }, opts.timeoutMs);
 
     // Which of the four ways it ended, decided in ONE place so the log line,

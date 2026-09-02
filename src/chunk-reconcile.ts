@@ -43,10 +43,12 @@
 // its writes are the wrap-up's, and what they could not finish comes back as
 // residue the orchestrator reports.
 //
-// REPORTED, AND — unlike the merge phase's own landings — NOT HALTED ON. That
-// asymmetry is a decision rather than an oversight, and it rests on where the
-// two run. A wrap-up that kept its branch is retried by THIS function, at the
-// top of the very next cycle, minutes later and with no operator involved: the
+// RESIDUE IS REPORTED, AND — unlike the merge phase's own landings — NOT
+// HALTED ON. A durable-log failure still propagates and ends the run; silently
+// continuing would make its record disagree with later forge writes. The
+// residue asymmetry is a decision rather than an oversight, and it rests on
+// where the two run. A wrap-up that kept its branch is retried by THIS function,
+// at the top of the very next cycle, minutes later and with no operator involved: the
 // reconciler is the retry, so halting in front of it stops a run before it has
 // done anything, over state the run did not create and that repairs itself.
 // The merge phase halts because its residue is its OWN unfinished landing,

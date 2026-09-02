@@ -24,7 +24,10 @@ import {
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import lockfile from "proper-lockfile";
-import { isErrno } from "./errors.js";
+
+const isEnoent = (err: unknown): boolean =>
+  typeof err === "object" && err !== null &&
+  (err as { code?: unknown }).code === "ENOENT";
 
 export type LockPaths = {
   readonly workDir: string;
@@ -62,7 +65,7 @@ async function maybeReleaseStaleLock(paths: LockPaths): Promise<void> {
   try {
     oldPid = Number.parseInt(readFileSync(paths.pidPath, "utf8").trim(), 10);
   } catch (err) {
-    if (!isErrno(err, "ENOENT")) throw err;
+    if (!isEnoent(err)) throw err;
     return;
   }
   // Fail CLOSED on a sidecar we cannot read as a pid: a truncated or garbage
@@ -74,16 +77,11 @@ async function maybeReleaseStaleLock(paths: LockPaths): Promise<void> {
   if (!Number.isFinite(oldPid) || oldPid <= 0) return;
   if (pidIsAlive(oldPid)) return;
 
-  try {
-    rmSync(lockDirFor(paths.lockPath), { recursive: true, force: true });
-  } catch (err) {
-    if (!isErrno(err, "ENOENT")) throw err;
-    // A racing stale-lock cleanup already removed it.
-  }
+  rmSync(lockDirFor(paths.lockPath), { recursive: true, force: true });
   try {
     unlinkSync(paths.pidPath);
   } catch (err) {
-    if (!isErrno(err, "ENOENT")) throw err;
+    if (!isEnoent(err)) throw err;
   }
 }
 
@@ -135,7 +133,7 @@ export async function acquireLock(paths: LockPaths): Promise<Release> {
     try {
       unlinkSync(paths.pidPath);
     } catch (err) {
-      if (!isErrno(err, "ENOENT")) throw err;
+      if (!isEnoent(err)) throw err;
     }
     await release();
   };

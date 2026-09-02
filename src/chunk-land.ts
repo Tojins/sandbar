@@ -170,12 +170,11 @@
 // is why there is no retry loop here — the retry is the next cycle, which is a
 // better one than three `gh` attempts a second apart.
 //
-// Every failure is collected as RESIDUE rather than thrown. The source branch
-// has already moved by the time any of this runs; a throw here would abandon
-// the members after the failing one and report a landing that did not finish
-// as a landing that did not happen. Residue is not one kind of thing, though,
-// and a caller must not report it as one — `chunkResidue` at the bottom of
-// this file is the split and owns that argument.
+// Forge-write failures are collected as RESIDUE rather than thrown. A failure
+// from the separate durable-log callback propagates: continuing would hide the
+// later writes from the run record. Residue is not one kind of thing, though,
+// and a caller must not report it as one — `chunkResidue` at the bottom of this
+// file is the split and owns that argument.
 //
 // ---------------------------------------------------------------------------
 // One implementation of the wrap-up's writes, for both callers

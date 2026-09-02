@@ -40,27 +40,18 @@ let child: ChildProcess | null = null;
 export function startKeepawake(): void {
   if (!isWsl2()) return;
   if (child) return;
-  try {
-    child = spawn("powershell.exe", ["-NoProfile", "-Command", PS_SCRIPT], {
-      stdio: "ignore",
-      detached: false,
-    });
-    child.on("error", (err) => {
-      console.error("Failed to start WSL2 keepawake helper", { cause: err });
-      child = null;
-    });
-  } catch (err) {
-    if (!isErrno(err, "ENOENT")) throw err;
+  child = spawn("powershell.exe", ["-NoProfile", "-Command", PS_SCRIPT], {
+    stdio: "ignore",
+    detached: false,
+  });
+  child.on("error", (err) => {
+    console.error("Failed to start WSL2 keepawake helper", { cause: err });
     child = null;
-  }
+  });
 }
 
 export function stopKeepawake(): void {
   if (!child) return;
-  try {
-    child.kill("SIGTERM");
-  } catch (err) {
-    if (!isErrno(err, "ESRCH")) throw err;
-  }
+  child.kill("SIGTERM");
   child = null;
 }
