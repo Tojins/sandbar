@@ -21,7 +21,9 @@ import {
   type DeclaredMount,
   deleteMergedSandbarBranches,
   gatherState,
+  PreflightError,
   readConfigStaleness,
+  runPreflight,
 } from "./preflight.js";
 import { type RepoLayout, ensureRepoCache, repoLayout } from "./repo-cache.js";
 
@@ -66,14 +68,15 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     target = await seedRepo("sandbar-target-");
     process.chdir(launchedFrom);
 
-    // A `gh` whose listing reads answer the factual empty set while auth still
-    // fails. Operational listing failures propagate since #99, so the fixture
-    // must state the tracker condition these git-focused tests need.
+    // A `gh` whose host auth and listing reads answer the factual state these
+    // git-focused tests need. Operational listing failures propagate since
+    // #99, so the fixture must not use one as shorthand for an empty tracker.
     shimBin = await mkdtemp(join(tmpdir(), "sandbar-shim-"));
     await writeFile(
       join(shimBin, "gh"),
       [
         "#!/bin/sh",
+        'if [ "$1 $2" = "auth status" ]; then exit 0; fi',
         'if [ "$1 $2" = "issue list" ]; then printf "[]"; exit 0; fi',
         'if [ "$1 $2" = "api graphql" ]; then',
         '  printf \'{"data":{"repository":{"i7":{"state":"CLOSED","labels":{"nodes":[]}}}}}\'',
@@ -112,6 +115,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     sourceBranch: "main",
     pulledImages: [] as readonly string[],
     mountSources: [] as readonly DeclaredMount[],
+    configPath: null,
     // The default routing (#72): claude for both roles, and claude for the
     // merger, so the set the credential check walks is the one every
     // pre-#72 config produces.
@@ -326,6 +330,25 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
   // The other consequence in #34: a clean launch directory would let preflight
   // pass while the actual target repo carries unmerged issue branches.
   describe("gatherState", () => {
+    it("reports failed gh auth before making tracker queries", async () => {
+      await writeFile(
+        join(shimBin, "gh"),
+        [
+          "#!/bin/sh",
+          'if [ "$1 $2" = "auth status" ]; then exit 1; fi',
+          'if [ "$1 $2" = "issue list" ]; then exit 73; fi',
+          "exit 1",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+
+      await expect(runPreflight(cfg(layoutAt(target)))).rejects.toSatisfy(
+        (err: unknown) =>
+          err instanceof PreflightError &&
+          err.failures.some((failure) => failure.includes("gh auth status")),
+      );
+    });
+
     it("classifies the target's issue branches, not the launch directory's", async () => {
       await git(launchedFrom, "checkout", "-q", "-b", "sandbar/issue-9-launch");
       await git(launchedFrom, "commit", "-q", "--allow-empty", "-m", "work");

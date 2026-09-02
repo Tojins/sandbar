@@ -72,6 +72,12 @@
 //                               Unit-tested with hand-built fixtures.
 //   - gatherState() / runPreflight() — I/O wrappers that shell out to git/gh.
 //
+// Tracker-backed branch classification is withheld when `gh` is absent or
+// unauthenticated (#99). Those are already explicit preflight failures, and
+// querying first would replace their tailored report with a raw shell error.
+// Once those prerequisites pass, tracker failures propagate; they are not an
+// empty issue set.
+//
 // HOST STATE is what this module is for, and `missingMountSources` (#51) is the
 // same class as the `missingImages` check beside it. Nothing used to verify
 // that a gate-stack container's `mounts[].hostPath` exists before the run: a
@@ -591,27 +597,33 @@ export async function gatherState(
 
   const originUrl = await readOriginUrl(repoDir);
   const parsedOrigin = originUrl === null ? null : parseRepoFromRemoteUrl(originUrl);
-  const openReadyIssues = await fetchOpenReadyIssueNumbers(cfg.repo);
-  const inChunkIssues =
-    knownInChunkIssues ?? (await fetchInChunkIssueNumbers(cfg.repo));
-  const branches = await listSandbarBranches(repoDir);
-  const upstreamTracks = await branchUpstreamTracks(repoDir);
-  // Only the branches the two listings above leave undecided need the tracker
-  // asked about state — the rest are already resumable or in-chunk.
-  const undecided = branches.flatMap((b) => {
-    const n = issueNumberFromBranch(b);
-    return n === null || openReadyIssues.has(n) || inChunkIssues.has(n)
-      ? []
-      : [n];
-  });
-  const openIssues = await fetchOpenIssueNumbers(cfg.repo, undecided);
-  const { unmerged, discarded, resumable, parked } = classifySandbarBranches({
-    branches,
-    upstreamTracks,
-    openReadyIssues,
-    inChunkIssues,
-    openIssues,
-  });
+  let unmerged: readonly string[] = [];
+  let discarded: readonly string[] = [];
+  let resumable: readonly string[] = [];
+  let parked: readonly string[] = [];
+  if (hasGh && ghAuthOk) {
+    const openReadyIssues = await fetchOpenReadyIssueNumbers(cfg.repo);
+    const inChunkIssues =
+      knownInChunkIssues ?? (await fetchInChunkIssueNumbers(cfg.repo));
+    const branches = await listSandbarBranches(repoDir);
+    const upstreamTracks = await branchUpstreamTracks(repoDir);
+    // Only the branches the two listings above leave undecided need the tracker
+    // asked about state — the rest are already resumable or in-chunk.
+    const undecided = branches.flatMap((b) => {
+      const n = issueNumberFromBranch(b);
+      return n === null || openReadyIssues.has(n) || inChunkIssues.has(n)
+        ? []
+        : [n];
+    });
+    const openIssues = await fetchOpenIssueNumbers(cfg.repo, undecided);
+    ({ unmerged, discarded, resumable, parked } = classifySandbarBranches({
+      branches,
+      upstreamTracks,
+      openReadyIssues,
+      inChunkIssues,
+      openIssues,
+    }));
+  }
 
   return {
     hasGit,
@@ -1015,7 +1027,17 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   // leftover branches are duplicates of published work, and `gatherState` uses
   // it to decide which are none of its three classifications. Asking twice
   // would also let the two disagree if a label moved in between.
-  const inChunkIssues = await fetchInChunkIssueNumbers(cfg.repo);
+  // Do not ask the tracker before the checks whose tailored failures explain
+  // why it cannot answer. `gatherState` repeats these cheap probes so it can
+  // preserve the same contract when called independently.
+  const hasGh = which("gh");
+  const ghAuthOk = hasGh
+    ? await runOk(cfg.layout.repoDir, "gh", ["auth", "status"])
+    : false;
+  const inChunkIssues =
+    hasGh && ghAuthOk
+      ? await fetchInChunkIssueNumbers(cfg.repo)
+      : new Set<number>();
 
   const deleted = await deleteMergedSandbarBranches({
     layout: cfg.layout,
