@@ -313,7 +313,11 @@ import {
 import type { GateResult } from "./gate.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { gitMountsForWorktree } from "./merger-worktree.js";
-import { type RunScope, scopedResourcePrefix } from "./naming.js";
+import {
+  memberBranchName,
+  type RunScope,
+  scopedResourcePrefix,
+} from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 import { RUNTIME } from "./runtime.js";
 import {
@@ -652,7 +656,10 @@ export type MergerAdapter = ResolveAdapter & {
   // Push HEAD to `refs/heads/<chunkBranch>` on origin. Never forcing: a
   // rejected push means the chunk branch moved under us, so this composition
   // is not built on what is there and overwriting it would drop a member.
-  pushChunkBranch(chunkBranch: string, issueBranches: readonly string[]): Promise<PushResult>;
+  pushChunkBranch(
+    chunkBranch: string,
+    members: readonly { readonly source: string; readonly destination: string }[],
+  ): Promise<PushResult>;
   // Create-or-update the chunk's DRAFT pull request against the source branch
   // (#62) — the review surface the whole review lane exists to produce. Called
   // once per chunk per cycle, AFTER the push, because a PR is a handle on
@@ -1466,7 +1473,13 @@ export async function runMergerWithAdapter(
     // is merged before it: a member is only ever recorded as landed once the
     // commits carrying it are on origin.
     const push = await adapter
-      .pushChunkBranch(branch, landedMembers.map((member) => member.branch))
+      .pushChunkBranch(
+        branch,
+        landedMembers.map((member) => ({
+          source: member.branch,
+          destination: memberBranchName(issueNumberOf(member)),
+        })),
+      )
       .catch(asHalt(`Chunk push failed for ${branch}`));
     if (push.kind !== "ok") {
       // Not force-pushed and not retried. A rejected push means the chunk
@@ -2703,7 +2716,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // halt; forcing would delete it.
       await exec("git", ["checkout", "--detach", ref], { cwd });
     },
-    async pushChunkBranch(chunkBranch, issueBranches) {
+    async pushChunkBranch(chunkBranch, members) {
       // Fully qualified, unlike the source branch's: a chunk branch may not
       // exist on origin yet, and git only creates a ref from an unambiguous
       // destination.
@@ -2713,12 +2726,24 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           "--atomic",
           "origin",
           `HEAD:refs/heads/${chunkBranch}`,
-          ...issueBranches.map((branch) => `${branch}:refs/heads/${branch}`),
+          ...members.map(
+            ({ source, destination }) =>
+              `${source}:refs/heads/${destination}`,
+          ),
         ], { cwd });
         return { kind: "ok" };
       } catch (err) {
         const e = err as { stderr?: string; message?: string };
         const stderr = e.stderr ?? "";
+        const memberRejected = members.some(({ destination }) =>
+          stderr.includes(destination),
+        );
+        if (memberRejected) {
+          return {
+            kind: "fatal",
+            reason: `membership ref rejected: ${stderr.trim() || e.message || "unknown push error"}`,
+          };
+        }
         if (/rejected|non-fast-forward|fetch first|stale info/i.test(stderr)) {
           return { kind: "race" };
         }

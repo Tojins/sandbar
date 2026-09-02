@@ -632,7 +632,7 @@ describe("ensureIssueBranch — a failed fetch falls back to the cached tip (#61
 // it plans only once chunk history names its blocker, which can happen only
 // after the chunk branch is on origin. What that argument leaves out is that
 // `chunk.branch` is DERIVED per cycle from the chunk's current root, and a
-// chunk can re-root only when its root's durable issue ref is missing or
+// chunk can re-root only when its root's durable member ref is missing or
 // repaired away. Ordinary closes do not do that: git-derived members are
 // fetched by number without a state filter, so a closed root stays in the graph.
 //

@@ -243,6 +243,7 @@ export function sandboxContainerNameFor(
 
 export const ISSUE_BRANCH_INFIX = "issue-";
 export const CHUNK_BRANCH_INFIX = "chunk-";
+export const MEMBER_BRANCH_INFIX = "member-";
 
 export const ALL_BRANCH_INFIXES: readonly string[] = [
   ISSUE_BRANCH_INFIX,
@@ -276,16 +277,20 @@ export const ORIGIN_CHUNK_BRANCH_REFGLOBS: readonly string[] =
 // Issue branches are durable membership refs since #93. They are fetched and
 // pruned beside chunk refs so containment questions are answered from one
 // fresh remote-tracking namespace.
-export const ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS: readonly string[] =
+export const ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS: readonly string[] =
   ALL_BRANCH_PREFIXES.map(
     (prefix) =>
-      `+refs/heads/${prefix}${ISSUE_BRANCH_INFIX}*:refs/remotes/origin/${prefix}${ISSUE_BRANCH_INFIX}*`,
+      `+refs/heads/${prefix}${MEMBER_BRANCH_INFIX}*:refs/remotes/origin/${prefix}${MEMBER_BRANCH_INFIX}*`,
   );
 
-export const ORIGIN_ISSUE_BRANCH_REFGLOBS: readonly string[] =
+export const ORIGIN_MEMBER_BRANCH_REFGLOBS: readonly string[] =
   ALL_BRANCH_PREFIXES.map(
-    (prefix) => `refs/remotes/origin/${prefix}${ISSUE_BRANCH_INFIX}*`,
+    (prefix) => `refs/remotes/origin/${prefix}${MEMBER_BRANCH_INFIX}*`,
   );
+
+export function memberBranchName(issue: number): string {
+  return `${BRANCH_PREFIX}${MEMBER_BRANCH_INFIX}${issue}`;
+}
 
 // The slug half of both shapes. It lives here rather than in the planner that
 // used to own it because it is half of a load-bearing identifier, and the two
@@ -334,6 +339,10 @@ function numberFromBranch(branch: string, infix: string): number | null {
 // `<prefix>issue-<n>-<slug>` -> n.
 export function issueNumberFromBranch(branch: string): number | null {
   return numberFromBranch(branch, ISSUE_BRANCH_INFIX);
+}
+
+export function issueNumberFromMemberBranch(branch: string): number | null {
+  return numberFromBranch(branch, MEMBER_BRANCH_INFIX);
 }
 
 // `<prefix>chunk-<root>-<slug>` -> root. Null for an issue branch, which is

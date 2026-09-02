@@ -388,8 +388,8 @@ export const CHUNK_LANDED_COMMENT_TEMPLATE = (chunkBranch: string): string =>
   `on the composed branch, and **nothing has reached the source branch** — this ` +
   `issue is review-gated, so a human reviews \`${chunkBranch}\` as one unit ` +
   `before any of it lands.\n\n` +
-  `The issue stays OPEN but is out of the agent queue: git records its origin ` +
-  `issue branch as contained by the chunk branch. It closes when the ` +
+  `The issue stays OPEN but is out of the agent queue: git records its durable ` +
+  `member ref as contained by the chunk branch. It closes when the ` +
   `chunk lands, which a human ` +
   `triggers by putting \`${LAND_LABEL}\` on the chunk's pull request — ` +
   `sandbar then merges \`${chunkBranch}\` into the source branch and closes every ` +

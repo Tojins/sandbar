@@ -153,7 +153,7 @@ import type { ResolvedStackContainer } from "./config.js";
 import type { EnvReader } from "./env.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
-  ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
+  ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
   issueNumberFromBranch,
@@ -859,7 +859,7 @@ async function classifySandbarBranches(
 // branch whose commits are reachable from the source branch has said everything
 // it had to say, whether one issue wrote it or a whole chunk did.
 //
-// SECOND ground, for issue branches only (#60): the origin issue ref is
+// SECOND ground, for issue branches only (#60): the origin member ref is
 // contained by a chunk branch. Such a
 // branch is published work under a different name, and nothing will ever pick
 // it up again — the planner drops git-derived members — so left alone it
@@ -945,7 +945,7 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
     "origin",
     "--prune",
     ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
-    ...ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
+    ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
     "--quiet",
   ]);
 

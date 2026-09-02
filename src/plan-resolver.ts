@@ -34,7 +34,7 @@
 // It used to be one clause: a blocker is satisfied when it reads CLOSED, which
 // for an auto-lane blocker means its work is on the source branch. Chunks add
 // the second: a blocker is ALSO satisfied when the exact derived chunk branch
-// contains its durable origin issue ref and it sits in the SAME chunk as the
+// contains its durable origin member ref and it sits in the SAME chunk as the
 // issue it blocks.
 //
 // The second clause exists because a chunk member never closes on its own. Its
@@ -63,7 +63,7 @@
 // One consequence for what this module LISTS: an issue that has landed on a
 // chunk branch has left the `ready-for-agent` query, yet it must stay in the
 // graph this module derives lanes and chunks from. `readChunkMembers` therefore
-// enumerates the issue numbers from issue refs contained by fetched chunk branches
+// enumerates issue numbers from member refs contained by fetched chunk branches
 // and fetches those issues directly. Dropping those issues from the
 // graph would break the feature in two separate ways: a chunk that has landed
 // its root would re-derive itself around the members that are left, under a new
@@ -173,8 +173,8 @@ import {
 import { issueBranchName } from "./naming.js";
 import {
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
-  ORIGIN_ISSUE_BRANCH_REFGLOBS,
-  issueNumberFromBranch,
+  ORIGIN_MEMBER_BRANCH_REFGLOBS,
+  issueNumberFromMemberBranch,
   rootIssueFromChunkBranch,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
@@ -230,7 +230,7 @@ export type PlanResolution = {
   // being queued, not once it reaches the front.
   readonly overrides: readonly LaneOverride[];
   // The chunks with work ON ORIGIN — those containing at least one origin
-  // issue ref — with everything each branch carries and its TIPS
+  // member ref — with everything each branch carries and its TIPS
   // (#63, #64). Empty for every host on the default lane, and empty before a
   // chunk's first landing.
   //
@@ -244,7 +244,6 @@ export type PlanResolution = {
   // branches and nothing else — and which ones a reconciled chunk owes a
   // close to.
   readonly landedChunks: readonly LandedChunk[];
-  readonly reconciliationChunks: readonly LandedChunk[];
   readonly chunkNameDrifts: readonly {
     readonly existing: string;
     readonly derived: string;
@@ -413,7 +412,6 @@ export function resolvePlan(
       chunkIssues,
       new Set(candidates.map((c) => c.number).filter(isOnDerivedChunk)),
     ),
-    reconciliationChunks: [],
     chunkNameDrifts: [...chunkMembers.keys()].flatMap((existing) => {
       const root = rootIssueFromChunkBranch(existing);
       if (root === null) return [];
@@ -473,26 +471,14 @@ export async function fetchCandidates(
 }
 
 /**
- * Read membership by branch containment relative to each chunk's base. For a
- * live chunk that base is the current source tip; for a landed chunk it is the
- * first parent of the source merge that incorporated the chunk.
+ * Read membership by containment of landing-only member refs. This remains
+ * valid after either a merge or fast-forward landing onto the source branch.
  */
 export async function readChunkMembers(
   repoDir: string,
   sourceBranch = "main",
 ): Promise<ReadonlyMap<string, ReadonlySet<number>>> {
-  return (await readChunkMembership(repoDir, sourceBranch)).members;
-}
-
-type ChunkMembership = {
-  readonly members: ReadonlyMap<string, ReadonlySet<number>>;
-  readonly landedBranches: ReadonlySet<string>;
-};
-
-async function readChunkMembership(
-  repoDir: string,
-  sourceBranch: string,
-): Promise<ChunkMembership> {
+  void sourceBranch;
   const { stdout: refsOut } = await exec(
     "git",
     [
@@ -503,58 +489,27 @@ async function readChunkMembership(
     { cwd: repoDir },
   );
   const result = new Map<string, ReadonlySet<number>>();
-  const landedBranches = new Set<string>();
   for (const ref of refsOut.split("\n").map((s) => s.trim()).filter(Boolean)) {
     const branch = ref.replace(/^origin\//, "");
-    const sourceRef = `origin/${sourceBranch}`;
-    const landed = await exec(
-      "git",
-      ["merge-base", "--is-ancestor", ref, sourceRef],
-      { cwd: repoDir },
-    ).then(() => true, () => false);
-    let exclusionRef = sourceRef;
-    if (landed) {
-      landedBranches.add(branch);
-      const { stdout: mergesOut } = await exec(
-        "git",
-        [
-          "rev-list",
-          "--first-parent",
-          "--merges",
-          "--reverse",
-          "--ancestry-path",
-          `${ref}..${sourceRef}`,
-        ],
-        { cwd: repoDir },
-      );
-      const landingMerge = mergesOut.split("\n").find(Boolean);
-      if (landingMerge === undefined) {
-        throw new Error(
-          `Could not find the source merge that contains landed chunk ${branch}`,
-        );
-      }
-      exclusionRef = `${landingMerge}^1`;
-    }
     const { stdout } = await exec(
       "git",
       [
         "for-each-ref",
         `--merged=${ref}`,
-        `--no-merged=${exclusionRef}`,
         "--format=%(refname)",
-        ...ORIGIN_ISSUE_BRANCH_REFGLOBS,
+        ...ORIGIN_MEMBER_BRANCH_REFGLOBS,
       ],
       { cwd: repoDir },
     );
     const members = new Set(
       stdout.split("\n").flatMap((memberRef) => {
-        const number = issueNumberFromBranch(memberRef.trim());
+        const number = issueNumberFromMemberBranch(memberRef.trim());
         return number === null ? [] : [number];
       }),
     );
     result.set(branch, members);
   }
-  return { members: result, landedBranches };
+  return result;
 }
 
 async function fetchIssueSummaries(
@@ -667,15 +622,12 @@ export async function buildPlan(
 ): Promise<PlanResolution> {
   const excluded = options.excluded ?? new Set<number>();
   const k = options.k ?? DEFAULT_K;
-  // One base-relative reading serves planning and reconciliation. Live chunks
-  // exclude the current source tip; landed chunks exclude the first parent of
-  // the merge that brought them into source, so inherited old issue refs never
-  // become members while real members remain de-queued until wrap-up succeeds.
+  // One containment reading serves planning and reconciliation. The member-ref
+  // namespace is written only by chunk landing and its refs are deleted with
+  // the chunk, so no source-history exclusion or landing-shape inference is
+  // needed here.
   const sourceBranch = options.sourceBranch ?? "main";
-  const { members: chunkMembers, landedBranches } = await readChunkMembership(
-    options.repoDir,
-    sourceBranch,
-  );
+  const chunkMembers = await readChunkMembers(options.repoDir, sourceBranch);
   const chunkMemberNumbers = [
     ...new Set([...chunkMembers.values()].flatMap((ns) => [...ns])),
   ];
@@ -701,7 +653,7 @@ export async function buildPlan(
     for (const n of parseBlockedBy(c.body)) wanted.add(n);
   }
   const facts = await fetchIssueStates([...wanted], repo);
-  const resolution = resolvePlan(
+  return resolvePlan(
     candidates,
     facts,
     excluded,
@@ -709,13 +661,4 @@ export async function buildPlan(
     options.defaultLane ?? DEFAULT_LANE,
     chunkMembers,
   );
-  return {
-    ...resolution,
-    landedChunks: resolution.landedChunks.filter(
-      (chunk) => !landedBranches.has(chunk.branch),
-    ),
-    reconciliationChunks: resolution.landedChunks.filter((chunk) =>
-      landedBranches.has(chunk.branch),
-    ),
-  };
 }

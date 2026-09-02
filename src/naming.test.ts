@@ -23,8 +23,8 @@ import {
   RESOURCE_PREFIX,
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
-  ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
-  ORIGIN_ISSUE_BRANCH_REFGLOBS,
+  ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
+  ORIGIN_MEMBER_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
   chunkBranchName,
   issueBranchName,
@@ -185,12 +185,12 @@ describe("branch names (#58)", () => {
     }
   });
 
-  it("names origin's issue branches for membership containment", () => {
-    expect(ORIGIN_ISSUE_BRANCH_REFGLOBS).toContain(
-      "refs/remotes/origin/sandbar/issue-*",
+  it("names origin's landing-only member refs", () => {
+    expect(ORIGIN_MEMBER_BRANCH_REFGLOBS).toContain(
+      "refs/remotes/origin/sandbar/member-*",
     );
-    expect(ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS).toContain(
-      "+refs/heads/sandbar/issue-*:refs/remotes/origin/sandbar/issue-*",
+    expect(ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS).toContain(
+      "+refs/heads/sandbar/member-*:refs/remotes/origin/sandbar/member-*",
     );
   });
 

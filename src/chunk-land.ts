@@ -120,7 +120,7 @@
 // point for anything, and KEEPING it would make the reconciler pick the same
 // chunk up every cycle forever, name nothing again, and never resolve. What it
 // costs is the one case where the emptiness is wrong — a missing or manually
-// deleted origin issue ref that no longer records a member — where the issue is left OPEN,
+// deleted origin member ref that no longer records a member — where the issue is left OPEN,
 // off the queue, with no branch left for anything to retry from. That is why
 // both the pull request and the orchestrator's console SAY the list was empty
 // rather than reporting a clean landing: it is the only thing that can be done
@@ -202,8 +202,8 @@ import {
 import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
 import {
-  ORIGIN_ISSUE_BRANCH_REFGLOBS,
-  issueNumberFromBranch,
+  ORIGIN_MEMBER_BRANCH_REFGLOBS,
+  issueNumberFromMemberBranch,
   rootIssueFromChunkBranch,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
@@ -449,7 +449,7 @@ export const CHUNK_LANDED_PR_COMMENT = (args: {
       "",
       "Still OPEN — sandbar stopped at the first issue it could not close, so " +
         "this is that one and everything the rest of the chunk is built on top " +
-        "of. Their origin issue refs remain contained by the kept chunk branch, " +
+        "of. Their origin member refs remain contained by the kept chunk branch, " +
         "so they stay off the agent queue:",
       "",
       ...list(args.unclosed),
@@ -671,12 +671,12 @@ export function chunkForgeWrites(deps: {
       try {
         const { stdout } = await exec(
           "git",
-          ["for-each-ref", "--format=%(refname)", ...ORIGIN_ISSUE_BRANCH_REFGLOBS],
+          ["for-each-ref", "--format=%(refname)", ...ORIGIN_MEMBER_BRANCH_REFGLOBS],
           { cwd: deps.gitCwd },
         );
         const wanted = new Set(memberIssues);
         const issueRefs = stdout.split("\n").flatMap((ref) => {
-          const number = issueNumberFromBranch(ref.trim());
+          const number = issueNumberFromMemberBranch(ref.trim());
           return number !== null && wanted.has(number)
             ? [ref.trim().replace(/^refs\/remotes\/origin\//, "refs/heads/")]
             : [];

@@ -36,7 +36,7 @@
 // absent, so the two agree — and every member behind it seeds from the chunk's
 // TIP, which is where its blockers' commits actually are. A chunk therefore
 // grows one LAYER per cycle rather than one member: a member is unblocked by a
-// blocker whose origin issue ref is contained by the chunk branch, visible in the
+// blocker whose origin member ref is contained by the chunk branch, visible in the
 // cycle AFTER the one that landed it, so every member planned together is a
 // set of siblings.
 //
@@ -175,7 +175,7 @@ export type ChunkTarget = {
   readonly root: number;
   readonly branch: string;
   // The chunk's members that were ALREADY on `branch` when the plan was built
-  // — the ones whose origin issue refs it contains (#62, #93). Ascending, and never including
+  // — the ones whose origin member refs it contains (#62, #93). Ascending, and never including
   // the issue carrying this target, which is on its way there and not there
   // yet.
   //
@@ -434,7 +434,7 @@ export function deriveChunks(
 /**
  * The chunks whose work is on origin: what each carries, and the tips of it.
  *
- * `landed` is the caller's set of issue refs contained by the exact
+ * `landed` is the caller's set of member refs contained by the exact
  * fetched chunk branch, so it means "this member's work is on the branch". `issues`
  * is the same list `deriveChunks` was given, and is where the titles and the
  * blocked-by edges come from; a member missing from it contributes an empty

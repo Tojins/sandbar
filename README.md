@@ -549,8 +549,8 @@ dependency; relabelling the issue alone will not do it.
 > Its issues are merged onto `sandbar/chunk-<root>-<slug>`, which is pushed to
 > origin and opened as a **draft pull request** against your source branch —
 > that PR is what a human reviews, and nothing on the branch reaches the source
-> branch until they land it. A landed member keeps its issue open; its origin
-> issue branch is pushed atomically with the chunk branch, and containment by
+> branch until they land it. A landed member keeps its issue open; a dedicated
+> `sandbar/member-<n>` ref is pushed atomically with the chunk branch, and containment by
 > `origin/sandbar/chunk-*` is what takes it out of the queue and
 > unblocks whatever was queued behind it. Sandbar adds `needs-review` as a
 > display-only cue for humans, so a chunk grows one *layer* per cycle, and
@@ -599,7 +599,7 @@ dependency; relabelling the issue alone will not do it.
 > A review you dismiss is never filed at all, and a review whose threads you
 > resolve before sandbar next runs is dropped if it had no body of its own.
 >
-> Keep the origin issue branches beside a live chunk branch. They are the
+> Keep the origin `sandbar/member-*` refs beside a live chunk branch. They are the
 > durable membership record: deleting one by hand can hide that member from
 > planning and wrap-up. Sandbar removes those refs atomically with the chunk
 > branch after every member has closed. Closing an issue by hand does not hide

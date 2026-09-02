@@ -110,7 +110,7 @@ an exit condition fires.
    **`land` label on that PR** (#64) makes the next cycle merge
    `origin/<chunk>` in the SAME source pass, ahead of the auto lane's branches,
    so one gate-2 and one landing cover both; the wrap-up then closes the
-   members whose issue refs it contains, drops `needs-review`, takes `land`
+   members whose landing-only member refs it contains, drops `needs-review`, takes `land`
    back off the PR,
    closes it and deletes the branch. `src/chunk-land.ts` owns the label, the
    selection, the wrap-up and — as `chunkForgeWrites` — the one spelling of the
@@ -205,15 +205,15 @@ and used to announce themselves in four different ways, the halt in none at all.
   header owns the argument; `NEEDS_REVIEW_LABEL` and `LAND_LABEL` (#93, #64) live
   there too. **Origin owns the chunk branch** — every landing bases on
   `origin/<chunk>`, preflight fetches that namespace to reason about it, and
-  the branch is deleted THERE when the chunk lands. Each member's origin issue
-  ref is pushed atomically beside the chunk ref, and containment is the
+  the branch is deleted THERE when the chunk lands. Each member gets a dedicated
+  `sandbar/member-<n>` ref pushed atomically beside the chunk ref, and containment is the
   membership record; commit subjects are cosmetic. What a chunk branch
   carries is `PlanResolution.landedChunks`, the only answer the whole
-  candidate graph can give: issue refs contained by the exact chunk branch but
-  not by that chunk's pre-landing base, which is the set a landing
+  candidate graph can give: member refs contained by the exact chunk branch,
+  which is the set a landing
   closes (#64) and whose tips a follow-up is blocked by (#63) — never the whole
   component, since a member that has never been worked has no commits
-  anywhere. De-queueing alone is broader and fail-safe: a member contained by any
+  anywhere. De-queueing alone is broader and fail-safe: a member ref contained by any
   fetched chunk branch is never reimplemented after title drift or re-rooting.
   It also carries the ORDER those closes must go in, for the reason
   the `land` bullet below states.

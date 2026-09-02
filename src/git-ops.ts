@@ -14,7 +14,7 @@
 //
 // A re-queued chunk member (#94) is seeded from the chunk tip under the same
 // issue-branch name. Its next atomic landing therefore fast-forwards the
-// durable origin issue ref, preserving containment across rework.
+// durable origin member ref, preserving containment across rework.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -72,7 +72,7 @@ export class ChunkBaseMissingError extends Error {
         `history no longer names the component's root, so the surviving graph ` +
         `derives a new branch name while its commits remain on the old one. ` +
         `Inspect origin's chunk ` +
-        `branches and their contained origin issue refs; restore the missing ` +
+        `branches and their contained origin member refs; restore the missing ` +
         `ref or land the branch that actually carries the work.`,
     );
     this.name = "ChunkBaseMissingError";
@@ -204,7 +204,7 @@ export async function fetchOriginChunkBranch(
 //   - A chunk the cache can name no branch for, and this issue is NOT its root
 //     → `ChunkBaseMissingError`. The ordinary argument says this cannot happen:
 //     a non-root member plans only once a blocker of its own carries
-//     its origin issue ref contained by the chunk branch, published atomically as that branch
+//     its origin member ref contained by the chunk branch, published atomically as that branch
 //     carrying the commits is on origin. But the branch NAME is derived per
 //     cycle from the chunk's current root. Git-derived members normally keep a
 //     closed root in the graph, but missing or repaired history can still make

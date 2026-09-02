@@ -889,7 +889,7 @@ export async function run(
         repoDir: layout.repoDir,
         repo,
         sourceBranch: config.sourceBranch,
-        chunks: resolution.reconciliationChunks,
+        chunks: resolution.landedChunks,
         log: (line) => runLogger.appendOrchestrator(line),
       });
       if (reconciliation.reconciled.length > 0) {

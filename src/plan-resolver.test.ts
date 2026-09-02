@@ -567,7 +567,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     // open and has not landed on the chunk branch. This is what bounds a chunk
     // to one layer per cycle and is why same-cycle members are always siblings
     // — #12 waits for the cycle AFTER the one that lands #11 and publishes its
-    // issue ref, so it can never be planned alongside the very branch it
+    // member ref, so it can never be planned alongside the very branch it
     // would have to be seeded from.
     const r = resolvePlan(
       [

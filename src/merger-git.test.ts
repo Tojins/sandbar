@@ -249,18 +249,37 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     await git(wt, "branch", "sandbar/issue-1-member", "HEAD");
     const head = await git(wt, "rev-parse", "HEAD");
 
-    const r = await adapter().pushChunkBranch("sandbar/chunk-1-c", [
-      "sandbar/issue-1-member",
-    ]);
+    const r = await adapter().pushChunkBranch("sandbar/chunk-1-c", [{
+      source: "sandbar/issue-1-member",
+      destination: "sandbar/member-1",
+    }]);
 
     expect(r).toEqual({ kind: "ok" });
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(head);
-    expect(await originHas("refs/heads/sandbar/issue-1-member")).toBe(head);
-    await git(wt, "update-ref", "refs/remotes/origin/sandbar/issue-1-member", head);
+    expect(await originHas("refs/heads/sandbar/member-1")).toBe(head);
+    await git(wt, "update-ref", "refs/remotes/origin/sandbar/member-1", head);
     await git(wt, "push", "-q", "origin", "HEAD:main");
     await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1]);
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBeNull();
-    expect(await originHas("refs/heads/sandbar/issue-1-member")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-1")).toBeNull();
+  });
+
+  it("reports a rejected member ref as a membership failure, not a chunk race", async () => {
+    await commit(wt, "member.txt", "first landing\n");
+    await git(wt, "branch", "sandbar/issue-2-member", "HEAD");
+    await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-2");
+    await git(wt, "reset", "--hard", "HEAD^");
+    await commit(wt, "replacement.txt", "diverged landing\n");
+    await git(wt, "branch", "-f", "sandbar/issue-2-member", "HEAD");
+
+    const result = await adapter().pushChunkBranch("sandbar/chunk-2-c", [{
+      source: "sandbar/issue-2-member",
+      destination: "sandbar/member-2",
+    }]);
+
+    expect(result.kind).toBe("fatal");
+    if (result.kind === "fatal") expect(result.reason).toContain("membership ref rejected");
+    expect(await originHas("refs/heads/sandbar/chunk-2-c")).toBeNull();
   });
 
   it("fast-forwards the chunk branch when the next member lands on it", async () => {

@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 describe("chunk membership from branch containment (#93)", () => {
-  it("reads contained origin issue refs without consulting commit messages", async () => {
+  it("reads contained origin member refs without consulting commit messages", async () => {
     const repo = await mkdtemp(join(tmpdir(), "sandbar-chunk-members-"));
     repos.push(repo);
     git(repo, "init", "-q", "-b", "main");
@@ -23,9 +23,12 @@ describe("chunk membership from branch containment (#93)", () => {
     git(repo, "commit", "--allow-empty", "-qm", "base");
     git(repo, "checkout", "-qb", "sandbar/issue-47-useful-work");
     git(repo, "commit", "--allow-empty", "-qm", "arbitrary agent prose");
-    git(repo, "update-ref", "refs/remotes/origin/sandbar/issue-47-useful-work", "HEAD");
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/member-47", "HEAD");
     git(repo, "checkout", "-q", "main");
     git(repo, "merge", "--no-ff", "sandbar/issue-47-useful-work", "-m", "cosmetic subject");
+    // A parked child can point at the chunk tip and is still not membership:
+    // finalise may publish issue branches, while only landing publishes member refs.
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/issue-48-parked", "HEAD");
     git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-47-useful-work", "HEAD");
     git(repo, "update-ref", "refs/remotes/origin/main", "HEAD~1");
     expect(await readChunkMembers(repo, "main")).toEqual(
@@ -33,18 +36,16 @@ describe("chunk membership from branch containment (#93)", () => {
     );
   });
 
-  it("retains landed members but excludes issue refs inherited from the chunk base", async () => {
+  it("retains members after a chunk is fast-forwarded into source", async () => {
     const repo = await mkdtemp(join(tmpdir(), "sandbar-landed-members-"));
     repos.push(repo);
     git(repo, "init", "-q", "-b", "main");
     git(repo, "config", "user.email", "sandbar@example.test");
     git(repo, "config", "user.name", "Sandbar Test");
     git(repo, "commit", "--allow-empty", "-qm", "base");
-    git(repo, "branch", "sandbar/issue-45-old");
-    git(repo, "update-ref", "refs/remotes/origin/sandbar/issue-45-old", "HEAD");
     git(repo, "checkout", "-qb", "sandbar/issue-60-root");
     git(repo, "commit", "--allow-empty", "-qm", "member work");
-    git(repo, "update-ref", "refs/remotes/origin/sandbar/issue-60-root", "HEAD");
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/member-60", "HEAD");
     git(repo, "checkout", "-q", "main");
     git(repo, "merge", "--no-ff", "sandbar/issue-60-root", "-m", "chunk work");
     git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-60-root", "HEAD");
