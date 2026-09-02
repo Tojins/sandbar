@@ -20,9 +20,14 @@ simplification — prefer deleting a branch, helper, or layer over polishing it.
 4. **Logic in the wrong layer.** Feature-specific code leaking into shared
    modules, or a bespoke reimplementation of a helper that already exists.
    Logic belongs in its canonical home and reuses what's there.
-5. **Loose contracts.** `any`, unjustified optional fields, silent fallbacks
-   that swallow errors, invariants left implicit. Types and boundaries should
-   state what is true.
+5. **Loose contracts.** `any`, unjustified optional fields, invariants left
+   implicit. Types and boundaries should state what is true. A `catch` may do
+   exactly one of two things: **classify** — map one named, expected condition
+   to a value, checked explicitly (exit 1 from `show-ref --verify` is
+   "absent"; exit 128 propagates) — or **clean up** — on a failure path, report
+   the secondary failure to the log with its cause, then rethrow the original
+   error. Everything else propagates. Blanket defaults, log-and-continue, and
+   empty catches are banned.
 6. **Non-atomic orchestration.** Multi-step state updates that can leave
    partial state on failure; independent async work serialized for no reason.
 

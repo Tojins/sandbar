@@ -2177,8 +2177,8 @@ export function captureAgentRun(
       timedOut = true;
       try {
         child.kill("SIGTERM");
-      } catch {
-        /* already exited */
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
       }
     }, opts.timeoutMs);
 
@@ -2356,19 +2356,15 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   // (#68) — the second asks the same question twice per conflicted merge, and a
   // second copy of the flags is a chance for the two to come to disagree about
   // what "still conflicted" means. An empty list on failure is honest for both
-  // readers: the comment renders no section, and the mechanical path declines.
+  // readers. A failure is not an empty set and propagates (#99).
   const unmergedPaths = async (): Promise<readonly string[]> => {
-    try {
-      const r = await exec("git", ["diff", "--name-only", "--diff-filter=U"], {
-        cwd,
-      });
-      return r.stdout
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean);
-    } catch {
-      return [];
-    }
+    const r = await exec("git", ["diff", "--name-only", "--diff-filter=U"], {
+      cwd,
+    });
+    return r.stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
   };
   // ORIGIN's copy of a chunk branch, for the #64 landing — and the one place
   // in this file that asks the question WITHOUT `fetchOriginChunkBranch`
@@ -2454,7 +2450,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           { cwd, env: gitAuthorEnv(deps) },
         );
         return { ok: true };
-      } catch {
+      } catch (err) {
+        if (typeof (err as { code?: unknown }).code !== "number") throw err;
         return { ok: false };
       }
     },
@@ -2507,45 +2504,29 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // production, which silently disabled the resolve loop's "still
       // conflicted, here is the digest" re-prompt. `--git-path` resolves it
       // correctly in a worktree and in a plain checkout alike.
-      try {
-        const { stdout } = await exec(
-          "git",
-          ["rev-parse", "--git-path", "MERGE_HEAD"],
-          { cwd },
-        );
-        const p = stdout.trim();
-        if (!p) return false;
-        return existsSync(isAbsolute(p) ? p : join(cwd, p));
-      } catch {
-        // Not a git dir at all, or git is unusable — the caller's next git
-        // command will fail loudly with a better message than this one could.
-        return false;
-      }
+      const { stdout } = await exec(
+        "git",
+        ["rev-parse", "--git-path", "MERGE_HEAD"],
+        { cwd },
+      );
+      const p = stdout.trim();
+      if (!p) return false;
+      return existsSync(isAbsolute(p) ? p : join(cwd, p));
     },
     async conflictDigest() {
-      let status = "";
-      let diff = "";
-      try {
-        const r = await exec("git", ["status", "--short"], { cwd });
-        status = r.stdout;
-      } catch {
-        status = "(git status failed)";
-      }
-      try {
-        const r = await exec("git", ["diff"], {
+      const status = (await exec("git", ["status", "--short"], { cwd })).stdout;
+      const diff = (
+        await exec("git", ["diff"], {
           cwd,
           maxBuffer: 50 * 1024 * 1024,
-        });
-        diff = r.stdout;
-      } catch {
-        diff = "(git diff failed)";
-      }
+        })
+      ).stdout;
       // The unmerged set, asked for as such rather than parsed back out of the
       // porcelain above (#67): the abandon comment lists these files, and a
       // status-line parser that silently produced an empty list would make a
       // hard conflict read like a broken container — the exact confusion the
-      // comment exists to end. An empty list on failure is honest: the comment
-      // renders no section at all rather than claiming nothing conflicted.
+      // comment exists to end. Read failures propagate rather than rendering
+      // an empty section as if no paths were conflicted (#99).
       return {
         status: status.trim(),
         diff: diff.trim(),
@@ -2556,7 +2537,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     async readWorktreeFile(path) {
       try {
         return await readFile(join(cwd, path), "utf8");
-      } catch {
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
         return null;
       }
     },
@@ -2579,7 +2561,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           { cwd, env: gitAuthorEnv(deps) },
         );
         return { ok: true };
-      } catch {
+      } catch (err) {
+        if (typeof (err as { code?: unknown }).code !== "number") throw err;
         return { ok: false };
       }
     },
@@ -2599,8 +2582,9 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     async abortMerge() {
       try {
         await exec("git", ["merge", "--abort"], { cwd });
-      } catch {
-        /* best-effort */
+      } catch (err) {
+        if ((err as { code?: unknown }).code !== 128) throw err;
+        // Exit 128 means there is no merge in progress.
       }
     },
     // `npm install` is sandbar's own step, and it WRITES TRACKED FILES: it
@@ -2625,7 +2609,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           cwd,
           maxBuffer: 50 * 1024 * 1024,
         });
-      } catch {
+      } catch (err) {
+        if (typeof (err as { code?: unknown }).code !== "number") throw err;
         return { ok: false };
       }
       if (dirtyBefore.length > 0) return { ok: true };
@@ -2708,7 +2693,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           cwd,
         });
         return { ok: true };
-      } catch {
+      } catch (err) {
+        if (typeof (err as { code?: unknown }).code !== "number") throw err;
         return { ok: false };
       }
     },
