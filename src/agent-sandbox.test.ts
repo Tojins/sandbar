@@ -40,7 +40,6 @@ import {
   createAgentSpeechAccumulator,
   createSandbox,
   defaultImageName,
-  formatUsageFields,
   killOnAbort,
   parseCodexJsonLine,
   parseStreamJsonLine,
@@ -171,6 +170,45 @@ describe("parseStreamJsonLine", () => {
     ]);
   });
 
+  it("uses Claude's complete model ledger instead of its main-loop usage", () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: "result",
+      result: "done",
+      usage: { input_tokens: 10 },
+      modelUsage: { "claude-haiku-4-5": { inputTokens: 910 } },
+    }))).toEqual([
+      { type: "result", result: "done" },
+      { type: "usage", usage: {
+        inputTokens: 910,
+        resolvedModel: "claude-haiku-4-5",
+      } },
+    ]);
+  });
+
+  it("reads a fresh Claude continuation ledger", () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: "result",
+      result: "continued",
+      duration_api_ms: 1143,
+      modelUsage: {
+        "claude-opus": {
+          inputTokens: 8,
+          cacheReadInputTokens: 18700,
+          outputTokens: 5,
+        },
+      },
+    }))).toEqual([
+      { type: "result", result: "continued" },
+      { type: "usage", usage: {
+        inputTokens: 8,
+        cachedInputTokens: 18700,
+        outputTokens: 5,
+        apiMs: 1143,
+        resolvedModel: "claude-opus",
+      } },
+    ]);
+  });
+
   it("omits Claude reasoning tokens when no model usage entry reports them", () => {
     expect(parseStreamJsonLine(JSON.stringify({
       type: "result",
@@ -212,26 +250,6 @@ describe("parseStreamJsonLine", () => {
 
   it("returns [] for an unknown top-level type", () => {
     expect(parseStreamJsonLine(JSON.stringify({ type: "future_event" }))).toEqual([]);
-  });
-});
-
-describe("formatUsageFields", () => {
-  it.each([
-    ["absent usage", undefined, ""],
-    ["partial usage", { cachedInputTokens: 0, outputTokens: 8 }, " tokens=cached:0,out:8"],
-    [
-      "full usage",
-      {
-        inputTokens: 10,
-        cachedInputTokens: 7,
-        outputTokens: 3,
-        apiMs: 250,
-        reasoningTokens: 2,
-      },
-      " tokens=in:10,cached:7,out:3,reasoning:2 apiMs=250",
-    ],
-  ])("renders %s", (_name, usage, expected) => {
-    expect(formatUsageFields(usage)).toBe(expected);
   });
 });
 
@@ -328,6 +346,25 @@ describe("parseCodexJsonLine", () => {
         reasoningTokens: 60,
       },
     }]);
+  });
+
+  it("normalizes a resumed Codex turn as its own near-total cache-hit ledger", () => {
+    expect(parseCodexJsonLine(JSON.stringify({
+      type: "turn.completed",
+      usage: {
+        input_tokens: 15345,
+        cached_input_tokens: 15104,
+        cache_write_input_tokens: 0,
+        output_tokens: 5,
+        reasoning_output_tokens: 0,
+      },
+    }))).toEqual([{ type: "usage", usage: {
+      inputTokens: 241,
+      cachedInputTokens: 15104,
+      cacheWriteInputTokens: 0,
+      outputTokens: 5,
+      reasoningTokens: 0,
+    } }]);
   });
 
   it("drops a turn.completed event whose usage has no numeric fields", () => {

@@ -65,10 +65,8 @@ import { resolveSandboxEnv } from "./env.js";
 import { RESOURCE_PREFIX } from "./naming.js";
 import type { RepoLayout } from "./repo-cache.js";
 import { startTimer } from "./timing.js";
-import { normalizeClaudeUsage, normalizeCodexUsage } from "./agent-usage.js";
+import { normalizeClaudeResult, normalizeCodexUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
-export { formatUsageFields } from "./agent-usage.js";
-export type { AgentUsage } from "./agent-usage.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -551,11 +549,7 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
       return events;
     }
     if (obj.type === "result") {
-      const normalized = normalizeClaudeUsage(obj.modelUsage);
-      const apiMs = typeof obj.duration_api_ms === "number" && Number.isFinite(obj.duration_api_ms) ? obj.duration_api_ms : undefined;
-      const terminalReason = typeof obj.terminal_reason === "string" ? obj.terminal_reason : undefined;
-      const measurement = normalized === undefined && apiMs === undefined && terminalReason === undefined
-        ? undefined : { ...normalized, ...(apiMs === undefined ? {} : { apiMs }), ...(terminalReason === undefined ? {} : { terminalReason }) };
+      const measurement = normalizeClaudeResult(obj);
       return [
         ...(typeof obj.result === "string" ? [{ type: "result" as const, result: obj.result }] : []),
         ...(measurement === undefined ? [] : [{ type: "usage" as const, usage: measurement }]),

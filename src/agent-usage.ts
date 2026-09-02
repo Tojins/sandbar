@@ -27,13 +27,17 @@ const present = (candidate: AgentUsage): AgentUsage | undefined => {
   return Object.keys(usage).length === 0 ? undefined : usage;
 };
 
-export function normalizeClaudeUsage(value: unknown): AgentUsage | undefined {
+export function normalizeClaudeResult(value: unknown): AgentUsage | undefined {
   if (value === null || typeof value !== "object") return undefined;
-  const entries = Object.entries(value).flatMap(([rawModel, raw]) =>
+  const result = value as Record<string, unknown>;
+  const modelUsage = result.modelUsage;
+  const entries = modelUsage !== null && typeof modelUsage === "object"
+    ? Object.entries(modelUsage).flatMap(([rawModel, raw]) =>
     raw !== null && typeof raw === "object"
       ? [{ rawModel, value: raw as Record<string, unknown> }]
       : [],
-  );
+    )
+    : [];
   const sum = (field: string): number | undefined => {
     const values = entries.map(({ value: entry }) => finite(entry[field]));
     return values.every((item) => item === undefined)
@@ -52,8 +56,13 @@ export function normalizeClaudeUsage(value: unknown): AgentUsage | undefined {
     cacheWriteInputTokens: sum("cacheCreationInputTokens"),
     outputTokens: sum("outputTokens"),
     reasoningTokens: sum("thinkingTokens"),
+    apiMs: finite(result.duration_api_ms),
     resolvedModel: resolved,
     models: entries.length > 1 ? entries.length : undefined,
+    terminalReason:
+      typeof result.terminal_reason === "string"
+        ? result.terminal_reason
+        : undefined,
   });
 }
 
@@ -89,13 +98,6 @@ export function sumAgentUsage(
       .filter((v): v is number => typeof v === "number");
     return numbers.length === 0 ? undefined : numbers.reduce((a, b) => a + b, 0);
   };
-  const resolvedModels = [
-    ...new Set(
-      values
-        .map((item) => item.resolvedModel)
-        .filter((v): v is string => v !== undefined),
-    ),
-  ];
   const largestOutputModel = values
     .filter((item) => item.resolvedModel !== undefined)
     .sort((a, b) => (b.outputTokens ?? 0) - (a.outputTokens ?? 0))[0]
@@ -103,10 +105,7 @@ export function sumAgentUsage(
   const reportedModels = values
     .map((item) => item.models)
     .filter((value): value is number => value !== undefined);
-  const modelCount = Math.max(
-    resolvedModels.length,
-    reportedModels.length === 0 ? 0 : Math.max(...reportedModels),
-  );
+  const modelCount = reportedModels.length === 0 ? 0 : Math.max(...reportedModels);
   return present({
     inputTokens: sum("inputTokens"),
     cachedInputTokens: sum("cachedInputTokens"),

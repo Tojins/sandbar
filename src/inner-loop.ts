@@ -37,8 +37,9 @@ import {
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
 import { agentPartialOutput, agentPartialUsage, podman } from "./agent-sandbox.js";
-import type { AgentUsage, Sandbox, SandboxHooks } from "./agent-sandbox.js";
+import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 import { formatUsageFields, sumAgentUsage } from "./agent-usage.js";
+import type { AgentUsage } from "./agent-usage.js";
 
 import type { ChunkTarget } from "./chunks.js";
 import type { ResolvedGateStack } from "./config.js";
