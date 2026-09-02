@@ -9,13 +9,13 @@
 // and the two-phase completion timer (F5).
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { appendFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   type RepoLayout,
@@ -1571,6 +1571,36 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
   });
   afterAll(async () => {
     await rm(dir, { recursive: true, force: true });
+  });
+
+  it("reports a stale-worktree sweep failure and still prepares the issue worktree", async () => {
+    const branch = "sandbar/issue-83-stale-sweep";
+    const layout = layoutFor(dir);
+    const reported = vi.spyOn(console, "error").mockImplementation(() => {});
+    await git(["branch", branch], dir);
+    await mkdir(layout.worktreesDir, { recursive: true });
+    const loopA = join(layout.worktreesDir, "loop-a");
+    const loopB = join(layout.worktreesDir, "loop-b");
+    await symlink("loop-b", loopA);
+    await symlink("loop-a", loopB);
+    try {
+      const worktreePath = await prepareWorktree({
+        branch,
+        layout,
+        copyToWorktree: [],
+      });
+
+      expect(worktreePath).toBe(worktreePathFor(layout.worktreesDir, branch));
+      expect((await stat(worktreePath)).isDirectory()).toBe(true);
+      expect(reported).toHaveBeenCalledWith(
+        "Stale-worktree sweep failed (continuing):",
+        expect.objectContaining({ code: "ELOOP" }),
+      );
+    } finally {
+      reported.mockRestore();
+      await rm(loopA, { force: true });
+      await rm(loopB, { force: true });
+    }
   });
 
   it("reuses a clean worktree when its local issue branch is absent from origin", async () => {

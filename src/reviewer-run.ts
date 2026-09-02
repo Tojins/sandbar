@@ -18,9 +18,6 @@
 // one event the state machine understands, keeping pass policy out of the I/O
 // runner. Follow-up invocation 1 resumes correctness; every retry is cold so a
 // crashed follow-up cannot accidentally resume its own partial session.
-// A catch may only classify one named expected condition checked explicitly,
-// or clean up on failure: log the secondary failure with its cause, then
-// rethrow the original (#83).
 
 import type { LoopEvent } from "./inner-loop-machine.js";
 import { type ParsedVerdict, parseVerdict } from "./verdict-parser.js";

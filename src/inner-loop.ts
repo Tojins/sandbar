@@ -72,7 +72,7 @@ import {
 } from "./inner-loop-machine.js";
 import type { AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
-import { parsePromise } from "./promise-parser.js";
+import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
 import { loadTemplate } from "./prompts.js";
 import {
   type SandboxContainerStatus,
@@ -105,11 +105,6 @@ export const FAILURE_TAIL_LINES = 200;
 // The promise nudge (see runImplementer). Loaded at import time like every
 // other template; no placeholders.
 const PROMISE_NUDGE_TPL = loadTemplate("implementer-promise-nudge");
-const IMPLEMENTER_COMPLETION_SIGNALS = [
-  "<promise>COMPLETE</promise>",
-  "<promise>NEEDS-INFO</promise>",
-  "<promise>NEEDS-UI-PROTOTYPE</promise>",
-] as const;
 
 export type IssueRef = {
   readonly id: string;
@@ -699,7 +694,7 @@ async function runImplementer(
     name: `implementer-${issue.id}-attempt-${action.attempt}`,
     agent: buildAgentProvider(config.implementerAgent, config.implementerModelId),
     prompt,
-    completionSignal: IMPLEMENTER_COMPLETION_SIGNALS,
+    completionSignal: PROMISE_COMPLETION_SIGNALS,
   });
   if (opts.attemptLogger) {
     await opts.attemptLogger.writeAttempt(issue.id, action.attempt, run.stdout);
@@ -743,7 +738,7 @@ async function runImplementer(
       }),
       prompt: PROMISE_NUDGE_TPL,
       // Any of the three tags ends the wait, not just COMPLETE.
-      completionSignal: IMPLEMENTER_COMPLETION_SIGNALS,
+      completionSignal: PROMISE_COMPLETION_SIGNALS,
     });
     accumulated.push(...nudge.commits);
     const combined = `${run.stdout}\n${nudge.stdout}`;
@@ -789,9 +784,9 @@ async function runImplementer(
       `issue=${issue.id} attempt=${action.attempt} implementer ` +
         `signal=${signal.kind} commits=${run.commits.length} ` +
         `${durationField(implementerMs)}` +
-        // Absent when the agent never emitted `<promise>COMPLETE</promise>` —
-        // it escalated, it was killed idle, or the exec simply ended. Omitted
-        // rather than zeroed (#82).
+        // Absent when parsed speech carried none of the three promise tokens —
+        // for example, an idle kill or a plain process exit. Omitted rather
+        // than zeroed (#82).
         (run.signalMs === undefined ? "" : ` signalMs=${run.signalMs}`) +
         ` maxGapMs=${run.maxGapMs}`,
     );

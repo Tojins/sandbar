@@ -11,9 +11,6 @@
 // standards file that extends it. That keeps either verdict deterministic.
 // Missing tokens are absence, not a fabricated verdict. The reviewer harness
 // filters those runs by parsing once. Last token wins when several are emitted.
-// A catch may only classify one named expected condition checked explicitly,
-// or clean up on failure: log the secondary failure with its cause, then
-// rethrow the original (#83).
 
 export type Verdict = "APPROVED" | "CHANGES-REQUESTED";
 
