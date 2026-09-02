@@ -1639,9 +1639,8 @@ const invokeAgent = (
   agent: AgentProvider,
   idleTimeoutMs: number,
   completionTimeoutMs: number,
-  completionSignals: string[],
-  // Elapsed-since-`run()`, so the reported `signalMs` is on the same clock
-  // across iterations rather than restarting with each one (#82).
+  completionSignals: readonly string[],
+  // Elapsed since `run()` began, which is the instant `signalMs` records (#82).
   elapsed: () => number,
 ): Promise<{ result: string; signalMs?: number; maxGapMs: number }> =>
   new Promise((resolveRun, rejectRun) => {
@@ -2014,7 +2013,7 @@ export const createSandbox = async (
     prompt: string | undefined,
     idleTimeoutMs: number,
     completionTimeoutMs: number,
-    completionSignals: string[],
+    completionSignals: readonly string[],
     elapsed: () => number,
   ): Promise<{
     result: string;
@@ -2109,40 +2108,25 @@ export const createSandbox = async (
     worktreePath,
     containerName: providerHandle.containerName,
     async run(o) {
-      const completionSignals = [...o.completionSignal];
       const idleTimeoutMs =
         (o.idleTimeoutSeconds ?? DEFAULT_IDLE_TIMEOUT_SECONDS) * 1000;
       const completionTimeoutMs =
         (o.completionTimeoutSeconds ?? DEFAULT_COMPLETION_TIMEOUT_SECONDS) * 1000;
 
-      const allCommits: { sha: string }[] = [];
-      let allStdout = "";
-      // One clock for the whole call, so an iteration's `signalMs` is elapsed
-      // since `run()` began and not since that iteration did (#82).
-      const elapsed = startTimer();
-      let signalMs: number | undefined;
-      let maxGapMs: number | undefined;
-
-      {
-        const iter = await runOneIteration(
-          o.agent,
-          o.prompt,
-          idleTimeoutMs,
-          completionTimeoutMs,
-          completionSignals,
-          elapsed,
-        );
-        allCommits.push(...iter.commits);
-        allStdout += iter.result;
-        if (iter.signalMs !== undefined) signalMs = iter.signalMs;
-        maxGapMs = iter.maxGapMs;
-      }
+      const iter = await runOneIteration(
+        o.agent,
+        o.prompt,
+        idleTimeoutMs,
+        completionTimeoutMs,
+        o.completionSignal,
+        startTimer(),
+      );
 
       return {
-        stdout: allStdout,
-        commits: allCommits,
-        ...(signalMs === undefined ? {} : { signalMs }),
-        ...(maxGapMs === undefined ? {} : { maxGapMs }),
+        stdout: iter.result,
+        commits: iter.commits,
+        maxGapMs: iter.maxGapMs,
+        ...(iter.signalMs === undefined ? {} : { signalMs: iter.signalMs }),
       };
     },
     async close() {

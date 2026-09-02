@@ -33,6 +33,7 @@ import {
   type SandboxProvider,
   SANDBOX_REPO_DIR,
   AgentError,
+  AgentIdleTimeoutError,
   agentPartialOutput,
   claudeCode,
   codex,
@@ -970,32 +971,6 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
-  it("never returns raw transport for a provider with no speech (#83)", async () => {
-    await git(["branch", "sandbar/issue-5-fallback"], dir);
-    const provider = makeLocalProvider();
-    const sandbox = await createSandbox({
-      env: {},
-      branch: "sandbar/issue-5-fallback",
-      sandbox: provider,
-      layout: layoutFor(dir),
-    });
-    try {
-      const agent: AgentProvider = {
-        name: "codex",
-        env: {},
-        buildPrintCommand: () => ({
-          command: `printf '%s\\n' ${JSON.stringify(toolCallOnly)}`,
-          stdin: "",
-        }),
-        parseStreamLine: parseCodexJsonLine,
-      };
-      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
-      expect(run.stdout).toBe("");
-    } finally {
-      await sandbox.close();
-    }
-  });
-
   // The guard, not the credential path: a dead key makes codex print
   // `turn.failed` and exit 1, which the non-zero branch above already catches.
   // This is the residual — an exit code is not a contract the CLI states — and
@@ -1291,6 +1266,37 @@ describe("createSandbox integration (local provider)", () => {
       expect((err as Error).message).toContain("without exiting");
       expect(agentPartialOutput(err)).toContain("<promise>COMPLETE</promise>");
       expect(elapsed).toBeLessThan(5000);
+    } finally {
+      await sandbox.close();
+    }
+  }, 15_000);
+
+  it("an empty completion-signal list never enters the grace phase (#83)", async () => {
+    await git(["branch", "sandbar/issue-83-no-grace"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-83-no-grace",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const agent = scriptedAgent(
+        `printf '%s\\n' '${JSON.stringify({ type: "result", result: "<promise>COMPLETE</promise>" })}' && ` +
+          `sleep 30`,
+      );
+      const err = await sandbox.run({
+        agent,
+        prompt: "go",
+        completionSignal: [],
+        completionTimeoutSeconds: 0.2,
+        idleTimeoutSeconds: 0.6,
+      }).then(() => null, (e: unknown) => e);
+
+      expect(err).toBeInstanceOf(AgentIdleTimeoutError);
+      expect((err as Error).message).toContain("idle");
+      expect((err as Error).message).not.toContain("without exiting");
+      expect(agentPartialOutput(err)).toContain("<promise>COMPLETE</promise>");
     } finally {
       await sandbox.close();
     }

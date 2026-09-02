@@ -105,18 +105,9 @@ export function decideReviewRound(
       followup: "SKIPPED",
     };
   }
-  const correctnessVerdict = parseVerdict(correctness.stdout);
-  if (correctnessVerdict === null) {
-    return {
-      kind: "finished",
-      event: {
-        kind: "reviewer-harness-failed",
-        detail: "correctness: reviewing invocation had no verdict token",
-      },
-      correctness: "HARNESS-FAILED",
-      followup: "SKIPPED",
-    };
-  }
+  // `runReviewerInvocations` only constructs `reviewed` after `isReview` has
+  // found a verdict token in this same stdout string.
+  const correctnessVerdict = parseVerdict(correctness.stdout)!;
   if (correctnessVerdict.verdict === "CHANGES-REQUESTED") {
     return {
       kind: "finished",
@@ -138,18 +129,8 @@ export function decideReviewRound(
       followup: "HARNESS-FAILED",
     };
   }
-  const followupVerdict = parseVerdict(followup.stdout);
-  if (followupVerdict === null) {
-    return {
-      kind: "finished",
-      event: {
-        kind: "reviewer-harness-failed",
-        detail: "followup: reviewing invocation had no verdict token",
-      },
-      correctness: "APPROVED",
-      followup: "HARNESS-FAILED",
-    };
-  }
+  // As above, a `reviewed` outcome carries the token `parseVerdict` consumes.
+  const followupVerdict = parseVerdict(followup.stdout)!;
   return {
     kind: "finished",
     event: {
