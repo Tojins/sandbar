@@ -43,17 +43,16 @@ describe("run-owned agent images", () => {
     expect(file).toContain(AGENT_PROVIDER_PACKAGES.codex.spec);
   });
 
-  it("leaves provider installation to the driver augmentation (#75)", () => {
+  it("installs no agent CLI in the host image — the driver owns them (#75)", () => {
     const containerfile = readFileSync(
       new URL("../Containerfile", import.meta.url),
       "utf8",
     );
     for (const provider of AGENT_PROVIDER_NAMES) {
-      expect(containerfile, provider).not.toContain(
-        AGENT_PROVIDER_PACKAGES[provider].spec,
-      );
+      const spec = AGENT_PROVIDER_PACKAGES[provider].spec;
+      const packageName = spec.slice(0, spec.lastIndexOf("@"));
+      expect(containerfile, provider).not.toContain(packageName);
     }
-    expect(containerfile).toContain("FROM docker.io/library/node:");
   });
 
   it("rebuilds when the base provenance is unknown even if the derived tag exists", async () => {

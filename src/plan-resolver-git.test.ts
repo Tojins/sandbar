@@ -57,4 +57,30 @@ describe("chunk membership from branch containment (#93)", () => {
       new Map([["sandbar/chunk-60-root", new Set([60])]]),
     );
   });
+
+  it("reports inherited member refs in every containing chunk", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "sandbar-inherited-members-"));
+    repos.push(repo);
+    git(repo, "init", "-q", "-b", "main");
+    git(repo, "config", "user.email", "sandbar@example.test");
+    git(repo, "config", "user.name", "Sandbar Test");
+    git(repo, "commit", "--allow-empty", "-qm", "base");
+    git(repo, "checkout", "-qb", "member-10");
+    git(repo, "commit", "--allow-empty", "-qm", "member 10");
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/member-10", "HEAD");
+    git(repo, "checkout", "-q", "main");
+    git(repo, "merge", "--no-ff", "member-10", "-m", "chunk A");
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-10-alpha", "HEAD");
+    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD");
+    git(repo, "checkout", "-qb", "member-20");
+    git(repo, "commit", "--allow-empty", "-qm", "member 20");
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/member-20", "HEAD");
+    git(repo, "checkout", "-q", "main");
+    git(repo, "merge", "--no-ff", "member-20", "-m", "chunk B");
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-20-beta", "HEAD");
+    expect(await readChunkMembers(repo)).toEqual(new Map([
+      ["sandbar/chunk-10-alpha", new Set([10])],
+      ["sandbar/chunk-20-beta", new Set([10, 20])],
+    ]));
+  });
 });

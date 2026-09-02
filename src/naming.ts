@@ -16,9 +16,8 @@
 
 import { createHash } from "node:crypto";
 
-// Branch prefix for every branch sandbar creates — `sandbar/issue-<n>-<slug>`
-// and `sandbar/chunk-<root>-<slug>`. The two shapes are built and parsed in the
-// "Branch names" section below.
+// Branch prefix for every ref sandbar creates. The three shapes are built and
+// parsed in the "Branch names" section below.
 export const BRANCH_PREFIX = "sandbar/";
 
 // Old branch prefix, recognized (not created) during the transition window.
@@ -213,11 +212,12 @@ export function sandboxContainerNameFor(
 // ---------------------------------------------------------------------------
 // Branch names (#58)
 //
-// Sandbar owns two branch SHAPES, and both live under the same prefix:
+// Sandbar owns three ref SHAPES under the same prefix:
 //
 //   sandbar/issue-<n>-<slug>     one issue's work, landed by the merger
 //   sandbar/chunk-<root>-<slug>  one review-gated CHUNK (#54 §2), landed only
 //                                after a human has reviewed it
+//   sandbar/member-<n>           landing-only origin membership ref (#93)
 //
 // A chunk is a connected component of review-gated issues under the
 // `## Blocked by` graph (`chunks.ts`), and `<root>` is that component's
@@ -225,17 +225,12 @@ export function sandboxContainerNameFor(
 // just not the only issue whose commits are on the branch.
 //
 // A prefix plus an INFIX rather than two independent prefixes, because
-// everything that enumerates sandbar's branch namespace has to enumerate both
-// shapes or mistake one for a foreign ref: preflight's merged-branch delete
-// and its unmerged/discarded/resumable classification, and the
-// reserved-namespace check on `config.mergeMode.integrationBranch`.
-// `SANDBAR_BRANCH_REFGLOBS` is that enumeration, stated once, so a third shape
-// is one array entry instead of an archaeology exercise across three modules.
-// `ORIGIN_CHUNK_BRANCH_*` is the remote-tracking half of it, which only the
-// chunk shape needs (#60): an issue branch is answered for by the source
-// branch, a chunk branch by origin's copy of itself.
+// `ALL_BRANCH_INFIXES` reserves every owned shape from integration-branch use.
+// Local cleanup is narrower: sandbar never creates a local member ref, so
+// `SANDBAR_BRANCH_REFGLOBS` enumerates issue and chunk branches only. Member
+// refs have their own remote fetch/enumeration constants beside the chunk ones.
 //
-// The globs are the full cross product of prefixes and infixes, which includes
+// The local globs are the cross product of prefixes and local infixes, which includes
 // `sandcastle/chunk-*` — a branch that cannot exist, since chunks postdate the
 // rename by every commit. One dead refglob is cheaper than a second prefix
 // list shaped differently from the first.
@@ -251,11 +246,16 @@ export const ALL_BRANCH_INFIXES: readonly string[] = [
   MEMBER_BRANCH_INFIX,
 ];
 
+const LOCAL_BRANCH_INFIXES: readonly string[] = [
+  ISSUE_BRANCH_INFIX,
+  CHUNK_BRANCH_INFIX,
+];
+
 // Every ref pattern that can name a branch sandbar created. Callers hand these
 // straight to `git for-each-ref`.
 export const SANDBAR_BRANCH_REFGLOBS: readonly string[] =
   ALL_BRANCH_PREFIXES.flatMap((prefix) =>
-    ALL_BRANCH_INFIXES.map((infix) => `refs/heads/${prefix}${infix}*`),
+    LOCAL_BRANCH_INFIXES.map((infix) => `refs/heads/${prefix}${infix}*`),
   );
 
 // The same chunk-branch namespace, on the REMOTE side (#60). A chunk branch
@@ -275,9 +275,9 @@ export const ORIGIN_CHUNK_BRANCH_REFGLOBS: readonly string[] =
     (prefix) => `refs/remotes/origin/${prefix}${CHUNK_BRANCH_INFIX}*`,
   );
 
-// Issue branches are durable membership refs since #93. They are fetched and
-// pruned beside chunk refs so containment questions are answered from one
-// fresh remote-tracking namespace.
+// Landing-only member refs are durable membership records since #93. They are
+// fetched and pruned beside chunk refs so containment questions are answered
+// from one fresh remote-tracking namespace.
 export const ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS: readonly string[] =
   ALL_BRANCH_PREFIXES.map(
     (prefix) =>
@@ -347,7 +347,7 @@ export function issueNumberFromMemberBranch(branch: string): number | null {
 }
 
 // `<prefix>chunk-<root>-<slug>` -> root. Null for an issue branch, which is
-// what lets a caller tell the two shapes apart by asking both.
+// what lets a caller tell the issue and chunk shapes apart by asking both.
 export function rootIssueFromChunkBranch(branch: string): number | null {
   return numberFromBranch(branch, CHUNK_BRANCH_INFIX);
 }

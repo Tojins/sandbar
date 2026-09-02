@@ -71,6 +71,7 @@ import type { LandedChunk } from "./chunks.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
+  ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
@@ -104,8 +105,8 @@ async function capture(
  * Origin's chunk branches whose tips are already contained in
  * `origin/<sourceBranch>`, as branch names.
  *
- * Fetches first, and with the same refspecs preflight uses: preflight runs once
- * at startup and this runs every cycle, so a chunk a human merged twenty
+ * Fetches first, with the same chunk and member refspecs preflight uses:
+ * preflight runs once at startup and this runs every cycle, so a chunk a human merged twenty
  * minutes into a run is invisible without it. `--prune` on those same
  * destinations is what stops a branch somebody deleted on origin answering
  * "yes, still there" out of a stale cache — which would send the wrap-up to
@@ -132,6 +133,7 @@ export async function findLandedChunkBranches(
       "--prune",
       sourceBranch,
       ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+      ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
       "--quiet",
     ],
     repoDir,

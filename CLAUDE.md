@@ -189,11 +189,11 @@ and used to announce themselves in four different ways, the halt in none at all.
   suspend D1. Corollary for consumers: gate steps and sandbox siblings must
   write only into gitignored paths. `src/git-ops.ts`,
   `src/inner-loop-machine.ts`.
-- **Branch naming is load-bearing.** Two shapes under one prefix,
+- **Branch naming is load-bearing.** Three shapes under one prefix,
   `sandbar/issue-<n>-<kebab-slug>` and `sandbar/chunk-<root>-<kebab-slug>`
-  (#58) — preflight cleanup, orphan sweep and worktree paths all key off them,
-  so `src/naming.ts` owns both builders, both parsers and the one refglob list
-  every enumeration uses. Issue branches seed from origin, never local —
+  (#58), plus origin-only `sandbar/member-<n>` records (#93). Preflight cleanup,
+  orphan sweep and worktree paths key off the first two; `src/naming.ts` owns all
+  builders, parsers and local/remote refglob lists. Issue branches seed from origin, never local —
   `origin/<sourceBranch>`, or the chunk tip for a chained chunk member (#61) —
   and both prompt builders receive the same base `ensureIssueBranch` used.
   The seeding fallback guard and the re-rooting argument are

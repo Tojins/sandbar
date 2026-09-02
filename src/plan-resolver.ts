@@ -244,6 +244,10 @@ export type PlanResolution = {
   // branches and nothing else — and which ones a reconciled chunk owes a
   // close to.
   readonly landedChunks: readonly LandedChunk[];
+  // Fetched chunks whose root still derives under a different title slug. The
+  // broad union de-queues their members while exact-branch safety refuses to
+  // work or land them, so this is the plan-time repair signal. A root absent
+  // from the graph has no derived name and is intentionally not reported here.
   readonly chunkNameDrifts: readonly {
     readonly existing: string;
     readonly derived: string;

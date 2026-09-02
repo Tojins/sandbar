@@ -543,6 +543,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
       new Map([["sandbar/chunk-99-x", new Set([99])]]),
     );
 
+    expect(r.plan).toEqual([]);
     expect(r.heldForReview).toEqual([]);
   });
 
@@ -819,6 +820,28 @@ describe("resolvePlan git membership safety (#93)", () => {
 // origin, what each branch carries or what is at its tip, and nothing that
 // lists issues could see one filed sixty seconds ago.
 describe("resolvePlan landed chunks (#63, #64)", () => {
+  it("attributes an inherited member only to its exact derived chunk", () => {
+    const r = resolvePlan(
+      [issue(10, "", { title: "Alpha" }), issue(20, "", { title: "Beta" })],
+      facts({ 10: {}, 20: {} }),
+      new Set(),
+      3,
+      "review",
+      new Map([
+        ["sandbar/chunk-10-alpha", new Set([10])],
+        ["sandbar/chunk-20-beta", new Set([10, 20])],
+      ]),
+    );
+    expect(r.landedChunks.map((chunk) => ({
+      branch: chunk.branch,
+      members: chunk.members.map((member) => member.number),
+      closeOrder: chunk.closeOrder.map((member) => member.number),
+    }))).toEqual([
+      { branch: "sandbar/chunk-10-alpha", members: [10], closeOrder: [10] },
+      { branch: "sandbar/chunk-20-beta", members: [20], closeOrder: [20] },
+    ]);
+  });
+
   it("reports a chunk with work on origin: what its branch carries, and the tips", () => {
     const r = resolvePlan(
       [

@@ -121,7 +121,7 @@
 // one thing that is true of a chunk branch whatever else its lifecycle does.
 //
 // CHUNKS, both sides of the wire (#60). Now that chunk branches are real, this
-// module has to be right about them in two ref spaces and it treats each as its
+// module has to be right about them in three ref spaces and it treats each as its
 // own question:
 //   - LOCAL `refs/heads/sandbar/chunk-*` — recognized and passed over, as
 //     above. A chunk branch is unmerged for as long as its review takes, which
@@ -135,6 +135,8 @@
 //     published on a chunk branch, and can therefore be deleted. Origin is
 //     where a chunk branch actually lives; the local remote-tracking ref is a
 //     cache of it and is treated as one.
+//   - ORIGIN `refs/remotes/origin/sandbar/member-*` — fetched and pruned beside
+//     chunk refs; containment is the membership fact used for safe local reap.
 // The member's own issue branch is the third piece and is neither of the three
 // classifications either — see `classifySandbarBranches`.
 

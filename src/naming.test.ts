@@ -152,15 +152,13 @@ describe("branch names (#58)", () => {
     expect(rootIssueFromChunkBranch("sandbar/chunk-12x-foo")).toBeNull();
   });
 
-  it("globs every prefix × shape, so no branch sandbar made is missed", () => {
+  it("globs every prefix × local branch shape", () => {
     expect([...SANDBAR_BRANCH_REFGLOBS].sort()).toEqual(
       [
         "refs/heads/sandbar/issue-*",
         "refs/heads/sandbar/chunk-*",
-        "refs/heads/sandbar/member-*",
         "refs/heads/sandcastle/issue-*",
         "refs/heads/sandcastle/chunk-*",
-        "refs/heads/sandcastle/member-*",
       ].sort(),
     );
   });
@@ -200,7 +198,7 @@ describe("branch names (#58)", () => {
 
   it("reserves member refs with every sandbar-owned branch shape", () => {
     expect(ALL_BRANCH_INFIXES).toContain(MEMBER_BRANCH_INFIX);
-    expect(SANDBAR_BRANCH_REFGLOBS).toContain(
+    expect(SANDBAR_BRANCH_REFGLOBS).not.toContain(
       "refs/heads/sandbar/member-*",
     );
   });

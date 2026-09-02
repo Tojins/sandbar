@@ -2312,20 +2312,23 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   // retry", which both landing targets rest on — a second copy is a git version
   // or a server phrasing a rejection differently, patched in one place and
   // silently reclassified as `fatal` in the other.
+  const classifyPushError = (err: unknown): PushResult => {
+    const e = err as { stderr?: string; message?: string };
+    const stderr = e.stderr ?? "";
+    if (/rejected|non-fast-forward|fetch first|stale info/i.test(stderr)) {
+      return { kind: "race" };
+    }
+    return {
+      kind: "fatal",
+      reason: stderr.trim() || e.message || "unknown push error",
+    };
+  };
   const pushHeadTo = async (dest: string): Promise<PushResult> => {
     try {
       await exec("git", ["push", "origin", `HEAD:${dest}`], { cwd });
       return { kind: "ok" };
     } catch (err) {
-      const e = err as { stderr?: string; message?: string };
-      const stderr = e.stderr ?? "";
-      if (/rejected|non-fast-forward|fetch first|stale info/i.test(stderr)) {
-        return { kind: "race" };
-      }
-      return {
-        kind: "fatal",
-        reason: stderr.trim() || e.message || "unknown push error",
-      };
+      return classifyPushError(err);
     }
   };
   // The unmerged set. One spelling, shared by the conflict digest the resolve
@@ -2763,10 +2766,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
             reason: `membership ref rejected: ${stderr.trim() || e.message || "unknown push error"}`,
           };
         }
-        if (/rejected|non-fast-forward|fetch first|stale info/i.test(stderr)) {
-          return { kind: "race" };
-        }
-        return { kind: "fatal", reason: stderr.trim() || e.message || "unknown push error" };
+        return classifyPushError(err);
       }
     },
     async ensureChunkPullRequest({ chunkBranch, title, body }) {
