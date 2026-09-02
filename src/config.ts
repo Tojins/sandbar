@@ -264,6 +264,10 @@ export type GateStep = {
 export type BuiltImage = {
   readonly tag: string;
   readonly containerfile: string;
+  // Optional named stage of a multi-stage Containerfile. It is part of the
+  // rebuildOn fingerprint because two targets are different image inputs even
+  // when every file and build argument is identical.
+  readonly target?: string;
   // Build with NO context: `podman build -t <tag> - < <containerfile>`. For a
   // Containerfile that only pulls from a registry, this skips tarring the repo.
   readonly stdinContext?: boolean;
@@ -1520,6 +1524,11 @@ export function resolveImages(
         `config.images: entry '${img.tag}' has no containerfile.`,
       );
     }
+    if (img.target !== undefined && !img.target.trim()) {
+      throw new SandbarError(
+        `config.images: entry '${img.tag}' has an empty target.`,
+      );
+    }
     // Same rule and same reason as `step.timeoutMs` (#26): the deadline is a
     // `setTimeout` sandbar owns, so 0 and NaN fire on the next tick — every
     // build killed before it starts — and Infinity never fires at all.
@@ -1532,7 +1541,11 @@ export function resolveImages(
         );
       }
     }
-    resolved.push({ ...img, rebuildOn: resolveRebuildOn(img) });
+    resolved.push({
+      ...img,
+      ...(img.target === undefined ? {} : { target: img.target.trim() }),
+      rebuildOn: resolveRebuildOn(img),
+    });
   }
   // A consumer listing images at all must still build the sandbox image: it is
   // what the agent and the merger's resolve agent run in, and its absence is a

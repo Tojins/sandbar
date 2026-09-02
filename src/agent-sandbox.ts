@@ -104,6 +104,8 @@ export type SandboxHooks = {
   sandbox?: {
     onSandboxReady?: ReadonlyArray<{
       command: string;
+      // Run this hook as container uid 0 (`podman exec --user 0`). The image
+      // need not carry sudo or a sudoers policy.
       sudo?: boolean;
       timeoutMs?: number;
     }>;
@@ -1433,11 +1435,11 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
         worktreePath: sandboxWorktreePath,
         containerName,
         exec: (command, opts) => {
-          const effectiveCommand = opts?.sudo ? `sudo ${command}` : command;
           const args = ["exec"];
           if (opts?.stdin !== undefined) args.push("-i");
           if (opts?.cwd) args.push("-w", opts.cwd);
-          args.push(containerName, "sh", "-c", effectiveCommand);
+          if (opts?.sudo) args.push("--user", "0");
+          args.push(containerName, "sh", "-c", command);
           return new Promise<ExecResult>((resolveExec, rejectExec) => {
             const proc = spawn("podman", args, {
               stdio: [opts?.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],

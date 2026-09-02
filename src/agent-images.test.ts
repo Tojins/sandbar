@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFile, readdir } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 
@@ -18,40 +18,45 @@ import { runScope, variantImageTag } from "./naming.js";
 
 describe("run-owned agent images", () => {
   it("generates a no-context build containing only the routed, pinned tools", async () => {
-    const builds: Array<{ content: string; argv: string[] }> = [];
+    const builds: Array<{ files: string[]; content: string; argv: string[] }> = [];
     await createAgentImages({
       declaredBaseTag: "localhost/app:base",
       providers: ["codex"],
       scope: runScope("/agent-images"),
       inputsLabel: async (tag) => (tag === "localhost/app:base" ? "base-fp" : null),
       build: async (image, opts: BuildOptions) => {
-        builds.push({ content: opts.content ?? "", argv: buildArgv(image, opts) });
+        const root = opts.contextRoot!;
+        builds.push({
+          files: (await readdir(root)).sort(),
+          content: await readFile(`${root}/Containerfile`, "utf8"),
+          argv: buildArgv(image, opts),
+        });
       },
       log: () => {},
     });
     expect(builds).toHaveLength(1);
     expect(builds[0].argv.at(-1)).toBe("-");
-    expect(builds[0].content).toContain(AGENT_PROVIDER_PACKAGES.codex.spec);
-    expect(builds[0].content).not.toContain("anthropic");
-    expect(builds[0].content).toContain("USER 0\nRUN npm install");
+    expect(builds[0].files).toEqual(["Containerfile", "codex"]);
+    expect(builds[0].content).toContain("COPY --chmod=0755 codex");
+    expect(builds[0].content).not.toContain("claude");
   });
 
-  it("pins both providers and keeps claude lifecycle scripts enabled", () => {
+  it("copies and probes both standalone provider binaries", () => {
     const file = agentToolsContainerfile("base", ["claude", "codex"]);
-    expect(file).toContain(AGENT_PROVIDER_PACKAGES.claude.spec);
-    expect(file).toContain("--allow-scripts=@anthropic-ai/claude-code");
-    expect(file).toContain(AGENT_PROVIDER_PACKAGES.codex.spec);
+    expect(file).toContain("COPY --chmod=0755 claude /usr/local/bin/claude");
+    expect(file).toContain("COPY --chmod=0755 codex /usr/local/bin/codex");
+    expect(file).toContain("claude --version && codex --version && git --version");
+    expect(file).toContain(AGENT_PROVIDER_PACKAGES.claude.artifacts.x64.sha256);
+    expect(file).toContain(AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64.sha256);
+    expect(file).not.toContain("npm");
   });
 
-  it("keeps the temporary host-image pins aligned with every provider", () => {
-    const containerfile = readFileSync(
-      new URL("../Containerfile", import.meta.url),
-      "utf8",
-    );
+  it("pins a checksum and both supported architectures for every provider", () => {
     for (const provider of AGENT_PROVIDER_NAMES) {
-      expect(containerfile, provider).toContain(
-        AGENT_PROVIDER_PACKAGES[provider].spec,
-      );
+      const pin = AGENT_PROVIDER_PACKAGES[provider];
+      expect(pin.version).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(pin.artifacts.x64.sha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(pin.artifacts.arm64.sha256).toMatch(/^[a-f0-9]{64}$/);
     }
   });
 
@@ -148,7 +153,7 @@ describe("run-owned agent images", () => {
         log: () => {},
       }),
     ).rejects.toThrow(
-      `could not augment image 'broken-base' with agent tools codex: ${AGENT_PROVIDER_PACKAGES.codex.spec}: registry unavailable`,
+      `could not augment image 'broken-base' with agent tools codex: ${AGENT_PROVIDER_PACKAGES.codex.version}: registry unavailable`,
     );
   });
 });

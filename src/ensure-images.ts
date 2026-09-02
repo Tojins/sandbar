@@ -30,9 +30,9 @@
 // verdict about the branch, not an infrastructure fault to route to
 // HARD-ERROR.
 //
-// Agent base images additionally provide node >= 20 and npm (#75). The
-// generated augmentation build enforces that contract without a separate
-// probe: npm failing names the base image and routed toolset.
+// Agent bases need only /bin/sh, CA roots, and git or a supported package
+// manager (#76). The generated layer supplies git, uid 1000 and standalone
+// CLIs, then executes every binary as the contract probe.
 //
 // The uid check (#24 D3): a container in a pod cannot use `--userns=keep-id`,
 // and `--user 1000:1000` maps to a SUBUID whose worktree writes fail EACCES;
@@ -46,7 +46,11 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
+import { chmod, link, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 import { onCleanup } from "./cleanup.js";
@@ -229,21 +233,25 @@ export type BuildOptions = {
   // Generated Containerfile bytes. They are piped to `podman build ... -`, so
   // no transient recipe or context lands in the state directory (#75).
   readonly content?: string;
+  // A generated tar build context. The directory is streamed through host tar
+  // to `podman build -`; unlike `content`, COPY instructions can use it.
+  readonly contextRoot?: string;
 };
 
 // The `podman build` argv for one entry. Pure so the stdin-context, build-arg
 // and label wiring is table-testable — the real-adapter blind spot.
 export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
   const args = ["build", "-t", image.tag];
+  if (image.target !== undefined) args.push("--target", image.target);
   for (const [k, v] of Object.entries(image.buildArgs ?? {})) {
     args.push("--build-arg", `${k}=${v}`);
   }
   if (opts?.fingerprint) {
     args.push("--label", `${IMAGE_INPUTS_LABEL}=${opts.fingerprint}`);
   }
-  if (image.stdinContext || opts?.content !== undefined) {
-    // The Containerfile arrives on stdin and the context is empty. `-f` would
-    // be redundant and podman rejects it alongside the `-` context.
+  if (image.stdinContext || opts?.content !== undefined || opts?.contextRoot) {
+    // Stdin is either the Containerfile alone or a generated tar context. `-f`
+    // would be redundant and podman rejects it alongside the `-` context.
     args.push("-");
   } else {
     const containerfile = containerfilePath(image, opts?.root ?? "");
@@ -284,7 +292,7 @@ export async function buildImage(
   await new Promise<void>((resolve, reject) => {
     const child = spawn(RUNTIME, args, {
       stdio: [
-        image.stdinContext || opts.content !== undefined ? "pipe" : "ignore",
+        image.stdinContext || opts.content !== undefined || opts.contextRoot ? "pipe" : "ignore",
         capture ? "pipe" : "inherit",
         capture ? "pipe" : "inherit",
       ],
@@ -338,7 +346,18 @@ export async function buildImage(
         ),
       );
     });
-    if (opts.content !== undefined && child.stdin) {
+    if (opts.contextRoot !== undefined && child.stdin) {
+      const tar = spawn("tar", ["-cf", "-", "-C", opts.contextRoot, "."], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      tar.stderr?.on("data", (c: Buffer) => { output = appendTail(output, c.toString()); });
+      tar.on("error", (err) => { child.kill(); reject(err); });
+      tar.on("exit", (code) => {
+        if (code !== 0) child.kill();
+      });
+      child.stdin.on("error", () => {});
+      tar.stdout?.pipe(child.stdin);
+    } else if (opts.content !== undefined && child.stdin) {
       child.stdin.on("error", () => {});
       child.stdin.end(opts.content);
     } else if (image.stdinContext && child.stdin) {
@@ -455,17 +474,16 @@ export async function ensureImages(
 // ---------------------------------------------------------------------------
 // The branch owns the environment; the run owns the tools. Agent CLIs are
 // selected by resolved role routing, so they are appended AFTER the declared
-// image or a per-branch variant has been resolved. Base images must provide
-// node >= 20 and npm; the generated build is the executable enforcement of
-// that contract. Installation selects root because global npm installs must
-// not depend on the base's default user. That default is inert on the result:
+// image or a per-branch variant has been resolved. Base images need no CLI
+// runtime: host-downloaded, driver-hash-verified musl binaries are copied from
+// a tar context. Installation selects root. The base's default is inert:
 // both the sandbox and merger resolve container pass an explicit `--user`.
 
 export function agentToolsetSpec(
   providers: readonly AgentProviderName[],
 ): string {
   return providers
-    .map((provider) => `${provider}: ${AGENT_PROVIDER_PACKAGES[provider].spec}`)
+    .map((provider) => `${provider}: ${AGENT_PROVIDER_PACKAGES[provider].version}`)
     .join(", ");
 }
 
@@ -473,11 +491,79 @@ export function agentToolsContainerfile(
   baseTag: string,
   providers: readonly AgentProviderName[],
 ): string {
-  const packages = providers.flatMap((provider) => {
-    const install = AGENT_PROVIDER_PACKAGES[provider];
-    return [...(install.npmFlags ?? []), install.spec];
-  });
-  return `FROM ${baseTag}\nUSER 0\nRUN npm install -g ${packages.join(" ")}\n`;
+  const pins = providers.map((provider) => {
+    const pin = AGENT_PROVIDER_PACKAGES[provider];
+    return `# ${provider} ${pin.version} x64:${pin.artifacts.x64.sha256} arm64:${pin.artifacts.arm64.sha256}`;
+  }).join("\n");
+  const copies = providers
+    .map((provider) => `COPY --chmod=0755 ${provider} /usr/local/bin/${provider}`)
+    .join("\n");
+  const probes = providers
+    .map((provider) => `${provider} --version`)
+    .join(" && ");
+  return `FROM ${baseTag}\n${pins}\nUSER 0\nRUN command -v git >/dev/null || if command -v apt-get >/dev/null; then apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*; elif command -v apk >/dev/null; then apk add --no-cache git; elif command -v dnf >/dev/null; then dnf install -y git && dnf clean all; else echo 'git is missing and no supported package manager (apt-get, apk, dnf) is available' >&2; exit 1; fi\nRUN uid_user=$(awk -F: '$3 == 1000 { print $1; exit }' /etc/passwd); if [ -n "$uid_user" ] && [ "$uid_user" != agent ]; then sed -i "s/^$uid_user:/agent:/" /etc/passwd; fi; if ! id agent >/dev/null 2>&1; then if command -v useradd >/dev/null; then useradd -u 1000 -m -d /home/agent agent; else adduser -D -u 1000 -h /home/agent agent; fi; fi; mkdir -p /home/agent && chown -R 1000:$(id -g agent) /home/agent\n${copies}\nRUN ${probes} && git --version && test -x /bin/sh && test "$(id -u agent)" = 1000 && test "$(stat -c %u /home/agent)" = 1000\n`;
+}
+
+type PreparedAgentArtifacts = {
+  readonly root: string;
+  readonly dispose: () => Promise<void>;
+};
+
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+async function prepareAgentArtifacts(
+  providers: readonly AgentProviderName[],
+): Promise<PreparedAgentArtifacts> {
+  const arch = process.arch === "x64"
+    ? "x64"
+    : process.arch === "arm64" ? "arm64" : null;
+  if (arch === null) {
+    throw new SandbarError(
+      `agent tools have no pinned artifact for host architecture '${process.arch}'`,
+    );
+  }
+  const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-"));
+  try {
+    for (const provider of providers) {
+      const artifact = AGENT_PROVIDER_PACKAGES[provider].artifacts[arch];
+      const downloaded = join(root, `${provider}.download`);
+      const response = await fetch(artifact.url);
+      if (!response.ok || response.body === null) {
+        throw new Error(`download returned HTTP ${response.status}`);
+      }
+      await pipeline(Readable.fromWeb(response.body as never), createWriteStream(downloaded));
+      const actual = await sha256File(downloaded);
+      if (actual !== artifact.sha256) {
+        throw new Error(
+          `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
+        );
+      }
+      const destination = join(root, provider);
+      if (artifact.archive) {
+        const extractRoot = await mkdtemp(join(root, `${provider}-extracted-`));
+        await exec("tar", ["-xzf", downloaded, "-C", extractRoot]);
+        const binary = (await readdir(extractRoot)).find(
+          (n) => n === provider || n.startsWith(`${provider}-`),
+        );
+        if (!binary) throw new Error(`archive contains no ${provider} binary`);
+        await rename(join(extractRoot, binary), destination);
+      } else {
+        await rename(downloaded, destination);
+      }
+      await chmod(destination, 0o755);
+    }
+    return { root, dispose: () => rm(root, { recursive: true, force: true }) };
+  } catch (err) {
+    await rm(root, { recursive: true, force: true });
+    throw new SandbarError(
+      `could not stage verified agent artifacts: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  }
 }
 
 export type AgentImages = {
@@ -493,6 +579,9 @@ export async function createAgentImages(opts: {
   readonly build?: (image: BuiltImage, opts: BuildOptions) => Promise<unknown>;
   readonly inputsLabel?: (tag: string) => Promise<string | null>;
   readonly log?: (line: string) => void;
+  readonly prepareArtifacts?: (
+    providers: readonly AgentProviderName[],
+  ) => Promise<PreparedAgentArtifacts>;
 }): Promise<AgentImages> {
   const build = opts.build ?? buildImage;
   const inputsLabel = opts.inputsLabel ?? readInputsLabel;
@@ -500,6 +589,24 @@ export async function createAgentImages(opts: {
   const toolset = agentToolsetSpec(opts.providers);
   const pending = new Map<string, Promise<string>>();
   const order: string[] = [];
+  let artifacts: PreparedAgentArtifacts;
+  try {
+    artifacts = opts.prepareArtifacts !== undefined
+      ? await opts.prepareArtifacts(opts.providers)
+      : opts.build === undefined
+        ? await prepareAgentArtifacts(opts.providers)
+        : await (async () => {
+          const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-test-"));
+          for (const provider of opts.providers) await writeFile(join(root, provider), "");
+          return { root, dispose: () => rm(root, { recursive: true, force: true }) };
+        })();
+  } catch (err) {
+    throw new SandbarError(
+      `could not augment image '${opts.declaredBaseTag}' with agent tools ${toolset}: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  }
+  onCleanup(artifacts.dispose);
 
   const augment = async (baseTag: string): Promise<string> => {
     let promise = pending.get(baseTag);
@@ -519,15 +626,24 @@ export async function createAgentImages(opts: {
             `Augmenting '${baseTag}' as '${tag}' with agent tools ` +
               `${toolset}...`,
           );
-          await build(
-            { tag, containerfile: "<generated-agent-tools>" },
-            {
-              root: "",
-              content: containerfile,
-              fingerprint,
-              capture: true,
-            },
+          const contextRoot = await mkdtemp(
+            join(tmpdir(), "sandbar-agent-context-"),
           );
+          try {
+            await writeFile(join(contextRoot, "Containerfile"), containerfile);
+            for (const provider of opts.providers) {
+              await link(
+                join(artifacts.root, provider),
+                join(contextRoot, provider),
+              );
+            }
+            await build(
+              { tag, containerfile: "<generated-agent-tools>" },
+              { root: "", contextRoot, fingerprint, capture: true },
+            );
+          } finally {
+            await rm(contextRoot, { recursive: true, force: true });
+          }
         }
         order.push(tag);
         return tag;

@@ -133,6 +133,7 @@ export async function fingerprintImageInputs(
     );
   }
   await hashPath(hash, root, containerfile);
+  if (image.target !== undefined) record(hash, "target", "", image.target);
 
   for (const [k, v] of Object.entries(image.buildArgs ?? {}).sort(([a], [b]) =>
     a < b ? -1 : a > b ? 1 : 0,
