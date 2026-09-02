@@ -515,9 +515,10 @@ export function agentToolsContainerfile(
   baseTag: string,
   providers: readonly AgentProviderName[],
   arch: "x64" | "arm64" = hostAgentArchitecture(),
+  packages: typeof AGENT_PROVIDER_PACKAGES = AGENT_PROVIDER_PACKAGES,
 ): string {
   const pins = providers.map((provider) => {
-    const pin = AGENT_PROVIDER_PACKAGES[provider];
+    const pin = packages[provider];
     const digests = (["x64", "arm64"] as const).flatMap((arch) =>
       pin.artifacts[arch].map((artifact) =>
         `${arch}-${artifact.variant}:${artifact.sha256}`,
@@ -526,7 +527,7 @@ export function agentToolsContainerfile(
     return `# ${provider} ${pin.version} ${digests.join(" ")}`;
   }).join("\n");
   const copies = providers.flatMap((provider) => {
-    const variants = AGENT_PROVIDER_PACKAGES[provider].artifacts[arch];
+    const variants = packages[provider].artifacts[arch];
     if (variants.length === 1 && variants[0]?.variant === "static") {
       return [`COPY --chmod=0755 ${provider}-static /usr/local/bin/${provider}`];
     }
@@ -539,7 +540,42 @@ export function agentToolsContainerfile(
   const probes = providers
     .map((provider) => `${provider} --version`)
     .join(" && ");
-  return `FROM ${baseTag}\n${pins}\nUSER 0\nRUN command -v git >/dev/null || if command -v apt-get >/dev/null; then apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*; elif command -v apk >/dev/null; then apk add --no-cache git; elif command -v dnf >/dev/null; then dnf install -y git && dnf clean all; else echo 'git is missing and no supported package manager (apt-get, apk, dnf) is available' >&2; exit 1; fi\nRUN uid_user=$(awk -F: '$3 == 1000 { print $1; exit }' /etc/passwd); if [ -n "$uid_user" ] && [ "$uid_user" != agent ]; then sed -i "s/^$uid_user:/agent:/" /etc/passwd; fi; if ! id agent >/dev/null 2>&1; then if command -v useradd >/dev/null; then useradd -u 1000 -m -d /home/agent agent; else adduser -D -u 1000 -h /home/agent agent; fi; fi; mkdir -p /home/agent && chown -R 1000:$(id -g agent) /home/agent\n${copies}\nRUN ${probes} && git --version && test -x /bin/sh && test "$(id -u agent)" = 1000 && test "$(stat -c %u /home/agent)" = 1000\n`;
+  const gitClause = [
+    "command -v git >/dev/null ||",
+    "if command -v apt-get >/dev/null; then",
+    "apt-get update && apt-get install -y --no-install-recommends git &&",
+    "rm -rf /var/lib/apt/lists/*;",
+    "elif command -v apk >/dev/null; then apk add --no-cache git;",
+    "elif command -v dnf >/dev/null; then dnf install -y git && dnf clean all;",
+    "else echo 'git is missing and no supported package manager (apt-get, apk, dnf) is available' >&2; exit 1; fi",
+  ].join(" ");
+  const agentUserClause = [
+    "uid_user=$(awk -F: '$3 == 1000 { print $1; exit }' /etc/passwd);",
+    'if [ -n "$uid_user" ] && [ "$uid_user" != agent ]; then',
+    'sed -i "s/^$uid_user:/agent:/" /etc/passwd; fi;',
+    "if ! id agent >/dev/null 2>&1; then",
+    "if command -v useradd >/dev/null; then",
+    "useradd -u 1000 -m -d /home/agent agent;",
+    "else adduser -D -u 1000 -h /home/agent agent; fi; fi;",
+    "mkdir -p /home/agent && chown -R 1000:$(id -g agent) /home/agent",
+  ].join(" ");
+  const probeClause = [
+    probes,
+    "git --version",
+    "test -x /bin/sh",
+    'test "$(id -u agent)" = 1000',
+    'test "$(stat -c %u /home/agent)" = 1000',
+  ].join(" && ");
+  return [
+    `FROM ${baseTag}`,
+    pins,
+    "USER 0",
+    `RUN ${gitClause}`,
+    `RUN ${agentUserClause}`,
+    copies,
+    `RUN ${probeClause}`,
+    "",
+  ].join("\n");
 }
 
 export type PreparedAgentArtifacts = {
@@ -653,12 +689,14 @@ export async function prepareAgentArtifacts(
             }
           }
           const expected = stagedSha256[name];
+          if (expected === undefined) {
+            throw new Error(`missing staged sha256 for ${provider}/${arch}-${artifact.variant}`);
+          }
           const actual = await sha256File(join(root, name));
-          const pinned = artifact.archive ? expected : artifact.sha256;
-          if (pinned === undefined || actual !== pinned) {
+          if (actual !== expected) {
             throw new Error(
               `staged artifact ${provider}/${arch} failed re-verification ` +
-                `(expected ${pinned}, got ${actual})`,
+                `(expected ${expected}, got ${actual})`,
             );
           }
         }

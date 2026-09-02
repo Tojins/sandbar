@@ -88,6 +88,16 @@ describe("run-owned agent images", () => {
     expect(file).toContain("cp /tmp/claude-glibc /usr/local/bin/claude");
     expect(file).toContain("COPY --chmod=0755 codex-static /usr/local/bin/codex");
     expect(file).toContain("claude --version && codex --version && git --version");
+    expect(file).toContain("command -v git >/dev/null");
+    expect(file).toContain("apt-get install -y --no-install-recommends git");
+    expect(file).toContain("apk add --no-cache git");
+    expect(file).toContain("dnf install -y git");
+    expect(file).toContain("awk -F: '$3 == 1000");
+    expect(file).toContain("useradd -u 1000 -m -d /home/agent agent");
+    expect(file).toContain("adduser -D -u 1000 -h /home/agent agent");
+    expect(file).toContain("chown -R 1000:$(id -g agent) /home/agent");
+    expect(file).toContain('test "$(id -u agent)" = 1000');
+    expect(file).toContain('test "$(stat -c %u /home/agent)" = 1000');
     for (const artifacts of Object.values(AGENT_PROVIDER_PACKAGES.claude.artifacts)) {
       for (const artifact of artifacts) expect(file).toContain(artifact.sha256);
     }
@@ -187,17 +197,23 @@ describe("run-owned agent images", () => {
   });
 
   it("derives recipe file names from the selected architecture", () => {
-    const original = AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64;
-    (AGENT_PROVIDER_PACKAGES.codex.artifacts as Record<string, unknown>).arm64 = [{
-      ...original[0]!, variant: "glibc",
-    }, { ...original[0]!, variant: "musl" }];
-    try {
-      const file = agentToolsContainerfile("base", ["codex"], "arm64");
-      expect(file).toContain("codex-glibc codex-musl");
-      expect(file).not.toContain("codex-static /usr/local/bin/codex");
-    } finally {
-      (AGENT_PROVIDER_PACKAGES.codex.artifacts as Record<string, unknown>).arm64 = original;
-    }
+    const artifact = AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64[0]!;
+    const packages = {
+      ...AGENT_PROVIDER_PACKAGES,
+      codex: {
+        ...AGENT_PROVIDER_PACKAGES.codex,
+        artifacts: {
+          ...AGENT_PROVIDER_PACKAGES.codex.artifacts,
+          arm64: [
+            { ...artifact, variant: "glibc" as const },
+            { ...artifact, variant: "musl" as const },
+          ],
+        },
+      },
+    };
+    const file = agentToolsContainerfile("base", ["codex"], "arm64", packages);
+    expect(file).toContain("codex-glibc codex-musl");
+    expect(file).not.toContain("codex-static /usr/local/bin/codex");
   });
 
   it("selects extracted provider binaries and rejects unsupported hosts", () => {
@@ -242,6 +258,33 @@ describe("run-owned agent images", () => {
     expect(await readFile(join(prepared.root, "codex-static"), "utf8")).toBe("binary");
     await prepared.dispose();
     await expect(readdir(prepared.root)).rejects.toThrow();
+  });
+
+  it("stages and re-verifies a direct standalone download", async () => {
+    const bytes = "standalone claude fixture";
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const packages = {
+      ...AGENT_PROVIDER_PACKAGES,
+      claude: {
+        version: "test",
+        artifacts: {
+          x64: [{ variant: "static" as const, url: "fixture", sha256 }],
+          arm64: [{ variant: "static" as const, url: "fixture", sha256 }],
+        },
+      },
+    };
+    const prepared = await prepareAgentArtifacts(["claude"], () => {}, {
+      arch: "x64",
+      packages,
+      fetch: async () => new Response(bytes),
+    });
+    expect(await readFile(join(prepared.root, "claude-static"), "utf8")).toBe(bytes);
+    await prepared.verify("claude");
+    await writeFile(join(prepared.root, "claude-static"), "mutated");
+    await expect(prepared.verify("claude")).rejects.toThrow(
+      /staged artifact claude\/x64 failed re-verification/,
+    );
+    await prepared.dispose();
   });
 
   it("re-verifies staged tools before augmenting a later variant", async () => {

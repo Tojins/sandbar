@@ -1572,6 +1572,13 @@ describe("resolveImages", () => {
     ).toThrow(/empty target/);
   });
 
+  it("trims a multi-stage target", () => {
+    expect(resolveImages(
+      [{ tag: "sandbar:app", containerfile: "Containerfile", target: " dev " }],
+      "sandbar:app",
+    )[0]?.target).toBe("dev");
+  });
+
   it("defaults to building the sandbox image from ./Containerfile", () => {
     expect(resolveImages(undefined, "sandbar:app")).toEqual([
       // `rebuildOn` is normalised to the empty list rather than left absent:

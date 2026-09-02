@@ -20,6 +20,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { BuiltImage } from "./config.js";
 import {
   ImageBuildError,
+  agentToolsContainerfile,
   buildImage,
   ensureImages,
   readInputsLabel,
@@ -109,6 +110,53 @@ describe.runIf(available)("ensureImages against real podman", () => {
     },
     600_000,
   );
+
+  it(
+    "reports a missing generated context as an image build failure",
+    async () => {
+      const missing = join(root, "does-not-exist");
+      const error = await buildImage(
+        { tag: TAG, containerfile: "<generated>" },
+        { root: "", contextRoot: missing, capture: true },
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ImageBuildError);
+      expect((error as ImageBuildError).output).toMatch(/tar:|Cannot open|cannot open/i);
+    },
+    120_000,
+  );
+
+  for (const [base, packageManager] of [
+    ["docker.io/library/alpine:3.22", "apk"],
+    ["docker.io/library/debian:bookworm-slim", "apt-get"],
+  ] as const) {
+    it(
+      `executes the generated git and agent-user contract over ${packageManager}`,
+      async () => {
+        const context = await mkdtemp(join(tmpdir(), "sandbar-agent-recipe-"));
+        try {
+          await writeFile(
+            join(context, "Containerfile"),
+            agentToolsContainerfile(base, ["codex"]),
+          );
+          await writeFile(
+            join(context, "codex-static"),
+            "#!/bin/sh\necho 'codex fixture'\n",
+          );
+          await buildImage({ tag: TAG, containerfile: "<generated>" }, {
+            root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
+          });
+          const result = await exec(RUNTIME, [
+            "run", "--rm", TAG, "sh", "-c",
+            "git --version && codex --version && test $(id -u agent) = 1000 && test $(stat -c %u /home/agent) = 1000",
+          ]);
+          expect(result.stdout).toContain("codex fixture");
+        } finally {
+          await rm(context, { recursive: true, force: true });
+        }
+      },
+      600_000,
+    );
+  }
 
   it(
     "records the fingerprint as a label, and rebuilds only when the declared inputs change",
