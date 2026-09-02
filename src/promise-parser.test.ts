@@ -1,10 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { parsePromise } from "./promise-parser.js";
+import {
+  PROMISE_COMPLETION_SIGNALS,
+  parsePromise,
+} from "./promise-parser.js";
 
 const withCommits = { commitsAccumulated: 1 } as const;
 const noCommits = { commitsAccumulated: 0 } as const;
 
 describe("parsePromise", () => {
+  it("exports every parsed token as an implementer completion signal", () => {
+    expect(PROMISE_COMPLETION_SIGNALS).toEqual([
+      "<promise>COMPLETE</promise>",
+      "<promise>NEEDS-INFO</promise>",
+      "<promise>NEEDS-UI-PROTOTYPE</promise>",
+    ]);
+  });
+
   it("returns COMPLETE when a single COMPLETE token is present and commits exist", () => {
     expect(parsePromise("done\n<promise>COMPLETE</promise>", withCommits)).toEqual({
       kind: "COMPLETE",

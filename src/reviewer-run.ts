@@ -3,10 +3,8 @@
 //
 // A reviewer INVOCATION yields a verdict or it yields nothing, and this module
 // is the only place that decides which:
-//   - Completed with output → a verdict. A missing token is the verdict
-//     parser's business.
-//   - Failed, but the partial output holds a `<verdict>` token → a verdict.
-//     The run reached a decision and then died on the way out.
+//   - Completed or failed with a `<verdict>` token → a verdict; a failed run
+//     carrying the token reached a decision and then died on the way out.
 //   - Anything else → nothing. An unknown outcome must never read as APPROVED,
 //     but a fail-safe is not a licence to invent evidence: feeding a zero-byte
 //     run through the parser charges the issue review rounds for a harness
@@ -22,7 +20,7 @@
 // crashed follow-up cannot accidentally resume its own partial session.
 
 import type { LoopEvent } from "./inner-loop-machine.js";
-import { containsVerdictToken, parseVerdict } from "./verdict-parser.js";
+import { type ParsedVerdict, parseVerdict } from "./verdict-parser.js";
 
 // One retry. A second flake in a row is not a flake, and each invocation can
 // cost a full idle timeout (10 minutes) with the run's lock held.
@@ -47,11 +45,9 @@ export type ReviewerRun = {
 export type ReviewerOutcome =
   | {
       readonly kind: "reviewed";
-      // What to hand the verdict parser: the reviewing invocation's output
-      // alone, never the transcript. A previous invocation's harness error is
-      // not prose the reviewer wrote, and this string is quoted to the
-      // implementer and to humans as if it were.
-      readonly stdout: string;
+      // Parsed once from the reviewing invocation alone, never the transcript.
+      // A previous invocation's harness error is not reviewer prose.
+      readonly verdict: ParsedVerdict;
       readonly transcript: string;
       readonly invocations: number;
     }
@@ -104,7 +100,7 @@ export function decideReviewRound(
       followup: "SKIPPED",
     };
   }
-  const correctnessVerdict = parseVerdict(correctness.stdout);
+  const correctnessVerdict = correctness.verdict;
   if (correctnessVerdict.verdict === "CHANGES-REQUESTED") {
     return {
       kind: "finished",
@@ -126,7 +122,7 @@ export function decideReviewRound(
       followup: "HARNESS-FAILED",
     };
   }
-  const followupVerdict = parseVerdict(followup.stdout);
+  const followupVerdict = followup.verdict;
   return {
     kind: "finished",
     event: {
@@ -147,7 +143,13 @@ function tail(s: string, max: number): string {
 // matters — did any byte come back? — survives into the log and the handoff.
 function noReviewDetail(run: ReviewerRun): string {
   if (run.error === null) {
-    return "the run completed and emitted no output at all";
+    if (run.output.trim() === "") {
+      return "the run completed and emitted no output at all";
+    }
+    return (
+      "the run completed but emitted no verdict token\n" +
+      `output:\n${tail(run.output, REVIEWER_DETAIL_TAIL_CHARS)}`
+    );
   }
   if (run.output.trim() === "") {
     return `the run failed and emitted no output at all: ${run.error}`;
@@ -156,12 +158,6 @@ function noReviewDetail(run: ReviewerRun): string {
     `the run failed before reaching a verdict: ${run.error}\n` +
     `partial output:\n${tail(run.output, REVIEWER_DETAIL_TAIL_CHARS)}`
   );
-}
-
-// Pure: does this invocation carry a verdict about the code?
-export function isReview(run: ReviewerRun): boolean {
-  if (run.error === null) return run.output.trim() !== "";
-  return containsVerdictToken(run.output);
 }
 
 function transcriptEntry(n: number, run: ReviewerRun): string {
@@ -194,10 +190,11 @@ export async function runReviewerInvocations(
   for (let n = 1; n <= max; n++) {
     const run = await invoke(n);
     transcript.push(transcriptEntry(n, run));
-    if (isReview(run)) {
+    const verdict = parseVerdict(run.output);
+    if (verdict !== null) {
       return {
         kind: "reviewed",
-        stdout: run.output,
+        verdict,
         transcript: transcript.join("\n"),
         invocations: n,
       };

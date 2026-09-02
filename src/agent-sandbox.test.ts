@@ -5,17 +5,17 @@
 // registry (F3), worktree-path compatibility with finalize.ts, and an
 // integration harness using a LOCAL fake provider (no podman/container) against
 // a real temp git repo that exercises createSandbox's lifecycle: per-run
-// safe.directory, commit capture, the result||stdout fallback, env isolation,
+// safe.directory, commit capture, the parsed speech output, env isolation,
 // and the two-phase completion timer (F5).
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { appendFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   type RepoLayout,
@@ -33,6 +33,7 @@ import {
   type SandboxProvider,
   SANDBOX_REPO_DIR,
   AgentError,
+  AgentIdleTimeoutError,
   agentPartialOutput,
   claudeCode,
   codex,
@@ -75,8 +76,15 @@ describe("parseStreamJsonLine", () => {
     expect(parseStreamJsonLine('"str"')).toEqual([]);
   });
 
-  it("swallows malformed JSON that starts with { → []", () => {
+  it("classifies malformed JSON that starts with { as transport", () => {
     expect(parseStreamJsonLine("{bad json")).toEqual([]);
+  });
+
+  it.each([
+    '{"type":"assistant","message":{"content":[null]}}',
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":null}]}}',
+  ])("propagates a provider-shape fault after parsing valid JSON", (line) => {
+    expect(() => parseStreamJsonLine(line)).toThrow(TypeError);
   });
 
   it("concatenates multiple text blocks with NO separator", () => {
@@ -198,7 +206,7 @@ describe("parseCodexJsonLine", () => {
   const completed = (item: unknown) =>
     JSON.stringify({ type: "item.completed", item });
 
-  it("returns [] for non-{ lines, malformed JSON and unknown events", () => {
+  it("classifies non-{ lines, malformed JSON, and unknown events as transport", () => {
     expect(parseCodexJsonLine("")).toEqual([]);
     expect(parseCodexJsonLine("Reading prompt from stdin...")).toEqual([]);
     expect(parseCodexJsonLine("{bad json")).toEqual([]);
@@ -384,13 +392,6 @@ describe("codex command line", () => {
     expect(cmd.command).not.toContain("--dangerously-bypass-approvals-and-sandbox");
   });
 
-  // The evidence rule, declared on the provider: codex has no `result` event,
-  // so without this the raw JSONL of a failed turn would come back as a run's
-  // "output" and #41 would read it as a verdict.
-  it("declares parsedOutputOnly, which claudeCode does not", () => {
-    expect(codex("m").parsedOutputOnly).toBe(true);
-    expect(claudeCode("m").parsedOutputOnly).toBeUndefined();
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -829,10 +830,11 @@ describe("createSandbox integration (local provider)", () => {
         `git commit --allow-empty -m "agent work" >/dev/null 2>&1 && ` +
           `printf '%s\\n' '${JSON.stringify({ type: "result", result: "done <promise>COMPLETE</promise>" })}'`,
       );
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
 
       expect(run.stdout).toContain("<promise>COMPLETE</promise>");
       expect(run.commits).toHaveLength(1);
+      expect(typeof run.maxGapMs).toBe("number");
       expect(run.commits[0]!.sha).toMatch(/^[0-9a-f]{40}$/);
       // The captured commit is the one the agent made on the branch.
       const log = await git(["log", "-1", "--format=%H", "sandbar/issue-1-demo"], dir);
@@ -895,7 +897,7 @@ describe("createSandbox integration (local provider)", () => {
             `printf '%s\n' '${JSON.stringify({ type: "result", result: "x" })}'`,
         ),
         prompt: "go",
-        maxIterations: 1,
+        completionSignal: [],
       });
       expect(stray.commits).toEqual([]);
 
@@ -908,7 +910,7 @@ describe("createSandbox integration (local provider)", () => {
             `printf '%s\n' '${JSON.stringify({ type: "result", result: "y" })}'`,
         ),
         prompt: "go",
-        maxIterations: 1,
+        completionSignal: [],
       });
       expect(rescued.commits).toHaveLength(1);
       const tip = await git(
@@ -921,7 +923,7 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
-  it("falls back to raw stdout when no result event is emitted, and reports zero commits for a no-op", async () => {
+  it("returns no speech when raw stdout has no parsed events", async () => {
     await git(["branch", "sandbar/issue-2-noop"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
@@ -933,8 +935,8 @@ describe("createSandbox integration (local provider)", () => {
     try {
       // No result line, no commit — just raw text on stdout.
       const agent = scriptedAgent(`printf '%s\\n' 'raw output line with <promise>COMPLETE</promise>'`);
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
-      expect(run.stdout).toContain("raw output line with <promise>COMPLETE</promise>");
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
+      expect(run.stdout).toBe("");
       expect(run.commits).toEqual([]);
     } finally {
       await sandbox.close();
@@ -943,16 +945,14 @@ describe("createSandbox integration (local provider)", () => {
 
   // #72 — a stream that is well-formed, exits 0, and carries no speech at all:
   // codex's shape for a turn that ended on tool calls. The transport is not an
-  // answer, so a parsedOutputOnly provider returns nothing rather than its own
-  // JSONL — reviewer-run.ts (#41) reads "completed with output" as a verdict,
-  // and the verdict parser defaults a tokenless one to CHANGES-REQUESTED, a
-  // review of code no model looked at.
+  // answer, so a provider returns nothing rather than its own
+  // JSONL — transport cannot stand in for the reviewer's verdict token.
   const toolCallOnly = JSON.stringify({
     type: "item.completed",
     item: { id: "item_1", type: "command_execution", command: "ls" },
   });
 
-  it("returns nothing for a parsedOutputOnly run whose lines carried no speech (#72)", async () => {
+  it("returns nothing when a run's lines carried no speech (#72)", async () => {
     await git(["branch", "sandbar/issue-4-codex-quiet"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
@@ -965,44 +965,15 @@ describe("createSandbox integration (local provider)", () => {
       const agent: AgentProvider = {
         name: "codex",
         env: {},
-        parsedOutputOnly: true,
         buildPrintCommand: () => ({
           command: `printf '%s\\n' ${JSON.stringify(toolCallOnly)}`,
           stdin: "",
         }),
         parseStreamLine: parseCodexJsonLine,
       };
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
       expect(run.stdout).toBe("");
       expect(run.stdout).not.toContain("command_execution");
-    } finally {
-      await sandbox.close();
-    }
-  });
-
-  // The same run under the DEFAULT (fallback-allowed) rule, to pin that the
-  // difference is the flag and not the fixture.
-  it("still falls back to the raw stream for a provider that does not declare it (#72)", async () => {
-    await git(["branch", "sandbar/issue-5-fallback"], dir);
-    const provider = makeLocalProvider();
-    const sandbox = await createSandbox({
-      env: {},
-      branch: "sandbar/issue-5-fallback",
-      sandbox: provider,
-      layout: layoutFor(dir),
-    });
-    try {
-      const agent: AgentProvider = {
-        name: "codex",
-        env: {},
-        buildPrintCommand: () => ({
-          command: `printf '%s\\n' ${JSON.stringify(toolCallOnly)}`,
-          stdin: "",
-        }),
-        parseStreamLine: parseCodexJsonLine,
-      };
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
-      expect(run.stdout).toContain("command_execution");
     } finally {
       await sandbox.close();
     }
@@ -1032,7 +1003,6 @@ describe("createSandbox integration (local provider)", () => {
       const agent: AgentProvider = {
         name: "codex",
         env: {},
-        parsedOutputOnly: true,
         buildPrintCommand: () => ({
           command: `printf '%s\\n' ${JSON.stringify(failed)}`,
           stdin: "",
@@ -1040,7 +1010,7 @@ describe("createSandbox integration (local provider)", () => {
         parseStreamLine: parseCodexJsonLine,
       };
       const err = await sandbox
-        .run({ agent, prompt: "go", maxIterations: 1 })
+        .run({ agent, prompt: "go", completionSignal: [] })
         .then(() => null)
         .catch((e: unknown) => e);
       // AgentError, not SandbarError: inner-loop.ts lets a SandbarError out to
@@ -1079,7 +1049,6 @@ describe("createSandbox integration (local provider)", () => {
       const agent: AgentProvider = {
         name: "codex",
         env: {},
-        parsedOutputOnly: true,
         buildPrintCommand: () => ({
           command:
             `printf '%s\\n' ${JSON.stringify(failed)}; ` +
@@ -1090,7 +1059,7 @@ describe("createSandbox integration (local provider)", () => {
         parseStreamLine: parseCodexJsonLine,
       };
       const err = await sandbox
-        .run({ agent, prompt: "go", maxIterations: 1 })
+        .run({ agent, prompt: "go", completionSignal: [] })
         .then(() => null)
         .catch((e: unknown) => e);
       expect(err).toBeInstanceOf(AgentError);
@@ -1117,7 +1086,7 @@ describe("createSandbox integration (local provider)", () => {
     try {
       const agent = scriptedAgent(`printf '%s\\n' 'boom on stderr' >&2; exit 1`);
       const err = await sandbox
-        .run({ agent, prompt: "go", maxIterations: 1 })
+        .run({ agent, prompt: "go", completionSignal: [] })
         .then(() => null)
         .catch((e: unknown) => e);
       expect((err as Error).message).toContain("boom on stderr");
@@ -1158,14 +1127,13 @@ describe("createSandbox integration (local provider)", () => {
       const agent: AgentProvider = {
         name: "codex",
         env: {},
-        parsedOutputOnly: true,
         buildPrintCommand: () => ({
           command: `printf '%s\\n%s\\n' ${JSON.stringify(retry)} ${JSON.stringify(downgrade)}`,
           stdin: "",
         }),
         parseStreamLine: parseCodexJsonLine,
       };
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
       expect(run.stdout).toBe("");
     } finally {
       await sandbox.close();
@@ -1193,14 +1161,13 @@ describe("createSandbox integration (local provider)", () => {
       const agent: AgentProvider = {
         name: "codex",
         env: {},
-        parsedOutputOnly: true,
         buildPrintCommand: () => ({
           command: `printf '%s\\n%s\\n' ${JSON.stringify(spoke)} ${JSON.stringify(failed)}`,
           stdin: "",
         }),
         parseStreamLine: parseCodexJsonLine,
       };
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
       expect(run.stdout).toBe("<verdict>APPROVED</verdict>");
       expect(run.stdout).not.toContain("boom");
     } finally {
@@ -1228,7 +1195,7 @@ describe("createSandbox integration (local provider)", () => {
         message: { content: [{ type: "text", text: "the agent spoke" }] },
       });
       const agent = scriptedAgent(`printf '%s\\n' ${JSON.stringify(line)}`);
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
       expect(run.stdout).toBe("the agent spoke");
       expect(run.stdout).not.toContain("assistant");
     } finally {
@@ -1247,7 +1214,7 @@ describe("createSandbox integration (local provider)", () => {
     });
     try {
       const agent = scriptedAgent(`printf '%s\\n' 'ok'`);
-      await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      await sandbox.run({ agent, prompt: "go", completionSignal: [] });
       // The run() lifecycle wrote these into GIT_CONFIG_GLOBAL. Both reads
       // NAME the directory they run in, and that is not tidiness (#25): even
       // `git config --global` discovers a repository from its working
@@ -1277,7 +1244,70 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
-  it("resolves the run via the completion-grace timer when the pipe is held open (F5)", async () => {
+  it("classifies an unset host git identity and still marks safe.directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-no-identity-"));
+    const isolatedGlobal = join(root, "empty.gitconfig");
+    const previousGlobal = process.env.GIT_CONFIG_GLOBAL;
+    const previousSystem = process.env.GIT_CONFIG_SYSTEM;
+    await writeFile(isolatedGlobal, "");
+    try {
+      await git(["init", "-b", "main"], root);
+      await writeFile(join(root, "README.md"), "seed\n");
+      await git(["add", "."], root);
+      await git(
+        ["-c", "user.name=Fixture", "-c", "user.email=fixture@test.com", "commit", "-m", "seed"],
+        root,
+      );
+      const branch = "sandbar/issue-83-no-identity";
+      await git(["branch", branch], root);
+      process.env.GIT_CONFIG_GLOBAL = isolatedGlobal;
+      process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+
+      const sandbox = await createSandbox({
+        env: {},
+        branch,
+        sandbox: makeLocalProvider(),
+        layout: layoutFor(root),
+      });
+      try {
+        await sandbox.run({
+          agent: scriptedAgent(`printf '%s\\n' 'ok'`),
+          prompt: "go",
+          completionSignal: [],
+        });
+        const configEnv = {
+          cwd: root,
+          env: {
+            ...process.env,
+            GIT_CONFIG_GLOBAL: isolatedGlobal,
+            GIT_CONFIG_SYSTEM: "/dev/null",
+          },
+        };
+        const safe = await execFileP(
+          "git",
+          ["config", "--global", "--get-all", "safe.directory"],
+          configEnv,
+        );
+        expect(safe.stdout).toContain(sandbox.worktreePath);
+        await expect(
+          execFileP("git", ["config", "--global", "user.name"], configEnv),
+        ).rejects.toMatchObject({ code: 1 });
+        await expect(
+          execFileP("git", ["config", "--global", "user.email"], configEnv),
+        ).rejects.toMatchObject({ code: 1 });
+      } finally {
+        await sandbox.close();
+      }
+    } finally {
+      if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = previousGlobal;
+      if (previousSystem === undefined) delete process.env.GIT_CONFIG_SYSTEM;
+      else process.env.GIT_CONFIG_SYSTEM = previousSystem;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects via the completion-grace timer when the pipe is held open (F5)", async () => {
     await git(["branch", "sandbar/issue-4-grace"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
@@ -1295,21 +1325,93 @@ describe("createSandbox integration (local provider)", () => {
           `sleep 30`,
       );
       const start = Date.now();
-      const run = await sandbox.run({
+      const err = await sandbox.run({
         agent,
         prompt: "go",
-        maxIterations: 1,
+        completionSignal: ["<promise>COMPLETE</promise>"],
         completionTimeoutSeconds: 0.2,
         idleTimeoutSeconds: 30,
-      });
+      }).then(() => null, (e: unknown) => e);
       const elapsed = Date.now() - start;
-      expect(run.stdout).toContain("<promise>COMPLETE</promise>");
-      expect(run.commits).toHaveLength(1);
-      expect(elapsed).toBeLessThan(5000); // resolved on the grace timer, not the 30s idle
+      expect(err).toBeInstanceOf(AgentError);
+      expect((err as Error).message).toContain("without exiting");
+      expect(agentPartialOutput(err)).toContain("<promise>COMPLETE</promise>");
+      expect(elapsed).toBeLessThan(5000);
     } finally {
       await sandbox.close();
     }
   }, 15_000);
+
+  it("an empty completion-signal list never enters the grace phase (#83)", async () => {
+    await git(["branch", "sandbar/issue-83-no-grace"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-83-no-grace",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const agent = scriptedAgent(
+        `printf '%s\\n' '${JSON.stringify({ type: "result", result: "<promise>COMPLETE</promise>" })}' && ` +
+          `sleep 30`,
+      );
+      const err = await sandbox.run({
+        agent,
+        prompt: "go",
+        completionSignal: [],
+        completionTimeoutSeconds: 0.2,
+        idleTimeoutSeconds: 0.6,
+      }).then(() => null, (e: unknown) => e);
+
+      expect(err).toBeInstanceOf(AgentIdleTimeoutError);
+      expect((err as Error).message).toContain("idle");
+      expect((err as Error).message).not.toContain("without exiting");
+      expect(agentPartialOutput(err)).toContain("<promise>COMPLETE</promise>");
+    } finally {
+      await sandbox.close();
+    }
+  }, 15_000);
+
+  it("rejects one run when its provider parser throws, preserving prior speech", async () => {
+    await git(["branch", "sandbar/issue-83-parser"], dir);
+    const provider = makeLocalProvider();
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-83-parser",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const agent: AgentProvider = {
+        name: "claude-code",
+        env: {},
+        buildPrintCommand: () => ({
+          command:
+            `printf '%s\\n%s\\n' ` +
+            `${JSON.stringify(JSON.stringify({ type: "speech" }))} ` +
+            `${JSON.stringify(JSON.stringify({ type: "broken" }))}`,
+          stdin: "",
+        }),
+        parseStreamLine: (line) => {
+          const parsed = JSON.parse(line) as { type: string };
+          if (parsed.type === "broken") throw new TypeError("invalid provider shape");
+          return [{ type: "text", text: "partial agent speech" }];
+        },
+      };
+      const err = await sandbox
+        .run({ agent, prompt: "go", completionSignal: [] })
+        .then(() => null, (e: unknown) => e);
+
+      expect(err).toBeInstanceOf(AgentError);
+      expect((err as Error).message).toContain(
+        "claude-code stream parse failed on a JSON line: invalid provider shape",
+      );
+      expect(agentPartialOutput(err)).toBe("partial agent speech");
+    } finally {
+      await sandbox.close();
+    }
+  });
 
   it("the idle timeout carries out what the agent emitted, and kills the exec (#41)", async () => {
     await git(["branch", "sandbar/issue-41-idle"], dir);
@@ -1334,7 +1436,7 @@ describe("createSandbox integration (local provider)", () => {
         })}' && sleep 30`,
       );
       const err = await sandbox
-        .run({ agent, prompt: "go", maxIterations: 1, idleTimeoutSeconds: 0.4 })
+        .run({ agent, prompt: "go", completionSignal: [], idleTimeoutSeconds: 0.4 })
         .then(
           () => null,
           (e: unknown) => e,
@@ -1385,7 +1487,7 @@ describe("createSandbox integration (local provider)", () => {
       // The observed shape: not one byte, not even the stream's init event.
       const agent = scriptedAgent("sleep 30");
       const err = await sandbox
-        .run({ agent, prompt: "go", maxIterations: 1, idleTimeoutSeconds: 0.4 })
+        .run({ agent, prompt: "go", completionSignal: [], idleTimeoutSeconds: 0.4 })
         .then(
           () => null,
           (e: unknown) => e,
@@ -1469,6 +1571,152 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
   });
   afterAll(async () => {
     await rm(dir, { recursive: true, force: true });
+  });
+
+  it("reports a stale-worktree sweep failure and still prepares the issue worktree", async () => {
+    const branch = "sandbar/issue-83-stale-sweep";
+    const layout = layoutFor(dir);
+    const reported = vi.spyOn(console, "error").mockImplementation(() => {});
+    await git(["branch", branch], dir);
+    await mkdir(layout.worktreesDir, { recursive: true });
+    const loopA = join(layout.worktreesDir, "loop-a");
+    const loopB = join(layout.worktreesDir, "loop-b");
+    await symlink("loop-b", loopA);
+    await symlink("loop-a", loopB);
+    try {
+      const worktreePath = await prepareWorktree({
+        branch,
+        layout,
+        copyToWorktree: [],
+      });
+
+      expect(worktreePath).toBe(worktreePathFor(layout.worktreesDir, branch));
+      expect((await stat(worktreePath)).isDirectory()).toBe(true);
+      expect(reported).toHaveBeenCalledWith(
+        "Stale-worktree sweep failed (continuing):",
+        expect.objectContaining({ code: "ELOOP" }),
+      );
+    } finally {
+      reported.mockRestore();
+      await rm(loopA, { force: true });
+      await rm(loopB, { force: true });
+    }
+  });
+
+  it("reuses a clean worktree when its local issue branch is absent from origin", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-local-branch-"));
+    const origin = join(root, "origin.git");
+    const checkout = join(root, "checkout");
+    try {
+      await git(["init", "--bare", origin], root);
+      await git(["clone", origin, checkout], root);
+      await git(["config", "user.name", "Test Host"], checkout);
+      await git(["config", "user.email", "host@test.com"], checkout);
+      await writeFile(join(checkout, "README.md"), "seed\n");
+      await git(["add", "."], checkout);
+      await git(["commit", "-m", "seed"], checkout);
+      await git(["push", "-u", "origin", "HEAD:main"], checkout);
+      const branch = "sandbar/issue-83-local-only";
+      await git(["branch", branch], checkout);
+
+      const first = await prepareWorktree({
+        branch,
+        layout: layoutFor(checkout),
+        copyToWorktree: [],
+      });
+      const reused = await prepareWorktree({
+        branch,
+        layout: layoutFor(checkout),
+        copyToWorktree: [],
+      });
+      expect(reused).toBe(first);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects reuse when fetching the issue branch fails unexpectedly", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-fetch-failure-"));
+    const origin = join(root, "origin.git");
+    const checkout = join(root, "checkout");
+    try {
+      await git(["init", "--bare", origin], root);
+      await git(["clone", origin, checkout], root);
+      await git(["config", "user.name", "Test Host"], checkout);
+      await git(["config", "user.email", "host@test.com"], checkout);
+      await writeFile(join(checkout, "README.md"), "seed\n");
+      await git(["add", "."], checkout);
+      await git(["commit", "-m", "seed"], checkout);
+      await git(["push", "-u", "origin", "HEAD:main"], checkout);
+
+      const branch = "sandbar/issue-83-fetch-failure";
+      await git(["branch", branch], checkout);
+      await git(["push", "origin", `${branch}:${branch}`], checkout);
+      await prepareWorktree({
+        branch,
+        layout: layoutFor(checkout),
+        copyToWorktree: [],
+      });
+
+      await git(["remote", "set-url", "origin", join(root, "missing.git")], checkout);
+      await expect(
+        prepareWorktree({
+          branch,
+          layout: layoutFor(checkout),
+          copyToWorktree: [],
+        }),
+      ).rejects.toThrow("Could not fetch origin/");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects reuse when the local issue branch diverged from origin", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-diverged-branch-"));
+    const origin = join(root, "origin.git");
+    const checkout = join(root, "checkout");
+    const other = join(root, "other");
+    try {
+      await git(["init", "--bare", origin], root);
+      await git(["clone", origin, checkout], root);
+      await git(["config", "user.name", "Test Host"], checkout);
+      await git(["config", "user.email", "host@test.com"], checkout);
+      await writeFile(join(checkout, "README.md"), "seed\n");
+      await git(["add", "."], checkout);
+      await git(["commit", "-m", "seed"], checkout);
+      await git(["push", "-u", "origin", "HEAD:main"], checkout);
+
+      const branch = "sandbar/issue-83-diverged";
+      await git(["branch", branch], checkout);
+      await git(["push", "origin", `${branch}:${branch}`], checkout);
+      const worktreePath = await prepareWorktree({
+        branch,
+        layout: layoutFor(checkout),
+        copyToWorktree: [],
+      });
+      await writeFile(join(worktreePath, "local.txt"), "local\n");
+      await git(["add", "."], worktreePath);
+      await git(["commit", "-m", "local"], worktreePath);
+
+      await git(["clone", origin, other], root);
+      await git(["config", "user.name", "Other Host"], other);
+      await git(["config", "user.email", "other@test.com"], other);
+      await git(["checkout", branch], other);
+      await writeFile(join(other, "remote.txt"), "remote\n");
+      await git(["add", "."], other);
+      await git(["commit", "-m", "remote"], other);
+      await git(["push", "origin", branch], other);
+
+      await expect(
+        prepareWorktree({
+          branch,
+          layout: layoutFor(checkout),
+          copyToWorktree: [],
+        }),
+      ).rejects.toThrow("could not fast-forward to origin");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("runs copy + onWorktreeReady exactly once — createSandbox must not repeat worktree-side setup", async () => {

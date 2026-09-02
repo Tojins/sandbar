@@ -2246,7 +2246,7 @@ export function parseCapturedAgentRun(
   run: CapturedAgentRun,
   agent: AgentProvider,
 ): ResolveAgentRun {
-  const speech = createAgentSpeechAccumulator(agent);
+  const speech = createAgentSpeechAccumulator();
   for (const line of run.stdout.split(/\r?\n/)) {
     speech.ingest(agent.parseStreamLine(line));
   }
@@ -2255,7 +2255,7 @@ export function parseCapturedAgentRun(
     // Both supported providers emit structured transport here. Resolve
     // promises therefore have no raw fallback: only events their provider
     // parser classified as agent speech may reach parseResolveSignal (#74).
-    output: speech.output(""),
+    output: speech.spoken,
     detail: run.detail ?? speech.failure,
   };
 }

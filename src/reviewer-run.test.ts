@@ -7,7 +7,6 @@ import {
   decideReviewRound,
   type ReviewerOutcome,
   type ReviewerRun,
-  isReview,
   runReviewerInvocations,
 } from "./reviewer-run.js";
 import { parseVerdict } from "./verdict-parser.js";
@@ -18,12 +17,11 @@ const IDLE = "Agent idle for 600 seconds — no output received.";
 const idleRun: ReviewerRun = { output: "", error: IDLE };
 const blankRun: ReviewerRun = { output: "   \n", error: null };
 
-const reviewed = (stdout: string): ReviewerOutcome => ({
-  kind: "reviewed",
-  stdout,
-  transcript: stdout,
-  invocations: 1,
-});
+const reviewed = (stdout: string): ReviewerOutcome => {
+  const verdict = parseVerdict(stdout);
+  if (verdict === null) throw new Error("reviewed fixture requires a verdict token");
+  return { kind: "reviewed", verdict, transcript: stdout, invocations: 1 };
+};
 const failed = (detail: string): ReviewerOutcome => ({
   kind: "harness-failed",
   detail,
@@ -120,31 +118,26 @@ function drive(script: readonly ReviewerRun[]) {
   ).then((outcome) => ({ outcome, asked, retries }));
 }
 
-describe("isReview", () => {
-  it("a completed run with output is a review, token or not", () => {
-    expect(isReview({ output: "looks fine to me", error: null })).toBe(true);
-    expect(
-      isReview({ output: "<verdict>APPROVED</verdict>", error: null }),
-    ).toBe(true);
-  });
-
-  it("a completed run that printed nothing is NOT a review", () => {
-    expect(isReview({ output: "", error: null })).toBe(false);
-    expect(isReview({ output: " \n\t ", error: null })).toBe(false);
-  });
-
-  it("a FAILED run is a review only if it reached a verdict token", () => {
-    // Reached a decision and then died on the way out — reporting "the reviewer
-    // never ran" about that would be #41's fabrication in mirror image.
-    expect(
-      isReview({ output: "…<verdict>APPROVED</verdict>\n", error: "exited 1" }),
-    ).toBe(true);
-    // Prose without a decision is not a verdict about the branch.
-    expect(
-      isReview({ output: "Let me start by reading the diff.", error: IDLE }),
-    ).toBe(false);
-    expect(isReview(idleRun)).toBe(false);
-  });
+describe("review eligibility", () => {
+  it.each([
+    ["completed", true, null, "<verdict>APPROVED</verdict>", "reviewed"],
+    ["completed", false, null, "looks fine to me", "harness-failed"],
+    ["failed", true, "exited 1", "…<verdict>APPROVED</verdict>\n", "reviewed"],
+    [
+      "failed",
+      false,
+      IDLE,
+      "Let me start by reading the diff.",
+      "harness-failed",
+    ],
+  ] as const)(
+    "state=%s token=%s is classified from output",
+    async (_state, _hasToken, error, output, expectedKind) => {
+      const run = { output, error };
+      const { outcome } = await drive([run, run]);
+      expect(outcome.kind).toBe(expectedKind);
+    },
+  );
 });
 
 describe("runReviewerInvocations", () => {
@@ -157,7 +150,7 @@ describe("runReviewerInvocations", () => {
     expect(outcome.kind).toBe("reviewed");
     if (outcome.kind !== "reviewed") throw new Error("unreachable");
     expect(outcome.invocations).toBe(1);
-    expect(parseVerdict(outcome.stdout).verdict).toBe("CHANGES-REQUESTED");
+    expect(outcome.verdict.verdict).toBe("CHANGES-REQUESTED");
   });
 
   it("zero output is retried once, and a review on the retry is the outcome", async () => {
@@ -175,8 +168,8 @@ describe("runReviewerInvocations", () => {
     // transcript to the parser would put the previous invocation's harness
     // error into the prose an implementer and a human both read as the
     // reviewer's own words.
-    expect(outcome.stdout).not.toContain(IDLE);
-    expect(parseVerdict(outcome.stdout).verdict).toBe("APPROVED");
+    expect(outcome.verdict.prose).not.toContain(IDLE);
+    expect(outcome.verdict.verdict).toBe("APPROVED");
   });
 
   it("two zero-output runs are a harness failure, never a verdict", async () => {
@@ -199,6 +192,19 @@ describe("runReviewerInvocations", () => {
     expect(outcome.detail).toContain("the run completed and emitted no output at all");
   });
 
+  it("a completed tokenless review is reported with its output", async () => {
+    const prose = "I found a concrete problem but forgot the contract token.";
+    const { outcome } = await drive([
+      { output: prose, error: null },
+      { output: prose, error: null },
+    ]);
+    expect(outcome.kind).toBe("harness-failed");
+    if (outcome.kind !== "harness-failed") throw new Error("unreachable");
+    expect(outcome.detail).toContain("completed but emitted no verdict token");
+    expect(outcome.detail).toContain(prose);
+    expect(outcome.detail).not.toContain("emitted no output at all");
+  });
+
   it("a failure that reached a verdict is taken at its word, with no retry", async () => {
     const { outcome, asked } = await drive([
       { output: "findings\n<verdict>APPROVED</verdict>\n", error: "exited with code 1" },
@@ -206,7 +212,7 @@ describe("runReviewerInvocations", () => {
     expect(asked).toEqual([1]);
     expect(outcome.kind).toBe("reviewed");
     if (outcome.kind !== "reviewed") throw new Error("unreachable");
-    expect(parseVerdict(outcome.stdout).verdict).toBe("APPROVED");
+    expect(outcome.verdict.verdict).toBe("APPROVED");
   });
 
   it("a failure with prose but no verdict is a harness failure that keeps the prose", async () => {

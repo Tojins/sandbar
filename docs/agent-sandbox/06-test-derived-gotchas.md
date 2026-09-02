@@ -92,9 +92,10 @@ Source: `AgentProvider.ts`, `parseStreamJsonLine`. Tests: AgentProvider.test.ts,
   JSON (`[1,2]`, `42`, `"str"`) and empty lines all return `[]`, not just
   garbage. A bare `try{JSON.parse}` reimplementation would diverge.
   (Orchestrator.test.ts:854.)
-- 🔴 **Malformed JSON that starts with `{` is swallowed → `[]`, never thrown.**
-  `"{bad json"` parses-fails inside the `catch{}`. Stream lines are routinely
-  partial; throwing would abort the run. (AgentProvider.test.ts:351; Orchestrator.test.ts:859.)
+- 🔴 **Malformed transport JSON that starts with `{` is classified as `[]`.**
+  `"{bad json"` raises `SyntaxError`, the one expected condition the transport
+  parser maps to no event because stream lines can be partial. Any other parser
+  failure propagates and rejects that agent run; it is not transport.
 - 🟡 **Multiple text blocks concatenate with NO separator** (`texts.join("")`),
   e.g. `["Hello ","world"]` → one `{text:"Hello world"}`. (Orchestrator.test.ts:871.)
 - 🟡 **Text buffer flushes *before* each tool_use, preserving interleave order.**
@@ -150,10 +151,8 @@ Source: `Orchestrator.ts`, `invokeAgent`.
   prompts; only `--model` is shell-escaped). Tests: *"invokes claude with
   stream-json and verbose flags"* (1770), *"buildPrintCommand delivers prompt via
   stdin, not argv"* (AgentProvider.test.ts:31).
-- ⚪ **Completion match is a plain substring `includes`** of the `result||stdout`
-  value against default `"<promise>COMPLETE</promise>"`. Moot for sandbar
-  (`maxIterations:1`, own parser) but explains why the default signal matches
-  sandbar's promise contract.
+- ⚪ **Completion match is a plain substring `includes`** of parsed speech
+  against the caller's explicit signal list. An empty list never enters grace.
 
 ## (C) Commit capture & git setup (`withSandboxLifecycle`)
 
@@ -171,14 +170,13 @@ Source: `SandboxLifecycle.ts`. Tests: SandboxLifecycle.test.ts.
   worktree shares the object DB, so the branch ref is visible there); (3)
   `--reverse` ⇒ **oldest-first** ordering, which sandbar's merger relies on.
   Test: *"no cherry-pick when explicit branch is given"*.
-- 🔴 **Zero commits → `[]`, and a missing branch must NOT throw.** The rev-list is
-  wrapped in try/catch returning `[]` ("Branch doesn't exist on host (no commits
-  produced)"). Test: *"returns empty commits when no work is done"*. A port that
-  lets a nonzero git exit propagate turns a legitimate NEEDS-INFO / no-op outcome
-  into a hard error.
-- 🟡 **Asymmetric error policy:** setup commands and hooks use `execOk` (any
-  nonzero exit → `ExecError` `"Command failed (exit N): …"`), but commit
-  collection swallows errors → `[]`. Don't unify these. The git-**setup** commands
+- 🔴 **Zero commits → `[]` only when `rev-list` succeeds with empty stdout.**
+  `ensureIssueBranch` has already created the fully qualified branch ref, so a
+  missing or unreadable ref and every other nonzero git exit propagate as an
+  infrastructure fault instead of being laundered into "no work".
+- 🟡 **Error policy:** setup commands and hooks use `execOk` (any nonzero exit →
+  `ExecError` `"Command failed (exit N): …"`), and commit-collection failures
+  likewise propagate. The git-**setup** commands
   additionally go through `execOkWithGitTimeout`, which **retries on exit 126/137
   only** (2×, 250 ms apart) — transient container-`exec` races under parallelism
   (F2; `ExecError` carries `exitCode` to classify). The retry is scoped to
@@ -356,7 +354,8 @@ podman.test.ts, boundedTail.test.ts, mountUtils.test.ts.
   sandbox so commits accumulate) depends on this — do **not** respawn the
   container per run, and keep the worktree alive between runs (uncommitted state
   persists: *"state persists between runs"*).
-- 🟡 **Setup order is locked in:** resolveCwd → `pruneStale` (errors swallowed) →
+- 🟡 **Setup order is locked in:** resolveCwd → `pruneStale` (failures reported,
+  then current-run setup continues) →
   `WorktreeManager.create` → `copyToWorktree` → **`host.onWorktreeReady`** (files
   present, container NOT yet up) → start container → **`onSandboxReady`** →
   `registerShutdown` → return. The `create`→`onSandboxReady` span is wrapped in

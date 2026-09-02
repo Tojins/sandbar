@@ -2,7 +2,7 @@
 // (drops the ~72 MB Effect runtime; authoritative behaviour notes live in
 // docs/agent-sandbox/01-07). Reproduces ONLY sandbar's exercised path: a
 // bind-mount podman provider, an explicit pre-existing branch,
-// `maxIterations: 1`, no session capture. The public surface is the five
+// one iteration, no session capture. The public surface is the five
 // symbols sandbar imports (`createSandbox`, `podman`, `claudeCode`, types
 // `Sandbox`/`SandboxHooks`) — plus `codex` since #72, the second
 // implementation of `AgentProvider`, which is the seam a role's CLI is chosen
@@ -33,9 +33,8 @@
 //   F3 — ONE process-wide shutdown registration (an `onCleanup` entry, #35)
 //        fans out to a Set of teardowns; not a listener per sandbox.
 //   F4 — a failure after worktree create removes the worktree before rethrowing.
-//   F5 — two-phase agent timeout: once the completion signal is seen, a grace
-//        timer resolves the run SUCCESSFULLY with the collected commits
-//        instead of an idle error that discards them.
+//   F5 — two-phase timeout: after a named completion signal, failure to exit
+//        within the grace period rejects and preserves the partial speech.
 //   F7 — every host git invocation runs under LC_ALL=C (locale-stable stderr).
 //   F8 — the container runs with `--init`: the entrypoint is `sleep infinity`,
 //        which reaps nothing (#42). See `sandboxRunArgs`.
@@ -51,6 +50,10 @@
 // public (`containerName`) and its removal is `--depend`-aware. It publishes
 // no host ports on their behalf (#43). An anchor chain, not a pod, because a
 // pod cannot carry keep-id and the agent CLI refuses to run as root.
+// A catch may only classify one named expected condition checked explicitly,
+// clean up on failure while preserving the original error, or report a failed
+// best-effort hygiene action whose result is unrelated to the current run
+// (#83).
 
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -62,7 +65,7 @@ import { onCleanup } from "./cleanup.js";
 import { resolveSandboxEnv } from "./env.js";
 import { RESOURCE_PREFIX } from "./naming.js";
 import type { RepoLayout } from "./repo-cache.js";
-import { startTimer } from "./timing.js";
+import { startGapTimer, startTimer } from "./timing.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -73,7 +76,6 @@ const SANDBOX_HOMEDIR = "/home/agent";
 const CONTAINER_NAME_PREFIX = RESOURCE_PREFIX;
 
 export const MAX_TAIL_CHARS = 64 * 1024;
-export const DEFAULT_COMPLETION_SIGNAL = "<promise>COMPLETE</promise>";
 export const DEFAULT_IDLE_TIMEOUT_SECONDS = 10 * 60;
 export const DEFAULT_COMPLETION_TIMEOUT_SECONDS = 60;
 
@@ -137,20 +139,6 @@ export type AgentProvider = {
     dangerouslySkipPermissions?: boolean;
   }): { command: string; stdin?: string };
   parseStreamLine(line: string): ParsedStreamEvent[];
-  // When true, `parseStreamLine` is the ONLY source of a run's output: a run
-  // whose lines yielded no `text`/`result` event returns "" rather than the raw
-  // stream (#72). Absent, the raw stream is the last-resort fallback, which is
-  // what a provider that does not emit machine-readable lines at all needs.
-  //
-  // This is not a formatting preference, it is #41's evidence rule. "Completed
-  // with output" is what `reviewer-run.ts` reads as a verdict, so the string a
-  // run returns must be the agent's own SPEECH or nothing — and a provider's
-  // transport is not speech. A codex turn that ends on tool calls alone, or on
-  // reconnect notices it recovered from, is a well-formed JSONL stream under a
-  // successful process containing not one word the model said; returned as
-  // "output" it would be read as a review and default to CHANGES-REQUESTED, a
-  // verdict about code no model ever looked at, charged to the issue's rounds.
-  readonly parsedOutputOnly?: boolean;
 };
 
 // One implementation of the provider parser's three-register reduction.
@@ -162,12 +150,9 @@ export type AgentSpeechAccumulator = {
   readonly accumulated: string;
   readonly spoken: string;
   readonly failure: string | undefined;
-  output(rawFallback: string): string;
 };
 
-export function createAgentSpeechAccumulator(
-  agent: AgentProvider,
-): AgentSpeechAccumulator {
+export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
   let result = "";
   let accumulated = "";
   let failure: string | undefined;
@@ -189,11 +174,6 @@ export function createAgentSpeechAccumulator(
     },
     get failure() {
       return failure;
-    },
-    output(rawFallback) {
-      const spoken = result || accumulated;
-      if (spoken) return spoken;
-      return agent.parsedOutputOnly === true ? "" : rawFallback;
     },
   };
 }
@@ -284,9 +264,10 @@ export type PodmanOptions = {
 export type RunOptions = {
   readonly agent: AgentProvider;
   readonly prompt?: string;
-  readonly maxIterations?: number;
   readonly name?: string;
-  readonly completionSignal?: string | string[];
+  // Required because a role's signal is its contract, never a default. `[]`
+  // ends only on process exit or idle timeout; grace is unreachable (#83).
+  readonly completionSignal: readonly string[];
   readonly idleTimeoutSeconds?: number;
   readonly completionTimeoutSeconds?: number;
 };
@@ -294,8 +275,6 @@ export type RunOptions = {
 export type SandboxRunResult = {
   readonly stdout: string;
   readonly commits: { sha: string }[];
-  readonly iterations: unknown[];
-  readonly completionSignal?: string;
   // Milliseconds from the start of `run()` to the instant the completion signal
   // was first seen in the agent's accumulated speech (#82). ABSENT when it was
   // never seen — the run ended by exec exit or by the idle kill instead — which
@@ -311,6 +290,7 @@ export type SandboxRunResult = {
   // writes — milliseconds, and named here so a reader of the difference knows
   // exactly what is in it).
   readonly signalMs?: number;
+  readonly maxGapMs: number;
 };
 
 export interface Sandbox {
@@ -427,7 +407,13 @@ export const agentPartialOutput = (err: unknown): string => {
   return AGENT_PARTIAL_OUTPUT.get(err) ?? "";
 };
 
-class WorktreeError extends Error {}
+class WorktreeError extends Error {
+  readonly exitCode: number | undefined;
+  constructor(message: string, exitCode?: number) {
+    super(message);
+    this.exitCode = exitCode;
+  }
+}
 
 class ExecError extends Error {
   readonly command: string;
@@ -483,50 +469,62 @@ const TOOL_ARG_FIELDS: Record<string, string> = {
   Agent: "description",
 };
 
-export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
-  if (!line.startsWith("{")) return [];
+// A line that is not a complete JSON object is transport, not agent speech.
+// Once JSON parsing succeeds, provider-specific shape errors propagate from
+// the parser that understands that provider's contract (#83).
+const parseTransportJson = (
+  line: string,
+): Record<string, unknown> | undefined => {
+  if (!line.startsWith("{")) return undefined;
   try {
-    // JSON.parse yields `any`; the upstream parser is intentionally untyped.
-    const obj = JSON.parse(line) as any;
-    if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
-      const events: ParsedStreamEvent[] = [];
-      const texts: string[] = [];
-      for (const block of obj.message.content) {
-        if (block.type === "text" && typeof block.text === "string") {
-          texts.push(block.text);
-        } else if (
-          block.type === "tool_use" &&
-          typeof block.name === "string" &&
-          block.input !== undefined
-        ) {
-          const argField = TOOL_ARG_FIELDS[block.name];
-          if (argField === undefined) continue;
-          const argValue = block.input[argField];
-          if (typeof argValue !== "string") continue;
-          if (texts.length > 0) {
-            events.push({ type: "text", text: texts.join("") });
-            texts.length = 0;
-          }
-          events.push({ type: "tool_call", name: block.name, args: argValue });
+    return JSON.parse(line);
+  } catch (err) {
+    if (err instanceof SyntaxError) return undefined;
+    throw err;
+  }
+};
+
+export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
+  const parsed = parseTransportJson(line);
+  if (parsed === undefined) return [];
+  // JSON.parse yields `any`; the upstream parser is intentionally untyped.
+  const obj = parsed as any;
+  if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
+    const events: ParsedStreamEvent[] = [];
+    const texts: string[] = [];
+    for (const block of obj.message.content) {
+      if (block.type === "text" && typeof block.text === "string") {
+        texts.push(block.text);
+      } else if (
+        block.type === "tool_use" &&
+        typeof block.name === "string" &&
+        block.input !== undefined
+      ) {
+        const argField = TOOL_ARG_FIELDS[block.name];
+        if (argField === undefined) continue;
+        const argValue = block.input[argField];
+        if (typeof argValue !== "string") continue;
+        if (texts.length > 0) {
+          events.push({ type: "text", text: texts.join("") });
+          texts.length = 0;
         }
+        events.push({ type: "tool_call", name: block.name, args: argValue });
       }
-      if (texts.length > 0) {
-        events.push({ type: "text", text: texts.join("") });
-      }
-      return events;
     }
-    if (obj.type === "result" && typeof obj.result === "string") {
-      return [{ type: "result", result: obj.result }];
+    if (texts.length > 0) {
+      events.push({ type: "text", text: texts.join("") });
     }
-    if (
-      obj.type === "system" &&
-      obj.subtype === "init" &&
-      typeof obj.session_id === "string"
-    ) {
-      return [{ type: "session_id", sessionId: obj.session_id }];
-    }
-  } catch {
-    // Stream lines are routinely partial; swallow → [], never throw.
+    return events;
+  }
+  if (obj.type === "result" && typeof obj.result === "string") {
+    return [{ type: "result", result: obj.result }];
+  }
+  if (
+    obj.type === "system" &&
+    obj.subtype === "init" &&
+    typeof obj.session_id === "string"
+  ) {
+    return [{ type: "session_id", sessionId: obj.session_id }];
   }
   return [];
 };
@@ -591,7 +589,7 @@ export const claudeCode = (
 // `turn.failed` is the terminal one, arrives once, and carries the give-up
 // cause verbatim. It is the only `failure`, and the rest are transport: dropped
 // rather than degraded to text, because the accumulator holds the agent's
-// claim and a 401 read as a review defaults to CHANGES-REQUESTED (#41).
+// claim and transport must never be read as a review (#41, #83).
 //
 // That run exits 1, so a dead key lands on `invokeAgent`'s existing non-zero
 // path and is loud already. What the register buys is the CAUSE on that path —
@@ -625,42 +623,43 @@ const codexErrorMessage = (err: unknown): string => {
 };
 
 export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
-  if (!line.startsWith("{")) return [];
-  try {
-    // As in parseStreamJsonLine: the wire format is another process's, so it is
-    // read as `any` and every field is checked before it is believed.
-    const obj = JSON.parse(line) as any;
-    if (obj.type === "thread.started" && typeof obj.thread_id === "string") {
-      // Claude-shaped, and knowingly approximate: a codex THREAD is the unit
-      // `resume --last` reopens, which is what a session id is used for here.
-      return [{ type: "session_id", sessionId: obj.thread_id }];
+  const parsed = parseTransportJson(line);
+  if (parsed === undefined) return [];
+  // As in parseStreamJsonLine: the wire format is another process's, so it is
+  // read as `any` and every field is checked before it is believed.
+  const obj = parsed as any;
+  if (obj.type === "thread.started" && typeof obj.thread_id === "string") {
+    // Claude-shaped, and knowingly approximate: a codex THREAD is the unit
+    // `resume --last` reopens, which is what a session id is used for here.
+    return [{ type: "session_id", sessionId: obj.thread_id }];
+  }
+  // The one terminal shape (see above). The top-level `error` event and the
+  // `error` ITEM fall through to [] — they are what the CLI says while it is
+  // still trying.
+  if (obj.type === "turn.failed") {
+    return [{ type: "failure", message: codexErrorMessage(obj.error) }];
+  }
+  // Items are reported started → updated → completed; only the completed form
+  // is read, so a command's `aggregated_output` and an agent message's text
+  // are whole rather than a prefix that arrives again later.
+  if (
+    obj.type === "item.completed" &&
+    obj.item !== null &&
+    typeof obj.item === "object"
+  ) {
+    const item = obj.item;
+    if (item.type === "agent_message" && typeof item.text === "string") {
+      return [{ type: "text", text: item.text }];
     }
-    // The one terminal shape (see above). The top-level `error` event and the
-    // `error` ITEM fall through to [] — they are what the CLI says while it is
-    // still trying.
-    if (obj.type === "turn.failed") {
-      return [{ type: "failure", message: codexErrorMessage(obj.error) }];
+    // tool_call is informational (ignored on sandbar's path). Named after the
+    // codex item rather than mapped onto a Claude tool: the two vocabularies
+    // are not the same and a false equivalence would only mislead a reader.
+    if (item.type === "command_execution" && typeof item.command === "string") {
+      return [{ type: "tool_call", name: "command_execution", args: item.command }];
     }
-    // Items are reported started → updated → completed; only the completed form
-    // is read, so a command's `aggregated_output` and an agent message's text
-    // are whole rather than a prefix that arrives again later.
-    if (obj.type === "item.completed" && obj.item !== null && typeof obj.item === "object") {
-      const item = obj.item;
-      if (item.type === "agent_message" && typeof item.text === "string") {
-        return [{ type: "text", text: item.text }];
-      }
-      // tool_call is informational (ignored on sandbar's path). Named after the
-      // codex item rather than mapped onto a Claude tool: the two vocabularies
-      // are not the same and a false equivalence would only mislead a reader.
-      if (item.type === "command_execution" && typeof item.command === "string") {
-        return [{ type: "tool_call", name: "command_execution", args: item.command }];
-      }
-      if (item.type === "web_search" && typeof item.query === "string") {
-        return [{ type: "tool_call", name: "web_search", args: item.query }];
-      }
+    if (item.type === "web_search" && typeof item.query === "string") {
+      return [{ type: "tool_call", name: "web_search", args: item.query }];
     }
-  } catch {
-    // Stream lines are routinely partial; swallow → [], never throw.
   }
   return [];
 };
@@ -725,7 +724,6 @@ export type CodexOptions = {
 export const codex = (model: string, options?: CodexOptions): AgentProvider => ({
   name: "codex",
   env: options?.env ?? {},
-  parsedOutputOnly: true,
   buildPrintCommand({ prompt, dangerouslySkipPermissions }) {
     // Wanted on its own merits, not merely as the `--dangerously-skip-permissions`
     // analogue: codex's own sandbox is Landlock, which does not generally work
@@ -817,8 +815,8 @@ const runTeardowns = (): void => {
     teardownCallbacks.delete(teardown);
     try {
       teardown();
-    } catch {
-      // best-effort
+    } catch (err) {
+      console.error("Sandbox shutdown cleanup failed:", err);
     }
   }
 };
@@ -945,7 +943,10 @@ const execGit = (args: string[], cwd: string): Promise<string> =>
       { cwd, env: { ...process.env, LC_ALL: "C" }, maxBuffer: 16 * 1024 * 1024 },
       (error, stdout, stderr) => {
         if (error) {
-          reject(new WorktreeError(stderr?.trim() || error.message));
+          const exitCode = typeof (error as { code?: number }).code === "number"
+            ? (error as { code: number }).code
+            : undefined;
+          reject(new WorktreeError(stderr?.trim() || error.message, exitCode));
         } else {
           resolve(stdout);
         }
@@ -953,10 +954,13 @@ const execGit = (args: string[], cwd: string): Promise<string> =>
     );
   });
 
-const gitOrEmpty = (args: string[], cwd: string): Promise<string> =>
+const gitConfigOrEmpty = (args: string[], cwd: string): Promise<string> =>
   execGit(args, cwd)
     .then((s) => s.trim())
-    .catch(() => "");
+    .catch((err) => {
+      if (err instanceof WorktreeError && err.exitCode === 1) return "";
+      throw err;
+    });
 
 // ---------------------------------------------------------------------------
 // WorktreeManager — verbatim semantics from WorktreeManager.ts (no Effect)
@@ -1016,7 +1020,13 @@ const fastForwardFromOrigin = async (
   worktreePath: string,
   branch: string,
 ): Promise<void> => {
-  const headRef = await gitOrEmpty(["symbolic-ref", "--quiet", "HEAD"], worktreePath);
+  let headRef: string;
+  try {
+    headRef = (await execGit(["symbolic-ref", "--quiet", "HEAD"], worktreePath)).trim();
+  } catch (err) {
+    if (!(err instanceof WorktreeError) || err.exitCode !== 1) throw err;
+    headRef = "";
+  }
   if (headRef !== `refs/heads/${branch}`) {
     console.log(
       `Reusing worktree at ${worktreePath} (branch '${branch}') — HEAD is not on '${branch}', skipping origin refresh`,
@@ -1025,25 +1035,30 @@ const fastForwardFromOrigin = async (
   }
   try {
     await execGit([...NO_CONFIG_LOCK_FLAGS, "fetch", "origin", branch], worktreePath);
-  } catch {
-    console.log(
-      `Could not fetch from origin (reusing worktree at ${worktreePath} as-is, branch '${branch}')`,
+  } catch (err) {
+    if (
+      err instanceof WorktreeError &&
+      err.exitCode === 128 &&
+      err.message.includes(`couldn't find remote ref ${branch}`)
+    ) {
+      return;
+    }
+    throw new WorktreeError(
+      `Could not fetch origin/${branch} while reusing ${worktreePath}: ${(err as Error).message}`,
     );
-    return;
   }
-  const before = await gitOrEmpty(["rev-parse", "HEAD"], worktreePath);
+  const before = (await execGit(["rev-parse", "HEAD"], worktreePath)).trim();
   try {
     await execGit(
       [...NO_CONFIG_LOCK_FLAGS, "merge", "--ff-only", `origin/${branch}`],
       worktreePath,
     );
-  } catch {
-    console.log(
-      `Branch '${branch}' has diverged from origin (reusing worktree at ${worktreePath} as-is)`,
+  } catch (err) {
+    throw new WorktreeError(
+      `Branch '${branch}' could not fast-forward to origin while reusing ${worktreePath}: ${(err as Error).message}`,
     );
-    return;
   }
-  const after = await gitOrEmpty(["rev-parse", "HEAD"], worktreePath);
+  const after = (await execGit(["rev-parse", "HEAD"], worktreePath)).trim();
   if (before && after && before !== after) {
     console.log(
       `Fast-forwarded worktree at ${worktreePath} (branch '${branch}') to origin/${branch}`,
@@ -1151,7 +1166,7 @@ const pruneStale = (repoDir: string, worktreesDir: string): Promise<void> =>
         if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
         throw new WorktreeError((e as Error).message);
       }
-      const realWorktreesDir = await realpath(worktreesDir).catch(() => worktreesDir);
+      const realWorktreesDir = await realpath(worktreesDir);
       const worktreeList = await execGit(
         ["worktree", "list", "--porcelain"],
         repoDir,
@@ -1168,8 +1183,12 @@ const pruneStale = (repoDir: string, worktreesDir: string): Promise<void> =>
         let isDir = false;
         try {
           isDir = (await stat(entryPath)).isDirectory();
-        } catch {
-          isDir = false;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+            isDir = false;
+          } else {
+            throw err;
+          }
         }
         if (isDir && !activePaths.has(normalizePath(entryPath))) {
           await rm(entryPath, { recursive: true, force: true }).catch((err) => {
@@ -1439,8 +1458,8 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
             stdio: "ignore",
             timeout: 5000,
           });
-        } catch {
-          // best-effort
+        } catch (err) {
+          console.error(`Failed to remove sandbox container ${containerName}:`, err);
         }
       };
       const unregisterShutdown = registerShutdown(removeContainerSync);
@@ -1620,14 +1639,13 @@ const invokeAgent = (
   agent: AgentProvider,
   idleTimeoutMs: number,
   completionTimeoutMs: number,
-  completionSignals: string[],
-  // Elapsed-since-`run()`, so the reported `signalMs` is on the same clock
-  // across iterations rather than restarting with each one (#82).
+  completionSignals: readonly string[],
+  // Elapsed since `run()` began, which is the instant `signalMs` records (#82).
   elapsed: () => number,
-): Promise<{ result: string; signalMs?: number }> =>
+): Promise<{ result: string; signalMs?: number; maxGapMs: number }> =>
   new Promise((resolveRun, rejectRun) => {
-    const speech = createAgentSpeechAccumulator(agent);
-    let completionDetected = false;
+    const speech = createAgentSpeechAccumulator();
+    let matchedSignal: string | undefined;
     let signalMs: number | undefined;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
@@ -1635,6 +1653,7 @@ const invokeAgent = (
     // (#41). One controller per agent run, so the listener it installs on the
     // exec cannot outlive the run that made it.
     const abort = new AbortController();
+    const gaps = startGapTimer();
 
     const clearTimer = (): void => {
       if (timer !== null) {
@@ -1642,7 +1661,11 @@ const invokeAgent = (
         timer = null;
       }
     };
-    const settleResolve = (val: { result: string; signalMs?: number }): void => {
+    const settleResolve = (val: {
+      result: string;
+      signalMs?: number;
+      maxGapMs: number;
+    }): void => {
       if (settled) return;
       settled = true;
       clearTimer();
@@ -1660,8 +1683,8 @@ const invokeAgent = (
     };
 
     // Two-phase: pre-signal → idle kill timer; post-signal → completion-grace
-    // timer that resolves SUCCESSFULLY with the collected output (the agent has
-    // signalled but a child may be holding the stdout pipe open past EOF).
+    // timer that rejects: announcing completion without exiting is an
+    // infrastructure failure, not a clean result (#83).
     const resetTimer = (): void => {
       // Nothing is waiting any more, so nothing should be armed: `onLine` still
       // fires after a settle (readline flushes its trailing partial line as the
@@ -1672,17 +1695,19 @@ const invokeAgent = (
       // waiting for" thought as the abort below.
       if (settled) return;
       clearTimer();
-      if (completionDetected) {
+      if (matchedSignal !== undefined) {
         timer = setTimeout(() => {
           // Settle FIRST, then abort: the abort makes the exec resolve, and
           // settling first is what makes that resolution a no-op instead of a
           // race with this one. The agent has already emitted its completion
           // signal and whatever is still holding the pipe open is producing
           // output nobody will read, so there is nothing here worth waiting on.
-          settleResolve({
-            result: speech.spoken,
-            ...(signalMs === undefined ? {} : { signalMs }),
-          });
+          settleReject(
+            new AgentError(
+              `${agent.name} emitted completion signal ${JSON.stringify(matchedSignal)} at ` +
+                `${signalMs}ms, then produced no output for ${completionTimeoutMs}ms without exiting.`,
+            ),
+          );
           abort.abort();
         }, completionTimeoutMs);
       } else {
@@ -1716,12 +1741,23 @@ const invokeAgent = (
         stdin: printCmd.stdin,
         signal: abort.signal,
         onLine: (line) => {
-          speech.ingest(agent.parseStreamLine(line));
-          if (
-            !completionDetected &&
-            completionSignals.some((sig) => speech.accumulated.includes(sig))
-          ) {
-            completionDetected = true;
+          gaps.line();
+          try {
+            speech.ingest(agent.parseStreamLine(line));
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            settleReject(
+              new AgentError(`${agent.name} stream parse failed on a JSON line: ${detail}`),
+            );
+            abort.abort();
+            return;
+          }
+          if (matchedSignal === undefined) {
+            matchedSignal = completionSignals.find((sig) =>
+              speech.accumulated.includes(sig),
+            );
+          }
+          if (matchedSignal !== undefined && signalMs === undefined) {
             // Read here rather than in the grace timer: this is the instant the
             // agent said it was done, and the timer fires up to a minute later.
             signalMs = elapsed();
@@ -1754,14 +1790,6 @@ const invokeAgent = (
           );
           return;
         }
-        // Parsed accumulated speech sits between the two for #72. The grace
-        // path above already settles on the accumulator's speech, so
-        // without it the two settle paths disagreed about the same run: a
-        // provider that emits assistant text but no terminal `result` event
-        // returned its PARSED speech when the completion timer fired and the
-        // raw stream when the exec merely exited. Codex is that provider on
-        // every run — it has no `result` event — and for it the raw stream is
-        // not a degraded answer but a wrong one (see `parsedOutputOnly`).
         const spoken = speech.spoken;
         // A process that exited 0 having ANNOUNCED a terminal failure, and said
         // nothing else, did not answer — #67's rule for the resolve loop, held
@@ -1794,7 +1822,8 @@ const invokeAgent = (
           return;
         }
         settleResolve({
-          result: speech.output(execResult.stdout),
+          result: speech.spoken,
+          maxGapMs: gaps.finish(),
           ...(signalMs === undefined ? {} : { signalMs }),
         });
       })
@@ -1816,8 +1845,8 @@ export const prepareWorktree = async (
 ): Promise<string> => {
   const { repoDir, worktreesDir, hostCwd } = options.layout;
 
-  await pruneStale(repoDir, worktreesDir).catch(() => {
-    // best-effort
+  await pruneStale(repoDir, worktreesDir).catch((err) => {
+    console.error("Stale-worktree sweep failed (continuing):", err);
   });
 
   const { path: worktreePath } = await worktreeCreate(
@@ -1840,7 +1869,11 @@ export const prepareWorktree = async (
       await runHostHooks(options.hooks.host.onWorktreeReady, worktreePath);
     }
   } catch (e) {
-    await worktreeRemove(repoDir, worktreePath).catch(() => {});
+    try {
+      await worktreeRemove(repoDir, worktreePath);
+    } catch (cleanupError) {
+      console.error("Failed to remove worktree after setup failure:", cleanupError);
+    }
     throw e;
   }
   return worktreePath;
@@ -1935,7 +1968,11 @@ export const createSandbox = async (
         await Promise.all(effects);
       }
     } catch (e) {
-      await providerHandle.close().catch(() => {});
+      try {
+        await providerHandle.close();
+      } catch (cleanupError) {
+        console.error("Failed to close provider after sandbox setup failure:", cleanupError);
+      }
       throw e;
     }
   } catch (e) {
@@ -1944,7 +1981,13 @@ export const createSandbox = async (
     // caller, who may be concurrently bind-mounting from it (the gate stack's
     // mounts); deleting it here would corrupt that bringup's error into a
     // bogus missing-mount-source failure (#20).
-    if (!prepared) await worktreeRemove(repoDir, worktreePath).catch(() => {});
+    if (!prepared) {
+      try {
+        await worktreeRemove(repoDir, worktreePath);
+      } catch (cleanupError) {
+        console.error("Failed to remove worktree after sandbox failure:", cleanupError);
+      }
+    }
     throw e;
   }
 
@@ -1962,12 +2005,13 @@ export const createSandbox = async (
     prompt: string | undefined,
     idleTimeoutMs: number,
     completionTimeoutMs: number,
-    completionSignals: string[],
+    completionSignals: readonly string[],
     elapsed: () => number,
   ): Promise<{
     result: string;
     commits: { sha: string }[];
     signalMs?: number;
+    maxGapMs: number;
   }> => {
     // Read host git identity, then propagate into the sandbox. safe.directory
     // is set per-run (load-bearing: bind mount is owned by a different UID and
@@ -1977,8 +2021,8 @@ export const createSandbox = async (
     // none of it. Reading the cache would silently substitute the global
     // identity for a repo-local one.
     const [hostGitName, hostGitEmail] = await Promise.all([
-      gitOrEmpty(["config", "user.name"], hostCwd),
-      gitOrEmpty(["config", "user.email"], hostCwd),
+      gitConfigOrEmpty(["config", "user.name"], hostCwd),
+      gitConfigOrEmpty(["config", "user.email"], hostCwd),
     ]);
 
     await sandboxGitSetup(
@@ -2015,14 +2059,13 @@ export const createSandbox = async (
     // the branch, the rescued commits are counted, which is what every consumer
     // of this list already assumes it is looking at.
     //
-    // Falls back to the worktree HEAD if the ref is unreadable; ensureIssueBranch
-    // has created it by now, so this is belt-and-braces rather than a real path.
+    // ensureIssueBranch created this ref. Its absence is infrastructure failure,
+    // never permission to change the commit range's meaning (#83).
     const baseHead = (
       await execGit(["rev-parse", "--verify", `refs/heads/${branch}`], repoDir)
-        .catch(() => execGit(["rev-parse", "HEAD"], worktreePath))
     ).trim();
 
-    const { result, signalMs } = await invokeAgent(
+    const { result, signalMs, maxGapMs } = await invokeAgent(
       providerHandle,
       sandboxRepoDir,
       prompt,
@@ -2034,24 +2077,22 @@ export const createSandbox = async (
     );
 
     // Explicit-branch commit capture: fully-qualified ref, the cache repo,
-    // --reverse (oldest-first). Missing branch / zero commits → []. Never throw.
+    // --reverse (oldest-first). Zero commits is an empty list; git faults throw.
     const commits = await withTimeout(
       execGit(
         ["rev-list", `${baseHead}..refs/heads/${branch}`, "--reverse"],
         repoDir,
-      )
-        .then((out) => {
+      ).then((out) => {
           const trimmed = out.trim();
           if (!trimmed) return [] as { sha: string }[];
           return trimmed.split("\n").map((sha) => ({ sha }));
-        })
-        .catch(() => [] as { sha: string }[]),
+        }),
       COMMIT_COLLECTION_TIMEOUT_MS,
       () =>
         new Error(`Commit collection timed out after ${COMMIT_COLLECTION_TIMEOUT_MS}ms`),
     );
 
-    return { result, commits, ...(signalMs === undefined ? {} : { signalMs }) };
+    return { result, commits, maxGapMs, ...(signalMs === undefined ? {} : { signalMs }) };
   };
 
   return {
@@ -2059,51 +2100,25 @@ export const createSandbox = async (
     worktreePath,
     containerName: providerHandle.containerName,
     async run(o) {
-      const iterations = o.maxIterations ?? 1;
-      const completionSignals =
-        o.completionSignal === undefined
-          ? [DEFAULT_COMPLETION_SIGNAL]
-          : Array.isArray(o.completionSignal)
-            ? o.completionSignal
-            : [o.completionSignal];
       const idleTimeoutMs =
         (o.idleTimeoutSeconds ?? DEFAULT_IDLE_TIMEOUT_SECONDS) * 1000;
       const completionTimeoutMs =
         (o.completionTimeoutSeconds ?? DEFAULT_COMPLETION_TIMEOUT_SECONDS) * 1000;
 
-      const allCommits: { sha: string }[] = [];
-      let allStdout = "";
-      let matchedSignal: string | undefined;
-      // One clock for the whole call, so an iteration's `signalMs` is elapsed
-      // since `run()` began and not since that iteration did (#82).
-      const elapsed = startTimer();
-      let signalMs: number | undefined;
-
-      for (let i = 1; i <= iterations; i++) {
-        const iter = await runOneIteration(
-          o.agent,
-          o.prompt,
-          idleTimeoutMs,
-          completionTimeoutMs,
-          completionSignals,
-          elapsed,
-        );
-        allCommits.push(...iter.commits);
-        allStdout += iter.result;
-        if (iter.signalMs !== undefined) signalMs = iter.signalMs;
-        const found = completionSignals.find((s) => iter.result.includes(s));
-        if (found !== undefined) {
-          matchedSignal = found;
-          break;
-        }
-      }
+      const iter = await runOneIteration(
+        o.agent,
+        o.prompt,
+        idleTimeoutMs,
+        completionTimeoutMs,
+        o.completionSignal,
+        startTimer(),
+      );
 
       return {
-        stdout: allStdout,
-        commits: allCommits,
-        iterations: [],
-        completionSignal: matchedSignal,
-        ...(signalMs === undefined ? {} : { signalMs }),
+        stdout: iter.result,
+        commits: iter.commits,
+        maxGapMs: iter.maxGapMs,
+        ...(iter.signalMs === undefined ? {} : { signalMs: iter.signalMs }),
       };
     },
     async close() {
@@ -2111,11 +2126,11 @@ export const createSandbox = async (
       closed = true;
       unregisterShutdown();
       await providerHandle.close();
-      const dirty = await hasUncommittedChanges(worktreePath).catch(() => false);
+      const dirty = await hasUncommittedChanges(worktreePath);
       if (dirty) {
         return { preservedWorktreePath: worktreePath };
       }
-      await worktreeRemove(repoDir, worktreePath).catch(() => {});
+      await worktreeRemove(repoDir, worktreePath);
       return { preservedWorktreePath: undefined };
     },
   };

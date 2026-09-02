@@ -40,17 +40,17 @@ Sandbar always passes an explicit, already-existing `branch`:
        refresh.
      - **Clean**: call `fastForwardFromOrigin(path, branch)` (F6, baseline) —
        `git fetch origin <branch>` then `git merge --ff-only origin/<branch>`, so a
-       reused worktree isn't stale after origin moves. It **skips silently** (with
-       an explanatory `console.log`) in three cases: (a) HEAD is **not** attached
-       to `<branch>` — a mid-rebase worktree paused at an `edit`/`break` has a
-       clean tree but detached HEAD, and `--ff-only` there would advance past the
-       pause and break `rebase --continue`; (b) the fetch fails (no `origin`,
-       offline, branch missing); (c) the branch has **diverged** (`--ff-only`
-       refuses, preserving unpushed work). It **never** `reset --hard`s — that
-       would destroy accumulated ralph-loop commits ([06 §D](./06-test-derived-gotchas.md)).
-       Sandbar largely dodges all this (it pre-seeds via `ensureIssueBranch` and
-       disposes the sandbox per cycle), so F6 is **optional** for the port — but
-       if implemented, gate it exactly as above. Details:
+       reused worktree isn't stale after origin moves. The sandbar port skips the
+       refresh when HEAD is **not** attached to `<branch>` — a mid-rebase worktree
+       paused at an `edit`/`break` has a clean tree but detached HEAD, and
+       `--ff-only` there would advance past the pause and break
+       `rebase --continue`. It also classifies fetch exit 128 plus the exact
+       `couldn't find remote ref <branch>` message as a local-only branch and
+       returns. Every other fetch failure and a refused `--ff-only` merge throw:
+       those are cache faults, not permission to continue from stale or diverged
+       state. It **never** `reset --hard`s — that would destroy accumulated
+       ralph-loop commits ([06 §D](./06-test-derived-gotchas.md)). Upstream's
+       broader best-effort policy is recorded separately in
        [07 §F6](./07-upstream-fixes-since-0.5.12.md).
    - If found but **unmanaged** (main working tree or external worktree): throw
      `Branch '<branch>' is already checked out in worktree at '<path>'...`.
@@ -86,7 +86,9 @@ Derives `repoDir = join(worktreePath, "..", "..", "..")` (relies on the
 3. `realPath` the worktrees dir (so symlinked repo roots still match git's
    canonicalised `git worktree list --porcelain` output).
 4. For each entry dir not in the active-worktree set: `rm -rf`.
-5. 30 s timeout. Called best-effort (`catchAll`) at `createSandbox` start.
+5. 30 s timeout. At sandbox start, a sweep failure is reported and the current
+   worktree creation continues because stale-directory hygiene says nothing
+   about whether that worktree can be created.
 
 > Sandbar additionally has its own preflight/orphan cleanup in
 > `src/preflight.ts` and `src/containers.ts` — `pruneStale` is the agent-sandbox

@@ -117,24 +117,17 @@ session capture), so the port may omit it.
      (`accumulatedOutput`, fed by `text` + `result` events) is scanned for any
      `completionSignal`; the first match flips `completionDetected = true` and
      kills the warning fiber.
-   - **Post-signal (completion-grace) phase** — `resetTimer` now arms
-     `Effect.sleep(completionTimeoutMs)` then **`Deferred.succeed`** with
-     `{ result: resultText || accumulatedOutput, sessionId, usage }`. Default
-     `completionTimeoutMs = 60_000` (`DEFAULT_COMPLETION_TIMEOUT_SECONDS = 60`).
-     Resolving (not failing) hands control back to the orchestrator with the
-     buffered output — which still contains the signal — so the run **succeeds
-     with commits intact**. The timer still resets on each further line, so
-     trailing data (token-usage events, a terminal `result` event) is captured.
+   - **Post-signal (completion-grace) phase** — `resetTimer` arms a timer for
+     `completionTimeoutMs` (default 60,000). Expiry rejects with an `AgentError`
+     naming the matched signal and attaches the partial parsed speech. The timer
+     still resets on each further line, so trailing events are captured.
    - **Why this exists (the F5 fix, now baseline).** If the agent emits
      `<promise>COMPLETE</promise>` but a child it spawned (`gh`/`git`, an MCP
      server) holds the exec stdout pipe open, the parent never hits EOF. Without
-     the grace phase the run would wait the **full 600 s** and fail with
-     `AgentIdleTimeoutError`, **discarding the commits already made** — a finished
-     attempt becomes NEEDS-HUMAN. This is iteration-count-independent, so
-     `maxIterations: 1` does not dodge it. A clean process exit always wins the
-     race against the grace timer, so healthy runs add **zero** latency. The port
-     must keep both phases and the warning fiber, and clear them all on
-     completion (`Effect.ensuring`). See [07 §F5](./07-upstream-fixes-since-0.5.12.md).
+     the grace phase the run would wait the **full 600 s**. A process that says
+     it is complete but does not exit is infrastructure failure, not a clean
+     result. A clean process exit wins the race, so healthy runs add zero
+     latency. See [07 §F5](./07-upstream-fixes-since-0.5.12.md).
 5. **Abort**: if a `signal` is provided, a `Deferred.die(signal.reason)` races
    the exec. Sandbar passes no signal.
 6. On exec completion:
@@ -142,23 +135,17 @@ session capture), so the port may omit it.
      `"<provider> exited with code <N>:\n<detail>"` where `detail` =
      `stderr` || `resultText` || the last 20 non-empty stdout lines
      (`Orchestrator.ts`, the non-zero-exit branch). The race/timer cleanup runs via `ensuring`.
-   - **Zero exit** → return `{ result: resultText || execResult.stdout, sessionId }`.
-     I.e. if a `result` stream event was seen, that string is the output;
-     otherwise the raw joined stdout.
+   - **Zero exit** → return parsed agent speech. Raw JSONL transport is never a
+     fallback answer.
 
-The orchestrator then sets `lifecycleResult.result.stdout = result` and, after
-the lifecycle returns, `allStdout += result.stdout`. So **`run().stdout` is the
-`result` event text when present, else the raw stdout** — this is what sandbar
-feeds to `promise-parser.ts` / `verdict-parser.ts`.
+`run().stdout` is parsed agent speech, which sandbar feeds to
+`promise-parser.ts` / `verdict-parser.ts`.
 
 ## Completion signal
 
-`Orchestrator.ts`, `DEFAULT_COMPLETION_SIGNAL`. Default completion signal is the literal string
-`"<promise>COMPLETE</promise>"`; the loop stops early if `agentOutput.includes`
-it. Sandbar does **not** rely on this (it runs one iteration and parses the
-`<promise>` token itself), but the default matches sandbar's promise-token
-contract, so a faithful port should keep `"<promise>COMPLETE</promise>"` as the
-default completion signal even though it's moot at `maxIterations: 1`.
+Every caller supplies a signal list explicitly. Implementer calls watch its
+three full promise tokens; reviewer calls pass `[]`, so only process exit or
+idle timeout ends their runs. There is no default role contract.
 
 ## Reimplementation notes
 
@@ -167,8 +154,7 @@ default completion signal even though it's moot at `maxIterations: 1`.
   buffering across a tool_use), allowlisted vs non-allowlisted tool_use, the
   `result` event, the `system/init` session_id event, partial/non-JSON lines
   (→ `[]`), and the empty-string line.
-- The `result || stdout` fallback for `run.stdout` is load-bearing — sandbar's
-  parsers assume the agent's final prose is in `stdout`.
+- Only parsed speech reaches `run.stdout`; raw transport is never substituted.
 - Keep the idle-timeout reset-on-line behaviour; a hung `claude` with no output
   must eventually error rather than block the cycle forever (sandbar's
   HARD-ERROR retry depends on the call returning/throwing).

@@ -235,7 +235,7 @@ describe("renderReviewerSlot", () => {
     });
     expect(slot).toContain("<verdict>APPROVED</verdict>");
     expect(slot).toContain("<verdict>CHANGES-REQUESTED</verdict>");
-    expect(slot).toMatch(/missing verdict defaults to CHANGES-REQUESTED/i);
+    expect(slot).toMatch(/missing verdict is a failed reviewer invocation/i);
   });
 
   it("never carries prior-round transcript fields (statelessness)", () => {

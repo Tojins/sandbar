@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { containsVerdictToken, parseVerdict } from "./verdict-parser.js";
+import { parseVerdict } from "./verdict-parser.js";
 
 describe("parseVerdict", () => {
   it("returns APPROVED when a single APPROVED token is present", () => {
@@ -16,10 +16,8 @@ describe("parseVerdict", () => {
     expect(r.verdict).toBe("CHANGES-REQUESTED");
   });
 
-  it("defaults to CHANGES-REQUESTED when no verdict tag is present", () => {
-    const r = parseVerdict("I think this is fine actually");
-    expect(r.verdict).toBe("CHANGES-REQUESTED");
-    expect(r.prose).toBe("I think this is fine actually");
+  it("reports absence when no verdict tag is present", () => {
+    expect(parseVerdict("I think this is fine actually")).toBeNull();
   });
 
   it("defaults to CHANGES-REQUESTED on unknown token", () => {
@@ -52,6 +50,12 @@ describe("parseVerdict", () => {
     expect(r.verdict).toBe("CHANGES-REQUESTED");
   });
 
+  it("answers consistently across repeated parses", () => {
+    const stdout = "x<verdict>APPROVED</verdict>";
+    parseVerdict(stdout);
+    expect(parseVerdict(stdout)?.verdict).toBe("APPROVED");
+  });
+
   it("accepts verdict tags interleaved with prose", () => {
     const r = parseVerdict(
       "## Findings\n- naming nit in foo.ts\n- missing test for bar\n\n<verdict>CHANGES-REQUESTED</verdict>\n\n(End of review.)",
@@ -61,41 +65,12 @@ describe("parseVerdict", () => {
     expect(r.prose).toContain("missing test");
   });
 
-  it("rejects malformed: unclosed tag → defaults to CHANGES-REQUESTED", () => {
-    const r = parseVerdict("<verdict>APPROVED");
-    expect(r.verdict).toBe("CHANGES-REQUESTED");
+  it("reports an unclosed tag as absent", () => {
+    expect(parseVerdict("<verdict>APPROVED")).toBeNull();
   });
 
   it("rejects malformed: mismatched casing → defaults to CHANGES-REQUESTED", () => {
     const r = parseVerdict("<verdict>approved</verdict>");
     expect(r.verdict).toBe("CHANGES-REQUESTED");
-  });
-
-});
-
-describe("containsVerdictToken (#41)", () => {
-  it("is true for any well-formed token, whatever it says", () => {
-    expect(containsVerdictToken("<verdict>APPROVED</verdict>")).toBe(true);
-    expect(containsVerdictToken("prose\n<verdict>CHANGES-REQUESTED</verdict>\n")).toBe(true);
-    // A malformed token is still a decision the reviewer reached; parseVerdict
-    // reads it as CHANGES-REQUESTED, which is a verdict and not a harness fault.
-    expect(containsVerdictToken("<verdict>approved</verdict>")).toBe(true);
-    expect(containsVerdictToken("<verdict></verdict>")).toBe(true);
-  });
-
-  it("is false for prose that never reached a token", () => {
-    expect(containsVerdictToken("")).toBe(false);
-    expect(containsVerdictToken("Let me read the diff first.")).toBe(false);
-    expect(containsVerdictToken("<verdict>APPROVED")).toBe(false);
-  });
-
-  it("answers the same on repeated calls", () => {
-    // The literal is /g, so a shared regex object would advance lastIndex and
-    // answer false on the second call with the same input.
-    const s = "x<verdict>APPROVED</verdict>";
-    expect(containsVerdictToken(s)).toBe(true);
-    expect(containsVerdictToken(s)).toBe(true);
-    // And parseVerdict must still see it after those reads.
-    expect(parseVerdict(s).verdict).toBe("APPROVED");
   });
 });

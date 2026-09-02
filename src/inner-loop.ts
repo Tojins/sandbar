@@ -28,6 +28,9 @@
 // substituting prose. The implementer prompt also receives the configured
 // coding-standards path here; prompt.ts probes it in the issue worktree so a
 // branch can introduce the standards it is expected to follow (#78).
+// A catch may only classify one named expected condition checked explicitly,
+// clean up on failure while preserving the original error, or report a failed
+// best-effort teardown whose result is unrelated to the issue verdict (#83).
 
 import { join } from "node:path";
 
@@ -69,7 +72,7 @@ import {
 } from "./inner-loop-machine.js";
 import type { AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
-import { parsePromise } from "./promise-parser.js";
+import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
 import { loadTemplate } from "./prompts.js";
 import {
   type SandboxContainerStatus,
@@ -617,8 +620,8 @@ async function runSandboxCycle(
     if (sandbox) {
       try {
         await sandbox.close();
-      } catch {
-        // ignore
+      } catch (err) {
+        console.error("Failed to close agent sandbox:", err);
       }
     }
   }
@@ -689,9 +692,9 @@ async function runImplementer(
   const implementerTimer = startTimer();
   const run = await sandbox.run({
     name: `implementer-${issue.id}-attempt-${action.attempt}`,
-    maxIterations: 1,
     agent: buildAgentProvider(config.implementerAgent, config.implementerModelId),
     prompt,
+    completionSignal: PROMISE_COMPLETION_SIGNALS,
   });
   if (opts.attemptLogger) {
     await opts.attemptLogger.writeAttempt(issue.id, action.attempt, run.stdout);
@@ -727,15 +730,15 @@ async function runImplementer(
   // sandbox): a container that cannot run a one-line follow-up cannot run the
   // next attempt either, and swallowing it would hide the infra fault.
   if (signal.kind === "NO-SIGNAL" && signal.missingTag) {
+    const nudgeTimer = startTimer();
     const nudge = await sandbox.run({
       name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
-      maxIterations: 1,
       agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
         continueSession: true,
       }),
       prompt: PROMISE_NUDGE_TPL,
       // Any of the three tags ends the wait, not just COMPLETE.
-      completionSignal: "</promise>",
+      completionSignal: PROMISE_COMPLETION_SIGNALS,
     });
     accumulated.push(...nudge.commits);
     const combined = `${run.stdout}\n${nudge.stdout}`;
@@ -751,7 +754,9 @@ async function runImplementer(
     }
     if (opts.onOrchestratorLog) {
       await opts.onOrchestratorLog(
-        `issue=${issue.id} attempt=${action.attempt} promise-nudge signal=${signal.kind}`,
+        `issue=${issue.id} attempt=${action.attempt} promise-nudge signal=${signal.kind} ` +
+          `${durationField(nudgeTimer())}` +
+          ` maxGapMs=${nudge.maxGapMs}`,
       );
     }
   }
@@ -779,10 +784,11 @@ async function runImplementer(
       `issue=${issue.id} attempt=${action.attempt} implementer ` +
         `signal=${signal.kind} commits=${run.commits.length} ` +
         `${durationField(implementerMs)}` +
-        // Absent when the agent never emitted `<promise>COMPLETE</promise>` —
-        // it escalated, it was killed idle, or the exec simply ended. Omitted
-        // rather than zeroed (#82).
-        (run.signalMs === undefined ? "" : ` signalMs=${run.signalMs}`),
+        // Absent when parsed speech carried none of the three promise tokens —
+        // for example, an idle kill or a plain process exit. Omitted rather
+        // than zeroed (#82).
+        (run.signalMs === undefined ? "" : ` signalMs=${run.signalMs}`) +
+        ` maxGapMs=${run.maxGapMs}`,
     );
   }
   return { kind: "implementer-result", signal, dirtyPaths, offBranch };
@@ -855,14 +861,14 @@ async function runReviewer(
       // the same reason — the number is meaningless without knowing which model
       // spent it, and both are per-call config a stats reader cannot recover.
       const passTimer = startTimer();
-      const logPass = async (signalMs: number | undefined): Promise<void> => {
+      const logPass = async (maxGapMs: number | undefined): Promise<void> => {
         if (!opts.onOrchestratorLog) return;
         await opts.onOrchestratorLog(
           `issue=${issue.id} attempt=${action.attempt} reviewer ` +
             `round=${action.reviewRound} pass=${pass} invocation=${invocation} ` +
             `provider=${config.reviewerAgent} model=${modelId} ` +
             `${durationField(passTimer())}` +
-            (signalMs === undefined ? "" : ` signalMs=${signalMs}`),
+            (maxGapMs === undefined ? "" : ` maxGapMs=${maxGapMs}`),
         );
       };
       try {
@@ -870,15 +876,17 @@ async function runReviewer(
           name:
             `reviewer-${issue.id}-round-${action.reviewRound}-${pass}` +
             (invocation > 1 ? `-invocation-${invocation}` : ""),
-          maxIterations: 1,
           agent: buildAgentProvider(config.reviewerAgent, modelId, {
             // Only the first follow-up invocation resumes correctness. Any
             // rerun is cold: a crashed follow-up may itself now be "last".
             continueSession: continueReviewerSession(pass, invocation),
           }),
           prompt,
+          // A reviewer owns no completion signal. Process exit is the honest
+          // end of its single artefact; inherited role contracts are banned.
+          completionSignal: [],
         });
-        await logPass(reviewerRun.signalMs);
+        await logPass(reviewerRun.maxGapMs);
         return { output: reviewerRun.stdout, error: null };
       } catch (err) {
         // A failed invocation is timed too: an invocation that burned the ten

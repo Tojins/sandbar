@@ -71,7 +71,7 @@ export type AgentProviderPackage = {
 // Both packages are pinned because a generated RUN instruction would otherwise
 // remain byte-identical and freeze whichever version first entered the layer
 // cache. Codex's pin is additionally co-versioned with parseCodexJsonLine: its
-// JSONL dialect is load-bearing under parsedOutputOnly, so a parser change and
+// JSONL dialect is load-bearing, so a parser change and
 // a CLI change belong to the same driver release.
 export const AGENT_PROVIDER_PACKAGES: Readonly<
   Record<AgentProviderName, AgentProviderPackage>

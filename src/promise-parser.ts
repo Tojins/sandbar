@@ -33,6 +33,21 @@ export type ParseContext = {
   readonly commitsAccumulated: number;
 };
 
+export const PROMISE_TOKENS = {
+  COMPLETE: "COMPLETE",
+  NEEDS_INFO: "NEEDS-INFO",
+  NEEDS_UI_PROTOTYPE: "NEEDS-UI-PROTOTYPE",
+} as const;
+
+// The parser owns the implementer's token contract. The sandbox completion
+// watch consumes these same renderings so adding or renaming a parsed token
+// cannot silently leave the process bound by the idle timeout instead (#83).
+export const PROMISE_COMPLETION_SIGNALS = [
+  `<promise>${PROMISE_TOKENS.COMPLETE}</promise>`,
+  `<promise>${PROMISE_TOKENS.NEEDS_INFO}</promise>`,
+  `<promise>${PROMISE_TOKENS.NEEDS_UI_PROTOTYPE}</promise>`,
+] as const;
+
 const STILL_WORKING =
   "Still working. Emit `<promise>COMPLETE</promise>` when the implementation " +
   "is done and committed, `<promise>NEEDS-INFO</promise>` with a " +
@@ -80,14 +95,14 @@ export function parsePromise(
   const last = matches[matches.length - 1]!;
   const token = (last[1] ?? "").trim();
 
-  if (token === "COMPLETE") {
+  if (token === PROMISE_TOKENS.COMPLETE) {
     if (ctx.commitsAccumulated === 0) {
       return { kind: "NO-SIGNAL", reprompt: COMPLETE_NO_COMMITS };
     }
     return { kind: "COMPLETE" };
   }
 
-  if (token === "NEEDS-INFO") {
+  if (token === PROMISE_TOKENS.NEEDS_INFO) {
     const questions = lastBlock(stdout, "questions");
     if (!questions) {
       return { kind: "NO-SIGNAL", reprompt: NEEDS_INFO_NO_QUESTIONS };
@@ -95,7 +110,7 @@ export function parsePromise(
     return { kind: "NEEDS-INFO", questions };
   }
 
-  if (token === "NEEDS-UI-PROTOTYPE") {
+  if (token === PROMISE_TOKENS.NEEDS_UI_PROTOTYPE) {
     const uiImpact = lastBlock(stdout, "ui-impact");
     if (!uiImpact) {
       return { kind: "NO-SIGNAL", reprompt: NEEDS_UI_PROTOTYPE_NO_IMPACT };

@@ -44,12 +44,11 @@ export function createSandbox(options: {
 }): Promise<Sandbox>;
 ```
 
-`RunOptions` needs only what sandbar passes: `{ agent, prompt, maxIterations?,
-name? }`. `interactive()`, `[Symbol.asyncDispose]`, `promptFile`, `promptArgs`,
-`completionSignal`, `idleTimeoutSeconds`, `logging`, `signal` can be omitted (or
-kept as optional no-ops) — sandbar uses none of them. Keep the `SandboxRunResult`
-return type wider only if you want to preserve the full shape; sandbar reads only
-`stdout` and `commits`.
+`RunOptions` needs `{ agent, prompt, name?, completionSignal,
+idleTimeoutSeconds?, completionTimeoutSeconds? }`. `completionSignal` is a
+required string list; `[]` means process exit or idle timeout ends the run.
+`SandboxRunResult` carries `stdout`, `commits`, optional `signalMs`, and
+`maxGapMs`.
 
 ## Reduced control flow (sandbar's path only)
 
@@ -133,7 +132,7 @@ return { preservedWorktreePath: undefined }
 | Worktree-add flags | `-c branch.autoSetupMerge=false -c push.autoSetupRemote=false` |
 | Default image | `sandbar:<sanitised repo dir name>` |
 | podman run flags | `--user 1000:1000 --userns=keep-id:uid=1000,gid=1000 -w <wt> -e... -v host:sandbox:z --entrypoint sleep <img> infinity` |
-| Default completion signal | `<promise>COMPLETE</promise>` |
+| Completion signals | Required per call; implementer uses its three full tokens, reviewer uses `[]` |
 | Default idle timeout | 600 s (`DEFAULT_IDLE_TIMEOUT_SECONDS`) |
 | Default completion-grace timeout | 60 s (`DEFAULT_COMPLETION_TIMEOUT_SECONDS`) |
 | Output tail bound | 64 KiB (`MAX_TAIL_CHARS`), keep the **end** |
@@ -154,8 +153,7 @@ worktree create/remove/prune/dirty-check; copyToWorktree (Linux COW); the
 two-mount git resolution for worktrees; `.sandbar/.env` resolution; git
 identity propagation; `baseHead..refs/heads/<branch>` commit capture; the claude
 stream-json command + `parseStreamJsonLine`; the two-phase idle/completion
-timeout; the `result || stdout` fallback; the non-zero-exit error-detail
-ordering.
+timeout; parsed-speech-only output; the non-zero-exit error-detail ordering.
 
 ## Load-bearing 0.7.0 behaviours (the bug-fixed baseline — don't regress them)
 
@@ -171,9 +169,9 @@ history in [07](./07-upstream-fixes-since-0.5.12.md):
   and **takes down the whole `Promise.allSettled` cycle**.
 - 🔴 **F5 — two-phase timeout in `run`.** Beyond the 600 s idle timer, watch the
   stream for the completion signal; once seen, switch to a ~60 s completion-grace
-  timer that **resolves the run successfully with the collected commits** on
-  expiry (instead of a 10-minute `AgentIdleTimeoutError` that discards commits
-  when a `gh`/`git` child holds the pipe open).
+  timer that rejects on expiry with an `AgentError` naming the signal and carrying
+  the partial parsed speech. A process that announces completion but does not exit
+  is an infrastructure failure; a clean exit still succeeds with its commits.
 - 🟡 **F2 — retry git-setup on exit 126/137.** Carry `exitCode` on the exec
   error; retry only the `run`-phase git-setup commands (2×, 250 ms apart) on
   126/137 (transient container-exec races under parallelism). Not commit
@@ -214,9 +212,9 @@ Additional cases the upstream tests prove are necessary (see
    command in `run()`, *independent of whether hooks are present* (top-trap #1).
 6. **Idle timer resets on unparsed lines** — a stream of non-JSON noise within
    the window must NOT trip the idle timeout (top-trap #2).
-7. **`result || stdout` fallback** — a run with no `result` event still returns
-   the raw stdout (so the promise token is found there); a `result` event
-   overrides it (top-trap #3).
+7. **Parsed-speech-only output** — a run with no parsed `text` or `result` event
+   returns `""`, never raw JSONL transport; a `result` event overrides accumulated
+   text (top-trap #3).
 8. **Non-zero-exit error tiering** — stderr → resultText → stdout-tail, with the
    provider name and exit code in the message (gotcha B).
 9. **Worktree reuse** — a second `createSandbox` on the same branch reuses the
@@ -236,10 +234,9 @@ Tests for the load-bearing `0.7.0` baseline behaviours (history in doc
 13. **F1 bounded tail** — an `onLine` stream far larger than the tail bound
     returns without throwing, and a `<promise>COMPLETE</promise>` in the final
     lines is still present in the returned `stdout` (tail keeps the end).
-14. **F5 completion timer** — a stream that emits the completion signal and then
-    goes silent with no EOF resolves with the collected commits and does **not**
-    throw `AgentIdleTimeoutError`; a stream that never emits the signal and goes
-    silent still throws after the idle window.
+14. **F5 completion timer** — a stream that emits a named completion signal and
+    then goes silent with no EOF rejects with partial speech attached; a stream
+    with no configured signal still throws after the idle window.
 15. **F2 git-setup retry** — a git-setup exec that fails 126/137 then succeeds is
     retried and the run proceeds; a non-transient nonzero exit (e.g. 1) still
     fails fast without retry, and commit collection is **not** retried.

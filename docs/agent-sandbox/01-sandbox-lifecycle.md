@@ -5,8 +5,8 @@ Source (v0.7.0 tag): `src/createSandbox.ts`, `src/SandboxFactory.ts`,
 `src/shutdownRegistry.ts`.
 
 This is the orchestration heart. It is described here **as sandbar exercises
-it**: a bind-mount podman provider, an explicit pre-existing branch, and
-`maxIterations: 1`. Branches in the upstream code that sandbar never reaches are
+it**: a bind-mount podman provider, an explicit pre-existing branch, and one
+iteration. Branches in the upstream code that sandbar never reaches are
 called out as out-of-scope rather than detailed.
 
 ## Public types (from `createSandbox.d.ts`)
@@ -25,19 +25,18 @@ interface CreateSandboxOptions {
 interface SandboxRunOptions {
   agent: AgentProvider;           // sandbar: claudeCode(modelId)
   prompt?: string;                // sandbar: inline prompt
-  maxIterations?: number;         // sandbar: 1
   name?: string;                  // sandbar: e.g. "implementer-<id>-attempt-N"
-  completionSignal?: string | string[];  // sandbar: unset → default "<promise>COMPLETE</promise>"
+  completionSignal: readonly string[];   // reviewer: []; implementer: full promise tokens
   idleTimeoutSeconds?: number;    // sandbar: unset → default 600
   logging?: LoggingOption;        // sandbar: unset → defaults to a file under .sandbar/logs
   signal?: AbortSignal;           // sandbar: unset
 }
 
 interface SandboxRunResult {
-  iterations: IterationResult[];
-  completionSignal?: string;
   stdout: string;                 // ← sandbar reads this
   commits: { sha: string }[];     // ← sandbar reads this
+  signalMs?: number;
+  maxGapMs: number;
   logFilePath?: string;
 }
 
@@ -127,24 +126,22 @@ Two consequences for sandbar's path:
 
 ### Orchestrator loop (`Orchestrator.ts`, `orchestrate`)
 
-With `iterations = 1` the loop body runs once:
+`run()` performs exactly one invocation:
 
-1. Resolve `completionSignals` — default `["<promise>COMPLETE</promise>"]` when
-   `completionSignal` is unset.
+1. Copy the caller's required `completionSignal` list. An empty list never
+   enters the completion-grace phase.
 2. `factory.withSandbox(...)` → for the reuse layer, just runs the work with the
    existing sandbox. Inside, wrap in `withSandboxLifecycle` (below).
 3. The work:
    - `fullPrompt = prompt` (skipPromptExpansion true).
    - `invokeAgent(...)` runs the agent (see
-     [03](./03-claude-agent-provider.md)) and returns `{ result, sessionId }`
-     where `result = resultText || stdout`.
-   - Completion check: `matchedSignal = completionSignals.find(s =>
-     agentOutput.includes(s))`. Sandbar ignores this (parses stdout itself).
-   - Returns `{ completionSignal, stdout: agentOutput, sessionId, ... }`.
-4. After the iteration: `allCommits.push(...lifecycleResult.commits)`,
-   `allStdout += result.stdout`. If a completion signal matched, return early;
-   otherwise loop. With one iteration it returns
-   `{ iterations, completionSignal, stdout: allStdout, commits: allCommits, ... }`.
+     [03](./03-claude-agent-provider.md)) once and returns parsed agent speech,
+     optional `signalMs`, and `maxGapMs`. Raw stream transport is never used as
+     output.
+   - Commit collection returns the branch commits made during that invocation.
+4. Return `{ stdout, commits, signalMs?, maxGapMs }` for that single
+   invocation. A configured signal controls only the timeout phase; it is not a
+   result field.
 
 ### Lifecycle wrapper & commit capture (`SandboxLifecycle.ts`, `withSandboxLifecycle`)
 
@@ -153,8 +150,8 @@ depends on most. For an **explicit branch** (sandbar always), `branch` is
 truthy ⇒ `hostCurrentBranch = null` ⇒ the temp-branch / merge-to-host path is
 skipped entirely. Sequence:
 
-1. Read host git identity: `git config user.name` / `user.email` in `hostRepoDir`
-   (each defaulting to `""` on failure).
+1. Read host git identity: `git config user.name` / `user.email` in `hostRepoDir`.
+   Git exit 1 means the value is unset (`""`); every other failure propagates.
 2. "Setting up sandbox" task:
    - `git config --global --add safe.directory <sandboxRepoDir>` (bind mount is
      owned by a different UID; avoids "dubious ownership").
