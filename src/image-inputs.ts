@@ -30,7 +30,7 @@ import { lstat, readdir, readlink } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
 import type { BuiltImage } from "./config.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, isErrno } from "./errors.js";
 
 // The image label the fingerprint is recorded under, so a built image carries
 // the answer to "what was this built from" and no side-car state file is
@@ -72,7 +72,7 @@ async function hashPath(
   try {
     stat = await lstat(absolute);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (!isErrno(err, "ENOENT")) throw err;
     // Not an error at this layer: a branch may add or delete a declared input,
     // and both are precisely the change the fingerprint is meant to notice.
     // `ensureImages` is where absence in the HOST checkout is rejected as a
@@ -146,7 +146,7 @@ export async function fingerprintImageInputs(
       try {
         await lstat(join(root, path));
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        if (!isErrno(err, "ENOENT")) throw err;
         throw new SandbarError(
           `config.images: entry '${image.tag}' declares \`rebuildOn\` path ` +
             `'${path}', which does not exist in ${root}. The base image is ` +

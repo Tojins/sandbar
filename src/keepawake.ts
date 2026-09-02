@@ -8,12 +8,13 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { isErrno } from "./errors.js";
 
 function isWsl2(): boolean {
   try {
     return /microsoft/i.test(readFileSync("/proc/version", "utf8"));
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (!isErrno(err, "ENOENT")) throw err;
     return false;
   }
 }
@@ -49,7 +50,7 @@ export function startKeepawake(): void {
       child = null;
     });
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (!isErrno(err, "ENOENT")) throw err;
     child = null;
   }
 }
@@ -59,7 +60,7 @@ export function stopKeepawake(): void {
   try {
     child.kill("SIGTERM");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
+    if (!isErrno(err, "ESRCH")) throw err;
   }
   child = null;
 }

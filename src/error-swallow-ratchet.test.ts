@@ -3,19 +3,47 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { ERROR_SWALLOW_BASELINE } from "./error-swallow-baseline.js";
+import { ERROR_SWALLOW_BASELINE } from "./error-swallow-baseline.test-util.js";
 
 const SRC = dirname(fileURLToPath(import.meta.url));
 const SWALLOW_PATTERNS = [/\.catch\(\(\) =>/g, /catch \{/g];
 
-function countSwallowPatterns(source: string): number {
+export function countSwallowPatterns(source: string): number {
   return SWALLOW_PATTERNS.reduce(
     (count, pattern) => count + [...source.matchAll(pattern)].length,
     0,
   );
 }
 
+export function swallowPatternGrowth(
+  counts: Readonly<Record<string, number>>,
+  baseline: Readonly<Record<string, number>>,
+): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(counts).filter(
+      ([file, count]) => count > (baseline[file] ?? 0),
+    ),
+  );
+}
+
 describe("production error-swallow ratchet", () => {
+  it("counts only the two banned swallow forms", () => {
+    expect(
+      countSwallowPatterns(
+        "task.catch(() => fallback); try {} catch { fallback(); } try {} catch (err) { throw err; }",
+      ),
+    ).toBe(2);
+  });
+
+  it("reports files whose count exceeds their baseline", () => {
+    expect(
+      swallowPatternGrowth(
+        { "grown.ts": 2, "same.ts": 1, "new.ts": 1 },
+        { "grown.ts": 1, "same.ts": 1 },
+      ),
+    ).toEqual({ "grown.ts": 2, "new.ts": 1 });
+  });
+
   it("does not let any production file grow its swallow-pattern count", async () => {
     const files = (await readdir(SRC))
       .filter(
@@ -34,11 +62,7 @@ describe("production error-swallow ratchet", () => {
         ]),
       ),
     );
-    const growth = Object.fromEntries(
-      Object.entries(counts).filter(
-        ([file, count]) => count > (ERROR_SWALLOW_BASELINE[file] ?? 0),
-      ),
-    );
+    const growth = swallowPatternGrowth(counts, ERROR_SWALLOW_BASELINE);
 
     expect(growth).toEqual({});
   });

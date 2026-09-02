@@ -63,7 +63,7 @@ import { promisify } from "node:util";
 
 import { IN_CHUNK_LABEL, LAND_LABEL } from "./chunks.js";
 import type { LabelConfig } from "./config.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, isExitCode } from "./errors.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { IssueRef } from "./merger.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
@@ -1048,7 +1048,7 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
         );
         return true;
       } catch (err) {
-        if ((err as { code?: unknown }).code !== 1) throw err;
+        if (!isExitCode(err, 1)) throw err;
         return false;
       }
     },
@@ -1057,7 +1057,7 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       try {
         await exec("git", ["worktree", "remove", "--force", path], { cwd });
       } catch (err) {
-        if ((err as { code?: unknown }).code !== 128) throw err;
+        if (!isExitCode(err, 128)) throw err;
       }
       await exec("git", ["worktree", "prune"], { cwd });
     },

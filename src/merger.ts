@@ -300,7 +300,7 @@ import {
   createAgentSpeechAccumulator,
   type AgentProvider,
 } from "./agent-sandbox.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, hasExitCode, isErrno, isExitCode } from "./errors.js";
 import { type PullRequestRef, ensurePullRequest } from "./forge-pr.js";
 import { dirtyWorktreePaths, fetchOriginChunkBranch } from "./git-ops.js";
 import {
@@ -2177,7 +2177,7 @@ export function captureAgentRun(
       try {
         child.kill("SIGTERM");
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
+        if (!isErrno(err, "ESRCH")) throw err;
       }
     }, opts.timeoutMs);
 
@@ -2450,7 +2450,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         );
         return { ok: true };
       } catch (err) {
-        if (typeof (err as { code?: unknown }).code !== "number") throw err;
+        if (!hasExitCode(err)) throw err;
         return { ok: false };
       }
     },
@@ -2537,7 +2537,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       try {
         return await readFile(join(cwd, path), "utf8");
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        if (!isErrno(err, "ENOENT")) throw err;
         return null;
       }
     },
@@ -2561,7 +2561,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         );
         return { ok: true };
       } catch (err) {
-        if (typeof (err as { code?: unknown }).code !== "number") throw err;
+        if (!hasExitCode(err)) throw err;
         return { ok: false };
       }
     },
@@ -2582,7 +2582,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       try {
         await exec("git", ["merge", "--abort"], { cwd });
       } catch (err) {
-        if ((err as { code?: unknown }).code !== 128) throw err;
+        if (!isExitCode(err, 128)) throw err;
         // Exit 128 means there is no merge in progress.
       }
     },
@@ -2609,7 +2609,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           maxBuffer: 50 * 1024 * 1024,
         });
       } catch (err) {
-        if (typeof (err as { code?: unknown }).code !== "number") throw err;
+        if (!hasExitCode(err)) throw err;
         return { ok: false };
       }
       if (dirtyBefore.length > 0) return { ok: true };
@@ -2693,7 +2693,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         });
         return { ok: true };
       } catch (err) {
-        if (typeof (err as { code?: unknown }).code !== "number") throw err;
+        if (!hasExitCode(err)) throw err;
         return { ok: false };
       }
     },

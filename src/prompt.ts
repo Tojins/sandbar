@@ -32,7 +32,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { SandbarError } from "./errors.js";
+import { SandbarError, isErrno, isExitCode } from "./errors.js";
 import type { IssueBranchBase } from "./git-ops.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
@@ -105,9 +105,7 @@ export async function readGit(
     const { stdout } = await exec("git", [...args], { cwd, maxBuffer });
     return stdout;
   } catch (err) {
-    if (
-      (err as { code?: unknown }).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
-    ) {
+    if (isErrno(err, "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")) {
       const partial = (err as { stdout?: unknown }).stdout;
       return `${typeof partial === "string" ? partial : ""}\n${truncationNote(maxBuffer)}\n`;
     }
@@ -321,7 +319,7 @@ export async function buildProjectAnchor(
   } catch (err) {
     // A missing history ref is background context with an explicit unavailable
     // rendering. Other git and process failures are infrastructure faults.
-    if ((err as { code?: unknown }).code !== 128) throw err;
+    if (!isExitCode(err, 128)) throw err;
     lines.push("(unavailable)");
   }
   lines.push("```");

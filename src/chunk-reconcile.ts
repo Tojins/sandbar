@@ -68,6 +68,7 @@ import {
   wrapUpLandedChunk,
 } from "./chunk-land.js";
 import type { LandedChunk } from "./chunks.js";
+import { hasExitCode } from "./errors.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
@@ -96,7 +97,7 @@ async function capture(
     const { stdout } = await exec(file, [...args], cwd === undefined ? {} : { cwd });
     return { ok: true, stdout };
   } catch (err) {
-    if (typeof (err as { code?: unknown }).code !== "number") throw err;
+    if (!hasExitCode(err)) throw err;
     return { ok: false, stdout: "" };
   }
 }

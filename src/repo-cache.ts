@@ -47,7 +47,7 @@ import { mkdir, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { SandbarError } from "./errors.js";
+import { SandbarError, isErrno, isExitCode } from "./errors.js";
 
 const exec = promisify(execFile);
 
@@ -119,8 +119,7 @@ async function gitOk(cwd: string, args: readonly string[]): Promise<boolean> {
     await git(cwd, args);
     return true;
   } catch (err) {
-    const code = (err as { code?: unknown }).code;
-    if (code !== 1 && code !== 128) throw err;
+    if (!isExitCode(err, 1) && !isExitCode(err, 128)) throw err;
     return false;
   }
 }
@@ -134,7 +133,7 @@ function samePath(a: string, b: string): boolean {
   try {
     return realpathSync(a) === realpathSync(b);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (!isErrno(err, "ENOENT")) throw err;
     return false;
   }
 }
@@ -183,8 +182,7 @@ async function isPreparedCache(repoDir: string): Promise<boolean> {
     );
     return marked.stdout.trim() === "1";
   } catch (err) {
-    const code = (err as { code?: unknown }).code;
-    if (code !== 1 && code !== 128) throw err;
+    if (!isExitCode(err, 1) && !isExitCode(err, 128)) throw err;
     return false;
   }
 }
@@ -205,8 +203,7 @@ async function isWorktreeOfCache(
     // Relative, and relative to the worktree — `git rev-parse` says so.
     return common !== "" && samePath(resolve(dir, common), repoDir);
   } catch (err) {
-    const code = (err as { code?: unknown }).code;
-    if (code !== 1 && code !== 128) throw err;
+    if (!isExitCode(err, 1) && !isExitCode(err, 128)) throw err;
     return false;
   }
 }

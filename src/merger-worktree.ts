@@ -20,7 +20,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { registerDisposable } from "./cleanup.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, isExitCode } from "./errors.js";
 import type { RepoLayout } from "./repo-cache.js";
 
 const exec = promisify(execFile);
@@ -137,7 +137,7 @@ export async function createMergerWorktree(opts: {
     try {
       await exec("git", ["worktree", "remove", "--force", path], { cwd });
     } catch (err) {
-      if ((err as { code?: unknown }).code !== 128) throw err;
+      if (!isExitCode(err, 128)) throw err;
       // Not registered (or already gone) — fall through to the dir sweep.
     }
     await rm(path, { recursive: true, force: true });

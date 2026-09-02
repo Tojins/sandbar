@@ -69,7 +69,7 @@ import {
 } from "./agent-providers.js";
 import type { BuiltImage, ResolvedGateStack } from "./config.js";
 import type { RuntimeExec, SweepResult } from "./containers.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, isExitCode } from "./errors.js";
 import { IMAGE_INPUTS_LABEL, fingerprintImageInputs } from "./image-inputs.js";
 import {
   type RunScope,
@@ -184,7 +184,7 @@ async function imageExists(tag: string): Promise<boolean> {
     });
     return true;
   } catch (err) {
-    if ((err as { code?: unknown }).code !== 1) throw err;
+    if (!isExitCode(err, 1)) throw err;
     return false;
   }
 }

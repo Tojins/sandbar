@@ -32,7 +32,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { RunConfig } from "./config.js";
-import { SandbarError, faultDetail } from "./errors.js";
+import { SandbarError, faultDetail, isErrno } from "./errors.js";
 import { GATE_EXIT_NO_VERDICT, runGateCommand } from "./gate-run.js";
 import { run } from "./run.js";
 import { sandbarVersion } from "./version.js";
@@ -290,7 +290,7 @@ function isEntrypoint(): boolean {
   try {
     return realpathSync(argv1) === realpathSync(fileURLToPath(import.meta.url));
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (!isErrno(err, "ENOENT")) throw err;
     return false;
   }
 }

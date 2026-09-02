@@ -24,6 +24,7 @@ import {
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import lockfile from "proper-lockfile";
+import { isErrno } from "./errors.js";
 
 export type LockPaths = {
   readonly workDir: string;
@@ -61,7 +62,7 @@ async function maybeReleaseStaleLock(paths: LockPaths): Promise<void> {
   try {
     oldPid = Number.parseInt(readFileSync(paths.pidPath, "utf8").trim(), 10);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (!isErrno(err, "ENOENT")) throw err;
     return;
   }
   // Fail CLOSED on a sidecar we cannot read as a pid: a truncated or garbage
@@ -76,13 +77,13 @@ async function maybeReleaseStaleLock(paths: LockPaths): Promise<void> {
   try {
     rmSync(lockDirFor(paths.lockPath), { recursive: true, force: true });
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (!isErrno(err, "ENOENT")) throw err;
     // A racing stale-lock cleanup already removed it.
   }
   try {
     unlinkSync(paths.pidPath);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (!isErrno(err, "ENOENT")) throw err;
   }
 }
 
@@ -134,7 +135,7 @@ export async function acquireLock(paths: LockPaths): Promise<Release> {
     try {
       unlinkSync(paths.pidPath);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      if (!isErrno(err, "ENOENT")) throw err;
     }
     await release();
   };

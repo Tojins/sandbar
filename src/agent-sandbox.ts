@@ -68,6 +68,7 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { onCleanup } from "./cleanup.js";
 import { resolveSandboxEnv } from "./env.js";
+import { isErrno } from "./errors.js";
 import { RESOURCE_PREFIX } from "./naming.js";
 import type { RepoLayout } from "./repo-cache.js";
 import { startGapTimer, startTimer } from "./timing.js";
@@ -1242,7 +1243,7 @@ const pruneStale = (repoDir: string, worktreesDir: string): Promise<void> =>
       try {
         entries = await readdir(worktreesDir);
       } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+        if (isErrno(e, "ENOENT")) return;
         throw new WorktreeError((e as Error).message);
       }
       const realWorktreesDir = await realpath(worktreesDir);
@@ -1263,7 +1264,7 @@ const pruneStale = (repoDir: string, worktreesDir: string): Promise<void> =>
         try {
           isDir = (await stat(entryPath)).isDirectory();
         } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          if (isErrno(err, "ENOENT")) {
             isDir = false;
           } else {
             throw err;

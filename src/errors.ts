@@ -18,6 +18,28 @@ export class SandbarError extends Error {
   }
 }
 
+function propertyEquals(value: unknown, key: string, expected: unknown): boolean {
+  return typeof value === "object" && value !== null &&
+    (value as Record<string, unknown>)[key] === expected;
+}
+
+export function isExitCode(err: unknown, code: number): boolean {
+  return propertyEquals(err, "code", code);
+}
+
+export function hasExitCode(err: unknown): boolean {
+  return typeof err === "object" && err !== null &&
+    typeof (err as { code?: unknown }).code === "number";
+}
+
+export function isErrno(err: unknown, code: string): boolean {
+  return propertyEquals(err, "code", code);
+}
+
+export function isExitStatus(err: unknown, status: number): boolean {
+  return propertyEquals(err, "status", status);
+}
+
 // How a fault is rendered for an operator, wherever sandbar prints one and
 // stops: run.ts's top-level handler, the bin's, and `runGateCommand`'s (#45).
 // An operator-actionable SandbarError prints as its message alone; anything

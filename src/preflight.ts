@@ -174,6 +174,7 @@ import {
 } from "./agent-providers.js";
 import type { ResolvedStackContainer } from "./config.js";
 import type { EnvReader } from "./env.js";
+import { hasExitCode, isErrno, isExitStatus } from "./errors.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
@@ -510,7 +511,7 @@ function which(cmd: string): boolean {
     execFileSync("which", [cmd], { stdio: "ignore" });
     return true;
   } catch (err) {
-    if ((err as { status?: unknown }).status !== 1) throw err;
+    if (!isExitStatus(err, 1)) throw err;
     return false;
   }
 }
@@ -537,7 +538,7 @@ async function runOk(
     await exec(file, [...args], { cwd });
     return true;
   } catch (err) {
-    if (typeof (err as { code?: unknown }).code !== "number") throw err;
+    if (!hasExitCode(err)) throw err;
     return false;
   }
 }
@@ -551,7 +552,7 @@ async function captureOk(
     const { stdout } = await exec(file, [...args], { cwd });
     return { ok: true, stdout };
   } catch (err) {
-    if (typeof (err as { code?: unknown }).code !== "number") throw err;
+    if (!hasExitCode(err)) throw err;
     return { ok: false, stdout: "" };
   }
 }
@@ -741,7 +742,7 @@ async function checkSandboxGhToken(
     });
     return true;
   } catch (err) {
-    if (typeof (err as { code?: unknown }).code !== "number") throw err;
+    if (!hasExitCode(err)) throw err;
     return false;
   }
 }
@@ -1257,7 +1258,7 @@ function realpathOr(path: string): string {
   try {
     return realpathSync(path);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (!isErrno(err, "ENOENT")) throw err;
     return path;
   }
 }

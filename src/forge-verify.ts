@@ -114,7 +114,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import type { ResolvedMergeMode } from "./config.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, isExitCode } from "./errors.js";
 import {
   type PullRequestRef,
   ensurePullRequest as ensureForgePullRequest,
@@ -1432,7 +1432,7 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
           { cwd },
         );
       } catch (err) {
-        if ((err as { code?: unknown }).code !== 1) throw err;
+        if (!isExitCode(err, 1)) throw err;
         // GitHub reports an already-merged or already-closed PR with exit 1.
       }
     },

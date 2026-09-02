@@ -59,7 +59,7 @@ import {
   removeBranchImages,
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
-import { SandbarError, faultDetail } from "./errors.js";
+import { SandbarError, faultDetail, isExitCode } from "./errors.js";
 import { formatGateSteps, summarizeGateFailure } from "./gate.js";
 import { durationField } from "./timing.js";
 import {
@@ -531,7 +531,7 @@ async function gate(
   try {
     dirty = await dirtyWorktreePaths(worktreePath);
   } catch (err) {
-    if ((err as { code?: unknown }).code !== 128) throw err;
+    if (!isExitCode(err, 128)) throw err;
     dirty = [];
   }
   if (dirty.length > 0) {
