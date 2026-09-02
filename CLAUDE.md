@@ -338,7 +338,11 @@ and used to announce themselves in four different ways, the halt in none at all.
 - **Every outcome carries how long it took, and nothing decides on it (#82).**
   `src/timing.ts` is the one measurement — `startTimer` on a MONOTONIC clock,
   injectable because several suites assert log lines by exact string, and
-  `durationMs=<int>` as the one field spelling. It closes three defects the
+  `durationMs=<int>` as its elapsed-time field spelling. `startGapTimer` records
+  the largest leading, inter-line, or trailing stream silence as
+  `maxGapMs=<int>`; a line-less run reports its whole duration. It is likewise
+  evidence only, and absent stays absent rather than becoming zero. This closes
+  three defects the
   first attempt to assemble a timing table found: a cohort's terminals all
   carried the SETTLE instant in plan order (so "which issue held the cycle" and
   "how long did the others idle" were unanswerable, and an outcome reached

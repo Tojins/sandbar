@@ -1,4 +1,4 @@
-// Elapsed time — one measurement, one spelling (#82).
+// Elapsed time — one measurement module, two field spellings (#82, #83).
 //
 // Before this, sandbar reported exactly one duration: `ResolveAgentRun.durationMs`
 // (measured in merger.ts, rendered in logs.ts and resolve-loop.ts). Everything
@@ -21,6 +21,13 @@
 // because with the default one there is no backwards. An injected clock owns
 // its own behaviour, and a test that hands over a decreasing one gets what it
 // asked for.
+//
+// `startGapTimer` measures the largest silence between stream lines, including
+// the leading gap before the first line and the trailing gap after the last; a
+// line-less run therefore reports its whole duration. It owns the second field
+// spelling, `maxGapMs=<int>`. Like `durationMs`, it is evidence only: nothing
+// decides on it, and a caller that has no measurement omits it rather than
+// manufacturing zero.
 //
 // The clock is injectable because log lines are asserted by exact string in
 // several suites (`expect(lines).toContain("merged #42")`). A fake clock keeps

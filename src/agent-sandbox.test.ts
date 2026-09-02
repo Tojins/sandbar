@@ -1605,6 +1605,42 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     }
   });
 
+  it("rejects reuse when fetching the issue branch fails unexpectedly", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-fetch-failure-"));
+    const origin = join(root, "origin.git");
+    const checkout = join(root, "checkout");
+    try {
+      await git(["init", "--bare", origin], root);
+      await git(["clone", origin, checkout], root);
+      await git(["config", "user.name", "Test Host"], checkout);
+      await git(["config", "user.email", "host@test.com"], checkout);
+      await writeFile(join(checkout, "README.md"), "seed\n");
+      await git(["add", "."], checkout);
+      await git(["commit", "-m", "seed"], checkout);
+      await git(["push", "-u", "origin", "HEAD:main"], checkout);
+
+      const branch = "sandbar/issue-83-fetch-failure";
+      await git(["branch", branch], checkout);
+      await git(["push", "origin", `${branch}:${branch}`], checkout);
+      await prepareWorktree({
+        branch,
+        layout: layoutFor(checkout),
+        copyToWorktree: [],
+      });
+
+      await git(["remote", "set-url", "origin", join(root, "missing.git")], checkout);
+      await expect(
+        prepareWorktree({
+          branch,
+          layout: layoutFor(checkout),
+          copyToWorktree: [],
+        }),
+      ).rejects.toThrow("Could not fetch origin/");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects reuse when the local issue branch diverged from origin", async () => {
     const root = await mkdtemp(join(tmpdir(), "asb-diverged-branch-"));
     const origin = join(root, "origin.git");
