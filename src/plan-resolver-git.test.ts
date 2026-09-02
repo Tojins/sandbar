@@ -37,6 +37,8 @@ describe("chunk membership from branch containment (#93)", () => {
     const repo = await mkdtemp(join(tmpdir(), "sandbar-landed-members-"));
     repos.push(repo);
     git(repo, "init", "-q", "-b", "main");
+    git(repo, "config", "user.email", "sandbar@example.test");
+    git(repo, "config", "user.name", "Sandbar Test");
     git(repo, "commit", "--allow-empty", "-qm", "base");
     git(repo, "update-ref", "refs/remotes/origin/main", "HEAD");
     git(repo, "update-ref", "refs/remotes/origin/sandbar/issue-60-root", "HEAD");
