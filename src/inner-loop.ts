@@ -36,8 +36,9 @@ import {
   buildAgentProvider,
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
-import { agentPartialOutput, formatUsageFields, podman } from "./agent-sandbox.js";
+import { agentPartialOutput, agentPartialUsage, podman } from "./agent-sandbox.js";
 import type { AgentUsage, Sandbox, SandboxHooks } from "./agent-sandbox.js";
+import { formatUsageFields, sumAgentUsage } from "./agent-usage.js";
 
 import type { ChunkTarget } from "./chunks.js";
 import type { ResolvedGateStack } from "./config.js";
@@ -701,6 +702,8 @@ async function runImplementer(
   let signal = parsePromise(run.stdout, {
     commitsAccumulated: accumulated.length,
   });
+  let attemptUsage = run.usage;
+  let attemptToolCalls = run.toolCalls;
 
   // The promise nudge: output with NO tag at all gets one same-conversation
   // follow-up before it is allowed to cost an attempt. The observed failure is
@@ -738,6 +741,9 @@ async function runImplementer(
       completionSignal: "</promise>",
     });
     accumulated.push(...nudge.commits);
+    attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
+    attemptToolCalls = attemptToolCalls === undefined && nudge.toolCalls === undefined
+      ? undefined : (attemptToolCalls ?? 0) + (nudge.toolCalls ?? 0);
     const combined = `${run.stdout}\n${nudge.stdout}`;
     signal = parsePromise(combined, {
       commitsAccumulated: accumulated.length,
@@ -780,7 +786,7 @@ async function runImplementer(
         `signal=${signal.kind} commits=${run.commits.length} ` +
         `provider=${config.implementerAgent} model=${config.implementerModelId} ` +
         `${durationField(implementerMs)}` +
-        formatUsageFields(run.usage) +
+        formatUsageFields(attemptUsage, attemptToolCalls) +
         // Absent when the agent never emitted `<promise>COMPLETE</promise>` —
         // it escalated, it was killed idle, or the exec simply ended. Omitted
         // rather than zeroed (#82).
@@ -860,6 +866,7 @@ async function runReviewer(
       const logPass = async (
         signalMs: number | undefined,
         usage: AgentUsage | undefined,
+        toolCalls: number | undefined,
       ): Promise<void> => {
         if (!opts.onOrchestratorLog) return;
         await opts.onOrchestratorLog(
@@ -867,7 +874,7 @@ async function runReviewer(
             `round=${action.reviewRound} pass=${pass} invocation=${invocation} ` +
             `provider=${config.reviewerAgent} model=${modelId} ` +
             `${durationField(passTimer())}` +
-            formatUsageFields(usage) +
+            formatUsageFields(usage, toolCalls) +
             (signalMs === undefined ? "" : ` signalMs=${signalMs}`),
         );
       };
@@ -884,13 +891,14 @@ async function runReviewer(
           }),
           prompt,
         });
-        await logPass(reviewerRun.signalMs, reviewerRun.usage);
+        await logPass(reviewerRun.signalMs, reviewerRun.usage, reviewerRun.toolCalls);
         return { output: reviewerRun.stdout, error: null };
       } catch (err) {
         // A failed invocation is timed too: an invocation that burned the ten
         // minutes and died is the expensive case, and one that fell over in a
         // second is a different fault entirely.
-        await logPass(undefined, undefined);
+        const partial = agentPartialUsage(err);
+        await logPass(undefined, partial.usage, partial.toolCalls);
         // The bytes the agent had emitted before it failed ride out on the
         // error (#41, agent-sandbox F9). Without them a reviewer that emitted
         // a verdict and then died is indistinguishable from one that emitted

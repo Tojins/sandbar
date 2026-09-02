@@ -2257,6 +2257,8 @@ export function parseCapturedAgentRun(
     // parser classified as agent speech may reach parseResolveSignal (#74).
     output: speech.output(""),
     detail: run.detail ?? speech.failure,
+    ...(speech.usage === undefined ? {} : { usage: speech.usage }),
+    ...(speech.toolCalls === 0 ? {} : { toolCalls: speech.toolCalls }),
   };
 }
 

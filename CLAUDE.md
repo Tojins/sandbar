@@ -357,9 +357,11 @@ and used to announce themselves in four different ways, the halt in none at all.
   measurement is ABSENT, never `0`, because a stats reader averages a zero.
   Agent invocations additionally record the provider-reported token usage
   available on their terminal wire event (#85): input, cached input, output and
-  reasoning tokens, plus Claude's API duration. These occupy a fourth parser
-  register that never enters speech, failure or completion; malformed or
-  unavailable fields are omitted and invocation measurements are never summed.
+  reasoning tokens, plus Claude's API duration and tool-call count. Usage and
+  tool counts occupy independent parser registers that never enter speech,
+  failure or completion; malformed or unavailable fields are omitted. A line
+  spanning multiple fresh CLI invocations sums like buckets across invocations,
+  while cached/fresh/output/reasoning buckets are never collapsed together.
   `timing.ts`, `gate.ts`, `gate-stack.ts`, `ensure-images.ts` and `logs.ts`
   headers own the rest.
 - **The resolve loop leaves a trace, and a container that never ran halts

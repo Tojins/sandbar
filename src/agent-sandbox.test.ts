@@ -34,6 +34,7 @@ import {
   SANDBOX_REPO_DIR,
   AgentError,
   agentPartialOutput,
+  agentPartialUsage,
   claudeCode,
   codex,
   createAgentSpeechAccumulator,
@@ -102,6 +103,7 @@ describe("parseStreamJsonLine", () => {
     });
     expect(parseStreamJsonLine(line)).toEqual([
       { type: "text", text: "before" },
+      { type: "tool_calls", count: 1 },
       { type: "tool_call", name: "Bash", args: "ls" },
       { type: "text", text: "after" },
     ]);
@@ -118,8 +120,12 @@ describe("parseStreamJsonLine", () => {
         ],
       },
     });
-    // Read is not allowlisted; the two text blocks merge (no flush happened).
-    expect(parseStreamJsonLine(line)).toEqual([{ type: "text", text: "ab" }]);
+    // Read is not allowlisted for the informational register, but every
+    // verified tool_use shape contributes to the independent counter.
+    expect(parseStreamJsonLine(line)).toEqual([
+      { type: "tool_calls", count: 1 },
+      { type: "text", text: "ab" },
+    ]);
   });
 
   it("drops a tool_use with a non-string arg field", () => {
@@ -127,7 +133,7 @@ describe("parseStreamJsonLine", () => {
       type: "assistant",
       message: { content: [{ type: "tool_use", name: "Bash", input: { command: 42 } }] },
     });
-    expect(parseStreamJsonLine(line)).toEqual([]);
+    expect(parseStreamJsonLine(line)).toEqual([{ type: "tool_calls", count: 1 }]);
   });
 
   it("parses a result event verbatim, including the promise token", () => {
@@ -141,16 +147,10 @@ describe("parseStreamJsonLine", () => {
     const events = parseStreamJsonLine(JSON.stringify({
       type: "result",
       result: "done",
-      usage: {
-        input_tokens: 1200,
-        cache_read_input_tokens: 900,
-        output_tokens: 80,
-      },
       duration_api_ms: 4321,
       modelUsage: {
-        "claude-opus": { thinkingTokens: 40 },
-        "claude-haiku": { thinkingTokens: 5 },
-        "older-turn": { outputTokens: 10 },
+        "claude-opus-raw": { inputTokens: 1200, cacheReadInputTokens: 900, cacheCreationInputTokens: 25, outputTokens: 80, thinkingTokens: 40, canonicalModel: "claude-opus" },
+        "claude-haiku": { inputTokens: 5, cacheReadInputTokens: 10, outputTokens: 10, thinkingTokens: 5 },
       },
     }));
     expect(events).toEqual([
@@ -158,11 +158,14 @@ describe("parseStreamJsonLine", () => {
       {
         type: "usage",
         usage: {
-          inputTokens: 1200,
-          cachedInputTokens: 900,
-          outputTokens: 80,
+          inputTokens: 1205,
+          cachedInputTokens: 910,
+          cacheWriteInputTokens: 25,
+          outputTokens: 90,
           apiMs: 4321,
           reasoningTokens: 45,
+          resolvedModel: "claude-opus",
+          models: 2,
         },
       },
     ]);
@@ -176,7 +179,10 @@ describe("parseStreamJsonLine", () => {
         "older-turn": { outputTokens: 10 },
         malformed: { thinkingTokens: "5" },
       },
-    }))).toEqual([{ type: "result", result: "done" }]);
+    }))).toEqual([
+      { type: "result", result: "done" },
+      { type: "usage", usage: { outputTokens: 10, resolvedModel: "older-turn", models: 2 } },
+    ]);
   });
 
   it("keeps the result and omits malformed Claude usage fields", () => {
@@ -188,8 +194,13 @@ describe("parseStreamJsonLine", () => {
     }))).toEqual([{ type: "result", result: "done" }]);
   });
 
-  it("requires result to be a string", () => {
-    expect(parseStreamJsonLine(JSON.stringify({ type: "result", result: 1 }))).toEqual([]);
+  it("reads usage and terminal reason independently of error result speech", () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: "result", subtype: "error_during_execution", terminal_reason: "blocking_limit",
+      errors: ["limit"], modelUsage: { "claude-opus": { inputTokens: 4 } },
+    }))).toEqual([{ type: "usage", usage: {
+      inputTokens: 4, resolvedModel: "claude-opus", terminalReason: "blocking_limit",
+    } }]);
   });
 
   it("parses session_id only from system/init with a string session_id", () => {
@@ -207,7 +218,7 @@ describe("parseStreamJsonLine", () => {
 describe("formatUsageFields", () => {
   it.each([
     ["absent usage", undefined, ""],
-    ["partial usage", { cachedInputTokens: 0, outputTokens: 8 }, " cachedInputTokens=0 outputTokens=8"],
+    ["partial usage", { cachedInputTokens: 0, outputTokens: 8 }, " tokens=cached:0,out:8"],
     [
       "full usage",
       {
@@ -217,7 +228,7 @@ describe("formatUsageFields", () => {
         apiMs: 250,
         reasoningTokens: 2,
       },
-      " inputTokens=10 cachedInputTokens=7 outputTokens=3 apiMs=250 reasoningTokens=2",
+      " tokens=in:10,cached:7,out:3,reasoning:2 apiMs=250",
     ],
   ])("renders %s", (_name, usage, expected) => {
     expect(formatUsageFields(usage)).toBe(expected);
@@ -310,8 +321,9 @@ describe("parseCodexJsonLine", () => {
     }))).toEqual([{
       type: "usage",
       usage: {
-        inputTokens: 2000,
+        inputTokens: 250,
         cachedInputTokens: 1750,
+        cacheWriteInputTokens: 25,
         outputTokens: 100,
         reasoningTokens: 60,
       },
@@ -345,6 +357,7 @@ describe("parseCodexJsonLine", () => {
     expect(speech.usage).toEqual({
       inputTokens: 12,
     });
+    expect(speech.toolCalls).toBe(0);
   });
 
   it("replaces repeated usage measurements instead of summing them", () => {
@@ -446,12 +459,16 @@ describe("parseCodexJsonLine", () => {
       ),
     ).toEqual([
       { type: "tool_call", name: "command_execution", args: "bash -lc 'npm test'" },
+      { type: "tool_calls", count: 1 },
     ]);
     expect(
       parseCodexJsonLine(
         completed({ id: "item_3", type: "web_search", query: "podman keep-id" }),
       ),
-    ).toEqual([{ type: "tool_call", name: "web_search", args: "podman keep-id" }]);
+    ).toEqual([
+      { type: "tool_call", name: "web_search", args: "podman keep-id" },
+      { type: "tool_calls", count: 1 },
+    ]);
   });
 
   // started/updated arrive before the payload is whole; reading them too would
@@ -1469,6 +1486,10 @@ describe("createSandbox integration (local provider)", () => {
         `printf '%s\\n' '${JSON.stringify({
           type: "assistant",
           message: { content: [{ type: "text", text: "partial review findings" }] },
+        })}' '${JSON.stringify({
+          type: "result",
+          subtype: "error_during_execution",
+          modelUsage: { "claude-opus": { inputTokens: 12 } },
         })}' && sleep 30`,
       );
       const err = await sandbox
@@ -1481,6 +1502,10 @@ describe("createSandbox integration (local provider)", () => {
       expect(err).toBeInstanceOf(Error);
       expect((err as Error).message).toContain("idle");
       expect(agentPartialOutput(err)).toContain("partial review findings");
+      expect(agentPartialUsage(err).usage).toEqual({
+        inputTokens: 12,
+        resolvedModel: "claude-opus",
+      });
 
       // And the half the message never covered: the run stopped waiting for the
       // exec, so the exec is stopped. Before this, `sleep 30` (in production, a

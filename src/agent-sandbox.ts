@@ -65,6 +65,10 @@ import { resolveSandboxEnv } from "./env.js";
 import { RESOURCE_PREFIX } from "./naming.js";
 import type { RepoLayout } from "./repo-cache.js";
 import { startTimer } from "./timing.js";
+import { normalizeClaudeUsage, normalizeCodexUsage } from "./agent-usage.js";
+import type { AgentUsage } from "./agent-usage.js";
+export { formatUsageFields } from "./agent-usage.js";
+export type { AgentUsage } from "./agent-usage.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -119,6 +123,7 @@ export type ParsedStreamEvent =
   | { type: "tool_call"; name: string; args: string }
   | { type: "session_id"; sessionId: string }
   | { type: "usage"; usage: AgentUsage }
+  | { type: "tool_calls"; count: number }
   // The provider naming a TERMINAL fault of its own (#72) — its turn ended
   // without reaching an answer. Never folded into the run's output (it is not
   // the agent's speech, and #41 turns on that distinction) and never emitted
@@ -131,30 +136,6 @@ export type ParsedStreamEvent =
   // where a CLI's exit code does not answer the question, #67's rule that an
   // attempt which captured no answer is an infra failure rather than an answer.
   | { type: "failure"; message: string };
-
-export type AgentUsage = {
-  readonly inputTokens?: number;
-  readonly cachedInputTokens?: number;
-  readonly outputTokens?: number;
-  readonly apiMs?: number;
-  readonly reasoningTokens?: number;
-};
-
-// The one spelling of provider usage fields in logs, kept beside the
-// measurement contract so every consumer preserves omission and field order.
-export const formatUsageFields = (usage: AgentUsage | undefined): string => {
-  if (usage === undefined) return "";
-  return [
-    ["inputTokens", usage.inputTokens],
-    ["cachedInputTokens", usage.cachedInputTokens],
-    ["outputTokens", usage.outputTokens],
-    ["apiMs", usage.apiMs],
-    ["reasoningTokens", usage.reasoningTokens],
-  ]
-    .filter((field): field is [string, number] => field[1] !== undefined)
-    .map(([name, value]) => ` ${name}=${value}`)
-    .join("");
-};
 
 export type AgentProvider = {
   readonly name: string;
@@ -190,6 +171,7 @@ export type AgentSpeechAccumulator = {
   readonly spoken: string;
   readonly failure: string | undefined;
   readonly usage: AgentUsage | undefined;
+  readonly toolCalls: number;
   output(rawFallback: string): string;
 };
 
@@ -200,6 +182,7 @@ export function createAgentSpeechAccumulator(
   let accumulated = "";
   let failure: string | undefined;
   let usage: AgentUsage | undefined;
+  let toolCalls = 0;
   return {
     ingest(events) {
       for (const event of events) {
@@ -209,6 +192,7 @@ export function createAgentSpeechAccumulator(
           accumulated += event.result;
         } else if (event.type === "failure") failure = event.message;
         else if (event.type === "usage") usage = event.usage;
+        else if (event.type === "tool_calls") toolCalls += event.count;
       }
     },
     get accumulated() {
@@ -222,6 +206,9 @@ export function createAgentSpeechAccumulator(
     },
     get usage() {
       return usage;
+    },
+    get toolCalls() {
+      return toolCalls;
     },
     output(rawFallback) {
       const spoken = result || accumulated;
@@ -345,6 +332,7 @@ export type SandboxRunResult = {
   // exactly what is in it).
   readonly signalMs?: number;
   readonly usage?: AgentUsage;
+  readonly toolCalls?: number;
 };
 
 export interface Sandbox {
@@ -445,10 +433,14 @@ export class AgentIdleTimeoutError extends Error {
 // EPIPE on stdin) and those must carry the output too. Nothing is mutated and
 // no property name can collide with one the thrown error already has.
 const AGENT_PARTIAL_OUTPUT = new WeakMap<object, string>();
+const AGENT_PARTIAL_USAGE = new WeakMap<object, { usage?: AgentUsage; toolCalls?: number }>();
 
-const withPartialOutput = (err: unknown, partial: string): unknown => {
+const withPartialOutput = (err: unknown, partial: string, usage?: AgentUsage, toolCalls?: number): unknown => {
   if (partial !== "" && typeof err === "object" && err !== null) {
     AGENT_PARTIAL_OUTPUT.set(err, partial);
+  }
+  if (typeof err === "object" && err !== null && (usage !== undefined || toolCalls !== undefined)) {
+    AGENT_PARTIAL_USAGE.set(err, { usage, toolCalls });
   }
   return err;
 };
@@ -460,6 +452,8 @@ export const agentPartialOutput = (err: unknown): string => {
   if (typeof err !== "object" || err === null) return "";
   return AGENT_PARTIAL_OUTPUT.get(err) ?? "";
 };
+export const agentPartialUsage = (err: unknown): { usage?: AgentUsage; toolCalls?: number } =>
+  typeof err === "object" && err !== null ? AGENT_PARTIAL_USAGE.get(err) ?? {} : {};
 
 class WorktreeError extends Error {}
 
@@ -517,30 +511,6 @@ const TOOL_ARG_FIELDS: Record<string, string> = {
   Agent: "description",
 };
 
-const finiteNumber = (value: unknown): number | undefined =>
-  typeof value === "number" && Number.isFinite(value) ? value : undefined;
-
-const usageEvent = (candidate: AgentUsage): ParsedStreamEvent | undefined => {
-  const usage = Object.fromEntries(
-    Object.entries(candidate).filter((entry) => entry[1] !== undefined),
-  ) as AgentUsage;
-  return Object.keys(usage).length === 0 ? undefined : { type: "usage", usage };
-};
-
-const claudeReasoningTokens = (modelUsage: unknown): number | undefined => {
-  if (modelUsage === null || typeof modelUsage !== "object") return undefined;
-  const measurements = Object.values(modelUsage)
-    .map((entry) =>
-      entry !== null && typeof entry === "object"
-        ? finiteNumber(entry.thinkingTokens)
-        : undefined,
-    )
-    .filter((value): value is number => value !== undefined);
-  return measurements.length === 0
-    ? undefined
-    : measurements.reduce((sum, value) => sum + value, 0);
-};
-
 export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
   if (!line.startsWith("{")) return [];
   try {
@@ -558,13 +528,20 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
           block.input !== undefined
         ) {
           const argField = TOOL_ARG_FIELDS[block.name];
-          if (argField === undefined) continue;
+          if (argField === undefined) {
+            events.push({ type: "tool_calls", count: 1 });
+            continue;
+          }
           const argValue = block.input[argField];
-          if (typeof argValue !== "string") continue;
+          if (typeof argValue !== "string") {
+            events.push({ type: "tool_calls", count: 1 });
+            continue;
+          }
           if (texts.length > 0) {
             events.push({ type: "text", text: texts.join("") });
             texts.length = 0;
           }
+          events.push({ type: "tool_calls", count: 1 });
           events.push({ type: "tool_call", name: block.name, args: argValue });
         }
       }
@@ -573,20 +550,15 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
       }
       return events;
     }
-    if (obj.type === "result" && typeof obj.result === "string") {
-      // Top-level usage covers Claude's main loop, while modelUsage includes
-      // Task subagents, sidechains and internal calls. Its thinking-token sum
-      // therefore has deliberately broader scope than the other token fields.
-      const measurement = usageEvent({
-        inputTokens: finiteNumber(obj.usage?.input_tokens),
-        cachedInputTokens: finiteNumber(obj.usage?.cache_read_input_tokens),
-        outputTokens: finiteNumber(obj.usage?.output_tokens),
-        apiMs: finiteNumber(obj.duration_api_ms),
-        reasoningTokens: claudeReasoningTokens(obj.modelUsage),
-      });
+    if (obj.type === "result") {
+      const normalized = normalizeClaudeUsage(obj.modelUsage);
+      const apiMs = typeof obj.duration_api_ms === "number" && Number.isFinite(obj.duration_api_ms) ? obj.duration_api_ms : undefined;
+      const terminalReason = typeof obj.terminal_reason === "string" ? obj.terminal_reason : undefined;
+      const measurement = normalized === undefined && apiMs === undefined && terminalReason === undefined
+        ? undefined : { ...normalized, ...(apiMs === undefined ? {} : { apiMs }), ...(terminalReason === undefined ? {} : { terminalReason }) };
       return [
-        { type: "result", result: obj.result },
-        ...(measurement === undefined ? [] : [measurement]),
+        ...(typeof obj.result === "string" ? [{ type: "result" as const, result: obj.result }] : []),
+        ...(measurement === undefined ? [] : [{ type: "usage" as const, usage: measurement }]),
       ];
     }
     if (
@@ -713,13 +685,8 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
       return [{ type: "failure", message: codexErrorMessage(obj.error) }];
     }
     if (obj.type === "turn.completed") {
-      const measurement = usageEvent({
-        inputTokens: finiteNumber(obj.usage?.input_tokens),
-        cachedInputTokens: finiteNumber(obj.usage?.cached_input_tokens),
-        outputTokens: finiteNumber(obj.usage?.output_tokens),
-        reasoningTokens: finiteNumber(obj.usage?.reasoning_output_tokens),
-      });
-      return measurement === undefined ? [] : [measurement];
+      const usage = normalizeCodexUsage(obj.usage);
+      return usage === undefined ? [] : [{ type: "usage", usage }];
     }
     // Items are reported started → updated → completed; only the completed form
     // is read, so a command's `aggregated_output` and an agent message's text
@@ -732,12 +699,15 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
       // tool_call is informational (ignored on sandbar's path). Named after the
       // codex item rather than mapped onto a Claude tool: the two vocabularies
       // are not the same and a false equivalence would only mislead a reader.
+      const toolTypes = new Set(["command_execution", "file_change", "mcp_tool_call", "web_search"]);
+      const count = toolTypes.has(item.type) ? [{ type: "tool_calls" as const, count: 1 }] : [];
       if (item.type === "command_execution" && typeof item.command === "string") {
-        return [{ type: "tool_call", name: "command_execution", args: item.command }];
+        return [{ type: "tool_call", name: "command_execution", args: item.command }, ...count];
       }
       if (item.type === "web_search" && typeof item.query === "string") {
-        return [{ type: "tool_call", name: "web_search", args: item.query }];
+        return [{ type: "tool_call", name: "web_search", args: item.query }, ...count];
       }
+      return count;
     }
   } catch {
     // Stream lines are routinely partial; swallow → [], never throw.
@@ -1704,7 +1674,7 @@ const invokeAgent = (
   // Elapsed-since-`run()`, so the reported `signalMs` is on the same clock
   // across iterations rather than restarting with each one (#82).
   elapsed: () => number,
-): Promise<{ result: string; signalMs?: number; usage?: AgentUsage }> =>
+): Promise<{ result: string; signalMs?: number; usage?: AgentUsage; toolCalls?: number }> =>
   new Promise((resolveRun, rejectRun) => {
     const speech = createAgentSpeechAccumulator(agent);
     let completionDetected = false;
@@ -1726,6 +1696,7 @@ const invokeAgent = (
       result: string;
       signalMs?: number;
       usage?: AgentUsage;
+      toolCalls?: number;
     }): void => {
       if (settled) return;
       settled = true;
@@ -1740,7 +1711,7 @@ const invokeAgent = (
       // caller cannot tell "the agent never produced a byte" from "the agent
       // produced a full review and then died", and #41 turns on that
       // distinction. Read back with `agentPartialOutput`.
-      rejectRun(withPartialOutput(err, speech.spoken));
+      rejectRun(withPartialOutput(err, speech.spoken, speech.usage, speech.toolCalls || undefined));
     };
 
     // Two-phase: pre-signal → idle kill timer; post-signal → completion-grace
@@ -1767,6 +1738,7 @@ const invokeAgent = (
             result: speech.spoken,
             ...(signalMs === undefined ? {} : { signalMs }),
             ...(speech.usage === undefined ? {} : { usage: speech.usage }),
+            ...(speech.toolCalls === 0 ? {} : { toolCalls: speech.toolCalls }),
           });
           abort.abort();
         }, completionTimeoutMs);
@@ -1882,6 +1854,7 @@ const invokeAgent = (
           result: speech.output(execResult.stdout),
           ...(signalMs === undefined ? {} : { signalMs }),
           ...(speech.usage === undefined ? {} : { usage: speech.usage }),
+          ...(speech.toolCalls === 0 ? {} : { toolCalls: speech.toolCalls }),
         });
       })
       .catch((err) => settleReject(err));
@@ -2055,6 +2028,7 @@ export const createSandbox = async (
     commits: { sha: string }[];
     signalMs?: number;
     usage?: AgentUsage;
+    toolCalls?: number;
   }> => {
     // Read host git identity, then propagate into the sandbox. safe.directory
     // is set per-run (load-bearing: bind mount is owned by a different UID and
@@ -2109,7 +2083,7 @@ export const createSandbox = async (
         .catch(() => execGit(["rev-parse", "HEAD"], worktreePath))
     ).trim();
 
-    const { result, signalMs, usage } = await invokeAgent(
+    const { result, signalMs, usage, toolCalls } = await invokeAgent(
       providerHandle,
       sandboxRepoDir,
       prompt,
@@ -2143,6 +2117,7 @@ export const createSandbox = async (
       commits,
       ...(signalMs === undefined ? {} : { signalMs }),
       ...(usage === undefined ? {} : { usage }),
+      ...(toolCalls === undefined ? {} : { toolCalls }),
     };
   };
 
@@ -2171,6 +2146,7 @@ export const createSandbox = async (
       const elapsed = startTimer();
       let signalMs: number | undefined;
       let usage: AgentUsage | undefined;
+      let toolCalls = 0;
 
       for (let i = 1; i <= iterations; i++) {
         const iter = await runOneIteration(
@@ -2185,6 +2161,7 @@ export const createSandbox = async (
         allStdout += iter.result;
         if (iter.signalMs !== undefined) signalMs = iter.signalMs;
         if (iter.usage !== undefined) usage = iter.usage;
+        toolCalls += iter.toolCalls ?? 0;
         const found = completionSignals.find((s) => iter.result.includes(s));
         if (found !== undefined) {
           matchedSignal = found;
@@ -2199,6 +2176,7 @@ export const createSandbox = async (
         completionSignal: matchedSignal,
         ...(signalMs === undefined ? {} : { signalMs }),
         ...(usage === undefined ? {} : { usage }),
+        ...(toolCalls === 0 ? {} : { toolCalls }),
       };
     },
     async close() {
