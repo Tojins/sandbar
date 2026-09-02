@@ -92,9 +92,9 @@ dodge it. → baseline: [03 §two-phase timeout](./03-claude-agent-provider.md),
 ### F6 ⚪ `ff-only` refresh of a reused clean worktree · 0.7.0 `c6880a4`
 On the clean-reuse path, `0.7.0` runs `git fetch origin <branch>` +
 `git merge --ff-only origin/<branch>` so a reused worktree isn't stale after origin
-moves — but skips when the branch is absent from origin and throws on other fetch
-failures or divergence; it **never** `reset --hard`s. Sandbar pre-seeds via
-`ensureIssueBranch` and disposes the sandbox per cycle. → baseline:
+moves — but **skips with a log** on detached HEAD, fetch failure, or divergence,
+and **never** `reset --hard`s. This history records upstream's policy; the
+sandbar port's stricter fault classifications are documented in
 [04 §create reuse](./04-worktree-and-mounts.md).
 
 ### F7 ⚪ `LC_ALL=C` on worktree git · 0.6.1 `46eb483`

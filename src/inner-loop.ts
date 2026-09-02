@@ -29,8 +29,8 @@
 // coding-standards path here; prompt.ts probes it in the issue worktree so a
 // branch can introduce the standards it is expected to follow (#78).
 // A catch may only classify one named expected condition checked explicitly,
-// or clean up on failure: log the secondary failure with its cause, then
-// rethrow the original (#83).
+// clean up on failure while preserving the original error, or report a failed
+// best-effort teardown whose result is unrelated to the issue verdict (#83).
 
 import { join } from "node:path";
 
