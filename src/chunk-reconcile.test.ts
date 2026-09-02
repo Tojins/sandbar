@@ -43,8 +43,8 @@ function fakeAdapter(
       async closePullRequest(p) {
         record("closePullRequest", String(p));
       },
-      async deleteChunkBranch(b) {
-        record("deleteChunkBranch", b);
+      async deleteChunkBranch(b, members) {
+        record("deleteChunkBranch", `${b} [${members.join(",")}]`);
       },
     },
   };
@@ -127,7 +127,7 @@ describe("reconcileLandedChunks (#64)", () => {
       "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
       "closePullRequest 9",
-      "deleteChunkBranch sandbar/chunk-42-c",
+      "deleteChunkBranch sandbar/chunk-42-c [42,43]",
     ]);
     expect(r.reconciled[0]?.branchDeleted).toBe(true);
   });
@@ -140,7 +140,7 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(calls.some((c) => c.op.endsWith("PullRequest"))).toBe(false);
     expect(calls.at(-1)).toEqual({
       op: "deleteChunkBranch",
-      arg: "sandbar/chunk-42-c",
+      arg: "sandbar/chunk-42-c [42]",
     });
   });
 
@@ -154,7 +154,7 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(r.closedIssues).toEqual([]);
     expect(r.reconciled[0]?.residue).toEqual([]);
     expect(calls).toEqual([
-      { op: "deleteChunkBranch", arg: "sandbar/chunk-42-c" },
+      { op: "deleteChunkBranch", arg: "sandbar/chunk-42-c []" },
     ]);
   });
 

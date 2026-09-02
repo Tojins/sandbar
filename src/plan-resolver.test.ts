@@ -463,7 +463,6 @@ describe("resolvePlan lanes (#57)", () => {
 // (#61), so a member planned with `chunk: null` would be developed against a
 // tree missing its blocker's work.
 describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
-
   it("satisfies a blocker named on the SAME derived chunk branch", () => {
     // #10 landed on the chunk branch; #11 is built on it and is in that same
     // chunk by construction, so #10's commits are already under its feet. The
@@ -492,7 +491,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
   });
 
   it("does not satisfy a blocker that is merely OPEN", () => {
-    // The same graph with the label taken away: #10 is open, unlanded, and
+    // The same graph without branch membership: #10 is open, unlanded, and
     // still blocking. #10 is the chunk's root, so it plans (#60); #11 is
     // neither planned nor held, which is what "not satisfied" looks like —
     // a satisfied #11 would be planned beside it, as the case above shows.
@@ -533,8 +532,8 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
   });
 
   it("does not satisfy a blocker that is in no chunk sandbar can derive", () => {
-    // #99 is not in the listing at all, so it has no lane and no chunk. The
-    // label alone is not the criterion — the shared branch is.
+    // #99 is not in the listing at all, so it has no lane and no derived chunk.
+    // Naming it on an unrelated branch cannot satisfy #11's blocker.
     const r = resolvePlan(
       [issue(11, "## Blocked by\n- #99\n")],
       facts({ 99: {} }),
@@ -547,7 +546,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     expect(r.heldForReview).toEqual([]);
   });
 
-  it("still satisfies a CLOSED blocker, label or no label", () => {
+  it("still satisfies a CLOSED blocker without chunk membership", () => {
     // #10 is not in the listing, so it is in no chunk and #11 has no gated
     // blocker: #11 roots a chunk of its own and plans (#60).
     const r = resolvePlan(
@@ -851,6 +850,26 @@ describe("resolvePlan landed chunks (#63, #64)", () => {
         ],
         tips: [{ number: 11, title: "Second" }],
       },
+    ]);
+  });
+
+  it("keeps a closed root in the graph and closes it last", () => {
+    const r = resolvePlan(
+      [
+        issue(10, "", { title: "Root" }),
+        issue(11, "## Blocked by\n- #10\n", { title: "Second" }),
+      ],
+      facts({ 10: { state: "CLOSED" }, 11: {} }),
+      new Set(),
+      3,
+      "review",
+      membersOn(10, "Root", 10, 11),
+    );
+
+    expect(r.landedChunks[0]?.branch).toBe("sandbar/chunk-10-root");
+    expect(r.landedChunks[0]?.closeOrder.map((member) => member.number)).toEqual([
+      11,
+      10,
     ]);
   });
 

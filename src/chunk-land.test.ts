@@ -226,8 +226,8 @@ function makeWrapupAdapter(
       async closePullRequest(p) {
         record("closePullRequest", String(p));
       },
-      async deleteChunkBranch(b) {
-        record("deleteChunkBranch", b);
+      async deleteChunkBranch(b, members) {
+        record("deleteChunkBranch", `${b} [${members.join(",")}]`);
       },
     },
   };
@@ -270,7 +270,7 @@ describe("wrapUpLandedChunk (#64)", () => {
       "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
       "closePullRequest 9",
-      "deleteChunkBranch sandbar/chunk-42-alpha",
+      "deleteChunkBranch sandbar/chunk-42-alpha [42,43]",
     ]);
   });
 
@@ -629,7 +629,7 @@ describe("chunkResidue and the banners it feeds (#64)", () => {
     });
     expect(banner).toContain("knew no member issue");
     expect(banner).toContain("sandbar/chunk-4-unnamed");
-    expect(banner).toContain(NEEDS_REVIEW_LABEL);
+    expect(banner).toContain("sandbar/member-*");
     expect(banner).toContain("no later run will find it");
   });
 

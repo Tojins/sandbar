@@ -170,10 +170,10 @@ import {
   computeLanes,
   laneOverrides,
 } from "./lanes.js";
-import { issueBranchName } from "./naming.js";
 import {
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
   ORIGIN_MEMBER_BRANCH_REFGLOBS,
+  issueBranchName,
   issueNumberFromMemberBranch,
   rootIssueFromChunkBranch,
 } from "./naming.js";
@@ -302,7 +302,7 @@ export function resolvePlan(
   // change made today's derivation name a different branch. Every placement
   // and safety decision stays strict: a blocker is satisfied, a PR names a
   // member, and a landing closes it only when the EXACT derived branch names
-  // it. Labels are never consulted, and git has no search-index lag.
+  // it. Membership never consults labels, and git has no search-index lag.
   const publishedChunkMembers = new Set(
     [...chunkMembers.values()].flatMap((members) => [...members]),
   );

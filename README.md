@@ -604,6 +604,8 @@ dependency; relabelling the issue alone will not do it.
 > planning and wrap-up. Sandbar removes those refs atomically with the chunk
 > branch after every member has closed. Closing an issue by hand does not hide
 > it — git-derived members are fetched by number without an open-state filter.
+> Do not retitle a chunk's root issue while its chunk is live; rename it back if
+> you already have, because the title slug is part of the derived branch name.
 >
 > The one review-gated issue sandbar will not work is one that belongs to no
 > chunk — its blockers straddle two different chunks, it sits downstream of an

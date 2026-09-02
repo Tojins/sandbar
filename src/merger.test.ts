@@ -63,12 +63,15 @@ type Calls = {
   pulls: number;
   chunkBases: string[];
   checkouts: string[];
-  chunkPushes: string[];
+  chunkPushes: {
+    branch: string;
+    members: readonly { readonly source: string; readonly destination: string }[];
+  }[];
   chunkPrs: { chunkBranch: string; title: string; body: string }[];
   headReads: number;
   // #64
   chunkRefFetches: string[];
-  chunkBranchDeletes: string[];
+  chunkBranchDeletes: { branch: string; memberIssues: readonly number[] }[];
   prComments: { pr: number; body: string }[];
   prLabelRemovals: { pr: number; label: string }[];
   prCloses: number[];
@@ -317,8 +320,8 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       calls.chunkRefFetches.push(branch);
       return script.chunkRefs?.[branch] ?? { kind: "absent" };
     },
-    async deleteChunkBranch(branch) {
-      calls.chunkBranchDeletes.push(branch);
+    async deleteChunkBranch(branch, memberIssues) {
+      calls.chunkBranchDeletes.push({ branch, memberIssues });
       calls.order.push("chunk-branch-delete");
       const e = script.wrapupFails?.deleteChunkBranch;
       if (e) throw new SandbarError(e);
@@ -346,9 +349,9 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       calls.order.push("checkout");
       return undefined;
     },
-    async pushChunkBranch(branch) {
+    async pushChunkBranch(branch, members) {
       const r = script.chunkPushes?.[cpIdx++] ?? { kind: "ok" as const };
-      calls.chunkPushes.push(branch);
+      calls.chunkPushes.push({ branch, members });
       calls.order.push("chunk-push");
       return r;
     },
@@ -1850,7 +1853,6 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
     chunk: { root, branch: `sandbar/chunk-${root}-c` },
   });
 
-
   it("bases a first landing on origin/<sourceBranch>, merges, gates, pushes the chunk branch", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
@@ -1872,7 +1874,13 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
       "chunk-pr",
       "checkout",
     ]);
-    expect(calls.chunkPushes).toEqual(["sandbar/chunk-42-c"]);
+    expect(calls.chunkPushes).toEqual([{
+      branch: "sandbar/chunk-42-c",
+      members: [{
+        source: "sandbar/issue-42-t-42",
+        destination: "sandbar/member-42",
+      }],
+    }]);
     expect(summary.chunkLanded).toEqual([
       { issue: chunkIssue(42), chunkBranch: "sandbar/chunk-42-c" },
     ]);
@@ -1896,6 +1904,29 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
     await runMergerWithAdapter([chunkIssue(43, 42)], adapter);
 
     expect(calls.checkouts[0]).toBe("refs/remotes/origin/sandbar/chunk-42-c");
+  });
+
+  it("publishes every member in a chunk group under its durable member ref", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+    });
+
+    await runMergerWithAdapter([chunkIssue(42), chunkIssue(43, 42)], adapter);
+
+    expect(calls.chunkPushes).toEqual([{
+      branch: "sandbar/chunk-42-c",
+      members: [
+        {
+          source: "sandbar/issue-42-t-42",
+          destination: "sandbar/member-42",
+        },
+        {
+          source: "sandbar/issue-43-t-43",
+          destination: "sandbar/member-43",
+        },
+      ],
+    }]);
   });
 
   it("lands the chunks first, then returns the worktree to the sha the cycle started on", async () => {
@@ -1936,7 +1967,7 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
       "sandbar/chunk-42-c",
       "sandbar/chunk-44-c",
     ]);
-    expect(calls.chunkPushes).toEqual([
+    expect(calls.chunkPushes.map((push) => push.branch)).toEqual([
       "sandbar/chunk-42-c",
       "sandbar/chunk-44-c",
     ]);
@@ -2116,7 +2147,9 @@ describe("runMergerWithAdapter — the chunk PR (#62)", () => {
     // Not a skip: the issue landed, and telling it otherwise would ask for the
     // work again.
     expect(merr.partial?.skipped).toEqual([]);
-    expect(calls.chunkPushes).toEqual(["sandbar/chunk-42-c"]);
+    expect(calls.chunkPushes.map((push) => push.branch)).toEqual([
+      "sandbar/chunk-42-c",
+    ]);
   });
 });
 
@@ -2300,7 +2333,10 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     // still not a request the next cycle honours.
     expect(calls.prLabelRemovals).toEqual([{ pr: 542, label: LAND_LABEL }]);
     expect(calls.prCloses).toEqual([542]);
-    expect(calls.chunkBranchDeletes).toEqual(["sandbar/chunk-42-c"]);
+    expect(calls.chunkBranchDeletes).toEqual([{
+      branch: "sandbar/chunk-42-c",
+      memberIssues: [42, 43],
+    }]);
     expect(summary.mergedChunks.map((c) => c.closed)).toEqual([[42, 43]]);
     expect(summary.mergedChunks[0]?.residue).toEqual([]);
     expect(summary.skippedChunks).toEqual([]);

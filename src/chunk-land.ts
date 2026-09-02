@@ -991,8 +991,8 @@ export const CHUNK_LANDED_UNNAMED_BANNER = (args: {
   "none:\n" +
   args.chunks.map((c) => `  ${c.target.branch}`).join("\n") +
   "\nUsually that means they were closed by hand already. If any issue is still " +
-  `open under \`${NEEDS_REVIEW_LABEL}\` for one of these, close it yourself — the ` +
-  "branch is deleted, so no later run will find it.";
+  "open, inspect the retained origin `sandbar/member-*` refs and close the " +
+  "matching issue yourself — the chunk branch is deleted, so no later run will find it.";
 
 export const CHUNK_RESIDUE_RETIRED_BANNER = (args: ResidueBanner): string =>
   banner(

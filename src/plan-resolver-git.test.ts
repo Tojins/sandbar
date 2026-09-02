@@ -27,7 +27,7 @@ describe("chunk membership from branch containment (#93)", () => {
     git(repo, "checkout", "-q", "main");
     git(repo, "merge", "--no-ff", "sandbar/issue-47-useful-work", "-m", "cosmetic subject");
     // A parked child can point at the chunk tip and is still not membership:
-    // finalise may publish issue branches, while only landing publishes member refs.
+    // issue refs may survive independently, while only landing publishes member refs.
     git(repo, "update-ref", "refs/remotes/origin/sandbar/issue-48-parked", "HEAD");
     git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-47-useful-work", "HEAD");
     git(repo, "update-ref", "refs/remotes/origin/main", "HEAD~1");

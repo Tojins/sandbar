@@ -56,7 +56,7 @@
 //
 // The swap is not authoritative. Containment by any fetched chunk branch is
 // the fail-safe de-queue fact; membership on the exact derived branch is the
-// stricter blocker-satisfaction fact. Labels are never read.
+// stricter blocker-satisfaction fact. Membership is never read from a label.
 // The planner reads those members from git and fetches their issues back into
 // the candidate graph so the chunk cannot re-root around whatever remains queued.
 //

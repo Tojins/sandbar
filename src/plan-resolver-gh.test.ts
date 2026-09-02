@@ -230,7 +230,7 @@ describe("buildPlan loads git-derived members into the candidate graph (#93)", (
       "#!/bin/sh",
       'case "$1 $2" in',
       '  "issue list") printf "[]" ;;',
-      '  "api graphql") printf \'{"data":{"repository":{"i60":{"number":60,"title":"Root","body":"","state":"OPEN","labels":{"nodes":[]}}}}}\' ;;',
+      '  "api graphql") printf \'{"data":{"repository":{"i60":{"number":60,"title":"Root","body":"","state":"CLOSED","labels":{"nodes":[]}}}}}\' ;;',
       "esac",
     ].join("\n") + "\n", { mode: 0o755 });
     originalPath = process.env["PATH"];
@@ -248,5 +248,6 @@ describe("buildPlan loads git-derived members into the candidate graph (#93)", (
     const result = await buildPlan(CONFIGURED, { repoDir, defaultLane: "review" });
     expect(result.plan).toEqual([]);
     expect(result.landedChunks[0]?.members).toEqual([{ number: 60, title: "Root" }]);
+    expect(result.landedChunks[0]?.branch).toBe("sandbar/chunk-60-root");
   });
 });

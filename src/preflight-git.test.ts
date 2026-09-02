@@ -212,9 +212,8 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("keeps it when chunk history does not name the issue, whatever origin carries", async () => {
-      // The merge-subject record is the claim that the landing happened;
-      // without it this is an ordinary in-flight branch whose deletion could
-      // discard live work.
+      // The member ref is the claim that the landing happened; without it this
+      // is an ordinary in-flight branch whose deletion could discard live work.
       await landMemberOnChunk();
 
       const deleted = await deleteMergedSandbarBranches(cfg(layoutAt(target)));
@@ -224,8 +223,8 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("keeps it when no chunk branch on origin actually carries the commits", async () => {
-      // The label alone is a previous run's word for it. Ancestry is this
-      // run's verification, and without it nothing is force-deleted.
+      // The supplied membership set selects the branch, but ancestry is this
+      // run's verification; without it nothing is force-deleted.
       await git(target, "checkout", "-q", "-b", "sandbar/issue-7-member");
       await git(target, "commit", "-q", "--allow-empty", "-m", "member work");
       await git(target, "checkout", "-q", "main");
