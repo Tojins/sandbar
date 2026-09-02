@@ -35,12 +35,13 @@ describe("findLandedChunkBranches (real git)", () => {
   let root: string;
   let origin: string;
   let cache: string;
+  let work: string;
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "sandbar-recon-"));
     origin = join(root, "origin.git");
     cache = join(root, "cache.git");
-    const work = join(root, "work");
+    work = join(root, "work");
     await exec("git", ["init", "-b", "main", work], { env: GIT_ENV });
     await writeFile(join(work, "a.txt"), "a");
     await git(work, "add", ".");
@@ -84,11 +85,14 @@ describe("findLandedChunkBranches (real git)", () => {
   });
 
   it("fetches member refs beside chunk refs before deriving membership", async () => {
+    // Push from the work repository so the cache cannot learn this ref as a
+    // push-side remote-tracking update. The reconciler's fetch is therefore
+    // the only operation that can make the membership record visible there.
     await git(
-      cache,
+      work,
       "push",
       "origin",
-      "refs/heads/sandbar/chunk-42-landed:refs/heads/sandbar/member-42",
+      "sandbar/chunk-42-landed:refs/heads/sandbar/member-42",
     );
 
     await findLandedChunkBranches(cache, "main");

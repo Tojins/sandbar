@@ -183,7 +183,6 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     expect(await adapter().chunkBase("sandbar/chunk-1-c")).toBe("origin/main");
   });
 
-
   // #64 — the three answers, and the one git fact that separates two of them:
   // `ls-remote --exit-code` exits 2 for "reached the remote, no matching ref"
   // and something else non-zero for "could not ask". No fake can assert that,
@@ -264,6 +263,10 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
   });
 
   it("reports a rejected member ref as a membership failure, not a chunk race", async () => {
+    // Git gives the genuinely non-fast-forward member ref its own rejection
+    // reason while marking the chunk ref only as `(atomic push failed)`. The
+    // adapter reads that distinction so a member-ref conflict is not retried
+    // as though only the chunk branch had raced.
     await commit(wt, "member.txt", "first landing\n");
     await git(wt, "branch", "sandbar/issue-2-member", "HEAD");
     await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-2");
@@ -302,6 +305,9 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
   });
 
   it("reports a chunk race when member refs are rejected only as atomic collateral", async () => {
+    // The inverse git spelling: the chunk ref has the real rejection and the
+    // member ref is tagged only `(atomic push failed)`. Ignoring that collateral
+    // marker is what preserves the ordinary chunk-race result.
     await commit(seed, "remote.txt", "remote chunk move\n");
     await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-3-c");
     await commit(wt, "local.txt", "local member\n");
@@ -333,6 +339,9 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
   });
 
   it("atomically deletes real refs when a snapshotted member ref is already absent", async () => {
+    // Git accepts deletion of a missing FULLY QUALIFIED ref (with a warning)
+    // and still completes the atomic push. Wrap-up may therefore safely use
+    // its membership snapshot even if that remote ref disappeared meanwhile.
     await commit(wt, "member.txt", "member work\n");
     await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/chunk-1-c");
     await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-1");
