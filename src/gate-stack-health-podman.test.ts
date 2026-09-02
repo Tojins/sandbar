@@ -1,13 +1,12 @@
-// Gate-stack shard: the #49 pre-gate health check (a RUNNING container that
-// still works), #43 healthcheck readiness end to end, and the M5 in-namespace
-// port probe. The family header — why these run against a real podman and why
-// the suite is sharded — is gate-stack-podman.test-util.ts's.
+// Gate-stack slice: the #49 pre-gate health check (a RUNNING container that
+// still works) and #43 healthcheck readiness end to end. The family header —
+// why these run against real podman and concurrently — is the test util's.
 
 import { execFile } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import {
@@ -25,6 +24,7 @@ import { stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   podmanTestScope,
+  podmanTestStackId,
   removeFixtureContainer,
   runFixtureContainer,
 } from "./podman-test-scope.test-util.js";
@@ -43,9 +43,6 @@ const available = podmanTestsEnabled({
 const { scope: SCOPE, testImageTag, cleanup } = podmanTestScope(
   "gate-stack-health",
 );
-const STACK_ID = "podmantest";
-const cName = (name: string): string =>
-  stackContainerNameFor(SCOPE, STACK_ID, name);
 
 // One file-level sweep; nothing reaps this scope on SIGKILL — the recovery
 // command is in `podman-test-scope.test-util.ts`.
@@ -66,18 +63,6 @@ afterAll(async () => {
 describe.runIf(available)(
   "pre-gate health of a running issue container (#49)",
   () => {
-    let repo: string;
-    let stack: Stack | null = null;
-
-    beforeEach(async () => {
-      repo = await initStackRepo();
-    }, 60_000);
-
-    afterEach(async () => {
-      if (stack) await stack.stop();
-      stack = null;
-      await rm(repo, { recursive: true, force: true });
-    }, 60_000);
 
     const WEDGE = "out/wedge";
     const WEDGE_PROBE = [
@@ -120,11 +105,21 @@ describe.runIf(available)(
     // with an eager recreate present, and a recreate of a healthy `issue`
     // container would throw away the schema and rows the lifecycle exists to
     // keep.
-    it(
+    it.concurrent(
       "a running, healthy issue container is left exactly where it is",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: wedgeSpec(10_000),
@@ -155,11 +150,21 @@ describe.runIf(available)(
     // prevent it. So this is the assertion that fails if one-shot escalation
     // ever creeps back: unhealthy when the gate run starts, healthy before the
     // deadline, and nothing recreated.
-    it(
+    it.concurrent(
       "waits out a transiently unhealthy issue container instead of escalating",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: wedgeSpec(30_000),
@@ -192,9 +197,19 @@ describe.runIf(available)(
     // — the same one-word #37 regression `reapKilledStep`'s own test pins, at
     // the one other bringup that neither precedes nor follows a `running.map`
     // update.
-    it(
+    it.concurrent(
       "a persistently unhealthy issue container is recreated on its running image, then throws",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         // A built image, not a `podman tag` alias — see `buildVariantImage`.
         // Since #45 an alias is not a changed image: the staleness check
         // settles a difference in the reference STRING by comparing image IDs
@@ -204,7 +219,7 @@ describe.runIf(available)(
         const ALIAS = testImageTag("health-image");
         await buildVariantImage(ALIAS);
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           images: async () => new Map([[IMAGE, ALIAS]]),
@@ -260,11 +275,21 @@ describe.runIf(available)(
     // a probed container that STOPPED must still produce #36's message rather
     // than a health one, which would send its reader to debug a probe against a
     // container that is not running.
-    it(
+    it.concurrent(
       "a stopped issue container reports its state, not its health, even when probed",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: wedgeSpec(10_000),
@@ -301,11 +326,21 @@ describe.runIf(available)(
     // The image declares no HEALTHCHECK of its own (it ships the script and
     // leaves the instruction out), which is the other half of why `command` is
     // required rather than optional.
-    it(
+    it.concurrent(
       "healthcheck readiness goes green on the image's own probe",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
@@ -351,9 +386,19 @@ describe.runIf(available)(
     // so a message built from the CLIENT's output would say LESS than the
     // `exec` probe this replaced. What the probe actually saw is in
     // `.State.Health.Log`, and the error has to carry it.
-    it(
+    it.concurrent(
       "a readiness timeout quotes the probe's own output, not podman's `unhealthy`",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         const spec = resolveGateStack({
           containers: [
             { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
@@ -375,7 +420,7 @@ describe.runIf(available)(
         let caught: unknown = null;
         try {
           stack = await startStack({
-            stackId: STACK_ID,
+            stackId: stackId,
             scope: SCOPE,
             worktreePath: repo,
             spec,
@@ -404,66 +449,3 @@ describe.runIf(available)(
     );
   },
 );
-
-// M5, and what licenses deleting `TCP_SETTLE_MS` along with the `tcp` kind.
-//
-// The retired host-side probe could not treat a successful `connect` as a
-// readiness signal: rootless podman's port forwarder accepts at the host and
-// asks the backend afterwards, so a bare connect succeeded against a pod with
-// nothing listening, and only a socket that STAYED open for a settle window
-// told them apart. Inside the container that forwarder is not in the path, so a
-// dead port and a live one separate outright.
-//
-// Asserted with the client the image actually ships rather than with a socket
-// tool that may not be installed — which is also the realistic shape of a
-// `healthcheck` command.
-describe.runIf(available)("in-namespace port probe", () => {
-  const NAME = cName("portprobe");
-
-  beforeEach(async () => {
-    await removeFixtureContainer(NAME).catch(() => {});
-    await runFixtureContainer([
-      "--name", NAME,
-      "-e", "MYSQL_ALLOW_EMPTY_PASSWORD=yes",
-      IMAGE,
-    ]);
-    // Let the server come up, using the probe this feature exists to run.
-    const deadline = Date.now() + 120_000;
-    while (Date.now() < deadline) {
-      const r = await runExit([
-        "exec", NAME, "healthcheck.sh", "--connect", "--innodb_initialized",
-      ]);
-      if (r.code === 0) return;
-      await new Promise((r2) => setTimeout(r2, 1_000));
-    }
-    throw new Error("mariadb never came up");
-  }, 180_000);
-
-  afterEach(async () => {
-    await removeFixtureContainer(NAME).catch(() => {});
-  }, 60_000);
-
-  it(
-    "separates a live port from a dead one with no settle window",
-    async () => {
-      const live = await runExit([
-        "exec", NAME,
-        "mariadb", "-h", "127.0.0.1", "-P", "3306", "-uroot", "-e", "SELECT 1",
-      ]);
-      expect(live.code).toBe(0);
-
-      const started = Date.now();
-      const dead = await runExit([
-        "exec", NAME,
-        "mariadb", "-h", "127.0.0.1", "-P", "9999", "-uroot", "-e", "SELECT 1",
-      ]);
-      // The assertion the host-side probe could not make: nothing listening is
-      // a REFUSED connection, not an accepted one that closes 190ms later.
-      expect(dead.code).not.toBe(0);
-      // And it says so immediately, which is what makes the settle window
-      // unnecessary rather than merely unused.
-      expect(Date.now() - started).toBeLessThan(10_000);
-    },
-    120_000,
-  );
-});

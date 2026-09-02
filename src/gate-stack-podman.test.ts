@@ -1,13 +1,13 @@
-// Gate-stack shard: gate mechanics, the lifecycle split, bringup blame
+// Gate-stack slice: gate mechanics, the lifecycle split, bringup blame
 // (#24 D5/D9, #36) and both #50 volume layers. The family header — why these
 // run against a real podman, the empirical facts index, and why the suite is
-// sharded — is gate-stack-podman.test-util.ts's.
+// concurrent — is gate-stack-podman.test-util.ts's.
 
 import { execFile } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import {
@@ -26,6 +26,7 @@ import { scopedResourcePrefix, stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   podmanTestScope,
+  podmanTestStackId,
   removeFixtureContainer,
   runFixtureContainer,
 } from "./podman-test-scope.test-util.js";
@@ -59,13 +60,10 @@ const available = podmanTestsEnabled({
 // `startStack` force-removes a namesake before creating one — so each would
 // tear down the other's live stack mid-test.
 //
-// `STACK_ID` stays a literal on purpose: the scope already separates the two
+// `stackId` stays a literal on purpose: the scope already separates the two
 // processes, and a readable stack id is what makes leftover debris
 // identifiable.
 const { scope: SCOPE, cleanup } = podmanTestScope("gate-stack");
-const STACK_ID = "podmantest";
-const cName = (name: string): string =>
-  stackContainerNameFor(SCOPE, STACK_ID, name);
 
 // One file-level sweep, covering every `describe` below rather than only the
 // first. Guarded because it shells out to podman and there is none in the gate
@@ -79,24 +77,22 @@ afterAll(async () => {
 describe.runIf(available)(
   "gate stack against real podman",
   () => {
-    let repo: string;
-    let stack: Stack | null = null;
 
-    beforeEach(async () => {
-      repo = await initStackRepo();
-    }, 60_000);
-
-    afterEach(async () => {
-      if (stack) await stack.stop();
-      stack = null;
-      await rm(repo, { recursive: true, force: true });
-    }, 60_000);
-
-    it(
+    it.concurrent(
       "runs steps in a held container that sees the worktree, and reports the failing step",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
@@ -146,11 +142,21 @@ describe.runIf(available)(
       180_000,
     );
 
-    it(
+    it.concurrent(
       "a red step stops the run, names itself, and carries the container logs",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
@@ -194,11 +200,21 @@ describe.runIf(available)(
       180_000,
     );
 
-    it(
+    it.concurrent(
       "refuses to gate a dirty worktree instead of reporting a verdict about it",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
@@ -236,14 +252,24 @@ describe.runIf(available)(
       180_000,
     );
 
-    it(
+    it.concurrent(
       "a container running as root in the pod writes worktree files owned by the host user",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         // The load-bearing consequence of dropping --userns=keep-id (which
         // podman refuses alongside --pod). If this ever regresses, every file a
         // gate step writes lands owned by a subuid the operator cannot delete.
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
@@ -269,11 +295,21 @@ describe.runIf(available)(
     // that reason: #48 moved the tcp half of the original away (a host-side
     // probe a gate runner cannot reach) and left an `exec` probe behind, and
     // #43 retired `exec` in turn.
-    it(
+    it.concurrent(
       "issue containers keep their id and their state across gate runs",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
@@ -366,11 +402,21 @@ describe.runIf(available)(
     // not infrastructure. Getting this backwards sends an agent-broken service
     // bootstrap through two fresh-stack retries that reproduce it exactly, then
     // lands NEEDS-HUMAN with an "environment" trace.
-    it(
+    it.concurrent(
       "an attempt container that will not come up is a gate red, not a throw",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
@@ -407,11 +453,21 @@ describe.runIf(available)(
 
     // D9's actual claim: the answer is in a container the failing step never
     // touched. Asserted on a single-container stack it is vacuous.
-    it(
+    it.concurrent(
       "a red gate carries the logs of containers the failing step never ran in",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
@@ -450,12 +506,22 @@ describe.runIf(available)(
     // A container with no readiness declared was never inspected at all, so a
     // dead one passed bringup and its failure was charged to the branch by
     // every step that talked to it.
-    it(
+    it.concurrent(
       "a readiness-less container that dies at startup fails bringup",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         await expect(
           startStack({
-            stackId: STACK_ID,
+            stackId: stackId,
             scope: SCOPE,
             worktreePath: repo,
             spec: resolveGateStack({
@@ -487,9 +553,19 @@ describe.runIf(available)(
     // needs a local client: since #43 no probe runs on the host at all, and
     // this container dies before readiness is even asked. So it runs in the
     // gate, every attempt, rather than joining the host-only set.
-    it(
+    it.concurrent(
       "a bringup failure names the stack it was told it belongs to",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         const anchor = `${scopedResourcePrefix(SCOPE)}labelanchor`;
         await removeFixtureContainer("--depend", anchor).catch(() => {});
         await runFixtureContainer([
@@ -534,11 +610,21 @@ describe.runIf(available)(
     // long as the first attempt: an issue container that dies MID-RUN is still
     // infrastructure, so it must throw (→ HARD-ERROR → fresh stack) rather than
     // red the gate and hand the implementer a database it never touched.
-    it(
+    it.concurrent(
       "an issue container that dies between gate runs throws instead of reddening",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
@@ -569,11 +655,21 @@ describe.runIf(available)(
     // GONE and for a podman that is merely unwell, so the removed case was read
     // as "could not answer" and waved through — and the gate then reddened
     // AGAINST THE BRANCH on the first step to exec into it.
-    it(
+    it.concurrent(
       "an issue container that is REMOVED between gate runs throws instead of reddening",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
@@ -609,12 +705,22 @@ describe.runIf(available)(
     // object` from inspect, `no container with name or ID ... found` from
     // exec), so matching on stderr instead would be fragile in a way this is
     // not.
-    it(
+    it.concurrent(
       "`container exists` separates gone from flaked where `inspect` cannot",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         const name = cName("svc");
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
@@ -659,11 +765,21 @@ describe.runIf(available)(
     // empty list means the flag worked rather than that there was nothing to
     // suppress — is the layer-2 test at the bottom of this file, which creates
     // the same image WITHOUT the flag and finds one.
-    it(
+    it.concurrent(
       "creates no anonymous volume for the image's VOLUME directives",
-      async () => {
+      async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
         stack = await startStack({
-          stackId: STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: resolveGateStack({
@@ -701,15 +817,23 @@ describe.runIf(available)(
 // with a hand-written `podman run` at podman's DEFAULT, deliberately bypassing
 // `runFixtureContainer`: it is the pre-upgrade container, not a fixture.
 describe.runIf(available)("removing a pre-upgrade container's volume", () => {
-  const NAME = cName("volprobe");
-
-  afterEach(async () => {
-    await removeFixtureContainer(NAME).catch(() => {});
-  }, 60_000);
-
-  it(
+  it.concurrent(
     "takes the anonymous volume with the container",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+      const NAME = cName("volprobe");
+      onTestFinished(async () => {
+        await removeFixtureContainer(NAME).catch(() => {});
+      }, 60_000);
+
       await exec(RUNTIME, [
         "run",
         "-d",

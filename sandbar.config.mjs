@@ -174,11 +174,9 @@ export default {
         },
       },
     ],
-    // Split in three, and bounded explicitly rather than by the 15-minute
-    // default, which was sized for a suite that skipped 35 tests. Steps stop at
-    // the first red, so the cheap suite still fails fast — and the trace then
-    // NAMES which layer broke, which matters because a `podman-test` red has a
-    // second possible cause (the socket) that a `test` red does not.
+    // Type checking keeps its own blame. Unit and podman tests share one
+    // vitest invocation: on the overwhelmingly green path this avoids paying
+    // transform/import twice and lets quick unit files fill idle workers.
     //
     // The exclude glob deliberately misses `gate-stack-hostpodman.test.ts`,
     // which self-skips: it holds only for a LOCAL client, and this one is
@@ -188,19 +186,10 @@ export default {
     // invoking user" has to be whoever runs the test rather than whoever owns
     // the socket. Those two stay host-only.
     //
-    // `agent-sandbox-podman.test.ts` USED to be a third, on an unknown rather
-    // than a measured difference; #52 measured it — its `--init` assertions are
-    // made inside the container through `podman exec`, so a remote client
-    // observes them identically — and it is named below. The glob still
-    // excludes it from `test`, which is why naming it here is the whole of the
-    // wiring.
-    //
-    // NONE of that depends on this comment being right. Both host-only files
-    // declare `needsLocalClient`, so they skip against a remote client on their
-    // own say-so — which matters because a glob and a by-hand file list are two
-    // lists that drift, and the drift is silent in the direction that hurts
-    // (a host-only file quietly added to `podman-test` would be a red nobody
-    // asked for; one quietly dropped from BOTH would be a layer nobody runs).
+    // `agent-sandbox-podman.test.ts` is remote-safe (#52): its assertions are
+    // made through `podman exec`. There is no by-hand podman file list now;
+    // vitest's project include glob collects every test except the two explicit
+    // local-client exceptions, so a new podman file cannot silently disappear.
     //
     // `npm test` on the host still runs everything. The two host-only files
     // above are the whole of the manual step: run them on the host after a
@@ -209,30 +198,23 @@ export default {
     steps: [
       { name: "check", in: "runner", command: ["npm", "run", "check"] },
       {
-        name: "test",
-        in: "runner",
-        command: ["npm", "test", "--", "--exclude", "**/*-podman.test.ts"],
-        timeoutMs: 900_000,
-      },
-      {
         name: "podman-test",
         in: "runner",
         command: [
           "npm",
           "test",
           "--",
-          // The five gate-stack shards are ONE suite split for wall-clock
-          // parallelism — vitest runs a file's tests sequentially, and unsplit
-          // they bounded the whole run. The slice map is
-          // `gate-stack-podman.test-util.ts`'s header.
-          "src/gate-stack-podman.test.ts",
-          "src/gate-stack-health-podman.test.ts",
-          "src/gate-stack-timeout-podman.test.ts",
-          "src/gate-stack-images-podman.test.ts",
-          "src/gate-stack-standalone-podman.test.ts",
-          "src/ensure-images-podman.test.ts",
-          "src/agent-sandbox-podman.test.ts",
-          "src/gate-run-podman.test.ts",
+          // One invocation lets unit files occupy workers while concurrent
+          // podman tests wait. Only the two local-client suites remain outside
+          // the runner; the project include glob owns every other test.
+          "--exclude",
+          "src/gate-stack-hostpodman.test.ts",
+          "--exclude",
+          "src/sandbox-stack-podman.test.ts",
+          // Three gates share one 12-core host. Keep their combined fork count
+          // predictable; intra-file concurrency supplies the podman overlap.
+          "--maxWorkers",
+          "2",
         ],
         // `gate-run-podman.test.ts` (#45) is named here rather than staying
         // host-only: it drives `runGateCommand` end to end, and every podman
@@ -242,9 +224,9 @@ export default {
         //
         // 30 minutes. The only wall-clock measurement anyone has taken here is
         // #48's 229s, and it is quoted as the historical figure it is: it timed
-        // two of these files when they held 33 tests between them, and #45,
-        // #49, #50 and #52 have since taken this step to 59, measured with
-        // `vitest list` on this tree — several of the additions being
+        // two of these files when they held 33 tests between them; later work
+        // grew the recurring surface before #79 removed podman-only quirks.
+        // Several retained tests are
         // readiness timeouts the tests ask for deliberately, and #45's own
         // being bringups it cannot avoid (reuse and keep-alive are only
         // assertable by bringing a stack up more than once, and most of its

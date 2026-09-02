@@ -1,13 +1,13 @@
-// Gate-stack shard: per-branch images between gate runs (#37, #46) — the
+// Gate-stack slice: per-branch images between gate runs (#37, #46) — the
 // swap, the reap's image bookkeeping, the failed-recreate blame path, and the
 // build-failure red. The family header — why these run against a real podman
-// and why the suite is sharded — is gate-stack-podman.test-util.ts's.
+// and why its tests run concurrently — is the test util's.
 
 import { execFile } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import { ImageBuildError } from "./ensure-images.js";
@@ -35,9 +35,6 @@ const available = podmanTestsEnabled({
 const { scope: SCOPE, testImageTag, cleanup } = podmanTestScope(
   "gate-stack-images",
 );
-const STACK_ID = "podmantest";
-const cName = (name: string): string =>
-  stackContainerNameFor(SCOPE, STACK_ID, name);
 
 // One file-level sweep; nothing reaps this scope on SIGKILL — the recovery
 // command is in `podman-test-scope.test-util.ts`.
@@ -46,18 +43,6 @@ afterAll(async () => {
 }, 120_000);
 
 describe.runIf(available)("per-branch images between gate runs (#37)", () => {
-  let repo: string;
-  let stack: Stack | null = null;
-
-  beforeEach(async () => {
-    repo = await initStackRepo();
-  }, 60_000);
-
-  afterEach(async () => {
-    if (stack) await stack.stop();
-    stack = null;
-    await rm(repo, { recursive: true, force: true });
-  }, 60_000);
 
   // #37. An image that bakes a lockfile is a function of the branch, so the
   // stack has to be able to change which image it runs BETWEEN gate runs —
@@ -68,9 +53,19 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   // recreated every gate run regardless, so a swap could not fail to reach
   // them; an `issue` container is deliberately long-lived, which is exactly
   // how it would go on running the old image forever.
-  it(
+  it.concurrent(
     "a changed image recreates the issue container, and an unchanged one leaves it alone",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
       // A built image, not a `podman tag` alias — see `buildVariantImage`.
       // Since #45 an alias is not a changed image: same ID, so the staleness
       // check settles the string difference and recreates nothing, which is
@@ -84,7 +79,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
       // runs and be reddened by a build it has no use for.
       let askedFor: ReadonlySet<string> | null = null;
       stack = await startStack({
-        stackId: STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         images: async (only) => {
@@ -147,13 +142,23 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   // map still says it is on the branch's variant. Nothing ever sees it as
   // stale again, so every remaining attempt gates against the source
   // branch's dependencies — #37 verbatim, green included.
-  it(
+  it.concurrent(
     "a reaped issue container comes back on the image the branch put it on, not the declared one",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
       const ALIAS = testImageTag("reap-image");
       await buildVariantImage(ALIAS);
       stack = await startStack({
-        stackId: STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         images: async () => new Map([[IMAGE, ALIAS]]),
@@ -198,11 +203,21 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   // `assertIssueContainersAlive` would then read sandbar's own removal as
   // "it came up once and something killed it", i.e. an infra HARD-ERROR
   // blaming the environment for an image the branch authored.
-  it(
+  it.concurrent(
     "a failing issue-container recreate reds, and the next gate run retries it instead of reporting infra death",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
       stack = await startStack({
-        stackId: STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         // An invalid reference, so `podman run` refuses instantly instead of
@@ -243,11 +258,21 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   // lockfile that does not install is the branch's to fix; as an infra
   // failure it would buy two fresh-stack retries reproducing it exactly and
   // then park the issue with a trace blaming the environment.
-  it(
+  it.concurrent(
     "an image that will not build is a gate RED naming the image, not a throw",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
       stack = await startStack({
-        stackId: STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         images: async () => {
@@ -281,12 +306,22 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
 
   // The dirty-tree refusal is CHEAPER than a build and comes first: a tree
   // that gets no verdict at all should not pay for an image.
-  it(
+  it.concurrent(
     "does not resolve images for a worktree it is going to refuse anyway",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const repo = await initStackRepo();
+      let stack: Stack | null = null;
+      const stackId = podmanTestStackId("podmantest", task.id);
+      const cName = (name: string): string =>
+        stackContainerNameFor(SCOPE, stackId, name);
+      onTestFinished(async () => {
+        if (stack) await stack.stop();
+        await rm(repo, { recursive: true, force: true });
+      }, 120_000);
+
       let asked = 0;
       stack = await startStack({
-        stackId: STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         images: async () => {
