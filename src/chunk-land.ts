@@ -449,8 +449,8 @@ export const CHUNK_LANDED_PR_COMMENT = (args: {
       "",
       "Still OPEN — sandbar stopped at the first issue it could not close, so " +
         "this is that one and everything the rest of the chunk is built on top " +
-        `of. They keep their \`${NEEDS_REVIEW_LABEL}\` label, so they stay off the ` +
-        "agent queue:",
+        "of. Their origin issue refs remain contained by the kept chunk branch, " +
+        "so they stay off the agent queue:",
       "",
       ...list(args.unclosed),
       "",
@@ -854,8 +854,8 @@ export async function wrapUpLandedChunk(
 
   // Conditional, and the condition is the members rather than the pull
   // request: keeping the branch is what makes the next run reconcile this
-  // chunk again, and a member left OPEN under `needs-review` is the one residue
-  // worth another attempt. A PR that would not close is cosmetic by
+  // chunk again, and a member left OPEN with its origin ref contained is the
+  // one residue worth another attempt. A PR that would not close is cosmetic by
   // comparison, and a branch kept for it would re-run the whole wrap-up every
   // cycle forever. `closesComplete` is vacuously true for a chunk that named
   // no member at all, which deletes the branch too — see the header for why

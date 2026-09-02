@@ -599,24 +599,11 @@ dependency; relabelling the issue alone will not do it.
 > A review you dismiss is never filed at all, and a review whose threads you
 > resolve before sandbar next runs is dropped if it had no body of its own.
 >
-> And one thing to avoid: **don't close a chunk's issues one at a time while
-> others are still queued behind them.** The branch name is derived from the
-> chunk's root and sandbar only ever sees open issues, so closing a member
-> re-derives the chunk under whichever member is left at the front, and
-> therefore under a branch name nobody has pushed. What sandbar does then
-> depends on which member you are looking at, and only one of the two cases is
-> loud:
->
-> - A member queued *behind* that new front one is refused, one issue at a time,
->   rather than built on a tree missing the work it depends on.
-> - The new front member itself is indistinguishable, to sandbar, from the root
->   of a brand-new chunk — so it is worked from your source branch and lands on
->   a fresh chunk branch, while the closed member's commits stay behind on the
->   old one. Nothing reports this, because nothing about it looks wrong.
->
-> So: land a chunk branch and close all of its issues together. If you have
-> already closed one, reopen it — that restores the chunk's original root and
-> its branch name along with it.
+> Keep the origin issue branches beside a live chunk branch. They are the
+> durable membership record: deleting one by hand can hide that member from
+> planning and wrap-up. Sandbar removes those refs atomically with the chunk
+> branch after every member has closed. Closing an issue by hand does not hide
+> it — git-derived members are fetched by number without an open-state filter.
 >
 > The one review-gated issue sandbar will not work is one that belongs to no
 > chunk — its blockers straddle two different chunks, it sits downstream of an
