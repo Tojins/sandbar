@@ -15,7 +15,7 @@
 // `config.env` VALUE — so the seam absorbs a file-shaped credential without
 // sandbar learning a path or mounting anything (`CODEX_AUTH_SEED`).
 //
-// A provider's parser answers in three registers and the difference between
+// A provider's parser answers in five registers and the difference between
 // them is load-bearing: `text`/`result` is the agent's SPEECH and is the only
 // thing a run returns, `failure` is the provider naming a TERMINAL fault of its
 // own, and everything else — including a recoverable one it merely reports — is
@@ -23,7 +23,9 @@
 // that narrates its own retries (`codex exec` does, over the same wire shape it
 // uses for the fatal case) will hand a naive parser a `failure` for a
 // reconnect, and `invokeAgent` rejects on a failure, so a blip would arrive at
-// a human as NEEDS-HUMAN. See `ParsedStreamEvent` and `parseCodexJsonLine`.
+// a human as NEEDS-HUMAN. The fourth and fifth, `usage` and the additive tool
+// count, are measurements only: neither is speech or failure and neither can
+// trip completion (#85). See `ParsedStreamEvent` and `parseCodexJsonLine`.
 //
 // Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
@@ -39,8 +41,11 @@
 //   F8 — the container runs with `--init`: the entrypoint is `sleep infinity`,
 //        which reaps nothing (#42). See `sandboxRunArgs`.
 //   F9 — a run that FAILS still carries out whatever the agent had emitted
-//        (`agentPartialOutput`), and both timeout paths kill the exec they
-//        stop waiting for (#41). See invokeAgent.
+//        (`agentPartialOutput`) and what it had spent getting there
+//        (`agentPartialUsage`, #85 — an invocation that burned ten minutes and
+//        then died must not be recorded as having spent nothing), and both
+//        timeout paths kill the exec they stop waiting for (#41).
+//        See invokeAgent.
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
@@ -66,6 +71,8 @@ import { resolveSandboxEnv } from "./env.js";
 import { RESOURCE_PREFIX } from "./naming.js";
 import type { RepoLayout } from "./repo-cache.js";
 import { startGapTimer, startTimer } from "./timing.js";
+import { normalizeClaudeResult, normalizeCodexUsage } from "./agent-usage.js";
+import type { AgentUsage } from "./agent-usage.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -118,6 +125,8 @@ export type ParsedStreamEvent =
   | { type: "result"; result: string }
   | { type: "tool_call"; name: string; args: string }
   | { type: "session_id"; sessionId: string }
+  | { type: "usage"; usage: AgentUsage }
+  | { type: "tool_calls"; count: number }
   // The provider naming a TERMINAL fault of its own (#72) — its turn ended
   // without reaching an answer. Never folded into the run's output (it is not
   // the agent's speech, and #41 turns on that distinction) and never emitted
@@ -141,7 +150,7 @@ export type AgentProvider = {
   parseStreamLine(line: string): ParsedStreamEvent[];
 };
 
-// One implementation of the provider parser's three-register reduction.
+// One implementation of the provider parser's five-register reduction.
 // Both the live sandbox invocation and the merger's run-to-completion capture
 // feed this accumulator, so speech, terminal failures and raw transport cannot
 // drift into different meanings on the two agent paths (#74).
@@ -150,12 +159,16 @@ export type AgentSpeechAccumulator = {
   readonly accumulated: string;
   readonly spoken: string;
   readonly failure: string | undefined;
+  readonly usage: AgentUsage | undefined;
+  readonly toolCalls: number;
 };
 
 export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
   let result = "";
   let accumulated = "";
   let failure: string | undefined;
+  let usage: AgentUsage | undefined;
+  let toolCalls = 0;
   return {
     ingest(events) {
       for (const event of events) {
@@ -164,6 +177,8 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
           result = event.result;
           accumulated += event.result;
         } else if (event.type === "failure") failure = event.message;
+        else if (event.type === "usage") usage = event.usage;
+        else if (event.type === "tool_calls") toolCalls += event.count;
       }
     },
     get accumulated() {
@@ -174,6 +189,12 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
     },
     get failure() {
       return failure;
+    },
+    get usage() {
+      return usage;
+    },
+    get toolCalls() {
+      return toolCalls;
     },
   };
 }
@@ -291,6 +312,8 @@ export type SandboxRunResult = {
   // exactly what is in it).
   readonly signalMs?: number;
   readonly maxGapMs: number;
+  readonly usage?: AgentUsage;
+  readonly toolCalls: number;
 };
 
 export interface Sandbox {
@@ -391,10 +414,19 @@ export class AgentIdleTimeoutError extends Error {
 // EPIPE on stdin) and those must carry the output too. Nothing is mutated and
 // no property name can collide with one the thrown error already has.
 const AGENT_PARTIAL_OUTPUT = new WeakMap<object, string>();
+const AGENT_PARTIAL_USAGE = new WeakMap<object, { usage?: AgentUsage; toolCalls: number }>();
 
-const withPartialOutput = (err: unknown, partial: string): unknown => {
+const withPartialOutput = (
+  err: unknown,
+  partial: string,
+  usage: AgentUsage | undefined,
+  toolCalls: number,
+): unknown => {
   if (partial !== "" && typeof err === "object" && err !== null) {
     AGENT_PARTIAL_OUTPUT.set(err, partial);
+  }
+  if (typeof err === "object" && err !== null) {
+    AGENT_PARTIAL_USAGE.set(err, { usage, toolCalls });
   }
   return err;
 };
@@ -406,6 +438,12 @@ export const agentPartialOutput = (err: unknown): string => {
   if (typeof err !== "object" || err === null) return "";
   return AGENT_PARTIAL_OUTPUT.get(err) ?? "";
 };
+export const agentPartialUsage = (
+  err: unknown,
+): { usage?: AgentUsage; toolCalls?: number } =>
+  typeof err === "object" && err !== null
+    ? AGENT_PARTIAL_USAGE.get(err) ?? {}
+    : {};
 
 class WorktreeError extends Error {
   readonly exitCode: number | undefined;
@@ -495,11 +533,12 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
     for (const block of obj.message.content) {
       if (block.type === "text" && typeof block.text === "string") {
         texts.push(block.text);
-      } else if (
-        block.type === "tool_use" &&
-        typeof block.name === "string" &&
-        block.input !== undefined
-      ) {
+      } else if (block.type === "tool_use") {
+        // The counter is independent of TOOL_ARG_FIELDS, which allowlists the
+        // four tools whose argument is worth rendering and so misses
+        // Read/Grep/Edit — precisely the behaviour the count measures (#85).
+        events.push({ type: "tool_calls", count: 1 });
+        if (typeof block.name !== "string" || block.input === undefined) continue;
         const argField = TOOL_ARG_FIELDS[block.name];
         if (argField === undefined) continue;
         const argValue = block.input[argField];
@@ -516,8 +555,21 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
     }
     return events;
   }
-  if (obj.type === "result" && typeof obj.result === "string") {
-    return [{ type: "result", result: obj.result }];
+  // Usage is read independently of whether `result` is a string: an
+  // error-terminated turn keeps its text in `errors[]` and still reports what
+  // it spent, so the invocation that burned the budget is not recorded as
+  // having spent nothing (#85). No `failure` event is emitted here — that
+  // would change what reaches NEEDS-HUMAN, which this register may not do.
+  if (obj.type === "result") {
+    const measurement = normalizeClaudeResult(obj);
+    return [
+      ...(typeof obj.result === "string"
+        ? [{ type: "result" as const, result: obj.result }]
+        : []),
+      ...(measurement === undefined
+        ? []
+        : [{ type: "usage" as const, usage: measurement }]),
+    ];
   }
   if (
     obj.type === "system" &&
@@ -622,6 +674,15 @@ const codexErrorMessage = (err: unknown): string => {
   return "no message";
 };
 
+// The four item types that ARE tool calls, counted independently of the two
+// whose argument is rendered as an informational `tool_call` (#85).
+const CODEX_TOOL_ITEM_TYPES = new Set([
+  "command_execution",
+  "file_change",
+  "mcp_tool_call",
+  "web_search",
+]);
+
 export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
   const parsed = parseTransportJson(line);
   if (parsed === undefined) return [];
@@ -639,6 +700,14 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
   if (obj.type === "turn.failed") {
     return [{ type: "failure", message: codexErrorMessage(obj.error) }];
   }
+  // A MEASUREMENT, never a completion: the register is separate precisely
+  // because this event is named `turn.completed` and arrives in a parser whose
+  // neighbouring concept is the completion signal. It never enters speech, so
+  // it cannot end a run (#85).
+  if (obj.type === "turn.completed") {
+    const usage = normalizeCodexUsage(obj.usage);
+    return usage === undefined ? [] : [{ type: "usage", usage }];
+  }
   // Items are reported started → updated → completed; only the completed form
   // is read, so a command's `aggregated_output` and an agent message's text
   // are whole rather than a prefix that arrives again later.
@@ -654,12 +723,22 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
     // tool_call is informational (ignored on sandbar's path). Named after the
     // codex item rather than mapped onto a Claude tool: the two vocabularies
     // are not the same and a false equivalence would only mislead a reader.
+    const count: ParsedStreamEvent[] = CODEX_TOOL_ITEM_TYPES.has(item.type)
+      ? [{ type: "tool_calls", count: 1 }]
+      : [];
     if (item.type === "command_execution" && typeof item.command === "string") {
-      return [{ type: "tool_call", name: "command_execution", args: item.command }];
+      return [
+        { type: "tool_call", name: "command_execution", args: item.command },
+        ...count,
+      ];
     }
     if (item.type === "web_search" && typeof item.query === "string") {
-      return [{ type: "tool_call", name: "web_search", args: item.query }];
+      return [
+        { type: "tool_call", name: "web_search", args: item.query },
+        ...count,
+      ];
     }
+    return count;
   }
   return [];
 };
@@ -1642,7 +1721,13 @@ const invokeAgent = (
   completionSignals: readonly string[],
   // Elapsed since `run()` began, which is the instant `signalMs` records (#82).
   elapsed: () => number,
-): Promise<{ result: string; signalMs?: number; maxGapMs: number }> =>
+): Promise<{
+  result: string;
+  signalMs?: number;
+  maxGapMs: number;
+  usage?: AgentUsage;
+  toolCalls: number;
+}> =>
   new Promise((resolveRun, rejectRun) => {
     const speech = createAgentSpeechAccumulator();
     let matchedSignal: string | undefined;
@@ -1665,6 +1750,8 @@ const invokeAgent = (
       result: string;
       signalMs?: number;
       maxGapMs: number;
+      usage?: AgentUsage;
+      toolCalls: number;
     }): void => {
       if (settled) return;
       settled = true;
@@ -1679,7 +1766,7 @@ const invokeAgent = (
       // caller cannot tell "the agent never produced a byte" from "the agent
       // produced a full review and then died", and #41 turns on that
       // distinction. Read back with `agentPartialOutput`.
-      rejectRun(withPartialOutput(err, speech.spoken));
+      rejectRun(withPartialOutput(err, speech.spoken, speech.usage, speech.toolCalls));
     };
 
     // Two-phase: pre-signal → idle kill timer; post-signal → completion-grace
@@ -1825,6 +1912,8 @@ const invokeAgent = (
           result: speech.spoken,
           maxGapMs: gaps.finish(),
           ...(signalMs === undefined ? {} : { signalMs }),
+          ...(speech.usage === undefined ? {} : { usage: speech.usage }),
+          toolCalls: speech.toolCalls,
         });
       })
       .catch((err) => settleReject(err));
@@ -2012,6 +2101,8 @@ export const createSandbox = async (
     commits: { sha: string }[];
     signalMs?: number;
     maxGapMs: number;
+    usage?: AgentUsage;
+    toolCalls: number;
   }> => {
     // Read host git identity, then propagate into the sandbox. safe.directory
     // is set per-run (load-bearing: bind mount is owned by a different UID and
@@ -2065,7 +2156,7 @@ export const createSandbox = async (
       await execGit(["rev-parse", "--verify", `refs/heads/${branch}`], repoDir)
     ).trim();
 
-    const { result, signalMs, maxGapMs } = await invokeAgent(
+    const { result, signalMs, maxGapMs, usage, toolCalls } = await invokeAgent(
       providerHandle,
       sandboxRepoDir,
       prompt,
@@ -2092,7 +2183,14 @@ export const createSandbox = async (
         new Error(`Commit collection timed out after ${COMMIT_COLLECTION_TIMEOUT_MS}ms`),
     );
 
-    return { result, commits, maxGapMs, ...(signalMs === undefined ? {} : { signalMs }) };
+    return {
+      result,
+      commits,
+      maxGapMs,
+      ...(signalMs === undefined ? {} : { signalMs }),
+      ...(usage === undefined ? {} : { usage }),
+      toolCalls,
+    };
   };
 
   return {
@@ -2119,6 +2217,8 @@ export const createSandbox = async (
         commits: iter.commits,
         maxGapMs: iter.maxGapMs,
         ...(iter.signalMs === undefined ? {} : { signalMs: iter.signalMs }),
+        ...(iter.usage === undefined ? {} : { usage: iter.usage }),
+        toolCalls: iter.toolCalls,
       };
     },
     async close() {

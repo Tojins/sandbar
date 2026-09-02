@@ -39,8 +39,10 @@ import {
   buildAgentProvider,
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
-import { agentPartialOutput, podman } from "./agent-sandbox.js";
+import { agentPartialOutput, agentPartialUsage, podman } from "./agent-sandbox.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
+import { formatUsageFields, sumAgentUsage } from "./agent-usage.js";
+import type { AgentUsage } from "./agent-usage.js";
 
 import type { ChunkTarget } from "./chunks.js";
 import type { ResolvedGateStack } from "./config.js";
@@ -704,6 +706,8 @@ async function runImplementer(
   let signal = parsePromise(run.stdout, {
     commitsAccumulated: accumulated.length,
   });
+  let attemptUsage = run.usage;
+  let attemptToolCalls = run.toolCalls;
 
   // The promise nudge: output with NO tag at all gets one same-conversation
   // follow-up before it is allowed to cost an attempt. The observed failure is
@@ -741,6 +745,8 @@ async function runImplementer(
       completionSignal: PROMISE_COMPLETION_SIGNALS,
     });
     accumulated.push(...nudge.commits);
+    attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
+    attemptToolCalls += nudge.toolCalls;
     const combined = `${run.stdout}\n${nudge.stdout}`;
     signal = parsePromise(combined, {
       commitsAccumulated: accumulated.length,
@@ -783,7 +789,9 @@ async function runImplementer(
     await opts.onOrchestratorLog(
       `issue=${issue.id} attempt=${action.attempt} implementer ` +
         `signal=${signal.kind} commits=${run.commits.length} ` +
+        `provider=${config.implementerAgent} model=${config.implementerModelId} ` +
         `${durationField(implementerMs)}` +
+        formatUsageFields(attemptUsage, attemptToolCalls) +
         // Absent when parsed speech carried none of the three promise tokens —
         // for example, an idle kill or a plain process exit. Omitted rather
         // than zeroed (#82).
@@ -861,13 +869,20 @@ async function runReviewer(
       // the same reason — the number is meaningless without knowing which model
       // spent it, and both are per-call config a stats reader cannot recover.
       const passTimer = startTimer();
-      const logPass = async (maxGapMs: number | undefined): Promise<void> => {
+      // `signalMs` has no reviewer meaning: the reviewer names no completion
+      // signal (#83), so the grace phase it measures is unreachable here.
+      const logPass = async (
+        maxGapMs: number | undefined,
+        usage: AgentUsage | undefined,
+        toolCalls: number | undefined,
+      ): Promise<void> => {
         if (!opts.onOrchestratorLog) return;
         await opts.onOrchestratorLog(
           `issue=${issue.id} attempt=${action.attempt} reviewer ` +
             `round=${action.reviewRound} pass=${pass} invocation=${invocation} ` +
             `provider=${config.reviewerAgent} model=${modelId} ` +
             `${durationField(passTimer())}` +
+            formatUsageFields(usage, toolCalls) +
             (maxGapMs === undefined ? "" : ` maxGapMs=${maxGapMs}`),
         );
       };
@@ -886,13 +901,18 @@ async function runReviewer(
           // end of its single artefact; inherited role contracts are banned.
           completionSignal: [],
         });
-        await logPass(reviewerRun.maxGapMs);
+        await logPass(
+          reviewerRun.maxGapMs,
+          reviewerRun.usage,
+          reviewerRun.toolCalls,
+        );
         return { output: reviewerRun.stdout, error: null };
       } catch (err) {
         // A failed invocation is timed too: an invocation that burned the ten
         // minutes and died is the expensive case, and one that fell over in a
         // second is a different fault entirely.
-        await logPass(undefined);
+        const partial = agentPartialUsage(err);
+        await logPass(undefined, partial.usage, partial.toolCalls);
         // The bytes the agent had emitted before it failed ride out on the
         // error (#41, agent-sandbox F9). Without them a reviewer that emitted
         // a verdict and then died is indistinguishable from one that emitted

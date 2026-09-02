@@ -35,8 +35,10 @@ import {
   AgentError,
   AgentIdleTimeoutError,
   agentPartialOutput,
+  agentPartialUsage,
   claudeCode,
   codex,
+  createAgentSpeechAccumulator,
   createSandbox,
   defaultImageName,
   killOnAbort,
@@ -107,6 +109,7 @@ describe("parseStreamJsonLine", () => {
       },
     });
     expect(parseStreamJsonLine(line)).toEqual([
+      { type: "tool_calls", count: 1 },
       { type: "text", text: "before" },
       { type: "tool_call", name: "Bash", args: "ls" },
       { type: "text", text: "after" },
@@ -124,8 +127,12 @@ describe("parseStreamJsonLine", () => {
         ],
       },
     });
-    // Read is not allowlisted; the two text blocks merge (no flush happened).
-    expect(parseStreamJsonLine(line)).toEqual([{ type: "text", text: "ab" }]);
+    // Read is not allowlisted for the informational register, but every
+    // verified tool_use shape contributes to the independent counter.
+    expect(parseStreamJsonLine(line)).toEqual([
+      { type: "tool_calls", count: 1 },
+      { type: "text", text: "ab" },
+    ]);
   });
 
   it("drops a tool_use with a non-string arg field", () => {
@@ -133,7 +140,7 @@ describe("parseStreamJsonLine", () => {
       type: "assistant",
       message: { content: [{ type: "tool_use", name: "Bash", input: { command: 42 } }] },
     });
-    expect(parseStreamJsonLine(line)).toEqual([]);
+    expect(parseStreamJsonLine(line)).toEqual([{ type: "tool_calls", count: 1 }]);
   });
 
   it("parses a result event verbatim, including the promise token", () => {
@@ -143,6 +150,107 @@ describe("parseStreamJsonLine", () => {
     ]);
   });
 
+  it("reads usage beside a Claude result without folding it into speech", () => {
+    const events = parseStreamJsonLine(JSON.stringify({
+      type: "result",
+      result: "done",
+      duration_api_ms: 4321,
+      modelUsage: {
+        "claude-opus-raw": { inputTokens: 1200, cacheReadInputTokens: 900, cacheCreationInputTokens: 25, outputTokens: 80, thinkingTokens: 40, canonicalModel: "claude-opus" },
+        "claude-haiku": { inputTokens: 5, cacheReadInputTokens: 10, outputTokens: 10, thinkingTokens: 5 },
+      },
+    }));
+    expect(events).toEqual([
+      { type: "result", result: "done" },
+      {
+        type: "usage",
+        usage: {
+          inputTokens: 1205,
+          cachedInputTokens: 910,
+          cacheWriteInputTokens: 25,
+          outputTokens: 90,
+          apiMs: 4321,
+          reasoningTokens: 45,
+          resolvedModel: "claude-opus",
+          models: 2,
+        },
+      },
+    ]);
+  });
+
+  it("uses Claude's complete model ledger instead of its main-loop usage", () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: "result",
+      result: "done",
+      usage: { input_tokens: 10 },
+      modelUsage: { "claude-haiku-4-5": { inputTokens: 910 } },
+    }))).toEqual([
+      { type: "result", result: "done" },
+      { type: "usage", usage: {
+        inputTokens: 910,
+        resolvedModel: "claude-haiku-4-5",
+      } },
+    ]);
+  });
+
+  it("reads a fresh Claude continuation ledger", () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: "result",
+      result: "continued",
+      duration_api_ms: 1143,
+      modelUsage: {
+        "claude-opus": {
+          inputTokens: 8,
+          cacheReadInputTokens: 18700,
+          outputTokens: 5,
+        },
+      },
+    }))).toEqual([
+      { type: "result", result: "continued" },
+      { type: "usage", usage: {
+        inputTokens: 8,
+        cachedInputTokens: 18700,
+        outputTokens: 5,
+        apiMs: 1143,
+        resolvedModel: "claude-opus",
+      } },
+    ]);
+  });
+
+  it("omits Claude reasoning tokens when no model usage entry reports them", () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: "result",
+      result: "done",
+      modelUsage: {
+        "older-turn": { outputTokens: 10 },
+        malformed: { thinkingTokens: "5" },
+      },
+    }))).toEqual([
+      { type: "result", result: "done" },
+      { type: "usage", usage: { outputTokens: 10, resolvedModel: "older-turn", models: 2 } },
+    ]);
+  });
+
+  it("keeps the result and omits malformed Claude usage fields", () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: "result",
+      result: "done",
+      usage: { input_tokens: "1200", output_tokens: null },
+      duration_api_ms: "4321",
+    }))).toEqual([{ type: "result", result: "done" }]);
+  });
+
+  it("reads usage and terminal reason independently of error result speech", () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: "result", subtype: "error_during_execution", terminal_reason: "blocking_limit",
+      errors: ["limit"], modelUsage: { "claude-opus": { inputTokens: 4 } },
+    }))).toEqual([{ type: "usage", usage: {
+      inputTokens: 4, resolvedModel: "claude-opus", terminalReason: "blocking_limit",
+    } }]);
+  });
+
+  // #85 reads usage independently of the speech guard; the guard itself is
+  // unchanged, so a non-string `result` still contributes no speech.
   it("requires result to be a string", () => {
     expect(parseStreamJsonLine(JSON.stringify({ type: "result", result: 1 }))).toEqual([]);
   });
@@ -232,6 +340,82 @@ describe("parseCodexJsonLine", () => {
     ).toEqual([{ type: "session_id", sessionId: "01a05c69-362e" }]);
   });
 
+  it("reads turn.completed usage and does not invent an API duration", () => {
+    expect(parseCodexJsonLine(JSON.stringify({
+      type: "turn.completed",
+      usage: {
+        input_tokens: 2000,
+        cached_input_tokens: 1750,
+        cache_write_input_tokens: 25,
+        output_tokens: 100,
+        reasoning_output_tokens: 60,
+      },
+    }))).toEqual([{
+      type: "usage",
+      usage: {
+        inputTokens: 250,
+        cachedInputTokens: 1750,
+        cacheWriteInputTokens: 25,
+        outputTokens: 100,
+        reasoningTokens: 60,
+      },
+    }]);
+  });
+
+  it("normalizes a resumed Codex turn as its own near-total cache-hit ledger", () => {
+    expect(parseCodexJsonLine(JSON.stringify({
+      type: "turn.completed",
+      usage: {
+        input_tokens: 15345,
+        cached_input_tokens: 15104,
+        cache_write_input_tokens: 0,
+        output_tokens: 5,
+        reasoning_output_tokens: 0,
+      },
+    }))).toEqual([{ type: "usage", usage: {
+      inputTokens: 241,
+      cachedInputTokens: 15104,
+      cacheWriteInputTokens: 0,
+      outputTokens: 5,
+      reasoningTokens: 0,
+    } }]);
+  });
+
+  it("drops a turn.completed event whose usage has no numeric fields", () => {
+    expect(parseCodexJsonLine(JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: "2000", output_tokens: null },
+    }))).toEqual([]);
+  });
+
+  it("keeps usage separate from speech, failure, and completion", () => {
+    const speech = createAgentSpeechAccumulator();
+    speech.ingest(parseCodexJsonLine(JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: 12 },
+    })));
+    // Never speech, so it can neither reach a verdict parser (#41) nor enter
+    // the string the completion watch scans (#83) — the one way to get this
+    // wrong is to wire `turn.completed` as a completion rather than a
+    // measurement.
+    expect(speech.accumulated).toBe("");
+    expect(speech.spoken).toBe("");
+    expect(speech.failure).toBeUndefined();
+    expect(speech.usage).toEqual({
+      inputTokens: 12,
+    });
+    expect(speech.toolCalls).toBe(0);
+  });
+
+  it("replaces repeated usage measurements instead of summing them", () => {
+    const speech = createAgentSpeechAccumulator();
+    speech.ingest([
+      { type: "usage", usage: { inputTokens: 12, outputTokens: 3 } },
+      { type: "usage", usage: { inputTokens: 5, outputTokens: 2 } },
+    ]);
+    expect(speech.usage).toEqual({ inputTokens: 5, outputTokens: 2 });
+  });
+
   // Reasoning is the model's own thinking, not its speech. Folded into the
   // accumulated output it would let an agent that merely CONSIDERED emitting
   // the completion tag end the run by talking about it — and that output is
@@ -316,12 +500,16 @@ describe("parseCodexJsonLine", () => {
       ),
     ).toEqual([
       { type: "tool_call", name: "command_execution", args: "bash -lc 'npm test'" },
+      { type: "tool_calls", count: 1 },
     ]);
     expect(
       parseCodexJsonLine(
         completed({ id: "item_3", type: "web_search", query: "podman keep-id" }),
       ),
-    ).toEqual([{ type: "tool_call", name: "web_search", args: "podman keep-id" }]);
+    ).toEqual([
+      { type: "tool_call", name: "web_search", args: "podman keep-id" },
+      { type: "tool_calls", count: 1 },
+    ]);
   });
 
   // started/updated arrive before the payload is whole; reading them too would
@@ -1433,6 +1621,10 @@ describe("createSandbox integration (local provider)", () => {
         `printf '%s\\n' '${JSON.stringify({
           type: "assistant",
           message: { content: [{ type: "text", text: "partial review findings" }] },
+        })}' '${JSON.stringify({
+          type: "result",
+          subtype: "error_during_execution",
+          modelUsage: { "claude-opus": { inputTokens: 12 } },
         })}' && sleep 30`,
       );
       const err = await sandbox
@@ -1445,6 +1637,10 @@ describe("createSandbox integration (local provider)", () => {
       expect(err).toBeInstanceOf(Error);
       expect((err as Error).message).toContain("idle");
       expect(agentPartialOutput(err)).toContain("partial review findings");
+      expect(agentPartialUsage(err).usage).toEqual({
+        inputTokens: 12,
+        resolvedModel: "claude-opus",
+      });
 
       // And the half the message never covered: the run stopped waiting for the
       // exec, so the exec is stopped. Before this, `sleep 30` (in production, a

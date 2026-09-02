@@ -164,6 +164,34 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(parseResolveSignal(run.output ?? "")).toEqual({ kind: "COMMITTED" });
   });
 
+  it("carries usage and all four Codex tool item types beside resolve speech", () => {
+    const raw = [
+      ...["command_execution", "file_change", "mcp_tool_call", "web_search"].map(
+        (type) => JSON.stringify({ type: "item.completed", item: { type } }),
+      ),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 20,
+          cached_input_tokens: 12,
+          cache_write_input_tokens: 0,
+          output_tokens: 4,
+          reasoning_output_tokens: 2,
+        },
+      }),
+    ].join("\n");
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("codex", "m"));
+    expect(run.usage).toEqual({
+      inputTokens: 8,
+      cachedInputTokens: 12,
+      cacheWriteInputTokens: 0,
+      outputTokens: 4,
+      reasoningTokens: 2,
+    });
+    expect(run.toolCalls).toBe(4);
+    expect(run.output).toBe("");
+  });
+
   it("takes the default claude promise from its parsed result event", () => {
     const raw = [
       JSON.stringify({

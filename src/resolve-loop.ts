@@ -66,6 +66,8 @@ import {
 import type { MergerGateOutput } from "./merger.js";
 import { durationField, startTimer } from "./timing.js";
 import { loadTemplate, render } from "./prompts.js";
+import { formatUsageFields } from "./agent-usage.js";
+import type { AgentUsage } from "./agent-usage.js";
 
 export const RESOLVE_MAX_ATTEMPTS = 4;
 
@@ -153,6 +155,8 @@ export type ResolveAgentRun = {
   // A runtime spawn error or terminal failure reported by the provider. The
   // spawn error wins if both are ever present.
   readonly detail?: string;
+  readonly usage?: AgentUsage;
+  readonly toolCalls: number;
 };
 
 // Which prompt the attempt was answering — the same three shapes the loop's
@@ -386,6 +390,7 @@ export async function runResolveLoop(
       : null;
     await log(
       `resolve-attempt ${attempt} ${describeRunEnd(run)} container=${run.container}` +
+        formatUsageFields(run.usage, run.toolCalls) +
         (logPath ? ` log=${logPath}` : ""),
     );
 
