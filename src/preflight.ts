@@ -506,7 +506,7 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
   return out;
 }
 
-function which(cmd: string): boolean {
+export function which(cmd: string): boolean {
   try {
     execFileSync("which", [cmd], { stdio: "ignore" });
     return true;

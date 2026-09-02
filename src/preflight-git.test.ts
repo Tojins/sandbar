@@ -24,6 +24,7 @@ import {
   PreflightError,
   readConfigStaleness,
   runPreflight,
+  which,
 } from "./preflight.js";
 import { type RepoLayout, ensureRepoCache, repoLayout } from "./repo-cache.js";
 
@@ -330,6 +331,10 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
   // The other consequence in #34: a clean launch directory would let preflight
   // pass while the actual target repo carries unmerged issue branches.
   describe("gatherState", () => {
+    it("classifies a command that is not on PATH as absent", () => {
+      expect(which("sandbar-command-that-does-not-exist")).toBe(false);
+    });
+
     it("reports failed gh auth before making tracker queries", async () => {
       await writeFile(
         join(shimBin, "gh"),
@@ -347,6 +352,27 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
           err instanceof PreflightError &&
           err.failures.some((failure) => failure.includes("gh auth status")),
       );
+    });
+
+    it("withholds tracker-backed classifications when gh auth fails", async () => {
+      await writeFile(
+        join(shimBin, "gh"),
+        [
+          "#!/bin/sh",
+          'if [ "$1 $2" = "auth status" ]; then exit 1; fi',
+          'if [ "$1 $2" = "issue list" ]; then exit 73; fi',
+          "exit 1",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+
+      const state = await gatherState(cfg(layoutAt(target)));
+
+      expect(state.ghAuthOk).toBe(false);
+      expect(state.unmergedIssueBranches).toEqual([]);
+      expect(state.discardedIssueBranches).toEqual([]);
+      expect(state.resumableIssueBranches).toEqual([]);
+      expect(state.parkedIssueBranches).toEqual([]);
     });
 
     it("classifies the target's issue branches, not the launch directory's", async () => {

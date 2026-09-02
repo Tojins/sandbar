@@ -80,6 +80,10 @@ describe("realAdapter.isMergeInProgress (real linked worktree)", () => {
     expect(await adapterAt(wt).isMergeInProgress()).toBe(false);
   });
 
+  it("accepts abort when no merge is in progress", async () => {
+    await adapterAt(wt).abortMerge();
+  });
+
   it("is TRUE mid-conflict, where the naive .git/MERGE_HEAD path reads false", async () => {
     // Deliberately conflicting: both branches rewrote the same line.
     await expect(git(wt, "merge", "--no-ff", "side")).rejects.toThrow();

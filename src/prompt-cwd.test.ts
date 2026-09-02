@@ -157,6 +157,20 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     expect(anchor).not.toContain("commit-from-launch-dir");
   });
 
+  it("marks history unavailable when the named source ref is absent", async () => {
+    const anchor = await buildProjectAnchor(
+      {
+        repo: CONFIGURED,
+        repoDir: target,
+        claudeMdPath: "CLAUDE.md",
+        sourceBranch: "missing",
+      },
+      target,
+    );
+
+    expect(anchor).toContain("Last 10 commits on `missing`:\n```\n(unavailable)\n```");
+  });
+
   it("fetches the issue from the configured repo, not from any directory's remotes", async () => {
     const prompt = await buildPrompt(
       {
