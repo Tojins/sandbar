@@ -524,9 +524,16 @@ async function gate(
 
   // Reported, not refused (see `StackOptions.allowDirtyWorktree`).
   //
-  // A failed status read propagates: without it sandbar cannot honestly say
-  // whether this verdict describes a working tree with uncommitted changes.
-  const dirty = await dirtyWorktreePaths(worktreePath);
+  // A non-repository has no Git working-tree state to report; this command is
+  // also deliberately usable against an ordinary directory. Other status
+  // failures propagate because they do not establish that named condition.
+  let dirty: readonly string[];
+  try {
+    dirty = await dirtyWorktreePaths(worktreePath);
+  } catch (err) {
+    if ((err as { code?: unknown }).code !== 128) throw err;
+    dirty = [];
+  }
   if (dirty.length > 0) {
     out(
       `Gating the WORKING TREE at ${worktreePath}, which has ` +

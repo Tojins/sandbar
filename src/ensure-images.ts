@@ -189,9 +189,9 @@ async function imageExists(tag: string): Promise<boolean> {
   }
 }
 
-// The fingerprint an existing image was built from, or null when the image is
-// absent or carries no such label. Podman query failures propagate: they do not
-// establish either condition and cannot safely trigger a rebuild (#99).
+// The fingerprint an existing image was built from, or null when it carries no
+// such label. Callers establish absence with `imageExists` before inspecting;
+// inspect failures do not establish either condition and propagate (#99).
 export async function readInputsLabel(tag: string): Promise<string | null> {
   const { stdout } = await exec(
     RUNTIME,
@@ -485,8 +485,9 @@ export async function ensureImages(
       }
       continue;
     }
-    const recorded = await readInputsLabel(image.tag);
-    if (!rebuildInPlace && (await imageExists(image.tag))) {
+    const exists = await imageExists(image.tag);
+    const recorded = exists ? await readInputsLabel(image.tag) : null;
+    if (!rebuildInPlace && exists) {
       // The baseline is what the image on disk was built from, not what this
       // context hashes to — see above. A null recording leaves the entry out,
       // which drops the tag from `participating` in `createBranchImages`… and
