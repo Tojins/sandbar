@@ -257,7 +257,6 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     expect(r).toEqual({ kind: "ok" });
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(head);
     expect(await originHas("refs/heads/sandbar/member-1")).toBe(head);
-    await git(wt, "update-ref", "refs/remotes/origin/sandbar/member-1", head);
     await git(wt, "push", "-q", "origin", "HEAD:main");
     await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1]);
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBeNull();

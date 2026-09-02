@@ -202,8 +202,7 @@ import {
 import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
 import {
-  ORIGIN_MEMBER_BRANCH_REFGLOBS,
-  issueNumberFromMemberBranch,
+  memberBranchName,
   rootIssueFromChunkBranch,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
@@ -669,18 +668,9 @@ export function chunkForgeWrites(deps: {
       // establishes first — the branch's commits are contained in
       // `origin/<sourceBranch>`, so nothing is lost with the ref.
       try {
-        const { stdout } = await exec(
-          "git",
-          ["for-each-ref", "--format=%(refname)", ...ORIGIN_MEMBER_BRANCH_REFGLOBS],
-          { cwd: deps.gitCwd },
+        const memberRefs = memberIssues.map(
+          (number) => `refs/heads/${memberBranchName(number)}`,
         );
-        const wanted = new Set(memberIssues);
-        const issueRefs = stdout.split("\n").flatMap((ref) => {
-          const number = issueNumberFromMemberBranch(ref.trim());
-          return number !== null && wanted.has(number)
-            ? [ref.trim().replace(/^refs\/remotes\/origin\//, "refs/heads/")]
-            : [];
-        });
         await exec(
           "git",
           [
@@ -689,7 +679,7 @@ export function chunkForgeWrites(deps: {
             "origin",
             "--delete",
             `refs/heads/${chunkBranch}`,
-            ...issueRefs,
+            ...memberRefs,
           ],
           { cwd: deps.gitCwd },
         );
