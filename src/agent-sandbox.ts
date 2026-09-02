@@ -51,8 +51,9 @@
 // no host ports on their behalf (#43). An anchor chain, not a pod, because a
 // pod cannot carry keep-id and the agent CLI refuses to run as root.
 // A catch may only classify one named expected condition checked explicitly,
-// or clean up on failure: log the secondary failure with its cause, then
-// rethrow the original (#83).
+// clean up on failure while preserving the original error, or report a failed
+// best-effort hygiene action whose result is unrelated to the current run
+// (#83).
 
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -1844,7 +1845,9 @@ export const prepareWorktree = async (
 ): Promise<string> => {
   const { repoDir, worktreesDir, hostCwd } = options.layout;
 
-  await pruneStale(repoDir, worktreesDir);
+  await pruneStale(repoDir, worktreesDir).catch((err) => {
+    console.error("Stale-worktree sweep failed (continuing):", err);
+  });
 
   const { path: worktreePath } = await worktreeCreate(
     repoDir,
