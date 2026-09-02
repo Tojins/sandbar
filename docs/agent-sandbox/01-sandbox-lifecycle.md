@@ -5,8 +5,8 @@ Source (v0.7.0 tag): `src/createSandbox.ts`, `src/SandboxFactory.ts`,
 `src/shutdownRegistry.ts`.
 
 This is the orchestration heart. It is described here **as sandbar exercises
-it**: a bind-mount podman provider, an explicit pre-existing branch, and
-`maxIterations: 1`. Branches in the upstream code that sandbar never reaches are
+it**: a bind-mount podman provider, an explicit pre-existing branch, and one
+iteration. Branches in the upstream code that sandbar never reaches are
 called out as out-of-scope rather than detailed.
 
 ## Public types (from `createSandbox.d.ts`)
@@ -25,19 +25,18 @@ interface CreateSandboxOptions {
 interface SandboxRunOptions {
   agent: AgentProvider;           // sandbar: claudeCode(modelId)
   prompt?: string;                // sandbar: inline prompt
-  maxIterations?: number;         // sandbar: 1
   name?: string;                  // sandbar: e.g. "implementer-<id>-attempt-N"
-  completionSignal?: string | string[];  // sandbar: unset → default "<promise>COMPLETE</promise>"
+  completionSignal: readonly string[];   // reviewer: []; implementer: ["</promise>"]
   idleTimeoutSeconds?: number;    // sandbar: unset → default 600
   logging?: LoggingOption;        // sandbar: unset → defaults to a file under .sandbar/logs
   signal?: AbortSignal;           // sandbar: unset
 }
 
 interface SandboxRunResult {
-  iterations: IterationResult[];
-  completionSignal?: string;
   stdout: string;                 // ← sandbar reads this
   commits: { sha: string }[];     // ← sandbar reads this
+  signalMs?: number;
+  maxGapMs?: number;
   logFilePath?: string;
 }
 

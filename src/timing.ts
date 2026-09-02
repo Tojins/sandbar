@@ -56,3 +56,18 @@ export function startTimer(clock: Clock = defaultClock): () => number {
 export function durationField(ms: number): string {
   return `durationMs=${ms}`;
 }
+
+export type GapTimer = { line(): void; finish(): number };
+
+// Includes the leading and trailing gaps, so a line-less run reports its whole
+// duration. The clock seam keeps stream timing deterministic in tests (#83).
+export function startGapTimer(clock: Clock = defaultClock): GapTimer {
+  let previous = clock();
+  let maxGapMs = 0;
+  const observe = (): void => {
+    const now = clock();
+    maxGapMs = Math.max(maxGapMs, Math.round(now - previous));
+    previous = now;
+  };
+  return { line: observe, finish: () => { observe(); return maxGapMs; } };
+}

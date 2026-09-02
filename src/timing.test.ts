@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { durationField, startTimer } from "./timing.js";
+import { durationField, startGapTimer, startTimer } from "./timing.js";
 
 describe("startTimer", () => {
   it("reports elapsed time on the injected clock", () => {
@@ -34,5 +34,25 @@ describe("durationField", () => {
   it("is the one spelling of the field", () => {
     expect(durationField(0)).toBe("durationMs=0");
     expect(durationField(97210)).toBe("durationMs=97210");
+  });
+});
+
+describe("startGapTimer", () => {
+  it("reports the largest leading, inter-line, or trailing gap", () => {
+    let now = 100;
+    const gaps = startGapTimer(() => now);
+    now = 120;
+    gaps.line();
+    now = 175;
+    gaps.line();
+    now = 185;
+    expect(gaps.finish()).toBe(55);
+  });
+
+  it("reports the whole duration when no line arrives", () => {
+    let now = 10;
+    const gaps = startGapTimer(() => now);
+    now = 87;
+    expect(gaps.finish()).toBe(77);
   });
 });

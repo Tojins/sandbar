@@ -128,7 +128,7 @@ describe("run-owned agent images", () => {
   // the pin move deleted the host copies — at which point an agreement test
   // asserts the opposite of the rule. The rule the Containerfile now states in
   // prose is "do not re-add a host copy": an unpinned one drifts from the
-  // parser the driver couples to (`parsedOutputOnly`), and the driver's install
+  // parser the driver couples to, and the driver's install
   // wins over it anyway, so the host copy is invisible until the day it is the
   // one that ran. Asserting the ABSENCE is what keeps that prose enforced.
   it("installs no agent CLI in the host image — the driver owns them (#75)", () => {

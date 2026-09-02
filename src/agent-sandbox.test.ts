@@ -5,7 +5,7 @@
 // registry (F3), worktree-path compatibility with finalize.ts, and an
 // integration harness using a LOCAL fake provider (no podman/container) against
 // a real temp git repo that exercises createSandbox's lifecycle: per-run
-// safe.directory, commit capture, the result||stdout fallback, env isolation,
+// safe.directory, commit capture, the parsed speech output, env isolation,
 // and the two-phase completion timer (F5).
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
@@ -75,8 +75,8 @@ describe("parseStreamJsonLine", () => {
     expect(parseStreamJsonLine('"str"')).toEqual([]);
   });
 
-  it("swallows malformed JSON that starts with { → []", () => {
-    expect(parseStreamJsonLine("{bad json")).toEqual([]);
+  it("propagates malformed JSON that starts with {", () => {
+    expect(() => parseStreamJsonLine("{bad json")).toThrow(SyntaxError);
   });
 
   it("concatenates multiple text blocks with NO separator", () => {
@@ -198,10 +198,10 @@ describe("parseCodexJsonLine", () => {
   const completed = (item: unknown) =>
     JSON.stringify({ type: "item.completed", item });
 
-  it("returns [] for non-{ lines, malformed JSON and unknown events", () => {
+  it("classifies non-{ lines and unknown events, but propagates malformed JSON", () => {
     expect(parseCodexJsonLine("")).toEqual([]);
     expect(parseCodexJsonLine("Reading prompt from stdin...")).toEqual([]);
-    expect(parseCodexJsonLine("{bad json")).toEqual([]);
+    expect(() => parseCodexJsonLine("{bad json")).toThrow(SyntaxError);
     expect(parseCodexJsonLine('{"type":"turn.started"}')).toEqual([]);
     expect(parseCodexJsonLine('{"type":"future.event","text":"x"}')).toEqual([]);
   });
@@ -384,13 +384,6 @@ describe("codex command line", () => {
     expect(cmd.command).not.toContain("--dangerously-bypass-approvals-and-sandbox");
   });
 
-  // The evidence rule, declared on the provider: codex has no `result` event,
-  // so without this the raw JSONL of a failed turn would come back as a run's
-  // "output" and #41 would read it as a verdict.
-  it("declares parsedOutputOnly, which claudeCode does not", () => {
-    expect(codex("m").parsedOutputOnly).toBe(true);
-    expect(claudeCode("m").parsedOutputOnly).toBeUndefined();
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -829,7 +822,7 @@ describe("createSandbox integration (local provider)", () => {
         `git commit --allow-empty -m "agent work" >/dev/null 2>&1 && ` +
           `printf '%s\\n' '${JSON.stringify({ type: "result", result: "done <promise>COMPLETE</promise>" })}'`,
       );
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
 
       expect(run.stdout).toContain("<promise>COMPLETE</promise>");
       expect(run.commits).toHaveLength(1);
@@ -895,7 +888,7 @@ describe("createSandbox integration (local provider)", () => {
             `printf '%s\n' '${JSON.stringify({ type: "result", result: "x" })}'`,
         ),
         prompt: "go",
-        maxIterations: 1,
+        completionSignal: [],
       });
       expect(stray.commits).toEqual([]);
 
@@ -908,7 +901,7 @@ describe("createSandbox integration (local provider)", () => {
             `printf '%s\n' '${JSON.stringify({ type: "result", result: "y" })}'`,
         ),
         prompt: "go",
-        maxIterations: 1,
+        completionSignal: [],
       });
       expect(rescued.commits).toHaveLength(1);
       const tip = await git(
@@ -921,7 +914,7 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
-  it("falls back to raw stdout when no result event is emitted, and reports zero commits for a no-op", async () => {
+  it("returns no speech when raw stdout has no parsed events", async () => {
     await git(["branch", "sandbar/issue-2-noop"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
@@ -933,8 +926,8 @@ describe("createSandbox integration (local provider)", () => {
     try {
       // No result line, no commit — just raw text on stdout.
       const agent = scriptedAgent(`printf '%s\\n' 'raw output line with <promise>COMPLETE</promise>'`);
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
-      expect(run.stdout).toContain("raw output line with <promise>COMPLETE</promise>");
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
+      expect(run.stdout).toBe("");
       expect(run.commits).toEqual([]);
     } finally {
       await sandbox.close();
@@ -943,16 +936,14 @@ describe("createSandbox integration (local provider)", () => {
 
   // #72 — a stream that is well-formed, exits 0, and carries no speech at all:
   // codex's shape for a turn that ended on tool calls. The transport is not an
-  // answer, so a parsedOutputOnly provider returns nothing rather than its own
-  // JSONL — reviewer-run.ts (#41) reads "completed with output" as a verdict,
-  // and the verdict parser defaults a tokenless one to CHANGES-REQUESTED, a
-  // review of code no model looked at.
+  // answer, so a provider returns nothing rather than its own
+  // JSONL — transport cannot stand in for the reviewer's verdict token.
   const toolCallOnly = JSON.stringify({
     type: "item.completed",
     item: { id: "item_1", type: "command_execution", command: "ls" },
   });
 
-  it("returns nothing for a parsedOutputOnly run whose lines carried no speech (#72)", async () => {
+  it("returns nothing when a run's lines carried no speech (#72)", async () => {
     await git(["branch", "sandbar/issue-4-codex-quiet"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
@@ -965,14 +956,13 @@ describe("createSandbox integration (local provider)", () => {
       const agent: AgentProvider = {
         name: "codex",
         env: {},
-        parsedOutputOnly: true,
         buildPrintCommand: () => ({
           command: `printf '%s\\n' ${JSON.stringify(toolCallOnly)}`,
           stdin: "",
         }),
         parseStreamLine: parseCodexJsonLine,
       };
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
       expect(run.stdout).toBe("");
       expect(run.stdout).not.toContain("command_execution");
     } finally {
@@ -980,9 +970,7 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
-  // The same run under the DEFAULT (fallback-allowed) rule, to pin that the
-  // difference is the flag and not the fixture.
-  it("still falls back to the raw stream for a provider that does not declare it (#72)", async () => {
+  it("never returns raw transport for a provider with no speech (#83)", async () => {
     await git(["branch", "sandbar/issue-5-fallback"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
@@ -1001,8 +989,8 @@ describe("createSandbox integration (local provider)", () => {
         }),
         parseStreamLine: parseCodexJsonLine,
       };
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
-      expect(run.stdout).toContain("command_execution");
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
+      expect(run.stdout).toBe("");
     } finally {
       await sandbox.close();
     }
@@ -1032,7 +1020,6 @@ describe("createSandbox integration (local provider)", () => {
       const agent: AgentProvider = {
         name: "codex",
         env: {},
-        parsedOutputOnly: true,
         buildPrintCommand: () => ({
           command: `printf '%s\\n' ${JSON.stringify(failed)}`,
           stdin: "",
@@ -1040,7 +1027,7 @@ describe("createSandbox integration (local provider)", () => {
         parseStreamLine: parseCodexJsonLine,
       };
       const err = await sandbox
-        .run({ agent, prompt: "go", maxIterations: 1 })
+        .run({ agent, prompt: "go", completionSignal: [] })
         .then(() => null)
         .catch((e: unknown) => e);
       // AgentError, not SandbarError: inner-loop.ts lets a SandbarError out to
@@ -1079,7 +1066,6 @@ describe("createSandbox integration (local provider)", () => {
       const agent: AgentProvider = {
         name: "codex",
         env: {},
-        parsedOutputOnly: true,
         buildPrintCommand: () => ({
           command:
             `printf '%s\\n' ${JSON.stringify(failed)}; ` +
@@ -1090,7 +1076,7 @@ describe("createSandbox integration (local provider)", () => {
         parseStreamLine: parseCodexJsonLine,
       };
       const err = await sandbox
-        .run({ agent, prompt: "go", maxIterations: 1 })
+        .run({ agent, prompt: "go", completionSignal: [] })
         .then(() => null)
         .catch((e: unknown) => e);
       expect(err).toBeInstanceOf(AgentError);
@@ -1117,7 +1103,7 @@ describe("createSandbox integration (local provider)", () => {
     try {
       const agent = scriptedAgent(`printf '%s\\n' 'boom on stderr' >&2; exit 1`);
       const err = await sandbox
-        .run({ agent, prompt: "go", maxIterations: 1 })
+        .run({ agent, prompt: "go", completionSignal: [] })
         .then(() => null)
         .catch((e: unknown) => e);
       expect((err as Error).message).toContain("boom on stderr");
@@ -1158,14 +1144,13 @@ describe("createSandbox integration (local provider)", () => {
       const agent: AgentProvider = {
         name: "codex",
         env: {},
-        parsedOutputOnly: true,
         buildPrintCommand: () => ({
           command: `printf '%s\\n%s\\n' ${JSON.stringify(retry)} ${JSON.stringify(downgrade)}`,
           stdin: "",
         }),
         parseStreamLine: parseCodexJsonLine,
       };
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
       expect(run.stdout).toBe("");
     } finally {
       await sandbox.close();
@@ -1193,14 +1178,13 @@ describe("createSandbox integration (local provider)", () => {
       const agent: AgentProvider = {
         name: "codex",
         env: {},
-        parsedOutputOnly: true,
         buildPrintCommand: () => ({
           command: `printf '%s\\n%s\\n' ${JSON.stringify(spoke)} ${JSON.stringify(failed)}`,
           stdin: "",
         }),
         parseStreamLine: parseCodexJsonLine,
       };
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
       expect(run.stdout).toBe("<verdict>APPROVED</verdict>");
       expect(run.stdout).not.toContain("boom");
     } finally {
@@ -1228,7 +1212,7 @@ describe("createSandbox integration (local provider)", () => {
         message: { content: [{ type: "text", text: "the agent spoke" }] },
       });
       const agent = scriptedAgent(`printf '%s\\n' ${JSON.stringify(line)}`);
-      const run = await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
       expect(run.stdout).toBe("the agent spoke");
       expect(run.stdout).not.toContain("assistant");
     } finally {
@@ -1247,7 +1231,7 @@ describe("createSandbox integration (local provider)", () => {
     });
     try {
       const agent = scriptedAgent(`printf '%s\\n' 'ok'`);
-      await sandbox.run({ agent, prompt: "go", maxIterations: 1 });
+      await sandbox.run({ agent, prompt: "go", completionSignal: [] });
       // The run() lifecycle wrote these into GIT_CONFIG_GLOBAL. Both reads
       // NAME the directory they run in, and that is not tidiness (#25): even
       // `git config --global` discovers a repository from its working
@@ -1277,7 +1261,7 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
-  it("resolves the run via the completion-grace timer when the pipe is held open (F5)", async () => {
+  it("rejects via the completion-grace timer when the pipe is held open (F5)", async () => {
     await git(["branch", "sandbar/issue-4-grace"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
@@ -1295,17 +1279,18 @@ describe("createSandbox integration (local provider)", () => {
           `sleep 30`,
       );
       const start = Date.now();
-      const run = await sandbox.run({
+      const err = await sandbox.run({
         agent,
         prompt: "go",
-        maxIterations: 1,
+        completionSignal: ["<promise>COMPLETE</promise>"],
         completionTimeoutSeconds: 0.2,
         idleTimeoutSeconds: 30,
-      });
+      }).then(() => null, (e: unknown) => e);
       const elapsed = Date.now() - start;
-      expect(run.stdout).toContain("<promise>COMPLETE</promise>");
-      expect(run.commits).toHaveLength(1);
-      expect(elapsed).toBeLessThan(5000); // resolved on the grace timer, not the 30s idle
+      expect(err).toBeInstanceOf(AgentError);
+      expect((err as Error).message).toContain("without exiting");
+      expect(agentPartialOutput(err)).toContain("<promise>COMPLETE</promise>");
+      expect(elapsed).toBeLessThan(5000);
     } finally {
       await sandbox.close();
     }
@@ -1334,7 +1319,7 @@ describe("createSandbox integration (local provider)", () => {
         })}' && sleep 30`,
       );
       const err = await sandbox
-        .run({ agent, prompt: "go", maxIterations: 1, idleTimeoutSeconds: 0.4 })
+        .run({ agent, prompt: "go", completionSignal: [], idleTimeoutSeconds: 0.4 })
         .then(
           () => null,
           (e: unknown) => e,
@@ -1385,7 +1370,7 @@ describe("createSandbox integration (local provider)", () => {
       // The observed shape: not one byte, not even the stream's init event.
       const agent = scriptedAgent("sleep 30");
       const err = await sandbox
-        .run({ agent, prompt: "go", maxIterations: 1, idleTimeoutSeconds: 0.4 })
+        .run({ agent, prompt: "go", completionSignal: [], idleTimeoutSeconds: 0.4 })
         .then(
           () => null,
           (e: unknown) => e,

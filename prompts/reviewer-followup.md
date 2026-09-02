@@ -40,4 +40,4 @@ End your review with a single verdict token on its own:
 - `<verdict>CHANGES-REQUESTED</verdict>` — at least one dimension has actionable
   findings under its heading above.
 
-A missing verdict defaults to CHANGES-REQUESTED. Emit exactly one verdict.
+A missing verdict is a failed reviewer invocation and will be retried. Emit exactly one verdict.

@@ -3,9 +3,7 @@
 //
 // A reviewer INVOCATION yields a verdict or it yields nothing, and this module
 // is the only place that decides which:
-//   - Completed with output → a verdict. A missing token is the verdict
-//     parser's business.
-//   - Failed, but the partial output holds a `<verdict>` token → a verdict.
+//   - Completed or failed with a `<verdict>` token → a verdict.
 //     The run reached a decision and then died on the way out.
 //   - Anything else → nothing. An unknown outcome must never read as APPROVED,
 //     but a fail-safe is not a licence to invent evidence: feeding a zero-byte
@@ -20,6 +18,9 @@
 // one event the state machine understands, keeping pass policy out of the I/O
 // runner. Follow-up invocation 1 resumes correctness; every retry is cold so a
 // crashed follow-up cannot accidentally resume its own partial session.
+// A catch may only classify one named expected condition checked explicitly,
+// or clean up on failure: log the secondary failure with its cause, then
+// rethrow the original (#83).
 
 import type { LoopEvent } from "./inner-loop-machine.js";
 import { containsVerdictToken, parseVerdict } from "./verdict-parser.js";
@@ -105,6 +106,17 @@ export function decideReviewRound(
     };
   }
   const correctnessVerdict = parseVerdict(correctness.stdout);
+  if (correctnessVerdict === null) {
+    return {
+      kind: "finished",
+      event: {
+        kind: "reviewer-harness-failed",
+        detail: "correctness: reviewing invocation had no verdict token",
+      },
+      correctness: "HARNESS-FAILED",
+      followup: "SKIPPED",
+    };
+  }
   if (correctnessVerdict.verdict === "CHANGES-REQUESTED") {
     return {
       kind: "finished",
@@ -127,6 +139,17 @@ export function decideReviewRound(
     };
   }
   const followupVerdict = parseVerdict(followup.stdout);
+  if (followupVerdict === null) {
+    return {
+      kind: "finished",
+      event: {
+        kind: "reviewer-harness-failed",
+        detail: "followup: reviewing invocation had no verdict token",
+      },
+      correctness: "APPROVED",
+      followup: "HARNESS-FAILED",
+    };
+  }
   return {
     kind: "finished",
     event: {
@@ -160,7 +183,6 @@ function noReviewDetail(run: ReviewerRun): string {
 
 // Pure: does this invocation carry a verdict about the code?
 export function isReview(run: ReviewerRun): boolean {
-  if (run.error === null) return run.output.trim() !== "";
   return containsVerdictToken(run.output);
 }
 

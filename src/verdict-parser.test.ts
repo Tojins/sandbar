@@ -16,10 +16,8 @@ describe("parseVerdict", () => {
     expect(r.verdict).toBe("CHANGES-REQUESTED");
   });
 
-  it("defaults to CHANGES-REQUESTED when no verdict tag is present", () => {
-    const r = parseVerdict("I think this is fine actually");
-    expect(r.verdict).toBe("CHANGES-REQUESTED");
-    expect(r.prose).toBe("I think this is fine actually");
+  it("reports absence when no verdict tag is present", () => {
+    expect(parseVerdict("I think this is fine actually")).toBeNull();
   });
 
   it("defaults to CHANGES-REQUESTED on unknown token", () => {
@@ -61,9 +59,8 @@ describe("parseVerdict", () => {
     expect(r.prose).toContain("missing test");
   });
 
-  it("rejects malformed: unclosed tag → defaults to CHANGES-REQUESTED", () => {
-    const r = parseVerdict("<verdict>APPROVED");
-    expect(r.verdict).toBe("CHANGES-REQUESTED");
+  it("reports an unclosed tag as absent", () => {
+    expect(parseVerdict("<verdict>APPROVED")).toBeNull();
   });
 
   it("rejects malformed: mismatched casing → defaults to CHANGES-REQUESTED", () => {

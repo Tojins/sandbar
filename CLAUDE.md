@@ -275,7 +275,7 @@ and used to announce themselves in four different ways, the halt in none at all.
   being a claude alias and a half-moved config otherwise asking codex for
   "opus" on every attempt. `AgentProvider`
   (`src/agent-sandbox.ts`) was already the whole seam — argv plus a line parser,
-  with the completion watch, the idle timeout and commit collection reading
+  with the explicitly named completion watch, the idle timeout and commit collection reading
   parsed events and git — so `codex` is a second implementation of it and
   nothing downstream knows which ran. `src/agent-providers.ts` owns the
   NAME→factory map, each provider's credential and `requiredAgentProviders`;
@@ -287,8 +287,8 @@ and used to announce themselves in four different ways, the halt in none at all.
   provider's parser answers in THREE registers and the rule no new one may break
   is that they stay apart: `text`/`result` is the agent's SPEECH and the only
   thing a run returns (#41 — "completed with output" is what `reviewer-run.ts`
-  reads as a verdict, so codex's `reasoning` is dropped and `parsedOutputOnly`
-  keeps raw JSONL out); `failure` is the provider naming a TERMINAL fault of its
+  reads as a verdict, so codex's `reasoning` is dropped and parsed speech keeps
+  raw JSONL out); `failure` is the provider naming a TERMINAL fault of its
   own; everything else — including a fault it is still recovering from — is
   transport. That last distinction is the sharp one, because `invokeAgent`
   rejects on a `failure`: codex narrates its reconnects and a transport
@@ -306,7 +306,7 @@ and used to announce themselves in four different ways, the halt in none at all.
   dependencies but cannot remove this run's agent. The merger uses the same
   augmented declared image, while gate containers keep the unaugmented base
   because they run no agent. Both pins move with the driver, and codex's is
-  specifically co-versioned with its load-bearing `parsedOutputOnly` parser.
+  specifically co-versioned with its load-bearing JSONL parser.
   `PROVIDER_CREDENTIALS` is ANY-OF per provider, which is
   what let #73 add codex's subscription as data; what a second accepted key
   needed beyond data is `billingPrecedenceWarnings`, because a CLI handed both a
@@ -315,8 +315,9 @@ and used to announce themselves in four different ways, the halt in none at all.
   and sandbar cannot know which account the operator meant to spend.
 - **Token contracts.** Implementer: `<promise>COMPLETE|NEEDS-INFO|
   NEEDS-UI-PROTOTYPE</promise>`; resolve loop: `COMMITTED|ABANDON`; anything
-  else re-prompts. Reviewer: `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`,
-  defaulting to CHANGES-REQUESTED only for a run that produced output (#41).
+  else re-prompts. Reviewer: `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`.
+  A run without a verdict token is a reviewer harness failure, never a
+  fabricated CHANGES-REQUESTED (#41, #83).
   The orchestrator gates between attempts; agents never decide "green".
 - **Prompt prose lives in `prompts/*.md`**, loaded by `src/prompts.ts`; TS
   keeps only structure. Every git range a prompt renders anchors at the issue

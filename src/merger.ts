@@ -2255,7 +2255,7 @@ export function parseCapturedAgentRun(
     // Both supported providers emit structured transport here. Resolve
     // promises therefore have no raw fallback: only events their provider
     // parser classified as agent speech may reach parseResolveSignal (#74).
-    output: speech.output(""),
+    output: speech.output(),
     detail: run.detail ?? speech.failure,
   };
 }

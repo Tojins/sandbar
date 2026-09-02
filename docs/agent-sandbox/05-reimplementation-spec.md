@@ -44,12 +44,11 @@ export function createSandbox(options: {
 }): Promise<Sandbox>;
 ```
 
-`RunOptions` needs only what sandbar passes: `{ agent, prompt, maxIterations?,
-name? }`. `interactive()`, `[Symbol.asyncDispose]`, `promptFile`, `promptArgs`,
-`completionSignal`, `idleTimeoutSeconds`, `logging`, `signal` can be omitted (or
-kept as optional no-ops) — sandbar uses none of them. Keep the `SandboxRunResult`
-return type wider only if you want to preserve the full shape; sandbar reads only
-`stdout` and `commits`.
+`RunOptions` needs `{ agent, prompt, name?, completionSignal,
+idleTimeoutSeconds?, completionTimeoutSeconds? }`. `completionSignal` is a
+required string list; `[]` means process exit or idle timeout ends the run.
+`SandboxRunResult` carries `stdout`, `commits`, optional `signalMs`, and optional
+`maxGapMs`.
 
 ## Reduced control flow (sandbar's path only)
 

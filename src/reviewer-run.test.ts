@@ -121,8 +121,8 @@ function drive(script: readonly ReviewerRun[]) {
 }
 
 describe("isReview", () => {
-  it("a completed run with output is a review, token or not", () => {
-    expect(isReview({ output: "looks fine to me", error: null })).toBe(true);
+  it("a completed run is a review only with a verdict token", () => {
+    expect(isReview({ output: "looks fine to me", error: null })).toBe(false);
     expect(
       isReview({ output: "<verdict>APPROVED</verdict>", error: null }),
     ).toBe(true);

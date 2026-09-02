@@ -9,10 +9,11 @@
 // requires a located, concrete defect and otherwise APPROVES; the follow-up
 // receives sandbar's built-in prompts/coding-standards.md plus any project
 // standards file that extends it. That keeps either verdict deterministic, so
-// we never block on the reviewer being indecisive: a missing or malformed
-// token defaults to CHANGES-REQUESTED
-// (the safer choice — implementer gets another pass instead of shipping
-// unreviewed work). Last token wins if the reviewer emits more than one.
+// Missing tokens are absence, not a fabricated verdict. The reviewer harness
+// filters those runs before parsing. Last token wins when several are emitted.
+// A catch may only classify one named expected condition checked explicitly,
+// or clean up on failure: log the secondary failure with its cause, then
+// rethrow the original (#83).
 
 export type Verdict = "APPROVED" | "CHANGES-REQUESTED";
 
@@ -39,11 +40,11 @@ export function containsVerdictToken(stdout: string): boolean {
   return VERDICT_TOKEN.test(stdout);
 }
 
-export function parseVerdict(stdout: string): ParsedVerdict {
+export function parseVerdict(stdout: string): ParsedVerdict | null {
   const prose = stdout;
   const matches = [...stdout.matchAll(VERDICT_TOKEN_ALL)];
   if (matches.length === 0) {
-    return { verdict: "CHANGES-REQUESTED", prose };
+    return null;
   }
   const last = matches[matches.length - 1]!;
   const token = (last[1] ?? "").trim();

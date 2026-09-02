@@ -34,4 +34,4 @@ End your review with a single verdict token on its own:
 - `<verdict>CHANGES-REQUESTED</verdict>` — list the correctness defects above and
   the implementer will address them in the next round.
 
-A missing verdict defaults to CHANGES-REQUESTED. Emit exactly one verdict.
+A missing verdict is a failed reviewer invocation and will be retried. Emit exactly one verdict.

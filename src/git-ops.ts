@@ -20,6 +20,10 @@ import { issueNumberFromBranch } from "./naming.js";
 
 const exec = promisify(execFile);
 
+const isGitExit = (err: unknown, code: number): boolean =>
+  typeof err === "object" && err !== null &&
+  (err as { code?: number }).code === code;
+
 // ---------------------------------------------------------------------------
 // Where an issue branch comes from (#61)
 // ---------------------------------------------------------------------------
@@ -137,8 +141,9 @@ export async function fetchOriginChunkBranch(
   try {
     await exec("git", ["show-ref", "--verify", "--quiet", remoteRef], { cwd });
     return remoteRef;
-  } catch {
-    return null;
+  } catch (err) {
+    if (isGitExit(err, 1)) return null;
+    throw err;
   }
 }
 
@@ -238,8 +243,8 @@ export async function ensureIssueBranch(
       { cwd: repoDir },
     );
     return base; // exists
-  } catch {
-    // fall through
+  } catch (err) {
+    if (!isGitExit(err, 1)) throw err;
   }
   // --no-track: don't write upstream config (a) we never `git pull` these
   // branches and (b) parallel `git branch` calls race on `.git/config`.
@@ -430,8 +435,11 @@ async function branchTip(
       { cwd: worktreePath },
     );
     return stdout.trim() || null;
-  } catch {
-    return null;
+  } catch (err) {
+    // `git rev-parse --verify` uses 128 for an unresolved ref (unlike
+    // `show-ref --verify`, which uses 1). That one named absence is data.
+    if (isGitExit(err, 128)) return null;
+    throw err;
   }
 }
 
