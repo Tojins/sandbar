@@ -85,15 +85,17 @@ export default {
   // floor below which it must not — but raise it in the same commit as anything
   // this file starts asking a newer sandbar for.
   //
-  // It is 0.23.0, the release this file started asking for by routing the
-  // implementer at codex below: `implementerAgent` landed in #72 and a driver
-  // that predates it spreads the field through UNREAD — the run comes up
-  // claude on the implementer with no refusal anywhere, #66's exact silent
-  // failure — and `CODEX_AUTH_JSON` (#73, 0.23.0) is the credential that
-  // routing declares, which an in-between driver would refuse loudly but
-  // refuse every time. It moves when this file starts asking a newer sandbar
-  // for something, not when the pin does.
-  requiresSandbar: "0.23.0",
+  // It is 0.24.6, the first TAGGED release that augments the resolved sandbox
+  // image with the routed agent CLIs (#75) — and this file started asking for
+  // that the moment the Containerfile stopped baking a CLI of its own: under a
+  // non-augmenting driver the image this config names would put an agent in a
+  // sandbox with NO CLI at all, a 127 on every attempt rather than a refusal.
+  // (#75 landed a few versions earlier in the same pass, but an untagged
+  // version is not installable, so a lower floor would buy nothing.) The
+  // previous floor, 0.23.0, was the codex routing below (#72) and its
+  // subscription credential (#73); 0.24.6 subsumes it. It moves when this file
+  // starts asking a newer sandbar for something, not when the pin does.
+  requiresSandbar: "0.24.6",
 
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
@@ -307,11 +309,11 @@ export default {
   //
   // The reviewer stays claude on purpose: it holds the verdict, and #72's
   // whole argument is that the strongest model belongs where the judgement is,
-  // not where the tokens are. The merger now has the same independent
-  // provider/model knobs; this config keeps its backward-compatible
-  // claude/opus defaults until self-host adoption raises requiresSandbar and
-  // the pinned driver together. The codex merger route is supported by the
-  // driver but has not yet been exercised by this self-host configuration.
+  // not where the tokens are. The merger has the same independent
+  // provider/model knobs since #74 and stays on its claude/opus defaults for
+  // the reviewer's reason — conflict resolution is judgement — not for
+  // compatibility; the codex merger route is driver-supported but unexercised
+  // by this self-host configuration.
   //
   // Nothing here takes effect through the pin. This file comes from the
   // checkout, not from `.sandbar/driver/`, so an edit applies on the next run

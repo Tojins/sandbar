@@ -66,13 +66,12 @@ RUN curl -fsSL https://github.com/containers/podman/releases/download/v4.9.3/pod
     && install -m0755 /tmp/bin/podman-remote-static-linux_amd64 /usr/bin/podman \
     && rm -rf /tmp/bin
 
-# The driver also appends its pinned, routed providers after resolving this
-# image (#75). Keep this host copy until sandbar.pin reaches a release carrying
-# that augmentation: the current pinned driver still runs this image directly
-# after a relaunch. These temporary pins mirror AGENT_PROVIDER_PACKAGES in
-# src/agent-providers.ts; always-install makes the overlap harmless.
-RUN npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.257
-RUN npm install -g @openai/codex@0.152.0
+# No agent CLI is installed here. The driver appends the routed providers, at
+# its own pins, after resolving this image (#75) — `AGENT_PROVIDER_PACKAGES` in
+# src/agent-providers.ts — and `sandbar.pin` now names a release that does. Do
+# not re-add a host copy: an unpinned one drifts from the parser the driver
+# couples to, and the driver's install wins over it anyway. What this image
+# still owes the augmentation is the base contract: node >= 20 with npm.
 
 # No `ENV HOME`: the sandbox provider sets HOME=/home/agent itself, and the
 # gate runner is root, whose /root is the right answer for it.
