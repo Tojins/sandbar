@@ -139,9 +139,8 @@ live stack, and guessing is the bug #28 fixed:
   `sandbar-<scope>-net-` — `src/naming.ts` (`RESOURCE_PREFIX`,
   `scopedResourcePrefix`), matched in `containers.ts`. The `<scope>` segment is
   per-run (#28); the sweeper keys on the full scoped prefix and must never fall
-  back to the bare one. (`merger.ts` names nothing prefixed — its one container
-  is `--rm` and unnamed, so podman assigns it a random name and the sweeper
-  never sees it.)
+  back to the bare one. The merger's per-attempt container is named with that
+  same scoped prefix, so a timeout cannot leave it invisible to the sweeper.
 - Branch prefix `sandbar/issue-<n>-<slug>` — `plan-resolver.ts:74`,
   `preflight.ts`, orphan sweeper.
 - Sandbox mount point `/home/agent/workspace` (`SANDBOX_REPO_DIR`) and home

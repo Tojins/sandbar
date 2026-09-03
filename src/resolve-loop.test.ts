@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { MergerGateOutput } from "./merger.js";
+import { classifyAgentRunEnd } from "./agent-run-end.js";
 import { SandbarError } from "./errors.js";
 import {
   RESOLVE_MAX_ATTEMPTS,
@@ -39,15 +40,25 @@ type AgentResult = ResolveAgentRun;
 // spell out an exit code or a signal.
 function agentRun(over: Partial<ResolveAgentRun> = {}): ResolveAgentRun {
   const stdout = over.stdout ?? "";
+  const output = over.output ?? stdout;
+  const classification = classifyAgentRunEnd({
+    end: over.end ?? "exit",
+    exitCode: over.exitCode ?? 0,
+    spoken: output,
+    failure: (over.exitCode ?? 0) !== 0 ? over.detail : undefined,
+    silentRunRecovery: "infra",
+  });
   return {
     stdout,
-    output: stdout,
+    output,
     stderr: "",
     end: "exit",
     exitCode: 0,
     signal: null,
     durationMs: 1234,
     container: "sandbar-wdeadbeef-resolve-1-uuid",
+    cause: classification.cause,
+    verdict: classification.verdict,
     ...over,
   };
 }
@@ -743,6 +754,9 @@ describe("runResolveLoop — an attempt that never ran (#67)", () => {
   });
 
   it("names the container, how it ended, and where its output went", async () => {
+    const stderr =
+      `beginning-must-not-be-inlined\n${"x".repeat(700)}\n` +
+      "Error: cannot connect to podman socket";
     const { adapter } = makeAdapter({
       initiallyConflicted: true,
       agentRuns: [
@@ -751,7 +765,7 @@ describe("runResolveLoop — an attempt that never ran (#67)", () => {
           run: {
             exitCode: 125,
             container: "sandbar-wdeadbeef-resolve-1-abc",
-            stderr: "Error: cannot connect to podman socket",
+            stderr,
           },
         },
       ],
@@ -771,6 +785,8 @@ describe("runResolveLoop — an attempt that never ran (#67)", () => {
     expect(err.message).toContain("remaining 3 resolve attempts");
     // stderr was piped to nobody before this issue; it is the whole diagnosis.
     expect(err.message).toContain("cannot connect to podman socket");
+    expect(err.message).not.toContain("beginning-must-not-be-inlined");
+    expect(err.message.length).toBeLessThan(1_500);
   });
 
   it("says so plainly when no sink was wired, rather than naming a file", async () => {

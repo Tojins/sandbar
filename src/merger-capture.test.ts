@@ -230,6 +230,26 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(isInfraFailure(run)).toBe(true);
   });
 
+  it("does not promote raw stderr into the merger's narrow detail", () => {
+    const run = parseCapturedAgentRun(
+      { ...captured(""), exitCode: 125, stderr: "unbounded runtime stderr" },
+      buildAgentProvider("codex", "m"),
+    );
+    expect(run.cause).toBe("provider-failure");
+    expect(run.detail).toBeUndefined();
+    expect(run.stderr).toBe("unbounded runtime stderr");
+  });
+
+  it("keeps a spawn error ahead of an in-band provider failure", () => {
+    const raw = JSON.stringify({ type: "turn.failed", error: { message: "provider" } });
+    const run = parseCapturedAgentRun(
+      { ...captured(raw), end: "spawn-error", exitCode: null, detail: "ENOENT" },
+      buildAgentProvider("codex", "m"),
+    );
+    expect(run.cause).toBe("spawn-error");
+    expect(run.detail).toBe("ENOENT");
+  });
+
   it("keeps agent speech when a terminal failure follows it", () => {
     const raw = [
       JSON.stringify({
@@ -245,6 +265,34 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(run.output).toBe("partial answer");
     expect(run.detail).toBe("terminal fault");
     expect(isInfraFailure(run)).toBe(false);
+  });
+
+  it("carries a parser shape error as infra data so capture can be logged", () => {
+    const provider = buildAgentProvider("claude", "m");
+    const run = parseCapturedAgentRun(
+      captured(JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", name: "Bash", input: null }] },
+      })),
+      provider,
+    );
+    expect(run.cause).toBe("parse-error");
+    expect(run.verdict).toBe("infra");
+    expect(run.detail).toContain("stream parse failed");
+    expect(run.stdout).toContain("tool_use");
+  });
+
+  it("stops ingesting after the first parser shape error", () => {
+    const raw = [
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", name: "Bash", input: null }] },
+      }),
+      JSON.stringify({ type: "result", result: "must not become speech" }),
+    ].join("\n");
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("claude", "m"));
+    expect(run.cause).toBe("parse-error");
+    expect(run.output).toBe("");
   });
 });
 
@@ -298,4 +346,31 @@ describe("resolve provider invocation (#74)", () => {
       expect(argv).toContain("/git-common:/git-common");
     },
   );
+
+  it("pins the complete resolve-container argv", () => {
+    const argv = buildResolveRunArgv({
+      container: "resolve-1",
+      cwd: "/worktree",
+      extraMounts: ["/git-common"],
+      image: "sandbox-image",
+      command: "agent --print",
+      credentials: {},
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+    });
+    expect(argv).toEqual([
+      "run", "--rm", "-i", "--image-volume=ignore",
+      "--name", "resolve-1",
+      "--userns=keep-id", "--user", "1000:1000",
+      "-v", "/worktree:/workspace", "-v", "/git-common:/git-common",
+      "-w", "/workspace", "-e", "HOME=/tmp",
+      "--label", "sandbar=true",
+      "-e", "GIT_AUTHOR_NAME=sandbar-bot",
+      "-e", "GIT_AUTHOR_EMAIL=bot@example.test",
+      "-e", "GIT_COMMITTER_NAME=sandbar-bot",
+      "-e", "GIT_COMMITTER_EMAIL=bot@example.test",
+      "--entrypoint", "/bin/sh", "sandbox-image", "-c", "agent --print",
+    ]);
+    expect(argv).not.toContain("--init");
+  });
 });
