@@ -1923,6 +1923,23 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     ).toBe(branch);
   });
 
+  it("recovers reuse when the preserved clone lost its issue ref", async () => {
+    const branch = "sandbar/issue-98-missing-private-ref";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    const clone = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+    const cacheTip = (await git(["rev-parse", branch], dir)).stdout.trim();
+    await git(["checkout", "--detach"], clone);
+    await git(["branch", "-D", branch], clone);
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect((await git(["symbolic-ref", "HEAD"], clone)).stdout.trim()).toBe(
+      `refs/heads/${branch}`,
+    );
+    expect((await git(["rev-parse", branch], clone)).stdout.trim()).toBe(cacheTip);
+  });
+
   it("sweeps an unmarked orphan outside the branch being prepared", async () => {
     const branch = "sandbar/issue-83-general-sweep";
     const layout = layoutFor(dir);

@@ -257,6 +257,7 @@ export async function startSandboxStack(
     attach,
     label: SANDBOX_LABEL,
     worktreePath: opts.worktreePath,
+    hideWorktreeGit: true,
     nameOf,
   };
 

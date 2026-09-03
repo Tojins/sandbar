@@ -1243,6 +1243,7 @@ export async function run(
             scope,
             spec: config.gateStack,
             worktreePath: mergerWorktree.path,
+            hideWorktreeGit: true,
             // gate-2 needs this as much as gate-1 does (#37): the merge result
             // is a tree neither branch had, and two branches that each touched
             // the lockfile compose into a third lockfile. Resolved per gate

@@ -1226,9 +1226,18 @@ const worktreeCreate = (
         const marker = await issueCloneMarker(worktreePath);
         if (marker === branch) {
           // Recover a commit made immediately before a host-side publish was
-          // interrupted, refresh the prompt base refs, then apply the existing
-          // clean-reuse policy.
-          await syncIssueBranchToCache(repoDir, worktreePath, branch);
+          // interrupted. If an agent deleted the private issue ref, the cache
+          // copy ensureIssueBranch just guaranteed is authoritative instead.
+          if (await hasLocalBranch(worktreePath, branch)) {
+            await syncIssueBranchToCache(repoDir, worktreePath, branch);
+          } else {
+            await execGit(
+              ["fetch", repoDir, `+refs/heads/${branch}:refs/heads/${branch}`],
+              worktreePath,
+            );
+          }
+          // Refresh the prompt base refs, then apply the existing clean-reuse
+          // policy.
           await refreshIssueClone(repoDir, worktreePath);
           const dirty = await hasUncommittedChanges(worktreePath);
           if (dirty) {

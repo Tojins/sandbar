@@ -558,6 +558,9 @@ async function gate(
     scope,
     spec: config.gateStack,
     worktreePath,
+    hideWorktreeGit:
+      statSync(resolve(worktreePath, ".git"), { throwIfNoEntry: false })?.isDirectory() ===
+      true,
     images: (only) => branchImages.resolve(worktreePath, only),
     reuseToken: gateReuseToken(
       config.gateStack,

@@ -493,6 +493,7 @@ async function runSandboxCycle(
         scope: config.scope,
         spec: config.gateStack,
         worktreePath,
+        hideWorktreeGit: true,
         // A thunk, not a value: the stack calls it before every gate run, and
         // the answer changes as the agent commits (#37). It hands back the
         // tags it runs, so the sandbox's entry is not resolved here (#46).
