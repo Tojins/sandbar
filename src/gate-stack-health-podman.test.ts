@@ -16,7 +16,10 @@ import {
   IMAGE,
 } from "./gate-stack-podman.test-util.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
-import { podmanTestScope } from "./podman-test-scope.test-util.js";
+import {
+  podmanTestScope,
+  removeFixtureContainer,
+} from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);

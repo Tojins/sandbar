@@ -105,7 +105,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "keeps the stack up, then adopts its issue container on the same token and rebuilds it on a different one",
     async ({ expect, task, onTestFinished }) => {
-      const { stackId, repo, spec } = await standaloneFixture(
+      const { stackId, repo, spec, idOf, gName } = await standaloneFixture(
         task.id,
         onTestFinished,
       );
@@ -187,7 +187,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "tears the stack down when keepAlive is not asked for, and reuses nothing without a token",
     async ({ expect, task, onTestFinished }) => {
-      const { stackId, repo } = await standaloneFixture(
+      const { stackId, repo, spec, idOf } = await standaloneFixture(
         task.id,
         onTestFinished,
       );
