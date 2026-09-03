@@ -186,6 +186,7 @@ import {
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import {
   describeIssueBranchOriginSync,
+  issueBranchDeletedOnOriginMessage,
   issueBranchDivergedMessage,
   syncIssueBranchWithOrigin,
 } from "./git-ops.js";
@@ -1019,32 +1020,37 @@ export class PreflightError extends Error {
 }
 
 // Run `syncIssueBranchWithOrigin` over the branches preflight keeps (#112).
-// `lines` is what runPreflight prints — one per branch that moved, was kept
-// ahead, or whose origin could not be asked — and `diverged` is what it
-// refuses over. Exported for the git-backed test; the decision per branch is
-// git-ops.ts's and tested there.
+// `lines` is what runPreflight prints — one per branch that moved, was
+// dropped, was kept ahead, or whose origin could not be asked; `refusals` are
+// the failures it adds to the invariants' (a diverged branch, or one deleted
+// on origin while the cache holds more than origin had); `abandoned` are the
+// branches the sync dropped, which the announcements must no longer list.
+// Exported for the git-backed test; the decision per branch is git-ops.ts's
+// and tested there.
 export async function syncKeptIssueBranches(
   repoDir: string,
   branches: readonly string[],
 ): Promise<{
   readonly lines: readonly string[];
-  readonly diverged: readonly {
-    readonly branch: string;
-    readonly local: string;
-    readonly origin: string;
-  }[];
+  readonly refusals: readonly string[];
+  readonly abandoned: readonly string[];
 }> {
   const lines: string[] = [];
-  const diverged: { branch: string; local: string; origin: string }[] = [];
+  const refusals: string[] = [];
+  const abandoned: string[] = [];
   for (const branch of branches) {
     const sync = await syncIssueBranchWithOrigin(repoDir, branch);
     if (sync.kind === "diverged") {
-      diverged.push({ branch, local: sync.local, origin: sync.origin });
+      refusals.push(issueBranchDivergedMessage(repoDir, branch, sync.local, sync.origin));
+    } else if (sync.kind === "origin-deleted") {
+      refusals.push(issueBranchDeletedOnOriginMessage(repoDir, branch, sync));
+    } else if (sync.kind === "abandoned") {
+      abandoned.push(branch);
     }
     const line = describeIssueBranchOriginSync(branch, sync);
     if (line !== null) lines.push(line);
   }
-  return { lines, diverged };
+  return { lines, refusals, abandoned };
 }
 
 export async function runPreflight(cfg: PreflightConfig): Promise<void> {
@@ -1100,22 +1106,26 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
     ...state.parkedIssueBranches,
   ]);
   for (const line of synced.lines) console.log(line);
-  if (state.resumableIssueBranches.length > 0) {
+  const kept = (branches: readonly string[]) =>
+    branches.filter((b) => !synced.abandoned.includes(b));
+  const resumable = kept(state.resumableIssueBranches);
+  const parked = kept(state.parkedIssueBranches);
+  if (resumable.length > 0) {
     console.log(
-      `Resuming ${state.resumableIssueBranches.length} stranded issue ` +
+      `Resuming ${resumable.length} stranded issue ` +
         `branch(es) from an interrupted run: ` +
-        `${state.resumableIssueBranches.join(", ")}. The planner will re-pick ` +
+        `${resumable.join(", ")}. The planner will re-pick ` +
         "the matching open `ready-for-agent` issue(s) and the inner loop " +
         "continues from each branch's commits.",
     );
   }
-  if (state.parkedIssueBranches.length > 0) {
+  if (parked.length > 0) {
     console.log(
-      `Keeping ${state.parkedIssueBranches.length} parked issue branch(es): ` +
-        `${state.parkedIssueBranches.join(", ")}. Each maps to an open issue ` +
+      `Keeping ${parked.length} parked issue branch(es): ` +
+        `${parked.join(", ")}. Each maps to an open issue ` +
         "that is not `ready-for-agent`; re-applying the label resumes from " +
-        "the branch's commits — origin's copy of them, which the cache now " +
-        "matches. Deleting the branch on origin is what abandons them.",
+        "the branch's commits, brought level with origin's copy wherever " +
+        "origin is ahead. Deleting the branch on origin is what abandons them.",
     );
   }
   // The other half of the #34 agreement check, and it is emitted BEFORE the
@@ -1155,9 +1165,7 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   const results = checkInvariants(state);
   const failures = [
     ...results.flatMap((r) => (r.ok ? [] : [r.message])),
-    ...synced.diverged.map((d) =>
-      issueBranchDivergedMessage(cfg.layout.repoDir, d.branch, d.local, d.origin),
-    ),
+    ...synced.refusals,
   ];
   if (failures.length > 0) throw new PreflightError(failures);
 

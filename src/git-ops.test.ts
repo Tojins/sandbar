@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SandbarError } from "./errors.js";
 import {
   ChunkBaseMissingError,
+  IssueBranchDeletedOnOriginError,
   IssueBranchDivergedError,
   dirtyWorktreePaths,
   ensureIssueBranch,
@@ -465,6 +466,36 @@ describe("ensureIssueBranch — the chunk tip is the other seed (#61)", () => {
   // same anchor a fresh one would. Without that, attempt 2 of a chained member
   // would be handed `origin/main` and shown its ancestors' whole chunk as "the
   // work done so far" — #61's failure mode, reached by the back door.
+  // #112's missing-branch arm against the chunk seed: origin's copy of a
+  // member's branch is resumed when the chunk tip does not contain it, and a
+  // copy the chunk tip already contains (the member landed) is a leftover.
+  it("resumes a missing member branch from origin's copy when the chunk tip lacks it", async () => {
+    await landRootOnChunkBranch();
+    await git(seed, "checkout", "-q", "-b", MEMBER, `origin/${CHUNK.branch}`);
+    await git(seed, "commit", "-q", "--allow-empty", "-m", "member work, parked");
+    await git(seed, "push", "-q", "origin", MEMBER);
+    const parkedTip = (await git(seed, "rev-parse", "HEAD")).stdout.trim();
+
+    const base = await ensureIssueBranch(cache, MEMBER, "main", CHUNK);
+
+    expect(base).toMatchObject({
+      ref: `refs/remotes/origin/${CHUNK.branch}`,
+      chunkBranch: CHUNK.branch,
+      originSync: { kind: "resumed-from-origin", tip: parkedTip },
+    });
+    expect((await git(cache, "rev-parse", MEMBER)).stdout.trim()).toBe(parkedTip);
+  });
+
+  it("seeds a missing member branch fresh when the chunk tip already contains origin's copy", async () => {
+    const tip = await landRootOnChunkBranch();
+    await git(seed, "push", "-q", "origin", `${tip}:refs/heads/${MEMBER}`);
+
+    const base = await ensureIssueBranch(cache, MEMBER, "main", CHUNK);
+
+    expect(base.originSync).toBeUndefined();
+    expect((await git(cache, "rev-parse", MEMBER)).stdout.trim()).toBe(tip);
+  });
+
   it("reports the chunk tip for a branch that already exists", async () => {
     const tip = await landRootOnChunkBranch();
     const first = await ensureIssueBranch(cache, MEMBER, "main", CHUNK);
@@ -910,18 +941,77 @@ describe("ensureIssueBranch — origin's copy of the branch (#112)", () => {
     expect(await tip(cache, `refs/heads/${B}`)).toBe(local);
   });
 
-  it("keeps a branch origin has no copy of, and drops a stale cached one", async () => {
+  it("keeps a branch origin has no copy of and never had", async () => {
     await git(cache, "branch", "--no-track", B, "origin/main");
     const before = await commitInCache();
-    // A remote-tracking ref left by an earlier fetch of a branch since deleted
-    // on origin: not to be read as origin's current answer.
-    await git(cache, "update-ref", `refs/remotes/origin/${B}`, "origin/main");
 
     const base = await ensureIssueBranch(cache, B, "main");
 
     expect(base.originSync).toEqual({ kind: "origin-absent" });
     expect(await tip(cache, `refs/heads/${B}`)).toBe(before);
+  });
+
+  // The cache follows origin in both directions. A park's push left the
+  // remote-tracking ref behind, so origin now saying "no such branch" is the
+  // human's deletion — the one way to abandon a parked issue's work — and the
+  // cache drops its copy and seeds the issue afresh.
+  it("drops the cache's copy of a branch deleted on origin and seeds afresh", async () => {
+    await pushOnBranch();
+    const c1 = await cacheLevelWithOrigin();
+    await git(work, "push", "-q", "origin", "--delete", B);
+
+    const base = await ensureIssueBranch(cache, B, "main");
+
+    expect(base.originSync).toEqual({ kind: "abandoned", tip: c1 });
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(await tip(cache, "origin/main"));
     expect(await hasRef(cache, `refs/remotes/origin/${B}`)).toBe(false);
+    // Still in the reflog, as the announcement says.
+    expect((await git(cache, "cat-file", "-t", c1)).stdout.trim()).toBe("commit");
+  });
+
+  it("refuses to drop a branch deleted on origin when the cache holds work past origin's tip", async () => {
+    const c1 = await pushOnBranch();
+    await cacheLevelWithOrigin();
+    const c2 = await commitInCache();
+    await git(work, "push", "-q", "origin", "--delete", B);
+
+    const err = await ensureIssueBranch(cache, B, "main").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(IssueBranchDeletedOnOriginError);
+    expect((err as Error).message).toContain(`${c1.slice(0, 7)}..${c2.slice(0, 7)}`);
+    expect(err).not.toBeInstanceOf(SandbarError);
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(c2);
+  });
+
+  it("refuses to drop a branch deleted on origin while a worktree has it checked out", async () => {
+    await pushOnBranch();
+    const c1 = await cacheLevelWithOrigin();
+    const wt = join(root, "wt");
+    await git(cache, "worktree", "add", "-q", wt, B);
+    await git(work, "push", "-q", "origin", "--delete", B);
+
+    const err = await ensureIssueBranch(cache, B, "main").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(IssueBranchDeletedOnOriginError);
+    expect((err as Error).message).toContain(wt);
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(c1);
+  });
+
+  // `git worktree list` keeps listing the branch of a worktree whose directory
+  // was deleted by hand, marked `prunable`. There is nothing to fast-forward
+  // through there; the ref moves directly.
+  it("fast-forwards past a prunable worktree registration", async () => {
+    await pushOnBranch();
+    await cacheLevelWithOrigin();
+    const wt = join(root, "wt");
+    await git(cache, "worktree", "add", "-q", wt, B);
+    await rm(wt, { recursive: true, force: true });
+    const c2 = await pushOnBranch();
+
+    const base = await ensureIssueBranch(cache, B, "main");
+
+    expect(base.originSync).toMatchObject({ kind: "fast-forwarded", to: c2 });
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(c2);
   });
 
   it("continues from the cache's copy when origin cannot be asked, and says so", async () => {

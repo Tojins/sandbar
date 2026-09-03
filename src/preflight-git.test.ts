@@ -826,10 +826,32 @@ describe("syncKeptIssueBranches — kept branches follow origin's copy (#112)", 
     expect(await tip(cache, behind)).toBe(b2);
     expect(await tip(cache, level)).toBe(l1);
     expect(await tip(cache, split)).toBe(cacheOnly);
-    expect(result.diverged).toEqual([{ branch: split, local: cacheOnly, origin: s2 }]);
+    expect(result.abandoned).toEqual([]);
+    expect(result.refusals).toHaveLength(1);
+    expect(result.refusals[0]).toContain(`${split} has diverged`);
+    expect(result.refusals[0]).toContain(cacheOnly.slice(0, 7));
+    expect(result.refusals[0]).toContain(s2.slice(0, 7));
     expect(result.lines).toHaveLength(2);
     expect(result.lines[0]).toContain(`${behind} fast-forwarded`);
     expect(result.lines[1]).toContain(`${split} has diverged`);
+  });
+
+  // A parked branch the human deleted on origin: the cache saw origin carry it
+  // (the park's push wrote the remote-tracking ref), so the cache drops its
+  // copy and the announcements must stop listing it.
+  it("drops a parked branch deleted on origin and names it as abandoned", async () => {
+    const gone = "sandbar/issue-5-gone";
+    const g1 = await pushOn(gone, "g1");
+    await git(cache, "fetch", "-q", "origin");
+    await cacheBranchAt(gone, g1);
+    await git(work, "push", "-q", "origin", "--delete", gone);
+
+    const result = await syncKeptIssueBranches(cache, [gone]);
+
+    expect(result.abandoned).toEqual([gone]);
+    expect(result.refusals).toEqual([]);
+    expect(result.lines[0]).toContain(`${gone} abandoned`);
+    await expect(git(cache, "rev-parse", "--verify", gone)).rejects.toBeDefined();
   });
 
   it("has nothing to say and nothing to refuse when every kept branch is level", async () => {
@@ -839,6 +861,6 @@ describe("syncKeptIssueBranches — kept branches follow origin's copy (#112)", 
 
     const result = await syncKeptIssueBranches(cache, ["sandbar/issue-4-level"]);
 
-    expect(result).toEqual({ lines: [], diverged: [] });
+    expect(result).toEqual({ lines: [], refusals: [], abandoned: [] });
   });
 });

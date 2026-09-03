@@ -176,10 +176,17 @@ export async function fetchOriginChunkBranch(
 // non-fast-forward two hours later. So an existing branch is measured against
 // `origin/<branch>` first, and a MISSING one is cut from origin's copy when
 // origin has one that the base does not already contain — which is what makes
-// `rm -rf .sandbar` cost agent time and never correctness for a parked issue,
-// and what makes "delete the branch on origin" the one way to abandon it.
+// `rm -rf .sandbar` cost agent time and never correctness for a parked issue.
+// The cache follows origin in BOTH directions: forward, and gone. A cache that
+// holds `refs/remotes/origin/<branch>` has seen origin carry the branch (a
+// park's push writes that ref, and so does this sync), so origin answering
+// "no such branch" afterwards is a human's deletion, not a run that never
+// pushed — and that is what abandons a parked issue's work: delete the branch
+// on origin, and the cache drops its copy. Only its copy of what origin had,
+// though: commits the cache holds PAST origin's last tip, or a worktree still
+// holding the branch, are a refusal rather than a deletion.
 //
-// The answers, and only one of them is a refusal:
+// The answers, and two of them are refusals:
 //   - in-sync          — the two tips are equal.
 //   - fast-forwarded   — the cache's tip is an ancestor of origin's: someone
 //                        pushed on the branch since the park. Moved through
@@ -202,9 +209,18 @@ export async function fetchOriginChunkBranch(
 //                        contained in the base: the branch is created at
 //                        origin's tip. Contained means the work landed and the
 //                        branch on origin is a leftover, so the seed is fresh.
-//   - origin-absent    — origin was reached and has no such branch: an
-//                        interrupted run that never pushed. Kept, or seeded
-//                        fresh.
+//   - origin-absent    — origin was reached and has no such branch, and the
+//                        cache never saw it have one: an interrupted run that
+//                        never pushed. Kept, or seeded fresh.
+//   - abandoned        — origin was reached, has no such branch, and the cache
+//                        saw it have one at the tip the cache's branch still
+//                        sits on. The cache branch is dropped and the issue is
+//                        seeded fresh; the reflog keeps the commits.
+//   - origin-deleted   — the same, but the cache holds commits past that tip
+//                        or a worktree still has the branch checked out. A
+//                        refusal (`IssueBranchDeletedOnOriginError`, and
+//                        preflight's failure list) naming what would be lost:
+//                        push it back to keep it, `branch -D` to abandon it.
 //   - origin-unreadable — origin could not be asked. Kept (or seeded fresh) and
 //                        said so; the push at the end of the issue will judge.
 //                        Told apart from `origin-absent` the way the merger
@@ -222,12 +238,30 @@ export type IssueBranchOriginSync =
   | { readonly kind: "diverged"; readonly local: string; readonly origin: string }
   | { readonly kind: "resumed-from-origin"; readonly tip: string }
   | { readonly kind: "origin-absent" }
+  | { readonly kind: "abandoned"; readonly tip: string }
+  | {
+      readonly kind: "origin-deleted";
+      readonly local: string;
+      readonly previous: string;
+      readonly worktree: string | null;
+    }
   | { readonly kind: "origin-unreadable"; readonly detail: string };
 
 type OriginIssueBranchLookup =
   | { readonly kind: "present"; readonly ref: string }
-  | { readonly kind: "absent" }
+  // `previous`: the remote-tracking ref the cache held before this fetch, the
+  // evidence that origin once carried the branch. Null when it never did.
+  | { readonly kind: "absent"; readonly previous: string | null }
   | { readonly kind: "unreadable"; readonly detail: string };
+
+const revParseOrNull = async (cwd: string, ref: string): Promise<string | null> => {
+  try {
+    return await revParse(cwd, ref);
+  } catch (err) {
+    if (isGitExit(err, 1)) return null;
+    throw err;
+  }
+};
 
 const errorMessage = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
@@ -254,6 +288,7 @@ const fetchOriginIssueBranch = async (
   branch: string,
 ): Promise<OriginIssueBranchLookup> => {
   const remoteRef = `refs/remotes/origin/${branch}`;
+  const previous = await revParseOrNull(repoDir, remoteRef);
   try {
     await exec(
       "git",
@@ -272,14 +307,17 @@ const fetchOriginIssueBranch = async (
     );
     if (probe !== null && isGitExit(probe, 2)) {
       await exec("git", ["update-ref", "-d", remoteRef], { cwd: repoDir });
-      return { kind: "absent" };
+      return { kind: "absent", previous };
     }
     return { kind: "unreadable", detail: errorMessage(probe ?? fetchErr) };
   }
 };
 
 // The worktree that has `branch` checked out, if any. The bare cache lists
-// itself first (`bare`, no `branch` line) and every linked worktree after it.
+// itself first (`bare`, no `branch` line) and every linked worktree after it,
+// blank-line separated. A registration whose directory is gone still lists the
+// branch, with a `prunable` line beside it; there is no worktree to
+// fast-forward through there, so it does not count.
 const worktreeHoldingBranch = async (
   repoDir: string,
   branch: string,
@@ -287,10 +325,16 @@ const worktreeHoldingBranch = async (
   const { stdout } = await exec("git", ["worktree", "list", "--porcelain"], {
     cwd: repoDir,
   });
-  let path: string | null = null;
-  for (const line of stdout.split("\n")) {
-    if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
-    else if (line === `branch refs/heads/${branch}` && path !== null) return path;
+  for (const block of stdout.split("\n\n")) {
+    const lines = block.split("\n");
+    const path = lines.find((l) => l.startsWith("worktree "))?.slice("worktree ".length);
+    if (
+      path !== undefined &&
+      lines.includes(`branch refs/heads/${branch}`) &&
+      !lines.some((l) => l.startsWith("prunable"))
+    ) {
+      return path;
+    }
   }
   return null;
 };
@@ -328,11 +372,21 @@ export async function syncIssueBranchWithOrigin(
   branch: string,
 ): Promise<IssueBranchOriginSync> {
   const lookup = await fetchOriginIssueBranch(repoDir, branch);
-  if (lookup.kind === "absent") return { kind: "origin-absent" };
   if (lookup.kind === "unreadable") {
     return { kind: "origin-unreadable", detail: lookup.detail };
   }
   const local = await revParse(repoDir, `refs/heads/${branch}`);
+  if (lookup.kind === "absent") {
+    if (lookup.previous === null) return { kind: "origin-absent" };
+    const worktree = await worktreeHoldingBranch(repoDir, branch);
+    if (local !== lookup.previous || worktree !== null) {
+      return { kind: "origin-deleted", local, previous: lookup.previous, worktree };
+    }
+    await exec("git", ["update-ref", "-d", `refs/heads/${branch}`, local], {
+      cwd: repoDir,
+    });
+    return { kind: "abandoned", tip: local };
+  }
   const origin = await revParse(repoDir, lookup.ref);
   if (local === origin) return { kind: "in-sync", tip: local };
   if (await isAncestor(repoDir, local, origin)) {
@@ -361,6 +415,22 @@ export const issueBranchDivergedMessage = (
   `keep the cache's: \`git -C ${repoDir} push --force-with-lease origin ` +
   `${branch}\`. Then re-queue the issue.`;
 
+export const issueBranchDeletedOnOriginMessage = (
+  repoDir: string,
+  branch: string,
+  sync: Extract<IssueBranchOriginSync, { kind: "origin-deleted" }>,
+): string =>
+  `origin no longer has ${branch}, which it last carried at ` +
+  `${sync.previous.slice(0, 7)}, and sandbar's cache (${repoDir}) ` +
+  (sync.worktree !== null
+    ? `still has it checked out in ${sync.worktree}`
+    : `holds commits past that (${sync.previous.slice(0, 7)}..${sync.local.slice(0, 7)})`) +
+  `. Deleting the branch on origin abandons it, but not work origin never ` +
+  `had. To keep it: \`git -C ${repoDir} push origin ${branch}\`. To abandon ` +
+  `it: \`git -C ${repoDir} branch -D ${branch}\`` +
+  (sync.worktree !== null ? ` after removing that worktree` : "") +
+  `.`;
+
 // The one line the outcomes worth a line share, for the orchestrator log and
 // preflight's stdout. Null for the two that say nothing happened.
 export const describeIssueBranchOriginSync = (
@@ -388,6 +458,18 @@ export const describeIssueBranchOriginSync = (
       );
     case "resumed-from-origin":
       return `${branch} resumed from origin's copy at ${sync.tip.slice(0, 7)}`;
+    case "abandoned":
+      return (
+        `${branch} abandoned: origin no longer has it, so the cache dropped its ` +
+        `copy at ${sync.tip.slice(0, 7)} (still in the reflog)`
+      );
+    case "origin-deleted":
+      return (
+        `${branch} was deleted on origin but the cache holds ` +
+        (sync.worktree !== null
+          ? `a worktree with it checked out`
+          : `work past origin's last tip (${sync.previous.slice(0, 7)}..${sync.local.slice(0, 7)})`)
+      );
     case "origin-unreadable":
       return (
         `${branch}: origin could not be asked for its copy, continuing from ` +
@@ -395,6 +477,17 @@ export const describeIssueBranchOriginSync = (
       );
   }
 };
+
+export class IssueBranchDeletedOnOriginError extends Error {
+  constructor(
+    readonly branch: string,
+    readonly sync: Extract<IssueBranchOriginSync, { kind: "origin-deleted" }>,
+    repoDir: string,
+  ) {
+    super(issueBranchDeletedOnOriginMessage(repoDir, branch, sync));
+    this.name = "IssueBranchDeletedOnOriginError";
+  }
+}
 
 export class IssueBranchDivergedError extends Error {
   constructor(
@@ -504,6 +597,10 @@ export async function ensureIssueBranch(
     if (!isGitExit(err, 1)) throw err;
     exists = false;
   }
+  // --no-track: don't write upstream config (a) we never `git pull` these
+  // branches and (b) parallel `git branch` calls race on `.git/config`.
+  const create = (ref: string) =>
+    exec("git", ["branch", "--no-track", branch, ref], { cwd: repoDir });
   if (exists) {
     const originSync = await syncIssueBranchWithOrigin(repoDir, branch);
     if (originSync.kind === "diverged") {
@@ -514,12 +611,14 @@ export async function ensureIssueBranch(
         repoDir,
       );
     }
+    if (originSync.kind === "origin-deleted") {
+      throw new IssueBranchDeletedOnOriginError(branch, originSync, repoDir);
+    }
+    if (originSync.kind !== "abandoned") return { ...base, originSync };
+    // The sync just dropped the cache's copy; the issue starts over.
+    await create(base.ref);
     return { ...base, originSync };
   }
-  // --no-track: don't write upstream config (a) we never `git pull` these
-  // branches and (b) parallel `git branch` calls race on `.git/config`.
-  const create = (ref: string) =>
-    exec("git", ["branch", "--no-track", branch, ref], { cwd: repoDir });
   const lookup = await fetchOriginIssueBranch(repoDir, branch);
   if (lookup.kind === "present" && !(await isAncestor(repoDir, lookup.ref, base.ref))) {
     await create(lookup.ref);

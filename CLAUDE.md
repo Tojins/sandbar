@@ -201,7 +201,10 @@ and used to announce themselves in four different ways, the halt in none at all.
   and fast-forwarded to it, a diverged one refuses (that issue at plan time,
   the run at preflight), and one the cache lacks is cut from origin's copy when
   origin has one the base does not contain (#112) — the parking comment says
-  "push a fix on the branch", so origin owns the issue branch too.
+  "push a fix on the branch", so origin owns the issue branch too, in both
+  directions: a branch origin carried and then lost is dropped from the cache
+  (deleting it on origin is how a parked issue's work is abandoned), unless
+  the cache holds more than origin ever had, which refuses instead.
   The seeding fallback guard, the origin sync and the re-rooting argument are
   `src/git-ops.ts`'s.
 - **A chunk is derived, never declared (#54 §2, #58).** A chunk is a connected
