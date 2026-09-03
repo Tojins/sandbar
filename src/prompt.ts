@@ -5,7 +5,7 @@
 // check #21, and the same coding standards the reviewer applies plus a live
 // pre-promise diff checklist (#78); reviewer: diff + commits, split into a
 // correctness pass and a self-sufficient checklist follow-up sharing one
-// provider session (#19)).
+// provider session (#19), plus every earlier successful review round (#88)).
 //
 // The issue anchor uses `--json`, NOT the human-readable `--comments` form —
 // that one is TTY-sensitive and, when piped, omits the body. A fetch failure
@@ -38,6 +38,7 @@ import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
 import type { SandboxContainerStatus } from "./sandbox-stack.js";
+import type { ParsedVerdict } from "./verdict-parser.js";
 
 const exec = promisify(execFile);
 
@@ -46,6 +47,7 @@ const exec = promisify(execFile);
 const CODING_STANDARDS = loadTemplate("coding-standards");
 const REVIEWER_TPL = loadTemplate("reviewer");
 const REVIEWER_FOLLOWUP_TPL = loadTemplate("reviewer-followup");
+const REVIEWER_PRIOR_ROUNDS_TPL = loadTemplate("reviewer-prior-rounds");
 const REVIEWER_PROJECT_STANDARDS_TPL = loadTemplate("reviewer-project-standards");
 const IMPLEMENTER_TPL = loadTemplate("implementer");
 const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
@@ -214,6 +216,18 @@ export type ReviewerPromptInputs = {
   readonly codingStandardsPath?: string;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
+  // Successful reviews earlier in this sandbox cycle (#88). A harness failure
+  // adds no entry and consumes no round, so a retry reuses its number and the
+  // history remains contiguous. The runner owns this history: it is prompt
+  // material, not state-machine input.
+  readonly priorRounds: readonly PriorReviewRound[];
+};
+
+export type PriorReviewRound = {
+  readonly round: number;
+  readonly head: string;
+  readonly correctness: ParsedVerdict;
+  readonly followup?: ParsedVerdict;
 };
 
 export async function buildPrompt(
@@ -544,8 +558,9 @@ async function buildReviewerSlotInputs(
 }
 
 // Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
-// shape without mocking git. Reviewer is strictly stateless across rounds:
-// nothing here carries prior-round content beyond what's already in the diff.
+// shape without mocking git. Each invocation stays cold across rounds, while
+// the runner supplies the earlier rounds' decisions as explicit prompt data
+// (#88); this preserves fresh investigation without reviewer amnesia.
 export type ReviewerSlotRender = ReviewerPromptInputs & {
   readonly commits: string;
   readonly diff: string;
@@ -587,6 +602,12 @@ function renderReviewerTemplate(
     ? `## Branch diff\n\n\`\`\`diff\n${diff}\n\`\`\``
     : `## Branch diff\n\n(empty — no changes against \`${base.ref}\`)`;
 
+  const priorRounds = inputs.priorRounds.length === 0
+    ? ""
+    : render(REVIEWER_PRIOR_ROUNDS_TPL, {
+        rounds: inputs.priorRounds.map(renderPriorReviewRound).join("\n\n"),
+      });
+
   return render(template, {
     branch: issue.branch,
     baseRef: base.ref,
@@ -596,10 +617,30 @@ function renderReviewerTemplate(
     issueTitle: issue.title,
     commits: section(commitsBlock),
     diff: section(diffBlock),
+    priorRounds: section(priorRounds),
     codingStandards: CODING_STANDARDS,
     projectStandards: projectStandardsSlot(codingStandardsPath),
     conventionsRef: conventionsRef(claudeMdPath, contextMdPath),
   });
+}
+
+function reviewFindings(pass: ParsedVerdict): string {
+  return pass.prose
+    .replace(/<verdict>[\s\S]*?<\/verdict>/g, "")
+    .trim();
+}
+
+function renderPriorReviewPass(name: "correctness" | "followup", pass: ParsedVerdict): string {
+  const findings = reviewFindings(pass);
+  return `${name}: ${pass.verdict}${findings ? `\n${findings}` : ""}`;
+}
+
+function renderPriorReviewRound(round: PriorReviewRound): string {
+  return [
+    `### Round ${round.round} — head=${round.head}`,
+    renderPriorReviewPass("correctness", round.correctness),
+    ...(round.followup ? [renderPriorReviewPass("followup", round.followup)] : []),
+  ].join("\n");
 }
 
 // One spelling shared by both roles: the conventions are the same documents,

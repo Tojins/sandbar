@@ -7,6 +7,7 @@ import {
 } from "./finalize.js";
 import { sourceBranchBase } from "./git-ops.js";
 import {
+  type PriorReviewRound,
   renderAttemptSlot,
   renderReviewerFollowupSlot,
   renderReviewerSlot,
@@ -25,6 +26,7 @@ const baseInputs = {
   base: sourceBranchBase("main"),
   codingStandardsPath: "docs/CODING_STANDARDS.md",
   claudeMdPath: "CLAUDE.md",
+  priorRounds: [],
 } as const;
 
 const implementerInputs = {
@@ -238,20 +240,13 @@ describe("renderReviewerSlot", () => {
     expect(slot).toMatch(/missing verdict is a failed reviewer invocation/i);
   });
 
-  it("never carries prior-round transcript fields (statelessness)", () => {
-    // The prompt's only inputs are the issue, branch state, and standards
-    // pointer — no prior-round prose, no historical verdicts, no "previous
-    // round said". Test the negative by checking the rendered output never
-    // mentions these patterns even when the diff itself does.
+  it("omits the prior-round section on the first reviewed round", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first",
       diff: "diff --git a/x b/x\n+hi",
     });
-    expect(slot).not.toMatch(/previous round/i);
-    expect(slot).not.toMatch(/prior round/i);
-    expect(slot).not.toMatch(/round 1/i);
-    expect(slot).not.toMatch(/last reviewer/i);
+    expect(slot).not.toContain("## Prior review rounds");
   });
 
   it("renders the commits block when commits exist", () => {
@@ -388,6 +383,96 @@ describe("renderReviewerFollowupSlot", () => {
     expect(slot).toContain("<verdict>APPROVED</verdict>");
     expect(slot).toContain("<verdict>CHANGES-REQUESTED</verdict>");
     expect(slot).toMatch(/Emit exactly one verdict/);
+  });
+});
+
+describe("reviewer prior-round history (#88)", () => {
+  const correctnessRejection = {
+    round: 1,
+    head: "1111111",
+    correctness: {
+      verdict: "CHANGES-REQUESTED" as const,
+      prose: "Null input crashes.\n<verdict>CHANGES-REQUESTED</verdict>",
+    },
+  };
+  const followupRejection = {
+    round: 2,
+    head: "2222222",
+    correctness: {
+      verdict: "APPROVED" as const,
+      prose: "<verdict>APPROVED</verdict>",
+    },
+    followup: {
+      verdict: "CHANGES-REQUESTED" as const,
+      prose: "### Tests\n\nThe error branch is uncovered.\n<verdict>CHANGES-REQUESTED</verdict>",
+    },
+  };
+  const renderBoth = (priorRounds: readonly PriorReviewRound[]) => {
+    const inputs = { ...baseInputs, priorRounds, commits: "a1 first", diff: "diff" };
+    return [renderReviewerSlot(inputs), renderReviewerFollowupSlot(inputs)] as const;
+  };
+
+  it("renders one prior correctness rejection identically in both templates", () => {
+    const [correctness, followup] = renderBoth([correctnessRejection]);
+    const expected =
+      "## Prior review rounds\n\nThe following rounds reviewed earlier heads of this branch, in order:\n\n" +
+      "### Round 1 — head=1111111\ncorrectness: CHANGES-REQUESTED\nNull input crashes.";
+    expect(correctness).toContain(expected);
+    expect(followup).toContain(expected);
+    expect(correctness).not.toContain("<verdict>CHANGES-REQUESTED</verdict>\n\n## Review process");
+  });
+
+  it("renders both pass lines when correctness approved and follow-up rejected", () => {
+    const [correctness, followup] = renderBoth([followupRejection]);
+    const expected =
+      "### Round 2 — head=2222222\ncorrectness: APPROVED\n" +
+      "followup: CHANGES-REQUESTED\n### Tests\n\nThe error branch is uncovered.";
+    expect(correctness).toContain(expected);
+    expect(followup).toContain(expected);
+  });
+
+  it("strips every verdict-shaped token from prior-round prose", () => {
+    const quotedAndMalformed = {
+      ...correctnessRejection,
+      correctness: {
+        verdict: "CHANGES-REQUESTED" as const,
+        prose:
+          "Quoted token: <verdict>APPROVED</verdict>.\n" +
+          "Malformed token: <verdict>changes requested</verdict>.\n" +
+          "<verdict>CHANGES-REQUESTED</verdict>",
+      },
+    };
+    const [correctness, followup] = renderBoth([quotedAndMalformed]);
+    const expected =
+      "correctness: CHANGES-REQUESTED\nQuoted token: .\nMalformed token: .";
+    for (const slot of [correctness, followup]) {
+      expect(slot).toContain(expected);
+      expect(slot).not.toContain("Quoted token: <verdict>");
+      expect(slot).not.toContain("Malformed token: <verdict>");
+    }
+  });
+
+  it("renders multiple reviewed rounds in order", () => {
+    const [correctness, followup] = renderBoth([correctnessRejection, followupRejection]);
+    const expected =
+      "## Prior review rounds\n\nThe following rounds reviewed earlier heads of this branch, in order:\n\n" +
+      "### Round 1 — head=1111111\ncorrectness: CHANGES-REQUESTED\nNull input crashes.\n\n" +
+      "### Round 2 — head=2222222\ncorrectness: APPROVED\n" +
+      "followup: CHANGES-REQUESTED\n### Tests\n\nThe error branch is uncovered.";
+    for (const slot of [correctness, followup]) {
+      expect(slot).toContain(expected);
+    }
+  });
+
+  it("gives both passes the lean output, dimension verification, and reversal rules", () => {
+    const [correctness, followup] = renderBoth([]);
+    for (const slot of [correctness, followup]) {
+      expect(slot).toMatch(/For each finding in the prior-round history/);
+      expect(slot).toMatch(/review this branch as you would with no history at\s+all/);
+      expect(slot).toMatch(/may not be reversed without naming that\s+round/);
+      expect(slot).toMatch(/Do not include a summary, what you checked, non-blocking\s+observations/);
+      expect(slot).toMatch(/When approving, emit the verdict\s+token alone/);
+    }
   });
 });
 

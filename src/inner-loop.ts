@@ -28,6 +28,9 @@
 // substituting prose. The implementer prompt also receives the configured
 // coding-standards path here; prompt.ts probes it in the issue worktree so a
 // branch can introduce the standards it is expected to follow (#78).
+// Successful review rounds accumulate here beside the commits they judged and
+// are handed to both cold reviewer prompts on later rounds (#88). Harness
+// failures add no entry, and a fresh HARD-ERROR cycle resets the history.
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -99,11 +102,61 @@ import type { RepoRef } from "./repo-ref.js";
 import { durationField, startTimer } from "./timing.js";
 import {
   type ProjectAnchorOptions,
+  type PriorReviewRound,
   buildPrompt,
   buildReviewerPrompts,
 } from "./prompt.js";
 
 export const FAILURE_TAIL_LINES = 200;
+
+// The runner-owned projection from pass outcomes to prompt history (#88).
+// A harness failure produced no review, so the whole round contributes no
+// entry; a correctness rejection has no follow-up pass by construction.
+export function priorReviewRound(
+  reviewRound: number,
+  head: string,
+  correctness: ReviewerOutcome,
+  followup: ReviewerOutcome | undefined,
+): PriorReviewRound | null {
+  if (correctness.kind === "harness-failed") return null;
+  if (correctness.verdict.verdict === "CHANGES-REQUESTED") {
+    return { round: reviewRound, head, correctness: correctness.verdict };
+  }
+  if (followup?.kind !== "reviewed") return null;
+  return {
+    round: reviewRound,
+    head,
+    correctness: correctness.verdict,
+    followup: followup.verdict,
+  };
+}
+
+// One spelling for the reviewer-round record consumed by operators and later
+// evidence tooling (#88). Keep the reviewed HEAD in both completed and
+// harness-failed records so every recorded judgment is anchored to a commit.
+export function reviewRoundLine(args: {
+  readonly issueId: string;
+  readonly attempt: number;
+  readonly reviewRound: number;
+  readonly head: string;
+  readonly failed: {
+    readonly pass: ReviewerPass;
+    readonly invocations: number;
+  } | null;
+  readonly correctness: FinishedReviewRoundDecision["correctness"];
+  readonly followup: FinishedReviewRoundDecision["followup"];
+  readonly durationField: string;
+}): string {
+  return (
+    `issue=${args.issueId} attempt=${args.attempt} reviewer round=${args.reviewRound} head=${args.head} ` +
+    (args.failed
+      ? `pass=${args.failed.pass} harness-failed invocations=${args.failed.invocations} `
+      : "") +
+    `correctness=${args.correctness} followup=${args.followup} ` +
+    args.durationField +
+    (args.failed ? " (round not consumed)" : "")
+  );
+}
 
 // The promise nudge (see runImplementer). Loaded at import time like every
 // other template; no placeholders.
@@ -299,6 +352,7 @@ async function runSandboxCycle(
   let stack: Stack | null = null;
   let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
+  const priorReviewRounds: PriorReviewRound[] = [];
 
   // Everything from here to a standing sandbox + gate stack is SETUP (#82), and
   // until it was measured it was the largest block of a cycle with nothing
@@ -563,6 +617,7 @@ async function runSandboxCycle(
         gateStack,
         worktreePath,
         accumulated,
+        priorReviewRounds,
         sandboxStatuses,
       });
       const r = step(state, event);
@@ -656,6 +711,9 @@ type ExecuteActionCtx = {
   // clean-assert reads — one tree, which is the whole point of D1.
   readonly worktreePath: string;
   readonly accumulated: { sha: string }[];
+  // Successful review rounds in this sandbox cycle (#88), beside the commits
+  // whose heads they judged. A fresh HARD-ERROR cycle recreates both arrays.
+  readonly priorReviewRounds: PriorReviewRound[];
   // What came up beside the agent, for the implementer's prompt slot (#44 D8).
   // Empty when the consumer declares no `inSandbox` container.
   readonly sandboxStatuses: readonly SandboxContainerStatus[];
@@ -846,6 +904,12 @@ async function runReviewer(
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
   const { issue, sandbox, opts, config } = ctx;
+  const head = ctx.accumulated.at(-1)?.sha;
+  if (!head) {
+    throw new SandbarError(
+      `cannot review issue #${issue.id} round ${action.reviewRound}: no accumulated HEAD`,
+    );
+  }
 
   const reviewerPromptInputs = {
     issue,
@@ -857,6 +921,7 @@ async function runReviewer(
     codingStandardsPath: config.codingStandardsPath,
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
+    priorRounds: ctx.priorReviewRounds,
   };
   // The whole round — both passes and every retried invocation inside them.
   // This is the unit every #77 §3.A idea removes, and at 10.2 minutes measured
@@ -959,13 +1024,14 @@ async function runReviewer(
   // artefact of what the reviewer did or did not say.
   const afterCorrectness = decideReviewRound(correctness);
   let decision: FinishedReviewRoundDecision;
+  let followup: ReviewerOutcome | undefined;
   let failed: { readonly pass: ReviewerPass; readonly invocations: number } | null =
     correctness.kind === "harness-failed"
       ? { pass: "correctness", invocations: correctness.invocations }
       : null;
 
   if (afterCorrectness.kind === "run-followup") {
-    const followup = await runPass(
+    followup = await runPass(
       "followup",
       reviewerPrompts.followup,
       config.reviewerFollowupModelId,
@@ -979,6 +1045,14 @@ async function runReviewer(
     decision = afterCorrectness;
   }
 
+  const historyEntry = priorReviewRound(
+    action.reviewRound,
+    head,
+    correctness,
+    followup,
+  );
+  if (historyEntry) ctx.priorReviewRounds.push(historyEntry);
+
   if (opts.attemptLogger) {
     await opts.attemptLogger.writeAttemptReviewer(
       issue.id,
@@ -986,14 +1060,16 @@ async function runReviewer(
       transcripts.join("\n\n"),
     );
   }
-  const line =
-    `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-    (failed
-      ? `pass=${failed.pass} harness-failed invocations=${failed.invocations} `
-      : "") +
-    `correctness=${decision.correctness} followup=${decision.followup} ` +
-    durationField(roundTimer()) +
-    (failed ? " (round not consumed)" : "");
+  const line = reviewRoundLine({
+    issueId: issue.id,
+    attempt: action.attempt,
+    reviewRound: action.reviewRound,
+    head,
+    failed,
+    correctness: decision.correctness,
+    followup: decision.followup,
+    durationField: durationField(roundTimer()),
+  });
   if (failed) console.error(`  ${line}`);
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(line);

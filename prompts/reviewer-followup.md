@@ -8,7 +8,7 @@ does not resolve.)
 
 Issue #{{issueId}}: {{issueTitle}}
 
-{{chunkBase}}{{commits}}{{diff}}{{codingStandards}}
+{{chunkBase}}{{commits}}{{diff}}{{priorRounds}}{{codingStandards}}
 
 {{projectStandards}}## Review process
 
@@ -27,6 +27,15 @@ Do not search for correctness defects or relitigate the first pass's judgment.
 If you independently notice a concrete correctness defect while checking these
 dimensions, however, report it under `### Correctness` and request changes.
 
+For each finding in the prior-round history from your tests, spec, and project
+standards dimensions, state whether it is addressed at this head; an
+unaddressed one blocks. Then review this branch as you would with no history at
+all. The history does not narrow what you may find or make new findings in
+these dimensions non-blocking.
+
+A change requested in an earlier round may not be reversed without naming that
+round and explaining why its request was wrong.
+
 Your role is strictly advisory: you must not modify the branch, commit, push, or
 run gate commands. Read-only investigation only.
 
@@ -35,6 +44,11 @@ exact heading: `### Correctness`, `### Tests`, `### Spec`, or `### Standards`.
 Omit headings for dimensions that pass.
 
 ## Verdict
+
+Your output is only the blocking findings under their exact headings followed
+by the verdict token. Do not include a summary, what you checked, non-blocking
+observations, or a restatement of the change. When approving, emit the verdict
+token alone.
 
 End your review with a single verdict token on its own:
 

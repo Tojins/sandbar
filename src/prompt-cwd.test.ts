@@ -257,6 +257,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
       codingStandardsPath: "CODING_STANDARDS.md",
+      priorRounds: [],
     })).followup;
 
     expect(prompt).toContain("@CODING_STANDARDS.md");
@@ -276,6 +277,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
       codingStandardsPath: "CODING_STANDARDS.md",
+      priorRounds: [],
     })).followup;
 
     expect(prompt).not.toContain("@CODING_STANDARDS.md");
@@ -341,6 +343,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       sourceBranch: "main",
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
+      priorRounds: [],
     })).correctness;
 
     expect(prompt).toContain("commit-from-target-repo");
