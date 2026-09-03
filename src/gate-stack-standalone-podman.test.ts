@@ -1,6 +1,6 @@
-// Gate-stack shard: the standalone gate's three accommodations (#45), against
+// Gate-stack slice: the standalone gate's three accommodations (#45), against
 // real podman. The family header — why these run against a real podman and why
-// the suite is sharded — is gate-stack-podman.test-util.ts's.
+// its tests run concurrently — is gate-stack-podman.test-util.ts's.
 //
 // All three are exceptions to rules the gate-stack module states elsewhere, so
 // an `ok`-only assertion proves nothing about any of them: reuse has to be
@@ -11,25 +11,25 @@
 // does NOT do in the other case.
 
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import { type Stack, startStack } from "./gate-stack.js";
 import {
   buildVariantImage,
   IMAGE,
+  initStackRepo,
 } from "./gate-stack-podman.test-util.js";
-import {
-  networkNameFor,
-  podNameFor,
-  stackContainerNameFor,
-} from "./naming.js";
+import { networkNameFor, podNameFor, stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
-import { podmanTestScope } from "./podman-test-scope.test-util.js";
+import {
+  type FinishedHook,
+  podmanTestScope,
+  podmanTestStackId,
+} from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -42,9 +42,11 @@ const available = podmanTestsEnabled({
 });
 
 // Per PROCESS, not per file (#47) — see gate-stack-podman.test.ts.
-const { scope: SCOPE, testImageTag, cleanup } = podmanTestScope(
-  "gate-stack-standalone",
-);
+const {
+  scope: SCOPE,
+  testImageTag,
+  cleanup,
+} = podmanTestScope("gate-stack-standalone");
 
 // One file-level sweep; nothing reaps this scope on SIGKILL — the recovery
 // command is in `podman-test-scope.test-util.ts`.
@@ -52,28 +54,17 @@ afterAll(async () => {
   if (available) await cleanup();
 }, 120_000);
 
-describe.runIf(available)("standalone gate accommodations (#45)", () => {
-  const GATE_STACK_ID = "gate45";
+async function standaloneFixture(taskId: string, onTestFinished: FinishedHook) {
+  const stackId = podmanTestStackId("gate45", taskId);
   const gName = (name: string): string =>
-    stackContainerNameFor(SCOPE, GATE_STACK_ID, name);
-  const podName = podNameFor(SCOPE, GATE_STACK_ID);
-  const networkName = networkNameFor(SCOPE, GATE_STACK_ID);
-
-  let repo: string;
-  const git = (...args: string[]) => exec("git", args, { cwd: repo });
-
+    stackContainerNameFor(SCOPE, stackId, name);
+  const podName = podNameFor(SCOPE, stackId);
+  const networkName = networkNameFor(SCOPE, stackId);
+  const repo = await initStackRepo();
   const idOf = async (name: string): Promise<string | null> =>
     await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", gName(name)])
-      .then((r) => r.stdout.trim())
+      .then((result) => result.stdout.trim())
       .catch(() => null);
-
-  // `keepAlive` makes `stop()` a no-op by design, so nothing but this removes
-  // what these tests leave behind.
-  const teardown = async (): Promise<void> => {
-    await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(() => {});
-    await exec(RUNTIME, ["network", "rm", "-f", networkName]).catch(() => {});
-  };
-
   const spec = () =>
     resolveGateStack({
       containers: [
@@ -81,12 +72,9 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
           name: "db",
           image: IMAGE,
           lifecycle: "issue",
-          // Held, so the container is `sleep infinity` and comes up in a
-          // second: what is under test is the reuse decision, not mariadb.
+          // Held so the test measures reuse, not mariadb bringup.
           hold: true,
-          // One-shot setup, which a reused container deliberately does NOT
-          // re-run — so the file's CONTENTS are how a recreate is told from a
-          // reuse even if podman were to hand back an identical id.
+          // A reused container deliberately does not repeat one-shot setup.
           postReadyCommands: [["sh", "-c", "date +%s%N > /seeded"]],
         },
         { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
@@ -96,27 +84,28 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       ],
     });
 
-  beforeEach(async () => {
-    await teardown();
-    repo = await mkdtemp(join(tmpdir(), "sandbar-gate45-"));
-    await git("init", "-q", "-b", "main");
-    await git("config", "user.email", "t@t");
-    await git("config", "user.name", "t");
-    await writeFile(join(repo, "marker.txt"), "committed\n");
-    await git("add", "-A");
-    await git("commit", "-qm", "init");
-  }, 60_000);
-
-  afterEach(async () => {
-    await teardown();
+  onTestFinished(async () => {
+    await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(
+      () => {},
+    );
+    await exec(RUNTIME, ["network", "rm", "-f", networkName]).catch(() => {});
     await rm(repo, { recursive: true, force: true });
   }, 120_000);
 
-  it(
+  return { stackId, gName, podName, repo, idOf, spec };
+}
+
+describe.runIf(available)("standalone gate accommodations (#45)", () => {
+  it.concurrent(
     "keeps the stack up, then adopts its issue container on the same token and rebuilds it on a different one",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const { stackId, repo, spec, idOf, gName } = await standaloneFixture(
+        task.id,
+        onTestFinished,
+      );
+
       const first = await startStack({
-        stackId: GATE_STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         spec: spec(),
@@ -144,7 +133,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       // again — which is the whole speed win and also the only way a schema an
       // earlier invocation migrated survives.
       const second = await startStack({
-        stackId: GATE_STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         spec: spec(),
@@ -155,7 +144,9 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       expect(second.reused).toEqual(["db"]);
       expect(await idOf("db")).toBe(dbId);
       expect(
-        (await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])).stdout.trim(),
+        (
+          await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
+        ).stdout.trim(),
       ).toBe(seeded);
       // And it still gates: the `attempt` container is recreated as always,
       // so an adopted stack is not a half-built one.
@@ -167,7 +158,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       // which is the point: adopting it would gate against what an older config
       // described.
       const third = await startStack({
-        stackId: GATE_STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         spec: spec(),
@@ -178,18 +169,25 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       expect(third.reused).toEqual([]);
       expect(await idOf("db")).not.toBe(dbId);
       expect(
-        (await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])).stdout.trim(),
+        (
+          await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
+        ).stdout.trim(),
       ).not.toBe(seeded);
       await third.stop();
     },
     600_000,
   );
 
-  it(
+  it.concurrent(
     "tears the stack down when keepAlive is not asked for, and reuses nothing without a token",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const { stackId, repo, spec, idOf } = await standaloneFixture(
+        task.id,
+        onTestFinished,
+      );
+
       const stack = await startStack({
-        stackId: GATE_STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         spec: spec(),
@@ -207,7 +205,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       // pod nothing can vouch for. (Here there is none, and the absence of a
       // token is what makes that unconditional.)
       const again = await startStack({
-        stackId: GATE_STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         spec: spec(),
@@ -219,9 +217,14 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
     600_000,
   );
 
-  it(
+  it.concurrent(
     "gates the working tree when told to, and refuses it otherwise",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const { stackId, repo, spec } = await standaloneFixture(
+        task.id,
+        onTestFinished,
+      );
+
       // Uncommitted, and untracked: the commonest shape of D1's refusal is a
       // forgotten `git add`, and it is also the shape the standalone gate most
       // needs to be able to gate.
@@ -229,7 +232,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       await writeFile(join(repo, "extra.txt"), "new\n");
 
       const refusing = await startStack({
-        stackId: GATE_STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         spec: spec(),
@@ -241,7 +244,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       await refusing.stop();
 
       const allowing = await startStack({
-        stackId: GATE_STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         spec: spec(),
@@ -258,17 +261,27 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
     600_000,
   );
 
-  it(
+  it.concurrent(
     "tees each step's output as it arrives without disturbing the capture",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const { stackId, repo } = await standaloneFixture(
+        task.id,
+        onTestFinished,
+      );
+
       const chunks: string[] = [];
       const stack = await startStack({
-        stackId: GATE_STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         spec: resolveGateStack({
           containers: [
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
           ],
           steps: [
             {
@@ -314,9 +327,12 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   // worktree, so fixing it changes no config at all. With the wreckage kept,
   // the second call adopts `db`, skips its postReadyCommands because they are
   // "already done", and gates against a database that was never seeded.
-  it(
+  it.concurrent(
     "does not keep — and so cannot adopt — a stack whose bringup never finished",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const { stackId, gName, podName, repo, idOf } =
+        await standaloneFixture(task.id, onTestFinished);
+
       const seedFlag = join(repo, "seed-flag");
       const seeding = () =>
         resolveGateStack({
@@ -331,16 +347,25 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
                 ["sh", "-c", "grep -q ok /seed-flag && date +%s%N > /seeded"],
               ],
             },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
+            {
+              name: "runner",
+              image: IMAGE,
+              mountWorktree: "/work",
+              hold: true,
+            },
           ],
           steps: [
-            { name: "read-marker", in: "runner", command: ["cat", "marker.txt"] },
+            {
+              name: "read-marker",
+              in: "runner",
+              command: ["cat", "marker.txt"],
+            },
           ],
         });
 
       await writeFile(seedFlag, "fail\n");
       const failed = await startStack({
-        stackId: GATE_STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         spec: seeding(),
@@ -364,7 +389,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       // — the case a "the label matched, so it is ours" reuse gets wrong.
       await writeFile(seedFlag, "ok\n");
       const fixed = await startStack({
-        stackId: GATE_STACK_ID,
+        stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
         spec: seeding(),
@@ -377,7 +402,9 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       // what `reused: []` is worth asserting FOR: an adopted container would
       // have skipped it and gated against an unseeded database.
       expect(
-        (await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])).stdout.trim(),
+        (
+          await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
+        ).stdout.trim(),
       ).not.toBe("");
       await fixed.stop();
     },
@@ -400,9 +427,14 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   // invocation that created the container and the other by the invocation that
   // adopts it. The property is the same either way — a difference in the string
   // is not a difference in the image.
-  it(
+  it.concurrent(
     "does not recreate an adopted container because the image it runs is spelled differently",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
+        task.id,
+        onTestFinished,
+      );
+
       const variantA = testImageTag("reuse-variant");
       const variantB = testImageTag("reuse-variant-alias");
       await buildVariantImage(variantA);
@@ -410,7 +442,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
 
       const start = async (variant: string): Promise<Stack> =>
         await startStack({
-          stackId: GATE_STACK_ID,
+          stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
           spec: spec(),
@@ -442,7 +474,9 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       // The id alone would be satisfied by podman handing an identical one
       // back; the seed is what says the container was never recreated.
       expect(
-        (await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])).stdout.trim(),
+        (
+          await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
+        ).stdout.trim(),
       ).toBe(seeded);
       await second.stop();
     },

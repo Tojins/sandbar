@@ -1,23 +1,22 @@
-// Gate-stack shard: per-branch images between gate runs (#37, #46) — the
+// Gate-stack slice: per-branch images between gate runs (#37, #46) — the
 // swap, the reap's image bookkeeping, the failed-recreate blame path, and the
 // build-failure red. The family header — why these run against a real podman
-// and why the suite is sharded — is gate-stack-podman.test-util.ts's.
+// and why its tests run concurrently — is the test util's.
 
 import { execFile } from "node:child_process";
-import { rm, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import { ImageBuildError } from "./ensure-images.js";
-import { type Stack, startStack } from "./gate-stack.js";
+import { startStack } from "./gate-stack.js";
 import {
   buildVariantImage,
+  gateStackFixture,
   IMAGE,
-  initStackRepo,
 } from "./gate-stack-podman.test-util.js";
-import { stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import { podmanTestScope } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
@@ -32,12 +31,11 @@ const available = podmanTestsEnabled({
 });
 
 // Per PROCESS, not per file (#47) — see gate-stack-podman.test.ts.
-const { scope: SCOPE, testImageTag, cleanup } = podmanTestScope(
-  "gate-stack-images",
-);
-const STACK_ID = "podmantest";
-const cName = (name: string): string =>
-  stackContainerNameFor(SCOPE, STACK_ID, name);
+const {
+  scope: SCOPE,
+  testImageTag,
+  cleanup,
+} = podmanTestScope("gate-stack-images");
 
 // One file-level sweep; nothing reaps this scope on SIGKILL — the recovery
 // command is in `podman-test-scope.test-util.ts`.
@@ -46,19 +44,6 @@ afterAll(async () => {
 }, 120_000);
 
 describe.runIf(available)("per-branch images between gate runs (#37)", () => {
-  let repo: string;
-  let stack: Stack | null = null;
-
-  beforeEach(async () => {
-    repo = await initStackRepo();
-  }, 60_000);
-
-  afterEach(async () => {
-    if (stack) await stack.stop();
-    stack = null;
-    await rm(repo, { recursive: true, force: true });
-  }, 60_000);
-
   // #37. An image that bakes a lockfile is a function of the branch, so the
   // stack has to be able to change which image it runs BETWEEN gate runs —
   // the branch grows under the loop, and an attempt that adds a dependency
@@ -68,9 +53,15 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   // recreated every gate run regardless, so a swap could not fail to reach
   // them; an `issue` container is deliberately long-lived, which is exactly
   // how it would go on running the old image forever.
-  it(
+  it.concurrent(
     "a changed image recreates the issue container, and an unchanged one leaves it alone",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const { repo, stackId, inspectOf, hold } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+      );
+
       // A built image, not a `podman tag` alias — see `buildVariantImage`.
       // Since #45 an alias is not a changed image: same ID, so the staleness
       // check settles the string difference and recreates nothing, which is
@@ -83,32 +74,35 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
       // images it runs, so it can never be handed an entry no container here
       // runs and be reddened by a build it has no use for.
       let askedFor: ReadonlySet<string> | null = null;
-      stack = await startStack({
-        stackId: STACK_ID,
-        scope: SCOPE,
-        worktreePath: repo,
-        images: async (only) => {
-          askedFor = only;
-          return swap;
-        },
-        spec: resolveGateStack({
-          containers: [
-            { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
-          ],
-          steps: [
-            { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
-          ],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          images: async (only) => {
+            askedFor = only;
+            return swap;
+          },
+          spec: resolveGateStack({
+            containers: [
+              { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              {
+                name: "sees-code",
+                in: "runner",
+                command: ["cat", "marker.txt"],
+              },
+            ],
+          }),
         }),
-      });
-
-      const inspectOf = async (
-        name: string,
-        field: string,
-      ): Promise<string> =>
-        (
-          await exec(RUNTIME, ["inspect", "--format", field, cName(name)])
-        ).stdout.trim();
+      );
 
       expect((await stack.runGate()).ok).toBe(true);
       // Exactly the two containers' images — this stack's own, and only its
@@ -147,27 +141,49 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   // map still says it is on the branch's variant. Nothing ever sees it as
   // stale again, so every remaining attempt gates against the source
   // branch's dependencies — #37 verbatim, green included.
-  it(
+  it.concurrent(
     "a reaped issue container comes back on the image the branch put it on, not the declared one",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const { repo, stackId, cName, hold } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+      );
+
       const ALIAS = testImageTag("reap-image");
       await buildVariantImage(ALIAS);
-      stack = await startStack({
-        stackId: STACK_ID,
-        scope: SCOPE,
-        worktreePath: repo,
-        images: async () => new Map([[IMAGE, ALIAS]]),
-        spec: resolveGateStack({
-          containers: [
-            { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
-          ],
-          steps: [
-            { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
-            { name: "hangs-in-held", in: "held", command: ["sleep", "613"], timeoutMs: 2_000 },
-          ],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          images: async () => new Map([[IMAGE, ALIAS]]),
+          spec: resolveGateStack({
+            containers: [
+              { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              {
+                name: "sees-code",
+                in: "runner",
+                command: ["cat", "marker.txt"],
+              },
+              {
+                name: "hangs-in-held",
+                in: "held",
+                command: ["sleep", "613"],
+                timeoutMs: 2_000,
+              },
+            ],
+          }),
         }),
-      });
+      );
 
       const imageNameOf = async (name: string): Promise<string> =>
         (
@@ -198,29 +214,46 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   // `assertIssueContainersAlive` would then read sandbar's own removal as
   // "it came up once and something killed it", i.e. an infra HARD-ERROR
   // blaming the environment for an image the branch authored.
-  it(
+  it.concurrent(
     "a failing issue-container recreate reds, and the next gate run retries it instead of reporting infra death",
-    async () => {
-      stack = await startStack({
-        stackId: STACK_ID,
-        scope: SCOPE,
-        worktreePath: repo,
-        // An invalid reference, so `podman run` refuses instantly instead of
-        // spending a pull timeout. WHY the run fails is not what is under
-        // test — the blame path is: whatever kills a recreate leaves the
-        // container removed, and that is the state the next gate run has to
-        // read correctly.
-        images: async () => new Map([[IMAGE, "localhost/Bad_Name:nope"]]),
-        spec: resolveGateStack({
-          containers: [
-            { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
-          ],
-          steps: [
-            { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
-          ],
+    async ({ expect, task, onTestFinished }) => {
+      const { repo, stackId, cName, hold } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+      );
+
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          // An invalid reference, so `podman run` refuses instantly instead of
+          // spending a pull timeout. WHY the run fails is not what is under
+          // test — the blame path is: whatever kills a recreate leaves the
+          // container removed, and that is the state the next gate run has to
+          // read correctly.
+          images: async () => new Map([[IMAGE, "localhost/Bad_Name:nope"]]),
+          spec: resolveGateStack({
+            containers: [
+              { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              {
+                name: "sees-code",
+                in: "runner",
+                command: ["cat", "marker.txt"],
+              },
+            ],
+          }),
         }),
-      });
+      );
 
       const first = await stack.runGate();
       expect(first.ok).toBe(false);
@@ -243,29 +276,46 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   // lockfile that does not install is the branch's to fix; as an infra
   // failure it would buy two fresh-stack retries reproducing it exactly and
   // then park the issue with a trace blaming the environment.
-  it(
+  it.concurrent(
     "an image that will not build is a gate RED naming the image, not a throw",
-    async () => {
-      stack = await startStack({
-        stackId: STACK_ID,
-        scope: SCOPE,
-        worktreePath: repo,
-        images: async () => {
-          throw new ImageBuildError(
-            "app",
-            "`podman build ...` exited with code 1.",
-            "npm error code EUSAGE\nnpm error `npm ci` can only install...",
-          );
-        },
-        spec: resolveGateStack({
-          containers: [
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
-          ],
-          steps: [
-            { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
-          ],
+    async ({ expect, task, onTestFinished }) => {
+      const { repo, stackId, hold } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+      );
+
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          images: async () => {
+            throw new ImageBuildError(
+              "app",
+              "`podman build ...` exited with code 1.",
+              "npm error code EUSAGE\nnpm error `npm ci` can only install...",
+            );
+          },
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              {
+                name: "sees-code",
+                in: "runner",
+                command: ["cat", "marker.txt"],
+              },
+            ],
+          }),
         }),
-      });
+      );
 
       const red = await stack.runGate();
       expect(red.ok).toBe(false);
@@ -281,27 +331,44 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
 
   // The dirty-tree refusal is CHEAPER than a build and comes first: a tree
   // that gets no verdict at all should not pay for an image.
-  it(
+  it.concurrent(
     "does not resolve images for a worktree it is going to refuse anyway",
-    async () => {
+    async ({ expect, task, onTestFinished }) => {
+      const { repo, stackId, hold } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+      );
+
       let asked = 0;
-      stack = await startStack({
-        stackId: STACK_ID,
-        scope: SCOPE,
-        worktreePath: repo,
-        images: async () => {
-          asked += 1;
-          return new Map();
-        },
-        spec: resolveGateStack({
-          containers: [
-            { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
-          ],
-          steps: [
-            { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
-          ],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          images: async () => {
+            asked += 1;
+            return new Map();
+          },
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              {
+                name: "sees-code",
+                in: "runner",
+                command: ["cat", "marker.txt"],
+              },
+            ],
+          }),
         }),
-      });
+      );
 
       await writeFile(join(repo, "uncommitted.txt"), "x\n");
       expect((await stack.runGate()).failedStep).toBe("worktree-clean");

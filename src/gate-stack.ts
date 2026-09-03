@@ -1676,7 +1676,7 @@ export type ContainerState = "running" | "stopped" | "gone" | "unknown";
 // the ones a real podman will not produce on demand — a timed-out inspect, a
 // kill, an exit code `exists` does not document. Every other podman call in
 // this module is exercised against a live podman in the gate-stack podman
-// shards (slice map in gate-stack-podman.test-util.ts's header);
+// files (slice map in gate-stack-podman.test-util.ts's header);
 // this one branch cannot be, and it is the branch whose misfire is a
 // HARD-ERROR storm, so it gets an injectable probe instead (the same argument
 // `realVerifyAdapter`'s `exec` and `checkWorktreeImageUids`' `UidProbe` make).

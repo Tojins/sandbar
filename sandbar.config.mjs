@@ -175,32 +175,31 @@ export default {
       },
     ],
     // Split in three, and bounded explicitly rather than by the 15-minute
-    // default, which was sized for a suite that skipped 35 tests. Steps stop at
-    // the first red, so the cheap suite still fails fast — and the trace then
-    // NAMES which layer broke, which matters because a `podman-test` red has a
-    // second possible cause (the socket) that a `test` red does not.
+    // default. Steps stop at the first red, so the cheap suite still fails
+    // fast — and the trace NAMES which layer broke, which matters because a
+    // `podman-test` red has a second possible cause (the socket) that a `test`
+    // red does not. Running unit tests beside podman tests was measured too:
+    // their CPU work contends with mariadb bringup instead of filling idle
+    // workers, costing 8s at K=1 and buying nothing at K=3.
     //
-    // The exclude glob deliberately misses `gate-stack-hostpodman.test.ts`,
-    // which self-skips: it holds only for a LOCAL client, and this one is
-    // remote. `sandbox-stack-podman.test.ts` (#44) is excluded and not named
-    // below for the same kind of reason — it builds its anchor with the
+    // The `podman-test` step explicitly excludes
+    // `gate-stack-hostpodman.test.ts`: it holds only for a LOCAL client, and
+    // this one is remote. `sandbox-stack-podman.test.ts` (#44) is excluded too
+    // for the same kind of reason — it builds its anchor with the
     // production sandbox run args and then execs into it as the agent, so "the
     // invoking user" has to be whoever runs the test rather than whoever owns
     // the socket. Those two stay host-only.
     //
-    // `agent-sandbox-podman.test.ts` USED to be a third, on an unknown rather
-    // than a measured difference; #52 measured it — its `--init` assertions are
-    // made inside the container through `podman exec`, so a remote client
-    // observes them identically — and it is named below. The glob still
-    // excludes it from `test`, which is why naming it here is the whole of the
-    // wiring.
+    // `agent-sandbox-podman.test.ts` is remote-safe (#52): its assertions are
+    // made through `podman exec`. There is no by-hand podman file list now;
+    // vitest's project include glob plus the filename filter collects every
+    // podman test except the two explicit local-client exceptions, so a new
+    // podman file cannot silently disappear.
     //
     // NONE of that depends on this comment being right. Both host-only files
-    // declare `needsLocalClient`, so they skip against a remote client on their
-    // own say-so — which matters because a glob and a by-hand file list are two
-    // lists that drift, and the drift is silent in the direction that hurts
-    // (a host-only file quietly added to `podman-test` would be a red nobody
-    // asked for; one quietly dropped from BOTH would be a layer nobody runs).
+    // declare `needsLocalClient`, so they self-skip against a remote client on
+    // their own say-so. That remains the safety net when the glob collects a
+    // newly added local-client file before this exclusion list knows its name.
     //
     // `npm test` on the host still runs everything. The two host-only files
     // above are the whole of the manual step: run them on the host after a
@@ -221,39 +220,31 @@ export default {
           "npm",
           "test",
           "--",
-          // The five gate-stack shards are ONE suite split for wall-clock
-          // parallelism — vitest runs a file's tests sequentially, and unsplit
-          // they bounded the whole run. The slice map is
-          // `gate-stack-podman.test-util.ts`'s header.
-          "src/gate-stack-podman.test.ts",
-          "src/gate-stack-health-podman.test.ts",
-          "src/gate-stack-timeout-podman.test.ts",
-          "src/gate-stack-images-podman.test.ts",
-          "src/gate-stack-standalone-podman.test.ts",
-          "src/ensure-images-podman.test.ts",
-          "src/agent-sandbox-podman.test.ts",
-          "src/gate-run-podman.test.ts",
+          // A filename filter over the project's include glob owns the podman
+          // file list; only the two local-client suites stay outside it.
+          "podman.test.ts",
+          "--exclude",
+          "src/gate-stack-hostpodman.test.ts",
+          "--exclude",
+          "src/sandbox-stack-podman.test.ts",
+          // Measured on the 12-core x3 host: 2 workers cost 254s per gate, 4
+          // cost 222s, 8 cost 207s, and Vitest's 11-worker default cost 213s.
+          // Eight is the flat optimum at K=1 and K=3 and leaves host capacity;
+          // maxConcurrency=3 keeps the other side of the product explicit.
+          "--maxWorkers",
+          "8",
         ],
-        // `gate-run-podman.test.ts` (#45) is named here rather than staying
+        // `gate-run-podman.test.ts` (#45) is collected here rather than staying
         // host-only: it drives `runGateCommand` end to end, and every podman
         // call it makes goes through the same client as the others. It declares
         // no `needsLocalClient` because it needs none — nothing in it asks a
         // question about the host's own session.
         //
-        // 30 minutes. The only wall-clock measurement anyone has taken here is
-        // #48's 229s, and it is quoted as the historical figure it is: it timed
-        // two of these files when they held 33 tests between them, and #45,
-        // #49, #50 and #52 have since taken this step to 59, measured with
-        // `vitest list` on this tree — several of the additions being
-        // readiness timeouts the tests ask for deliberately, and #45's own
-        // being bringups it cannot avoid (reuse and keep-alive are only
-        // assertable by bringing a stack up more than once, and most of its
-        // `runGateCommand` invocations bring one up). The bound stays where it
-        // is because it was never sized against that figure: the runtime is
-        // dominated by mariadb bringup and by those deliberate timeouts, and
-        // three gates run concurrently at the default plan size, contending
-        // for one podman. Do not tighten it towards a number that has not
-        // been re-measured.
+        // The retained 51 tests report 0 skipped. On the measured quiet K=1
+        // host this step takes 71s at eight workers and all three test steps
+        // take 79s; at K=3 the whole workload takes 208s per gate. The 30-minute
+        // hard bound remains sized for loaded shared hosts and deliberate
+        // readiness/step timeouts, not as a performance assertion.
         timeoutMs: 1_800_000,
       },
     ],

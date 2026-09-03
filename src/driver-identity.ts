@@ -43,7 +43,8 @@
 // only a directory whose content that repo actually tracks gets to have its
 // HEAD named. A non-repository falls out the same way — check-ignore's 128 is
 // not "ignored", but the `rev-parse` behind it fails and the state is unknown
-// anyway. `driver-identity-git.test.ts` pins the git facts underneath.
+// anyway. `driver-identity.test.ts` pins the adapter decisions around those
+// git facts.
 //
 // DIRTY INCLUDES UNTRACKED, and the argv is imported from `git-ops.ts` rather
 // than spelled again: `tsc` compiles everything under `src/`, so an untracked

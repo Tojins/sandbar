@@ -43,9 +43,10 @@
 // assertions exercised by nobody, with nothing saying so.
 
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, describe, it } from "vitest";
 
 import { scopedResourcePrefix } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
@@ -67,11 +68,11 @@ const IMAGE = "docker.io/library/mariadb:10.11";
 // silently skips everything — a test file that always passes by never running.
 //
 // No `needsLocalClient`, which is the whole of the wiring change (#52): the
-// `test` step's `**/*-podman.test.ts` exclude already misses this file, so
-// naming it in `podman-test` is what runs it. Dropping the flag is also what
-// makes `SANDBAR_REQUIRE_PODMAN_TESTS=1` reach these two tests — under it an
-// unreachable podman is a failing test here rather than a silent skip, which is
-// the point of putting the file in a step at all.
+// `podman-test` step's `podman.test.ts` filter collects this file, and it is not
+// one of that step's two explicit local-client exclusions. Dropping the flag is
+// also what makes `SANDBAR_REQUIRE_PODMAN_TESTS=1` reach these two tests — under
+// it an unreachable podman is a failing test here rather than a silent skip,
+// which is the point of putting the file in a step at all.
 const available = podmanTestsEnabled({
   what: "agent-sandbox podman tests",
   image: IMAGE,
@@ -83,7 +84,8 @@ const available = podmanTestsEnabled({
 // scope. The debris report asks a different question:
 // `findUnattributableResources` names every `sandbar-`-prefixed resource that
 // fails `isScopedResourceName`, nothing sweeps it, and it repeats at every
-// startup until an operator clears it by hand. `afterEach` removes these, so
+// startup until an operator clears it by hand. A per-test finished hook removes
+// these, so
 // only a SIGKILL leaks one — and moving into the gate is precisely what changes
 // those odds, from a human running the file occasionally to three runners on
 // every cycle. With the scope carrying the uniqueness, the per-container part
@@ -91,7 +93,7 @@ const available = podmanTestsEnabled({
 // it: which of the two variants this was.
 const { scope: SCOPE, cleanup } = podmanTestScope("agent-sandbox");
 
-// This process's own scoped sweep, for whatever `afterEach` did not reach.
+// This process's own scoped sweep, for whatever a finished hook did not reach.
 afterAll(async () => {
   if (available) await cleanup();
 }, 120_000);
@@ -100,13 +102,11 @@ const delay = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));
 
 describe.runIf(available)("the sandbox container against real podman", () => {
-  const started: string[] = [];
-
-  afterEach(async () => {
-    for (const name of started.splice(0)) {
-      await removeFixtureContainer(name).catch(() => {});
-    }
-  }, 60_000);
+  // Rootless podman 4.9 can race two simultaneous keep-id container creates
+  // while both runtimes write `ping_group_range`, rejecting one with EINVAL.
+  // Serialize only that short create operation; the two test bodies and their
+  // deliberate orphan/reaping waits still overlap.
+  let previousStart: Promise<void> = Promise.resolve();
 
   // The production argv, verbatim, with `--init` kept or filtered out — the
   // only axis this file has. Taking that axis rather than a list of flags to
@@ -114,7 +114,7 @@ describe.runIf(available)("the sandbox container against real podman", () => {
   // the two being able to disagree: one argument decides both, so a leftover
   // `…-noinit` can only ever be a container that really was started without it.
   const start = async (init: "with-init" | "without-init"): Promise<string> => {
-    const name = `${scopedResourcePrefix(SCOPE)}initprobe-${
+    const name = `${scopedResourcePrefix(SCOPE)}initprobe-${randomUUID()}-${
       init === "with-init" ? "init" : "noinit"
     }`;
     const args = sandboxRunArgs({
@@ -133,8 +133,11 @@ describe.runIf(available)("the sandbox container against real podman", () => {
       devices: [],
       cpus: undefined,
     }).filter((a) => init === "with-init" || a !== "--init");
-    started.push(name);
-    await exec(RUNTIME, args);
+    const started = previousStart.then(async () => {
+      await exec(RUNTIME, args);
+    });
+    previousStart = started.catch(() => {});
+    await started;
     return name;
   };
 
@@ -186,10 +189,14 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     return stdout.trim();
   };
 
-  it(
+  it.concurrent(
     "leaks a zombie per orphan when pid 1 is the sleep entrypoint",
-    async () => {
+    async ({ expect, onTestFinished }) => {
       const name = await start("without-init");
+      onTestFinished(
+        () => removeFixtureContainer(name).catch(() => {}),
+        60_000,
+      );
       // The control's own premise: without --init, `sleep infinity` is pid 1.
       expect(await pid1Comm(name)).toBe("sleep");
 
@@ -199,10 +206,14 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     60_000,
   );
 
-  it(
+  it.concurrent(
     "reaps the same orphan under --init",
-    async () => {
+    async ({ expect, onTestFinished }) => {
       const name = await start("with-init");
+      onTestFinished(
+        () => removeFixtureContainer(name).catch(() => {}),
+        60_000,
+      );
       // podman's init takes pid 1 and the entrypoint becomes its child; the
       // binary's comm has been both `catatonit` and `podman-init` across
       // versions, so what is asserted is that `sleep` is no longer pid 1.

@@ -24,16 +24,12 @@
 // issues gate concurrently at the default plan size, each running these files,
 // three processes inside one file, against one podman.
 //
-// WHAT ACTUALLY COLLIDES. Once the scope is per-process every *scoped* name —
-// pod, network, containers, `variantImageTag` refs — is disjoint by
-// construction. `stackId` is deliberately NOT tokenised: it is what makes
-// leftover debris readable, and the scope already separates it. What needs the
-// token are the names the scope does not reach, which is exactly the fixture
-// IMAGE TAGS the files write by hand: `ensure-images-podman.test.ts` does
-// `rmi -f` on its fixture tag in `beforeEach` and rebuilds it inside the
-// tests, so two concurrent processes destroy and rebuild each other's image
-// with no pod involved. So `testImageTag` exists and is the only way to name
-// one — a future fixture tag cannot be written without the token.
+// WHAT ACTUALLY COLLIDES. The scope separates files and processes, but tests
+// now overlap inside a file. `stackId` is therefore tokenised per test: sibling
+// calls to `startStack` would otherwise force-remove the same pod. The scope
+// stays per FILE so its `afterAll` remains the one crash-debris reaper. Fixture
+// image tags also carry a test token through `testImageTag`; they live outside
+// the pod/name hierarchy and concurrent tests may each rebuild or remove one.
 //
 // The issue called that tag collision the worse half of the bug. Measurement
 // says the opposite and the correction is kept here rather than lost, because
@@ -87,8 +83,8 @@
 // All four lines are load-bearing, and the middle two are the ones easily
 // dropped as redundant. `pod rm -f` takes its member containers and the pod's
 // unreachably-named infra container, but it reaches neither the fixture
-// containers these files start outside a pod (`killprobe`, `hcprobe`,
-// `portprobe`, `hctimer`, `hcnotimer`, `initprobe` — and `killprobe` is a
+// containers these files start outside a pod (`killprobe`, `hctimer`,
+// `hcnotimer`, `initprobe` — and `killprobe` is a
 // `sleep infinity`, i.e. a container left RUNNING forever) nor
 // the network sandbar created for the pod, which outlives it. Under the old fixed scope both classes reaped
 // themselves, because the next run recomputed the same names and the fixtures'
@@ -129,11 +125,11 @@
 // host-only facts out to gate-stack-hostpodman.test.ts, and #43 deleted the
 // `log` follower's tests, handed one of those three back — an in-container port
 // probe needs no local client — and added the `healthcheck run` layer).
-// Those figures describe the file before it was sharded for wall-clock
-// parallelism (slice map in gate-stack-podman.test-util.ts); the name above
-// now denotes the core shard, which still brings stacks up under the
-// hardcoded ids and so still discriminates — as, indeed, does every shard,
-// which is precisely what the per-process scope licenses.
+// Those figures describe the file before it was split by subject. The core
+// file above still discriminates: each process mints its own file scope, while
+// each concurrent body derives a stable stack id from its task id. Replacing
+// either token with a constant makes sibling processes or sibling tests tear
+// down namesake stacks.
 //
 // The same pair over `ensure-images-podman.test.ts` proves nothing on its own
 // and must not be recorded as evidence: it passes pre-#47 too, 0 failures in 6
@@ -189,8 +185,9 @@
 // without it this compiles into `dist/` and ships as importable dead weight.
 
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
+import type { TestContext } from "vitest";
 
 import { cleanupOrphanContainers } from "./containers.js";
 import { sweepBranchImages } from "./ensure-images.js";
@@ -198,6 +195,16 @@ import { type RunScope, runScope } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
+
+export type FinishedHook = TestContext["onTestFinished"];
+
+// A file scope separates vitest processes; this second token separates tests
+// running concurrently inside one process. Keep the readable prefix while
+// bounding the pod/container names that incorporate it.
+export function podmanTestStackId(label: string, taskId: string): string {
+  const token = createHash("sha256").update(taskId).digest("hex").slice(0, 10);
+  return `${label}-${token}`;
+}
 
 // Create a fixture container the way production does. `args` is everything
 // after `run -d`, so a call site still writes its own `--name`, flags, image
