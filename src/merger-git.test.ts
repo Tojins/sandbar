@@ -128,6 +128,50 @@ describe("realAdapter.isMergeInProgress (real linked worktree)", () => {
   });
 });
 
+describe("realAdapter.mergeNoFf issue-ref import (#98)", () => {
+  let root: string;
+  let cache: string;
+  let merger: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-merge-import-"));
+    cache = join(root, "repo.git");
+    merger = join(root, "merger");
+    await exec("git", ["init", "--bare", "-b", "main", cache], {
+      env: GIT_ENV,
+    });
+    await exec("git", ["init", "-b", "main", merger], { env: GIT_ENV });
+    await commit(merger, "base.txt", "base\n");
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("rejects a missing cache ref instead of reporting a merge conflict", async () => {
+    const adapter = realAdapter({
+      cwd: merger,
+      cacheDir: cache,
+      sourceBranch: "main",
+      botName: "bot",
+      botEmail: "bot@e",
+      coauthorTrailer: "",
+    } as unknown as Parameters<typeof realAdapter>[0]);
+    const before = await git(merger, "rev-parse", "HEAD");
+
+    await expect(
+      adapter.mergeNoFf({
+        id: "98",
+        title: "missing cache ref",
+        branch: "sandbar/issue-98-missing",
+      }),
+    ).rejects.toThrow();
+
+    expect(await git(merger, "rev-parse", "HEAD")).toBe(before);
+    expect(await adapter.isMergeInProgress()).toBe(false);
+  });
+});
+
 // #60 — the three git primitives the chunk landing rests on, against real
 // repositories in the shape production uses: a BARE object cache with
 // `+refs/heads/*:refs/remotes/origin/*` configured, a detached linked worktree

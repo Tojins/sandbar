@@ -2462,14 +2462,21 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     // difference. See `chunk-land.ts`.
     ...chunkForgeWrites({ repo: deps.repo, gitCwd: cwd, errPrefix: "merger" }),
     async mergeNoFf(unit) {
+      // Fetch failures are infrastructure failures, not merge conflicts. Keep
+      // this outside the merge-only catch so the caller's halt path preserves
+      // that distinction (#67, #98).
+      if (issueNumberFromBranch(unit.branch) !== null) {
+        await exec(
+          "git",
+          [
+            "fetch",
+            deps.cacheDir,
+            `+refs/heads/${unit.branch}:refs/heads/${unit.branch}`,
+          ],
+          { cwd },
+        );
+      }
       try {
-        if (issueNumberFromBranch(unit.branch) !== null) {
-          await exec(
-            "git",
-            ["fetch", deps.cacheDir, `+refs/heads/${unit.branch}:refs/heads/${unit.branch}`],
-            { cwd },
-          );
-        }
         await exec(
           "git",
           [
