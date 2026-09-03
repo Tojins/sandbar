@@ -38,6 +38,7 @@ import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
 import type { SandboxContainerStatus } from "./sandbox-stack.js";
+import type { ParsedVerdict } from "./verdict-parser.js";
 
 const exec = promisify(execFile);
 
@@ -222,16 +223,11 @@ export type ReviewerPromptInputs = {
   readonly priorRounds: readonly PriorReviewRound[];
 };
 
-export type PriorReviewPass = {
-  readonly verdict: "APPROVED" | "CHANGES-REQUESTED";
-  readonly prose: string;
-};
-
 export type PriorReviewRound = {
   readonly round: number;
   readonly head: string;
-  readonly correctness: PriorReviewPass;
-  readonly followup?: PriorReviewPass;
+  readonly correctness: ParsedVerdict;
+  readonly followup?: ParsedVerdict;
 };
 
 export async function buildPrompt(
@@ -628,13 +624,13 @@ function renderReviewerTemplate(
   });
 }
 
-function reviewFindings(pass: PriorReviewPass): string {
+function reviewFindings(pass: ParsedVerdict): string {
   return pass.prose
     .replace(new RegExp(`<verdict>\\s*${pass.verdict}\\s*</verdict>`, "g"), "")
     .trim();
 }
 
-function renderPriorReviewPass(name: "correctness" | "followup", pass: PriorReviewPass): string {
+function renderPriorReviewPass(name: "correctness" | "followup", pass: ParsedVerdict): string {
   const findings = reviewFindings(pass);
   return `${name}: ${pass.verdict}${findings ? `\n${findings}` : ""}`;
 }

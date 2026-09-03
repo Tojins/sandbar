@@ -142,8 +142,8 @@ export function reviewRoundLine(args: {
     readonly pass: ReviewerPass;
     readonly invocations: number;
   } | null;
-  readonly correctness: string;
-  readonly followup: string;
+  readonly correctness: FinishedReviewRoundDecision["correctness"];
+  readonly followup: FinishedReviewRoundDecision["followup"];
   readonly durationField: string;
 }): string {
   return (
