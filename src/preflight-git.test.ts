@@ -151,6 +151,20 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       expect(existsSync(leftover)).toBe(false);
     });
 
+    it("prunes a legacy worktree registration before deleting its merged branch", async () => {
+      const layout = layoutAt(target);
+      const leftover = join(layout.worktreesDir, "sandbar-issue-1-merged");
+      await git(target, "worktree", "add", leftover, "sandbar/issue-1-merged");
+
+      const deleted = await deleteMergedSandbarBranches(cfg(layout));
+
+      expect(deleted).toEqual(["sandbar/issue-1-merged"]);
+      expect(await hasBranch(target, "sandbar/issue-1-merged")).toBe(false);
+      expect((await git(target, "worktree", "list", "--porcelain")).stdout).not.toContain(
+        leftover,
+      );
+    });
+
     it("does not touch the identically-named branch in the launch directory", async () => {
       await deleteMergedSandbarBranches(cfg(layoutAt(target)));
 

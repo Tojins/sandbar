@@ -1076,6 +1076,25 @@ describe("createSandbox integration (local provider)", () => {
     await rm(path, { recursive: true, force: true });
   });
 
+  it("preserves a clean clone when HEAD leaves the issue branch", async () => {
+    const branch = "sandbar/issue-98-stranded-head";
+    await git(["branch", branch], dir);
+    const sandbox = await createSandbox({
+      env: {},
+      branch,
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+    });
+    const path = sandbox.worktreePath;
+    await git(["checkout", "--detach"], path);
+
+    const closed = await sandbox.close();
+
+    expect(closed).toEqual({ preservedWorktreePath: path });
+    expect(existsSync(join(path, ".git"))).toBe(true);
+    await rm(path, { recursive: true, force: true });
+  });
+
   // #27 follow-up. The commit range is anchored at `refs/heads/<branch>`, not at
   // the worktree's HEAD. With HEAD on the branch the two are the same commit and
   // nothing changes; they diverge only when HEAD has wandered off, and there the

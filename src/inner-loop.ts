@@ -1013,8 +1013,11 @@ async function runReviewer(
     beforeReview[0] !== afterReview[0] ||
     JSON.stringify(beforeReview[1]) !== JSON.stringify(afterReview[1])
   ) {
-    await sandbox.syncBranchToCache();
     sandbox.preserveWorktree();
+    // Deleting the issue ref is itself a reviewer write. There is then no ref
+    // to publish, but the preserved clone still contains the evidence and the
+    // reviewer-wrote terminal must win over a fetch failure (#98).
+    if (afterReview[0] !== null) await sandbox.syncBranchToCache();
     return {
       kind: "reviewer-wrote",
       detail:

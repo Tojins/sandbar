@@ -1071,20 +1071,28 @@ const hasUncommittedChanges = async (worktreePath: string): Promise<boolean> => 
   return output.trim().length > 0;
 };
 
+const isOnIssueBranch = async (
+  worktreePath: string,
+  branch: string,
+): Promise<boolean> => {
+  try {
+    const headRef = (
+      await execGit(["symbolic-ref", "--quiet", "HEAD"], worktreePath)
+    ).trim();
+    return headRef === `refs/heads/${branch}`;
+  } catch (err) {
+    if (err instanceof WorktreeError && err.exitCode === 1) return false;
+    throw err;
+  }
+};
+
 // Clean-reuse refresh: ff-only from origin, gated (on-branch, fetch-ok,
 // strictly-behind); never reset --hard. Optional on sandbar's path.
 const fastForwardFromOrigin = async (
   worktreePath: string,
   branch: string,
 ): Promise<void> => {
-  let headRef: string;
-  try {
-    headRef = (await execGit(["symbolic-ref", "--quiet", "HEAD"], worktreePath)).trim();
-  } catch (err) {
-    if (!(err instanceof WorktreeError) || err.exitCode !== 1) throw err;
-    headRef = "";
-  }
-  if (headRef !== `refs/heads/${branch}`) {
+  if (!(await isOnIssueBranch(worktreePath, branch))) {
     console.log(
       `Reusing worktree at ${worktreePath} (branch '${branch}') — HEAD is not on '${branch}', skipping origin refresh`,
     );
@@ -2251,8 +2259,14 @@ export const createSandbox = async (
       closed = true;
       unregisterShutdown();
       await providerHandle.close();
-      const dirty = await hasUncommittedChanges(worktreePath);
-      if (preserveWorktree || dirty) {
+      const [dirty, onIssueBranch] = await Promise.all([
+        hasUncommittedChanges(worktreePath),
+        isOnIssueBranch(worktreePath, branch),
+      ]);
+      // A clean detached HEAD or scratch branch may hold commits that were not
+      // published with the issue ref. Keep its private object store intact so
+      // the off-branch handoff's recovery SHA remains resolvable (#27, #98).
+      if (preserveWorktree || dirty || !onIssueBranch) {
         return { preservedWorktreePath: worktreePath };
       }
       await worktreeRemove(repoDir, worktreePath);

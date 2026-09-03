@@ -224,9 +224,9 @@ export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
 // the correction, so for them this note is the ONLY place the work is recorded.
 //
 // The prose branches on `headRef`, and that distinction is not cosmetic. A
-// DETACHED head leaves the commits unreachable, so they are on gc's clock and
-// the reader has to act. A scratch BRANCH is a real local ref that survives
-// `worktree remove`, branch deletion of the issue branch, and gc indefinitely —
+// DETACHED head leaves the commits unreachable, so the preserved clone is the
+// only repository that can resolve them. A scratch BRANCH is a real local ref
+// in that clone and survives gc indefinitely —
 // telling that reader their work is about to be pruned would send them to
 // perform an urgent rescue of something in no danger, and telling them to
 // `git branch <name> <sha>` would have them create a second name for a commit
@@ -235,17 +235,19 @@ export const STRANDED_COMMITS_NOTE = (m: StrandedHead): string =>
   m.headRef === null
     ? `\n\n---\n\n**Work was left off \`${m.branch}\`.** This run committed on a ` +
       `detached HEAD at \`${m.headSha}\`, so none of it is on the branch and ` +
-      `nothing above includes it. Those commits are reachable from no ref: they ` +
-      `survive in this repo until a \`git gc\` prunes them, and \`${m.headSha}\` ` +
-      `is the only remaining handle on them once the worktree is removed. ` +
-      `Recover them with \`git branch <rescue-name> ${m.headSha}\`, then fold ` +
+      `nothing above includes it. The managed issue clone was preserved, and ` +
+      `its private object store is the only repository that contains these ` +
+      `unreferenced commits. Before removing that clone or running \`git gc\` ` +
+      `inside it, recover them there with ` +
+      `\`git branch <rescue-name> ${m.headSha}\`, then fold ` +
       `them into \`${m.branch}\` with \`cherry-pick\`/\`merge\` — not ` +
       `\`branch -f\`, unless \`${m.branch}\` is an ancestor of ${m.headSha}.`
     : `\n\n---\n\n**Work was left off \`${m.branch}\`.** This run committed on ` +
       `\`${m.headRef}\` (at \`${m.headSha}\`) instead, so none of it is on the ` +
       `branch and nothing above includes it. That ref is a normal local branch ` +
-      `and is not at risk — nothing here deletes it — but it is local to the ` +
-      `machine that ran sandbar. Fold it into \`${m.branch}\` with ` +
+      `inside the preserved managed issue clone and is not at risk — this ` +
+      `handoff does not delete that clone — but it is local to the machine ` +
+      `that ran sandbar. Fold it into \`${m.branch}\` with ` +
       `\`cherry-pick\`/\`merge\`.`;
 
 // The implementer committed off the issue branch and stayed off it after being
@@ -547,7 +549,8 @@ export type FinalizeAction =
   | { readonly kind: "delete-failed"; readonly error: string }
   | { readonly kind: "pushed" }
   // A human-handoff terminal landed on an already-CLOSED issue, so the label
-  // flip + comment were skipped (the worktree was still reclaimed). See #16.
+  // flip + comment were skipped. Its clone is reclaimed unless it contains
+  // evidence the corresponding open-issue handoff would preserve. See #16.
   | { readonly kind: "skipped-closed" }
   | { readonly kind: "noop" };
 
@@ -563,8 +566,22 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
   "needs-ui-prototype",
   "needs-human",
   "review-budget-exhausted",
+  "reviewer-wrote",
   "silent-noop-exhausted",
 ]);
+
+const preservesIssueClone = (input: FinalizeInput): boolean =>
+  input.kind === "reviewer-wrote" ||
+  ("strandedHead" in input && input.strandedHead !== null);
+
+const removeIssueCloneUnlessPreserved = async (
+  input: FinalizeInput,
+  adapter: FinalizeAdapter,
+): Promise<void> => {
+  if (!preservesIssueClone(input)) {
+    await adapter.removeWorktreeFor(input.issue.branch);
+  }
+};
 
 export type FinalizeResult = {
   readonly input: FinalizeInput;
@@ -619,12 +636,12 @@ export async function finalizeOne(
   // The planner can re-pick a merged+closed issue while the `gh` search backend
   // lags (root cause fixed in plan-resolver), and a human can close an issue
   // mid-run — in both cases the handoff write would contradict the closed
-  // state. Reclaim the worktree (local hygiene, always safe) and skip the
+  // state. Reclaim ordinary clones, preserve evidence clones, and skip the
   // issue-facing side effects.
   if (HANDOFF_KINDS.has(input.kind)) {
     const n = issueNumberOf(input.issue);
     if ((await adapter.issueState(n)) === "CLOSED") {
-      await adapter.removeWorktreeFor(input.issue.branch);
+      await removeIssueCloneUnlessPreserved(input, adapter);
       return { kind: "skipped-closed" };
     }
   }
@@ -691,7 +708,7 @@ export async function finalizeOne(
     }
     case "needs-info": {
       const n = issueNumberOf(input.issue);
-      await adapter.removeWorktreeFor(input.issue.branch);
+      await removeIssueCloneUnlessPreserved(input, adapter);
       await adapter.pushBranch(input.issue.branch);
       await adapter.postComment(
         n,
@@ -713,7 +730,7 @@ export async function finalizeOne(
     }
     case "needs-ui-prototype": {
       const n = issueNumberOf(input.issue);
-      await adapter.removeWorktreeFor(input.issue.branch);
+      await removeIssueCloneUnlessPreserved(input, adapter);
       if (input.hasCommits) {
         // Late escalation: the agent had already committed before it realised
         // it was inventing UI. Hand the partial work to the human.
@@ -770,7 +787,7 @@ export async function finalizeOne(
     }
     case "needs-human": {
       const n = issueNumberOf(input.issue);
-      await adapter.removeWorktreeFor(input.issue.branch);
+      await removeIssueCloneUnlessPreserved(input, adapter);
       await adapter.pushBranch(input.issue.branch);
       // #17: name the real blocker. reviewer-blocked → surface the reviewer's
       // CHANGES-REQUESTED prose; uncommittable-worktree → the dirty paths, and

@@ -986,6 +986,9 @@ export async function deleteMergedSandbarBranches(
       recursive: true,
       force: true,
     });
+    // A pre-#98 linked worktree may still be registered after its directory is
+    // gone, and that stale registration blocks branch deletion until pruned.
+    await runOk(repoDir, "git", ["worktree", "prune"]);
     // Use -D rather than -d: when the branch is merged only into
     // origin/sourceBranch (not local), git's safety check refuses -d even
     // though the commits are demonstrably preserved on a remote ref.

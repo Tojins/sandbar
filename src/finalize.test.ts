@@ -822,6 +822,8 @@ describe("finalizeOne", () => {
     expect(body).not.toContain("without a green gate");
     expect(body).not.toContain("No gate ran");
     expect(body).not.toContain("never moved");
+    expect(body).toContain("managed issue clone was preserved");
+    expect(calls.worktreeRemoves).toEqual([]);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
@@ -857,6 +859,7 @@ describe("finalizeOne", () => {
     expect(body).toContain("a new settings screen");
     expect(body).toContain("abc9999");
     expect(body).toContain("git branch <rescue-name> abc9999");
+    expect(calls.worktreeRemoves).toEqual([]);
   });
 
   it("needs-info: appends the stranded-commits note when the run went off-branch (#27)", async () => {
@@ -880,6 +883,7 @@ describe("finalizeOne", () => {
     const body = calls.comments[0]!.body;
     expect(body).toContain("which currency?");
     expect(body).toContain("abc9999");
+    expect(calls.worktreeRemoves).toEqual([]);
   });
 
   it("says nothing about stranded work on an ordinary on-branch handoff", async () => {
@@ -973,6 +977,25 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
+  });
+
+  it("reviewer-wrote on a CLOSED issue skips tracker writes and preserves the clone", async () => {
+    const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
+    const action = await finalizeOne(
+      {
+        kind: "reviewer-wrote",
+        issue: issue(45),
+        latestReviewerProse: "Reviewer deleted the issue ref.",
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "skipped-closed" });
+    expect(calls.worktreeRemoves).toEqual([]);
+    expect(calls.pushes).toEqual([]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.labelEdits).toEqual([]);
   });
 
   it("hard-error with commits: removes worktree, pushes only, no label flip, no comment", async () => {
