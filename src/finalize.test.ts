@@ -45,6 +45,7 @@ type Calls = {
 
 type Script = {
   pushError?: string;
+  postCommentError?: string;
   deleteOk?: boolean;
   deleteError?: string;
   forceDeleteOk?: boolean;
@@ -101,6 +102,9 @@ function makeAdapter(
     },
     async postComment(n, body) {
       calls.comments.push({ n, body });
+      if (script.postCommentError !== undefined) {
+        throw new SandbarError(script.postCommentError);
+      }
     },
     async editLabels(n, remove, add) {
       calls.labelEdits.push({ n, remove, add });
@@ -1007,6 +1011,25 @@ describe("finalizeOne", () => {
     ]);
     expect(calls.comments[0]!.body).toContain("non-fast-forward");
     expect(calls.comments[0]!.body).toContain("authoritative state");
+  });
+
+  it("reviewer-wrote: does not park before the handoff comment succeeds", async () => {
+    const { adapter, calls } = makeAdapter({ postCommentError: "comment failed" });
+
+    await expect(
+      finalizeOne(
+        {
+          kind: "reviewer-wrote",
+          issue: issue(45),
+          latestReviewerProse: "Reviewer changed git state.",
+        },
+        adapter,
+        LABELS,
+      ),
+    ).rejects.toThrow("comment failed");
+
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.labelEdits).toEqual([]);
   });
 
   it("reviewer-wrote on a CLOSED issue skips tracker writes and preserves the clone", async () => {

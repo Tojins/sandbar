@@ -12,9 +12,10 @@
 // loop usually has already removed the issue clone, but crash leftovers still
 // need deterministic cleanup. Reviewer-write handoffs deliberately preserve
 // the clone because committed rewrites may not push fast-forward and
-// uncommitted evidence cannot travel through a push. They park the issue before
-// attempting that push and report rejection in the handoff comment, so a
-// reviewer's rewind cannot abort the rest of the finalise pass.
+// uncommitted evidence cannot travel through a push. They report push rejection
+// in the handoff comment instead of aborting the rest of the finalise pass. As
+// with every human handoff, the explanatory comment precedes the label flip so
+// a comment failure cannot park an issue without its recovery instructions.
 //
 // `git branch -d` is escalated to `-D` only where the caller owns the certainty
 // that the work is preserved elsewhere. For `merged`/`chunk-landed`/
@@ -897,8 +898,6 @@ export async function finalizeOne(
       // Keep the clone: uncommitted reviewer writes cannot travel through a
       // push, and deleting it would destroy the evidence this terminal exists
       // to hand to a human.
-      const r = await adapter.editLabels(n, [READY_FOR_AGENT_LABEL], [labels.agentStuck]);
-      requireFlip(r, n);
       let pushFailure: string | null = null;
       try {
         await adapter.pushBranch(input.issue.branch);
@@ -914,6 +913,12 @@ export async function finalizeOne(
             : ` The changed branch could not be pushed (${pushFailure}); inspect the preserved clone for the authoritative state.`) +
           `\n\n${input.latestReviewerProse}`,
       );
+      const r = await adapter.editLabels(
+        n,
+        [READY_FOR_AGENT_LABEL],
+        [labels.agentStuck],
+      );
+      requireFlip(r, n);
       return { kind: pushFailure === null ? "pushed" : "parked-local" };
     }
     case "hard-error": {

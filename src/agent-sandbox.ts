@@ -1104,6 +1104,14 @@ const restoreIssueBranch = async (
   await execGit(["checkout", branch], worktreePath);
 };
 
+const hasStrandedCommits = async (worktreePath: string): Promise<boolean> =>
+  (
+    await execGit(
+      ["for-each-ref", "--count=1", "--format=%(refname)", "refs/sandbar/stranded"],
+      worktreePath,
+    )
+  ).trim() !== "";
+
 // Clean-reuse refresh: ff-only from origin, gated (on-branch, fetch-ok,
 // strictly-behind); never reset --hard. Optional on sandbar's path.
 const fastForwardFromOrigin = async (
@@ -2292,14 +2300,16 @@ export const createSandbox = async (
       closed = true;
       unregisterShutdown();
       await providerHandle.close();
-      const [dirty, onIssueBranch] = await Promise.all([
+      const [dirty, onIssueBranch, strandedCommits] = await Promise.all([
         hasUncommittedChanges(worktreePath),
         isOnIssueBranch(worktreePath, branch),
+        hasStrandedCommits(worktreePath),
       ]);
       // A clean detached HEAD or scratch branch may hold commits that were not
-      // published with the issue ref. Keep its private object store intact so
-      // the off-branch handoff's recovery SHA remains resolvable (#27, #98).
-      if (preserveWorktree || dirty || !onIssueBranch) {
+      // published with the issue ref. Reuse pins those commits before restoring
+      // the issue branch, so both the live off-branch state and its durable pins
+      // keep the private object store intact (#27, #98).
+      if (preserveWorktree || dirty || !onIssueBranch || strandedCommits) {
         return { preservedWorktreePath: worktreePath };
       }
       await worktreeRemove(repoDir, worktreePath);

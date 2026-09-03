@@ -1076,7 +1076,7 @@ describe("createSandbox integration (local provider)", () => {
     await rm(path, { recursive: true, force: true });
   });
 
-  it("pins a stranded HEAD and restores the issue branch when reusing a clean clone", async () => {
+  it("preserves a pinned stranded HEAD after restoring the issue branch", async () => {
     const branch = "sandbar/issue-98-stranded-head";
     await git(["branch", branch], dir);
     const sandbox = await createSandbox({
@@ -1096,6 +1096,18 @@ describe("createSandbox integration (local provider)", () => {
     expect((await git(["symbolic-ref", "HEAD"], path)).stdout.trim()).toBe(
       `refs/heads/${branch}`,
     );
+    expect(
+      (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], path)).stdout.trim(),
+    ).toBe(stranded);
+
+    const retry = await createSandbox({
+      env: {},
+      branch,
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+      preparedWorktreePath: path,
+    });
+    expect(await retry.close()).toEqual({ preservedWorktreePath: path });
     expect(
       (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], path)).stdout.trim(),
     ).toBe(stranded);
