@@ -576,7 +576,7 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
 
 const preservesIssueClone = (input: FinalizeInput): boolean =>
   input.kind === "reviewer-wrote" ||
-  ("strandedHead" in input && input.strandedHead !== null);
+  ("strandedHead" in input && input.strandedHead != null);
 
 const removeIssueCloneUnlessPreserved = async (
   input: FinalizeInput,
@@ -758,12 +758,26 @@ export async function finalizeOne(
       );
       requireFlip(r, n);
       if (input.hasCommits) return { kind: "pushed" };
+      // The preserved clone is the only repository guaranteed to contain an
+      // off-branch commit. Keep its cache branch as the clone's liveness
+      // record: pruneStaleIssueClones removes marked clones once that ref is
+      // absent, so deleting it here would invalidate the recovery instructions
+      // in STRANDED_COMMITS_NOTE on the next sandbox creation (#98).
+      if (input.strandedHead != null) {
+        return {
+          kind: "delete-failed",
+          error:
+            "kept the cache branch so the preserved issue clone and its stranded work remain recoverable",
+        };
+      }
       // Nothing was written this sandbox cycle, so drop the local branch:
       // ensureIssueBranch reuses an existing branch verbatim, and keeping an
       // empty one would pin the next run (after the human supplies the
       // prototype) to a stale origin tip.
       //
-      // `-d` refusing is not permission to force: it also refuses when the
+      // The off-branch case returned above because its clone is evidence that
+      // must outlive the handoff. For an ordinary empty attempt, `-d` refusing
+      // is not permission to force: it also refuses when the
       // local source branch merely trails the origin tip we seeded from. And
       // `hasCommits` is per-sandbox-cycle, not per-branch — a HARD-ERROR retry
       // restarts the cycle with an empty commit list while the previous

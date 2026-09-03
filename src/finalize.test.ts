@@ -831,11 +831,11 @@ describe("finalizeOne", () => {
     ]);
   });
 
-  // #27. The exemption that lets an off-branch NEEDS-UI-PROTOTYPE through must
-  // not also lose the work: hasCommits is false (commits are counted on the
-  // branch), so this arm deletes the branch, and without the note the detached
-  // sha would appear in no comment, no log and no ref.
-  it("needs-ui-prototype: names the stranded sha even though it deletes the branch (#27)", async () => {
+  // #27, #98. Commits are counted on the issue branch, so an off-branch UI
+  // escalation has hasCommits=false. Its private clone remains the only store
+  // for the detached commit, and the cache branch is the sweep's liveness
+  // record for that clone; both must survive the handoff.
+  it("needs-ui-prototype: preserves the cache branch that keeps stranded clone evidence live", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
@@ -855,8 +855,13 @@ describe("finalizeOne", () => {
       LABELS,
     );
 
-    expect(action).toEqual({ kind: "deleted-local" });
+    expect(action).toEqual({
+      kind: "delete-failed",
+      error: expect.stringContaining("preserved issue clone"),
+    });
     expect(calls.pushes).toEqual([]);
+    expect(calls.deletes).toEqual([]);
+    expect(calls.forceDeletes).toEqual([]);
     const body = calls.comments[0]!.body;
     expect(body).toContain("a new settings screen");
     expect(body).toContain("abc9999");
