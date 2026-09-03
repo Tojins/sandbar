@@ -357,10 +357,7 @@ describe("renderReviewerFollowupSlot", () => {
       priorRounds,
       commits: "a1 first",
       diff: "whole branch",
-      changedSince: {
-        anchor: "abc1234",
-        diff: "diff --git a/x b/x\n+new line",
-      },
+      changedSinceDiff: "diff --git a/x b/x\n+new line",
     });
     expect(slot).toContain(
       "An earlier pass listed this branch's tests, spec and standards findings; the history above carries them. " +
@@ -375,11 +372,18 @@ describe("renderReviewerFollowupSlot", () => {
   });
 
   it("distinguishes an empty changed-since diff from an uncomputed one", () => {
+    const priorRounds: readonly PriorReviewRound[] = [{
+      round: 2,
+      head: "abc1234",
+      correctness: { verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>" },
+      followup: { verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>" },
+    }];
     const slot = renderReviewerFollowupSlot({
       ...baseInputs,
+      priorRounds,
       commits: "a1 first",
       diff: "whole branch",
-      changedSince: { anchor: "abc1234", diff: "" },
+      changedSinceDiff: "",
     });
     expect(slot).toContain("(empty — no changes since `abc1234`)");
   });
