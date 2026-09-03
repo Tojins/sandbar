@@ -674,7 +674,7 @@ export type ArtifactPreparationAdapters = {
 export function agentArtifactCacheRoot(
   uid: number | undefined = process.getuid?.(),
 ): string {
-  if (!Number.isSafeInteger(uid) || (uid ?? -1) < 0) {
+  if (typeof uid !== "number" || !Number.isSafeInteger(uid) || uid < 0) {
     throw new SandbarError("agent artifact caching requires a numeric host uid");
   }
   return join(tmpdir(), `sandbar-agent-tools-${uid}`);

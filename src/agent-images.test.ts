@@ -203,9 +203,9 @@ describe("run-owned agent images", () => {
       declaredBaseTag: "base",
       providers: ["codex"],
       scope: runScope("/cached-agent-image"),
-      prepareArtifacts: async (providers) => {
+      prepareArtifacts: async (providers, libc) => {
         artifactPreparations += 1;
-        return fakeAgentArtifacts(providers);
+        return fakeAgentArtifacts(providers, libc);
       },
       inputsLabel: async () => (++reads === 1 ? "base-fp" : fingerprint),
       build: async () => {
@@ -228,9 +228,9 @@ describe("run-owned agent images", () => {
       declaredBaseTag: "base",
       providers: ["codex"],
       scope: runScope("/deduplicated-agent-image"),
-      prepareArtifacts: async (providers) => {
+      prepareArtifacts: async (providers, libc) => {
         artifactPreparations += 1;
-        return fakeAgentArtifacts(providers);
+        return fakeAgentArtifacts(providers, libc);
       },
       inputsLabel: async () => null,
       build: async () => {
@@ -355,6 +355,8 @@ describe("run-owned agent images", () => {
       },
     });
     await prepared.verify();
+    expect(prepared.names).toEqual(["codex-static"]);
+    expect(await readdir(prepared.root)).toEqual(["codex-static"]);
     expect(await readFile(join(prepared.root, "codex-static"), "utf8")).toBe("binary");
     await prepared.dispose();
     await expect(readdir(prepared.root)).rejects.toThrow();
@@ -415,6 +417,7 @@ describe("run-owned agent images", () => {
         },
       });
       expect(fetched).toEqual(["musl"]);
+      expect(prepared.names).toEqual(["claude-musl"]);
       expect(await readdir(prepared.root)).toEqual(["claude-musl"]);
       await prepared.dispose();
     } finally {
@@ -593,10 +596,10 @@ describe("run-owned agent images", () => {
       declaredBaseTag: "base",
       providers: ["codex"],
       scope: runScope("/artifact-retry"),
-      prepareArtifacts: async (providers) => {
+      prepareArtifacts: async (providers, libc) => {
         preparations += 1;
         if (preparations === 1) throw new Error("transient CDN failure");
-        return fakeAgentArtifacts(providers);
+        return fakeAgentArtifacts(providers, libc);
       },
       inputsLabel: async (tag) => tag === "base"
         ? "base-fp"

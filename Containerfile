@@ -28,7 +28,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # node:*-slim already ships a `node` user at uid/gid 1000. Keep the host-side
-# migration while sandbar.pin names v0.24.6, whose augment layer installs only
+# migration while sandbar.pin names a release whose augment layer installs only
 # the CLIs and does not yet absorb the uid-1000 agent user (#76).
 RUN groupmod -n agent node \
     && usermod -l agent -d /home/agent -m node
@@ -67,7 +67,7 @@ RUN curl -fsSL https://github.com/containers/podman/releases/download/v4.9.3/pod
 # src/agent-providers.ts — and `sandbar.pin` now names a release that does. Do
 # not re-add a host copy: an unpinned one drifts from the parser the driver
 # couples to, and the driver's install wins over it anyway. What this image
-# still owes the pinned v0.24.6 augmentation is the temporary uid/home migration
+# still owes the currently pinned augmentation is the temporary uid/home migration
 # above. The standalone CLIs need no Node/npm runtime from future augmentations.
 
 # No `ENV HOME`: the sandbox provider sets HOME=/home/agent itself, and the
