@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { priorReviewRound } from "./inner-loop.js";
+import { priorReviewRound, reviewRoundLine } from "./inner-loop.js";
 import type { ReviewerOutcome } from "./reviewer-run.js";
 
 const reviewed = (
@@ -67,5 +67,39 @@ describe("priorReviewRound (#88)", () => {
     },
   ])("records $name correctly", ({ correctness, followup, expected }) => {
     expect(priorReviewRound(2, "abc1234", correctness, followup)).toEqual(expected);
+  });
+});
+
+describe("reviewRoundLine (#88)", () => {
+  it.each([
+    {
+      name: "completed round",
+      failed: null,
+      expected:
+        "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
+        "correctness=APPROVED followup=CHANGES-REQUESTED durationMs=123",
+    },
+    {
+      name: "harness-failed round",
+      failed: { pass: "followup" as const, invocations: 2 },
+      expected:
+        "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
+        "pass=followup harness-failed invocations=2 " +
+        "correctness=APPROVED followup=HARNESS-FAILED durationMs=123 " +
+        "(round not consumed)",
+    },
+  ])("formats a $name with its reviewed HEAD", ({ failed, expected }) => {
+    expect(
+      reviewRoundLine({
+        issueId: 88,
+        attempt: 5,
+        reviewRound: 4,
+        head: "abc1234",
+        failed,
+        correctness: "APPROVED",
+        followup: failed ? "HARNESS-FAILED" : "CHANGES-REQUESTED",
+        durationField: "durationMs=123",
+      }),
+    ).toBe(expected);
   });
 });

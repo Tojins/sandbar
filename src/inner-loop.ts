@@ -130,6 +130,33 @@ export function priorReviewRound(
   };
 }
 
+// One spelling for the reviewer-round record consumed by operators and later
+// evidence tooling (#88). Keep the reviewed HEAD in both completed and
+// harness-failed records so every recorded judgment is anchored to a commit.
+export function reviewRoundLine(args: {
+  readonly issueId: number;
+  readonly attempt: number;
+  readonly reviewRound: number;
+  readonly head: string;
+  readonly failed: {
+    readonly pass: ReviewerPass;
+    readonly invocations: number;
+  } | null;
+  readonly correctness: string;
+  readonly followup: string;
+  readonly durationField: string;
+}): string {
+  return (
+    `issue=${args.issueId} attempt=${args.attempt} reviewer round=${args.reviewRound} head=${args.head} ` +
+    (args.failed
+      ? `pass=${args.failed.pass} harness-failed invocations=${args.failed.invocations} `
+      : "") +
+    `correctness=${args.correctness} followup=${args.followup} ` +
+    args.durationField +
+    (args.failed ? " (round not consumed)" : "")
+  );
+}
+
 // The promise nudge (see runImplementer). Loaded at import time like every
 // other template; no placeholders.
 const PROMISE_NUDGE_TPL = loadTemplate("implementer-promise-nudge");
@@ -1021,14 +1048,16 @@ async function runReviewer(
       transcripts.join("\n\n"),
     );
   }
-  const line =
-    `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} head=${head} ` +
-    (failed
-      ? `pass=${failed.pass} harness-failed invocations=${failed.invocations} `
-      : "") +
-    `correctness=${decision.correctness} followup=${decision.followup} ` +
-    durationField(roundTimer()) +
-    (failed ? " (round not consumed)" : "");
+  const line = reviewRoundLine({
+    issueId: Number(issue.id),
+    attempt: action.attempt,
+    reviewRound: action.reviewRound,
+    head,
+    failed,
+    correctness: decision.correctness,
+    followup: decision.followup,
+    durationField: durationField(roundTimer()),
+  });
   if (failed) console.error(`  ${line}`);
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(line);
