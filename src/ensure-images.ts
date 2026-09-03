@@ -252,17 +252,13 @@ export type BuildOptions = {
   readonly capture?: boolean;
   // Deadline for the whole build. Defaults to DEFAULT_BUILD_TIMEOUT_MS.
   readonly timeoutMs?: number;
-  // Generated Containerfile bytes. They are piped to `podman build ... -`, so
-  // no transient recipe or context lands in the state directory (#75).
-  readonly content?: string;
   // A generated tar build context. The directory is streamed through host tar
-  // to `podman build -`; unlike `content`, COPY instructions can use it.
+  // to `podman build -`, so COPY instructions can use it.
   readonly contextRoot?: string;
 };
 
 function buildUsesStdin(image: BuiltImage, opts?: BuildOptions): boolean {
-  return image.stdinContext === true || opts?.content !== undefined ||
-    opts?.contextRoot !== undefined;
+  return image.stdinContext === true || opts?.contextRoot !== undefined;
 }
 
 // The `podman build` argv for one entry. Pure so the stdin-context, build-arg
@@ -394,9 +390,6 @@ export async function buildImage(
       });
       child.stdin.on("error", () => {});
       tar.stdout?.pipe(child.stdin);
-    } else if (opts.content !== undefined && child.stdin) {
-      child.stdin.on("error", () => {});
-      child.stdin.end(opts.content);
     } else if (image.stdinContext && child.stdin) {
       const src = createReadStream(
         containerfilePath(image, opts.root),
@@ -530,12 +523,12 @@ export function agentToolsContainerfile(
   options: {
     readonly arch?: "x64" | "arm64";
     readonly packages?: typeof AGENT_PROVIDER_PACKAGES;
-    readonly libc?: "glibc" | "musl";
-  } = {},
+    readonly libc: "glibc" | "musl";
+  },
 ): string {
   const arch = options.arch ?? hostAgentArchitecture();
   const packages = options.packages ?? AGENT_PROVIDER_PACKAGES;
-  const libc = options.libc ?? "glibc";
+  const libc = options.libc;
   const pins = providers.map((provider) => {
     const pin = packages[provider];
     const digests = (["x64", "arm64"] as const).flatMap((arch) =>
@@ -545,12 +538,9 @@ export function agentToolsContainerfile(
     );
     return `# ${provider} ${pin.version} ${digests.join(" ")}`;
   }).join("\n");
-  const copies = providers.flatMap((provider) => {
-    const selected = selectedAgentArtifacts(packages[provider], arch, libc);
-    if (selected.length !== 1) {
-      throw new SandbarError(`${provider} has no ${arch}-${libc} artifact`);
-    }
-    return [`COPY --chmod=0755 ${provider}-${selected[0]!.variant} /usr/local/bin/${provider}`];
+  const copies = providers.map((provider) => {
+    const selected = selectedAgentArtifact(packages[provider], arch, libc);
+    return `COPY --chmod=0755 ${provider}-${selected.variant} /usr/local/bin/${provider}`;
   })
     .join("\n");
   const probes = providers
@@ -578,7 +568,6 @@ export function agentToolsContainerfile(
   const probeClause = [
     probes,
     "git --version",
-    "test -x /bin/sh",
     'test "$(id -u agent)" = 1000',
     'test "$(stat -c %u /home/agent)" = 1000',
   ].join(" && ");
@@ -596,7 +585,7 @@ export function agentToolsContainerfile(
 
 export type PreparedAgentArtifacts = {
   readonly root: string;
-  readonly verify: (provider: AgentProviderName) => Promise<void>;
+  readonly verify: () => Promise<void>;
   readonly dispose: () => Promise<void>;
 };
 
@@ -613,17 +602,23 @@ export function hostAgentArchitecture(arch: string = process.arch): "x64" | "arm
   );
 }
 
-export function selectedAgentArtifacts(
+export function selectedAgentArtifact(
   pin: AgentProviderPackage,
   arch: "x64" | "arm64",
   libc: "glibc" | "musl",
-): readonly AgentArtifact[] {
+): AgentArtifact {
   const staticArtifacts = pin.artifacts[arch].filter(
     (artifact) => artifact.variant === "static",
   );
-  return staticArtifacts.length > 0
+  const selected = staticArtifacts.length > 0
     ? staticArtifacts
     : pin.artifacts[arch].filter((artifact) => artifact.variant === libc);
+  if (selected.length !== 1) {
+    throw new SandbarError(
+      `agent provider has ${selected.length} ${arch}-${libc} artifacts; expected exactly one`,
+    );
+  }
+  return selected[0]!;
 }
 
 export function findAgentBinary(
@@ -665,7 +660,7 @@ export type ArtifactPreparationAdapters = {
   readonly extract?: (archive: string, destination: string) => Promise<void>;
   readonly packages?: typeof AGENT_PROVIDER_PACKAGES;
   readonly cacheRoot?: string;
-  readonly libc?: "glibc" | "musl";
+  readonly libc: "glibc" | "musl";
 };
 
 export function agentArtifactCacheRoot(
@@ -680,14 +675,12 @@ export function agentArtifactCacheRoot(
 export async function prepareAgentArtifacts(
   providers: readonly AgentProviderName[],
   log: (line: string) => void,
-  adapters: ArtifactPreparationAdapters = {},
+  adapters: ArtifactPreparationAdapters,
 ): Promise<PreparedAgentArtifacts> {
   const arch = hostAgentArchitecture(adapters.arch);
   const fetchArtifact = adapters.fetch ?? fetch;
   const packages = adapters.packages ?? AGENT_PROVIDER_PACKAGES;
-  const libc = adapters.libc ?? "glibc";
-  const selectedArtifacts = (provider: AgentProviderName) =>
-    selectedAgentArtifacts(packages[provider], arch, libc);
+  const libc = adapters.libc;
   const extract = adapters.extract ?? (async (archive, destination) => {
     await exec("tar", ["-xzf", archive, "-C", destination]);
   });
@@ -700,82 +693,75 @@ export async function prepareAgentArtifacts(
   const stagedSha256: Record<string, string> = {};
   try {
     for (const provider of providers) {
-      for (const artifact of selectedArtifacts(provider)) {
-        const name = `${provider}-${artifact.variant}`;
-        const artifactRoot = join(cacheRoot, artifact.sha256);
-        const downloaded = join(artifactRoot, "download");
-        await mkdir(artifactRoot, { recursive: true });
-        const identity = `${provider}/${arch}-${artifact.variant} from ${artifact.url}`;
+      const artifact = selectedAgentArtifact(packages[provider], arch, libc);
+      const name = `${provider}-${artifact.variant}`;
+      const artifactRoot = join(cacheRoot, artifact.sha256);
+      const downloaded = join(artifactRoot, "download");
+      await mkdir(artifactRoot, { recursive: true });
+      const identity = `${provider}/${arch}-${artifact.variant} from ${artifact.url}`;
+      try {
+        let cached = false;
         try {
-          let cached = false;
-          try {
-            cached = await sha256File(downloaded) === artifact.sha256;
-          } catch {
-            // Missing and interrupted cache entries are ordinary cold misses.
-          }
-          if (!cached) {
-            await rm(downloaded, { force: true });
-            log(`Downloading agent tool ${identity}...`);
-            const partial = join(artifactRoot, `download-${process.pid}.partial`);
-            try {
-              const response = await fetchArtifact(artifact.url, {
-                signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
-              });
-              if (!response.ok || response.body === null) {
-                throw new Error(`download returned HTTP ${response.status}`);
-              }
-              await pipeline(
-                Readable.fromWeb(response.body as never),
-                createWriteStream(partial),
-              );
-              const actual = await sha256File(partial);
-              if (actual !== artifact.sha256) {
-                throw new Error(
-                  `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
-                );
-              }
-              await rename(partial, downloaded);
-            } finally {
-              await rm(partial, { force: true });
-            }
-          }
-          const destination = join(root, name);
-          if (artifact.archive) {
-            // The archive digest is pinned; the extracted bytes are not. Derive
-            // them afresh from the verified cache instead of trusting a prior
-            // run's executable as though it were content-addressed itself.
-            const extractRoot = await mkdtemp(join(root, `${provider}-extracted-`));
-            await extract(downloaded, extractRoot);
-            const binary = findAgentBinary(provider, await readdir(extractRoot));
-            await rename(join(extractRoot, binary), destination);
-          } else {
-            await copyFile(downloaded, destination);
-          }
-          await chmod(destination, 0o755);
-          stagedSha256[name] = await sha256File(destination);
-        } catch (err) {
-          throw new Error(
-            `could not download and stage ${identity}: ${err instanceof Error ? err.message : String(err)}`,
-            { cause: err },
-          );
+          cached = await sha256File(downloaded) === artifact.sha256;
+        } catch {
+          // Missing and interrupted cache entries are ordinary cold misses.
         }
+        if (!cached) {
+          await rm(downloaded, { force: true });
+          log(`Downloading agent tool ${identity}...`);
+          const partial = join(artifactRoot, `download-${process.pid}.partial`);
+          try {
+            const response = await fetchArtifact(artifact.url, {
+              signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
+            });
+            if (!response.ok || response.body === null) {
+              throw new Error(`download returned HTTP ${response.status}`);
+            }
+            await pipeline(
+              Readable.fromWeb(response.body as never),
+              createWriteStream(partial),
+            );
+            const actual = await sha256File(partial);
+            if (actual !== artifact.sha256) {
+              throw new Error(
+                `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
+              );
+            }
+            await rename(partial, downloaded);
+          } finally {
+            await rm(partial, { force: true });
+          }
+        }
+        const destination = join(root, name);
+        if (artifact.archive) {
+          // The archive digest is pinned; the extracted bytes are not. Derive
+          // them afresh from the verified cache instead of trusting a prior
+          // run's executable as though it were content-addressed itself.
+          const extractRoot = await mkdtemp(join(root, `${provider}-extracted-`));
+          await extract(downloaded, extractRoot);
+          const binary = findAgentBinary(provider, await readdir(extractRoot));
+          await rename(join(extractRoot, binary), destination);
+        } else {
+          await copyFile(downloaded, destination);
+        }
+        await chmod(destination, 0o755);
+        stagedSha256[name] = await sha256File(destination);
+      } catch (err) {
+        throw new Error(
+          `could not download and stage ${identity}: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
       }
     }
     return {
       root,
-      verify: async (provider) => {
-        for (const artifact of selectedArtifacts(provider)) {
-          const name = `${provider}-${artifact.variant}`;
-          const expected = stagedSha256[name];
-          if (expected === undefined) {
-            throw new Error(`missing staged sha256 for ${provider}/${arch}-${artifact.variant}`);
-          }
+      verify: async () => {
+        for (const [name, expected] of Object.entries(stagedSha256)) {
           const actual = await sha256File(join(root, name));
-          const verified = artifact.archive ? expected : artifact.sha256;
-          if (actual !== verified) {
+          if (actual !== expected) {
             throw new Error(
-              `staged artifact ${provider}/${arch} failed re-verification ` +
-                `(expected ${verified}, got ${actual})`,
+              `staged artifact ${name}/${arch} failed re-verification ` +
+                `(expected ${expected}, got ${actual})`,
             );
           }
         }
@@ -814,6 +800,13 @@ export async function createAgentImages(opts: {
   const log = opts.log ?? ((line: string) => console.log(line));
   const toolset = agentToolsetSpec(opts.providers);
   const arch = hostAgentArchitecture();
+  const needsLibcChoice = opts.providers.some((provider) =>
+    selectedAgentArtifact(
+      AGENT_PROVIDER_PACKAGES[provider], arch, "glibc",
+    ).variant !== selectedAgentArtifact(
+      AGENT_PROVIDER_PACKAGES[provider], arch, "musl",
+    ).variant
+  );
   const pending = new Map<string, Promise<string>>();
   const order: string[] = [];
   const artifactPromises = new Map<"glibc" | "musl", Promise<PreparedAgentArtifacts>>();
@@ -844,12 +837,6 @@ export async function createAgentImages(opts: {
     if (promise === undefined) {
       promise = (async () => {
         const baseInputs = await inputsLabel(baseTag);
-        const needsLibcChoice = opts.providers.some((provider) => {
-          const pin = AGENT_PROVIDER_PACKAGES[provider];
-          const variants = (libc: "glibc" | "musl") =>
-            selectedAgentArtifacts(pin, arch, libc).map((a) => a.variant).join();
-          return variants("glibc") !== variants("musl");
-        });
         const libc = needsLibcChoice
           ? await (opts.detectLibc ?? detectImageLibc)(baseTag)
           : "glibc";
@@ -877,14 +864,13 @@ export async function createAgentImages(opts: {
           try {
             const prepared = await artifacts(libc);
             await writeFile(join(contextRoot, "Containerfile"), containerfile);
+            await prepared.verify();
             for (const provider of opts.providers) {
-              await prepared.verify(provider);
-              for (const artifact of selectedAgentArtifacts(
+              const artifact = selectedAgentArtifact(
                 AGENT_PROVIDER_PACKAGES[provider], arch, libc,
-              )) {
-                const name = `${provider}-${artifact.variant}`;
-                await link(join(prepared.root, name), join(contextRoot, name));
-              }
+              );
+              const name = `${provider}-${artifact.variant}`;
+              await link(join(prepared.root, name), join(contextRoot, name));
             }
             await build(
               { tag, containerfile: "<generated-agent-tools>" },

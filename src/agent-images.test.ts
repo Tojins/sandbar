@@ -20,7 +20,7 @@ import {
   findAgentBinary,
   hostAgentArchitecture,
   prepareAgentArtifacts,
-  selectedAgentArtifacts,
+  selectedAgentArtifact,
   sweepBranchImages,
 } from "./ensure-images.js";
 import { runScope, variantImageTag } from "./naming.js";
@@ -41,16 +41,18 @@ async function fakeAgentArtifacts(
   }
   return {
     root,
-    verify: async (provider) => {
-      for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
-        const name = `${provider}-${artifact.variant}`;
-        const actual = createHash("sha256")
-          .update(await readFile(join(root, name)))
-          .digest("hex");
-        if (actual !== sha256[name]) {
-          throw new Error(
-            `staged artifact ${provider}/${process.arch} failed re-verification`,
-          );
+    verify: async () => {
+      for (const provider of providers) {
+        for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
+          const name = `${provider}-${artifact.variant}`;
+          const actual = createHash("sha256")
+            .update(await readFile(join(root, name)))
+            .digest("hex");
+          if (actual !== sha256[name]) {
+            throw new Error(
+              `staged artifact ${name}/${process.arch} failed re-verification`,
+            );
+          }
         }
       }
     },
@@ -105,7 +107,9 @@ describe("run-owned agent images", () => {
   });
 
   it("copies and probes both standalone provider binaries", () => {
-    const file = agentToolsContainerfile("base", ["claude", "codex"]);
+    const file = agentToolsContainerfile("base", ["claude", "codex"], {
+      libc: "glibc",
+    });
     expect(file).toContain("COPY --chmod=0755 claude-glibc /usr/local/bin/claude");
     expect(file).not.toContain("claude-musl /usr/local/bin/claude");
     expect(file).toContain("COPY --chmod=0755 codex-static /usr/local/bin/codex");
@@ -158,7 +162,9 @@ describe("run-owned agent images", () => {
   });
 
   it("reuses a derived image whose label matches a labelled base and toolset", async () => {
-    const containerfile = agentToolsContainerfile("base", ["codex"]);
+    const containerfile = agentToolsContainerfile("base", ["codex"], {
+      libc: "glibc",
+    });
     const fingerprint = createHash("sha256")
       .update(JSON.stringify(["base-fp", containerfile]))
       .digest("hex");
@@ -219,30 +225,8 @@ describe("run-owned agent images", () => {
     expect(artifactPreparations).toBe(1);
   });
 
-  it("derives recipe file names from the selected architecture", () => {
-    const artifact = AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64[0]!;
-    const packages = {
-      ...AGENT_PROVIDER_PACKAGES,
-      codex: {
-        ...AGENT_PROVIDER_PACKAGES.codex,
-        artifacts: {
-          ...AGENT_PROVIDER_PACKAGES.codex.artifacts,
-          arm64: [
-            { ...artifact, variant: "glibc" as const },
-            { ...artifact, variant: "musl" as const },
-          ],
-        },
-      },
-    };
-    const file = agentToolsContainerfile("base", ["codex"], {
-      arch: "arm64", packages, libc: "musl",
-    });
-    expect(file).toContain("codex-musl /usr/local/bin/codex");
-    expect(file).not.toContain("codex-glibc /usr/local/bin/codex");
-    expect(file).not.toContain("codex-static /usr/local/bin/codex");
-  });
-
   it("selects extracted provider binaries and rejects unsupported hosts", () => {
+    expect(findAgentBinary("codex", ["codex"])).toBe("codex");
     expect(findAgentBinary("codex", ["README", "codex-aarch64"])).toBe("codex-aarch64");
     expect(() => findAgentBinary("codex", ["README"])).toThrow(/no codex binary/);
     expect(() => hostAgentArchitecture("riscv64")).toThrow(/riscv64/);
@@ -257,8 +241,22 @@ describe("run-owned agent images", () => {
         arm64: [artifact],
       },
     };
-    expect(selectedAgentArtifacts(pin, "x64", "glibc").map((a) => a.variant))
-      .toEqual(["static"]);
+    expect(selectedAgentArtifact(pin, "x64", "glibc").variant).toBe("static");
+  });
+
+  it("rejects missing and duplicate architecture/libc artifacts", () => {
+    const artifact = AGENT_PROVIDER_PACKAGES.claude.artifacts.x64[0]!;
+    const pin = {
+      version: "test",
+      artifacts: { x64: [artifact], arm64: [artifact] },
+    };
+    expect(() => selectedAgentArtifact(pin, "x64", "musl"))
+      .toThrow(/0 x64-musl artifacts; expected exactly one/);
+    expect(() => selectedAgentArtifact(
+      { ...pin, artifacts: { ...pin.artifacts, x64: [artifact, artifact] } },
+      "x64",
+      "glibc",
+    )).toThrow(/2 x64-glibc artifacts; expected exactly one/);
   });
 
   it("isolates the libc probe from image entrypoints and declared volumes", () => {
@@ -278,10 +276,12 @@ describe("run-owned agent images", () => {
   it("rejects non-OK and hash-mismatched pinned downloads", async () => {
     await expect(prepareAgentArtifacts(["codex"], () => {}, {
       arch: "x64",
+      libc: "glibc",
       fetch: async () => new Response("missing", { status: 503 }),
     })).rejects.toThrow(/HTTP 503/);
     await expect(prepareAgentArtifacts(["codex"], () => {}, {
       arch: "x64",
+      libc: "glibc",
       fetch: async () => new Response("not the pinned artifact"),
     })).rejects.toThrow(/sha256 mismatch/);
   });
@@ -301,13 +301,14 @@ describe("run-owned agent images", () => {
     };
     const prepared = await prepareAgentArtifacts(["codex"], () => {}, {
       arch: "x64",
+      libc: "glibc",
       packages,
       fetch: async () => new Response(bytes),
       extract: async (_archive, destination) => {
         await writeFile(join(destination, "codex-x86_64-unknown-linux-musl"), "binary");
       },
     });
-    await prepared.verify("codex");
+    await prepared.verify();
     expect(await readFile(join(prepared.root, "codex-static"), "utf8")).toBe("binary");
     await prepared.dispose();
     await expect(readdir(prepared.root)).rejects.toThrow();
@@ -328,14 +329,15 @@ describe("run-owned agent images", () => {
     };
     const prepared = await prepareAgentArtifacts(["claude"], () => {}, {
       arch: "x64",
+      libc: "glibc",
       packages,
       fetch: async () => new Response(bytes),
     });
     expect(await readFile(join(prepared.root, "claude-static"), "utf8")).toBe(bytes);
-    await prepared.verify("claude");
+    await prepared.verify();
     await writeFile(join(prepared.root, "claude-static"), "mutated");
-    await expect(prepared.verify("claude")).rejects.toThrow(
-      /staged artifact claude\/x64 failed re-verification/,
+    await expect(prepared.verify()).rejects.toThrow(
+      /staged artifact claude-static\/x64 failed re-verification/,
     );
     await prepared.dispose();
   });
@@ -393,6 +395,7 @@ describe("run-owned agent images", () => {
       arch: "x64",
       cacheRoot,
       packages,
+      libc: "glibc",
       fetch: async () => {
         fetches += 1;
         return new Response(bytes);
@@ -402,7 +405,7 @@ describe("run-owned agent images", () => {
       const first = await prepareAgentArtifacts(["codex"], () => {}, adapters);
       await first.dispose();
       const second = await prepareAgentArtifacts(["codex"], () => {}, adapters);
-      await second.verify("codex");
+      await second.verify();
       await second.dispose();
       expect(fetches).toBe(1);
     } finally {
@@ -430,13 +433,13 @@ describe("run-owned agent images", () => {
     let fetches = 0;
     try {
       const prepared = await prepareAgentArtifacts(["codex"], () => {}, {
-        arch: "x64", cacheRoot, packages,
+        arch: "x64", cacheRoot, packages, libc: "glibc",
         fetch: async () => {
           fetches += 1;
           return new Response(bytes);
         },
       });
-      await prepared.verify("codex");
+      await prepared.verify();
       expect(fetches).toBe(1);
       expect(await readFile(join(artifactRoot, "download"), "utf8")).toBe(bytes);
       await prepared.dispose();
@@ -466,7 +469,7 @@ describe("run-owned agent images", () => {
     });
     try {
       await expect(prepareAgentArtifacts(["codex"], () => {}, {
-        arch: "x64", cacheRoot, packages,
+        arch: "x64", cacheRoot, packages, libc: "glibc",
         fetch: async () => new Response(body),
       })).rejects.toThrow(/connection reset/);
       expect(await readdir(join(cacheRoot, sha256))).toEqual([]);
@@ -489,12 +492,14 @@ describe("run-owned agent images", () => {
     });
     await writeFile(join(artifacts.root, "codex-static"), "branch replacement");
     await expect(images.augment("variant")).rejects.toThrow(
-      /staged artifact codex\/.+ failed re-verification/,
+      /staged artifact codex-static\/.+ failed re-verification/,
     );
   });
 
   it("retries artifact staging after a transient failure", async () => {
-    const containerfile = agentToolsContainerfile("base", ["codex"]);
+    const containerfile = agentToolsContainerfile("base", ["codex"], {
+      libc: "glibc",
+    });
     const fingerprint = createHash("sha256")
       .update(JSON.stringify(["base-fp", containerfile]))
       .digest("hex");

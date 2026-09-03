@@ -193,16 +193,23 @@ describe.runIf(available)("ensureImages against real podman", () => {
   it(
     "renames an existing uid-1000 user and preserves its writable home contract",
     async () => {
-      await buildImage({ tag: UID_BASE_TAG, containerfile: "<generated>" }, {
-        root: "",
-        content: "FROM docker.io/library/alpine:3.22\nRUN adduser -D -u 1000 -h /home/node node\n",
-        capture: true,
-      });
+      const baseContext = await mkdtemp(join(tmpdir(), "sandbar-agent-uid-base-"));
+      try {
+        await writeFile(
+          join(baseContext, "Containerfile"),
+          "FROM docker.io/library/alpine:3.22\nRUN adduser -D -u 1000 -h /home/node node\n",
+        );
+        await buildImage({ tag: UID_BASE_TAG, containerfile: "<generated>" }, {
+          root: "", contextRoot: baseContext, capture: true,
+        });
+      } finally {
+        await rm(baseContext, { recursive: true, force: true });
+      }
       const context = await mkdtemp(join(tmpdir(), "sandbar-agent-uid-recipe-"));
       try {
         await writeFile(
           join(context, "Containerfile"),
-          agentToolsContainerfile(UID_BASE_TAG, ["codex"]),
+          agentToolsContainerfile(UID_BASE_TAG, ["codex"], { libc: "musl" }),
         );
         await writeFile(join(context, "codex-static"), "#!/bin/sh\necho fixture\n");
         await buildImage({ tag: TAG, containerfile: "<generated>" }, {
