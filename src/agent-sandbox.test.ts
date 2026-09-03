@@ -1952,6 +1952,25 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     expect((await git(["rev-parse", branch], clone)).stdout.trim()).toBe(cacheTip);
   });
 
+  it("recovers reuse when HEAD still names the deleted issue ref", async () => {
+    const branch = "sandbar/issue-98-unborn-private-ref";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    const clone = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+    const cacheTip = (await git(["rev-parse", branch], dir)).stdout.trim();
+    await git(["update-ref", "-d", `refs/heads/${branch}`], clone);
+    expect((await git(["symbolic-ref", "HEAD"], clone)).stdout.trim()).toBe(
+      `refs/heads/${branch}`,
+    );
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect((await git(["symbolic-ref", "HEAD"], clone)).stdout.trim()).toBe(
+      `refs/heads/${branch}`,
+    );
+    expect((await git(["rev-parse", branch], clone)).stdout.trim()).toBe(cacheTip);
+  });
+
   it("sweeps an unmarked orphan outside the branch being prepared", async () => {
     const branch = "sandbar/issue-83-general-sweep";
     const layout = layoutFor(dir);

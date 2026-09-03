@@ -1200,10 +1200,19 @@ const worktreeCreate = (
           if (await hasLocalBranch(worktreePath, branch)) {
             await syncIssueBranchToCache(repoDir, worktreePath, branch);
           } else {
+            const reseedRef = "refs/sandbar/reseed";
             await execGit(
-              ["fetch", repoDir, `+refs/heads/${branch}:refs/heads/${branch}`],
+              ["fetch", repoDir, `+refs/heads/${branch}:${reseedRef}`],
               worktreePath,
             );
+            // Fetch refuses to update a branch named by HEAD, even when its
+            // ref was deleted and HEAD is therefore unborn. update-ref has no
+            // checked-out-branch restriction, so reseed through a private ref.
+            await execGit(
+              ["update-ref", `refs/heads/${branch}`, reseedRef],
+              worktreePath,
+            );
+            await execGit(["update-ref", "-d", reseedRef], worktreePath);
           }
           // Refresh the prompt base refs, then apply the existing clean-reuse
           // policy.

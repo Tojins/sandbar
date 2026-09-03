@@ -1080,7 +1080,11 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
     },
     async removeWorktreeFor(branch) {
       const path = worktreePathFor(deps.layout.worktreesDir, branch);
-      await rm(path, { recursive: true, force: true });
+      try {
+        await rm(path, { recursive: true, force: true });
+      } catch (err) {
+        console.error(`Could not remove issue clone at ${path} (continuing):`, err);
+      }
     },
     async postComment(issueNum, body) {
       // Required: the comment is the issue's handoff payload (questions, failure

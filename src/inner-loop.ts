@@ -888,7 +888,10 @@ async function runGate1(
 }
 
 class ReviewerWriteDetected extends Error {
-  constructor(readonly event: Extract<LoopEvent, { kind: "reviewer-wrote" }>) {
+  constructor(
+    readonly event: Extract<LoopEvent, { kind: "reviewer-wrote" }>,
+    readonly transcript: string,
+  ) {
     super(event.detail);
   }
 }
@@ -904,7 +907,10 @@ async function runReviewer(
       branchTip(sandbox.worktreePath, issue.branch),
       dirtyWorktreePaths(sandbox.worktreePath),
     ]) as Promise<ReviewSnapshot>;
-  const detectWrite = async (before: ReviewSnapshot): Promise<void> => {
+  const detectWrite = async (
+    before: ReviewSnapshot,
+    transcript: string,
+  ): Promise<void> => {
     const after = await snapshot();
     if (
       before[0] === after[0] &&
@@ -916,13 +922,18 @@ async function runReviewer(
     // Deleting the issue ref is itself a reviewer write. There is then no ref
     // to publish, but the preserved clone still contains the evidence.
     if (after[0] !== null) await sandbox.syncBranchToCache();
-    throw new ReviewerWriteDetected({
-      kind: "reviewer-wrote",
-      detail:
-        `Reviewer changed git state. Branch tip before: ${before[0]}; ` +
-        `after: ${after[0]}. Status after:\n` +
-        (after[1].length > 0 ? after[1].join("\n") : "(clean worktree)"),
-    });
+    const renderedTranscript = transcript.trim() || "(reviewer emitted no output)";
+    throw new ReviewerWriteDetected(
+      {
+        kind: "reviewer-wrote",
+        detail:
+          `Reviewer changed git state. Branch tip before: ${before[0]}; ` +
+          `after: ${after[0]}. Status after:\n` +
+          (after[1].length > 0 ? after[1].join("\n") : "(clean worktree)") +
+          `\n\nReviewer transcript:\n${renderedTranscript}`,
+      },
+      transcript,
+    );
   };
 
   const reviewerPromptInputs = {
@@ -997,7 +1008,7 @@ async function runReviewer(
           reviewerRun.usage,
           reviewerRun.toolCalls,
         );
-        await detectWrite(beforeInvocation);
+        await detectWrite(beforeInvocation, reviewerRun.stdout);
         return { output: reviewerRun.stdout, error: null };
       } catch (err) {
         if (err instanceof ReviewerWriteDetected) throw err;
@@ -1006,7 +1017,7 @@ async function runReviewer(
         // second is a different fault entirely.
         const partial = agentPartialUsage(err);
         await logPass(undefined, partial.usage, partial.toolCalls);
-        await detectWrite(beforeInvocation);
+        await detectWrite(beforeInvocation, agentPartialOutput(err));
         // The bytes the agent had emitted before it failed ride out on the
         // error (#41, agent-sandbox F9). Without them a reviewer that emitted
         // a verdict and then died is indistinguishable from one that emitted
@@ -1029,6 +1040,24 @@ async function runReviewer(
     },
   );
 
+  const preserveReviewerWrite = async (
+    err: ReviewerWriteDetected,
+    pass: ReviewerPass,
+    completedTranscripts: readonly string[] = [],
+  ): Promise<Extract<LoopEvent, { kind: "reviewer-wrote" }>> => {
+    if (opts.attemptLogger) {
+      await opts.attemptLogger.writeAttemptReviewer(
+        issue.id,
+        action.attempt,
+        [
+          ...completedTranscripts,
+          `=== ${pass} pass ===\n${err.transcript}`,
+        ].join("\n\n"),
+      );
+    }
+    return err.event;
+  };
+
   let correctness: ReviewerOutcome;
   try {
     correctness = await runPass(
@@ -1037,7 +1066,9 @@ async function runReviewer(
       config.reviewerModelId,
     );
   } catch (err) {
-    if (err instanceof ReviewerWriteDetected) return err.event;
+    if (err instanceof ReviewerWriteDetected) {
+      return preserveReviewerWrite(err, "correctness");
+    }
     throw err;
   }
 
@@ -1061,7 +1092,9 @@ async function runReviewer(
         config.reviewerFollowupModelId,
       );
     } catch (err) {
-      if (err instanceof ReviewerWriteDetected) return err.event;
+      if (err instanceof ReviewerWriteDetected) {
+        return preserveReviewerWrite(err, "followup", transcripts);
+      }
       throw err;
     }
     transcripts.push(`=== follow-up pass ===\n${followup.transcript}`);
