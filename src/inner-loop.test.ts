@@ -91,7 +91,7 @@ describe("reviewRoundLine (#88)", () => {
   ])("formats a $name with its reviewed HEAD", ({ failed, expected }) => {
     expect(
       reviewRoundLine({
-        issueId: 88,
+        issueId: "88",
         attempt: 5,
         reviewRound: 4,
         head: "abc1234",

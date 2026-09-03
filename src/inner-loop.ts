@@ -134,7 +134,7 @@ export function priorReviewRound(
 // evidence tooling (#88). Keep the reviewed HEAD in both completed and
 // harness-failed records so every recorded judgment is anchored to a commit.
 export function reviewRoundLine(args: {
-  readonly issueId: number;
+  readonly issueId: string;
   readonly attempt: number;
   readonly reviewRound: number;
   readonly head: string;
@@ -1049,7 +1049,7 @@ async function runReviewer(
     );
   }
   const line = reviewRoundLine({
-    issueId: Number(issue.id),
+    issueId: issue.id,
     attempt: action.attempt,
     reviewRound: action.reviewRound,
     head,
