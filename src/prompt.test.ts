@@ -357,7 +357,10 @@ describe("renderReviewerFollowupSlot", () => {
       priorRounds,
       commits: "a1 first",
       diff: "whole branch",
-      changedSinceDiff: "diff --git a/x b/x\n+new line",
+      changedSince: {
+        anchor: "abc1234",
+        diff: "diff --git a/x b/x\n+new line",
+      },
     });
     expect(slot).toContain(
       "An earlier pass listed this branch's tests, spec and standards findings; the history above carries them. " +
@@ -371,19 +374,12 @@ describe("renderReviewerFollowupSlot", () => {
     expect(slot).toContain("An entry under `### Non-blocking` is checked but never blocks.");
   });
 
-  it("distinguishes an empty changed-since diff from an uncomputed one", () => {
-    const priorRounds: readonly PriorReviewRound[] = [{
-      round: 2,
-      head: "abc1234",
-      correctness: { verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>" },
-      followup: { verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>" },
-    }];
+  it("renders an empty changed-since diff as no changes since the anchor", () => {
     const slot = renderReviewerFollowupSlot({
       ...baseInputs,
-      priorRounds,
       commits: "a1 first",
       diff: "whole branch",
-      changedSinceDiff: "",
+      changedSince: { anchor: "abc1234", diff: "" },
     });
     expect(slot).toContain("(empty — no changes since `abc1234`)");
   });

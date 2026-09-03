@@ -574,14 +574,17 @@ async function buildReviewerSlotInputs(
   ).trim();
 
   const followup = followupReviewContext(inputs.priorRounds);
-  const changedSinceDiff = followup.mode === "verify"
-    ? (
-        await readGit(
-          ["diff", `${followup.anchor}..HEAD`],
-          worktreePath,
-          `changes since the last follow-up review for ${inputs.issue.branch}, anchored at ${followup.anchor}`,
-        )
-      ).trim()
+  const changedSince = followup.mode === "verify"
+    ? {
+        anchor: followup.anchor,
+        diff: (
+          await readGit(
+            ["diff", `${followup.anchor}..HEAD`],
+            worktreePath,
+            `changes since the last follow-up review for ${inputs.issue.branch}, anchored at ${followup.anchor}`,
+          )
+        ).trim(),
+      }
     : undefined;
 
   const codingStandardsPath = resolveCodingStandardsPath(
@@ -589,7 +592,7 @@ async function buildReviewerSlotInputs(
     inputs.codingStandardsPath,
   );
 
-  return { ...inputs, codingStandardsPath, commits, diff, changedSinceDiff };
+  return { ...inputs, codingStandardsPath, commits, diff, changedSince };
 }
 
 // Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
@@ -599,7 +602,10 @@ async function buildReviewerSlotInputs(
 export type ReviewerSlotRender = ReviewerPromptInputs & {
   readonly commits: string;
   readonly diff: string;
-  readonly changedSinceDiff?: string;
+  readonly changedSince?: {
+    readonly anchor: string;
+    readonly diff: string;
+  };
 };
 
 export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
@@ -644,15 +650,14 @@ function renderReviewerTemplate(
         rounds: inputs.priorRounds.map(renderPriorReviewRound).join("\n\n"),
       });
 
-  const followup = followupReviewContext(inputs.priorRounds);
-  const followupMode = followup.mode === "verify"
+  const followupMode = inputs.changedSince
     ? REVIEWER_FOLLOWUP_VERIFY_TPL
     : REVIEWER_FOLLOWUP_LISTING_TPL;
 
-  const changedSinceDiff = followup.mode === "verify"
-    ? `## Changed since the last follow-up review\n\n${inputs.changedSinceDiff
-      ? `\`\`\`diff\n${inputs.changedSinceDiff}\n\`\`\``
-      : `(empty — no changes since \`${followup.anchor}\`)`}`
+  const changedSinceDiff = inputs.changedSince
+    ? `## Changed since the last follow-up review\n\n${inputs.changedSince.diff
+      ? `\`\`\`diff\n${inputs.changedSince.diff}\n\`\`\``
+      : `(empty — no changes since \`${inputs.changedSince.anchor}\`)`}`
     : "";
 
   return render(template, {
