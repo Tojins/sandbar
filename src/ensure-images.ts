@@ -50,8 +50,11 @@
 // cannot prove an embedded trust store; CA roots remain a conservative base
 // requirement rather than setting a driver-owned SSL_CERT_FILE.
 // Dynamic CLI releases require a libc choice, so each augmentation probes its
-// resolved base with an entrypoint-neutral `podman run`; one artifact selector
-// then owns recipe generation, host staging, and build-context linking.
+// resolved base with an entrypoint-neutral `podman run`. That probe is an
+// answer only when the child explicitly exits 0 without having been killed or
+// signalled: podman may trap the timeout's SIGTERM and itself exit 0 even though
+// no container ever started. One artifact selector then owns recipe generation,
+// host staging, and build-context linking.
 //
 // Large pinned downloads are cached across runs and workdirs at
 // `<tmpdir>/sandbar-agent-tools-<uid>/<sha256>/download`. The driver's digest is
@@ -824,9 +827,17 @@ export function detectImageLibcArgv(baseTag: string): string[] {
 
 export async function detectImageLibc(baseTag: string): Promise<"glibc" | "musl"> {
   try {
-    await exec(RUNTIME, detectImageLibcArgv(baseTag), {
+    const probe = exec(RUNTIME, detectImageLibcArgv(baseTag), {
       timeout: IMAGE_QUERY_TIMEOUT_MS,
     });
+    await probe;
+    const { exitCode, killed, signalCode } = probe.child;
+    if (exitCode !== 0 || killed || signalCode !== null) {
+      throw new Error(
+        `libc probe did not exit cleanly ` +
+          `(exit=${exitCode ?? "none"}, signal=${signalCode ?? "none"}, killed=${killed})`,
+      );
+    }
     return "musl";
   } catch (err) {
     const exitCode = (err as { code?: unknown }).code;
