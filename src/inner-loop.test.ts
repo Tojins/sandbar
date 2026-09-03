@@ -77,7 +77,7 @@ describe("reviewRoundLine (#88)", () => {
       failed: null,
       expected:
         "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
-        "correctness=APPROVED followup=CHANGES-REQUESTED durationMs=123",
+        "correctness=APPROVED followup=CHANGES-REQUESTED mode=verify durationMs=123",
     },
     {
       name: "harness-failed round",
@@ -85,7 +85,7 @@ describe("reviewRoundLine (#88)", () => {
       expected:
         "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
         "pass=followup harness-failed invocations=2 " +
-        "correctness=APPROVED followup=HARNESS-FAILED durationMs=123 " +
+        "correctness=APPROVED followup=HARNESS-FAILED mode=verify durationMs=123 " +
         "(round not consumed)",
     },
   ])("formats a $name with its reviewed HEAD", ({ failed, expected }) => {
@@ -98,6 +98,7 @@ describe("reviewRoundLine (#88)", () => {
         failed,
         correctness: "APPROVED",
         followup: failed ? "HARNESS-FAILED" : "CHANGES-REQUESTED",
+        followupMode: "verify",
         durationField: "durationMs=123",
       }),
     ).toBe(expected);

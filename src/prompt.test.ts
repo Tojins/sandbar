@@ -8,6 +8,7 @@ import {
 import { sourceBranchBase } from "./git-ops.js";
 import {
   type PriorReviewRound,
+  followupReviewContext,
   renderAttemptSlot,
   renderReviewerFollowupSlot,
   renderReviewerSlot,
@@ -331,6 +332,45 @@ describe("renderReviewerFollowupSlot", () => {
     expect(slot).toMatch(/1\. Test quality and coverage[\s\S]*2\. Spec conformance[\s\S]*3\. Project standards/);
   });
 
+  it("renders the exact whole-branch listing contract before any follow-up verdict", () => {
+    const slot = renderFollowup();
+    expect(slot).toContain(
+      "This is the only pass that reviews the whole branch for tests, spec and standards. " +
+      "Anything you do not raise now is not raised later. List every finding you would block on. " +
+      "There is no limit on length.",
+    );
+    expect(slot).not.toContain("## Changed since the last follow-up review");
+  });
+
+  it("renders the exact verify contract and changed-since diff", () => {
+    const priorRounds: readonly PriorReviewRound[] = [{
+      round: 2,
+      head: "abc1234",
+      correctness: { verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>" },
+      followup: {
+        verdict: "CHANGES-REQUESTED",
+        prose: "### Tests\n\nMissing coverage.\n<verdict>CHANGES-REQUESTED</verdict>",
+      },
+    }];
+    const slot = renderReviewerFollowupSlot({
+      ...baseInputs,
+      priorRounds,
+      commits: "a1 first",
+      diff: "whole branch",
+      changedSinceDiff: "diff --git a/x b/x\n+new line",
+    });
+    expect(slot).toContain(
+      "An earlier pass listed this branch's tests, spec and standards findings; the history above carries them. " +
+      "Review only two things:\n1. The lines changed since that review, in the \"changed since\" diff below, " +
+      "on all three dimensions, exactly as at a listing.\n2. Whether the branch delivers what the issue asks. " +
+      "An unmet requirement blocks wherever it is.\nRaise nothing else. If you request changes, you may add " +
+      "findings outside these two under `### Non-blocking`; they never affect a verdict, now or later.",
+    );
+    expect(slot).toContain("## Changed since the last follow-up review\n\n```diff\n" +
+      "diff --git a/x b/x\n+new line\n```");
+    expect(slot).toContain("An entry under `### Non-blocking` is checked but never blocks.");
+  });
+
   it("requires test findings to identify a deletion the suite cannot detect", () => {
     const slot = renderFollowup();
     expect(slot).toContain("a production line no test covers");
@@ -383,6 +423,37 @@ describe("renderReviewerFollowupSlot", () => {
     expect(slot).toContain("<verdict>APPROVED</verdict>");
     expect(slot).toContain("<verdict>CHANGES-REQUESTED</verdict>");
     expect(slot).toMatch(/Emit exactly one verdict/);
+  });
+});
+
+describe("followupReviewContext (#107)", () => {
+  const approved = { verdict: "APPROVED" as const, prose: "<verdict>APPROVED</verdict>" };
+  const correctnessOnly = (round: number, head: string): PriorReviewRound => ({
+    round,
+    head,
+    correctness: approved,
+  });
+  const reviewed = (round: number, head: string): PriorReviewRound => ({
+    ...correctnessOnly(round, head),
+    followup: approved,
+  });
+
+  it.each([
+    ["no history", [], { mode: "list", anchor: null }],
+    ["correctness-only history", [correctnessOnly(1, "head-1")], { mode: "list", anchor: null }],
+    ["one listing", [reviewed(1, "listing")], { mode: "verify", anchor: "listing" }],
+    [
+      "listing then harness-failed follow-up (no history entry)",
+      [reviewed(1, "listing")],
+      { mode: "verify", anchor: "listing" },
+    ],
+    [
+      "listing followed by two verifies",
+      [reviewed(1, "listing"), reviewed(2, "verify-1"), reviewed(3, "verify-2")],
+      { mode: "verify", anchor: "verify-2" },
+    ],
+  ] as const)("derives mode and anchor for %s", (_name, rounds, expected) => {
+    expect(followupReviewContext(rounds)).toEqual(expected);
   });
 });
 
@@ -464,15 +535,16 @@ describe("reviewer prior-round history (#88)", () => {
     }
   });
 
-  it("gives both passes the lean output, dimension verification, and reversal rules", () => {
+  it("gives both passes dimension verification and reversal rules", () => {
     const [correctness, followup] = renderBoth([]);
     for (const slot of [correctness, followup]) {
       expect(slot).toMatch(/For each finding in the prior-round history/);
-      expect(slot).toMatch(/review this branch as you would with no history at\s+all/);
       expect(slot).toMatch(/may not be reversed without naming that\s+round/);
-      expect(slot).toMatch(/Do not include a summary, what you checked, non-blocking\s+observations/);
-      expect(slot).toMatch(/When approving, emit the verdict\s+token alone/);
+      expect(slot).toMatch(/When\s+approving, emit the verdict\s+token alone/);
     }
+    expect(correctness).toMatch(/review this branch as you would with no history at\s+all/);
+    expect(correctness).toMatch(/Do not include a summary, what you checked, non-blocking\s+observations/);
+    expect(followup).toMatch(/Do not include a summary,\s+what you checked, other observations/);
   });
 });
 

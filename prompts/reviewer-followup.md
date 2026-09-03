@@ -8,7 +8,7 @@ does not resolve.)
 
 Issue #{{issueId}}: {{issueTitle}}
 
-{{chunkBase}}{{commits}}{{diff}}{{priorRounds}}{{codingStandards}}
+{{chunkBase}}{{commits}}{{diff}}{{priorRounds}}{{followupMode}}{{changedSinceDiff}}{{codingStandards}}
 
 {{projectStandards}}## Review process
 
@@ -29,9 +29,7 @@ dimensions, however, report it under `### Correctness` and request changes.
 
 For each finding in the prior-round history from your tests, spec, and project
 standards dimensions, state whether it is addressed at this head; an
-unaddressed one blocks. Then review this branch as you would with no history at
-all. The history does not narrow what you may find or make new findings in
-these dimensions non-blocking.
+unaddressed one blocks.
 
 A change requested in an earlier round may not be reversed without naming that
 round and explaining why its request was wrong.
@@ -41,14 +39,15 @@ run gate commands. Read-only investigation only.
 
 If a dimension requests changes, put only its actionable findings under its
 exact heading: `### Correctness`, `### Tests`, `### Spec`, or `### Standards`.
-Omit headings for dimensions that pass.
+Omit headings for dimensions that pass. In verify mode, `### Non-blocking` is
+also allowed only as described above.
 
 ## Verdict
 
-Your output is only the blocking findings under their exact headings followed
-by the verdict token. Do not include a summary, what you checked, non-blocking
-observations, or a restatement of the change. When approving, emit the verdict
-token alone.
+Your output is only the actionable findings allowed by the mode above under
+their exact headings, followed by the verdict token. Do not include a summary,
+what you checked, other observations, or a restatement of the change. When
+approving, emit the verdict token alone.
 
 End your review with a single verdict token on its own:
 

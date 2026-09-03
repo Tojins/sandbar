@@ -5,7 +5,9 @@
 // check #21, and the same coding standards the reviewer applies plus a live
 // pre-promise diff checklist (#78); reviewer: diff + commits, split into a
 // correctness pass and a self-sufficient checklist follow-up sharing one
-// provider session (#19), plus every earlier successful review round (#88)).
+// provider session (#19), plus every earlier successful review round (#88).
+// After its first whole-branch follow-up listing, that history also anchors a
+// strict review of only the lines no follow-up has seen yet (#107).
 //
 // The issue anchor uses `--json`, NOT the human-readable `--comments` form —
 // that one is TTY-sensitive and, when piped, omits the body. A fetch failure
@@ -229,6 +231,26 @@ export type PriorReviewRound = {
   readonly correctness: ParsedVerdict;
   readonly followup?: ParsedVerdict;
 };
+
+export type FollowupReviewContext =
+  | { readonly mode: "list"; readonly anchor: null }
+  | { readonly mode: "verify"; readonly anchor: string };
+
+// A follow-up review is represented by its verdict line in #88's history. A
+// harness failure contributes no such entry, while intervening correctness-only
+// rounds do, so selecting the newest follow-up entry gives both first-ness and
+// the exact last head this pass reviewed without adding runner state (#107).
+export function followupReviewContext(
+  priorRounds: readonly PriorReviewRound[],
+): FollowupReviewContext {
+  for (let index = priorRounds.length - 1; index >= 0; index -= 1) {
+    const round = priorRounds[index];
+    if (round?.followup !== undefined) {
+      return { mode: "verify", anchor: round.head };
+    }
+  }
+  return { mode: "list", anchor: null };
+}
 
 export async function buildPrompt(
   inputs: PromptInputs,
@@ -549,12 +571,23 @@ async function buildReviewerSlotInputs(
     )
   ).trim();
 
+  const followup = followupReviewContext(inputs.priorRounds);
+  const changedSinceDiff = followup.mode === "verify"
+    ? (
+        await readGit(
+          ["diff", `${followup.anchor}..HEAD`],
+          worktreePath,
+          `changes since the last follow-up review for ${inputs.issue.branch}, anchored at ${followup.anchor}`,
+        )
+      ).trim()
+    : undefined;
+
   const codingStandardsPath = resolveCodingStandardsPath(
     worktreePath,
     inputs.codingStandardsPath,
   );
 
-  return { ...inputs, codingStandardsPath, commits, diff };
+  return { ...inputs, codingStandardsPath, commits, diff, changedSinceDiff };
 }
 
 // Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
@@ -564,6 +597,7 @@ async function buildReviewerSlotInputs(
 export type ReviewerSlotRender = ReviewerPromptInputs & {
   readonly commits: string;
   readonly diff: string;
+  readonly changedSinceDiff?: string;
 };
 
 export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
@@ -608,6 +642,17 @@ function renderReviewerTemplate(
         rounds: inputs.priorRounds.map(renderPriorReviewRound).join("\n\n"),
       });
 
+  const followup = followupReviewContext(inputs.priorRounds);
+  const followupMode = followup.mode === "list"
+    ? "This is the only pass that reviews the whole branch for tests, spec and standards. Anything you do not raise now is not raised later. List every finding you would block on. There is no limit on length."
+    : "An earlier pass listed this branch's tests, spec and standards findings; the history above carries them. Review only two things:\n1. The lines changed since that review, in the \"changed since\" diff below, on all three dimensions, exactly as at a listing.\n2. Whether the branch delivers what the issue asks. An unmet requirement blocks wherever it is.\nRaise nothing else. If you request changes, you may add findings outside these two under `### Non-blocking`; they never affect a verdict, now or later.";
+
+  const changedSinceDiff = followup.mode === "verify"
+    ? `## Changed since the last follow-up review\n\n${inputs.changedSinceDiff
+      ? `\`\`\`diff\n${inputs.changedSinceDiff}\n\`\`\``
+      : `(empty — no changes since \`${followup.anchor}\`)`}`
+    : "";
+
   return render(template, {
     branch: issue.branch,
     baseRef: base.ref,
@@ -618,6 +663,8 @@ function renderReviewerTemplate(
     commits: section(commitsBlock),
     diff: section(diffBlock),
     priorRounds: section(priorRounds),
+    followupMode: section(followupMode),
+    changedSinceDiff: section(changedSinceDiff),
     codingStandards: CODING_STANDARDS,
     projectStandards: projectStandardsSlot(codingStandardsPath),
     conventionsRef: conventionsRef(claudeMdPath, contextMdPath),
