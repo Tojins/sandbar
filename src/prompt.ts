@@ -215,9 +215,10 @@ export type ReviewerPromptInputs = {
   readonly codingStandardsPath?: string;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
-  // Successful reviews earlier in this sandbox cycle (#88). Harness failures
-  // are absent, so round numbers may have holes. The runner owns this history:
-  // it is prompt material, not state-machine input.
+  // Successful reviews earlier in this sandbox cycle (#88). A harness failure
+  // adds no entry and consumes no round, so a retry reuses its number and the
+  // history remains contiguous. The runner owns this history: it is prompt
+  // material, not state-machine input.
   readonly priorRounds: readonly PriorReviewRound[];
 };
 
