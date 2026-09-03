@@ -7,6 +7,7 @@ import {
 } from "./finalize.js";
 import { sourceBranchBase } from "./git-ops.js";
 import {
+  type PriorReviewRound,
   renderAttemptSlot,
   renderReviewerFollowupSlot,
   renderReviewerSlot,
@@ -406,7 +407,7 @@ describe("reviewer prior-round history (#88)", () => {
       prose: "### Tests\n\nThe error branch is uncovered.\n<verdict>CHANGES-REQUESTED</verdict>",
     },
   };
-  const renderBoth = (priorRounds: typeof correctnessRejection[] | readonly (typeof correctnessRejection | typeof followupRejection)[]) => {
+  const renderBoth = (priorRounds: readonly PriorReviewRound[]) => {
     const inputs = { ...baseInputs, priorRounds, commits: "a1 first", diff: "diff" };
     return [renderReviewerSlot(inputs), renderReviewerFollowupSlot(inputs)] as const;
   };
@@ -430,13 +431,12 @@ describe("reviewer prior-round history (#88)", () => {
     expect(followup).toContain(expected);
   });
 
-  it("preserves a harness-failure hole because only reviewed rounds are supplied", () => {
-    const round3 = { ...followupRejection, round: 3, head: "3333333" };
-    const [correctness, followup] = renderBoth([correctnessRejection, round3]);
+  it("renders multiple reviewed rounds in order", () => {
+    const [correctness, followup] = renderBoth([correctnessRejection, followupRejection]);
     const expected =
       "## Prior review rounds\n\nThe following rounds reviewed earlier heads of this branch, in order:\n\n" +
       "### Round 1 — head=1111111\ncorrectness: CHANGES-REQUESTED\nNull input crashes.\n\n" +
-      "### Round 3 — head=3333333\ncorrectness: APPROVED\n" +
+      "### Round 2 — head=2222222\ncorrectness: APPROVED\n" +
       "followup: CHANGES-REQUESTED\n### Tests\n\nThe error branch is uncovered.";
     for (const slot of [correctness, followup]) {
       expect(slot).toContain(expected);

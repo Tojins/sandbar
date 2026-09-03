@@ -108,6 +108,28 @@ import {
 
 export const FAILURE_TAIL_LINES = 200;
 
+// The runner-owned projection from pass outcomes to prompt history (#88).
+// A harness failure produced no review, so the whole round contributes no
+// entry; a correctness rejection has no follow-up pass by construction.
+export function priorReviewRound(
+  reviewRound: number,
+  head: string,
+  correctness: ReviewerOutcome,
+  followup: ReviewerOutcome | undefined,
+): PriorReviewRound | null {
+  if (correctness.kind === "harness-failed") return null;
+  if (correctness.verdict.verdict === "CHANGES-REQUESTED") {
+    return { round: reviewRound, head, correctness: correctness.verdict };
+  }
+  if (followup?.kind !== "reviewed") return null;
+  return {
+    round: reviewRound,
+    head,
+    correctness: correctness.verdict,
+    followup: followup.verdict,
+  };
+}
+
 // The promise nudge (see runImplementer). Loaded at import time like every
 // other template; no placeholders.
 const PROMISE_NUDGE_TPL = loadTemplate("implementer-promise-nudge");
@@ -984,16 +1006,13 @@ async function runReviewer(
     decision = afterCorrectness;
   }
 
-  if (!failed && correctness.kind === "reviewed") {
-    ctx.priorReviewRounds.push({
-      round: action.reviewRound,
-      head,
-      correctness: correctness.verdict,
-      ...(followup?.kind === "reviewed"
-        ? { followup: followup.verdict }
-        : {}),
-    });
-  }
+  const historyEntry = priorReviewRound(
+    action.reviewRound,
+    head,
+    correctness,
+    followup,
+  );
+  if (historyEntry) ctx.priorReviewRounds.push(historyEntry);
 
   if (opts.attemptLogger) {
     await opts.attemptLogger.writeAttemptReviewer(
