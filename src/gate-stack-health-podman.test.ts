@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
-import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
+import { ContainerBringupError, startStack } from "./gate-stack.js";
 import {
   buildVariantImage,
   gateStackFixture,
@@ -106,20 +106,20 @@ describe.runIf(available)(
     it.concurrent(
       "a running, healthy issue container is left exactly where it is",
       async ({ expect, task, onTestFinished }) => {
-        let stack: Stack | null = null;
-        const { repo, stackId, cName } = await gateStackFixture(
+        const { repo, stackId, cName, hold } = await gateStackFixture(
           SCOPE,
           task.id,
           onTestFinished,
-          () => stack,
         );
 
-        stack = await startStack({
-          stackId: stackId,
-          scope: SCOPE,
-          worktreePath: repo,
-          spec: wedgeSpec(10_000),
-        });
+        const stack = hold(
+          await startStack({
+            stackId: stackId,
+            scope: SCOPE,
+            worktreePath: repo,
+            spec: wedgeSpec(10_000),
+          }),
+        );
         expect((await stack.runGate()).ok).toBe(true);
         const before = await idOf(cName, "svc");
 
@@ -149,20 +149,20 @@ describe.runIf(available)(
     it.concurrent(
       "waits out a transiently unhealthy issue container instead of escalating",
       async ({ expect, task, onTestFinished }) => {
-        let stack: Stack | null = null;
-        const { repo, stackId, cName } = await gateStackFixture(
+        const { repo, stackId, cName, hold } = await gateStackFixture(
           SCOPE,
           task.id,
           onTestFinished,
-          () => stack,
         );
 
-        stack = await startStack({
-          stackId: stackId,
-          scope: SCOPE,
-          worktreePath: repo,
-          spec: wedgeSpec(30_000),
-        });
+        const stack = hold(
+          await startStack({
+            stackId: stackId,
+            scope: SCOPE,
+            worktreePath: repo,
+            spec: wedgeSpec(30_000),
+          }),
+        );
         expect((await stack.runGate()).ok).toBe(true);
         const before = await idOf(cName, "svc");
 
@@ -194,12 +194,10 @@ describe.runIf(available)(
     it.concurrent(
       "a persistently unhealthy issue container is recreated on its running image, then throws",
       async ({ expect, task, onTestFinished }) => {
-        let stack: Stack | null = null;
-        const { repo, stackId, cName } = await gateStackFixture(
+        const { repo, stackId, cName, hold } = await gateStackFixture(
           SCOPE,
           task.id,
           onTestFinished,
-          () => stack,
         );
 
         // A built image, not a `podman tag` alias — see `buildVariantImage`.
@@ -210,13 +208,15 @@ describe.runIf(available)(
         // when the assertion below reads it back.
         const ALIAS = testImageTag("health-image");
         await buildVariantImage(ALIAS);
-        stack = await startStack({
-          stackId: stackId,
-          scope: SCOPE,
-          worktreePath: repo,
-          images: async () => new Map([[IMAGE, ALIAS]]),
-          spec: wedgeSpec(4_000),
-        });
+        const stack = hold(
+          await startStack({
+            stackId: stackId,
+            scope: SCOPE,
+            worktreePath: repo,
+            images: async () => new Map([[IMAGE, ALIAS]]),
+            spec: wedgeSpec(4_000),
+          }),
+        );
         expect((await stack.runGate()).ok).toBe(true);
         const before = await idOf(cName, "svc");
         expect(await inspectOf(cName, "svc", "{{.ImageName}}")).toBe(ALIAS);
@@ -272,20 +272,20 @@ describe.runIf(available)(
     it.concurrent(
       "a stopped issue container reports its state, not its health, even when probed",
       async ({ expect, task, onTestFinished }) => {
-        let stack: Stack | null = null;
-        const { repo, stackId, cName } = await gateStackFixture(
+        const { repo, stackId, cName, hold } = await gateStackFixture(
           SCOPE,
           task.id,
           onTestFinished,
-          () => stack,
         );
 
-        stack = await startStack({
-          stackId: stackId,
-          scope: SCOPE,
-          worktreePath: repo,
-          spec: wedgeSpec(10_000),
-        });
+        const stack = hold(
+          await startStack({
+            stackId: stackId,
+            scope: SCOPE,
+            worktreePath: repo,
+            spec: wedgeSpec(10_000),
+          }),
+        );
         expect((await stack.runGate()).ok).toBe(true);
 
         await exec(RUNTIME, ["stop", "-t", "0", cName("svc")]);
@@ -321,61 +321,61 @@ describe.runIf(available)(
     it.concurrent(
       "healthcheck readiness goes green on the image's own probe",
       async ({ expect, task, onTestFinished }) => {
-        let stack: Stack | null = null;
-        const { repo, stackId, cName } = await gateStackFixture(
+        const { repo, stackId, cName, hold } = await gateStackFixture(
           SCOPE,
           task.id,
           onTestFinished,
-          () => stack,
         );
 
-        stack = await startStack({
-          stackId: stackId,
-          scope: SCOPE,
-          worktreePath: repo,
-          spec: resolveGateStack({
-            containers: [
-              {
-                name: "runner",
-                image: IMAGE,
-                mountWorktree: "/work",
-                hold: true,
-              },
-              {
-                name: "db",
-                image: IMAGE,
-                lifecycle: "issue",
-                env: {
-                  MYSQL_ALLOW_EMPTY_PASSWORD: "yes",
-                  MYSQL_DATABASE: "app",
+        const stack = hold(
+          await startStack({
+            stackId: stackId,
+            scope: SCOPE,
+            worktreePath: repo,
+            spec: resolveGateStack({
+              containers: [
+                {
+                  name: "runner",
+                  image: IMAGE,
+                  mountWorktree: "/work",
+                  hold: true,
                 },
-                readiness: {
-                  kind: "healthcheck",
+                {
+                  name: "db",
+                  image: IMAGE,
+                  lifecycle: "issue",
+                  env: {
+                    MYSQL_ALLOW_EMPTY_PASSWORD: "yes",
+                    MYSQL_DATABASE: "app",
+                  },
+                  readiness: {
+                    kind: "healthcheck",
+                    command: [
+                      "healthcheck.sh",
+                      "--connect",
+                      "--innodb_initialized",
+                    ],
+                  },
+                  readinessTimeoutMs: 120_000,
+                },
+              ],
+              steps: [
+                {
+                  name: "query",
+                  in: "runner",
                   command: [
-                    "healthcheck.sh",
-                    "--connect",
-                    "--innodb_initialized",
+                    "mariadb",
+                    "-h",
+                    "127.0.0.1",
+                    "-uroot",
+                    "-e",
+                    "SELECT 1",
                   ],
                 },
-                readinessTimeoutMs: 120_000,
-              },
-            ],
-            steps: [
-              {
-                name: "query",
-                in: "runner",
-                command: [
-                  "mariadb",
-                  "-h",
-                  "127.0.0.1",
-                  "-uroot",
-                  "-e",
-                  "SELECT 1",
-                ],
-              },
-            ],
+              ],
+            }),
           }),
-        });
+        );
         // Bringup returning is the readiness assertion; the step is what makes
         // it a claim about a REAL server rather than about the probe giving up.
         expect((await stack.runGate()).ok).toBe(true);
@@ -391,12 +391,10 @@ describe.runIf(available)(
     it.concurrent(
       "a readiness timeout quotes the probe's own output, not podman's `unhealthy`",
       async ({ expect, task, onTestFinished }) => {
-        let stack: Stack | null = null;
-        const { repo, stackId, cName } = await gateStackFixture(
+        const { repo, stackId, cName, hold } = await gateStackFixture(
           SCOPE,
           task.id,
           onTestFinished,
-          () => stack,
         );
 
         const spec = resolveGateStack({
@@ -424,12 +422,14 @@ describe.runIf(available)(
 
         let caught: unknown = null;
         try {
-          stack = await startStack({
-            stackId: stackId,
-            scope: SCOPE,
-            worktreePath: repo,
-            spec,
-          });
+          hold(
+            await startStack({
+              stackId: stackId,
+              scope: SCOPE,
+              worktreePath: repo,
+              spec,
+            }),
+          );
         } catch (err) {
           caught = err;
         }

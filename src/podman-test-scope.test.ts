@@ -33,6 +33,6 @@ describe("podmanTestScope", () => {
     const first = podmanTestStackId("podmantest", "task-a");
     expect(first).toBe(podmanTestStackId("podmantest", "task-a"));
     expect(first).not.toBe(podmanTestStackId("podmantest", "task-b"));
-    expect(first).toMatch(/^podmantest-/);
+    expect(first).toMatch(/^podmantest-[0-9a-f]{10}$/);
   });
 });

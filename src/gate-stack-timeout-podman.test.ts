@@ -10,7 +10,7 @@ import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
-import { type Stack, startStack } from "./gate-stack.js";
+import { startStack } from "./gate-stack.js";
 import { gateStackFixture, IMAGE } from "./gate-stack-podman.test-util.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
@@ -45,44 +45,44 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
   it.concurrent(
     "a step that exceeds its timeout is a red gate naming the step and the bound",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          steps: [
-            {
-              name: "hangs",
-              in: "runner",
-              // Prints, then never returns: a suite whose reporter never
-              // exits, which is the shape that actually happens.
-              command: ["sh", "-c", "echo about-to-hang; sleep 600"],
-              timeoutMs: 3_000,
-            },
-            {
-              name: "never",
-              in: "runner",
-              command: ["sh", "-c", "echo RAN-ANYWAY"],
-            },
-          ],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              {
+                name: "hangs",
+                in: "runner",
+                // Prints, then never returns: a suite whose reporter never
+                // exits, which is the shape that actually happens.
+                command: ["sh", "-c", "echo about-to-hang; sleep 600"],
+                timeoutMs: 3_000,
+              },
+              {
+                name: "never",
+                in: "runner",
+                command: ["sh", "-c", "echo RAN-ANYWAY"],
+              },
+            ],
+          }),
         }),
-      });
+      );
 
       const started = Date.now();
       const red = await stack.runGate();
@@ -111,55 +111,59 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
   it.concurrent(
     "the timed-out work is reaped: an issue container is recreated, only the step's container touched",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            // `issue` + `hold` is the one shape that may legally be stepped
-            // into and survive attempts, so it is where a runaway would
-            // otherwise live for the whole issue.
-            {
-              name: "held",
-              image: IMAGE,
-              lifecycle: "issue",
-              mounts: [
-                {
-                  hostPath: "marker.txt",
-                  containerPath: "/fixture/marker.txt",
-                },
-              ],
-              hold: true,
-            },
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          steps: [
-            // Satisfies the #29 reachability rule; also proves the timeout
-            // stops the run rather than the run never getting that far.
-            { name: "sees-code", in: "runner", command: ["cat", "marker.txt"] },
-            {
-              name: "hangs-in-held",
-              in: "held",
-              command: ["sleep", "601"],
-              timeoutMs: 2_000,
-            },
-          ],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              // `issue` + `hold` is the one shape that may legally be stepped
+              // into and survive attempts, so it is where a runaway would
+              // otherwise live for the whole issue.
+              {
+                name: "held",
+                image: IMAGE,
+                lifecycle: "issue",
+                mounts: [
+                  {
+                    hostPath: "marker.txt",
+                    containerPath: "/fixture/marker.txt",
+                  },
+                ],
+                hold: true,
+              },
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              // Satisfies the #29 reachability rule; also proves the timeout
+              // stops the run rather than the run never getting that far.
+              {
+                name: "sees-code",
+                in: "runner",
+                command: ["cat", "marker.txt"],
+              },
+              {
+                name: "hangs-in-held",
+                in: "held",
+                command: ["sleep", "601"],
+                timeoutMs: 2_000,
+              },
+            ],
+          }),
         }),
-      });
+      );
 
       const idOf = async (name: string): Promise<string | null> =>
         await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", cName(name)])
@@ -204,37 +208,37 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
   it.concurrent(
     "a timeout in an attempt container removes it, so the runaway cannot outlive the attempt",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          steps: [
-            {
-              name: "hangs",
-              in: "runner",
-              command: ["sleep", "607"],
-              timeoutMs: 2_000,
-            },
-          ],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              {
+                name: "hangs",
+                in: "runner",
+                command: ["sleep", "607"],
+                timeoutMs: 2_000,
+              },
+            ],
+          }),
         }),
-      });
+      );
 
       expect((await stack.runGate()).failedStep).toBe("hangs");
 

@@ -26,6 +26,7 @@ import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
 import type { RunConfig } from "./config.js";
+import type { FinishedHook } from "./gate-stack-podman.test-util.js";
 import {
   GATE_EXIT_GREEN,
   GATE_EXIT_NO_VERDICT,
@@ -64,10 +65,7 @@ afterAll(async () => {
 // under test remains the one `gateScope` derives from the worktree; `mkdtemp`
 // gives every concurrent case a different production scope.
 
-async function gateRunFixture(
-  taskId: string,
-  onTestFinished: (fn: () => Promise<void>, timeout?: number) => void,
-) {
+async function gateRunFixture(taskId: string, onTestFinished: FinishedHook) {
   const repo = await mkdtemp(join(tmpdir(), "sandbar-gate-run-"));
   const podName = podNameFor(gateScope(repo), GATE_STACK_ID);
   const SANDBOX_ONLY_TAG = testImageTag(`sandbox-${taskId}`);

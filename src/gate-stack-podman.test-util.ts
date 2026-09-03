@@ -61,9 +61,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import type { TestContext } from "vitest";
 
 import type { Stack } from "./gate-stack.js";
-import { stackContainerNameFor } from "./naming.js";
+import { type RunScope, stackContainerNameFor } from "./naming.js";
 import { podmanTestStackId } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -135,28 +136,33 @@ export const initStackRepo = async (): Promise<string> => {
   return repo;
 };
 
-type FinishedHook = (cleanup: () => Promise<void>, timeout?: number) => void;
+export type FinishedHook = TestContext["onTestFinished"];
 
-// Per-test state for concurrent gate-stack cases. The getter lets cleanup
-// observe a stack assigned after this helper returns.
+// Per-test state for concurrent gate-stack cases. `hold` both returns the
+// stack to the test and registers it for stop-before-worktree cleanup.
 export const gateStackFixture = async (
-  scope: string,
+  scope: RunScope,
   taskId: string,
   onTestFinished: FinishedHook,
-  heldStack: () => Stack | null,
 ): Promise<{
   repo: string;
   stackId: string;
   cName: (name: string) => string;
+  hold: (stack: Stack) => Stack;
 }> => {
   const repo = await initStackRepo();
   const stackId = podmanTestStackId("podmantest", taskId);
   const cName = (name: string): string =>
     stackContainerNameFor(scope, stackId, name);
+  let held: Stack | null = null;
   onTestFinished(async () => {
-    const stack = heldStack();
-    if (stack) await stack.stop();
+    if (held) await held.stop();
     await rm(repo, { recursive: true, force: true });
   }, 120_000);
-  return { repo, stackId, cName };
+  return {
+    repo,
+    stackId,
+    cName,
+    hold: (stack) => (held = stack),
+  };
 };

@@ -19,7 +19,11 @@ import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import { type Stack, startStack } from "./gate-stack.js";
-import { buildVariantImage, IMAGE } from "./gate-stack-podman.test-util.js";
+import {
+  buildVariantImage,
+  type FinishedHook,
+  IMAGE,
+} from "./gate-stack-podman.test-util.js";
 import { networkNameFor, podNameFor, stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
@@ -50,10 +54,7 @@ afterAll(async () => {
   if (available) await cleanup();
 }, 120_000);
 
-async function standaloneFixture(
-  taskId: string,
-  onTestFinished: (fn: () => Promise<void>, timeout?: number) => void,
-) {
+async function standaloneFixture(taskId: string, onTestFinished: FinishedHook) {
   const stackId = podmanTestStackId("gate45", taskId);
   const gName = (name: string): string =>
     stackContainerNameFor(SCOPE, stackId, name);

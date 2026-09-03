@@ -14,7 +14,6 @@ import {
   bringUpContainers,
   CONTAINER_RM_ARGS,
   ContainerBringupError,
-  type Stack,
   startStack,
 } from "./gate-stack.js";
 import {
@@ -78,41 +77,41 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "runs steps in a held container that sees the worktree, and reports the failing step",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId } = await gateStackFixture(
+      const { repo, stackId, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          steps: [
-            {
-              name: "read-marker",
-              in: "runner",
-              command: ["cat", "marker.txt"],
-            },
-            {
-              name: "env",
-              in: "runner",
-              command: ["sh", "-c", 'test "$CI" = true'],
-            },
-          ],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              {
+                name: "read-marker",
+                in: "runner",
+                command: ["cat", "marker.txt"],
+              },
+              {
+                name: "env",
+                in: "runner",
+                command: ["sh", "-c", 'test "$CI" = true'],
+              },
+            ],
+          }),
         }),
-      });
+      );
 
       const green = await stack.runGate();
       expect(green.ok).toBe(true);
@@ -148,43 +147,43 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "a red step stops the run, names itself, and carries the container logs",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          steps: [
-            {
-              name: "boom",
-              in: "runner",
-              command: ["sh", "-c", "echo nope >&2; exit 3"],
-            },
-            // Must NOT run: later steps read what earlier ones build, so
-            // running them buries the real failure under derived ones.
-            {
-              name: "never",
-              in: "runner",
-              command: ["sh", "-c", "echo RAN-ANYWAY"],
-            },
-          ],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              {
+                name: "boom",
+                in: "runner",
+                command: ["sh", "-c", "echo nope >&2; exit 3"],
+              },
+              // Must NOT run: later steps read what earlier ones build, so
+              // running them buries the real failure under derived ones.
+              {
+                name: "never",
+                in: "runner",
+                command: ["sh", "-c", "echo RAN-ANYWAY"],
+              },
+            ],
+          }),
         }),
-      });
+      );
 
       const red = await stack.runGate();
       expect(red.ok).toBe(false);
@@ -217,30 +216,30 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "refuses to gate a dirty worktree instead of reporting a verdict about it",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          steps: [{ name: "ok", in: "runner", command: ["true"] }],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+          }),
         }),
-      });
+      );
       expect((await stack.runGate()).ok).toBe(true);
 
       await writeFile(join(repo, "forgotten.ts"), "export const x = 1;\n");
@@ -272,39 +271,39 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "a container running as root in the pod writes worktree files owned by the host user",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
       // The load-bearing consequence of dropping --userns=keep-id (which
       // podman refuses alongside --pod). If this ever regresses, every file a
       // gate step writes lands owned by a subuid the operator cannot delete.
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          steps: [
-            {
-              name: "write",
-              in: "runner",
-              command: ["sh", "-c", "mkdir -p out && touch out/made"],
-            },
-          ],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              {
+                name: "write",
+                in: "runner",
+                command: ["sh", "-c", "mkdir -p out && touch out/made"],
+              },
+            ],
+          }),
         }),
-      });
+      );
       expect((await stack.runGate()).ok).toBe(true);
 
       const { stdout } = await exec("stat", [
@@ -326,27 +325,54 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "issue containers keep their id and their state across gate runs",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            {
-              name: "db",
-              image: IMAGE,
-              lifecycle: "issue",
-              env: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "app" },
-              readiness: {
-                kind: "healthcheck",
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "db",
+                image: IMAGE,
+                lifecycle: "issue",
+                env: {
+                  MYSQL_ALLOW_EMPTY_PASSWORD: "yes",
+                  MYSQL_DATABASE: "app",
+                },
+                readiness: {
+                  kind: "healthcheck",
+                  command: [
+                    "mariadb",
+                    "-h",
+                    "127.0.0.1",
+                    "-uroot",
+                    "-e",
+                    "SELECT 1",
+                  ],
+                },
+                readinessTimeoutMs: 120_000,
+              },
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            // The whole point of one namespace: the consumer writes 127.0.0.1
+            // as a literal, because with a pod it is an address it can know at
+            // config time. No pinned IP, no reserved DB_HOST key.
+            steps: [
+              {
+                name: "query",
+                in: "runner",
                 command: [
                   "mariadb",
                   "-h",
@@ -356,34 +382,10 @@ describe.runIf(available)("gate stack against real podman", () => {
                   "SELECT 1",
                 ],
               },
-              readinessTimeoutMs: 120_000,
-            },
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          // The whole point of one namespace: the consumer writes 127.0.0.1
-          // as a literal, because with a pod it is an address it can know at
-          // config time. No pinned IP, no reserved DB_HOST key.
-          steps: [
-            {
-              name: "query",
-              in: "runner",
-              command: [
-                "mariadb",
-                "-h",
-                "127.0.0.1",
-                "-uroot",
-                "-e",
-                "SELECT 1",
-              ],
-            },
-          ],
+            ],
+          }),
         }),
-      });
+      );
 
       expect((await stack.runGate()).ok).toBe(true);
 
@@ -445,44 +447,44 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "an attempt container that will not come up is a gate red, not a throw",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-            {
-              name: "broken",
-              image: IMAGE,
-              // Dies immediately, the way a branch that breaks its own
-              // service bootstrap does.
-              args: ["sh", "-c", "echo bootstrap-failed >&2; exit 1"],
-              // A probe that would PASS, deliberately: what fails here is the
-              // container, and `podman healthcheck run` against a container
-              // that is not running exits 125 whatever the command is. That
-              // keeps the assertion about D5's blame mapping rather than
-              // about a probe verdict.
-              readiness: { kind: "healthcheck", command: ["true"] },
-              readinessTimeoutMs: 4_000,
-            },
-          ],
-          steps: [{ name: "ok", in: "runner", command: ["true"] }],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+              {
+                name: "broken",
+                image: IMAGE,
+                // Dies immediately, the way a branch that breaks its own
+                // service bootstrap does.
+                args: ["sh", "-c", "echo bootstrap-failed >&2; exit 1"],
+                // A probe that would PASS, deliberately: what fails here is the
+                // container, and `podman healthcheck run` against a container
+                // that is not running exits 125 whatever the command is. That
+                // keeps the assertion about D5's blame mapping rather than
+                // about a probe verdict.
+                readiness: { kind: "healthcheck", command: ["true"] },
+                readinessTimeoutMs: 4_000,
+              },
+            ],
+            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+          }),
         }),
-      });
+      );
 
       const red = await stack.runGate();
       expect(red.ok).toBe(false);
@@ -499,41 +501,45 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "a red gate carries the logs of containers the failing step never ran in",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            {
-              name: "backend",
-              image: IMAGE,
-              lifecycle: "issue",
-              // Written by the container's MAIN process — `podman logs` shows
-              // that, not the output of `podman exec`, so a postReadyCommand
-              // would not have appeared here.
-              args: ["sh", "-c", "echo BACKEND-IS-ANGRY >&2; sleep infinity"],
-            },
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          steps: [
-            { name: "browser", in: "runner", command: ["sh", "-c", "exit 1"] },
-          ],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "backend",
+                image: IMAGE,
+                lifecycle: "issue",
+                // Written by the container's MAIN process — `podman logs` shows
+                // that, not the output of `podman exec`, so a postReadyCommand
+                // would not have appeared here.
+                args: ["sh", "-c", "echo BACKEND-IS-ANGRY >&2; sleep infinity"],
+              },
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              {
+                name: "browser",
+                in: "runner",
+                command: ["sh", "-c", "exit 1"],
+              },
+            ],
+          }),
         }),
-      });
+      );
 
       const red = await stack.runGate();
       expect(red.ok).toBe(false);
@@ -551,12 +557,10 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "a readiness-less container that dies at startup fails bringup",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
       const { repo, stackId, cName } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
       await expect(
@@ -601,12 +605,10 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "a bringup failure names the stack it was told it belongs to",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
       const { repo, stackId, cName } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
       const anchor = `${scopedResourcePrefix(SCOPE)}labelanchor`;
@@ -656,31 +658,31 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "an issue container that dies between gate runs throws instead of reddening",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            { name: "svc", image: IMAGE, lifecycle: "issue", hold: true },
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          steps: [{ name: "ok", in: "runner", command: ["true"] }],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              { name: "svc", image: IMAGE, lifecycle: "issue", hold: true },
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+          }),
         }),
-      });
+      );
       expect((await stack.runGate()).ok).toBe(true);
 
       await exec(RUNTIME, ["stop", "-t", "0", cName("svc")]);
@@ -704,34 +706,34 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "an issue container that is REMOVED between gate runs throws instead of reddening",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            { name: "svc", image: IMAGE, lifecycle: "issue", hold: true },
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          // The step does not touch `svc` at all: the assert is a property of
-          // the stack, checked before any step runs, not a step failure that
-          // happens to mention it.
-          steps: [{ name: "ok", in: "runner", command: ["true"] }],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              { name: "svc", image: IMAGE, lifecycle: "issue", hold: true },
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            // The step does not touch `svc` at all: the assert is a property of
+            // the stack, checked before any step runs, not a step failure that
+            // happens to mention it.
+            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+          }),
         }),
-      });
+      );
       expect((await stack.runGate()).ok).toBe(true);
 
       await removeFixtureContainer(cName("svc"));
@@ -757,32 +759,32 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "`container exists` separates gone from flaked where `inspect` cannot",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
       const name = cName("svc");
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            { name: "svc", image: IMAGE, lifecycle: "issue", hold: true },
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          steps: [{ name: "ok", in: "runner", command: ["true"] }],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              { name: "svc", image: IMAGE, lifecycle: "issue", hold: true },
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+          }),
         }),
-      });
+      );
 
       const inspect = ["inspect", "--format", "{{.State.Running}}", name];
       const exists = ["container", "exists", name];
@@ -820,31 +822,31 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "creates no anonymous volume for the image's VOLUME directives",
     async ({ expect, task, onTestFinished }) => {
-      let stack: Stack | null = null;
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId, cName, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
-        () => stack,
       );
 
-      stack = await startStack({
-        stackId: stackId,
-        scope: SCOPE,
-        worktreePath: repo,
-        spec: resolveGateStack({
-          containers: [
-            { name: "db", image: IMAGE, lifecycle: "issue", hold: true },
-            {
-              name: "runner",
-              image: IMAGE,
-              mountWorktree: "/work",
-              hold: true,
-            },
-          ],
-          steps: [{ name: "ok", in: "runner", command: ["true"] }],
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              { name: "db", image: IMAGE, lifecycle: "issue", hold: true },
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [{ name: "ok", in: "runner", command: ["true"] }],
+          }),
         }),
-      });
+      );
       expect((await stack.runGate()).ok).toBe(true);
 
       // Both containers: `issue` and `attempt` differ in lifetime, and the

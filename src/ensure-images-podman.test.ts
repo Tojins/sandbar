@@ -18,6 +18,7 @@ import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
 import type { BuiltImage } from "./config.js";
+import type { FinishedHook } from "./gate-stack-podman.test-util.js";
 import {
   ImageBuildError,
   buildImage,
@@ -63,10 +64,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
   // command is in `podman-test-scope.test-util.ts`.
   afterAll(cleanup, 120_000);
 
-  const fixture = async (
-    taskId: string,
-    onTestFinished: (cleanup: () => Promise<void>, timeout?: number) => void,
-  ) => {
+  const fixture = async (taskId: string, onTestFinished: FinishedHook) => {
     const root = await mkdtemp(join(tmpdir(), "sandbar-ensure-images-"));
     const tag = testImageTag(`probe-${taskId}`);
     const image: BuiltImage = {
@@ -79,10 +77,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       `FROM ${BASE}\nCOPY package-lock.json /lock.json\n`,
     );
     await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
-    onTestFinished(
-      async () => rm(root, { recursive: true, force: true }),
-      60_000,
-    );
+    onTestFinished(() => rm(root, { recursive: true, force: true }), 60_000);
     return { root, tag, image };
   };
 
