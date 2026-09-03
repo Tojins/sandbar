@@ -17,7 +17,7 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   "gate-stack.ts": 7,
   "inner-loop.ts": 5,
   "lock.ts": 4,
-  "merger.ts": 7,
+  "merger.ts": 9,
   "preflight.ts": 1,
   "prompt.ts": 1,
   "run.ts": 8,

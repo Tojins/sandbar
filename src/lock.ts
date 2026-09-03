@@ -29,6 +29,12 @@ const isEnoent = (err: unknown): boolean =>
   typeof err === "object" && err !== null &&
   (err as { code?: unknown }).code === "ENOENT";
 
+const staleLockRemovalRefused = (err: unknown): boolean =>
+  typeof err === "object" && err !== null &&
+  ["EACCES", "EPERM", "EROFS"].includes(
+    String((err as { code?: unknown }).code),
+  );
+
 export type LockPaths = {
   readonly workDir: string;
   readonly lockPath: string;
@@ -77,7 +83,14 @@ async function maybeReleaseStaleLock(paths: LockPaths): Promise<void> {
   if (!Number.isFinite(oldPid) || oldPid <= 0) return;
   if (pidIsAlive(oldPid)) return;
 
-  rmSync(lockDirFor(paths.lockPath), { recursive: true, force: true });
+  try {
+    rmSync(lockDirFor(paths.lockPath), { recursive: true, force: true });
+  } catch (err) {
+    // These conditions do not let us prove the stale lock was removed. Leave
+    // its sidecar alone and let the atomic acquire below report it as held.
+    if (!staleLockRemovalRefused(err)) throw err;
+    return;
+  }
   try {
     unlinkSync(paths.pidPath);
   } catch (err) {
@@ -134,7 +147,11 @@ export async function acquireLock(paths: LockPaths): Promise<Release> {
       unlinkSync(paths.pidPath);
     } catch (err) {
       if (!isEnoent(err)) throw err;
+    } finally {
+      // Removing the sidecar comes first so a successor cannot create its own
+      // and have this holder unlink it. Releasing the real lock is mandatory
+      // even when that sidecar cleanup fails.
+      await release();
     }
-    await release();
   };
 }

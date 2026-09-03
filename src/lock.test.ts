@@ -25,6 +25,7 @@
 import { spawn } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -171,6 +172,17 @@ describe("acquireLock", () => {
 
     expect(existsSync(p.pidPath)).toBe(false);
     await take(p);
+  });
+
+  it("releases the real lock when removing the pid sidecar fails", async () => {
+    const p = paths();
+    const release = await take(p);
+    releases.pop();
+    rmSync(p.pidPath);
+    mkdirSync(p.pidPath);
+
+    await expect(release()).rejects.toMatchObject({ code: "EISDIR" });
+    expect(lockDirExists(p)).toBe(false);
   });
 
   it("takes over from ANOTHER process that died holding the lock", async () => {

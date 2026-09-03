@@ -7,7 +7,8 @@ import { ERROR_SWALLOW_BASELINE } from "./error-swallow-baseline.test-util.js";
 
 const SRC = dirname(fileURLToPath(import.meta.url));
 const SWALLOW_PATTERNS = [
-  /\.catch\(\([^)]*\)\s*=>/g,
+  /\.catch\(\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/g,
+  /\.catch\(\s*[A-Za-z_$][\w$.]*\s*\)/g,
   /catch\s*\([^)]*\)\s*\{(?![^{}]*\bthrow\b)/g,
   /catch\s*\{/g,
 ];
@@ -35,10 +36,12 @@ describe("production error-swallow ratchet", () => {
     expect(
       countSwallowPatterns(
         "task.catch(() => fallback); task.catch((err) => fallback(err)); " +
-          "try {} catch { fallback(); } try {} catch (err) { return null; } " +
+          "task.catch(err => null); task.catch(async (err) => null); " +
+          "task.catch(swallowIt); try {} catch { fallback(); } " +
+          "try {} catch (err) { return null; } " +
           "try {} catch (err) { throw err; }",
       ),
-    ).toBe(4);
+    ).toBe(7);
   });
 
   it("reports files whose count exceeds their baseline", () => {
