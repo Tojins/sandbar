@@ -227,7 +227,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "gates the working tree when told to, and refuses it otherwise",
     async ({ expect, task, onTestFinished }) => {
-      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
+      const { stackId, repo, spec } = await standaloneFixture(
         task.id,
         onTestFinished,
       );
@@ -271,7 +271,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "tees each step's output as it arrives without disturbing the capture",
     async ({ expect, task, onTestFinished }) => {
-      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
+      const { stackId, repo } = await standaloneFixture(
         task.id,
         onTestFinished,
       );
@@ -337,7 +337,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "does not keep — and so cannot adopt — a stack whose bringup never finished",
     async ({ expect, task, onTestFinished }) => {
-      const { stackId, gName, podName, repo, idOf, spec } =
+      const { stackId, gName, podName, repo, idOf } =
         await standaloneFixture(task.id, onTestFinished);
 
       const seedFlag = join(repo, "seed-flag");

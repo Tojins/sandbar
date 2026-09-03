@@ -321,7 +321,7 @@ describe.runIf(available)(
     it.concurrent(
       "healthcheck readiness goes green on the image's own probe",
       async ({ expect, task, onTestFinished }) => {
-        const { repo, stackId, cName, hold } = await gateStackFixture(
+        const { repo, stackId, hold } = await gateStackFixture(
           SCOPE,
           task.id,
           onTestFinished,
@@ -391,7 +391,7 @@ describe.runIf(available)(
     it.concurrent(
       "a readiness timeout quotes the probe's own output, not podman's `unhealthy`",
       async ({ expect, task, onTestFinished }) => {
-        const { repo, stackId, cName, hold } = await gateStackFixture(
+        const { repo, stackId, hold } = await gateStackFixture(
           SCOPE,
           task.id,
           onTestFinished,

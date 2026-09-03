@@ -182,10 +182,10 @@ export default {
     // their CPU work contends with mariadb bringup instead of filling idle
     // workers, costing 8s at K=1 and buying nothing at K=3.
     //
-    // The runner explicitly excludes `gate-stack-hostpodman.test.ts`: it holds
-    // only for a LOCAL client, and this one is remote.
-    // `sandbox-stack-podman.test.ts` (#44) is excluded too
-    // below for the same kind of reason — it builds its anchor with the
+    // The `podman-test` step explicitly excludes
+    // `gate-stack-hostpodman.test.ts`: it holds only for a LOCAL client, and
+    // this one is remote. `sandbox-stack-podman.test.ts` (#44) is excluded too
+    // for the same kind of reason — it builds its anchor with the
     // production sandbox run args and then execs into it as the agent, so "the
     // invoking user" has to be whoever runs the test rather than whoever owns
     // the socket. Those two stay host-only.
@@ -195,6 +195,11 @@ export default {
     // vitest's project include glob plus the filename filter collects every
     // podman test except the two explicit local-client exceptions, so a new
     // podman file cannot silently disappear.
+    //
+    // NONE of that depends on this comment being right. Both host-only files
+    // declare `needsLocalClient`, so they self-skip against a remote client on
+    // their own say-so. That remains the safety net when the glob collects a
+    // newly added local-client file before this exclusion list knows its name.
     //
     // `npm test` on the host still runs everything. The two host-only files
     // above are the whole of the manual step: run them on the host after a

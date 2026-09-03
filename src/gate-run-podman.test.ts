@@ -116,7 +116,7 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "exits green, then red, and leaves no pod behind either time",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+      const { repo, config, podExists } =
         await gateRunFixture(task.id, onTestFinished);
 
       const out: string[] = [];
@@ -165,7 +165,7 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "keeps a stack when asked, and the next invocation reuses the pod rather than a second one",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+      const { repo, podName, config, podExists, podId } =
         await gateRunFixture(task.id, onTestFinished);
 
       const out: string[] = [];
@@ -222,7 +222,7 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "keeps an adopted stack whose re-probe fails, and does not call it a half-built bringup",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+      const { repo, podName, config, podId } =
         await gateRunFixture(task.id, onTestFinished);
 
       const out: string[] = [];
@@ -334,7 +334,7 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "refuses up front when a referenced image is missing, naming the pull",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+      const { repo, config, podExists } =
         await gateRunFixture(task.id, onTestFinished);
 
       const cfg = config([
@@ -385,7 +385,7 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "reports no verdict rather than a red when an issue container will not come up, and does not keep the wreckage",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+      const { repo, config, podExists } =
         await gateRunFixture(task.id, onTestFinished);
 
       const cfg = config([
@@ -463,7 +463,7 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "does not build a declared image no gateStack container runs",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+      const { repo, SANDBOX_ONLY_TAG, config, podExists } =
         await gateRunFixture(task.id, onTestFinished);
 
       await rmi(SANDBOX_ONLY_TAG);
@@ -507,7 +507,7 @@ describe.runIf(available)("sandbar gate against real podman", () => {
   it.concurrent(
     "reds — not 2 — when an image the stack DOES run will not build",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, podName, SANDBOX_ONLY_TAG, config, podExists, podId } =
+      const { repo, SANDBOX_ONLY_TAG, config, podExists } =
         await gateRunFixture(task.id, onTestFinished);
 
       await rmi(SANDBOX_ONLY_TAG);

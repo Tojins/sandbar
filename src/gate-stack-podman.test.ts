@@ -147,7 +147,7 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "a red step stops the run, names itself, and carries the container logs",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, stackId, cName, hold } = await gateStackFixture(
+      const { repo, stackId, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
@@ -216,7 +216,7 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "refuses to gate a dirty worktree instead of reporting a verdict about it",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, stackId, cName, hold } = await gateStackFixture(
+      const { repo, stackId, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
@@ -271,7 +271,7 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "a container running as root in the pod writes worktree files owned by the host user",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, stackId, cName, hold } = await gateStackFixture(
+      const { repo, stackId, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
@@ -501,7 +501,7 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "a red gate carries the logs of containers the failing step never ran in",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, stackId, cName, hold } = await gateStackFixture(
+      const { repo, stackId, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
@@ -557,7 +557,7 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "a readiness-less container that dies at startup fails bringup",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, stackId } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
@@ -605,7 +605,7 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "a bringup failure names the stack it was told it belongs to",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, stackId, cName } = await gateStackFixture(
+      const { repo, cName } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
@@ -766,7 +766,7 @@ describe.runIf(available)("gate stack against real podman", () => {
       );
 
       const name = cName("svc");
-      const stack = hold(
+      hold(
         await startStack({
           stackId: stackId,
           scope: SCOPE,

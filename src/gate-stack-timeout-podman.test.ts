@@ -45,7 +45,7 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
   it.concurrent(
     "a step that exceeds its timeout is a red gate naming the step and the bound",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, stackId, cName, hold } = await gateStackFixture(
+      const { repo, stackId, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
@@ -105,9 +105,9 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
   );
 
   // The note #26 makes about killing the step: the `podman exec` CLIENT dying
-  // does nothing to the process in the container (pinned below), so without
-  // a reap the timed-out work keeps running — burning CPU beside the next
-  // attempt and skewing whatever the next gate run measures.
+  // does nothing to the process in the container (#26 and git history), so
+  // without a reap the timed-out work keeps running — burning CPU beside the
+  // next attempt and skewing whatever the next gate run measures.
   it.concurrent(
     "the timed-out work is reaped: an issue container is recreated, only the step's container touched",
     async ({ expect, task, onTestFinished }) => {
@@ -258,15 +258,14 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
 
 // Sandbar owns this bound; the deleted siblings pinned podman quirks.
 describe.runIf(available)("sandbar healthcheck timeout", () => {
-  // The CONTROL half, and it carries the weight: the test above passes just as
-  // happily with `--health-timeout` added back to `healthCheckArgs`, because
-  // asserting that podman does not enforce says nothing about who does. This is
-  // the assertion that fails if sandbar's own deadline ever stops being the
-  // bound — the container's `readinessTimeoutMs`, enforced by `boundedPodman`
-  // through the production bringup path.
+  // This is the recurring control for #43's podman finding, retained in the
+  // issue and git history: knowing podman does not enforce `--health-timeout`
+  // says nothing about who does. This assertion fails if sandbar's own deadline
+  // ever stops being the bound — the container's `readinessTimeoutMs`, enforced
+  // by `boundedPodman` through the production bringup path.
   it.concurrent(
     "sandbar's readinessTimeoutMs IS the bound on a probe that never returns",
-    async ({ expect, task, onTestFinished }) => {
+    async ({ expect, task }) => {
       const stackId = podmanTestStackId("podmantest", task.id);
       const repo = await mkdtemp(join(tmpdir(), "sandbar-hcbound-"));
       try {

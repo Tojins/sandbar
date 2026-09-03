@@ -210,7 +210,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
   it.concurrent(
     "halts a failing BASE build rather than leaving a stale tag in place",
     async ({ expect, task, onTestFinished }) => {
-      const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
+      const { root, image } = await fixture(task.id, onTestFinished);
 
       await writeFile(
         join(root, "Containerfile"),
@@ -262,7 +262,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
   it.concurrent(
     "refuses a declared path that is not in the build context, instead of going inert",
     async ({ expect, task, onTestFinished }) => {
-      const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
+      const { root, image } = await fixture(task.id, onTestFinished);
 
       // A typo here would otherwise make the whole declaration a no-op: the
       // path is absent from every tree, so it compares equal everywhere and the

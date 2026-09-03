@@ -4,7 +4,7 @@
 // and why its tests run concurrently — is the test util's.
 
 import { execFile } from "node:child_process";
-import { rm, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
@@ -284,7 +284,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   it.concurrent(
     "an image that will not build is a gate RED naming the image, not a throw",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, stackId, cName, hold } = await gateStackFixture(
+      const { repo, stackId, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
@@ -339,7 +339,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   it.concurrent(
     "does not resolve images for a worktree it is going to refuse anyway",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, stackId, cName, hold } = await gateStackFixture(
+      const { repo, stackId, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
