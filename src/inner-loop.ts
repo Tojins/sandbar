@@ -887,15 +887,43 @@ async function runGate1(
   };
 }
 
+class ReviewerWriteDetected extends Error {
+  constructor(readonly event: Extract<LoopEvent, { kind: "reviewer-wrote" }>) {
+    super(event.detail);
+  }
+}
+
 async function runReviewer(
   action: Extract<LoopAction, { kind: "run-reviewer" }>,
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
   const { issue, sandbox, opts, config } = ctx;
-  const beforeReview = await Promise.all([
-    branchTip(sandbox.worktreePath, issue.branch),
-    dirtyWorktreePaths(sandbox.worktreePath),
-  ]);
+  type ReviewSnapshot = readonly [string | null, readonly string[]];
+  const snapshot = (): Promise<ReviewSnapshot> =>
+    Promise.all([
+      branchTip(sandbox.worktreePath, issue.branch),
+      dirtyWorktreePaths(sandbox.worktreePath),
+    ]) as Promise<ReviewSnapshot>;
+  const detectWrite = async (before: ReviewSnapshot): Promise<void> => {
+    const after = await snapshot();
+    if (
+      before[0] === after[0] &&
+      JSON.stringify(before[1]) === JSON.stringify(after[1])
+    ) {
+      return;
+    }
+    sandbox.preserveWorktree();
+    // Deleting the issue ref is itself a reviewer write. There is then no ref
+    // to publish, but the preserved clone still contains the evidence.
+    if (after[0] !== null) await sandbox.syncBranchToCache();
+    throw new ReviewerWriteDetected({
+      kind: "reviewer-wrote",
+      detail:
+        `Reviewer changed git state. Branch tip before: ${before[0]}; ` +
+        `after: ${after[0]}. Status after:\n` +
+        (after[1].length > 0 ? after[1].join("\n") : "(clean worktree)"),
+    });
+  };
 
   const reviewerPromptInputs = {
     issue,
@@ -919,6 +947,7 @@ async function runReviewer(
     modelId: string,
   ): Promise<ReviewerOutcome> => runReviewerInvocations(
     async (invocation) => {
+      const beforeInvocation = await snapshot();
       // The retry is a fresh agent run in the SAME sandbox. The sandbox is not
       // what failed — in the observed case the implementer was working in it
       // concurrently — and rebuilding it would restart the whole issue from
@@ -968,13 +997,16 @@ async function runReviewer(
           reviewerRun.usage,
           reviewerRun.toolCalls,
         );
+        await detectWrite(beforeInvocation);
         return { output: reviewerRun.stdout, error: null };
       } catch (err) {
+        if (err instanceof ReviewerWriteDetected) throw err;
         // A failed invocation is timed too: an invocation that burned the ten
         // minutes and died is the expensive case, and one that fell over in a
         // second is a different fault entirely.
         const partial = agentPartialUsage(err);
         await logPass(undefined, partial.usage, partial.toolCalls);
+        await detectWrite(beforeInvocation);
         // The bytes the agent had emitted before it failed ride out on the
         // error (#41, agent-sandbox F9). Without them a reviewer that emitted
         // a verdict and then died is indistinguishable from one that emitted
@@ -997,11 +1029,17 @@ async function runReviewer(
     },
   );
 
-  const correctness = await runPass(
-    "correctness",
-    reviewerPrompts.correctness,
-    config.reviewerModelId,
-  );
+  let correctness: ReviewerOutcome;
+  try {
+    correctness = await runPass(
+      "correctness",
+      reviewerPrompts.correctness,
+      config.reviewerModelId,
+    );
+  } catch (err) {
+    if (err instanceof ReviewerWriteDetected) return err.event;
+    throw err;
+  }
 
   const transcripts = [`=== correctness pass ===\n${correctness.transcript}`];
   // Every invocation's output, not just the reviewing one: the observed failure
@@ -1015,11 +1053,17 @@ async function runReviewer(
       : null;
 
   if (afterCorrectness.kind === "run-followup") {
-    const followup = await runPass(
-      "followup",
-      reviewerPrompts.followup,
-      config.reviewerFollowupModelId,
-    );
+    let followup: ReviewerOutcome;
+    try {
+      followup = await runPass(
+        "followup",
+        reviewerPrompts.followup,
+        config.reviewerFollowupModelId,
+      );
+    } catch (err) {
+      if (err instanceof ReviewerWriteDetected) return err.event;
+      throw err;
+    }
     transcripts.push(`=== follow-up pass ===\n${followup.transcript}`);
     if (followup.kind === "harness-failed") {
       failed = { pass: "followup", invocations: followup.invocations };
@@ -1047,27 +1091,6 @@ async function runReviewer(
   if (failed) console.error(`  ${line}`);
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(line);
-  }
-  const afterReview = await Promise.all([
-    branchTip(sandbox.worktreePath, issue.branch),
-    dirtyWorktreePaths(sandbox.worktreePath),
-  ]);
-  if (
-    beforeReview[0] !== afterReview[0] ||
-    JSON.stringify(beforeReview[1]) !== JSON.stringify(afterReview[1])
-  ) {
-    sandbox.preserveWorktree();
-    // Deleting the issue ref is itself a reviewer write. There is then no ref
-    // to publish, but the preserved clone still contains the evidence and the
-    // reviewer-wrote terminal must win over a fetch failure (#98).
-    if (afterReview[0] !== null) await sandbox.syncBranchToCache();
-    return {
-      kind: "reviewer-wrote",
-      detail:
-        `Reviewer changed git state. Branch tip before: ${beforeReview[0]}; ` +
-        `after: ${afterReview[0]}. Status after:\n` +
-        (afterReview[1].length > 0 ? afterReview[1].join("\n") : "(clean worktree)"),
-    };
   }
   return decision.event;
 }

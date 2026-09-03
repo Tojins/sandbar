@@ -534,9 +534,9 @@ describe("finalizeOne", () => {
       LABELS,
     );
 
-    expect(action.kind).toBe("delete-failed");
-    if (action.kind === "delete-failed") {
-      expect(action.error).toContain("not on origin");
+    expect(action.kind).toBe("kept-branch");
+    if (action.kind === "kept-branch") {
+      expect(action.reason).toContain("not on origin");
     }
     expect(calls.forceDeletes).toEqual([]);
     // The handoff itself still completed — the human gets the comment and the
@@ -860,8 +860,8 @@ describe("finalizeOne", () => {
     );
 
     expect(action).toEqual({
-      kind: "delete-failed",
-      error: expect.stringContaining("preserved issue clone"),
+      kind: "kept-branch",
+      reason: expect.stringContaining("preserved issue clone"),
     });
     expect(calls.pushes).toEqual([]);
     expect(calls.deletes).toEqual([]);
@@ -1123,8 +1123,8 @@ describe("finalizeOne", () => {
     );
 
     expect(action).toEqual({
-      kind: "delete-failed",
-      error: expect.stringContaining("preserved issue clone"),
+      kind: "kept-branch",
+      reason: expect.stringContaining("preserved issue clone"),
     });
     expect(calls.worktreeRemoves).toEqual([]);
     expect(calls.deletes).toEqual([]);

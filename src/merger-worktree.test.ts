@@ -29,7 +29,7 @@ describe("mergerWorktreePathFor", () => {
 // ---------------------------------------------------------------------------
 // Integration: real git, no podman. Validates the core issue-#10 claim — the
 // merge surface is clean regardless of the operator's dirty checkout — plus the
-// gitlink mount resolution end-to-end.
+// standalone clone's ref and remote configuration.
 // ---------------------------------------------------------------------------
 
 const git = (args: string[], cwd: string) =>
@@ -67,7 +67,7 @@ describe("createMergerWorktree (real git)", () => {
   });
 
   it("checks out a clean tree at origin/main even when the operator checkout is dirty", async () => {
-    const { cwd, layout } = await setupRepoWithOrigin();
+    const { origin, cwd, layout } = await setupRepoWithOrigin();
     dirs.push(join(cwd, ".."));
 
     // Operator has unrelated uncommitted work in their primary checkout.
@@ -84,6 +84,12 @@ describe("createMergerWorktree (real git)", () => {
     const cacheWorktrees = await git(["worktree", "list"], layout.repoDir);
     expect(cacheWorktrees.stdout).not.toContain(wt.path);
     expect((await stat(join(wt.path, ".git"))).isDirectory()).toBe(true);
+    expect((await git(["config", "--get", "remote.origin.url"], wt.path)).stdout.trim()).toBe(
+      origin,
+    );
+    expect((await git(["rev-parse", "origin/main"], wt.path)).stdout.trim()).toBe(
+      (await git(["rev-parse", "origin/main"], layout.repoDir)).stdout.trim(),
+    );
 
     // The merge surface is clean — the operator's edits are not present.
     const status = await git(["status", "--porcelain"], wt.path);

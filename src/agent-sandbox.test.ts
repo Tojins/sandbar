@@ -9,7 +9,7 @@
 // and the two-phase completion timer (F5).
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { appendFile, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -1836,15 +1836,15 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     const target = worktreePathFor(layout.worktreesDir, branch);
     await mkdir(target, { recursive: true });
     await writeFile(join(target, "stale"), "garbage");
-      const worktreePath = await prepareWorktree({
-        branch,
-        layout,
-        copyToWorktree: [],
-      });
+    const worktreePath = await prepareWorktree({
+      branch,
+      layout,
+      copyToWorktree: [],
+    });
 
-      expect(worktreePath).toBe(worktreePathFor(layout.worktreesDir, branch));
-      expect((await stat(worktreePath)).isDirectory()).toBe(true);
-      expect(existsSync(join(worktreePath, "stale"))).toBe(false);
+    expect(worktreePath).toBe(worktreePathFor(layout.worktreesDir, branch));
+    expect((await stat(worktreePath)).isDirectory()).toBe(true);
+    expect(existsSync(join(worktreePath, "stale"))).toBe(false);
   });
 
   it("reuses a clean worktree when its local issue branch is absent from origin", async () => {
@@ -2287,7 +2287,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
         }),
       ).rejects.toThrow(/copyToWorktree is ignored/);
     } finally {
-    await rm(worktreePath, { recursive: true, force: true });
+      await rm(worktreePath, { recursive: true, force: true });
     }
   });
 

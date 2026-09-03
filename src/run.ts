@@ -751,9 +751,11 @@ export async function run(
               ? "pushed branch"
               : r.action.kind === "parked-local"
                 ? "parked; branch preserved locally"
-              : r.action.kind === "skipped-closed"
-                ? "skipped (issue already closed)"
-                : "no action";
+                : r.action.kind === "kept-branch"
+                  ? r.action.reason
+                  : r.action.kind === "skipped-closed"
+                    ? "skipped (issue already closed)"
+                    : "no action";
       console.log(`  #${issueNumberOf(issue)} ${r.input.kind} → ${tag}`);
       await runLogger.appendOrchestrator(
         `finalise #${issueNumberOf(issue)} ${r.input.kind} → ${tag}`,

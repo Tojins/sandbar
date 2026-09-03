@@ -1025,45 +1025,6 @@ const gitConfigOrEmpty = (args: string[], cwd: string): Promise<string> =>
       throw err;
     });
 
-// ---------------------------------------------------------------------------
-// WorktreeManager — verbatim semantics from WorktreeManager.ts (no Effect)
-// ---------------------------------------------------------------------------
-
-type WorktreeEntry = { path: string; branch: string | null };
-
-const normalizePath = (p: string): string => p.replace(/\\/g, "/");
-
-const listWorktrees = async (repoDir: string): Promise<WorktreeEntry[]> => {
-  const output = await execGit(["worktree", "list", "--porcelain"], repoDir);
-  const entries: WorktreeEntry[] = [];
-  let currentPath: string | null = null;
-  let currentBranch: string | null = null;
-  for (const line of output.split("\n")) {
-    if (line.startsWith("worktree ")) {
-      if (currentPath !== null) {
-        entries.push({ path: currentPath, branch: currentBranch });
-      }
-      currentPath = line.slice("worktree ".length).trim();
-      currentBranch = null;
-    } else if (line.startsWith("branch ")) {
-      currentBranch = line.slice("branch refs/heads/".length).trim();
-    }
-  }
-  if (currentPath !== null) {
-    entries.push({ path: currentPath, branch: currentBranch });
-  }
-  return entries;
-};
-
-// Branch first, then target-path fallback (catches detached-HEAD reuse).
-const findCollidingWorktree = (
-  existing: WorktreeEntry[],
-  branch: string,
-  worktreePath: string,
-): WorktreeEntry | undefined =>
-  existing.find((wt) => wt.branch === branch) ??
-  existing.find((wt) => normalizePath(wt.path) === normalizePath(worktreePath));
-
 // `-c status.showUntrackedFiles=normal`: a bare `git status --porcelain` honours
 // that setting, and a repo (or user) that sets it to `no` would make this report
 // a worktree holding a forgotten `git add` as clean — so the worktree gets
@@ -1291,13 +1252,6 @@ const worktreeCreate = (
         `Worktree creation timed out after ${WORKTREE_TIMEOUT_MS}ms`,
       ),
   );
-
-// Issue clones are ordinary directories, not registrations in the cache.
-const worktreeRemove = (
-  _repoDir: string,
-  worktreePath: string,
-): Promise<void> =>
-  rm(worktreePath, { recursive: true, force: true });
 
 // Clones have no central worktree registry. Sweep only directories that cannot
 // belong to a live issue: unmarked debris, or a marked clone whose branch no
@@ -2035,7 +1989,7 @@ export const prepareWorktree = async (
     }
   } catch (e) {
     try {
-      await worktreeRemove(repoDir, worktreePath);
+      await rm(worktreePath, { recursive: true, force: true });
     } catch (cleanupError) {
       console.error("Failed to remove worktree after setup failure:", cleanupError);
     }
@@ -2139,7 +2093,7 @@ export const createSandbox = async (
     // bogus missing-mount-source failure (#20).
     if (!prepared) {
       try {
-        await worktreeRemove(repoDir, worktreePath);
+        await rm(worktreePath, { recursive: true, force: true });
       } catch (cleanupError) {
         console.error("Failed to remove worktree after sandbox failure:", cleanupError);
       }
@@ -2312,7 +2266,7 @@ export const createSandbox = async (
       if (preserveWorktree || dirty || !onIssueBranch || strandedCommits) {
         return { preservedWorktreePath: worktreePath };
       }
-      await worktreeRemove(repoDir, worktreePath);
+      await rm(worktreePath, { recursive: true, force: true });
       return { preservedWorktreePath: undefined };
     },
   };

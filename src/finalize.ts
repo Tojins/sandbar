@@ -554,6 +554,7 @@ export type FinalizeAction =
   | { readonly kind: "delete-failed"; readonly error: string }
   | { readonly kind: "pushed" }
   | { readonly kind: "parked-local" }
+  | { readonly kind: "kept-branch"; readonly reason: string }
   // A human-handoff terminal landed on an already-CLOSED issue, so the label
   // flip + comment were skipped. Its clone is reclaimed unless it contains
   // evidence the corresponding open-issue handoff would preserve. See #16.
@@ -767,8 +768,8 @@ export async function finalizeOne(
       // in STRANDED_COMMITS_NOTE on the next sandbox creation (#98).
       if (input.strandedHead != null) {
         return {
-          kind: "delete-failed",
-          error:
+          kind: "kept-branch",
+          reason:
             "kept the cache branch so the preserved issue clone and its stranded work remain recoverable",
         };
       }
@@ -793,8 +794,8 @@ export async function finalizeOne(
       if (d.ok) return { kind: "deleted-local" };
       if (!(await adapter.branchIsContainedInOrigin(input.issue.branch))) {
         return {
-          kind: "delete-failed",
-          error:
+          kind: "kept-branch",
+          reason:
             `${d.error ?? "branch -d refused"} — kept: it carries commits that ` +
             `are not on origin (an earlier attempt's work), and this handoff ` +
             `did not push it.`,
@@ -930,8 +931,8 @@ export async function finalizeOne(
       await removeIssueCloneUnlessPreserved(input, adapter);
       if (input.strandedHead !== null) {
         return {
-          kind: "delete-failed",
-          error:
+          kind: "kept-branch",
+          reason:
             "kept the cache branch so the preserved issue clone and its stranded work remain recoverable",
         };
       }
