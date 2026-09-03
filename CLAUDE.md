@@ -333,7 +333,14 @@ and used to announce themselves in four different ways, the halt in none at all.
   NEEDS-UI-PROTOTYPE</promise>`; resolve loop: `COMMITTED|ABANDON`; anything
   else re-prompts. Reviewer: `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`.
   A run without a verdict token is a reviewer harness failure, never a
-  fabricated CHANGES-REQUESTED (#41, #83).
+  fabricated CHANGES-REQUESTED (#41, #83). A token is one of those LITERAL
+  strings and nothing else (#113): a tag quoted in prose, an unclosed opener,
+  a mis-cased or empty tag are prose, the last well-formed token wins, and
+  the free-text blocks (`<questions>`, `<reason>`) cannot be swallowed by a
+  quoted opener. `src/token-scan.ts` is the one spelling of both scans and
+  owns the argument — the reviewer reviews the code that spells the token and
+  quotes what it reviews, which is how #88's approving round 8 parsed as a
+  rejection.
   The orchestrator gates between attempts; agents never decide "green".
 - **Prompt prose lives in `prompts/*.md`**, loaded by `src/prompts.ts`; TS
   keeps only structure. Every git range a prompt renders anchors at the issue

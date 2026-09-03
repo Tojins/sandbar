@@ -148,15 +148,47 @@ describe("parsePromise", () => {
     }
   });
 
-  it("returns NO-SIGNAL with verbatim mention of an unknown token", () => {
+  // A token is one of the three literal strings (#113); a tag around any other
+  // word is prose, so the output carries no token and the nudge — which names
+  // the three valid ones — is the correction.
+  it("treats an unknown token as a missing one", () => {
     const r = parsePromise("<promise>FOOBAR</promise>", withCommits);
     expect(r.kind).toBe("NO-SIGNAL");
     if (r.kind === "NO-SIGNAL") {
-      expect(r.reprompt).toContain('"FOOBAR"');
-      expect(r.reprompt).toContain("`COMPLETE`");
-      expect(r.reprompt).toContain("`NEEDS-INFO`");
-      expect(r.reprompt).toContain("`NEEDS-UI-PROTOTYPE`");
+      expect(r.missingTag).toBe(true);
+      expect(r.reprompt).toContain("<promise>COMPLETE</promise>");
+      expect(r.reprompt).toContain("<promise>NEEDS-INFO</promise>");
+      expect(r.reprompt).toContain("<promise>NEEDS-UI-PROTOTYPE</promise>");
     }
+  });
+
+  // The #88 shape (#113): an opener quoted without a closer used to become the
+  // start of the token, and the real token's closer ended it.
+  it("a quoted opener without a closer does not swallow the real token", () => {
+    const r = parsePromise(
+      "the parser scans `/<promise>([\\s\\S]*?)<\\/promise>/g` today.\n" +
+        "Committed the fix.\n<promise>COMPLETE</promise>",
+      withCommits,
+    );
+    expect(r.kind).toBe("COMPLETE");
+  });
+
+  it("a well-formed token quoted before the real one loses to it", () => {
+    const r = parsePromise(
+      "the prompt asks for <promise>COMPLETE</promise> when done.\n" +
+        "<questions>\nWhich?\n</questions>\n<promise>NEEDS-INFO</promise>",
+      withCommits,
+    );
+    expect(r).toEqual({ kind: "NEEDS-INFO", questions: "Which?" });
+  });
+
+  it("a quoted block opener does not swallow the real block", () => {
+    const r = parsePromise(
+      "I will put them in a `<questions>` block.\n" +
+        "<questions>\nWhich?\n</questions>\n<promise>NEEDS-INFO</promise>",
+      withCommits,
+    );
+    expect(r).toEqual({ kind: "NEEDS-INFO", questions: "Which?" });
   });
 
   // `missingTag` is the promise nudge's licence (inner-loop.ts): only output
@@ -169,12 +201,6 @@ describe("parsePromise", () => {
       const r = parsePromise("finished everything, see the commits", withCommits);
       expect(r.kind).toBe("NO-SIGNAL");
       if (r.kind === "NO-SIGNAL") expect(r.missingTag).toBe(true);
-    });
-
-    it("is absent for an unknown token", () => {
-      const r = parsePromise("<promise>FOOBAR</promise>", withCommits);
-      expect(r.kind).toBe("NO-SIGNAL");
-      if (r.kind === "NO-SIGNAL") expect(r.missingTag).toBeUndefined();
     });
 
     it("is absent for a zero-commit COMPLETE", () => {
@@ -213,9 +239,8 @@ describe("parsePromise", () => {
     });
   });
 
-  it("rejects token with extra content (NEEDS-HUMAN is not a valid agent-emitted token)", () => {
+  it("rejects NEEDS-HUMAN (not a valid agent-emitted token)", () => {
     const r = parsePromise("<promise>NEEDS-HUMAN</promise>", withCommits);
-    expect(r.kind).toBe("NO-SIGNAL");
-    if (r.kind === "NO-SIGNAL") expect(r.reprompt).toContain('"NEEDS-HUMAN"');
+    expect(r).toMatchObject({ kind: "NO-SIGNAL", missingTag: true });
   });
 });

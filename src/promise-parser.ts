@@ -6,18 +6,27 @@
 // is a no-signal — the inner loop keeps going, optionally with a re-prompt
 // hint payload that the next attempt's prompt should include.
 //
-// `missingTag` marks the one NO-SIGNAL flavour where NO tag was emitted at
-// all, as opposed to a tag that failed its guard. The distinction is the inner
-// loop's licence for the promise nudge: no tag is overwhelmingly a finished
-// agent that forgot the contract, worth one cheap same-conversation follow-up
-// before it costs a full attempt; a failed guard means the agent got the
-// substance wrong, and the guard's specific re-prompt is the correction.
+// `missingTag` marks the one NO-SIGNAL flavour where NO token was emitted at
+// all, as opposed to a token that failed its guard. The distinction is the
+// inner loop's licence for the promise nudge: no token is overwhelmingly a
+// finished agent that forgot the contract, worth one cheap same-conversation
+// follow-up before it costs a full attempt; a failed guard means the agent got
+// the substance wrong, and the guard's specific re-prompt is the correction.
+//
+// A token is one of the three literal strings and nothing else (#113): a
+// `<promise>` quoted in prose, an unclosed opener, a tag around some other
+// word — all prose, none a signal. So an unknown word inside the tag is the
+// missing-token case (the nudge names the three valid ones), and a quoted
+// opener cannot swallow the real token that follows it. `token-scan.ts` owns
+// the scan and the argument.
 //
 // NEEDS-UI-PROTOTYPE is deliberately NOT guarded on `commitsAccumulated === 0`:
 // an agent often only realises it is inventing UI a few files in, and rejecting
 // a late escalation would punish it for noticing. "No commits exist when this
 // fires" stays a prompt-level expectation, never an invariant downstream code
 // relies on (finalize handles both cases).
+
+import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
 
 export type ParseSignal =
   | { readonly kind: "COMPLETE" }
@@ -76,24 +85,25 @@ const NEEDS_UI_PROTOTYPE_NO_IMPACT =
 // drafts a block, keeps working, then re-emits a revised one must have the
 // revision reach the human, not the draft it superseded.
 function lastBlock(stdout: string, tag: string): string {
-  const matches = [
-    ...stdout.matchAll(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "g")),
-  ];
-  const last = matches[matches.length - 1];
-  return (last?.[1] ?? "").trim();
+  return lastToken(stdout, temperedBlockPattern(tag)) ?? "";
 }
+
+// The literal alternation of the three tokens (#113): a `<promise>` quoted in
+// prose, or a tag around anything else, is not a signal and cannot swallow
+// the one that follows it.
+const PROMISE_TOKEN_ALL = literalTokenPattern(
+  "promise",
+  Object.values(PROMISE_TOKENS),
+);
 
 export function parsePromise(
   stdout: string,
   ctx: ParseContext,
 ): ParseSignal {
-  const matches = [...stdout.matchAll(/<promise>([\s\S]*?)<\/promise>/g)];
-  if (matches.length === 0) {
+  const token = lastToken(stdout, PROMISE_TOKEN_ALL);
+  if (token === null) {
     return { kind: "NO-SIGNAL", reprompt: STILL_WORKING, missingTag: true };
   }
-
-  const last = matches[matches.length - 1]!;
-  const token = (last[1] ?? "").trim();
 
   if (token === PROMISE_TOKENS.COMPLETE) {
     if (ctx.commitsAccumulated === 0) {
@@ -118,10 +128,5 @@ export function parsePromise(
     return { kind: "NEEDS-UI-PROTOTYPE", uiImpact };
   }
 
-  return {
-    kind: "NO-SIGNAL",
-    reprompt:
-      `Unknown promise token: "${token}". Only \`COMPLETE\`, \`NEEDS-INFO\` ` +
-      "and `NEEDS-UI-PROTOTYPE` are valid. Continue working.",
-  };
+  throw new Error(`parsePromise: literal scan yielded a token it does not own: "${token}"`);
 }

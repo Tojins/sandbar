@@ -9,8 +9,20 @@
 // requires a located, concrete defect and otherwise APPROVES; the follow-up
 // receives sandbar's built-in prompts/coding-standards.md plus any project
 // standards file that extends it. That keeps either verdict deterministic.
-// Missing tokens are absence, not a fabricated verdict. The reviewer harness
-// filters those runs by parsing once. Last token wins when several are emitted.
+//
+// A token is one of those two literal strings and nothing else (#113). A
+// `<verdict>` quoted in prose without a closer, a mis-cased or empty tag, a
+// tag around a paragraph — none is a token, so none can stand in for one: a
+// run carrying only those is absence, exactly like a run carrying nothing,
+// and the reviewer harness retries it without spending a round (#41). The
+// alternative the parser used to take — read whatever sits between the
+// nearest `<verdict>` and the next `</verdict>` and call anything but APPROVED
+// a rejection — fabricated a CHANGES-REQUESTED from an approving review that
+// quoted the token's regex, and #88 parked on it. Last well-formed token wins
+// when several are emitted, so a token quoted before the real one loses to it.
+// `token-scan.ts` owns the scan and the argument.
+
+import { lastToken, literalTokenPattern } from "./token-scan.js";
 
 export type Verdict = "APPROVED" | "CHANGES-REQUESTED";
 
@@ -19,18 +31,21 @@ export type ParsedVerdict = {
   readonly prose: string;
 };
 
-// `matchAll` clones this shared global regex, so repeated parses cannot leak
-// `lastIndex` from one invocation into the next.
-const VERDICT_TOKEN_ALL = /<verdict>([\s\S]*?)<\/verdict>/g;
+export const VERDICT_TOKENS: readonly Verdict[] = ["APPROVED", "CHANGES-REQUESTED"];
+
+const VERDICT_TOKEN_ALL = literalTokenPattern("verdict", VERDICT_TOKENS);
 
 export function parseVerdict(stdout: string): ParsedVerdict | null {
-  const prose = stdout;
-  const matches = [...stdout.matchAll(VERDICT_TOKEN_ALL)];
-  if (matches.length === 0) {
-    return null;
-  }
-  const last = matches[matches.length - 1]!;
-  const token = (last[1] ?? "").trim();
-  if (token === "APPROVED") return { verdict: "APPROVED", prose };
-  return { verdict: "CHANGES-REQUESTED", prose };
+  const token = lastToken(stdout, VERDICT_TOKEN_ALL);
+  if (token === null) return null;
+  return { verdict: token as Verdict, prose: stdout };
+}
+
+// The prose with every well-formed verdict token removed — what a later
+// prompt may quote as the reviewer's findings without re-emitting its
+// decision. Strips exactly what `parseVerdict` recognises: a quoted opener or
+// a malformed tag is prose to both, so the strip and the parse cannot
+// disagree about where the findings end.
+export function stripVerdictTokens(prose: string): string {
+  return prose.replace(VERDICT_TOKEN_ALL, "");
 }

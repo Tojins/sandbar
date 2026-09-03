@@ -38,7 +38,7 @@ import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
 import type { SandboxContainerStatus } from "./sandbox-stack.js";
-import type { ParsedVerdict } from "./verdict-parser.js";
+import { type ParsedVerdict, stripVerdictTokens } from "./verdict-parser.js";
 
 const exec = promisify(execFile);
 
@@ -625,9 +625,7 @@ function renderReviewerTemplate(
 }
 
 function reviewFindings(pass: ParsedVerdict): string {
-  return pass.prose
-    .replace(/<verdict>[\s\S]*?<\/verdict>/g, "")
-    .trim();
+  return stripVerdictTokens(pass.prose).trim();
 }
 
 function renderPriorReviewPass(name: "correctness" | "followup", pass: ParsedVerdict): string {

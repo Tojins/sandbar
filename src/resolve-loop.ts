@@ -66,6 +66,7 @@ import {
 import type { MergerGateOutput } from "./merger.js";
 import { durationField, startTimer } from "./timing.js";
 import { loadTemplate, render } from "./prompts.js";
+import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
 import { formatUsageFields } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
 
@@ -769,15 +770,15 @@ export type ResolveSignal =
   | { readonly kind: "ABANDON"; readonly reason: string }
   | { readonly kind: "NO-SIGNAL" };
 
+// Literal tokens only, last wins; a `<promise>` quoted in the agent's prose is
+// not a signal and cannot swallow the real one (#113, token-scan.ts). The
+// `<reason>` block is free text, so it takes the tempered form instead.
+const RESOLVE_TOKEN_ALL = literalTokenPattern("promise", ["COMMITTED", "ABANDON"]);
+
 export function parseResolveSignal(stdout: string): ResolveSignal {
-  const matches = [...stdout.matchAll(/<promise>([\s\S]*?)<\/promise>/g)];
-  if (matches.length === 0) return { kind: "NO-SIGNAL" };
-  const token = (matches[matches.length - 1]![1] ?? "").trim();
+  const token = lastToken(stdout, RESOLVE_TOKEN_ALL);
+  if (token === null) return { kind: "NO-SIGNAL" };
   if (token === "COMMITTED") return { kind: "COMMITTED" };
-  if (token === "ABANDON") {
-    const m = stdout.match(/<reason>([\s\S]*?)<\/reason>/);
-    const reason = m && m[1] ? m[1].trim() : "(no reason given)";
-    return { kind: "ABANDON", reason };
-  }
-  return { kind: "NO-SIGNAL" };
+  const reason = lastToken(stdout, temperedBlockPattern("reason"));
+  return { kind: "ABANDON", reason: reason || "(no reason given)" };
 }

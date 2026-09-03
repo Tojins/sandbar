@@ -188,6 +188,24 @@ describe("parseResolveSignal", () => {
       kind: "NO-SIGNAL",
     });
   });
+  // The #88 shape (#113): a quoted opener without a closer is prose, not the
+  // start of the token that follows it.
+  it("a quoted opener without a closer does not swallow the real token", () => {
+    expect(
+      parseResolveSignal(
+        "the loop scans `/<promise>([\\s\\S]*?)<\\/promise>/g`.\n" +
+          "Merged and committed.\n<promise>COMMITTED</promise>",
+      ),
+    ).toEqual({ kind: "COMMITTED" });
+  });
+  it("a quoted <reason> opener does not swallow the real reason block", () => {
+    expect(
+      parseResolveSignal(
+        "I will explain in a `<reason>` block.\n" +
+          "<reason>ours drops the API</reason>\n<promise>ABANDON</promise>",
+      ),
+    ).toEqual({ kind: "ABANDON", reason: "ours drops the API" });
+  });
 });
 
 describe("runResolveLoop — conflict mode", () => {

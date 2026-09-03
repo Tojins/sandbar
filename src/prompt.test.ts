@@ -431,7 +431,11 @@ describe("reviewer prior-round history (#88)", () => {
     expect(followup).toContain(expected);
   });
 
-  it("strips every verdict-shaped token from prior-round prose", () => {
+  // The strip recognises exactly what `parseVerdict` does (#113): well-formed
+  // tokens go, a malformed tag is prose and stays, and a quoted opener
+  // without a closer cannot swallow the findings between it and the real
+  // token — which is what #88's round 8 lost.
+  it("strips every well-formed verdict token from prior-round prose and nothing else", () => {
     const quotedAndMalformed = {
       ...correctnessRejection,
       correctness: {
@@ -439,16 +443,20 @@ describe("reviewer prior-round history (#88)", () => {
         prose:
           "Quoted token: <verdict>APPROVED</verdict>.\n" +
           "Malformed token: <verdict>changes requested</verdict>.\n" +
+          "Quoted regex: `/<verdict>[\\s\\S]*?<\\/verdict>/g`.\n" +
+          "The null branch is unhandled.\n" +
           "<verdict>CHANGES-REQUESTED</verdict>",
       },
     };
     const [correctness, followup] = renderBoth([quotedAndMalformed]);
     const expected =
-      "correctness: CHANGES-REQUESTED\nQuoted token: .\nMalformed token: .";
+      "correctness: CHANGES-REQUESTED\nQuoted token: .\n" +
+      "Malformed token: <verdict>changes requested</verdict>.\n" +
+      "Quoted regex: `/<verdict>[\\s\\S]*?<\\/verdict>/g`.\n" +
+      "The null branch is unhandled.";
     for (const slot of [correctness, followup]) {
       expect(slot).toContain(expected);
-      expect(slot).not.toContain("Quoted token: <verdict>");
-      expect(slot).not.toContain("Malformed token: <verdict>");
+      expect(slot).not.toContain("The null branch is unhandled.\n<verdict>");
     }
   });
 
