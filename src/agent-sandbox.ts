@@ -326,6 +326,9 @@ export interface Sandbox {
   // calls publish unconditionally; reviewer calls publish only after detecting
   // a branch write that must be handed to a human.
   syncBranchToCache(): Promise<void>;
+  // Keep the issue clone at close even when its worktree is clean. Reviewer
+  // writes use this so committed as well as uncommitted evidence survives.
+  preserveWorktree(): void;
   close(): Promise<{ preservedWorktreePath?: string }>;
 }
 
@@ -1146,6 +1149,23 @@ const syncIssueBranchToCache = async (
   );
 };
 
+const refreshIssueClone = async (
+  repoDir: string,
+  worktreePath: string,
+): Promise<void> => {
+  await execGit(
+    ["fetch", repoDir, "+refs/remotes/origin/*:refs/remotes/origin/*"],
+    worktreePath,
+  );
+  const originUrl = await gitConfigOrEmpty(
+    ["config", "--get", "remote.origin.url"],
+    repoDir,
+  );
+  if (originUrl) {
+    await execGit(["config", "remote.origin.url", originUrl], worktreePath);
+  }
+};
+
 const hasLocalBranch = async (
   repoDir: string,
   branch: string,
@@ -1180,8 +1200,10 @@ const worktreeCreate = (
         const marker = await issueCloneMarker(worktreePath);
         if (marker === branch) {
           // Recover a commit made immediately before a host-side publish was
-          // interrupted, then apply the existing clean-reuse policy.
+          // interrupted, refresh the prompt base refs, then apply the existing
+          // clean-reuse policy.
           await syncIssueBranchToCache(repoDir, worktreePath, branch);
+          await refreshIssueClone(repoDir, worktreePath);
           const dirty = await hasUncommittedChanges(worktreePath);
           if (dirty) {
             console.warn(
@@ -1196,10 +1218,7 @@ const worktreeCreate = (
       }
 
       await execGit(["clone", "--local", "--no-checkout", repoDir, worktreePath], repoDir);
-      await execGit(
-        ["fetch", repoDir, "+refs/remotes/origin/*:refs/remotes/origin/*"],
-        worktreePath,
-      );
+      await refreshIssueClone(repoDir, worktreePath);
       // A clone maps the cache's local branches to remote-tracking refs, and
       // the origin/* copy above may overwrite that name with an old branch
       // still present on the forge. Import the seed ensureIssueBranch authored
@@ -1208,10 +1227,6 @@ const worktreeCreate = (
         ["fetch", repoDir, `+refs/heads/${branch}:refs/heads/${branch}`],
         worktreePath,
       );
-      const originUrl = await gitConfigOrEmpty(["config", "--get", "remote.origin.url"], repoDir);
-      if (originUrl) {
-        await execGit(["config", "remote.origin.url", originUrl], worktreePath);
-      }
       await execGit(["config", ISSUE_CLONE_MARKER, branch], worktreePath);
       try {
         await execGit(["checkout", branch], worktreePath);
@@ -1244,12 +1259,11 @@ const pruneStaleIssueClones = async (
   repoDir: string,
   worktreesDir: string,
 ): Promise<void> => {
-  let entries: string[];
+  let entries: string[] = [];
   try {
     entries = await readdir(worktreesDir);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw err;
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
   for (const entry of entries) {
     if (entry === "source" || entry === "merger") continue;
@@ -1265,6 +1279,10 @@ const pruneStaleIssueClones = async (
     const branchIsLive = branch !== "" && (await hasLocalBranch(repoDir, branch));
     if (!branchIsLive) await rm(path, { recursive: true, force: true });
   }
+  // Migration from linked worktrees leaves registrations in the cache after
+  // their directories are removed above. Prune them now so branch deletion is
+  // not permanently blocked. The source worktree is locked and survives.
+  await execGit(["worktree", "prune"], repoDir);
 };
 
 // prepareWorktree runs once per planned issue in parallel. Keep the sweep and
@@ -2088,6 +2106,7 @@ export const createSandbox = async (
   const unregisterShutdown = registerShutdown(forceCleanup);
 
   let closed = false;
+  let preserveWorktree = false;
 
   const runOneIteration = async (
     agent: AgentProvider,
@@ -2224,13 +2243,16 @@ export const createSandbox = async (
     async syncBranchToCache() {
       await syncIssueBranchToCache(repoDir, worktreePath, branch);
     },
+    preserveWorktree() {
+      preserveWorktree = true;
+    },
     async close() {
       if (closed) return { preservedWorktreePath: undefined };
       closed = true;
       unregisterShutdown();
       await providerHandle.close();
       const dirty = await hasUncommittedChanges(worktreePath);
-      if (dirty) {
+      if (preserveWorktree || dirty) {
         return { preservedWorktreePath: worktreePath };
       }
       await worktreeRemove(repoDir, worktreePath);

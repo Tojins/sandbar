@@ -60,6 +60,15 @@ describe("terminalFinalizeInputs", () => {
         issue: issue("5"),
         terminal: { type: "HARD-ERROR", reason: "podman", commits: [] },
       },
+      {
+        issue: issue("6"),
+        terminal: {
+          type: "NEEDS-HUMAN-REVIEW",
+          cause: "reviewer-wrote",
+          latestReviewerProse: "changed",
+          commits: [],
+        },
+      },
     ];
     expect(terminalFinalizeInputs(outcomes).map((i) => i.kind)).toEqual([
       "needs-info",
@@ -67,6 +76,7 @@ describe("terminalFinalizeInputs", () => {
       "needs-human",
       "review-budget-exhausted",
       "hard-error",
+      "reviewer-wrote",
     ]);
   });
 

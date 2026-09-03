@@ -1057,6 +1057,25 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
+  it("preserves a clean clone when the caller requests an evidence handoff", async () => {
+    const branch = "sandbar/issue-98-reviewer-commit";
+    await git(["branch", branch], dir);
+    const sandbox = await createSandbox({
+      env: {},
+      branch,
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+    });
+    const path = sandbox.worktreePath;
+
+    sandbox.preserveWorktree();
+    const closed = await sandbox.close();
+
+    expect(closed).toEqual({ preservedWorktreePath: path });
+    expect(existsSync(path)).toBe(true);
+    await rm(path, { recursive: true, force: true });
+  });
+
   // #27 follow-up. The commit range is anchored at `refs/heads/<branch>`, not at
   // the worktree's HEAD. With HEAD on the branch the two are the same commit and
   // nothing changes; they diverge only when HEAD has wandered off, and there the
@@ -1889,7 +1908,60 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     expect(existsSync(orphan)).toBe(false);
   });
 
-  it("reuses the clone against its pinned forge origin when the operator remote changes", async () => {
+  it("prunes a legacy cache worktree registration after removing its directory", async () => {
+    const branch = "sandbar/issue-83-prune-migration";
+    const legacyBranch = "sandbar/issue-999-legacy-worktree";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    await git(["branch", legacyBranch], dir);
+    const legacyPath = worktreePathFor(layout.worktreesDir, legacyBranch);
+    await git(["worktree", "add", legacyPath, legacyBranch], dir);
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect(existsSync(legacyPath)).toBe(false);
+    expect((await git(["worktree", "list", "--porcelain"], dir)).stdout).not.toContain(
+      legacyPath,
+    );
+    await expect(git(["branch", "-D", legacyBranch], dir)).resolves.toBeDefined();
+  });
+
+  it("refreshes prompt base refs when reusing an issue clone", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-refresh-reuse-"));
+    const origin = join(root, "origin.git");
+    const checkout = join(root, "checkout");
+    try {
+      await git(["init", "--bare", origin], root);
+      await git(["clone", origin, checkout], root);
+      await git(["config", "user.name", "Test Host"], checkout);
+      await git(["config", "user.email", "host@test.com"], checkout);
+      await writeFile(join(checkout, "content.txt"), "first\n");
+      await git(["add", "."], checkout);
+      await git(["commit", "-m", "first"], checkout);
+      await git(["push", "-u", "origin", "HEAD:main"], checkout);
+      const branch = "sandbar/issue-83-refresh-reuse";
+      await git(["branch", branch], checkout);
+      const layout = layoutFor(checkout);
+      const clone = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+      const oldBase = (await git(["rev-parse", "origin/main"], clone)).stdout.trim();
+
+      await writeFile(join(checkout, "content.txt"), "second\n");
+      await git(["commit", "-am", "second"], checkout);
+      await git(["push", "origin", "HEAD:main"], checkout);
+      const newBase = (await git(["rev-parse", "origin/main"], checkout)).stdout.trim();
+      expect(newBase).not.toBe(oldBase);
+
+      await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+      expect((await git(["rev-parse", "origin/main"], clone)).stdout.trim()).toBe(
+        newBase,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects reuse when the cache's refreshed forge origin cannot be fetched", async () => {
     const root = await mkdtemp(join(tmpdir(), "asb-fetch-failure-"));
     const origin = join(root, "origin.git");
     const checkout = join(root, "checkout");
@@ -1919,7 +1991,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
           layout: layoutFor(checkout),
           copyToWorktree: [],
         }),
-      ).resolves.toContain("sandbar-issue-83-fetch-failure");
+      ).rejects.toThrow("Could not fetch origin/");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

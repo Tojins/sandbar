@@ -953,6 +953,28 @@ describe("finalizeOne", () => {
     ]);
   });
 
+  it("reviewer-wrote: leaves the preserved clone in place and publishes the handoff", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "reviewer-wrote",
+        issue: i,
+        latestReviewerProse: "Reviewer changed git state. Branch tip before: a; after: b.",
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    expect(calls.pushes).toEqual([i.branch]);
+    expect(calls.worktreeRemoves).toEqual([]);
+    expect(calls.comments[0]!.body).toContain("preserved for human inspection");
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+    ]);
+  });
+
   it("hard-error with commits: removes worktree, pushes only, no label flip, no comment", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);

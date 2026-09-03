@@ -1014,6 +1014,7 @@ async function runReviewer(
     JSON.stringify(beforeReview[1]) !== JSON.stringify(afterReview[1])
   ) {
     await sandbox.syncBranchToCache();
+    sandbox.preserveWorktree();
     return {
       kind: "reviewer-wrote",
       detail:
