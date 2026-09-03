@@ -124,6 +124,7 @@ const reviewerInputs = (base = sourceBranchBase("main"), sourceBranch = "main") 
   sourceBranch,
   base,
   claudeMdPath: "CLAUDE.md",
+  priorRounds: [],
 });
 
 describe("prompt slots resolve their base ref in a worktree of the bare cache (#40)", () => {

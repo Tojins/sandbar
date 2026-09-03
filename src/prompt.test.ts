@@ -25,6 +25,7 @@ const baseInputs = {
   base: sourceBranchBase("main"),
   codingStandardsPath: "docs/CODING_STANDARDS.md",
   claudeMdPath: "CLAUDE.md",
+  priorRounds: [],
 } as const;
 
 const implementerInputs = {
@@ -238,20 +239,13 @@ describe("renderReviewerSlot", () => {
     expect(slot).toMatch(/missing verdict is a failed reviewer invocation/i);
   });
 
-  it("never carries prior-round transcript fields (statelessness)", () => {
-    // The prompt's only inputs are the issue, branch state, and standards
-    // pointer — no prior-round prose, no historical verdicts, no "previous
-    // round said". Test the negative by checking the rendered output never
-    // mentions these patterns even when the diff itself does.
+  it("omits the prior-round section on the first reviewed round", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first",
       diff: "diff --git a/x b/x\n+hi",
     });
-    expect(slot).not.toMatch(/previous round/i);
-    expect(slot).not.toMatch(/prior round/i);
-    expect(slot).not.toMatch(/round 1/i);
-    expect(slot).not.toMatch(/last reviewer/i);
+    expect(slot).not.toContain("## Prior review rounds");
   });
 
   it("renders the commits block when commits exist", () => {
@@ -388,6 +382,74 @@ describe("renderReviewerFollowupSlot", () => {
     expect(slot).toContain("<verdict>APPROVED</verdict>");
     expect(slot).toContain("<verdict>CHANGES-REQUESTED</verdict>");
     expect(slot).toMatch(/Emit exactly one verdict/);
+  });
+});
+
+describe("reviewer prior-round history (#88)", () => {
+  const correctnessRejection = {
+    round: 1,
+    head: "1111111",
+    correctness: {
+      verdict: "CHANGES-REQUESTED" as const,
+      prose: "Null input crashes.\n<verdict>CHANGES-REQUESTED</verdict>",
+    },
+  };
+  const followupRejection = {
+    round: 2,
+    head: "2222222",
+    correctness: {
+      verdict: "APPROVED" as const,
+      prose: "<verdict>APPROVED</verdict>",
+    },
+    followup: {
+      verdict: "CHANGES-REQUESTED" as const,
+      prose: "### Tests\n\nThe error branch is uncovered.\n<verdict>CHANGES-REQUESTED</verdict>",
+    },
+  };
+  const renderBoth = (priorRounds: typeof correctnessRejection[] | readonly (typeof correctnessRejection | typeof followupRejection)[]) => {
+    const inputs = { ...baseInputs, priorRounds, commits: "a1 first", diff: "diff" };
+    return [renderReviewerSlot(inputs), renderReviewerFollowupSlot(inputs)] as const;
+  };
+
+  it("renders one prior correctness rejection identically in both templates", () => {
+    const [correctness, followup] = renderBoth([correctnessRejection]);
+    const expected =
+      "## Prior review rounds\n\nThe following rounds reviewed earlier heads of this branch, in order:\n\n" +
+      "### Round 1 — head=1111111\ncorrectness: CHANGES-REQUESTED\nNull input crashes.";
+    expect(correctness).toContain(expected);
+    expect(followup).toContain(expected);
+    expect(correctness).not.toContain("<verdict>CHANGES-REQUESTED</verdict>\n\n## Review process");
+  });
+
+  it("renders both pass lines when correctness approved and follow-up rejected", () => {
+    const [correctness, followup] = renderBoth([followupRejection]);
+    const expected =
+      "### Round 2 — head=2222222\ncorrectness: APPROVED\n" +
+      "followup: CHANGES-REQUESTED\n### Tests\n\nThe error branch is uncovered.";
+    expect(correctness).toContain(expected);
+    expect(followup).toContain(expected);
+  });
+
+  it("preserves a harness-failure hole because only reviewed rounds are supplied", () => {
+    const round3 = { ...followupRejection, round: 3, head: "3333333" };
+    const [correctness, followup] = renderBoth([correctnessRejection, round3]);
+    for (const slot of [correctness, followup]) {
+      expect(slot).toContain("### Round 1 — head=1111111");
+      expect(slot).toContain("### Round 3 — head=3333333");
+      expect(slot).not.toContain("### Round 2 —");
+      expect(slot).not.toMatch(/harness.failed/i);
+    }
+  });
+
+  it("gives both passes the lean output, dimension verification, and reversal rules", () => {
+    const [correctness, followup] = renderBoth([]);
+    for (const slot of [correctness, followup]) {
+      expect(slot).toMatch(/For each finding in the prior-round history/);
+      expect(slot).toMatch(/review this branch as you would with no history at\s+all/);
+      expect(slot).toMatch(/may not be reversed without naming that\s+round/);
+      expect(slot).toMatch(/Do not include a summary, what you checked, non-blocking\s+observations/);
+      expect(slot).toMatch(/When approving, emit the verdict\s+token alone/);
+    }
   });
 });
 
