@@ -21,7 +21,7 @@ import {
   selectReconciliations,
   wrapUpLandedChunk,
 } from "./chunk-land.js";
-import { IN_CHUNK_LABEL, type LandedChunk } from "./chunks.js";
+import { NEEDS_REVIEW_LABEL, type LandedChunk } from "./chunks.js";
 import type { ResolveAttemptSummary } from "./resolve-loop.js";
 
 // One entry of the resolve loop's journal (#67), as the abandoned-chunk comment
@@ -226,8 +226,8 @@ function makeWrapupAdapter(
       async closePullRequest(p) {
         record("closePullRequest", String(p));
       },
-      async deleteChunkBranch(b) {
-        record("deleteChunkBranch", b);
+      async deleteChunkBranch(b, members) {
+        record("deleteChunkBranch", `${b} [${members.join(",")}]`);
       },
     },
   };
@@ -251,7 +251,7 @@ const target = {
 };
 
 describe("wrapUpLandedChunk (#64)", () => {
-  it("closes every member in dependency order, drops in-chunk, closes the PR, deletes the branch", async () => {
+  it("closes every member in dependency order, drops needs-review, closes the PR, deletes the branch", async () => {
     const { adapter, calls } = makeWrapupAdapter();
     const r = await wrapUpLandedChunk(target, adapter, {
       sourceBranch: "main",
@@ -264,23 +264,22 @@ describe("wrapUpLandedChunk (#64)", () => {
     expect(r.branchDeleted).toBe(true);
     expect(calls.map((c) => `${c.op} ${c.arg}`)).toEqual([
       "closeIssue 43",
-      `removeLabel 43:${IN_CHUNK_LABEL}`,
+      `removeLabel 43:${NEEDS_REVIEW_LABEL}`,
       "closeIssue 42",
-      `removeLabel 42:${IN_CHUNK_LABEL}`,
+      `removeLabel 42:${NEEDS_REVIEW_LABEL}`,
       "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
       "closePullRequest 9",
-      "deleteChunkBranch sandbar/chunk-42-alpha",
+      "deleteChunkBranch sandbar/chunk-42-alpha [42,43]",
     ]);
   });
 
   it("stops at the first close it cannot make, and never closes the root behind it", async () => {
     // THE invariant of the whole wrap-up. The branch is kept so the next
-    // cycle's reconciler retries it, and that reconciler finds it by NAME —
-    // `sandbar/chunk-<root>-<slug>`, re-derived from the open issues. Closing
-    // #42 here would take the root out of that graph, re-root the chunk under
-    // #43 on a branch origin has never had, and leave the kept branch matching
-    // nothing: deleted next cycle, with #43 open, `in-chunk`, on no queue.
+    // cycle's reconciler retries it. Git-derived members are fetched by number
+    // without a state filter, so a successful root close would not by itself
+    // change the branch derivation; dependents-first remains the safe recovery
+    // order if refs are repaired or history is changed by hand.
     const { adapter, calls } = makeWrapupAdapter({ "closeIssue:43": "gh boom" });
     const r = await wrapUpLandedChunk(target, adapter, {
       sourceBranch: "main",
@@ -292,8 +291,8 @@ describe("wrapUpLandedChunk (#64)", () => {
       "43",
     ]);
     expect(calls.some((c) => c.op === "deleteChunkBranch")).toBe(false);
-    // And the un-closed member KEEPS `in-chunk`: an open issue that lost it
-    // would be on no queue at all.
+    // The unclosed member keeps its display cue; wrap-up changes labels only
+    // after the corresponding close succeeds.
     expect(calls.some((c) => c.op === "removeLabel")).toBe(false);
     expect(r.residue.join("\n")).toContain("#43 could not be closed");
     expect(r.residue.join("\n")).toContain("kept on origin");
@@ -302,9 +301,8 @@ describe("wrapUpLandedChunk (#64)", () => {
   it("leaves everything behind a failed close untouched, the root included", async () => {
     // A chain: #42 ← #43 ← #44, so the order is #44, #43, #42. #44 closes,
     // #43 will not, and #42 is never asked — which is what the ORDER buys
-    // beyond simply holding the root back. Closing #42 now would re-root the
-    // chunk under #43 and rename its branch; the branch on origin is the one
-    // #44's commits are on, and it has to keep matching.
+    // beyond simply holding the root back: every still-open member retains all
+    // blockers needed to reconstruct the component if refs are repaired.
     const chain = {
       ...target,
       members: [...target.members, { number: 44, title: "gamma" }],
@@ -437,7 +435,7 @@ describe("the prose (#64)", () => {
     expect(body).toContain(LAND_LABEL);
     expect(body).toContain("sandbar/chunk-42-alpha");
     expect(body).toContain("#43");
-    expect(body).toContain(IN_CHUNK_LABEL);
+    expect(body).toContain(NEEDS_REVIEW_LABEL);
   });
 
   it("does not claim sandbar landed a chunk a human merged", () => {
@@ -618,9 +616,8 @@ describe("chunkResidue and the banners it feeds (#64)", () => {
 
   it("calls a chunk that retired having named no member its own thing", () => {
     // Every write worked, so there is no residue to split — and the chunk is
-    // still news: its branch is gone, so if any member was open under
-    // `in-chunk` and the graph had lost it, this line is the last mention of
-    // it anywhere.
+    // still news: its branch is gone, so if malformed history hid an open
+    // member from the graph, this line is the last mention of it anywhere.
     const unnamed = wrapup("sandbar/chunk-4-unnamed", true, [], []);
     const split = chunkResidue([unnamed]);
 
@@ -632,7 +629,7 @@ describe("chunkResidue and the banners it feeds (#64)", () => {
     });
     expect(banner).toContain("knew no member issue");
     expect(banner).toContain("sandbar/chunk-4-unnamed");
-    expect(banner).toContain(IN_CHUNK_LABEL);
+    expect(banner).toContain("sandbar/member-*");
     expect(banner).toContain("no later run will find it");
   });
 

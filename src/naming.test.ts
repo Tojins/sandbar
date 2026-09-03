@@ -15,15 +15,20 @@ import {
   sandboxContainerNameFor,
   scopedResourcePrefix,
   stackContainerNameFor,
+  ALL_BRANCH_INFIXES,
   ALL_BRANCH_PREFIXES,
   ALL_RESOURCE_PREFIXES,
   BRANCH_PREFIX,
   LEGACY_BRANCH_PREFIXES,
   LEGACY_RESOURCE_PREFIXES,
+  MEMBER_BRANCH_INFIX,
   RESOURCE_PREFIX,
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
+  ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
+  ORIGIN_MEMBER_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
+  branchNameFromOriginRef,
   chunkBranchName,
   issueBranchName,
   issueNumberFromBranch,
@@ -111,6 +116,12 @@ describe("kebabSlug", () => {
 // reserved-namespace check on `integrationBranch` are the same statement made
 // three times if they don't.
 describe("branch names (#58)", () => {
+  it("strips the remote from a short origin ref", () => {
+    expect(branchNameFromOriginRef("origin/sandbar/member-42")).toBe(
+      "sandbar/member-42",
+    );
+  });
+
   it("builds the issue shape exactly as the planner always spelled it", () => {
     expect(issueBranchName(296, "Keyword escape")).toBe(
       "sandbar/issue-296-keyword-escape",
@@ -143,7 +154,7 @@ describe("branch names (#58)", () => {
     expect(rootIssueFromChunkBranch("sandbar/chunk-12x-foo")).toBeNull();
   });
 
-  it("globs every prefix × shape, so no branch sandbar made is missed", () => {
+  it("globs every prefix × local branch shape", () => {
     expect([...SANDBAR_BRANCH_REFGLOBS].sort()).toEqual(
       [
         "refs/heads/sandbar/issue-*",
@@ -176,6 +187,22 @@ describe("branch names (#58)", () => {
     for (const spec of ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS) {
       expect(ORIGIN_CHUNK_BRANCH_REFGLOBS).toContain(spec.split(":")[1]);
     }
+  });
+
+  it("names origin's landing-only member refs", () => {
+    expect(ORIGIN_MEMBER_BRANCH_REFGLOBS).toContain(
+      "refs/remotes/origin/sandbar/member-*",
+    );
+    expect(ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS).toContain(
+      "+refs/heads/sandbar/member-*:refs/remotes/origin/sandbar/member-*",
+    );
+  });
+
+  it("reserves member refs with every sandbar-owned branch shape", () => {
+    expect(ALL_BRANCH_INFIXES).toContain(MEMBER_BRANCH_INFIX);
+    expect(SANDBAR_BRANCH_REFGLOBS).not.toContain(
+      "refs/heads/sandbar/member-*",
+    );
   });
 
   it("keeps origin's chunk refs out of the local branch globs", () => {

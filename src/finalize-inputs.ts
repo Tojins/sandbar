@@ -165,24 +165,10 @@ export function mergeFinalizeInputs(
     }
     inputs.push({ kind: finalizeKindForSkip(s.reason), issue: s.issue });
   }
-  // #60, and LAST — not beside `merged`, which is where a success would
-  // naturally go. `chunk-landed` is the only input here whose arm can THROW:
-  // its label flip is the de-queue, so it is required rather than best-effort
-  // the way `merged`'s flip deliberately is. `finalizeAll` is fail-fast, so the
-  // first throw abandons every input after it, and the two ways that can go
-  // wrong are not symmetric:
-  //   - a `chunk-landed` input that never runs is self-healing. The issue keeps
-  //     `ready-for-agent` and its branch, the next cycle re-plans it, the
-  //     re-merge onto the chunk branch is a no-op, and the flip is retried.
-  //   - a handoff input that never runs is NOT recoverable. The merger has
-  //     already commented on a skipped issue and stripped `ready-for-agent`
-  //     from it, and only finalise applies the parking label — so the issue
-  //     ends up OPEN on no queue at all, invisible to the planner and to a
-  //     human filtering on `agent-stuck`. That is the #8/#33 failure mode this
-  //     module exists to prevent.
-  // The input that can throw therefore goes after the ones that cannot afford
-  // it. The first run on a review-lane host without an `in-chunk` label is not
-  // a hypothetical: it is the expected way this throws.
+  // #60, and LAST. The display-label edit is best-effort since #93, but the
+  // required issue comment can still throw. `finalizeAll` is fail-fast, so a
+  // chunk-landed input must not abandon an ordinary handoff after the merger
+  // has already stripped that issue's queue label (#8, #33).
   for (const c of summary.chunkLanded) {
     inputs.push({
       kind: "chunk-landed",

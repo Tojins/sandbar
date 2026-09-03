@@ -220,13 +220,13 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
     // The same call the auto lane drops `ready-for-agent` with, which is why it
     // is not spelled twice either.
     it("drops a label in the configured repo", async () => {
-      await adapter().removeLabel(7, "in-chunk");
+      await adapter().removeLabel(7, "needs-review");
 
       const [argv] = await calls();
       expect(argv?.slice(0, 3)).toEqual(["issue", "edit", "7"]);
       expect(repoFlagOf(argv ?? [])).toBe("acme/app");
       expect(argv).toContain("--remove-label");
-      expect(argv).toContain("in-chunk");
+      expect(argv).toContain("needs-review");
     });
 
     // `land` is the chunk's queue, so the wrong repository here is a request
@@ -255,6 +255,41 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       // every member having closed, which this call cannot know.
       expect(close).not.toContain("--delete-branch");
     });
+  });
+
+  it("atomically deletes the chunk ref and its strict member refs", async () => {
+    await writeFile(
+      join(shimBin, "git"),
+      [
+        "#!/bin/sh",
+        `log='${argvLog}'`,
+        'printf "[" >> "$log"',
+        'sep=""',
+        'for a in "$@"; do',
+        '  printf \'%s"%s"\' "$sep" "$a" >> "$log"',
+        '  sep=","',
+        "done",
+        'printf "]\\n" >> "$log"',
+      ].join("\n") + "\n",
+      { mode: 0o755 },
+    );
+    const adapter = chunkForgeWrites({
+      repo: REPO,
+      gitCwd: shimBin,
+      errPrefix: "test",
+    });
+
+    await adapter.deleteChunkBranch("sandbar/chunk-42-root", [42, 43]);
+
+    expect(await calls()).toEqual([[
+      "push",
+      "--atomic",
+      "origin",
+      "--delete",
+      "refs/heads/sandbar/chunk-42-root",
+      "refs/heads/sandbar/member-42",
+      "refs/heads/sandbar/member-43",
+    ]]);
   });
 
   // #64 — the two READS that decide which chunks are acted on at all. A wrong

@@ -40,12 +40,11 @@
 // silent-noop-exhausted, needs-human, review-budget-exhausted) parks the issue
 // under the single `agentStuck` label; the *reason* lives in the bot comment.
 //
-// `chunk-landed` (#60) is the one label flip that is neither a handoff nor
-// cosmetic: `in-chunk` is sandbar's own protocol label — hardcoded, like
-// `ready-for-agent`, for the reason chunks.ts gives — and applying it is what
-// takes a landed chunk member out of the queue while leaving it OPEN. Its arm
-// says why both orderings around it are load-bearing — the flip before the
-// branch delete, and the comment after the flip rather than before it.
+// `chunk-landed` (#60) applies the display-only `needs-review` label. Membership
+// and de-queueing come from issue-ref containment by the chunk branch (#93), so a missing
+// or hand-removed label costs only the human cue and never blocks landing. The
+// issue comment is still required: it names the review branch even when that
+// optional display-label edit fails.
 //
 // Required side-effects fail loud, they don't swallow (#8). The original bug was
 // `editLabels` catching a "label doesn't exist" error, logging it, and returning
@@ -61,7 +60,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { IN_CHUNK_LABEL, LAND_LABEL } from "./chunks.js";
+import { LAND_LABEL, NEEDS_REVIEW_LABEL } from "./chunks.js";
 import type { LabelConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
 import type { HeadMismatch } from "./git-ops.js";
@@ -380,22 +379,18 @@ export const SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE = (attempts: number): string
 //
 // Three things a human needs and none of them is "done": where the work is (a
 // branch on origin, not the source branch), why the issue is still open (the
-// review that closes it is a review of the whole chunk), and what happened to
-// the label they applied. The last one matters most in practice — an issue
-// that silently loses `ready-for-agent` reads as sandbar having dropped it.
-export const CHUNK_LANDED_COMMENT_TEMPLATE = (
-  chunkBranch: string,
-  inChunkLabel: string,
-  readyLabel: string,
-): string =>
+// review that closes it is a review of the whole chunk), and why leaving the
+// agent queue did not lose it. The last one matters even when the optional
+// display label cannot be applied.
+export const CHUNK_LANDED_COMMENT_TEMPLATE = (chunkBranch: string): string =>
   `${BOT_COMMENT_PREFIX} this issue's work is merged and pushed to ` +
   `\`${chunkBranch}\`, the branch its review chunk lands on. The gate is green ` +
   `on the composed branch, and **nothing has reached the source branch** — this ` +
   `issue is review-gated, so a human reviews \`${chunkBranch}\` as one unit ` +
   `before any of it lands.\n\n` +
-  `The issue stays OPEN and \`${readyLabel}\` has been replaced with ` +
-  `\`${inChunkLabel}\`: it is out of the agent queue (its work is done and on ` +
-  `the branch) but not finished. It closes when the chunk lands, which a human ` +
+  `The issue stays OPEN but is out of the agent queue: git records its durable ` +
+  `member ref as contained by the chunk branch. It closes when the ` +
+  `chunk lands, which a human ` +
   `triggers by putting \`${LAND_LABEL}\` on the chunk's pull request — ` +
   `sandbar then merges \`${chunkBranch}\` into the source branch and closes every ` +
   `issue on it. The local issue branch was deleted — \`${chunkBranch}\` carries ` +
@@ -406,7 +401,7 @@ export type FinalizeInput =
   // #60 — a review-gated issue whose branch landed on its chunk's branch, which
   // is now on origin. NOT a close: nothing has reached the source branch and
   // the review that would justify closing has not happened. The issue stays
-  // OPEN and swaps `ready-for-agent` for `in-chunk`.
+  // OPEN and attempts to swap `ready-for-agent` for `needs-review` for display.
   | {
       readonly kind: "chunk-landed";
       readonly issue: IssueRef;
@@ -593,24 +588,6 @@ function requireFlip(r: LabelEditResult, issueNum: number): void {
   );
 }
 
-// The chunk-landing flip (#60). Separate from `requireFlip` for the message
-// alone: `in-chunk` is sandbar's own protocol label, not one of `config.labels`
-// (chunks.ts says why it is hardcoded), so pointing the operator at a config
-// knob that cannot spell it would send them looking for a setting that does not
-// exist. What they have to do is create the label.
-function requireChunkFlip(r: LabelEditResult, issueNum: number): void {
-  if (r.ok) return;
-  throw new SandbarError(
-    `Issue #${issueNum} landed on its chunk's branch, but relabelling it ` +
-      `\`${IN_CHUNK_LABEL}\` failed (${r.error ?? "unknown error"}). The commits ` +
-      `are safe on the chunk branch; the run stops here because an issue that ` +
-      `keeps \`${READY_FOR_AGENT_LABEL}\` would be planned again and its work ` +
-      `written a second time. This is almost certainly a missing label — ` +
-      `sandbar never creates labels, and \`${IN_CHUNK_LABEL}\` is not ` +
-      `configurable. Create it in the repo, then re-run.`,
-  );
-}
-
 // `-d`, escalating to `-D` when it refuses. ONLY for callers that own the
 // certainty the work is preserved elsewhere — see the module header. Callers
 // without that certainty must verify it (branchIsContainedInOrigin) instead of
@@ -671,49 +648,19 @@ export async function finalizeOne(
       // branch and that branch is on origin, so the local issue branch is a
       // duplicate and `-D` is safe on the same structural certainty. What
       // differs is everything issue-facing: no close (the review has not
-      // happened), and the label flip is LOAD-BEARING rather than cosmetic.
-      //
-      // Order is load-bearing too, and it is the opposite of `merged`'s
-      // best-effort flip: the flip must succeed BEFORE the branch is deleted.
-      // `in-chunk` is what de-queues the issue; an issue that kept
-      // `ready-for-agent` with its branch deleted would be re-planned next
-      // cycle onto a fresh branch seeded from `origin/<sourceBranch>` — which
-      // has none of this work — and the implementer would write it a second
-      // time, on top of a chunk branch that already carries the first. So a
-      // failed flip stops the run here (requireChunkFlip), with the branch
-      // intact and the re-merge of it a no-op. That throw is also why
-      // finalize-inputs.ts emits every `chunk-landed` input LAST: this is the
-      // only success arm that can abandon the rest of a fail-fast batch, and
-      // its own failure is the only one in that batch the next cycle repairs
-      // by itself.
-      //
-      // The COMMENT goes after the flip, which is the other way round from
-      // every arm above. Those comment first because their label edit is the
-      // handoff and a comment lost after it would leave a parked issue with no
-      // stated reason (#8). Here the comment ASSERTS the flip — it tells the
-      // author `ready-for-agent` has been replaced — so posting it first means
-      // the one failure this arm is written for (a repo with no `in-chunk`
-      // label, which is how a review-lane host's first chunk landing goes)
-      // leaves the issue carrying `ready-for-agent` under a comment saying it
-      // does not, and the self-heal posts the same comment again next cycle.
-      // Posting after inverts both: a comment that fails lands on an issue
-      // already de-queued onto the visible `in-chunk` queue, which is the
-      // strictly better half to lose.
+      // happened), and the label edit is best-effort display. Git has already
+      // recorded membership, so failure here cannot cause duplicate work or
+      // prevent the branch and local issue branch lifecycle from completing.
       const n = issueNumberOf(input.issue);
       await adapter.removeWorktreeFor(input.issue.branch);
-      const r = await adapter.editLabels(
+      await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
-        [IN_CHUNK_LABEL],
+        [NEEDS_REVIEW_LABEL],
       );
-      requireChunkFlip(r, n);
       await adapter.postComment(
         n,
-        CHUNK_LANDED_COMMENT_TEMPLATE(
-          input.chunkBranch,
-          IN_CHUNK_LABEL,
-          READY_FOR_AGENT_LABEL,
-        ),
+        CHUNK_LANDED_COMMENT_TEMPLATE(input.chunkBranch),
       );
       return deleteBranchForcing(adapter, input.issue.branch);
     }

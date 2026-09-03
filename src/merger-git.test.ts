@@ -243,26 +243,144 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     expect(await git(cache, "rev-parse", "--verify", base)).toBeTruthy();
   });
 
-  it("pushes a detached HEAD to a chunk branch, creating it on origin", async () => {
+  it("atomically pushes the chunk and member issue branch", async () => {
     await commit(wt, "b.txt", "member work\n");
+    await git(wt, "branch", "sandbar/issue-1-member", "HEAD");
     const head = await git(wt, "rev-parse", "HEAD");
 
-    const r = await adapter().pushChunkBranch("sandbar/chunk-1-c");
+    const r = await adapter().pushChunkBranch("sandbar/chunk-1-c", [{
+      source: "sandbar/issue-1-member",
+      destination: "sandbar/member-1",
+    }]);
 
     expect(r).toEqual({ kind: "ok" });
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(head);
+    expect(await originHas("refs/heads/sandbar/member-1")).toBe(head);
+    await git(wt, "push", "-q", "origin", "HEAD:main");
+    await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1]);
+    expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-1")).toBeNull();
   });
 
-  it("fast-forwards the chunk branch when the next member lands on it", async () => {
+  it("reports a rejected member ref as a membership failure, not a chunk race", async () => {
+    // Git gives the genuinely non-fast-forward member ref its own rejection
+    // reason while marking the chunk ref only as `(atomic push failed)`. The
+    // adapter reads that distinction so a member-ref conflict is not retried
+    // as though only the chunk branch had raced.
+    await commit(wt, "member.txt", "first landing\n");
+    await git(wt, "branch", "sandbar/issue-2-member", "HEAD");
+    await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-2");
+    await git(wt, "reset", "--hard", "HEAD^");
+    await commit(wt, "replacement.txt", "diverged landing\n");
+    await git(wt, "branch", "-f", "sandbar/issue-2-member", "HEAD");
+
+    const result = await adapter().pushChunkBranch("sandbar/chunk-2-c", [{
+      source: "sandbar/issue-2-member",
+      destination: "sandbar/member-2",
+    }]);
+
+    expect(result.kind).toBe("fatal");
+    if (result.kind === "fatal") expect(result.reason).toContain("membership ref rejected");
+    expect(await originHas("refs/heads/sandbar/chunk-2-c")).toBeNull();
+  });
+
+  it("refuses to publish a member source not contained by the chunk", async () => {
+    await commit(seed, "member-source.txt", "member source\n");
+    await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/issue-5-member");
+    await git(cache, "fetch", "origin", "--quiet");
+
+    const result = await adapter().pushChunkBranch("sandbar/chunk-5-c", [{
+      source: "origin/sandbar/issue-5-member",
+      destination: "sandbar/member-5",
+    }]);
+
+    expect(result).toEqual({
+      kind: "fatal",
+      reason:
+        "membership source origin/sandbar/issue-5-member is not contained in " +
+        "the composed chunk branch sandbar/chunk-5-c",
+    });
+    expect(await originHas("refs/heads/sandbar/chunk-5-c")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-5")).toBeNull();
+  });
+
+  it("reports a chunk race when member refs are rejected only as atomic collateral", async () => {
+    // The inverse git spelling: the chunk ref has the real rejection and the
+    // member ref is tagged only `(atomic push failed)`. Ignoring that collateral
+    // marker is what preserves the ordinary chunk-race result.
+    await commit(seed, "remote.txt", "remote chunk move\n");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-3-c");
+    await commit(wt, "local.txt", "local member\n");
+    await git(wt, "branch", "sandbar/issue-3-member", "HEAD");
+
+    const result = await adapter().pushChunkBranch("sandbar/chunk-3-c", [{
+      source: "sandbar/issue-3-member",
+      destination: "sandbar/member-3",
+    }]);
+
+    expect(result).toEqual({ kind: "race" });
+    expect(await originHas("refs/heads/sandbar/member-3")).toBeNull();
+  });
+
+  it("deletes only the strict members owned by the retiring chunk", async () => {
+    await commit(wt, "member.txt", "member work\n");
+    const head = await git(wt, "rev-parse", "HEAD");
+    await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/chunk-4-old-title");
+    await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-4");
+    await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-3");
+    await git(wt, "update-ref", "refs/remotes/origin/sandbar/chunk-4-old-title", head);
+    await git(wt, "update-ref", "refs/remotes/origin/sandbar/member-4", head);
+
+    await adapter().deleteChunkBranch("sandbar/chunk-4-old-title", [4]);
+
+    expect(await originHas("refs/heads/sandbar/chunk-4-old-title")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-4")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-3")).toBe(head);
+  });
+
+  it("atomically deletes real refs when a snapshotted member ref is already absent", async () => {
+    // Git accepts deletion of a missing FULLY QUALIFIED ref (with a warning)
+    // and still completes the atomic push. Wrap-up may therefore safely use
+    // its membership snapshot even if that remote ref disappeared meanwhile.
+    await commit(wt, "member.txt", "member work\n");
+    await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/chunk-1-c");
+    await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-1");
+
+    await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1, 9]);
+
+    expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-1")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-9")).toBeNull();
+  });
+
+  it("accumulates members and fast-forwards a reworked member ref", async () => {
     await commit(wt, "b.txt", "first member\n");
-    await adapter().pushChunkBranch("sandbar/chunk-1-c");
+    await git(wt, "branch", "sandbar/issue-1-member", "HEAD");
+    const first = await git(wt, "rev-parse", "HEAD");
+    expect(await adapter().pushChunkBranch("sandbar/chunk-1-c", [{
+      source: "sandbar/issue-1-member",
+      destination: "sandbar/member-1",
+    }])).toEqual({ kind: "ok" });
+    expect(await originHas("refs/heads/sandbar/member-1")).toBe(first);
+
     await commit(wt, "c.txt", "second member\n");
+    await git(wt, "branch", "-f", "sandbar/issue-1-member", "HEAD");
+    await git(wt, "branch", "sandbar/issue-2-member", "HEAD");
     const head = await git(wt, "rev-parse", "HEAD");
 
-    expect(await adapter().pushChunkBranch("sandbar/chunk-1-c")).toEqual({
-      kind: "ok",
-    });
+    expect(await adapter().pushChunkBranch("sandbar/chunk-1-c", [
+      {
+        source: "sandbar/issue-1-member",
+        destination: "sandbar/member-1",
+      },
+      {
+        source: "sandbar/issue-2-member",
+        destination: "sandbar/member-2",
+      },
+    ])).toEqual({ kind: "ok" });
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(head);
+    expect(await originHas("refs/heads/sandbar/member-1")).toBe(head);
+    expect(await originHas("refs/heads/sandbar/member-2")).toBe(head);
   });
 
   it("reports a race rather than overwriting a chunk branch that moved", async () => {
@@ -273,7 +391,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     const theirs = (await originHas("refs/heads/sandbar/chunk-1-c"))!;
     await commit(wt, "b.txt", "our work\n");
 
-    expect(await adapter().pushChunkBranch("sandbar/chunk-1-c")).toEqual({
+    expect(await adapter().pushChunkBranch("sandbar/chunk-1-c", [])).toEqual({
       kind: "race",
     });
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(theirs);
