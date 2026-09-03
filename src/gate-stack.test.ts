@@ -389,6 +389,7 @@ describe("containerRunArgs", () => {
       container: container({ mountWorktree: "/app" }),
     });
     expect(args).toContain("/wt:/app:rw,z");
+    expect(args).toContain("/app/.git:rw,nosuid,nodev,noexec");
     expect(args[args.indexOf("-w") + 1]).toBe("/app");
   });
 

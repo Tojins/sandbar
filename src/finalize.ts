@@ -8,10 +8,10 @@
 // merger's own outcomes after. The inputs for each pass are built by
 // finalize-inputs.ts; nothing here cares which pass it is in.
 //
-// Every kind calls removeWorktreeFor — sandbox.close() in the inner-loop
-// usually has already removed the worktree, but leftover worktrees from
-// crashes or non-merged terminals would otherwise block the next run's
-// preflight cleanup (it can't `git branch -D` a branch a worktree is on).
+// Every ordinary kind calls removeWorktreeFor — sandbox.close() in the inner
+// loop usually has already removed the issue clone, but crash leftovers still
+// need deterministic cleanup. Reviewer-write handoffs deliberately preserve a
+// dirty clone because uncommitted evidence cannot travel through a push.
 //
 // `git branch -d` is escalated to `-D` only where the caller owns the certainty
 // that the work is preserved elsewhere. For `merged`/`chunk-landed`/
@@ -58,6 +58,7 @@
 // failure while the handoff arms turn it into a loud stop.
 
 import { execFile } from "node:child_process";
+import { rm } from "node:fs/promises";
 import { promisify } from "node:util";
 
 import { LAND_LABEL, NEEDS_REVIEW_LABEL } from "./chunks.js";
@@ -470,6 +471,11 @@ export type FinalizeInput =
       readonly latestReviewerProse: string;
     }
   | {
+      readonly kind: "reviewer-wrote";
+      readonly issue: IssueRef;
+      readonly latestReviewerProse: string;
+    }
+  | {
       readonly kind: "hard-error";
       readonly issue: IssueRef;
       readonly hasCommits: boolean;
@@ -850,6 +856,21 @@ export async function finalizeOne(
       requireFlip(r, n);
       return { kind: "pushed" };
     }
+    case "reviewer-wrote": {
+      const n = issueNumberOf(input.issue);
+      // Keep the clone: uncommitted reviewer writes cannot travel through a
+      // push, and deleting it would destroy the evidence this terminal exists
+      // to hand to a human.
+      await adapter.pushBranch(input.issue.branch);
+      await adapter.postComment(
+        n,
+        `${BOT_COMMENT_PREFIX} stopped because the read-only reviewer changed the issue repository. ` +
+          `The write is contained to this issue and its managed clone has been preserved for human inspection.\n\n${input.latestReviewerProse}`,
+      );
+      const r = await adapter.editLabels(n, [READY_FOR_AGENT_LABEL], [labels.agentStuck]);
+      requireFlip(r, n);
+      return { kind: "pushed" };
+    }
     case "hard-error": {
       if (input.hasCommits) {
         await adapter.removeWorktreeFor(input.issue.branch);
@@ -1001,16 +1022,7 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
     },
     async removeWorktreeFor(branch) {
       const path = worktreePathFor(deps.layout.worktreesDir, branch);
-      try {
-        await exec("git", ["worktree", "remove", "--force", path], { cwd });
-      } catch {
-        /* already removed by the sandbox close() in normal operation */
-      }
-      try {
-        await exec("git", ["worktree", "prune"], { cwd });
-      } catch {
-        /* best-effort */
-      }
+      await rm(path, { recursive: true, force: true });
     },
     async postComment(issueNum, body) {
       // Required: the comment is the issue's handoff payload (questions, failure

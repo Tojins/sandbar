@@ -410,7 +410,7 @@ export async function ensureSourceWorktree(
     // has no registration for, and `worktree add` refuses a non-empty one. It
     // is inside the disposable state directory and, by the probe above, holds
     // no repository of its own.
-    await gitOk(repoDir, ["worktree", "remove", "--force", sourceWorktree]);
+    await gitOk(repoDir, ["worktree", "remove", "--force", "--force", sourceWorktree]);
     await gitOk(repoDir, ["worktree", "prune"]);
     await rm(sourceWorktree, { recursive: true, force: true });
     try {
@@ -421,6 +421,7 @@ export async function ensureSourceWorktree(
         sourceWorktree,
         target,
       ]);
+      await git(repoDir, ["worktree", "lock", sourceWorktree]);
     } catch (err) {
       throw new SandbarError(
         `Failed to create the source worktree at ${sourceWorktree} ` +
@@ -432,6 +433,7 @@ export async function ensureSourceWorktree(
   }
 
   try {
+    await gitOk(repoDir, ["worktree", "lock", sourceWorktree]);
     await git(sourceWorktree, ["reset", "--hard", "-q", target]);
     await git(sourceWorktree, ["clean", "-ffdx", "-q"]);
   } catch (err) {

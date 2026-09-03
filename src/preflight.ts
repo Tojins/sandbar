@@ -99,8 +99,8 @@
 //     wrong BEFORE the run starts, which is the one an operator can act on
 //     from the message.
 // The agent sandbox needs no equivalent, and that is settled rather than open:
-// its mounts are entirely sandbar-derived (the worktree plus whatever
-// `resolveGitMounts` answers) and `config.ts` exposes no mount surface for it,
+// its mounts are entirely sandbar-derived (the self-contained issue clone)
+// and `config.ts` exposes no mount surface for it,
 // so `gateStack.containers[].mounts[]` is the whole class of consumer-supplied
 // host paths and this check is complete at that scope.
 //

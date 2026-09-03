@@ -1024,6 +1024,7 @@ describe("createSandbox integration (local provider)", () => {
       expect(run.commits).toHaveLength(1);
       expect(typeof run.maxGapMs).toBe("number");
       expect(run.commits[0]!.sha).toMatch(/^[0-9a-f]{40}$/);
+      await sandbox.syncBranchToCache();
       // The captured commit is the one the agent made on the branch.
       const log = await git(["log", "-1", "--format=%H", "sandbar/issue-1-demo"], dir);
       expect(log.stdout.trim()).toBe(run.commits[0]!.sha);
@@ -1101,6 +1102,7 @@ describe("createSandbox integration (local provider)", () => {
         completionSignal: [],
       });
       expect(rescued.commits).toHaveLength(1);
+      await sandbox.syncBranchToCache();
       const tip = await git(
         ["log", "-1", "--format=%H", "sandbar/issue-9-rescue"],
         dir,
@@ -1769,17 +1771,14 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it("reports a stale-worktree sweep failure and still prepares the issue worktree", async () => {
+  it("replaces an unmarked leftover at the issue's managed path", async () => {
     const branch = "sandbar/issue-83-stale-sweep";
     const layout = layoutFor(dir);
-    const reported = vi.spyOn(console, "error").mockImplementation(() => {});
     await git(["branch", branch], dir);
     await mkdir(layout.worktreesDir, { recursive: true });
-    const loopA = join(layout.worktreesDir, "loop-a");
-    const loopB = join(layout.worktreesDir, "loop-b");
-    await symlink("loop-b", loopA);
-    await symlink("loop-a", loopB);
-    try {
+    const target = worktreePathFor(layout.worktreesDir, branch);
+    await mkdir(target, { recursive: true });
+    await writeFile(join(target, "stale"), "garbage");
       const worktreePath = await prepareWorktree({
         branch,
         layout,
@@ -1788,15 +1787,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
 
       expect(worktreePath).toBe(worktreePathFor(layout.worktreesDir, branch));
       expect((await stat(worktreePath)).isDirectory()).toBe(true);
-      expect(reported).toHaveBeenCalledWith(
-        "Stale-worktree sweep failed (continuing):",
-        expect.objectContaining({ code: "ELOOP" }),
-      );
-    } finally {
-      reported.mockRestore();
-      await rm(loopA, { force: true });
-      await rm(loopB, { force: true });
-    }
+      expect(existsSync(join(worktreePath, "stale"))).toBe(false);
   });
 
   it("reuses a clean worktree when its local issue branch is absent from origin", async () => {
@@ -1831,7 +1822,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     }
   });
 
-  it("rejects reuse when fetching the issue branch fails unexpectedly", async () => {
+  it("reuses the clone against its pinned forge origin when the operator remote changes", async () => {
     const root = await mkdtemp(join(tmpdir(), "asb-fetch-failure-"));
     const origin = join(root, "origin.git");
     const checkout = join(root, "checkout");
@@ -1861,7 +1852,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
           layout: layoutFor(checkout),
           copyToWorktree: [],
         }),
-      ).rejects.toThrow("Could not fetch origin/");
+      ).resolves.toContain("sandbar-issue-83-fetch-failure");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2031,7 +2022,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     expect(closed).toBe(true);
     // Caller-owned, so it survives — the same rule the bringup case below pins.
     expect(existsSync(worktreePath)).toBe(true);
-    await git(["worktree", "remove", "--force", worktreePath], dir);
+    await rm(worktreePath, { recursive: true, force: true });
   });
 
   it("a container bringup failure leaves the caller-owned prepared worktree in place", async () => {
@@ -2063,7 +2054,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     // initMounts from it, and the caller (not createSandbox) owns it.
     expect(existsSync(worktreePath)).toBe(true);
 
-    await git(["worktree", "remove", "--force", worktreePath], dir);
+    await rm(worktreePath, { recursive: true, force: true });
   });
 
   it("rejects copyToWorktree alongside preparedWorktreePath instead of silently skipping it", async () => {
@@ -2084,7 +2075,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
         }),
       ).rejects.toThrow(/copyToWorktree is ignored/);
     } finally {
-      await git(["worktree", "remove", "--force", worktreePath], dir);
+    await rm(worktreePath, { recursive: true, force: true });
     }
   });
 
@@ -2115,7 +2106,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
 // one answer for a plain repo and for a bare cache, and BOTH are asserted
 // because a fix that only handles the new shape breaks every embedding host
 // that still hands sandbar an ordinary checkout.
-describe("git mounts follow --git-common-dir, bare or not (#38)", () => {
+describe("issue clone isolation (#98)", () => {
   const cleanups: string[] = [];
   afterAll(async () => {
     for (const d of cleanups) await rm(d, { recursive: true, force: true });
@@ -2136,7 +2127,7 @@ describe("git mounts follow --git-common-dir, bare or not (#38)", () => {
     return provider.capturedMounts ?? [];
   };
 
-  it("mounts the plain repo's .git directory", async () => {
+  it("does not mount a plain parent repository's git directory", async () => {
     const dir = await mkdtemp(join(tmpdir(), "asb-mounts-plain-"));
     cleanups.push(dir);
     await git(["init", "-b", "main"], dir);
@@ -2150,14 +2141,10 @@ describe("git mounts follow --git-common-dir, bare or not (#38)", () => {
     const mounts = await mountsFor(layoutFor(dir), "sandbar/issue-1-plain");
 
     const extra = mounts.filter((m) => m.sandboxPath !== SANDBOX_REPO_DIR);
-    expect(extra).toHaveLength(1);
-    expect(extra[0]!.hostPath).toBe(join(dir, ".git"));
-    // Identity: the gitlink inside the worktree names an absolute host path,
-    // so the mount has to appear at that same path inside the container.
-    expect(extra[0]!.sandboxPath).toBe(extra[0]!.hostPath);
+    expect(extra).toEqual([]);
   });
 
-  it("mounts the bare cache itself for a worktree of it", async () => {
+  it("does not mount the bare cache", async () => {
     const root = await mkdtemp(join(tmpdir(), "asb-mounts-bare-"));
     cleanups.push(root);
     const origin = join(root, "origin.git");
@@ -2181,11 +2168,7 @@ describe("git mounts follow --git-common-dir, bare or not (#38)", () => {
     const mounts = await mountsFor(layout, "sandbar/issue-1-bare");
 
     const extra = mounts.filter((m) => m.sandboxPath !== SANDBOX_REPO_DIR);
-    expect(extra).toHaveLength(1);
-    // The cache directory itself — there is no `.git` inside it, which is
-    // exactly what the structural discovery got wrong.
-    expect(extra[0]!.hostPath).toBe(layout.repoDir);
-    expect(extra[0]!.sandboxPath).toBe(layout.repoDir);
+    expect(extra).toEqual([]);
   });
 });
 

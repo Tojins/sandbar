@@ -5,9 +5,9 @@
 // uncommitted edits are physically absent here and so cannot be swept into a
 // merge commit.
 //
-// The worktree lives beside the per-issue worktrees, registered in the bare
-// cache (#38), so `git worktree prune` + the orphan sweep reclaims any
-// leftover after a crash. Removal is also registered with the cleanup registry
+// The merger clone lives beside the per-issue clones and owns a real `.git`
+// directory (#98), so no resolve container needs the cache. Removal is
+// registered with the cleanup registry
 // before creation so a signal mid-bringup tears it down — as a disposable
 // (#55), since run.ts creates one per CYCLE.
 //
@@ -15,8 +15,8 @@
 // operator's local branch is never touched.
 
 import { execFile } from "node:child_process";
-import { readFile, rm, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { registerDisposable } from "./cleanup.js";
@@ -24,15 +24,6 @@ import { SandbarError } from "./errors.js";
 import type { RepoLayout } from "./repo-cache.js";
 
 const exec = promisify(execFile);
-
-// Mirror agent-sandbox's worktree flags: keep `git worktree add` from mutating
-// the repo's merge/push autosetup config under us.
-const NO_CONFIG_LOCK_FLAGS = [
-  "-c",
-  "branch.autoSetupMerge=false",
-  "-c",
-  "push.autoSetupRemote=false",
-];
 
 export const MERGER_WORKTREE_NAME = "merger";
 
@@ -44,73 +35,9 @@ export function mergerWorktreePathFor(worktreesDir: string): string {
   return join(worktreesDir, MERGER_WORKTREE_NAME);
 }
 
-// Given the contents of a worktree's `.git` gitlink file ("gitdir: <abs>"),
-// return the repo's common git dir, or null when the content isn't a gitlink.
-// Since #38 that is sandbar's bare cache rather than a `.git` inside a
-// checkout — "up two levels from the gitdir" lands correctly on either. The
-// container running the resolve agent must mount this path at its own absolute
-// location so in-container git can follow the gitlink. Pure; `resolveGitMounts`
-// in agent-sandbox.ts answers the same question by asking
-// `git rev-parse --git-common-dir`, which it can because it has a worktree to
-// ask from and this one is handed only the file's bytes.
-export function gitlinkCommonDir(gitFileContent: string): string | null {
-  const match = gitFileContent.trim().match(/^gitdir:\s*(.+)$/);
-  if (!match || match[1] === undefined) return null;
-  // <commonDir>/.git/worktrees/<name>  →  up two levels  →  <commonDir>/.git
-  return resolve(match[1].trim(), "..", "..");
-}
-
-// Resolve the extra identity bind-mount the resolve-agent container needs so
-// in-container git works against a worktree. Returns [] only for the one case
-// that legitimately needs no extra mount: a normal repo, whose `.git` is a
-// directory already covered by mounting the workspace.
-//
-// Every other outcome THROWS rather than returning []. Since #38 the merger
-// worktree is always a linked worktree of the bare cache, so its `.git` is
-// always a gitlink and the mount is always required — an empty list means
-// in-container git cannot follow it, and every command the resolve agent runs
-// fails with "not a git repository" while the loop reads the result as the
-// agent's own doing. That is the same swallow #38 removed from
-// `resolveGitMounts` one file over, and it belongs removed here for the same
-// reason.
-export async function gitMountsForWorktree(
-  worktreeCwd: string,
-): Promise<readonly string[]> {
-  const gitPath = join(worktreeCwd, ".git");
-  let isDir: boolean;
-  try {
-    isDir = (await stat(gitPath)).isDirectory();
-  } catch (err) {
-    throw new SandbarError(
-      `No \`.git\` at ${gitPath}: the merger worktree must be a git worktree ` +
-        "for the resolve agent's container to see the repository.",
-      { cause: err },
-    );
-  }
-  if (isDir) return [];
-  let content: string;
-  try {
-    content = await readFile(gitPath, "utf-8");
-  } catch (err) {
-    throw new SandbarError(
-      `Cannot read the gitlink at ${gitPath}, so the resolve agent's ` +
-        "container cannot be given the repository it points at.",
-      { cause: err },
-    );
-  }
-  const commonDir = gitlinkCommonDir(content);
-  if (commonDir === null) {
-    throw new SandbarError(
-      `The gitlink at ${gitPath} does not name a git directory ` +
-        `(expected a \`gitdir: <path>\` line, got ${JSON.stringify(content.trim().slice(0, 120))}).`,
-    );
-  }
-  return [commonDir];
-}
-
 export type MergerWorktree = {
   readonly path: string;
-  // Idempotent teardown — `git worktree remove --force` + prune. Safe to call
+  // Idempotent teardown of the standalone clone. Safe to call
   // more than once (onCleanup + the explicit finally may both fire).
   remove(): Promise<void>;
 };
@@ -135,17 +62,7 @@ export async function createMergerWorktree(opts: {
   // to clear a prior crashed run's leftover and once as the teardown.
   const sweep = async (): Promise<void> => {
     try {
-      await exec("git", ["worktree", "remove", "--force", path], { cwd });
-    } catch {
-      // Not registered (or already gone) — fall through to the dir sweep.
-    }
-    try {
       await rm(path, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
-    try {
-      await exec("git", ["worktree", "prune"], { cwd });
     } catch {
       /* best-effort */
     }
@@ -182,18 +99,11 @@ export async function createMergerWorktree(opts: {
   }
 
   try {
-    await exec(
-      "git",
-      [
-        ...NO_CONFIG_LOCK_FLAGS,
-        "worktree",
-        "add",
-        "--detach",
-        path,
-        `origin/${sourceBranch}`,
-      ],
-      { cwd },
-    );
+    await exec("git", ["clone", "--local", "--no-checkout", cwd, path], { cwd });
+    await exec("git", ["fetch", cwd, "+refs/remotes/origin/*:refs/remotes/origin/*"], { cwd: path });
+    const { stdout: originUrl } = await exec("git", ["config", "--get", "remote.origin.url"], { cwd });
+    await exec("git", ["config", "remote.origin.url", originUrl.trim()], { cwd: path });
+    await exec("git", ["checkout", "--detach", `origin/${sourceBranch}`], { cwd: path });
   } catch (err) {
     throw new SandbarError(
       `merger: failed to create the merge worktree at ${path} (origin/${sourceBranch}): ${

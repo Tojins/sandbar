@@ -103,7 +103,7 @@ export function terminalFinalizeInputs(
         break;
       case "NEEDS-HUMAN-REVIEW":
         inputs.push({
-          kind: "review-budget-exhausted",
+          kind: t.cause === "reviewer-wrote" ? "reviewer-wrote" : "review-budget-exhausted",
           issue: o.issue,
           latestReviewerProse: t.latestReviewerProse,
         });

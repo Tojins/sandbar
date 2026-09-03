@@ -337,6 +337,18 @@ describe("inner-loop-machine — reviewer CHANGES-REQUESTED loop", () => {
 });
 
 describe("inner-loop-machine — reviewer harness failure (#41)", () => {
+  it("parks immediately when a reviewer writes git state (#98)", () => {
+    const { verdict } = drive(defaultOpts, [
+      impl(complete),
+      gate1Ok,
+      { kind: "reviewer-wrote", detail: "before a; after b; M src/x.ts" },
+    ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN-REVIEW",
+      cause: "reviewer-wrote",
+      latestReviewerProse: "before a; after b; M src/x.ts",
+    });
+  });
   it("spends NO review round: the next reviewer pass is still round 1", () => {
     const { actions } = drive(defaultOpts, [
       impl(complete),

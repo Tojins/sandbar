@@ -424,7 +424,7 @@ async function headRef(worktreePath: string): Promise<string | null> {
 // payload — once the worktree is removed, the sha printed in the handoff comment
 // is the only remaining handle on the stranded commits, and degrading it to "an
 // unknown commit" would lose the work quietly rather than loudly.
-async function branchTip(
+export async function branchTip(
   worktreePath: string,
   branch: string,
 ): Promise<string | null> {

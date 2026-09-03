@@ -63,7 +63,7 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readdir, realpath, rm, stat } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { onCleanup } from "./cleanup.js";
@@ -322,6 +322,9 @@ export interface Sandbox {
   // The anchor the sandbox stack's siblings attach to (#44). See SandboxHandle.
   readonly containerName: string;
   run(o: RunOptions): Promise<SandboxRunResult>;
+  // Publish this issue clone's branch into the host-only cache. The caller
+  // does this after implementer work, never after a reviewer invocation.
+  syncBranchToCache(): Promise<void>;
   close(): Promise<{ preservedWorktreePath?: string }>;
 }
 
@@ -365,7 +368,7 @@ export type CreateSandboxOptions = {
   // caller has no handle yet. It is passed the container's name for the same
   // reason `containerName` is public at all.
   beforeSandboxReady?: (containerName: string) => Promise<void>;
-  // Extra bind mounts, appended after the worktree and the git common dir
+  // Extra bind mounts, appended after the self-contained issue clone
   // (#44). The one caller is the sandbox stack's log directory — a host
   // directory the followers write each sibling's `podman logs -f` into, mounted
   // read-only so the agent can read its neighbours' logs without being handed
@@ -953,37 +956,8 @@ const formatVolumeMount = (
 // Git mount resolution
 // ---------------------------------------------------------------------------
 //
-// A linked worktree's `.git` is a FILE holding an absolute gitlink into the
-// repo's common directory, so in-container git can only follow it if that
-// directory is mounted at its own absolute host path. The worktree itself is
-// already mounted (at SANDBOX_REPO_DIR), so the common dir is the only extra.
-//
-// ASK GIT (#38 item 6). This used to derive the path structurally — `<repo>/
-// .git`, or the gitlink's target up two levels — which hardcoded the non-bare
-// layout and stopped being true the moment the repo became `repo.git`. There is
-// a command whose entire job is this question, it answers it for a bare repo, a
-// normal repo and a linked worktree of either, and the mount SHAPE (identity,
-// at the same absolute path) was already right. Only the discovery was wrong.
-//
-// `--git-common-dir` may answer relatively (a plain `.git` in a normal
-// checkout), so it is resolved against the worktree before being used as a
-// mount source — an unresolved relative path would be a podman error, not a
-// wrong mount, but the failure would name the worktree rather than the repo.
-const resolveGitMounts = async (worktreePath: string): Promise<Mount[]> => {
-  const commonDir = (
-    await execGit(["rev-parse", "--git-common-dir"], worktreePath)
-  ).trim();
-  // Unreachable against a working git, and deliberately not softened to `[]`:
-  // an empty answer means the container gets no repo mount, which is the same
-  // silent "not a git repository" the swallow at the call site used to produce.
-  if (!commonDir) {
-    throw new WorktreeError(
-      `git rev-parse --git-common-dir returned nothing for ${worktreePath}`,
-    );
-  }
-  const abs = resolve(worktreePath, commonDir);
-  return [{ hostPath: abs, sandboxPath: abs }];
-};
+// Issue directories are real clones (#98), so their .git directory is already
+// inside the workspace mount. No cache path is exposed to the container.
 
 // ---------------------------------------------------------------------------
 // Host git + small async helpers
@@ -1145,10 +1119,25 @@ const fastForwardFromOrigin = async (
   }
 };
 
-// Sandbar always passes an explicit, pre-existing branch. Collision → reuse if
-// managed (else throw); no collision → `worktree add <path> <branch>` with the
-// config-lock flags. The `-b` fork fallback is kept for the (unreached) case of
-// a missing branch.
+const ISSUE_CLONE_MARKER = "sandbar.issueBranch";
+
+const issueCloneMarker = async (path: string): Promise<string> =>
+  gitConfigOrEmpty(["config", "--local", "--get", ISSUE_CLONE_MARKER], path);
+
+const syncIssueBranchToCache = async (
+  repoDir: string,
+  worktreePath: string,
+  branch: string,
+): Promise<void> => {
+  await execGit(
+    ["fetch", worktreePath, `+refs/heads/${branch}:refs/heads/${branch}`],
+    repoDir,
+  );
+};
+
+// Each issue gets a self-contained local clone. A local clone hardlinks object
+// files on the same filesystem, but refs, config, index and future objects all
+// belong to this issue alone (#98).
 const worktreeCreate = (
   repoDir: string,
   branch: string,
@@ -1160,50 +1149,40 @@ const worktreeCreate = (
       const worktreeName = branch.replace(/\//g, "-");
       const worktreePath = join(worktreesDir, worktreeName);
 
-      const existing = await listWorktrees(repoDir);
-      const collision = findCollidingWorktree(existing, branch, worktreePath);
-      if (collision) {
-        const managed = normalizePath(collision.path).startsWith(
-          normalizePath(worktreesDir),
-        );
-        if (managed) {
-          const dirty = await hasUncommittedChanges(collision.path);
+      if (existsSync(worktreePath)) {
+        const marker = await issueCloneMarker(worktreePath);
+        if (marker === branch) {
+          // Recover a commit made immediately before a host-side publish was
+          // interrupted, then apply the existing clean-reuse policy.
+          await syncIssueBranchToCache(repoDir, worktreePath, branch);
+          const dirty = await hasUncommittedChanges(worktreePath);
           if (dirty) {
             console.warn(
-              `Reusing worktree at ${collision.path} (branch '${branch}') — worktree has uncommitted changes`,
+              `Reusing worktree at ${worktreePath} (branch '${branch}') — worktree has uncommitted changes`,
             );
           } else {
-            await fastForwardFromOrigin(collision.path, branch);
+            await fastForwardFromOrigin(worktreePath, branch);
           }
-          return { path: collision.path, branch };
+          return { path: worktreePath, branch };
         }
-        throw new WorktreeError(
-          `Branch '${branch}' is already checked out in worktree at '${collision.path}'. Use a different branch name, or wait for the other run to finish.`,
-        );
+        await rm(worktreePath, { recursive: true, force: true });
       }
 
+      await execGit(["clone", "--local", "--no-checkout", repoDir, worktreePath], repoDir);
+      await execGit(
+        ["fetch", repoDir, "+refs/remotes/origin/*:refs/remotes/origin/*"],
+        worktreePath,
+      );
+      const originUrl = await gitConfigOrEmpty(["config", "--get", "remote.origin.url"], repoDir);
+      if (originUrl) {
+        await execGit(["config", "remote.origin.url", originUrl], worktreePath);
+      }
+      await execGit(["config", ISSUE_CLONE_MARKER, branch], worktreePath);
       try {
-        await execGit(
-          [...NO_CONFIG_LOCK_FLAGS, "worktree", "add", worktreePath, branch],
-          repoDir,
-        );
+        await execGit(["checkout", branch], worktreePath);
       } catch (e) {
-        if (e instanceof WorktreeError && e.message.includes("invalid reference")) {
-          await execGit(
-            [
-              ...NO_CONFIG_LOCK_FLAGS,
-              "worktree",
-              "add",
-              "-b",
-              branch,
-              worktreePath,
-              baseBranch ?? "HEAD",
-            ],
-            repoDir,
-          );
-        } else {
-          throw e;
-        }
+        if (!(e instanceof WorktreeError) || !e.message.includes("did not match")) throw e;
+        await execGit(["checkout", "-b", branch, baseBranch ?? "HEAD"], worktreePath);
       }
       return { path: worktreePath, branch };
     })(),
@@ -1214,71 +1193,12 @@ const worktreeCreate = (
       ),
   );
 
-// The repo is NAMED, not derived from the path (#38). It used to walk three
-// levels up from the worktree — `<repo>/<workDir>/worktrees/<name>` — which was
-// sound only while the repo was the worktrees' grandparent AND `workDir` was a
-// single path segment, neither of which survives the split: three levels up
-// from `<hostCwd>/.sandbar/worktrees/<name>` is now the OPERATOR'S checkout, a
-// repo the worktree is not registered in. Every caller swallows this failure,
-// so the whole class of bug would have been a silent worktree leak.
+// Issue clones are ordinary directories, not registrations in the cache.
 const worktreeRemove = (
-  repoDir: string,
+  _repoDir: string,
   worktreePath: string,
 ): Promise<void> =>
-  execGit(["worktree", "remove", "--force", worktreePath], repoDir).then(
-    () => undefined,
-  );
-
-// Best-effort hygiene run at createSandbox start: prune metadata, then sweep
-// orphaned dirs under the worktrees directory. realPath-canonicalises the dir
-// so a symlinked workDir does not make active worktrees look orphaned (#470).
-// Takes the directory rather than composing it from `repoDir` + `workDir`,
-// which stopped being the same place in #38.
-const pruneStale = (repoDir: string, worktreesDir: string): Promise<void> =>
-  withTimeout(
-    (async () => {
-      await execGit(["worktree", "prune"], repoDir);
-      let entries: string[];
-      try {
-        entries = await readdir(worktreesDir);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
-        throw new WorktreeError((e as Error).message);
-      }
-      const realWorktreesDir = await realpath(worktreesDir);
-      const worktreeList = await execGit(
-        ["worktree", "list", "--porcelain"],
-        repoDir,
-      );
-      const activePaths = new Set(
-        worktreeList
-          .split("\n")
-          .filter((l) => l.startsWith("worktree "))
-          .map((l) => l.slice("worktree ".length).trim())
-          .map(normalizePath),
-      );
-      for (const entry of entries) {
-        const entryPath = join(realWorktreesDir, entry);
-        let isDir = false;
-        try {
-          isDir = (await stat(entryPath)).isDirectory();
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-            isDir = false;
-          } else {
-            throw err;
-          }
-        }
-        if (isDir && !activePaths.has(normalizePath(entryPath))) {
-          await rm(entryPath, { recursive: true, force: true }).catch((err) => {
-            throw new WorktreeError(`Failed to remove ${entryPath}: ${err.message}`);
-          });
-        }
-      }
-    })(),
-    WORKTREE_TIMEOUT_MS,
-    () => new WorktreeError(`Worktree prune timed out after ${WORKTREE_TIMEOUT_MS}ms`),
-  );
+  rm(worktreePath, { recursive: true, force: true });
 
 // ---------------------------------------------------------------------------
 // copyToWorktree — Linux COW with plain `cp -R` fallback; skip missing sources
@@ -1923,7 +1843,7 @@ const invokeAgent = (
 // prepareWorktree / createSandbox — orchestration, lifecycle, commit capture
 // ---------------------------------------------------------------------------
 
-// Worktree-only setup: prune stale entries, create (or reuse) the branch's
+// Worktree-only setup: create (or reuse) the branch's
 // managed worktree, copy host paths in, run host.onWorktreeReady hooks.
 // Returns the worktree path. Split out of createSandbox (#20) so callers can
 // know the path — with its files on disk — before container bringup, and hand
@@ -1933,10 +1853,6 @@ export const prepareWorktree = async (
   options: PrepareWorktreeOptions,
 ): Promise<string> => {
   const { repoDir, worktreesDir, hostCwd } = options.layout;
-
-  await pruneStale(repoDir, worktreesDir).catch((err) => {
-    console.error("Stale-worktree sweep failed (continuing):", err);
-  });
 
   const { path: worktreePath } = await worktreeCreate(
     repoDir,
@@ -1998,17 +1914,8 @@ export const createSandbox = async (
     // over resolved (overlap between agent⨯sandbox would throw, but agent={}).
     const env = { ...resolvedEnv, ...options.sandbox.env };
 
-    // NOT swallowed to `[]` (#38). It used to be, back when the mount was
-    // often redundant — a plain checkout's `.git` sits inside the worktree the
-    // container already mounts. Against the bare cache it is essential: without
-    // it in-container git cannot follow the worktree's gitlink, so every agent
-    // command fails with "not a git repository" and the attempt produces
-    // nothing, silently, for the whole budget. A genuine failure here is infra,
-    // so it belongs on the HARD-ERROR path with the rest of bringup.
-    const gitMounts = await resolveGitMounts(worktreePath);
     const mounts: Mount[] = [
       { hostPath: worktreePath, sandboxPath: SANDBOX_REPO_DIR },
-      ...gitMounts,
       ...(options.extraMounts ?? []),
     ];
 
@@ -2083,7 +1990,7 @@ export const createSandbox = async (
   const forceCleanup = (): void => {
     console.error(`\nWorktree preserved at ${worktreePath}`);
     console.error(`  To review: cd ${worktreePath}`);
-    console.error(`  To clean up: git worktree remove --force ${worktreePath}`);
+    console.error(`  To clean up: remove ${worktreePath}`);
   };
   const unregisterShutdown = registerShutdown(forceCleanup);
 
@@ -2153,7 +2060,7 @@ export const createSandbox = async (
     // ensureIssueBranch created this ref. Its absence is infrastructure failure,
     // never permission to change the commit range's meaning (#83).
     const baseHead = (
-      await execGit(["rev-parse", "--verify", `refs/heads/${branch}`], repoDir)
+      await execGit(["rev-parse", "--verify", `refs/heads/${branch}`], worktreePath)
     ).trim();
 
     const { result, signalMs, maxGapMs, usage, toolCalls } = await invokeAgent(
@@ -2172,7 +2079,7 @@ export const createSandbox = async (
     const commits = await withTimeout(
       execGit(
         ["rev-list", `${baseHead}..refs/heads/${branch}`, "--reverse"],
-        repoDir,
+        worktreePath,
       ).then((out) => {
           const trimmed = out.trim();
           if (!trimmed) return [] as { sha: string }[];
@@ -2220,6 +2127,9 @@ export const createSandbox = async (
         ...(iter.usage === undefined ? {} : { usage: iter.usage }),
         toolCalls: iter.toolCalls,
       };
+    },
+    async syncBranchToCache() {
+      await syncIssueBranchToCache(repoDir, worktreePath, branch);
     },
     async close() {
       if (closed) return { preservedWorktreePath: undefined };

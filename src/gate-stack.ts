@@ -682,6 +682,9 @@ export function containerRunArgs(opts: {
   ];
   if (c.mountWorktree !== null) {
     args.push("-v", `${opts.worktreePath}:${c.mountWorktree}:rw,z`);
+    // A gate consumes files, never repository state (#98). Hide the clone's
+    // real object store just as the former gitlink was unusable in-container.
+    args.push("--tmpfs", `${c.mountWorktree}/.git:rw,nosuid,nodev,noexec`);
     args.push("-w", c.mountWorktree);
   }
   if (c.hold) {

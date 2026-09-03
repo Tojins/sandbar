@@ -163,6 +163,7 @@ export type Verdict =
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
+      readonly cause?: "reviewer-wrote";
     }
   | { readonly type: "HARD-ERROR"; readonly reason: string };
 
@@ -212,7 +213,8 @@ export type LoopEvent =
       // diagnostics, never prose attributed to the reviewer.
       readonly kind: "reviewer-harness-failed";
       readonly detail: string;
-    };
+    }
+  | { readonly kind: "reviewer-wrote"; readonly detail: string };
 
 export type StepResult = {
   readonly state: LoopState;
@@ -302,6 +304,21 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
         );
       }
       return onReviewerHarnessFailed(state, event.detail);
+    case "reviewer-wrote":
+      if (state.phase !== "needs-reviewer") {
+        throw new Error(`reviewer-wrote event in phase ${state.phase}; expected needs-reviewer`);
+      }
+      return {
+        state: { ...state, phase: "terminated" },
+        action: {
+          kind: "terminate",
+          verdict: {
+            type: "NEEDS-HUMAN-REVIEW",
+            cause: "reviewer-wrote",
+            latestReviewerProse: event.detail,
+          },
+        },
+      };
   }
 }
 

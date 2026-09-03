@@ -57,6 +57,7 @@ import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
 import {
   type HeadMismatch,
   type IssueBranchBase,
+  branchTip,
   dirtyWorktreePaths,
   ensureIssueBranch,
   headMismatch,
@@ -158,6 +159,7 @@ export type Terminal =
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
+      readonly cause?: "reviewer-wrote";
       readonly commits: readonly { sha: string }[];
     }
   | {
@@ -275,6 +277,7 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
     case "NEEDS-HUMAN-REVIEW":
       return {
         type: "NEEDS-HUMAN-REVIEW",
+        ...(verdict.cause === undefined ? {} : { cause: verdict.cause }),
         latestReviewerProse: verdict.latestReviewerProse,
         commits: accumulatedCommits,
       };
@@ -698,6 +701,10 @@ async function runImplementer(
     prompt,
     completionSignal: PROMISE_COMPLETION_SIGNALS,
   });
+  // The issue repository is private to its sandbox (#98). Publish agent work
+  // to the host-only cache before any cache-based commit collection or later
+  // merge lifecycle reads the branch.
+  await sandbox.syncBranchToCache();
   if (opts.attemptLogger) {
     await opts.attemptLogger.writeAttempt(issue.id, action.attempt, run.stdout);
   }
@@ -744,6 +751,7 @@ async function runImplementer(
       // Any of the three tags ends the wait, not just COMPLETE.
       completionSignal: PROMISE_COMPLETION_SIGNALS,
     });
+    await sandbox.syncBranchToCache();
     accumulated.push(...nudge.commits);
     attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
     attemptToolCalls += nudge.toolCalls;
@@ -834,6 +842,10 @@ async function runReviewer(
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
   const { issue, sandbox, opts, config } = ctx;
+  const beforeReview = await Promise.all([
+    branchTip(sandbox.worktreePath, issue.branch),
+    dirtyWorktreePaths(sandbox.worktreePath),
+  ]);
 
   const reviewerPromptInputs = {
     issue,
@@ -985,6 +997,23 @@ async function runReviewer(
   if (failed) console.error(`  ${line}`);
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(line);
+  }
+  const afterReview = await Promise.all([
+    branchTip(sandbox.worktreePath, issue.branch),
+    dirtyWorktreePaths(sandbox.worktreePath),
+  ]);
+  if (
+    beforeReview[0] !== afterReview[0] ||
+    JSON.stringify(beforeReview[1]) !== JSON.stringify(afterReview[1])
+  ) {
+    await sandbox.syncBranchToCache();
+    return {
+      kind: "reviewer-wrote",
+      detail:
+        `Reviewer changed git state. Branch tip before: ${beforeReview[0]}; ` +
+        `after: ${afterReview[0]}. Status after:\n` +
+        (afterReview[1].length > 0 ? afterReview[1].join("\n") : "(clean worktree)"),
+    };
   }
   return decision.event;
 }

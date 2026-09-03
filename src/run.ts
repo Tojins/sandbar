@@ -1250,6 +1250,7 @@ export async function run(
           const stackForGate2 = mergerStack;
           const adapter = realAdapter({
             cwd: mergerWorktree.path,
+            cacheDir: layout.repoDir,
             scope,
             repo,
             sourceBranch: config.sourceBranch,
