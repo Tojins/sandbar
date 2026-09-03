@@ -59,15 +59,56 @@ describe("classifyAgentRunEnd (#114)", () => {
       spoken: "partial",
       parseError: "shape broke",
       silentRunRecovery: "retryable",
-    })).toEqual({ cause: "parse-error", verdict: "infra", detail: "shape broke" });
+    })).toEqual({
+      cause: "parse-error",
+      verdict: "infra",
+      detail: "shape broke",
+      diagnostic: "shape broke",
+    });
   });
 
   it("uses the provider, stderr, speech, stdout-tail detail ladder", () => {
     const base = { end: "exit" as const, exitCode: 1, signal: null, silentRunRecovery: "infra" as const };
-    expect(classifyAgentRunEnd({ ...base, spoken: "speech", failure: "provider", stderr: "stderr", stdout: "stdout" }).detail).toBe("provider");
-    expect(classifyAgentRunEnd({ ...base, spoken: "speech", stderr: "stderr", stdout: "stdout" }).detail).toBe("stderr");
-    expect(classifyAgentRunEnd({ ...base, spoken: "speech", stdout: "stdout" }).detail).toBe("speech");
+    expect(classifyAgentRunEnd({
+      ...base, spoken: "speech", failure: "provider", stderr: "stderr", stdout: "stdout",
+    }).diagnostic).toBe("provider");
+    expect(classifyAgentRunEnd({
+      ...base, spoken: "speech", stderr: "stderr", stdout: "stdout",
+    }).diagnostic).toBe("stderr");
+    expect(classifyAgentRunEnd({
+      ...base, spoken: "speech", stdout: "stdout",
+    }).diagnostic).toBe("speech");
     const stdout = Array.from({ length: 25 }, (_, i) => `line-${i}`).join("\n");
-    expect(classifyAgentRunEnd({ ...base, spoken: "", stdout }).detail).toBe(Array.from({ length: 20 }, (_, i) => `line-${i + 5}`).join("\n"));
+    expect(classifyAgentRunEnd({ ...base, spoken: "", stdout }).diagnostic).toBe(
+      Array.from({ length: 20 }, (_, i) => `line-${i + 5}`).join("\n"),
+    );
+  });
+
+  it("keeps merger detail narrow while retaining the sandbox diagnostic", () => {
+    const classified = classifyAgentRunEnd({
+      end: "exit",
+      exitCode: 125,
+      signal: null,
+      spoken: "",
+      stderr: "podman failed",
+      silentRunRecovery: "infra",
+    });
+    expect(classified.detail).toBeUndefined();
+    expect(classified.diagnostic).toBe("podman failed");
+  });
+
+  it("gives a spawn error precedence over a provider failure", () => {
+    const classified = classifyAgentRunEnd({
+      end: "spawn-error",
+      exitCode: null,
+      signal: null,
+      spoken: "",
+      failure: "provider",
+      spawnError: "ENOENT",
+      silentRunRecovery: "infra",
+    });
+    expect(classified).toMatchObject({
+      cause: "spawn-error", detail: "ENOENT", diagnostic: "ENOENT",
+    });
   });
 });

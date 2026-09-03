@@ -230,6 +230,26 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(isInfraFailure(run)).toBe(true);
   });
 
+  it("does not promote raw stderr into the merger's narrow detail", () => {
+    const run = parseCapturedAgentRun(
+      { ...captured(""), exitCode: 125, stderr: "unbounded runtime stderr" },
+      buildAgentProvider("codex", "m"),
+    );
+    expect(run.cause).toBe("provider-failure");
+    expect(run.detail).toBeUndefined();
+    expect(run.stderr).toBe("unbounded runtime stderr");
+  });
+
+  it("keeps a spawn error ahead of an in-band provider failure", () => {
+    const raw = JSON.stringify({ type: "turn.failed", error: { message: "provider" } });
+    const run = parseCapturedAgentRun(
+      { ...captured(raw), end: "spawn-error", exitCode: null, detail: "ENOENT" },
+      buildAgentProvider("codex", "m"),
+    );
+    expect(run.cause).toBe("spawn-error");
+    expect(run.detail).toBe("ENOENT");
+  });
+
   it("keeps agent speech when a terminal failure follows it", () => {
     const raw = [
       JSON.stringify({

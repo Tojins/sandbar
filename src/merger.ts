@@ -2286,7 +2286,8 @@ export function parseCapturedAgentRun(
     exitCode: run.exitCode,
     signal: run.signal,
     spoken: speech.spoken,
-    failure: speech.failure ?? run.detail,
+    failure: speech.failure,
+    spawnError: run.end === "spawn-error" ? run.detail : undefined,
     parseError,
     stderr: run.stderr,
     stdout: run.stdout,
@@ -2300,7 +2301,7 @@ export function parseCapturedAgentRun(
     output: speech.spoken,
     cause: classification.cause,
     verdict: classification.verdict,
-    ...(classification.detail ? { detail: classification.detail } : {}),
+    ...(classification.detail === undefined ? {} : { detail: classification.detail }),
     ...(speech.usage === undefined ? {} : { usage: speech.usage }),
     toolCalls: speech.toolCalls,
   };

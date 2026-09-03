@@ -1889,8 +1889,8 @@ const invokeAgent = (
           settleReject(
             new AgentError(
               classification.cause === "provider-failure" && execResult.exitCode === 0
-                ? `${agent.name} reported a failed turn and produced no output:\n${classification.detail}`
-                : `${agent.name} exited with code ${execResult.exitCode}:\n${classification.detail}`,
+                ? `${agent.name} reported a failed turn and produced no output:\n${classification.diagnostic}`
+                : `${agent.name} exited with code ${execResult.exitCode}:\n${classification.diagnostic}`,
             ),
           );
           return;

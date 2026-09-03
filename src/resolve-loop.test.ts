@@ -755,6 +755,9 @@ describe("runResolveLoop — an attempt that never ran (#67)", () => {
   });
 
   it("names the container, how it ended, and where its output went", async () => {
+    const stderr =
+      `beginning-must-not-be-inlined\n${"x".repeat(700)}\n` +
+      "Error: cannot connect to podman socket";
     const { adapter } = makeAdapter({
       initiallyConflicted: true,
       agentRuns: [
@@ -763,7 +766,7 @@ describe("runResolveLoop — an attempt that never ran (#67)", () => {
           run: {
             exitCode: 125,
             container: "sandbar-wdeadbeef-resolve-1-abc",
-            stderr: "Error: cannot connect to podman socket",
+            stderr,
           },
         },
       ],
@@ -783,6 +786,8 @@ describe("runResolveLoop — an attempt that never ran (#67)", () => {
     expect(err.message).toContain("remaining 3 resolve attempts");
     // stderr was piped to nobody before this issue; it is the whole diagnosis.
     expect(err.message).toContain("cannot connect to podman socket");
+    expect(err.message).not.toContain("beginning-must-not-be-inlined");
+    expect(err.message.length).toBeLessThan(1_500);
   });
 
   it("says so plainly when no sink was wired, rather than naming a file", async () => {
