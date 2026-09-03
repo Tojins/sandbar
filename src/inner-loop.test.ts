@@ -53,6 +53,7 @@ describe("runSandboxAndPublish", () => {
     const sandbox = {
       run: vi.fn().mockRejectedValue(agentError),
       syncBranchToCache: vi.fn().mockRejectedValue(new Error("packed-refs.lock")),
+      preserveWorktree: vi.fn(),
     } as unknown as Sandbox;
     const reported = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -61,6 +62,7 @@ describe("runSandboxAndPublish", () => {
         runSandboxAndPublish(sandbox, {} as Parameters<Sandbox["run"]>[0], "98"),
       ).rejects.toBe(agentError);
       expect(sandbox.syncBranchToCache).toHaveBeenCalledOnce();
+      expect(sandbox.preserveWorktree).toHaveBeenCalledOnce();
       expect(reported).toHaveBeenCalledWith(
         expect.stringContaining("continuing with original error"),
         expect.any(Error),
@@ -68,5 +70,20 @@ describe("runSandboxAndPublish", () => {
     } finally {
       reported.mockRestore();
     }
+  });
+
+  it("preserves a successful run when its only publish fails", async () => {
+    const publishError = new Error("cache ref lock failed");
+    const sandbox = {
+      run: vi.fn().mockResolvedValue({ commits: [{ sha: "c1" }] }),
+      syncBranchToCache: vi.fn().mockRejectedValue(publishError),
+      preserveWorktree: vi.fn(),
+    } as unknown as Sandbox;
+
+    await expect(
+      runSandboxAndPublish(sandbox, {} as Parameters<Sandbox["run"]>[0], "98"),
+    ).rejects.toBe(publishError);
+    expect(sandbox.syncBranchToCache).toHaveBeenCalledOnce();
+    expect(sandbox.preserveWorktree).toHaveBeenCalledOnce();
   });
 });

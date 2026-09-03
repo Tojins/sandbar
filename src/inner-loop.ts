@@ -841,10 +841,9 @@ export async function runSandboxAndPublish(
   options: Parameters<Sandbox["run"]>[0],
   issueId: string,
 ): ReturnType<Sandbox["run"]> {
+  let result: Awaited<ReturnType<Sandbox["run"]>>;
   try {
-    const result = await sandbox.run(options);
-    await sandbox.syncBranchToCache();
-    return result;
+    result = await sandbox.run(options);
   } catch (agentError) {
     // A failed invocation may still have committed. Try to publish it, but a
     // second failure must not replace the agent/provider error that selects
@@ -852,6 +851,7 @@ export async function runSandboxAndPublish(
     try {
       await sandbox.syncBranchToCache();
     } catch (publishError) {
+      sandbox.preserveWorktree();
       console.error(
         `Could not publish issue=${issueId} after implementer failure (continuing with original error):`,
         publishError,
@@ -859,6 +859,15 @@ export async function runSandboxAndPublish(
     }
     throw agentError;
   }
+  try {
+    await sandbox.syncBranchToCache();
+  } catch (publishError) {
+    // A clean on-branch clone otherwise looks disposable to close(), even
+    // though it is now the only repository containing the agent's commits.
+    sandbox.preserveWorktree();
+    throw publishError;
+  }
+  return result;
 }
 
 async function runGate1(
