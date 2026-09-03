@@ -322,8 +322,9 @@ export interface Sandbox {
   // The anchor the sandbox stack's siblings attach to (#44). See SandboxHandle.
   readonly containerName: string;
   run(o: RunOptions): Promise<SandboxRunResult>;
-  // Publish this issue clone's branch into the host-only cache. The caller
-  // does this after implementer work, never after a reviewer invocation.
+  // Publish this issue clone's branch into the host-only cache. Implementer
+  // calls publish unconditionally; reviewer calls publish only after detecting
+  // a branch write that must be handed to a human.
   syncBranchToCache(): Promise<void>;
   close(): Promise<{ preservedWorktreePath?: string }>;
 }

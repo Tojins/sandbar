@@ -2463,7 +2463,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     ...chunkForgeWrites({ repo: deps.repo, gitCwd: cwd, errPrefix: "merger" }),
     async mergeNoFf(unit) {
       try {
-        if (deps.cacheDir && issueNumberFromBranch(unit.branch) !== null) {
+        if (issueNumberFromBranch(unit.branch) !== null) {
           await exec(
             "git",
             ["fetch", deps.cacheDir, `+refs/heads/${unit.branch}:refs/heads/${unit.branch}`],
