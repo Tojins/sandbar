@@ -381,7 +381,7 @@ describe.runIf(available)(
     it.concurrent(
       "a readiness timeout quotes the probe's own output, not podman's `unhealthy`",
       async ({ expect, task, onTestFinished }) => {
-        const { repo, stackId, hold } = await gateStackFixture(
+        const { repo, stackId } = await gateStackFixture(
           SCOPE,
           task.id,
           onTestFinished,
@@ -412,14 +412,12 @@ describe.runIf(available)(
 
         let caught: unknown = null;
         try {
-          hold(
-            await startStack({
-              stackId: stackId,
-              scope: SCOPE,
-              worktreePath: repo,
-              spec,
-            }),
-          );
+          await startStack({
+            stackId: stackId,
+            scope: SCOPE,
+            worktreePath: repo,
+            spec,
+          });
         } catch (err) {
           caught = err;
         }

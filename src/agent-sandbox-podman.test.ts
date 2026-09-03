@@ -68,11 +68,11 @@ const IMAGE = "docker.io/library/mariadb:10.11";
 // silently skips everything — a test file that always passes by never running.
 //
 // No `needsLocalClient`, which is the whole of the wiring change (#52): the
-// `test` step's `**/*-podman.test.ts` exclude already misses this file, so
-// naming it in `podman-test` is what runs it. Dropping the flag is also what
-// makes `SANDBAR_REQUIRE_PODMAN_TESTS=1` reach these two tests — under it an
-// unreachable podman is a failing test here rather than a silent skip, which is
-// the point of putting the file in a step at all.
+// `podman-test` step's `podman.test.ts` filter collects this file, and it is not
+// one of that step's two explicit local-client exclusions. Dropping the flag is
+// also what makes `SANDBAR_REQUIRE_PODMAN_TESTS=1` reach these two tests — under
+// it an unreachable podman is a failing test here rather than a silent skip,
+// which is the point of putting the file in a step at all.
 const available = podmanTestsEnabled({
   what: "agent-sandbox podman tests",
   image: IMAGE,
