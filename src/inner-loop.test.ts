@@ -42,7 +42,9 @@ describe("reviewer write detection", () => {
         "partial reviewer output",
       ),
     ).rejects.toThrow("Reviewer changed git state");
-    expect(sandbox.preserveWorktree).toHaveBeenCalledOnce();
+    expect(sandbox.preserveWorktree).toHaveBeenCalledWith(
+      expect.stringContaining("human inspection"),
+    );
     expect(sandbox.syncBranchToCache).not.toHaveBeenCalled();
   });
 });
@@ -53,7 +55,6 @@ describe("runSandboxAndPublish", () => {
     const sandbox = {
       run: vi.fn().mockRejectedValue(agentError),
       syncBranchToCache: vi.fn().mockRejectedValue(new Error("packed-refs.lock")),
-      preserveWorktree: vi.fn(),
     } as unknown as Sandbox;
     const reported = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -62,7 +63,6 @@ describe("runSandboxAndPublish", () => {
         runSandboxAndPublish(sandbox, {} as Parameters<Sandbox["run"]>[0], "98"),
       ).rejects.toBe(agentError);
       expect(sandbox.syncBranchToCache).toHaveBeenCalledOnce();
-      expect(sandbox.preserveWorktree).toHaveBeenCalledOnce();
       expect(reported).toHaveBeenCalledWith(
         expect.stringContaining("continuing with original error"),
         expect.any(Error),
@@ -72,18 +72,20 @@ describe("runSandboxAndPublish", () => {
     }
   });
 
-  it("preserves a successful run when its only publish fails", async () => {
+  // The publish failure is the error, not the agent's success: the merge phase
+  // reads the cache, so a run whose commits never reached it must not proceed
+  // as if they had (#98). The commits themselves are the clone reclaim's to
+  // keep, not this function's.
+  it("surfaces a failed publish of a successful run as the error", async () => {
     const publishError = new Error("cache ref lock failed");
     const sandbox = {
       run: vi.fn().mockResolvedValue({ commits: [{ sha: "c1" }] }),
       syncBranchToCache: vi.fn().mockRejectedValue(publishError),
-      preserveWorktree: vi.fn(),
     } as unknown as Sandbox;
 
     await expect(
       runSandboxAndPublish(sandbox, {} as Parameters<Sandbox["run"]>[0], "98"),
     ).rejects.toBe(publishError);
     expect(sandbox.syncBranchToCache).toHaveBeenCalledOnce();
-    expect(sandbox.preserveWorktree).toHaveBeenCalledOnce();
   });
 });

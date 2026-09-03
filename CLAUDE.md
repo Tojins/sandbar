@@ -164,7 +164,13 @@ and used to announce themselves in four different ways, the halt in none at all.
   hardlink clones of the host-only bare cache; no container mounts the cache,
   and each sandbox can write only its own repository. Gate containers get an
   empty tmpfs over `.git`, while reviewer writes are detected and parked for
-  human inspection. All resource
+  human inspection. The corollary: an attempt's commits live in the clone until
+  a host-side fetch publishes them, so removing a clone is where work can be
+  destroyed — `reclaimIssueClone` (`src/agent-sandbox.ts`) is the ONE spelling
+  of that removal, for the sandbox's `close()` and finalize alike: publish the
+  branch and pin an off-branch HEAD in the cache first, delete only once the
+  cache holds both, otherwise keep the clone and say why. Nothing decides
+  preservation by terminal kind. All resource
   names carry `w`+8-hex of the *realpath'd* locked workdir; the orphan sweep
   only ever touches its own scope, and unattributable debris is reported, never
   removed. `src/containers.ts` and `src/naming.ts` headers. Image **tags** are

@@ -50,10 +50,21 @@
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
 // Issue workspaces are standalone hardlink clones (#98), so no container sees
-// the host cache. Clean crash leftovers are reusable, but reuse first retains
-// an off-branch HEAD under refs/sandbar/stranded/* and restores the issue
-// branch; otherwise a fresh attempt would inherit the prior attempt's detached
-// HEAD or scratch branch.
+// the host cache — and so the clone, not the cache, is where an attempt's
+// commits live until a host-side fetch publishes them. Removing a clone is
+// therefore the one place work can be destroyed, and `reclaimIssueClone` is
+// the ONLY spelling of that removal (the sandbox's close() and finalize's
+// adapter both call it): publish first — the issue branch into the cache's
+// `refs/heads/<branch>`, an off-branch HEAD under
+// `refs/sandbar/stranded/<sha>` — and delete only once the cache holds both.
+// A publish that fails, an uncommitted tree, or a caller asking for evidence
+// to be kept all leave the clone in place and say why. Structural on purpose:
+// an earlier version decided preservation by terminal kind and by flags
+// threaded out of the inner loop, and every review round found one more arm
+// where the classification and the deletion disagreed. Clean crash leftovers
+// are reusable, and reuse pins an off-branch HEAD the same way before
+// restoring the issue branch; otherwise a fresh attempt would inherit the
+// prior attempt's detached HEAD or scratch branch.
 //
 // This container is also the ANCHOR of the sandbox stack's network namespace
 // (#44): joiners attach with `--network container:<name>`, so its name is
@@ -332,9 +343,10 @@ export interface Sandbox {
   // calls publish unconditionally; reviewer calls publish only after detecting
   // a branch write that must be handed to a human.
   syncBranchToCache(): Promise<void>;
-  // Keep the issue clone at close even when its worktree is clean. Reviewer
-  // writes use this so committed as well as uncommitted evidence survives.
-  preserveWorktree(): void;
+  // Keep the issue clone at close even when reclaiming it would lose nothing.
+  // The reviewer-write handoff uses this: the human is told to inspect the
+  // clone, so it must still be there. `reason` is what close() reports.
+  preserveWorktree(reason: string): void;
   close(): Promise<{ preservedWorktreePath?: string }>;
 }
 
@@ -1053,28 +1065,46 @@ const isOnIssueBranch = async (
   }
 };
 
+// The clone's HEAD commit, or null when HEAD is unborn (an orphan checkout, or
+// HEAD naming a branch an agent deleted) — there is then nothing to pin.
+const headCommit = async (worktreePath: string): Promise<string | null> => {
+  try {
+    return (
+      await execGit(["rev-parse", "--verify", "--quiet", "HEAD"], worktreePath)
+    ).trim();
+  } catch (err) {
+    if (err instanceof WorktreeError && err.exitCode === 1) return null;
+    throw err;
+  }
+};
+
+// Pin the clone's HEAD in the host cache as `refs/sandbar/stranded/<sha>`, so
+// the commit survives the clone. The pin is the ONLY durable handle on work an
+// agent left off its branch (#27); the handoff comment names the sha, and this
+// ref is what keeps that sha resolvable. Fetched from the clone by refspec
+// rather than written locally first: the cache is the repository that outlives
+// the clone, and a clone-side ref would only exist to be copied.
+const pinStrandedHead = async (
+  repoDir: string,
+  worktreePath: string,
+): Promise<string | null> => {
+  const head = await headCommit(worktreePath);
+  if (head === null) return null;
+  await execGit(
+    ["fetch", worktreePath, `+HEAD:refs/sandbar/stranded/${head}`],
+    repoDir,
+  );
+  return head;
+};
+
 const restoreIssueBranch = async (
   repoDir: string,
   worktreePath: string,
   branch: string,
 ): Promise<void> => {
-  const head = (await execGit(["rev-parse", "--verify", "HEAD"], worktreePath)).trim();
-  const strandedRef = `refs/sandbar/stranded/${head}`;
-  // Publish the durable pin into the host cache before returning the reusable
-  // clone to its issue branch. Finalise may reclaim the clone after a later
-  // on-branch cycle, so a clone-only pin would eventually lose the work.
-  await execGit(["update-ref", strandedRef, head], worktreePath);
-  await execGit(["fetch", worktreePath, `+${strandedRef}:${strandedRef}`], repoDir);
+  await pinStrandedHead(repoDir, worktreePath);
   await execGit(["checkout", branch], worktreePath);
 };
-
-const hasStrandedCommits = async (worktreePath: string): Promise<boolean> =>
-  (
-    await execGit(
-      ["for-each-ref", "--count=1", "--format=%(refname)", "refs/sandbar/stranded"],
-      worktreePath,
-    )
-  ).trim() !== "";
 
 // Clean-reuse refresh: ff-only from origin, gated (on-branch, fetch-ok,
 // strictly-behind); never reset --hard. Optional on sandbar's path.
@@ -1178,6 +1208,59 @@ const hasLocalBranch = async (
     if (err instanceof WorktreeError && err.exitCode === 1) return false;
     throw err;
   }
+};
+
+export type IssueCloneReclaim =
+  // The clone is gone and the cache holds everything it carried.
+  | { readonly kind: "removed" }
+  // Nothing at the managed path.
+  | { readonly kind: "absent" }
+  // The clone stays, and this is why. Whatever DID publish is in the cache.
+  | { readonly kind: "preserved"; readonly reason: string };
+
+// Remove an issue clone without losing what it holds — the one rule every
+// removal goes through (see the module header). "What it holds" is the two
+// places a prompt can leave work: `refs/heads/<branch>`, published into the
+// cache's branch of the same name, and HEAD when it is somewhere else, pinned
+// under `refs/sandbar/stranded/<sha>`. Either publish failing preserves the
+// clone with the failure as the reason, so a cache that could not be written
+// (a wedged ref lock, a full disk) keeps the only repository with the work
+// rather than being reported as having received it. An uncommitted tree is
+// preserved too — nothing carries it — and `keep` lets a caller preserve a
+// clone the rule would reclaim, for a human who has been told to look at it.
+// A directory at the path that is not a marked clone of this branch is debris
+// from a checkout that never completed (the marker is installed last) and is
+// removed as the sweep would remove it.
+export const reclaimIssueClone = async (
+  repoDir: string,
+  worktreePath: string,
+  branch: string,
+  keep?: string,
+): Promise<IssueCloneReclaim> => {
+  if (!existsSync(worktreePath)) return { kind: "absent" };
+  if ((await issueCloneMarker(worktreePath)) !== branch) {
+    await rm(worktreePath, { recursive: true, force: true });
+    return { kind: "removed" };
+  }
+  try {
+    if (await hasLocalBranch(worktreePath, branch)) {
+      await syncIssueBranchToCache(repoDir, worktreePath, branch);
+    }
+    if (!(await isOnIssueBranch(worktreePath, branch))) {
+      await pinStrandedHead(repoDir, worktreePath);
+    }
+  } catch (err) {
+    return {
+      kind: "preserved",
+      reason: `could not publish its git state into the cache: ${(err as Error).message}`,
+    };
+  }
+  if (await hasUncommittedChanges(worktreePath)) {
+    return { kind: "preserved", reason: "the worktree has uncommitted changes" };
+  }
+  if (keep !== undefined) return { kind: "preserved", reason: keep };
+  await rm(worktreePath, { recursive: true, force: true });
+  return { kind: "removed" };
 };
 
 // Each issue gets a self-contained local clone. A local clone hardlinks object
@@ -2121,7 +2204,7 @@ export const createSandbox = async (
   const unregisterShutdown = registerShutdown(forceCleanup);
 
   let closed = false;
-  let preserveWorktree = false;
+  let keepReason: string | undefined;
 
   const runOneIteration = async (
     agent: AgentProvider,
@@ -2258,28 +2341,18 @@ export const createSandbox = async (
     async syncBranchToCache() {
       await syncIssueBranchToCache(repoDir, worktreePath, branch);
     },
-    preserveWorktree() {
-      preserveWorktree = true;
+    preserveWorktree(reason) {
+      keepReason = reason;
     },
     async close() {
       if (closed) return { preservedWorktreePath: undefined };
       closed = true;
       unregisterShutdown();
       await providerHandle.close();
-      const [dirty, onIssueBranch, strandedCommits] = await Promise.all([
-        hasUncommittedChanges(worktreePath),
-        isOnIssueBranch(worktreePath, branch),
-        hasStrandedCommits(worktreePath),
-      ]);
-      // A clean detached HEAD or scratch branch may hold commits that were not
-      // published with the issue ref. Reuse pins those commits before restoring
-      // the issue branch, so both the live off-branch state and its durable pins
-      // keep the private object store intact (#27, #98).
-      if (preserveWorktree || dirty || !onIssueBranch || strandedCommits) {
-        return { preservedWorktreePath: worktreePath };
-      }
-      await rm(worktreePath, { recursive: true, force: true });
-      return { preservedWorktreePath: undefined };
+      const reclaim = await reclaimIssueClone(repoDir, worktreePath, branch, keepReason);
+      if (reclaim.kind !== "preserved") return { preservedWorktreePath: undefined };
+      console.error(`Issue clone preserved at ${worktreePath}: ${reclaim.reason}`);
+      return { preservedWorktreePath: worktreePath };
     },
   };
 };

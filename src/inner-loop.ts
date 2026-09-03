@@ -172,9 +172,6 @@ export type Terminal =
       readonly type: "HARD-ERROR";
       readonly reason: string;
       readonly commits: readonly { sha: string }[];
-      // A failed provider may have committed away from the issue branch before
-      // failing. The private clone is then the only repository with that work.
-      readonly strandedHead: HeadMismatch | null;
     };
 
 export type InnerLoopConfig = {
@@ -238,7 +235,6 @@ export type InnerLoopOptions = {
 type SandboxCycleOutcome = {
   readonly verdict: Verdict;
   readonly accumulatedCommits: readonly { sha: string }[];
-  readonly strandedHead?: HeadMismatch | null;
 };
 
 export async function runInnerLoop(
@@ -246,13 +242,11 @@ export async function runInnerLoop(
   opts: InnerLoopOptions,
 ): Promise<Terminal> {
   let retriesUsed = 0;
-  let strandedHead: HeadMismatch | null = null;
   for (;;) {
     const outcome = await runSandboxCycle(issue, opts);
-    if (outcome.strandedHead != null) strandedHead = outcome.strandedHead;
     const decision = decideAfterTerminal(outcome.verdict, retriesUsed);
     if (decision.kind === "surface") {
-      return toTerminal({ ...outcome, strandedHead });
+      return toTerminal(outcome);
     }
     retriesUsed = decision.nextRetriesUsed;
     const reason = outcome.verdict.type === "HARD-ERROR" ? outcome.verdict.reason : "";
@@ -300,7 +294,6 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
         type: "HARD-ERROR",
         reason: verdict.reason,
         commits: accumulatedCommits,
-        strandedHead: outcome.strandedHead ?? null,
       };
   }
 }
@@ -599,24 +592,17 @@ async function runSandboxCycle(
     }
     // Setup failure or any other unhandled exception inside the cycle.
     // Surface as HARD-ERROR so the outer loop can decide whether to retry
-    // with a fresh sandbox.
-    let strandedHead: HeadMismatch | null = null;
-    if (preparedWorktreePath !== null) {
-      try {
-        strandedHead = await headMismatch(preparedWorktreePath, issue.branch);
-      } catch (inspectError) {
-        // Recovery inspection must not replace the infrastructure error that
-        // selected this terminal, but its own failure must remain visible.
-        console.error("Could not inspect issue clone after HARD-ERROR:", inspectError);
-      }
-    }
+    // with a fresh sandbox. Whatever the attempt left in the clone — commits
+    // the publish never reached, a HEAD off the branch — is not this
+    // terminal's to classify: `sandbox.close()` below reclaims the clone
+    // through `reclaimIssueClone`, which publishes before it deletes and keeps
+    // the clone when it cannot (#98).
     return {
       verdict: {
         type: "HARD-ERROR",
         reason: err instanceof Error ? err.message : String(err),
       },
       accumulatedCommits: accumulated,
-      strandedHead,
     };
   } finally {
     // Stack first: its containers bind-mount the worktree read-write, and
@@ -847,11 +833,12 @@ export async function runSandboxAndPublish(
   } catch (agentError) {
     // A failed invocation may still have committed. Try to publish it, but a
     // second failure must not replace the agent/provider error that selects
-    // and explains the HARD-ERROR path (#41, #67, #98).
+    // and explains the HARD-ERROR path (#41, #67, #98). The commits are not
+    // lost either way: close() retries the publish before it removes the
+    // clone, and keeps the clone if that fails too.
     try {
       await sandbox.syncBranchToCache();
     } catch (publishError) {
-      sandbox.preserveWorktree();
       console.error(
         `Could not publish issue=${issueId} after implementer failure (continuing with original error):`,
         publishError,
@@ -859,14 +846,11 @@ export async function runSandboxAndPublish(
     }
     throw agentError;
   }
-  try {
-    await sandbox.syncBranchToCache();
-  } catch (publishError) {
-    // A clean on-branch clone otherwise looks disposable to close(), even
-    // though it is now the only repository containing the agent's commits.
-    sandbox.preserveWorktree();
-    throw publishError;
-  }
+  // A publish that fails is infrastructure, not an answer: the merge phase
+  // reads the cache's copy of the branch, so continuing past it would gate and
+  // review one tree and merge another. HARD-ERROR retries in a fresh sandbox,
+  // whose reuse path publishes again from the clone reclaim kept.
+  await sandbox.syncBranchToCache();
   return result;
 }
 
@@ -930,7 +914,7 @@ export async function enforceReviewerSnapshot(
   transcript: string,
 ): Promise<void> {
   if (!reviewerSnapshotChanged(before, after)) return;
-  sandbox.preserveWorktree();
+  sandbox.preserveWorktree("the reviewer changed the repository; kept for human inspection");
   // Deleting the issue ref is itself a reviewer write. There is then no ref
   // to publish, but the preserved clone still contains the evidence.
   if (after.tip !== null) await sandbox.syncBranchToCache();

@@ -8,14 +8,22 @@
 // merger's own outcomes after. The inputs for each pass are built by
 // finalize-inputs.ts; nothing here cares which pass it is in.
 //
-// Every ordinary kind calls removeWorktreeFor — sandbox.close() in the inner
-// loop usually has already removed the issue clone, but crash leftovers still
-// need deterministic cleanup. Reviewer-write handoffs deliberately preserve
-// the clone because committed rewrites may not push fast-forward and
-// uncommitted evidence cannot travel through a push. They report push rejection
-// in the handoff comment instead of aborting the rest of the finalise pass. As
-// with every human handoff, the explanatory comment precedes the label flip so
-// a comment failure cannot park an issue without its recovery instructions.
+// Every kind calls reclaimIssueClone — sandbox.close() in the inner loop
+// usually has already reclaimed the issue clone, but crash leftovers still need
+// deterministic cleanup. Since #98 the clone is a repository of its own, so
+// removing it is where commits can be destroyed; `reclaimIssueClone`
+// (agent-sandbox.ts) is the one rule for that, and it publishes into the cache
+// BEFORE it deletes, answering `preserved` with a reason when it could not.
+// Nothing here decides preservation by terminal kind: the arms that would go on
+// to delete the cache branch with `-d` (hard-error, needs-ui-prototype) read
+// that answer and keep the branch instead, because the cache branch is what
+// keeps `pruneStaleIssueClones` off a preserved clone. The reviewer-write
+// handoff is the one caller that asks for the clone to be kept when the rule
+// would reclaim it: the human is told to inspect it, and uncommitted evidence
+// cannot travel through a push. It reports push rejection in the handoff
+// comment instead of aborting the rest of the finalise pass. As with every
+// human handoff, the explanatory comment precedes the label flip so a comment
+// failure cannot park an issue without its recovery instructions.
 //
 // `git branch -d` is escalated to `-D` only where the caller owns the certainty
 // that the work is preserved elsewhere. For `merged`/`chunk-landed`/
@@ -62,9 +70,9 @@
 // failure while the handoff arms turn it into a loud stop.
 
 import { execFile } from "node:child_process";
-import { rm } from "node:fs/promises";
 import { promisify } from "node:util";
 
+import { type IssueCloneReclaim, reclaimIssueClone } from "./agent-sandbox.js";
 import { LAND_LABEL, NEEDS_REVIEW_LABEL } from "./chunks.js";
 import type { LabelConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
@@ -238,18 +246,18 @@ export const STRANDED_COMMITS_NOTE = (m: StrandedHead): string =>
   m.headRef === null
     ? `\n\n---\n\n**Work was left off \`${m.branch}\`.** This run committed on a ` +
       `detached HEAD at \`${m.headSha}\`, so none of it is on the branch and ` +
-      `nothing above includes it. The managed issue clone was preserved, and ` +
-      `on its next reuse Sandbar pins this commit in the host cache. Recover ` +
-      `it from the preserved clone or host cache with ` +
-      `\`git branch <rescue-name> ${m.headSha}\`, then fold ` +
-      `them into \`${m.branch}\` with \`cherry-pick\`/\`merge\` — not ` +
+      `nothing above includes it. Sandbar pinned that commit in the host-side ` +
+      `cache as \`refs/sandbar/stranded/${m.headSha}\` before reclaiming the ` +
+      `issue clone (the clone is kept instead if that pin failed). Recover it ` +
+      `with \`git branch <rescue-name> ${m.headSha}\`, then fold ` +
+      `it into \`${m.branch}\` with \`cherry-pick\`/\`merge\` — not ` +
       `\`branch -f\`, unless \`${m.branch}\` is an ancestor of ${m.headSha}.`
     : `\n\n---\n\n**Work was left off \`${m.branch}\`.** This run committed on ` +
       `\`${m.headRef}\` (at \`${m.headSha}\`) instead, so none of it is on the ` +
-      `branch and nothing above includes it. The managed issue clone was ` +
-      `preserved, and on its next reuse Sandbar pins this commit in the host ` +
-      `cache. Fold it into \`${m.branch}\` with ` +
-      `\`cherry-pick\`/\`merge\`.`;
+      `branch and nothing above includes it. Sandbar pinned that commit in the ` +
+      `host-side cache as \`refs/sandbar/stranded/${m.headSha}\` before ` +
+      `reclaiming the issue clone (the clone is kept instead if that pin ` +
+      `failed). Fold it into \`${m.branch}\` with \`cherry-pick\`/\`merge\`.`;
 
 // The implementer committed off the issue branch and stayed off it after being
 // told (#27). Neither the gate-red nor the reviewer-blocked comment applies —
@@ -482,7 +490,6 @@ export type FinalizeInput =
       readonly kind: "hard-error";
       readonly issue: IssueRef;
       readonly hasCommits: boolean;
-      readonly strandedHead: StrandedHead | null;
     }
   // Silent-noop under the retry cap: discard the branch + worktree so the
   // next cycle's implementer starts fresh against current source. The issue
@@ -512,9 +519,11 @@ export type FinalizeAdapter = {
   forceDeleteBranch(
     branch: string,
   ): Promise<{ readonly ok: boolean; readonly error?: string }>;
-  // Best-effort: sandbox.close() in the inner-loop usually has already removed
-  // the worktree. Adapter swallows errors.
-  removeWorktreeFor(branch: string): Promise<void>;
+  // Reclaim the issue clone through `reclaimIssueClone` (agent-sandbox.ts):
+  // publish into the cache, then delete — or keep it and say why. `keep` is a
+  // reason to preserve a clone the rule would reclaim. sandbox.close() in the
+  // inner loop usually has already reclaimed it, in which case `absent`.
+  reclaimIssueClone(branch: string, keep?: string): Promise<IssueCloneReclaim>;
   // True iff every commit on `branch` is already contained in
   // origin/<sourceBranch> — i.e. deleting it destroys nothing. This is the
   // *verified* form of the certainty forceDeleteBranch requires; `-d` refusing
@@ -574,18 +583,28 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
   "silent-noop-exhausted",
 ]);
 
-const preservesIssueClone = (input: FinalizeInput): boolean =>
-  input.kind === "reviewer-wrote" ||
-  ("strandedHead" in input && input.strandedHead != null);
+// The one caller that keeps a clone the reclaim rule would remove — see the
+// module header.
+const REVIEWER_WROTE_KEEP =
+  "the reviewer changed the repository; kept for human inspection";
 
-const removeIssueCloneUnlessPreserved = async (
+const reclaimClone = (
   input: FinalizeInput,
   adapter: FinalizeAdapter,
-): Promise<void> => {
-  if (!preservesIssueClone(input)) {
-    await adapter.removeWorktreeFor(input.issue.branch);
-  }
-};
+): Promise<IssueCloneReclaim> =>
+  adapter.reclaimIssueClone(
+    input.issue.branch,
+    input.kind === "reviewer-wrote" ? REVIEWER_WROTE_KEEP : undefined,
+  );
+
+// What a preserved clone means for the cache branch an arm was about to
+// delete: keep it. `pruneStaleIssueClones` removes a marked clone whose cache
+// branch is gone, so deleting the branch would hand the preserved clone — and
+// whatever the publish could not move out of it — to the next sweep.
+const keptForPreservedClone = (reason: string): FinalizeAction => ({
+  kind: "kept-branch",
+  reason: `kept the cache branch: the issue clone was preserved (${reason})`,
+});
 
 export type FinalizeResult = {
   readonly input: FinalizeInput;
@@ -645,7 +664,7 @@ export async function finalizeOne(
   if (HANDOFF_KINDS.has(input.kind)) {
     const n = issueNumberOf(input.issue);
     if ((await adapter.issueState(n)) === "CLOSED") {
-      await removeIssueCloneUnlessPreserved(input, adapter);
+      await reclaimClone(input, adapter);
       return { kind: "skipped-closed" };
     }
   }
@@ -653,7 +672,7 @@ export async function finalizeOne(
     case "merged": {
       // AC: worktree first, then branch — so an interrupt mid-cleanup never
       // leaves a dangling worktree pointing at a deleted ref.
-      await adapter.removeWorktreeFor(input.issue.branch);
+      await adapter.reclaimIssueClone(input.issue.branch);
       // The merger's merge commit auto-closes the issue, but GitHub doesn't
       // strip labels on close — drop `ready-for-agent` so the closed issue
       // isn't left advertising itself as plannable (#7). Best-effort: a failure
@@ -679,7 +698,7 @@ export async function finalizeOne(
       // recorded membership, so failure here cannot cause duplicate work or
       // prevent the branch and local issue branch lifecycle from completing.
       const n = issueNumberOf(input.issue);
-      await adapter.removeWorktreeFor(input.issue.branch);
+      await adapter.reclaimIssueClone(input.issue.branch);
       await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
@@ -693,7 +712,7 @@ export async function finalizeOne(
     }
     case "merge-conflict": {
       const n = issueNumberOf(input.issue);
-      await adapter.removeWorktreeFor(input.issue.branch);
+      await adapter.reclaimIssueClone(input.issue.branch);
       await adapter.pushBranch(input.issue.branch);
       // The merger already dropped `ready-for-agent`; finalize only parks it
       // under the handoff label.
@@ -704,7 +723,7 @@ export async function finalizeOne(
     case "merge-gate-red":
     case "forge-unverified": {
       const n = issueNumberOf(input.issue);
-      await adapter.removeWorktreeFor(input.issue.branch);
+      await adapter.reclaimIssueClone(input.issue.branch);
       await adapter.pushBranch(input.issue.branch);
       const r = await adapter.editLabels(n, [], [labels.agentStuck]);
       requireFlip(r, n);
@@ -712,7 +731,7 @@ export async function finalizeOne(
     }
     case "needs-info": {
       const n = issueNumberOf(input.issue);
-      await removeIssueCloneUnlessPreserved(input, adapter);
+      await adapter.reclaimIssueClone(input.issue.branch);
       await adapter.pushBranch(input.issue.branch);
       await adapter.postComment(
         n,
@@ -734,7 +753,7 @@ export async function finalizeOne(
     }
     case "needs-ui-prototype": {
       const n = issueNumberOf(input.issue);
-      await removeIssueCloneUnlessPreserved(input, adapter);
+      const reclaim = await adapter.reclaimIssueClone(input.issue.branch);
       if (input.hasCommits) {
         // Late escalation: the agent had already committed before it realised
         // it was inventing UI. Hand the partial work to the human.
@@ -758,18 +777,7 @@ export async function finalizeOne(
       );
       requireFlip(r, n);
       if (input.hasCommits) return { kind: "pushed" };
-      // The preserved clone is the only repository guaranteed to contain an
-      // off-branch commit. Keep its cache branch as the clone's liveness
-      // record: pruneStaleIssueClones removes marked clones once that ref is
-      // absent, so deleting it here would invalidate the recovery instructions
-      // in STRANDED_COMMITS_NOTE on the next sandbox creation (#98).
-      if (input.strandedHead != null) {
-        return {
-          kind: "kept-branch",
-          reason:
-            "kept the cache branch so the preserved issue clone and its stranded work remain recoverable",
-        };
-      }
+      if (reclaim.kind === "preserved") return keptForPreservedClone(reclaim.reason);
       // Nothing was written this sandbox cycle, so drop the local branch:
       // ensureIssueBranch reuses an existing branch verbatim, and keeping an
       // empty one would pin the next run (after the human supplies the
@@ -805,7 +813,7 @@ export async function finalizeOne(
     }
     case "needs-human": {
       const n = issueNumberOf(input.issue);
-      await removeIssueCloneUnlessPreserved(input, adapter);
+      await adapter.reclaimIssueClone(input.issue.branch);
       await adapter.pushBranch(input.issue.branch);
       // #17: name the real blocker. reviewer-blocked → surface the reviewer's
       // CHANGES-REQUESTED prose; uncommittable-worktree → the dirty paths, and
@@ -872,7 +880,7 @@ export async function finalizeOne(
     }
     case "review-budget-exhausted": {
       const n = issueNumberOf(input.issue);
-      await adapter.removeWorktreeFor(input.issue.branch);
+      await adapter.reclaimIssueClone(input.issue.branch);
       await adapter.pushBranch(input.issue.branch);
       await adapter.postComment(
         n,
@@ -895,7 +903,9 @@ export async function finalizeOne(
       const n = issueNumberOf(input.issue);
       // Keep the clone: uncommitted reviewer writes cannot travel through a
       // push, and deleting it would destroy the evidence this terminal exists
-      // to hand to a human.
+      // to hand to a human. Reclaiming still publishes the branch first, which
+      // is what the push below reads.
+      await reclaimClone(input, adapter);
       let pushFailure: string | null = null;
       try {
         await adapter.pushBranch(input.issue.branch);
@@ -920,19 +930,20 @@ export async function finalizeOne(
       return { kind: pushFailure === null ? "pushed" : "parked-local" };
     }
     case "hard-error": {
+      const reclaim = await adapter.reclaimIssueClone(input.issue.branch);
       if (input.hasCommits) {
-        await removeIssueCloneUnlessPreserved(input, adapter);
         await adapter.pushBranch(input.issue.branch);
-        return { kind: "pushed" };
+        // A preserved clone may hold commits the push did not carry (the
+        // reason says so when the publish is what failed); name it rather than
+        // report a plain push.
+        return reclaim.kind === "preserved"
+          ? {
+              kind: "kept-branch",
+              reason: `pushed the cache's copy of the branch and kept the issue clone (${reclaim.reason})`,
+            }
+          : { kind: "pushed" };
       }
-      await removeIssueCloneUnlessPreserved(input, adapter);
-      if (input.strandedHead !== null) {
-        return {
-          kind: "kept-branch",
-          reason:
-            "kept the cache branch so the preserved issue clone and its stranded work remain recoverable",
-        };
-      }
+      if (reclaim.kind === "preserved") return keptForPreservedClone(reclaim.reason);
       const r = await adapter.deleteBranch(input.issue.branch);
       return r.ok
         ? { kind: "deleted-local" }
@@ -944,12 +955,12 @@ export async function finalizeOne(
       // the source branch and `-d` would refuse). No push, no comment, no
       // label flip — the issue stays `ready-for-agent` for the next cycle's
       // planner.
-      await adapter.removeWorktreeFor(input.issue.branch);
+      await adapter.reclaimIssueClone(input.issue.branch);
       return deleteBranchForcing(adapter, input.issue.branch);
     }
     case "silent-noop-exhausted": {
       const n = issueNumberOf(input.issue);
-      await adapter.removeWorktreeFor(input.issue.branch);
+      await adapter.reclaimIssueClone(input.issue.branch);
       // The branch from the final silent-noop attempt was already deleted by
       // the merger (we don't push it for human inspection because the work
       // didn't survive the abort). Best-effort delete in case anything's
@@ -1075,13 +1086,13 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
         return false;
       }
     },
-    async removeWorktreeFor(branch) {
+    async reclaimIssueClone(branch, keep) {
       const path = worktreePathFor(deps.layout.worktreesDir, branch);
-      try {
-        await rm(path, { recursive: true, force: true });
-      } catch (err) {
-        console.error(`Could not remove issue clone at ${path} (continuing):`, err);
+      const reclaim = await reclaimIssueClone(cwd, path, branch, keep);
+      if (reclaim.kind === "preserved") {
+        console.error(`Issue clone preserved at ${path}: ${reclaim.reason}`);
       }
+      return reclaim;
     },
     async postComment(issueNum, body) {
       // Required: the comment is the issue's handoff payload (questions, failure

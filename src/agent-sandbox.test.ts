@@ -11,7 +11,7 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { appendFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 
@@ -45,6 +45,7 @@ import {
   parseCodexJsonLine,
   parseStreamJsonLine,
   prepareWorktree,
+  reclaimIssueClone,
   registerShutdown,
   sandboxRemoveArgs,
   sandboxRunArgs,
@@ -1068,7 +1069,7 @@ describe("createSandbox integration (local provider)", () => {
     });
     const path = sandbox.worktreePath;
 
-    sandbox.preserveWorktree();
+    sandbox.preserveWorktree("evidence handoff");
     const closed = await sandbox.close();
 
     expect(closed).toEqual({ preservedWorktreePath: path });
@@ -1076,7 +1077,9 @@ describe("createSandbox integration (local provider)", () => {
     await rm(path, { recursive: true, force: true });
   });
 
-  it("preserves a pinned stranded HEAD after restoring the issue branch", async () => {
+  // #98: a clean off-branch clone is reclaimed, not preserved — its HEAD is
+  // pinned in the cache first, and the pin is what the handoff comment names.
+  it("reclaims a clean off-branch clone after pinning its HEAD in the cache", async () => {
     const branch = "sandbar/issue-98-stranded-head";
     await git(["branch", branch], dir);
     const sandbox = await createSandbox({
@@ -1089,49 +1092,130 @@ describe("createSandbox integration (local provider)", () => {
     await git(["checkout", "--detach"], path);
     await writeFile(join(path, "stranded.txt"), "off branch\n");
     await git(["add", "stranded.txt"], path);
-    await git(["commit", "-m", "stranded work"], path);
+    await git(["-c", "user.name=Test Host", "-c", "user.email=host@test.com", "commit", "-m", "stranded work"], path);
     const stranded = (await git(["rev-parse", "HEAD"], path)).stdout.trim();
     expect((await git(["rev-parse", branch], path)).stdout.trim()).not.toBe(stranded);
 
     const closed = await sandbox.close();
 
-    expect(closed).toEqual({ preservedWorktreePath: path });
-    await prepareWorktree({ branch, layout: layoutFor(dir), copyToWorktree: [] });
+    expect(closed).toEqual({ preservedWorktreePath: undefined });
+    expect(existsSync(path)).toBe(false);
+    expect(
+      (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], dir)).stdout.trim(),
+    ).toBe(stranded);
+  });
+
+  // A crash between the attempt and close() leaves the clone unreclaimed. Reuse
+  // pins the off-branch HEAD the same way before restoring the issue branch,
+  // so the fresh attempt neither inherits the detached HEAD nor loses it.
+  it("reuse pins a crash leftover's off-branch HEAD in the cache and restores the issue branch", async () => {
+    const branch = "sandbar/issue-98-crash-leftover";
+    await git(["branch", branch], dir);
+    const layout = layoutFor(dir);
+    const path = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+    await git(["checkout", "--detach"], path);
+    await git(["-c", "user.name=Test Host", "-c", "user.email=host@test.com", "commit", "--allow-empty", "-m", "stranded work"], path);
+    const stranded = (await git(["rev-parse", "HEAD"], path)).stdout.trim();
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
     expect((await git(["symbolic-ref", "HEAD"], path)).stdout.trim()).toBe(
       `refs/heads/${branch}`,
     );
     expect(
-      (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], path)).stdout.trim(),
-    ).toBe(stranded);
-    expect(
-      (
-        await git(
-          ["rev-parse", `refs/sandbar/stranded/${stranded}`],
-          layoutFor(dir).repoDir,
-        )
-      ).stdout.trim(),
-    ).toBe(stranded);
-
-    const retry = await createSandbox({
-      env: {},
-      branch,
-      sandbox: makeLocalProvider(),
-      layout: layoutFor(dir),
-      preparedWorktreePath: path,
-    });
-    expect(await retry.close()).toEqual({ preservedWorktreePath: path });
-    expect(
-      (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], path)).stdout.trim(),
+      (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], dir)).stdout.trim(),
     ).toBe(stranded);
     await rm(path, { recursive: true, force: true });
-    expect(
-      (
-        await git(
-          ["cat-file", "-t", `refs/sandbar/stranded/${stranded}`],
-          layoutFor(dir).repoDir,
-        )
-      ).stdout.trim(),
-    ).toBe("commit");
+  });
+
+  describe("reclaimIssueClone", () => {
+    it("publishes the branch into the cache before removing the clone", async () => {
+      const branch = "sandbar/issue-98-reclaim-publish";
+      await git(["branch", branch], dir);
+      const layout = layoutFor(dir);
+      const path = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+      await git(["-c", "user.name=Test Host", "-c", "user.email=host@test.com", "commit", "--allow-empty", "-m", "unpublished"], path);
+      const tip = (await git(["rev-parse", "HEAD"], path)).stdout.trim();
+
+      expect(await reclaimIssueClone(dir, path, branch)).toEqual({ kind: "removed" });
+
+      expect(existsSync(path)).toBe(false);
+      expect((await git(["rev-parse", branch], dir)).stdout.trim()).toBe(tip);
+    });
+
+    it("keeps a dirty clone, having published what was committed", async () => {
+      const branch = "sandbar/issue-98-reclaim-dirty";
+      await git(["branch", branch], dir);
+      const layout = layoutFor(dir);
+      const path = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+      await git(["-c", "user.name=Test Host", "-c", "user.email=host@test.com", "commit", "--allow-empty", "-m", "committed"], path);
+      const tip = (await git(["rev-parse", "HEAD"], path)).stdout.trim();
+      await writeFile(join(path, "scratch.txt"), "not committed\n");
+
+      const reclaim = await reclaimIssueClone(dir, path, branch);
+
+      expect(reclaim).toEqual({
+        kind: "preserved",
+        reason: expect.stringContaining("uncommitted changes"),
+      });
+      expect(existsSync(join(path, "scratch.txt"))).toBe(true);
+      expect((await git(["rev-parse", branch], dir)).stdout.trim()).toBe(tip);
+      await rm(path, { recursive: true, force: true });
+    });
+
+    // The case the rule exists for: the clone holds commits the cache does not,
+    // and the cache cannot be written. Deleting the clone would destroy them.
+    it("keeps the clone when the cache refuses the publish", async () => {
+      const branch = "sandbar/issue-98-reclaim-locked";
+      await git(["branch", branch], dir);
+      const seeded = (await git(["rev-parse", branch], dir)).stdout.trim();
+      const layout = layoutFor(dir);
+      const path = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+      await git(["-c", "user.name=Test Host", "-c", "user.email=host@test.com", "commit", "--allow-empty", "-m", "unpublished"], path);
+      const lock = join(dir, ".git", "refs", "heads", `${branch}.lock`);
+      await mkdir(dirname(lock), { recursive: true });
+      await writeFile(lock, "");
+      try {
+        const reclaim = await reclaimIssueClone(dir, path, branch);
+
+        expect(reclaim).toEqual({
+          kind: "preserved",
+          reason: expect.stringContaining("could not publish"),
+        });
+        expect(existsSync(path)).toBe(true);
+        expect((await git(["rev-parse", branch], dir)).stdout.trim()).toBe(seeded);
+      } finally {
+        await rm(lock, { force: true });
+        await rm(path, { recursive: true, force: true });
+      }
+    });
+
+    it("honours a caller's reason to keep a clone it would otherwise remove", async () => {
+      const branch = "sandbar/issue-98-reclaim-keep";
+      await git(["branch", branch], dir);
+      const layout = layoutFor(dir);
+      const path = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+      expect(await reclaimIssueClone(dir, path, branch, "kept for a human")).toEqual({
+        kind: "preserved",
+        reason: "kept for a human",
+      });
+      expect(existsSync(path)).toBe(true);
+      await rm(path, { recursive: true, force: true });
+    });
+
+    it("answers absent for a missing path and removes an unmarked directory", async () => {
+      const branch = "sandbar/issue-98-reclaim-debris";
+      const layout = layoutFor(dir);
+      const path = worktreePathFor(layout.worktreesDir, branch);
+
+      expect(await reclaimIssueClone(dir, path, branch)).toEqual({ kind: "absent" });
+
+      await mkdir(path, { recursive: true });
+      await writeFile(join(path, "leftover"), "garbage");
+      expect(await reclaimIssueClone(dir, path, branch)).toEqual({ kind: "removed" });
+      expect(existsSync(path)).toBe(false);
+    });
   });
 
   // #27 follow-up. The commit range is anchored at `refs/heads/<branch>`, not at
