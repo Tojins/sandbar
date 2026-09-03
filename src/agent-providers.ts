@@ -1,6 +1,6 @@
 // Which CLI a role's agent runs (#72, #74, #75) — the NAME → provider mapping,
-// the package and protocol-version pin the driver installs, and the one place
-// that says what credential each provider needs.
+// the release-artifact and protocol-version pin the driver installs, and the
+// one place that says what credential each provider needs.
 //
 // The config splits the MODEL per call (`implementerModelId`, correctness
 // `reviewerModelId`, `reviewerFollowupModelId`, and `mergerModelId`); this is
@@ -57,32 +57,76 @@ export type AgentProviderName = (typeof AGENT_PROVIDER_NAMES)[number];
 // Driver-owned because these binaries implement the provider protocol this
 // release parses. A routed role must not inherit whichever CLI a host image (or
 // an old branch's image recipe) happened to bake (#75).
-export type AgentProviderPackage = {
-  readonly spec: string;
-  readonly npmFlags?: readonly string[];
+export type AgentArtifact = {
+  // Claude publishes libc-specific dynamic binaries; Codex's musl release is
+  // static. The augment recipe chooses the former inside the base image.
+  readonly variant: "static" | "glibc" | "musl";
+  readonly url: string;
+  readonly sha256: string;
+  readonly archive?: true;
 };
 
-// npm >= 11 blocks lifecycle scripts by default with only a warning. Claude's
-// postinstall must therefore be explicitly allowed: silently skipping it can
-// turn a future package change into an apparent agent failure. Codex declares
-// no lifecycle scripts; it resolves its platform binary through optional
-// dependencies, so granting it a script permission would be misleading.
-//
-// Both packages are pinned because a generated RUN instruction would otherwise
-// remain byte-identical and freeze whichever version first entered the layer
-// cache. Codex's pin is additionally co-versioned with the load-bearing half of
-// parseCodexJsonLine: its agent-message dialect supplies all of a codex run's
-// speech, so a parser change and a CLI change belong to the same driver
-// release. Its `turn.completed` usage branch is deliberately softer: a drift
-// there loses a measurement but cannot change a verdict or spend a round (#85).
+export type AgentProviderPackage = {
+  readonly version: string;
+  readonly artifacts: Readonly<Record<"x64" | "arm64", readonly AgentArtifact[]>>;
+};
+
+// Both standalone releases and every architecture's digest are pinned here; CDN
+// metadata is not trusted at download time. Codex's pin is additionally
+// co-versioned with the load-bearing half of parseCodexJsonLine: its
+// agent-message dialect supplies all of a codex run's speech, so a parser change
+// and a CLI change belong to the same driver release. Its `turn.completed` usage
+// branch is deliberately softer: a drift there loses a measurement but cannot
+// change a verdict or spend a round (#85).
 export const AGENT_PROVIDER_PACKAGES: Readonly<
   Record<AgentProviderName, AgentProviderPackage>
 > = {
   claude: {
-    spec: "@anthropic-ai/claude-code@2.1.257",
-    npmFlags: ["--allow-scripts=@anthropic-ai/claude-code"],
+    version: "2.1.257",
+    artifacts: {
+      x64: [
+        {
+          variant: "glibc",
+          url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-x64/claude",
+          sha256: "9a64bda9d8722a1fa05bef9a5961d07e0331b99597eda9e2f6a732f3a0ff7f05",
+        },
+        {
+          variant: "musl",
+          url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-x64-musl/claude",
+          sha256: "51e08d1948c31d4ab386cd744ba633739236ac0cbedded05d0ef07f2d60e950e",
+        },
+      ],
+      arm64: [
+        {
+          variant: "glibc",
+          url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-arm64/claude",
+          sha256: "22f7d48f17193952c3c2d0b8bf2f31db2cd08fd5fb09a374fa321496b711d017",
+        },
+        {
+          variant: "musl",
+          url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-arm64-musl/claude",
+          sha256: "c5c088fb49fb514f8df5af9840731bfbe38f74a2d85f21bbd233a6e7b6b8d2e2",
+        },
+      ],
+    },
   },
-  codex: { spec: "@openai/codex@0.152.0" },
+  codex: {
+    version: "0.152.0",
+    artifacts: {
+      x64: [{
+        variant: "static",
+        url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-x86_64-unknown-linux-musl.tar.gz",
+        sha256: "05f942d3d3c5b5acd9edad56ce2797b6fe72dbb1462b24e5c9bf7dcec9a28a11",
+        archive: true,
+      }],
+      arm64: [{
+        variant: "static",
+        url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-aarch64-unknown-linux-musl.tar.gz",
+        sha256: "37da6b486503c8a42cc4604d2a3d80d388df896dd251e9225f4f3d49b08c2e8c",
+        archive: true,
+      }],
+    },
+  },
 };
 
 // Default for every role, so every config written before #72 resolves

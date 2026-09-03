@@ -616,13 +616,20 @@ dependency; relabelling the issue alone will not do it.
 ### `images` — what sandbar builds
 
 By default sandbar builds one image: `sandboxImage`, from `./Containerfile`.
-The sandbox base-image contract includes Node.js 20 or newer and npm. After
-resolving that image, sandbar adds a generated layer containing exactly the
-agent CLIs routed by `implementerAgent`, `reviewerAgent`, and `mergerAgent`, at
-versions pinned by the driver. The same happens after resolving a per-branch
+The sandbox base-image contract is `/bin/sh`, CA certificates, and either git
+or one of apt/apk/dnf so sandbar can install it. After resolving that image,
+sandbar adds a generated layer containing a uid-1000 `agent` user, git, and
+exactly the standalone agent CLIs routed by `implementerAgent`, `reviewerAgent`,
+and `mergerAgent`, downloaded on the host and verified against per-architecture
+hashes pinned by the driver. The same happens after resolving a per-branch
 variant, so an older branch's Containerfile cannot remove a CLI selected by the
 current run. Gate containers keep using the unaugmented image: they judge the
 branch environment and run no agent CLI.
+
+CA certificates remain explicit because bare-container probes of both
+standalone CLIs stop at credential validation before making an authenticated
+TLS request; that experiment therefore cannot establish that either binary
+ships a usable trust store. Sandbar does not inject an `SSL_CERT_FILE`.
 
 Migration is deliberately order-independent: upgrade sandbar first, then remove
 `@anthropic-ai/claude-code` and `@openai/codex` install lines from your sandbox
@@ -634,6 +641,9 @@ List `images` explicitly when the stack needs more than one:
 ```ts
 images: [
   { tag: "localhost/your-repo-sandbar:latest", containerfile: "Containerfile" },
+  // A named stage makes the sandbox and gates address stages of one ordinary
+  // multi-stage product Dockerfile. The target also participates in rebuildOn.
+  { tag: "localhost/your-repo-dev:latest", containerfile: "Dockerfile", target: "dev" },
   // No build context at all — right for a Containerfile that only pulls from a
   // registry and installs packages; tarring the repo up for it is pure latency.
   { tag: "localhost/app-php:gate", containerfile: "gate/Containerfile.php", stdinContext: true },
@@ -677,7 +687,7 @@ would rebuild on every change and produce a byte-identical image, which is the
 silent no-op this whole feature exists to remove.
 
 Sandbar hashes those paths — plus the Containerfile's own bytes and the entry's
-`buildArgs` — and uses the hash, not the tag, as the cache key:
+`buildArgs` and `target` — and uses the hash, not the tag, as the cache key:
 
 - at startup the tag is rebuilt when the hash no longer matches your checkout,
   instead of being reused because the name exists (the hash is recorded as an

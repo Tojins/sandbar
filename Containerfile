@@ -1,8 +1,8 @@
 # The one image sandbar's self-hosted run needs, serving BOTH roles (#39).
 #
-#   - the agent sandbox, run as `--user 1000:1000 --userns=keep-id:uid=1000,
-#     gid=1000` (see agent-sandbox.ts), which is why an `agent` user must exist
-#     at uid/gid 1000 with a writable /home/agent;
+#   - the agent sandbox, run as uid 1000 with HOME=/home/agent. The checked-in
+#     driver still predates the augmentation's user creation, so this image
+#     retains the compatible uid/home migration until sandbar.pin advances;
 #   - the gate stack's `runner`, which lives in a podman POD, where keep-id is
 #     impossible. There, container root is what maps back to the invoking user,
 #     so the image's default USER is deliberately left as root and no `USER`
@@ -17,7 +17,6 @@
 FROM docker.io/library/node:24-bookworm-slim
 
 # git: the agent commits, and a good half of the suite drives real repos.
-# sudo: `sandboxHooks.sandbox.onSandboxReady` entries may set `sudo: true`.
 # ca-certificates/curl: TLS for the agent's own network reads.
 # procps: the suite's SIGKILL-reaping assertions read process state.
 RUN apt-get update \
@@ -26,16 +25,13 @@ RUN apt-get update \
         curl \
         git \
         procps \
-        sudo \
     && rm -rf /var/lib/apt/lists/*
 
-# node:*-slim already ships a `node` user AT uid/gid 1000, so the agent user is
-# a rename rather than a `useradd` — which would fail with the uid taken, and
-# the uid is the part that has to be 1000.
+# node:*-slim already ships a `node` user at uid/gid 1000. Keep the host-side
+# migration while sandbar.pin names a release whose augment layer installs only
+# the CLIs and does not yet absorb the uid-1000 agent user (#76).
 RUN groupmod -n agent node \
-    && usermod -l agent -d /home/agent -m node \
-    && printf 'agent ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/agent \
-    && chmod 0440 /etc/sudoers.d/agent
+    && usermod -l agent -d /home/agent -m node
 
 # The podman REMOTE client (#48). The gate runner reaches the HOST's podman
 # through a socket mounted into it, and `CONTAINER_HOST` alone switches this
@@ -71,7 +67,8 @@ RUN curl -fsSL https://github.com/containers/podman/releases/download/v4.9.3/pod
 # src/agent-providers.ts — and `sandbar.pin` now names a release that does. Do
 # not re-add a host copy: an unpinned one drifts from the parser the driver
 # couples to, and the driver's install wins over it anyway. What this image
-# still owes the augmentation is the base contract: node >= 20 with npm.
+# still owes the currently pinned augmentation is the temporary uid/home migration
+# above. The standalone CLIs need no Node/npm runtime from future augmentations.
 
 # No `ENV HOME`: the sandbox provider sets HOME=/home/agent itself, and the
 # gate runner is root, whose /root is the right answer for it.

@@ -55,9 +55,9 @@ const { readEnvFile } = await import(DRIVER_ENTRY.href);
 
 // One image serves both roles — the agent sandbox (`--user 1000:1000
 // --userns=keep-id`) and the gate runner (a pod member, where keep-id is
-// impossible and container root is what maps back to the invoking user). See
-// the Containerfile, which is why it defines an `agent` user at uid/gid 1000
-// and leaves its default USER as root.
+// impossible and container root is what maps back to the invoking user). The
+// driver's augmentation supplies the sandbox's uid-1000 agent; the base image
+// leaves its default USER as root for the gate runner.
 const IMAGE = "localhost/sandbar-agent:latest";
 
 // The gate runner talks to the host's podman over this (#48). The config is a

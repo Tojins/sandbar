@@ -111,9 +111,10 @@ Sequence (`podman.ts`, `create`):
 `podman.ts`, handle `exec` (~line 306). This is what the agent run and all git
 setup go through.
 
-- `effectiveCommand = opts.sudo ? "sudo " + command : command`.
 - args: `["exec"]` + `["-i"]` if `opts.stdin !== undefined` +
-  `["-w", opts.cwd]` if `opts.cwd` + `[name, "sh", "-c", effectiveCommand]`.
+  `["-w", opts.cwd]` if `opts.cwd` + `["--user", "0"]` if `opts.sudo` +
+  `[name, "sh", "-c", command]`. The option retains its privileged-hook
+  contract without requiring a sudo binary or sudoers policy in the image.
 - Spawns `podman` with `spawn`. stdio: `[stdin?"pipe":"ignore", "pipe", "pipe"]`.
   If `opts.stdin` set, write it and `end()`.
 - **Line streaming (the `onLine` branch — sandbar's path)**: stdout is read via

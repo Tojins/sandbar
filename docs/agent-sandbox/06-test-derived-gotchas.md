@@ -299,7 +299,8 @@ podman.test.ts, boundedTail.test.ts, mountUtils.test.ts.
   UID directly. `mkdir+chown` only fires for file-mount parents (sandbar has
   none). Don't add a defensive `chown -R` (slow/destructive). Test: *"does not run
   chown after container start"*.
-- ⚪ **`sudo` is a command-string prefix** (`sudo ${command}`), not a podman flag.
+- ⚪ **`sudo` selects container uid 0** (`podman exec --user 0`); the command
+  string is passed unchanged and the image need not contain sudo.
 
 ## (F) Mounts & volume formatting (`mountUtils.js`)
 

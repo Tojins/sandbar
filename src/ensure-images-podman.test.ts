@@ -18,9 +18,12 @@ import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
 import type { BuiltImage } from "./config.js";
+import { AGENT_PROVIDER_PACKAGES } from "./agent-providers.js";
 import {
   ImageBuildError,
+  agentToolsContainerfile,
   buildImage,
+  detectImageLibc,
   ensureImages,
   readInputsLabel,
   sweepBranchImages,
@@ -87,6 +90,137 @@ describe.runIf(available)("ensureImages against real podman", () => {
     (
       await exec(RUNTIME, ["image", "inspect", tag, "--format", "{{.Id}}"])
     ).stdout.trim();
+
+  it.concurrent(
+    "builds a generated tar context and applies COPY --chmod",
+    async ({ expect, task, onTestFinished }) => {
+      const tag = testImageTag(`generated-${task.id}`);
+      const context = await mkdtemp(join(tmpdir(), "sandbar-generated-context-"));
+      onTestFinished(() => rm(context, { recursive: true, force: true }), 60_000);
+      await writeFile(join(context, "Containerfile"),
+        `FROM ${BASE}\nCOPY --chmod=0755 payload /usr/local/bin/payload\n`);
+      await writeFile(join(context, "payload"), "generated-context\n");
+      await buildImage({ tag, containerfile: "<generated>" }, {
+        root: "", contextRoot: context, capture: true,
+      });
+      const result = await exec(RUNTIME, [
+        "run", "--rm", tag, "sh", "-c",
+        "test -x /usr/local/bin/payload && cat /usr/local/bin/payload",
+      ]);
+      expect(result.stdout).toContain("generated-context");
+    },
+    600_000,
+  );
+
+  it.concurrent(
+    "reports a missing generated context as an image build failure",
+    async ({ expect, task, onTestFinished }) => {
+      const { root, tag } = await fixture(task.id, onTestFinished);
+      const missing = join(root, "does-not-exist");
+      const error = await buildImage(
+        { tag, containerfile: "<generated>" },
+        { root: "", contextRoot: missing, capture: true },
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ImageBuildError);
+      expect((error as ImageBuildError).output).toMatch(/tar:|Cannot open|cannot open/i);
+    },
+    120_000,
+  );
+
+  for (const [base, packageManager, selectedVariant] of [
+    ["docker.io/library/alpine:3.22", "apk", "musl"],
+    ["docker.io/library/debian:bookworm-slim", "apt-get", "glibc"],
+  ] as const) {
+    it.concurrent(
+      `executes the generated git, user, and ${selectedVariant} selection contract over ${packageManager}`,
+      async ({ expect, task, onTestFinished }) => {
+        const tag = testImageTag(`agent-recipe-${selectedVariant}-${task.id}`);
+        const context = await mkdtemp(join(tmpdir(), "sandbar-agent-recipe-"));
+        onTestFinished(() => rm(context, { recursive: true, force: true }), 60_000);
+        const artifact = AGENT_PROVIDER_PACKAGES.codex.artifacts.x64[0]!;
+        const packages = {
+          ...AGENT_PROVIDER_PACKAGES,
+          codex: {
+            ...AGENT_PROVIDER_PACKAGES.codex,
+            artifacts: {
+              x64: [
+                { ...artifact, variant: "glibc" as const },
+                { ...artifact, variant: "musl" as const },
+              ],
+              arm64: AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64,
+            },
+          },
+        };
+        await writeFile(
+          join(context, "Containerfile"),
+          agentToolsContainerfile(base, ["codex"], {
+            arch: "x64", packages, libc: selectedVariant,
+          }),
+        );
+        await writeFile(
+          join(context, "codex-glibc"),
+          "#!/bin/sh\necho 'codex glibc fixture'\n",
+        );
+        await writeFile(
+          join(context, "codex-musl"),
+          "#!/bin/sh\necho 'codex musl fixture'\n",
+        );
+        await buildImage({ tag, containerfile: "<generated>" }, {
+          root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
+        });
+        const result = await exec(RUNTIME, [
+          "run", "--rm", tag, "sh", "-c",
+          "git --version && codex --version && test $(id -u agent) = 1000 && test $(stat -c %u /home/agent) = 1000",
+        ]);
+        expect(result.stdout).toContain(`codex ${selectedVariant} fixture`);
+      },
+      600_000,
+    );
+  }
+
+  it.concurrent(
+    "detects musl and glibc bases and rethrows runtime failures",
+    async ({ expect }) => {
+      expect(await detectImageLibc("docker.io/library/alpine:3.22")).toBe("musl");
+      expect(await detectImageLibc("docker.io/library/debian:bookworm-slim")).toBe("glibc");
+      await expect(detectImageLibc("localhost/sandbar-missing-libc-base:test"))
+        .rejects.toThrow();
+    },
+    600_000,
+  );
+
+  it.concurrent(
+    "renames an existing uid-1000 user and preserves its writable home contract",
+    async ({ expect, task, onTestFinished }) => {
+      const uidBaseTag = testImageTag(`uid-base-${task.id}`);
+      const tag = testImageTag(`uid-recipe-${task.id}`);
+      const baseContext = await mkdtemp(join(tmpdir(), "sandbar-agent-uid-base-"));
+      onTestFinished(() => rm(baseContext, { recursive: true, force: true }), 60_000);
+      await writeFile(
+        join(baseContext, "Containerfile"),
+        "FROM docker.io/library/alpine:3.22\nRUN adduser -D -u 1000 -h /home/node node\n",
+      );
+      await buildImage({ tag: uidBaseTag, containerfile: "<generated>" }, {
+        root: "", contextRoot: baseContext, capture: true,
+      });
+      const context = await mkdtemp(join(tmpdir(), "sandbar-agent-uid-recipe-"));
+      onTestFinished(() => rm(context, { recursive: true, force: true }), 60_000);
+      await writeFile(
+        join(context, "Containerfile"),
+        agentToolsContainerfile(uidBaseTag, ["codex"], { libc: "musl" }),
+      );
+      await writeFile(join(context, "codex-static"), "#!/bin/sh\necho fixture\n");
+      await buildImage({ tag, containerfile: "<generated>" }, {
+        root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
+      });
+      const result = await exec(RUNTIME, [
+        "run", "--rm", tag, "sh", "-c",
+        "test $(id -u agent) = 1000 && ! id node >/dev/null 2>&1 && test $(stat -c %u /home/agent) = 1000 && test -w /home/agent",
+      ]);
+      expect(result.stderr).toBe("");
+    },
+    600_000,
+  );
 
   it.concurrent(
     "records the fingerprint as a label, and rebuilds only when the declared inputs change",

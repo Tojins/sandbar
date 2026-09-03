@@ -654,6 +654,14 @@ describe("buildArgv", () => {
       ".",
     ]);
   });
+
+  it("passes a named multi-stage target", () => {
+    expect(
+      buildArgv({ tag: "t", containerfile: "Containerfile", target: "dev" }),
+    ).toEqual([
+      "build", "-t", "t", "--target", "dev", "-f", "Containerfile", ".",
+    ]);
+  });
 });
 
 describe("withImages / imageFor (#37)", () => {
@@ -1555,6 +1563,22 @@ describe("resolveImages: rebuildOn (#37)", () => {
 });
 
 describe("resolveImages", () => {
+  it("refuses an empty multi-stage target", () => {
+    expect(() =>
+      resolveImages(
+        [{ tag: "sandbar:app", containerfile: "Containerfile", target: " " }],
+        "sandbar:app",
+      ),
+    ).toThrow(/empty target/);
+  });
+
+  it("trims a multi-stage target", () => {
+    expect(resolveImages(
+      [{ tag: "sandbar:app", containerfile: "Containerfile", target: " dev " }],
+      "sandbar:app",
+    )[0]?.target).toBe("dev");
+  });
+
   it("defaults to building the sandbox image from ./Containerfile", () => {
     expect(resolveImages(undefined, "sandbar:app")).toEqual([
       // `rebuildOn` is normalised to the empty list rather than left absent:

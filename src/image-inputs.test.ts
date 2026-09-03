@@ -109,6 +109,16 @@ describe("fingerprintImageInputs", () => {
     expect(await fp(root, withUid)).not.toBe(await fp(root));
   });
 
+  it("covers a multi-stage target", async () => {
+    const root = await tree({
+      Containerfile: "FROM x",
+      "package-lock.json": "{}",
+    });
+    expect(await fp(root, { ...IMAGE, target: "dev" })).not.toBe(
+      await fp(root, { ...IMAGE, target: "service" }),
+    );
+  });
+
   it("does not depend on the ORDER the inputs were declared in", async () => {
     const root = await tree({
       Containerfile: "FROM x",

@@ -47,11 +47,35 @@ import {
   prepareWorktree,
   registerShutdown,
   sandboxRemoveArgs,
+  sandboxExecArgs,
   sandboxRunArgs,
 } from "./agent-sandbox.js";
 import { existsSync } from "node:fs";
 
 const execFileP = promisify(execFile);
+
+describe("sandboxExecArgs", () => {
+  it("passes an ordinary command unchanged", () => {
+    expect(sandboxExecArgs("box", "echo ok")).toEqual([
+      "exec", "box", "sh", "-c", "echo ok",
+    ]);
+  });
+
+  it("implements privileged hooks with podman --user 0", () => {
+    expect(sandboxExecArgs("box", "setup", { sudo: true })).toEqual([
+      "exec", "--user", "0", "box", "sh", "-c", "setup",
+    ]);
+  });
+
+  it("orders stdin, cwd, and root options before the container", () => {
+    expect(sandboxExecArgs("box", "setup", {
+      stdin: "input", cwd: "/work", sudo: true,
+    })).toEqual([
+      "exec", "-i", "-w", "/work", "--user", "0",
+      "box", "sh", "-c", "setup",
+    ]);
+  });
+});
 
 // Per-worker global git config isolation: the code under test runs
 // `git config --global` (safe.directory, identity). Without this, parallel

@@ -43,9 +43,23 @@
 // verdict about the branch, not an infrastructure fault to route to
 // HARD-ERROR.
 //
-// Agent base images additionally provide node >= 20 and npm (#75). The
-// generated augmentation build enforces that contract without a separate
-// probe: npm failing names the base image and routed toolset.
+// Agent bases need only /bin/sh, CA roots, and git or a supported package
+// manager (#76). The generated layer supplies git, uid 1000 and standalone
+// CLIs, then executes every binary as the contract probe. Bare-container CLI
+// probes without credentials stop before an authenticated TLS request, so they
+// cannot prove an embedded trust store; CA roots remain a conservative base
+// requirement rather than setting a driver-owned SSL_CERT_FILE.
+// Dynamic CLI releases require a libc choice, so each augmentation probes its
+// resolved base with an entrypoint-neutral `podman run`; one artifact selector
+// then owns recipe generation, host staging, and build-context linking.
+//
+// Large pinned downloads are cached across runs and workdirs at
+// `<tmpdir>/sandbar-agent-tools-<uid>/<sha256>/download`. The driver's digest is
+// the content address and every reuse is re-hashed before staging. The cache is
+// deliberately not swept: concurrent sandbar runs on one host share it, and a
+// pin change leaves the old entry available rather than racing another run.
+// This durable, reproducible cache is the sole exception here to the usual
+// rule that sandbar state lives below `<cwd>/<workDir>`.
 //
 // The uid check (#24 D3): a container in a pod cannot use `--userns=keep-id`,
 // and `--user 1000:1000` maps to a SUBUID whose worktree writes fail EACCES;
@@ -59,12 +73,18 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
+import { copyFile, link, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
-import { onCleanup } from "./cleanup.js";
+import { onCleanup, registerDisposable } from "./cleanup.js";
 import {
   AGENT_PROVIDER_PACKAGES,
+  type AgentArtifact,
+  type AgentProviderPackage,
   type AgentProviderName,
 } from "./agent-providers.js";
 import type { BuiltImage, ResolvedGateStack } from "./config.js";
@@ -102,6 +122,12 @@ const IMAGE_QUERY_TIMEOUT_MS = 30_000;
 // browser image do not want the same ceiling and only the consumer knows which
 // is which.
 export const DEFAULT_BUILD_TIMEOUT_MS = 45 * 60_000;
+
+// Standalone agent releases are large enough to need a generous transfer
+// window, but staging happens while the run owns the single-instance lock. A
+// trickling or stalled CDN response must therefore have a total deadline just
+// like the augment build it replaced.
+export const AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS = 45 * 60_000;
 
 // Images the gate stack references that sandbar does NOT build. Sandbar refuses
 // when one is missing rather than pulling it (#24 D7) — a startup must not do
@@ -240,24 +266,29 @@ export type BuildOptions = {
   readonly capture?: boolean;
   // Deadline for the whole build. Defaults to DEFAULT_BUILD_TIMEOUT_MS.
   readonly timeoutMs?: number;
-  // Generated Containerfile bytes. They are piped to `podman build ... -`, so
-  // no transient recipe or context lands in the state directory (#75).
-  readonly content?: string;
+  // A generated tar build context. The directory is streamed through host tar
+  // to `podman build -`, so COPY instructions can use it.
+  readonly contextRoot?: string;
 };
+
+function buildUsesStdin(image: BuiltImage, opts?: BuildOptions): boolean {
+  return image.stdinContext === true || opts?.contextRoot !== undefined;
+}
 
 // The `podman build` argv for one entry. Pure so the stdin-context, build-arg
 // and label wiring is table-testable — the real-adapter blind spot.
 export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
   const args = ["build", "-t", image.tag];
+  if (image.target !== undefined) args.push("--target", image.target);
   for (const [k, v] of Object.entries(image.buildArgs ?? {})) {
     args.push("--build-arg", `${k}=${v}`);
   }
   if (opts?.fingerprint) {
     args.push("--label", `${IMAGE_INPUTS_LABEL}=${opts.fingerprint}`);
   }
-  if (image.stdinContext || opts?.content !== undefined) {
-    // The Containerfile arrives on stdin and the context is empty. `-f` would
-    // be redundant and podman rejects it alongside the `-` context.
+  if (buildUsesStdin(image, opts)) {
+    // Stdin is either the Containerfile alone or a generated tar context. `-f`
+    // would be redundant and podman rejects it alongside the `-` context.
     args.push("-");
   } else {
     const containerfile = containerfilePath(image, opts?.root ?? "");
@@ -296,9 +327,10 @@ export async function buildImage(
   let output = "";
   let timedOut = false;
   await new Promise<void>((resolve, reject) => {
+    let tar: ChildProcess | undefined;
     const child = spawn(RUNTIME, args, {
       stdio: [
-        image.stdinContext || opts.content !== undefined ? "pipe" : "ignore",
+        buildUsesStdin(image, opts) ? "pipe" : "ignore",
         capture ? "pipe" : "inherit",
         capture ? "pipe" : "inherit",
       ],
@@ -309,6 +341,7 @@ export async function buildImage(
     // bound that cannot fail.
     const timer = setTimeout(() => {
       timedOut = true;
+      tar?.kill("SIGKILL");
       child.kill("SIGKILL");
     }, timeoutMs);
     // Tracked for the run's cleanup, because a signal during a build would
@@ -325,11 +358,13 @@ export async function buildImage(
       output = appendTail(output, c);
     });
     child.on("error", (err) => {
+      tar?.kill("SIGKILL");
       untrack();
       clearTimeout(timer);
       reject(err);
     });
     child.on("exit", (code) => {
+      tar?.kill("SIGKILL");
       untrack();
       clearTimeout(timer);
       if (code === 0 && !timedOut) {
@@ -352,9 +387,23 @@ export async function buildImage(
         ),
       );
     });
-    if (opts.content !== undefined && child.stdin) {
+    if (opts.contextRoot !== undefined && child.stdin) {
+      tar = spawn("tar", ["-cf", "-", "-C", opts.contextRoot, "."], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const untrackTar = trackBuild(tar);
+      tar.stderr?.on("data", (c: Buffer) => { output = appendTail(output, c.toString()); });
+      tar.on("error", (err) => {
+        untrackTar();
+        child.kill("SIGKILL");
+        reject(err);
+      });
+      tar.on("exit", (code) => {
+        untrackTar();
+        if (code !== 0 && !timedOut) child.kill("SIGKILL");
+      });
       child.stdin.on("error", () => {});
-      child.stdin.end(opts.content);
+      tar.stdout?.pipe(child.stdin);
     } else if (image.stdinContext && child.stdin) {
       const src = createReadStream(
         containerfilePath(image, opts.root),
@@ -524,33 +573,294 @@ export async function ensureImages(
 }
 
 // ---------------------------------------------------------------------------
-// Run-owned agent tools (#75)
+// Run-owned agent tools and host artifact cache (#75, #76)
 // ---------------------------------------------------------------------------
 // The branch owns the environment; the run owns the tools. Agent CLIs are
 // selected by resolved role routing, so they are appended AFTER the declared
-// image or a per-branch variant has been resolved. Base images must provide
-// node >= 20 and npm; the generated build is the executable enforcement of
-// that contract. Installation selects root because global npm installs must
-// not depend on the base's default user. That default is inert on the result:
+// image or a per-branch variant has been resolved. Base images need no CLI
+// runtime: host-downloaded, driver-hash-verified standalone binaries are copied
+// from a tar context. Installation selects root. The base's default is inert:
 // both the sandbox and merger resolve container pass an explicit `--user`.
 
 export function agentToolsetSpec(
   providers: readonly AgentProviderName[],
 ): string {
   return providers
-    .map((provider) => `${provider}: ${AGENT_PROVIDER_PACKAGES[provider].spec}`)
+    .map((provider) => `${provider}: ${AGENT_PROVIDER_PACKAGES[provider].version}`)
     .join(", ");
 }
 
 export function agentToolsContainerfile(
   baseTag: string,
   providers: readonly AgentProviderName[],
+  options: {
+    readonly arch?: "x64" | "arm64";
+    readonly packages?: typeof AGENT_PROVIDER_PACKAGES;
+    readonly libc: "glibc" | "musl";
+  },
 ): string {
-  const packages = providers.flatMap((provider) => {
-    const install = AGENT_PROVIDER_PACKAGES[provider];
-    return [...(install.npmFlags ?? []), install.spec];
+  const arch = options.arch ?? hostAgentArchitecture();
+  const packages = options.packages ?? AGENT_PROVIDER_PACKAGES;
+  const libc = options.libc;
+  const pins = providers.map((provider) => {
+    const pin = packages[provider];
+    const digests = (["x64", "arm64"] as const).flatMap((arch) =>
+      pin.artifacts[arch].map((artifact) =>
+        `${arch}-${artifact.variant}:${artifact.sha256}`,
+      ),
+    );
+    return `# ${provider} ${pin.version} ${digests.join(" ")}`;
+  }).join("\n");
+  const copies = providers.map((provider) => {
+    const selected = selectedAgentArtifact(packages[provider], arch, libc);
+    return `COPY --chmod=0755 ${agentArtifactName(provider, selected)} /usr/local/bin/${provider}`;
+  })
+    .join("\n");
+  const probes = providers
+    .map((provider) => `${provider} --version`)
+    .join(" && ");
+  const gitClause = [
+    "command -v git >/dev/null ||",
+    "if command -v apt-get >/dev/null; then",
+    "apt-get update && apt-get install -y --no-install-recommends git &&",
+    "rm -rf /var/lib/apt/lists/*;",
+    "elif command -v apk >/dev/null; then apk add --no-cache git;",
+    "elif command -v dnf >/dev/null; then dnf install -y git && dnf clean all;",
+    "else echo 'git is missing and no supported package manager (apt-get, apk, dnf) is available' >&2; exit 1; fi",
+  ].join(" ");
+  const agentUserClause = [
+    "uid_user=$(awk -F: '$3 == 1000 { print $1; exit }' /etc/passwd);",
+    'if [ -n "$uid_user" ] && [ "$uid_user" != agent ]; then',
+    'sed -i "s/^$uid_user:/agent:/" /etc/passwd; fi;',
+    "if ! id agent >/dev/null 2>&1; then",
+    "if command -v useradd >/dev/null; then",
+    "useradd -u 1000 -m -d /home/agent agent;",
+    "else adduser -D -u 1000 -h /home/agent agent; fi; fi;",
+    "mkdir -p /home/agent && chown -R 1000:$(id -g agent) /home/agent",
+  ].join(" ");
+  const probeClause = [
+    probes,
+    "git --version",
+    'test "$(id -u agent)" = 1000',
+    'test "$(stat -c %u /home/agent)" = 1000',
+  ].join(" && ");
+  return [
+    `FROM ${baseTag}`,
+    pins,
+    "USER 0",
+    `RUN ${gitClause}`,
+    `RUN ${agentUserClause}`,
+    copies,
+    `RUN ${probeClause}`,
+    "",
+  ].join("\n");
+}
+
+export type PreparedAgentArtifacts = {
+  readonly root: string;
+  readonly names: readonly string[];
+  readonly verify: () => Promise<void>;
+  readonly dispose: () => Promise<void>;
+};
+
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+export function hostAgentArchitecture(arch: string = process.arch): "x64" | "arm64" {
+  if (arch === "x64" || arch === "arm64") return arch;
+  throw new SandbarError(
+    `agent tools have no pinned artifact for host architecture '${arch}'`,
+  );
+}
+
+export function selectedAgentArtifact(
+  pin: AgentProviderPackage,
+  arch: "x64" | "arm64",
+  libc: "glibc" | "musl",
+): AgentArtifact {
+  const staticArtifacts = pin.artifacts[arch].filter(
+    (artifact) => artifact.variant === "static",
+  );
+  const selected = staticArtifacts.length > 0
+    ? staticArtifacts
+    : pin.artifacts[arch].filter((artifact) => artifact.variant === libc);
+  if (selected.length !== 1) {
+    throw new SandbarError(
+      `agent provider has ${selected.length} ${arch}-${libc} artifacts; expected exactly one`,
+    );
+  }
+  return selected[0]!;
+}
+
+export function agentArtifactName(
+  provider: AgentProviderName,
+  artifact: AgentArtifact,
+): string {
+  return `${provider}-${artifact.variant}`;
+}
+
+export function findAgentBinary(
+  provider: AgentProviderName,
+  entries: readonly string[],
+): string {
+  const binary = entries.find((name) =>
+    name === provider || name.startsWith(`${provider}-`)
+  );
+  if (!binary) throw new Error(`archive contains no ${provider} binary`);
+  return binary;
+}
+
+export function detectImageLibcArgv(baseTag: string): string[] {
+  return [
+    "run", "--rm", "--image-volume=ignore", "--entrypoint", "sh", baseTag,
+    "-c", "[ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ]",
+  ];
+}
+
+export async function detectImageLibc(baseTag: string): Promise<"glibc" | "musl"> {
+  try {
+    await exec(RUNTIME, detectImageLibcArgv(baseTag), {
+      timeout: IMAGE_QUERY_TIMEOUT_MS,
+    });
+    return "musl";
+  } catch (err) {
+    const exitCode = (err as { code?: unknown }).code;
+    if (exitCode === 1) {
+      return "glibc";
+    }
+    throw err;
+  }
+}
+
+export type ArtifactPreparationAdapters = {
+  readonly arch?: string;
+  readonly fetch?: typeof fetch;
+  readonly extract?: (archive: string, destination: string) => Promise<void>;
+  readonly packages?: typeof AGENT_PROVIDER_PACKAGES;
+  readonly cacheRoot?: string;
+  readonly libc: "glibc" | "musl";
+};
+
+export function agentArtifactCacheRoot(
+  uid: number | undefined = process.getuid?.(),
+): string {
+  if (typeof uid !== "number" || !Number.isSafeInteger(uid) || uid < 0) {
+    throw new SandbarError("agent artifact caching requires a numeric host uid");
+  }
+  return join(tmpdir(), `sandbar-agent-tools-${uid}`);
+}
+
+export async function prepareAgentArtifacts(
+  providers: readonly AgentProviderName[],
+  log: (line: string) => void,
+  adapters: ArtifactPreparationAdapters,
+): Promise<PreparedAgentArtifacts> {
+  const arch = hostAgentArchitecture(adapters.arch);
+  const fetchArtifact = adapters.fetch ?? fetch;
+  const packages = adapters.packages ?? AGENT_PROVIDER_PACKAGES;
+  const libc = adapters.libc;
+  const extract = adapters.extract ?? (async (archive, destination) => {
+    await exec("tar", ["-xzf", archive, "-C", destination]);
   });
-  return `FROM ${baseTag}\nUSER 0\nRUN npm install -g ${packages.join(" ")}\n`;
+  const cacheRoot = adapters.cacheRoot ?? agentArtifactCacheRoot();
+  await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
+  // A disposable view gives callers the old flat file layout while the large
+  // verified bytes live in a persistent, content-addressed cache across runs.
+  const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-view-"));
+  const stagedSha256: Record<string, string> = {};
+  try {
+    for (const provider of providers) {
+      const artifact = selectedAgentArtifact(packages[provider], arch, libc);
+      const name = agentArtifactName(provider, artifact);
+      const artifactRoot = join(cacheRoot, artifact.sha256);
+      const downloaded = join(artifactRoot, "download");
+      await mkdir(artifactRoot, { recursive: true });
+      const identity = `${provider}/${arch}-${artifact.variant} from ${artifact.url}`;
+      try {
+        let cached = false;
+        try {
+          cached = await sha256File(downloaded) === artifact.sha256;
+        } catch {
+          // Missing and interrupted cache entries are ordinary cold misses.
+        }
+        if (!cached) {
+          log(`Downloading agent tool ${identity}...`);
+          // Two base variants can prepare the same static artifact concurrently
+          // in one process. Give each transfer its own directory: a PID-only
+          // name lets one successful rename remove the other's open path.
+          const partialRoot = await mkdtemp(
+            join(artifactRoot, `download-${process.pid}-`),
+          );
+          const partial = join(partialRoot, "download.partial");
+          try {
+            const response = await fetchArtifact(artifact.url, {
+              signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
+            });
+            if (!response.ok) {
+              throw new Error(`download returned HTTP ${response.status}`);
+            }
+            if (response.body === null) {
+              throw new Error("download returned an empty response body");
+            }
+            await pipeline(
+              Readable.fromWeb(response.body as never),
+              createWriteStream(partial),
+            );
+            const actual = await sha256File(partial);
+            if (actual !== artifact.sha256) {
+              throw new Error(
+                `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
+              );
+            }
+            await rename(partial, downloaded);
+          } finally {
+            await rm(partialRoot, { recursive: true, force: true });
+          }
+        }
+        const destination = join(root, name);
+        if (artifact.archive) {
+          // The archive digest is pinned; the extracted bytes are not. Derive
+          // them afresh from the verified cache instead of trusting a prior
+          // run's executable as though it were content-addressed itself.
+          const extractRoot = await mkdtemp(join(root, `${provider}-extracted-`));
+          await extract(downloaded, extractRoot);
+          const binary = findAgentBinary(provider, await readdir(extractRoot));
+          await rename(join(extractRoot, binary), destination);
+          await rm(extractRoot, { recursive: true, force: true });
+        } else {
+          await copyFile(downloaded, destination);
+        }
+        stagedSha256[name] = await sha256File(destination);
+      } catch (err) {
+        throw new Error(
+          `could not download and stage ${identity}: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      }
+    }
+    return {
+      root,
+      names: Object.keys(stagedSha256),
+      verify: async () => {
+        for (const [name, expected] of Object.entries(stagedSha256)) {
+          const actual = await sha256File(join(root, name));
+          if (actual !== expected) {
+            throw new Error(
+              `staged artifact ${name}/${arch} failed re-verification ` +
+                `(expected ${expected}, got ${actual})`,
+            );
+          }
+        }
+      },
+      dispose: () => rm(root, { recursive: true, force: true }),
+    };
+  } catch (err) {
+    await rm(root, { recursive: true, force: true });
+    throw err;
+  }
 }
 
 export type AgentImages = {
@@ -567,13 +877,48 @@ export async function createAgentImages(opts: {
   readonly inputsLabel?: (tag: string) => Promise<string | null>;
   readonly log?: (line: string) => void;
   readonly onImage?: ImageRecorder;
+  readonly prepareArtifacts?: (
+    providers: readonly AgentProviderName[],
+    libc: "glibc" | "musl",
+  ) => Promise<PreparedAgentArtifacts>;
+  readonly detectLibc?: (baseTag: string) => Promise<"glibc" | "musl">;
 }): Promise<AgentImages> {
   const build = opts.build ?? buildImage;
   const inputsLabel = opts.inputsLabel ?? readInputsLabel;
   const log = opts.log ?? ((line: string) => console.log(line));
   const toolset = agentToolsetSpec(opts.providers);
+  const arch = hostAgentArchitecture();
+  const needsLibcChoice = opts.providers.some((provider) =>
+    selectedAgentArtifact(
+      AGENT_PROVIDER_PACKAGES[provider], arch, "glibc",
+    ).variant !== selectedAgentArtifact(
+      AGENT_PROVIDER_PACKAGES[provider], arch, "musl",
+    ).variant
+  );
   const pending = new Map<string, Promise<string>>();
   const order: string[] = [];
+  const artifactPromises = new Map<"glibc" | "musl", Promise<PreparedAgentArtifacts>>();
+
+  const artifacts = (libc: "glibc" | "musl"): Promise<PreparedAgentArtifacts> => {
+    let promise = artifactPromises.get(libc);
+    if (promise === undefined) {
+      promise = (
+        opts.prepareArtifacts !== undefined
+          ? opts.prepareArtifacts(opts.providers, libc)
+          : prepareAgentArtifacts(opts.providers, log, {
+            libc,
+          })
+      ).then((prepared) => {
+        onCleanup(prepared.dispose);
+        return prepared;
+      }).catch((err) => {
+        artifactPromises.delete(libc);
+        throw err;
+      });
+      artifactPromises.set(libc, promise);
+    }
+    return promise;
+  };
 
   const augment = async (baseTag: string): Promise<string> => {
     let promise = pending.get(baseTag);
@@ -581,7 +926,12 @@ export async function createAgentImages(opts: {
       promise = (async () => {
         const elapsed = startTimer();
         const baseInputs = await inputsLabel(baseTag);
-        const containerfile = agentToolsContainerfile(baseTag, opts.providers);
+        const libc = needsLibcChoice
+          ? await (opts.detectLibc ?? detectImageLibc)(baseTag)
+          : "glibc";
+        const containerfile = agentToolsContainerfile(baseTag, opts.providers, {
+          arch, libc,
+        });
         const fingerprint = createHash("sha256")
           .update(JSON.stringify([baseInputs ?? "unknown", containerfile]))
           .digest("hex");
@@ -600,15 +950,27 @@ export async function createAgentImages(opts: {
             `Augmenting '${baseTag}' as '${tag}' with agent tools ` +
               `${toolset}...`,
           );
-          await build(
-            { tag, containerfile: "<generated-agent-tools>" },
-            {
-              root: "",
-              content: containerfile,
-              fingerprint,
-              capture: true,
-            },
+          const contextRoot = await mkdtemp(
+            join(tmpdir(), "sandbar-agent-context-"),
           );
+          const withdrawContextCleanup = registerDisposable(
+            () => rm(contextRoot, { recursive: true, force: true }),
+          );
+          try {
+            const prepared = await artifacts(libc);
+            await writeFile(join(contextRoot, "Containerfile"), containerfile);
+            await prepared.verify();
+            for (const name of prepared.names) {
+              await link(join(prepared.root, name), join(contextRoot, name));
+            }
+            await build(
+              { tag, containerfile: "<generated-agent-tools>" },
+              { root: "", contextRoot, fingerprint, capture: true },
+            );
+          } finally {
+            await rm(contextRoot, { recursive: true, force: true });
+            withdrawContextCleanup();
+          }
           await opts.onImage?.({
             tag,
             built: true,
