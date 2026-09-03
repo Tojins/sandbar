@@ -27,32 +27,32 @@ import { runScope, variantImageTag } from "./naming.js";
 
 async function fakeAgentArtifacts(
   providers: readonly (typeof AGENT_PROVIDER_NAMES)[number][],
+  libc: "glibc" | "musl",
 ): Promise<PreparedAgentArtifacts> {
   const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-test-"));
   const sha256: Record<string, string> = {};
   const arch = process.arch as "x64" | "arm64";
   for (const provider of providers) {
-    for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
-      const name = `${provider}-${artifact.variant}`;
-      const content = `test ${name}`;
-      await writeFile(join(root, name), content);
-      sha256[name] = createHash("sha256").update(content).digest("hex");
-    }
+    const artifact = selectedAgentArtifact(
+      AGENT_PROVIDER_PACKAGES[provider], arch, libc,
+    );
+    const name = `${provider}-${artifact.variant}`;
+    const content = `test ${name}`;
+    await writeFile(join(root, name), content);
+    sha256[name] = createHash("sha256").update(content).digest("hex");
   }
   return {
     root,
+    names: Object.keys(sha256),
     verify: async () => {
-      for (const provider of providers) {
-        for (const artifact of AGENT_PROVIDER_PACKAGES[provider].artifacts[arch]) {
-          const name = `${provider}-${artifact.variant}`;
-          const actual = createHash("sha256")
-            .update(await readFile(join(root, name)))
-            .digest("hex");
-          if (actual !== sha256[name]) {
-            throw new Error(
-              `staged artifact ${name}/${process.arch} failed re-verification`,
-            );
-          }
+      for (const [name, expected] of Object.entries(sha256)) {
+        const actual = createHash("sha256")
+          .update(await readFile(join(root, name)))
+          .digest("hex");
+        if (actual !== expected) {
+          throw new Error(
+            `staged artifact ${name}/${process.arch} failed re-verification`,
+          );
         }
       }
     },
@@ -61,7 +61,7 @@ async function fakeAgentArtifacts(
 }
 
 describe("run-owned agent images", () => {
-  it("generates a no-context build containing only the routed, pinned tools", async () => {
+  it("stages a tar context containing only the routed, pinned tools", async () => {
     const builds: Array<{ files: string[]; content: string; argv: string[] }> = [];
     await createAgentImages({
       declaredBaseTag: "localhost/app:base",
@@ -104,6 +104,34 @@ describe("run-owned agent images", () => {
       log: () => {},
     });
     expect(files).toEqual(["Containerfile", "claude-musl"]);
+  });
+
+  it("prepares each libc variant once across different base images", async () => {
+    const preparations: Array<"glibc" | "musl"> = [];
+    const contextFiles: string[][] = [];
+    const images = await createAgentImages({
+      declaredBaseTag: "declared",
+      providers: ["claude"],
+      scope: runScope("/agent-libc-memo"),
+      prepareArtifacts: async (providers, libc) => {
+        preparations.push(libc);
+        return fakeAgentArtifacts(providers, libc);
+      },
+      detectLibc: async (baseTag) => baseTag === "declared" ? "musl" : "glibc",
+      inputsLabel: async () => null,
+      build: async (_image, opts) => {
+        contextFiles.push((await readdir(opts.contextRoot!)).sort());
+      },
+      log: () => {},
+    });
+    await images.augment("variant");
+    await images.augment("another-variant");
+    expect(preparations).toEqual(["musl", "glibc"]);
+    expect(contextFiles).toEqual([
+      ["Containerfile", "claude-musl"],
+      ["Containerfile", "claude-glibc"],
+      ["Containerfile", "claude-glibc"],
+    ]);
   });
 
   it("copies and probes both standalone provider binaries", () => {
@@ -292,6 +320,11 @@ describe("run-owned agent images", () => {
       libc: "glibc",
       fetch: async () => new Response("missing", { status: 503 }),
     })).rejects.toThrow(/HTTP 503/);
+    await expect(prepareAgentArtifacts(["codex"], () => {}, {
+      arch: "x64",
+      libc: "glibc",
+      fetch: async () => new Response(null),
+    })).rejects.toThrow(/empty response body/);
     await expect(prepareAgentArtifacts(["codex"], () => {}, {
       arch: "x64",
       libc: "glibc",
@@ -527,7 +560,7 @@ describe("run-owned agent images", () => {
   });
 
   it("re-verifies staged tools before augmenting a later variant", async () => {
-    const artifacts = await fakeAgentArtifacts(["codex"]);
+    const artifacts = await fakeAgentArtifacts(["codex"], "glibc");
     const images = await createAgentImages({
       declaredBaseTag: "base",
       providers: ["codex"],

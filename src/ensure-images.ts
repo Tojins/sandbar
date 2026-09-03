@@ -61,7 +61,7 @@ import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
 import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, copyFile, link, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, link, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -540,7 +540,7 @@ export function agentToolsContainerfile(
   }).join("\n");
   const copies = providers.map((provider) => {
     const selected = selectedAgentArtifact(packages[provider], arch, libc);
-    return `COPY --chmod=0755 ${provider}-${selected.variant} /usr/local/bin/${provider}`;
+    return `COPY --chmod=0755 ${agentArtifactName(provider, selected)} /usr/local/bin/${provider}`;
   })
     .join("\n");
   const probes = providers
@@ -585,6 +585,7 @@ export function agentToolsContainerfile(
 
 export type PreparedAgentArtifacts = {
   readonly root: string;
+  readonly names: readonly string[];
   readonly verify: () => Promise<void>;
   readonly dispose: () => Promise<void>;
 };
@@ -619,6 +620,13 @@ export function selectedAgentArtifact(
     );
   }
   return selected[0]!;
+}
+
+export function agentArtifactName(
+  provider: AgentProviderName,
+  artifact: AgentArtifact,
+): string {
+  return `${provider}-${artifact.variant}`;
 }
 
 export function findAgentBinary(
@@ -666,7 +674,7 @@ export type ArtifactPreparationAdapters = {
 export function agentArtifactCacheRoot(
   uid: number | undefined = process.getuid?.(),
 ): string {
-  if (uid === undefined || !Number.isSafeInteger(uid) || uid < 0) {
+  if (!Number.isSafeInteger(uid) || (uid ?? -1) < 0) {
     throw new SandbarError("agent artifact caching requires a numeric host uid");
   }
   return join(tmpdir(), `sandbar-agent-tools-${uid}`);
@@ -689,12 +697,11 @@ export async function prepareAgentArtifacts(
   // A disposable view gives callers the old flat file layout while the large
   // verified bytes live in a persistent, content-addressed cache across runs.
   const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-view-"));
-  onCleanup(() => rm(root, { recursive: true, force: true }));
   const stagedSha256: Record<string, string> = {};
   try {
     for (const provider of providers) {
       const artifact = selectedAgentArtifact(packages[provider], arch, libc);
-      const name = `${provider}-${artifact.variant}`;
+      const name = agentArtifactName(provider, artifact);
       const artifactRoot = join(cacheRoot, artifact.sha256);
       const downloaded = join(artifactRoot, "download");
       await mkdir(artifactRoot, { recursive: true });
@@ -707,7 +714,6 @@ export async function prepareAgentArtifacts(
           // Missing and interrupted cache entries are ordinary cold misses.
         }
         if (!cached) {
-          await rm(downloaded, { force: true });
           log(`Downloading agent tool ${identity}...`);
           // Two base variants can prepare the same static artifact concurrently
           // in one process. Give each transfer its own directory: a PID-only
@@ -720,8 +726,11 @@ export async function prepareAgentArtifacts(
             const response = await fetchArtifact(artifact.url, {
               signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
             });
-            if (!response.ok || response.body === null) {
+            if (!response.ok) {
               throw new Error(`download returned HTTP ${response.status}`);
+            }
+            if (response.body === null) {
+              throw new Error("download returned an empty response body");
             }
             await pipeline(
               Readable.fromWeb(response.body as never),
@@ -747,10 +756,10 @@ export async function prepareAgentArtifacts(
           await extract(downloaded, extractRoot);
           const binary = findAgentBinary(provider, await readdir(extractRoot));
           await rename(join(extractRoot, binary), destination);
+          await rm(extractRoot, { recursive: true, force: true });
         } else {
           await copyFile(downloaded, destination);
         }
-        await chmod(destination, 0o755);
         stagedSha256[name] = await sha256File(destination);
       } catch (err) {
         throw new Error(
@@ -761,6 +770,7 @@ export async function prepareAgentArtifacts(
     }
     return {
       root,
+      names: Object.keys(stagedSha256),
       verify: async () => {
         for (const [name, expected] of Object.entries(stagedSha256)) {
           const actual = await sha256File(join(root, name));
@@ -776,10 +786,7 @@ export async function prepareAgentArtifacts(
     };
   } catch (err) {
     await rm(root, { recursive: true, force: true });
-    throw new SandbarError(
-      `could not stage verified agent artifacts: ${err instanceof Error ? err.message : String(err)}`,
-      { cause: err },
-    );
+    throw err;
   }
 }
 
@@ -798,6 +805,7 @@ export async function createAgentImages(opts: {
   readonly log?: (line: string) => void;
   readonly prepareArtifacts?: (
     providers: readonly AgentProviderName[],
+    libc: "glibc" | "musl",
   ) => Promise<PreparedAgentArtifacts>;
   readonly detectLibc?: (baseTag: string) => Promise<"glibc" | "musl">;
 }): Promise<AgentImages> {
@@ -822,7 +830,7 @@ export async function createAgentImages(opts: {
     if (promise === undefined) {
       promise = (
         opts.prepareArtifacts !== undefined
-          ? opts.prepareArtifacts(opts.providers)
+          ? opts.prepareArtifacts(opts.providers, libc)
           : prepareAgentArtifacts(opts.providers, log, {
             libc,
           })
@@ -871,11 +879,7 @@ export async function createAgentImages(opts: {
             const prepared = await artifacts(libc);
             await writeFile(join(contextRoot, "Containerfile"), containerfile);
             await prepared.verify();
-            for (const provider of opts.providers) {
-              const artifact = selectedAgentArtifact(
-                AGENT_PROVIDER_PACKAGES[provider], arch, libc,
-              );
-              const name = `${provider}-${artifact.variant}`;
+            for (const name of prepared.names) {
               await link(join(prepared.root, name), join(contextRoot, name));
             }
             await build(
