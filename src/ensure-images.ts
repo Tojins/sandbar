@@ -581,6 +581,16 @@ export async function ensureImages(
 // runtime: host-downloaded, driver-hash-verified standalone binaries are copied
 // from a tar context. Installation selects root. The base's default is inert:
 // both the sandbox and merger resolve container pass an explicit `--user`.
+//
+// A provider installs one or more BINARIES, not one file (#120). A CLI that
+// execs a sibling it resolves for itself — codex's code-mode host — is that
+// sibling's only caller, so the sibling belongs to the same run-owned pin and
+// the same digest verification; shipping the CLI alone leaves a capability the
+// SERVER can switch on with nothing on disk to serve it. Artifacts are grouped
+// by `binary` and selected per group, so a helper and its CLI never compete for
+// "the" artifact of an arch, and every name a group produces — the staged file,
+// the fingerprint digest line, the archive member — is keyed on the installed
+// command rather than the provider.
 
 export function agentToolsetSpec(
   providers: readonly AgentProviderName[],
@@ -606,18 +616,30 @@ export function agentToolsContainerfile(
     const pin = packages[provider];
     const digests = (["x64", "arm64"] as const).flatMap((arch) =>
       pin.artifacts[arch].map((artifact) =>
-        `${arch}-${artifact.variant}:${artifact.sha256}`,
+        `${arch}-${agentArtifactName(provider, artifact)}:${artifact.sha256}`,
       ),
     );
     return `# ${provider} ${pin.version} ${digests.join(" ")}`;
   }).join("\n");
-  const copies = providers.map((provider) => {
-    const selected = selectedAgentArtifact(packages[provider], arch, libc);
-    return `COPY --chmod=0755 ${agentArtifactName(provider, selected)} /usr/local/bin/${provider}`;
-  })
-    .join("\n");
-  const probes = providers
-    .map((provider) => `${provider} --version`)
+  const installed = providers.flatMap((provider) =>
+    selectedAgentArtifacts(packages[provider], arch, libc, provider)
+      .map((artifact) => ({
+        provider,
+        artifact,
+        binary: agentArtifactBinary(provider, artifact),
+      })),
+  );
+  const copies = installed.map(({ provider, artifact, binary }) =>
+    `COPY --chmod=0755 ${agentArtifactName(provider, artifact)} /usr/local/bin/${binary}`,
+  ).join("\n");
+  // The CLI answers `--version`; a helper is a server with no such flag
+  // (`codex-code-mode-host` speaks stdio/gRPC and rejects one), so it is probed
+  // for presence and the executable bit instead — which is the whole of what
+  // the image owes it, since the CLI is what execs it.
+  const probes = installed
+    .map(({ provider, binary }) =>
+      binary === provider ? `${binary} --version` : `test -x /usr/local/bin/${binary}`,
+    )
     .join(" && ");
   const gitClause = [
     "command -v git >/dev/null ||",
@@ -676,41 +698,121 @@ export function hostAgentArchitecture(arch: string = process.arch): "x64" | "arm
   );
 }
 
+// The CLI's OWN artifact — the one whose `binary` is absent. This answers about
+// the CLI ALONE, so it is the wrong question for anything deciding on behalf of
+// everything installed (the libc probe asks `selectedAgentArtifacts`); what is
+// left is the callers that genuinely mean the agent binary itself.
 export function selectedAgentArtifact(
   pin: AgentProviderPackage,
   arch: "x64" | "arm64",
   libc: "glibc" | "musl",
 ): AgentArtifact {
-  const staticArtifacts = pin.artifacts[arch].filter(
+  return selectAgentArtifact(
+    pin.artifacts[arch].filter((artifact) => artifact.binary === undefined),
+    arch,
+    libc,
+    undefined,
+  );
+}
+
+// Every binary the provider installs, the CLI first and its named siblings
+// after, in declaration order (#120). Grouped by `binary` so a helper is
+// selected by the SAME static-else-libc rule as the CLI and can never be
+// mistaken for a competing variant of it.
+export function selectedAgentArtifacts(
+  pin: AgentProviderPackage,
+  arch: "x64" | "arm64",
+  libc: "glibc" | "musl",
+  provider: AgentProviderName,
+): readonly AgentArtifact[] {
+  const groups = new Map<string | undefined, AgentArtifact[]>();
+  for (const artifact of pin.artifacts[arch]) {
+    const group = groups.get(artifact.binary);
+    if (group) group.push(artifact);
+    else groups.set(artifact.binary, [artifact]);
+  }
+  const selected = [...groups.entries()].map(
+    ([binary, group]) => selectAgentArtifact(group, arch, libc, binary),
+  );
+  // `binary` naming the provider's own command would split into a second group
+  // that resolves to the SAME staged file, COPY target and `names` entry as the
+  // CLI — one destination, last write wins, a silently wrong install. Data this
+  // module owns, so a guard rather than a type, but the grouping argument above
+  // is only true while it holds.
+  const names = selected.map(
+    (artifact) => agentArtifactBinary(provider, artifact),
+  );
+  if (new Set(names).size !== names.length) {
+    throw new SandbarError(
+      `${provider} declares two artifacts for one installed command ` +
+        `(${names.join(", ")}); a helper's \`binary\` must not repeat the ` +
+        "provider's own name",
+    );
+  }
+  return selected;
+}
+
+function selectAgentArtifact(
+  candidates: readonly AgentArtifact[],
+  arch: "x64" | "arm64",
+  libc: "glibc" | "musl",
+  binary: string | undefined,
+): AgentArtifact {
+  const staticArtifacts = candidates.filter(
     (artifact) => artifact.variant === "static",
   );
   const selected = staticArtifacts.length > 0
     ? staticArtifacts
-    : pin.artifacts[arch].filter((artifact) => artifact.variant === libc);
+    : candidates.filter((artifact) => artifact.variant === libc);
   if (selected.length !== 1) {
     throw new SandbarError(
-      `agent provider has ${selected.length} ${arch}-${libc} artifacts; expected exactly one`,
+      `agent provider has ${selected.length} ${arch}-${libc} ` +
+        `${binary === undefined ? "artifacts" : `${binary} artifacts`}; ` +
+        "expected exactly one",
     );
   }
   return selected[0]!;
 }
 
+// Keyed on the INSTALLED COMMAND, so a provider's helper stages beside its CLI
+// instead of colliding with it (#120). Unchanged for every artifact without a
+// `binary`: `claude-glibc`, `codex-static`.
 export function agentArtifactName(
   provider: AgentProviderName,
   artifact: AgentArtifact,
 ): string {
-  return `${provider}-${artifact.variant}`;
+  return `${agentArtifactBinary(provider, artifact)}-${artifact.variant}`;
 }
 
-export function findAgentBinary(
+// The command an artifact installs: its own name, or the provider's.
+export function agentArtifactBinary(
   provider: AgentProviderName,
+  artifact: AgentArtifact,
+): string {
+  return artifact.binary ?? provider;
+}
+
+// Which member of an extracted archive IS the binary. Release tarballs name the
+// file for the target triple (`codex-x86_64-unknown-linux-musl`), so an exact
+// match is tried first and a prefix match second — and an AMBIGUOUS prefix is
+// refused rather than resolved by readdir order (#120): `codex-` matches
+// `codex-code-mode-host-<triple>` too, and picking the wrong one would install
+// a gRPC server as the agent CLI and only fail once an issue was in flight.
+export function findAgentBinary(
+  binary: string,
   entries: readonly string[],
 ): string {
-  const binary = entries.find((name) =>
-    name === provider || name.startsWith(`${provider}-`)
-  );
-  if (!binary) throw new Error(`archive contains no ${provider} binary`);
-  return binary;
+  if (entries.includes(binary)) return binary;
+  const prefixed = entries.filter((name) => name.startsWith(`${binary}-`));
+  if (prefixed.length > 1) {
+    throw new Error(
+      `archive contains ${prefixed.length} candidates for the ${binary} ` +
+        `binary (${prefixed.join(", ")}); expected exactly one`,
+    );
+  }
+  const found = prefixed[0];
+  if (!found) throw new Error(`archive contains no ${binary} binary`);
+  return found;
 }
 
 export function detectImageLibcArgv(baseTag: string): string[] {
@@ -773,72 +875,76 @@ export async function prepareAgentArtifacts(
   const stagedSha256: Record<string, string> = {};
   try {
     for (const provider of providers) {
-      const artifact = selectedAgentArtifact(packages[provider], arch, libc);
-      const name = agentArtifactName(provider, artifact);
-      const artifactRoot = join(cacheRoot, artifact.sha256);
-      const downloaded = join(artifactRoot, "download");
-      await mkdir(artifactRoot, { recursive: true });
-      const identity = `${provider}/${arch}-${artifact.variant} from ${artifact.url}`;
-      try {
-        let cached = false;
+      for (
+        const artifact of selectedAgentArtifacts(packages[provider], arch, libc, provider)
+      ) {
+        const binary = agentArtifactBinary(provider, artifact);
+        const name = agentArtifactName(provider, artifact);
+        const artifactRoot = join(cacheRoot, artifact.sha256);
+        const downloaded = join(artifactRoot, "download");
+        await mkdir(artifactRoot, { recursive: true });
+        const identity = `${binary}/${arch}-${artifact.variant} from ${artifact.url}`;
         try {
-          cached = await sha256File(downloaded) === artifact.sha256;
-        } catch {
-          // Missing and interrupted cache entries are ordinary cold misses.
-        }
-        if (!cached) {
-          log(`Downloading agent tool ${identity}...`);
-          // Two base variants can prepare the same static artifact concurrently
-          // in one process. Give each transfer its own directory: a PID-only
-          // name lets one successful rename remove the other's open path.
-          const partialRoot = await mkdtemp(
-            join(artifactRoot, `download-${process.pid}-`),
-          );
-          const partial = join(partialRoot, "download.partial");
+          let cached = false;
           try {
-            const response = await fetchArtifact(artifact.url, {
-              signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
-            });
-            if (!response.ok) {
-              throw new Error(`download returned HTTP ${response.status}`);
-            }
-            if (response.body === null) {
-              throw new Error("download returned an empty response body");
-            }
-            await pipeline(
-              Readable.fromWeb(response.body as never),
-              createWriteStream(partial),
-            );
-            const actual = await sha256File(partial);
-            if (actual !== artifact.sha256) {
-              throw new Error(
-                `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
-              );
-            }
-            await rename(partial, downloaded);
-          } finally {
-            await rm(partialRoot, { recursive: true, force: true });
+            cached = await sha256File(downloaded) === artifact.sha256;
+          } catch {
+            // Missing and interrupted cache entries are ordinary cold misses.
           }
+          if (!cached) {
+            log(`Downloading agent tool ${identity}...`);
+            // Two base variants can prepare the same static artifact concurrently
+            // in one process. Give each transfer its own directory: a PID-only
+            // name lets one successful rename remove the other's open path.
+            const partialRoot = await mkdtemp(
+              join(artifactRoot, `download-${process.pid}-`),
+            );
+            const partial = join(partialRoot, "download.partial");
+            try {
+              const response = await fetchArtifact(artifact.url, {
+                signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
+              });
+              if (!response.ok) {
+                throw new Error(`download returned HTTP ${response.status}`);
+              }
+              if (response.body === null) {
+                throw new Error("download returned an empty response body");
+              }
+              await pipeline(
+                Readable.fromWeb(response.body as never),
+                createWriteStream(partial),
+              );
+              const actual = await sha256File(partial);
+              if (actual !== artifact.sha256) {
+                throw new Error(
+                  `sha256 mismatch (expected ${artifact.sha256}, got ${actual})`,
+                );
+              }
+              await rename(partial, downloaded);
+            } finally {
+              await rm(partialRoot, { recursive: true, force: true });
+            }
+          }
+          const destination = join(root, name);
+          if (artifact.archive) {
+            // The archive digest is pinned; the extracted bytes are not. Derive
+            // them afresh from the verified cache instead of trusting a prior
+            // run's executable as though it were content-addressed itself.
+            const extractRoot = await mkdtemp(join(root, `${binary}-extracted-`));
+            await extract(downloaded, extractRoot);
+            const member = findAgentBinary(binary, await readdir(extractRoot));
+            await rename(join(extractRoot, member), destination);
+            await rm(extractRoot, { recursive: true, force: true });
+          } else {
+            await copyFile(downloaded, destination);
+          }
+          stagedSha256[name] = await sha256File(destination);
+        } catch (err) {
+          throw new Error(
+            `could not download and stage ${identity}: ${err instanceof Error ? err.message : String(err)}`,
+            { cause: err },
+          );
         }
-        const destination = join(root, name);
-        if (artifact.archive) {
-          // The archive digest is pinned; the extracted bytes are not. Derive
-          // them afresh from the verified cache instead of trusting a prior
-          // run's executable as though it were content-addressed itself.
-          const extractRoot = await mkdtemp(join(root, `${provider}-extracted-`));
-          await extract(downloaded, extractRoot);
-          const binary = findAgentBinary(provider, await readdir(extractRoot));
-          await rename(join(extractRoot, binary), destination);
-          await rm(extractRoot, { recursive: true, force: true });
-        } else {
-          await copyFile(downloaded, destination);
-        }
-        stagedSha256[name] = await sha256File(destination);
-      } catch (err) {
-        throw new Error(
-          `could not download and stage ${identity}: ${err instanceof Error ? err.message : String(err)}`,
-          { cause: err },
-        );
       }
     }
     return {
@@ -888,12 +994,21 @@ export async function createAgentImages(opts: {
   const log = opts.log ?? ((line: string) => console.log(line));
   const toolset = agentToolsetSpec(opts.providers);
   const arch = hostAgentArchitecture();
+  // Over EVERY binary a provider installs, not just its CLI (#120). What this
+  // decides is whether the base is probed at all, and a false skips the probe
+  // and hard-codes `glibc` for the whole selection — so a helper with
+  // libc-specific variants under a static CLI would be staged glibc into a musl
+  // image, silently. Asking the singular question here would be asking about
+  // the CLI and answering for the set.
+  const installedVariants = (
+    provider: AgentProviderName,
+    libc: "glibc" | "musl",
+  ): string =>
+    selectedAgentArtifacts(AGENT_PROVIDER_PACKAGES[provider], arch, libc, provider)
+      .map((artifact) => artifact.variant)
+      .join(",");
   const needsLibcChoice = opts.providers.some((provider) =>
-    selectedAgentArtifact(
-      AGENT_PROVIDER_PACKAGES[provider], arch, "glibc",
-    ).variant !== selectedAgentArtifact(
-      AGENT_PROVIDER_PACKAGES[provider], arch, "musl",
-    ).variant
+    installedVariants(provider, "glibc") !== installedVariants(provider, "musl")
   );
   const pending = new Map<string, Promise<string>>();
   const order: string[] = [];

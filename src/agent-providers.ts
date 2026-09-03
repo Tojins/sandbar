@@ -54,6 +54,12 @@ export const AGENT_PROVIDER_NAMES = ["claude", "codex"] as const;
 
 export type AgentProviderName = (typeof AGENT_PROVIDER_NAMES)[number];
 
+// The sibling binary codex execs to run Code Mode cells (#120). A NAME rather
+// than a path: codex resolves it beside its own executable, and the augment
+// recipe puts both in `/usr/local/bin`, which is the layout codex calls a
+// "standalone" install.
+export const CODEX_CODE_MODE_HOST = "codex-code-mode-host";
+
 // Driver-owned because these binaries implement the provider protocol this
 // release parses. A routed role must not inherit whichever CLI a host image (or
 // an old branch's image recipe) happened to bake (#75).
@@ -64,6 +70,13 @@ export type AgentArtifact = {
   readonly url: string;
   readonly sha256: string;
   readonly archive?: true;
+  // The command this artifact installs, at `/usr/local/bin/<binary>`. ABSENT
+  // means the provider's own name, which is the ordinary case and keeps every
+  // pre-#120 entry unchanged; a value names a SIBLING the CLI resolves for
+  // itself and cannot run without (codex's code-mode host). Selection groups
+  // the arch's artifacts by this key and demands exactly one per group, so a
+  // helper never competes with the CLI for "the" artifact.
+  readonly binary?: string;
 };
 
 export type AgentProviderPackage = {
@@ -71,6 +84,62 @@ export type AgentProviderPackage = {
   readonly artifacts: Readonly<Record<"x64" | "arm64", readonly AgentArtifact[]>>;
 };
 
+// codex's code-mode host (#120). Code Mode is a second execution architecture:
+// instead of emitting one tool call per turn, the model writes JavaScript that
+// codex runs in a separate process — `codex-code-mode-host`, spoken to over
+// gRPC — and that script calls the ordinary tools as functions, so a search, a
+// read of five files and a test run cost one round trip and return FILTERED
+// output instead of a whole test log. Whether it engages is not sandbar's
+// choice and not the operator's: it is MODEL METADATA, fetched per session
+// (`models_cache.json`), and OpenAI turned it on for `gpt-5.6-sol` mid-series
+// on 2026-09-03 under a driver and a CLI both pinned by digest.
+//
+// That is the whole reason this is a driver-owned pin and not a note in a
+// README. The standalone tarball ships `codex` ALONE, the host is a separate
+// release asset, and codex resolves it as a SIBLING of its own path — so the
+// first run after the flip found `/usr/local/bin/codex-code-mode-host` missing,
+// had no command runner at all, made zero tool calls, and reported an
+// environment fault as its answer (issue #114, parked NEEDS-INFO on attempt 1).
+// A capability the server can switch on is one the image must already carry:
+// installing the host unconditionally is what makes the flip a non-event in
+// both directions, since a codex that never enters code mode never execs it.
+//
+// Deliberately NOT paired with a `features.code_mode` pin in the container, and
+// that is the half this was verified for rather than reasoned about. Forced on
+// in a probe sandbox against the pinned CLI, `code_mode`, `code_mode_host` and
+// `code_mode_only` together changed NOTHING: three runs stayed on ordinary
+// `command_execution` (`/bin/bash -lc …`), and the only visible effect was an
+// `error` item saying "Under-development features enabled: code_mode.
+// Under-development features are incomplete and may behave unpredictably."
+// The switch is not the operator's to throw — the models endpoint carries a
+// per-model `tool_mode` (`gpt-5.6-sol` reads `code_mode_only` in the very
+// metadata those runs fetched) and the session still did not enter code mode.
+// So a pin would buy no determinism, would opt every host repo into a feature
+// its vendor calls incomplete, and in the one direction it CAN act would draw
+// codex's own "model `X` does not advertise Code Mode support. This may degrade
+// model performance". The binary is the capability; the server says when.
+//
+// `codex features list` states the same shape in two rows: `code_mode` is stage
+// UNDER DEVELOPMENT and off, `code_mode_host` is STABLE and already on. The
+// client needs no configuration to reach for the host, so the only thing an
+// image can get wrong is not having it.
+//
+// What none of this is, is a demonstration that the parked issue would now
+// succeed: code mode has not engaged in any run since, and nothing in this repo
+// can make it — the flip is the server's. What was verified is narrower and is
+// the whole claim being made — that the binary codex went looking for is now
+// on the image, under a pinned digest, by the same path every other agent tool
+// takes.
+//
+// The parser is unchanged for the same reason (#85's registers): no code-mode
+// stream could be produced to read, and `@openai/codex-sdk`'s `ThreadItem`
+// union at this pinned version has no code-mode member — a cell's tool calls
+// are expected to surface as the ordinary `command_execution`/`file_change`
+// items `CODEX_TOOL_ITEM_TYPES` already counts. Inventing item types for a
+// dialect nobody has observed would be a guess wearing a pin's clothes; if a
+// code-mode run ever lands with `toolCalls=0` beside real commits, THAT is the
+// evidence that this paragraph is stale.
+//
 // Both standalone releases and every architecture's digest are pinned here; CDN
 // metadata is not trusted at download time. Codex's pin is additionally
 // co-versioned with the load-bearing half of parseCodexJsonLine: its
@@ -113,18 +182,36 @@ export const AGENT_PROVIDER_PACKAGES: Readonly<
   codex: {
     version: "0.152.0",
     artifacts: {
-      x64: [{
-        variant: "static",
-        url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-x86_64-unknown-linux-musl.tar.gz",
-        sha256: "05f942d3d3c5b5acd9edad56ce2797b6fe72dbb1462b24e5c9bf7dcec9a28a11",
-        archive: true,
-      }],
-      arm64: [{
-        variant: "static",
-        url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-aarch64-unknown-linux-musl.tar.gz",
-        sha256: "37da6b486503c8a42cc4604d2a3d80d388df896dd251e9225f4f3d49b08c2e8c",
-        archive: true,
-      }],
+      x64: [
+        {
+          variant: "static",
+          url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-x86_64-unknown-linux-musl.tar.gz",
+          sha256: "05f942d3d3c5b5acd9edad56ce2797b6fe72dbb1462b24e5c9bf7dcec9a28a11",
+          archive: true,
+        },
+        {
+          variant: "static",
+          binary: CODEX_CODE_MODE_HOST,
+          url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz",
+          sha256: "449cefe35b9f347e3fdbf121e816339b37825eb0bfee7de8298a0a61b6687cba",
+          archive: true,
+        },
+      ],
+      arm64: [
+        {
+          variant: "static",
+          url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-aarch64-unknown-linux-musl.tar.gz",
+          sha256: "37da6b486503c8a42cc4604d2a3d80d388df896dd251e9225f4f3d49b08c2e8c",
+          archive: true,
+        },
+        {
+          variant: "static",
+          binary: CODEX_CODE_MODE_HOST,
+          url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-code-mode-host-aarch64-unknown-linux-musl.tar.gz",
+          sha256: "134183c7f5bb2245ed4bb15cfcf00d1a64950adbdd089d33c003c8bcf13267e9",
+          archive: true,
+        },
+      ],
     },
   },
 };

@@ -210,6 +210,12 @@ describe.runIf(available)("ensureImages against real podman", () => {
         agentToolsContainerfile(uidBaseTag, ["codex"], { libc: "musl" }),
       );
       await writeFile(join(context, "codex-static"), "#!/bin/sh\necho fixture\n");
+      // The recipe installs every binary the provider declares (#120), so the
+      // context has to carry the code-mode host beside the CLI.
+      await writeFile(
+        join(context, "codex-code-mode-host-static"),
+        "#!/bin/sh\necho fixture-host\n",
+      );
       await buildImage({ tag, containerfile: "<generated>" }, {
         root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
       });

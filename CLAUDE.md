@@ -343,7 +343,14 @@ and used to announce themselves in four different ways, the halt in none at all.
   driver appends git, the uid-1000 agent user and exactly the routed standalone
   CLIs. `AGENT_PROVIDER_PACKAGES` owns each release artifact and per-architecture
   digest; an old branch recipe can therefore change its dependencies but cannot
-  remove or replace this run's agent. The augmentation enforces a base contract
+  remove or replace this run's agent. A provider pins one or more BINARIES
+  (#120): a CLI that execs a sibling it resolves for itself — codex's
+  `codex-code-mode-host` — carries that sibling in the same pin, because the
+  capability is switched on SERVER-side (per-model `tool_mode` metadata, fetched
+  per session) and an image missing the helper has no command runner at all.
+  Installed unconditionally and never paired with a `features.code_mode` pin;
+  `agent-providers.ts`'s header owns the probe runs behind that. The
+  augmentation enforces a base contract
   of `/bin/sh`, CA roots, and git or apt/apk/dnf — no Node/npm runtime. The
   merger uses the same augmented declared image, while gate containers keep the
   unaugmented base because they run no agent. Both pins move with the driver,

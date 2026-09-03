@@ -7,3 +7,6 @@ dist/
 # whose name is the host's to pick.
 .sandbar/
 sandbar.env
+
+# Browser-MCP session logs, written into the checkout by an editor integration.
+.playwright-mcp/

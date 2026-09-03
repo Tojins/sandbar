@@ -14,7 +14,9 @@ import {
   type BuildOptions,
   type PreparedAgentArtifacts,
   agentToolsContainerfile,
+  agentArtifactBinary,
   agentArtifactCacheRoot,
+  agentArtifactName,
   buildArgv,
   createAgentImages,
   detectImageLibcArgv,
@@ -23,6 +25,7 @@ import {
   hostAgentArchitecture,
   prepareAgentArtifacts,
   selectedAgentArtifact,
+  selectedAgentArtifacts,
   sweepBranchImages,
 } from "./ensure-images.js";
 import { runScope, variantImageTag } from "./naming.js";
@@ -34,14 +37,21 @@ async function fakeAgentArtifacts(
   const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-test-"));
   const sha256: Record<string, string> = {};
   const arch = process.arch as "x64" | "arm64";
+  // EVERY binary the provider installs, named by the module's own rule (#120).
+  // A second spelling of the naming rule here is what let this fixture drift
+  // out from under the recipe: it staged one file while the Containerfile
+  // beside it COPYed two, and only a stubbed `build` hid it.
   for (const provider of providers) {
-    const artifact = selectedAgentArtifact(
-      AGENT_PROVIDER_PACKAGES[provider], arch, libc,
-    );
-    const name = `${provider}-${artifact.variant}`;
-    const content = `test ${name}`;
-    await writeFile(join(root, name), content);
-    sha256[name] = createHash("sha256").update(content).digest("hex");
+    for (
+      const artifact of selectedAgentArtifacts(
+        AGENT_PROVIDER_PACKAGES[provider], arch, libc, provider,
+      )
+    ) {
+      const name = agentArtifactName(provider, artifact);
+      const content = `test ${name}`;
+      await writeFile(join(root, name), content);
+      sha256[name] = createHash("sha256").update(content).digest("hex");
+    }
   }
   return {
     root,
@@ -83,9 +93,22 @@ describe("run-owned agent images", () => {
     });
     expect(builds).toHaveLength(1);
     expect(builds[0].argv.at(-1)).toBe("-");
-    expect(builds[0].files).toEqual(["Containerfile", "codex-static"]);
+    expect(builds[0].files).toEqual([
+      "Containerfile", "codex-code-mode-host-static", "codex-static",
+    ]);
     expect(builds[0].content).toContain("COPY --chmod=0755 codex-static");
     expect(builds[0].content).not.toContain("claude");
+    // The context must carry exactly what the recipe COPYs — the invariant the
+    // per-file assertion above only samples. Stated over the generated recipe
+    // so the next provider to grow a binary cannot pass with a short context.
+    const copied = builds[0]!.content
+      .split("\n")
+      .filter((line) => line.startsWith("COPY "))
+      .map((line) => line.split(/\s+/)[2]!);
+    expect(copied.length).toBeGreaterThan(1);
+    expect([...copied].sort()).toEqual(
+      builds[0]!.files.filter((file) => file !== "Containerfile").sort(),
+    );
   });
 
   // #82. The augment build happens on EVERY run since #75 — the end-of-run
@@ -229,7 +252,10 @@ describe("run-owned agent images", () => {
     expect(file).toContain("COPY --chmod=0755 claude-glibc /usr/local/bin/claude");
     expect(file).not.toContain("claude-musl /usr/local/bin/claude");
     expect(file).toContain("COPY --chmod=0755 codex-static /usr/local/bin/codex");
-    expect(file).toContain("claude --version && codex --version && git --version");
+    expect(file).toContain(
+      "claude --version && codex --version && " +
+        "test -x /usr/local/bin/codex-code-mode-host && git --version",
+    );
     expect(file).toContain("command -v git >/dev/null");
     expect(file).toContain("apt-get install -y --no-install-recommends git");
     expect(file).toContain("apk add --no-cache git");
@@ -380,6 +406,39 @@ describe("run-owned agent images", () => {
     expect(() => hostAgentArchitecture("riscv64")).toThrow(/riscv64/);
   });
 
+  // #120: `codex-` is a prefix of the code-mode host's own file name, so the
+  // CLI's lookup must not be settled by readdir order. An exact hit still wins
+  // over a longer sibling.
+  it("refuses an ambiguous archive member and prefers an exact name", () => {
+    const both = [
+      "codex-x86_64-unknown-linux-musl",
+      "codex-code-mode-host-x86_64-unknown-linux-musl",
+    ];
+    expect(() => findAgentBinary("codex", both))
+      .toThrow(/2 candidates for the codex binary/);
+    expect(findAgentBinary("codex-code-mode-host", both))
+      .toBe("codex-code-mode-host-x86_64-unknown-linux-musl");
+    expect(findAgentBinary("codex", ["codex", ...both])).toBe("codex");
+  });
+
+  // The helper is selected by the same static-else-libc rule as the CLI, and
+  // grouping is what keeps the two from competing for "the" x64 artifact.
+  it("installs every named binary a provider declares", () => {
+    const codex = AGENT_PROVIDER_PACKAGES.codex;
+    const selected = selectedAgentArtifacts(codex, "x64", "glibc");
+    expect(selected.map((a) => agentArtifactBinary("codex", a)))
+      .toEqual(["codex", "codex-code-mode-host"]);
+    expect(selected.map((a) => agentArtifactName("codex", a)))
+      .toEqual(["codex-static", "codex-code-mode-host-static"]);
+    // The CLI's own artifact is still addressable as one thing.
+    expect(selectedAgentArtifact(codex, "x64", "glibc").binary).toBeUndefined();
+    const file = agentToolsContainerfile("base", ["codex"], { libc: "glibc" });
+    expect(file).toContain(
+      "COPY --chmod=0755 codex-code-mode-host-static " +
+        "/usr/local/bin/codex-code-mode-host",
+    );
+  });
+
   it("selects static artifacts before libc-specific artifacts", () => {
     const artifact = AGENT_PROVIDER_PACKAGES.codex.artifacts.x64[0]!;
     const pin = {
@@ -434,22 +493,111 @@ describe("run-owned agent images", () => {
     expect(() => agentArtifactCacheRoot(-1)).toThrow(/numeric host uid/);
   });
 
+  // An EMPTY cache root, not the shared host one: these assertions are about
+  // what a download does, and against `agentArtifactCacheRoot()` a machine that
+  // has already run the driver serves every pinned artifact from cache, never
+  // calls the stub, and rejects nothing.
   it("rejects non-OK and hash-mismatched pinned downloads", async () => {
-    await expect(prepareAgentArtifacts(["codex"], () => {}, {
-      arch: "x64",
-      libc: "glibc",
-      fetch: async () => new Response("missing", { status: 503 }),
-    })).rejects.toThrow(/HTTP 503/);
-    await expect(prepareAgentArtifacts(["codex"], () => {}, {
-      arch: "x64",
-      libc: "glibc",
-      fetch: async () => new Response(null),
-    })).rejects.toThrow(/empty response body/);
-    await expect(prepareAgentArtifacts(["codex"], () => {}, {
-      arch: "x64",
-      libc: "glibc",
-      fetch: async () => new Response("not the pinned artifact"),
-    })).rejects.toThrow(/sha256 mismatch/);
+    const cacheRoot = await mkdtemp(join(tmpdir(), "sandbar-agent-reject-cache-"));
+    try {
+      await expect(prepareAgentArtifacts(["codex"], () => {}, {
+        arch: "x64",
+        libc: "glibc",
+        cacheRoot,
+        fetch: async () => new Response("missing", { status: 503 }),
+      })).rejects.toThrow(/HTTP 503/);
+      await expect(prepareAgentArtifacts(["codex"], () => {}, {
+        arch: "x64",
+        libc: "glibc",
+        cacheRoot,
+        fetch: async () => new Response(null),
+      })).rejects.toThrow(/empty response body/);
+      await expect(prepareAgentArtifacts(["codex"], () => {}, {
+        arch: "x64",
+        libc: "glibc",
+        cacheRoot,
+        fetch: async () => new Response("not the pinned artifact"),
+      })).rejects.toThrow(/sha256 mismatch/);
+    } finally {
+      await rm(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  // #120: two archives for one provider. Distinct shas so each gets its own
+  // content-addressed cache entry, and distinct members so a swapped extraction
+  // would show up as swapped content rather than as a passing test.
+  it("stages every binary a provider installs, without collision", async () => {
+    const cliBytes = "cli archive fixture";
+    const hostBytes = "host archive fixture";
+    const sha = (bytes: string) =>
+      createHash("sha256").update(bytes).digest("hex");
+    const packages = {
+      ...AGENT_PROVIDER_PACKAGES,
+      codex: {
+        version: "test",
+        artifacts: {
+          x64: [
+            { variant: "static" as const, url: "cli", sha256: sha(cliBytes), archive: true as const },
+            {
+              variant: "static" as const,
+              binary: "codex-code-mode-host",
+              url: "host",
+              sha256: sha(hostBytes),
+              archive: true as const,
+            },
+          ],
+          arm64: AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64,
+        },
+      },
+    };
+    const cacheRoot = await mkdtemp(join(tmpdir(), "sandbar-agent-multi-cache-"));
+    try {
+      const prepared = await prepareAgentArtifacts(["codex"], () => {}, {
+        arch: "x64",
+        libc: "glibc",
+        packages,
+        cacheRoot,
+        fetch: async (url) =>
+          new Response(url === "cli" ? cliBytes : hostBytes),
+        extract: async (archive, destination) => {
+          const bytes = await readFile(archive, "utf8");
+          const member = bytes === cliBytes
+            ? "codex-x86_64-unknown-linux-musl"
+            : "codex-code-mode-host-x86_64-unknown-linux-musl";
+          await writeFile(join(destination, member), `binary:${bytes}`);
+        },
+      });
+      await prepared.verify();
+      expect([...prepared.names].sort())
+        .toEqual(["codex-code-mode-host-static", "codex-static"]);
+      expect(await readFile(join(prepared.root, "codex-static"), "utf8"))
+        .toBe(`binary:${cliBytes}`);
+      expect(
+        await readFile(join(prepared.root, "codex-code-mode-host-static"), "utf8"),
+      ).toBe(`binary:${hostBytes}`);
+      // Two cache entries, one per digest — neither artifact evicted the other.
+      expect((await readdir(cacheRoot)).sort())
+        .toEqual([sha(cliBytes), sha(hostBytes)].sort());
+      await prepared.dispose();
+    } finally {
+      await rm(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  // A `binary` repeating the provider's own name resolves to one staged file
+  // and one COPY target for two artifacts — the silent wrong-binary install the
+  // grouping argument depends on being impossible.
+  it("refuses an artifact whose binary repeats the provider's own name", () => {
+    const artifact = AGENT_PROVIDER_PACKAGES.codex.artifacts.x64[0]!;
+    const pin = {
+      version: "test",
+      artifacts: {
+        x64: [artifact, { ...artifact, binary: "codex" }],
+        arm64: AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64,
+      },
+    };
+    expect(() => selectedAgentArtifacts(pin, "x64", "glibc", "codex"))
+      .toThrow(/two artifacts for one installed command/);
   });
 
   it("extracts, discovers, verifies, and disposes an archived pinned tool", async () => {
