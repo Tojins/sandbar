@@ -1263,6 +1263,26 @@ export const reclaimIssueClone = async (
   return { kind: "removed" };
 };
 
+const importIssueBranchFromCache = async (
+  repoDir: string,
+  worktreePath: string,
+  branch: string,
+): Promise<void> => {
+  const reseedRef = "refs/sandbar/reseed";
+  await execGit(
+    ["fetch", repoDir, `+refs/heads/${branch}:${reseedRef}`],
+    worktreePath,
+  );
+  // Fetch refuses to update the branch named by HEAD in a non-bare clone,
+  // including an unborn HEAD inherited from the cache. Install the fetched
+  // object through a private ref instead.
+  await execGit(
+    ["update-ref", `refs/heads/${branch}`, reseedRef],
+    worktreePath,
+  );
+  await execGit(["update-ref", "-d", reseedRef], worktreePath);
+};
+
 // Each issue gets a self-contained local clone. A local clone hardlinks object
 // files on the same filesystem, but refs, config, index and future objects all
 // belong to this issue alone (#98).
@@ -1286,19 +1306,7 @@ const worktreeCreate = (
           if (await hasLocalBranch(worktreePath, branch)) {
             await syncIssueBranchToCache(repoDir, worktreePath, branch);
           } else {
-            const reseedRef = "refs/sandbar/reseed";
-            await execGit(
-              ["fetch", repoDir, `+refs/heads/${branch}:${reseedRef}`],
-              worktreePath,
-            );
-            // Fetch refuses to update a branch named by HEAD, even when its
-            // ref was deleted and HEAD is therefore unborn. update-ref has no
-            // checked-out-branch restriction, so reseed through a private ref.
-            await execGit(
-              ["update-ref", `refs/heads/${branch}`, reseedRef],
-              worktreePath,
-            );
-            await execGit(["update-ref", "-d", reseedRef], worktreePath);
+            await importIssueBranchFromCache(repoDir, worktreePath, branch);
           }
           // Refresh the prompt base refs, then apply the existing clean-reuse
           // policy.
@@ -1325,10 +1333,7 @@ const worktreeCreate = (
       // the origin/* copy above may overwrite that name with an old branch
       // still present on the forge. Import the seed ensureIssueBranch authored
       // as a LOCAL ref before checkout, so DWIM can never select the old copy.
-      await execGit(
-        ["fetch", repoDir, `+refs/heads/${branch}:refs/heads/${branch}`],
-        worktreePath,
-      );
+      await importIssueBranchFromCache(repoDir, worktreePath, branch);
       try {
         await execGit(["checkout", branch], worktreePath);
       } catch (e) {

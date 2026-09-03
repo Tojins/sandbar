@@ -2021,6 +2021,25 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     }
   });
 
+  it("creates a clone when the cache HEAD names the issue branch", async () => {
+    const branch = "sandbar/issue-98-cache-head";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    await git(["symbolic-ref", "HEAD", `refs/heads/${branch}`], dir);
+    const cacheTip = (await git(["rev-parse", branch], dir)).stdout.trim();
+
+    const clone = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect((await git(["symbolic-ref", "HEAD"], clone)).stdout.trim()).toBe(
+      `refs/heads/${branch}`,
+    );
+    expect((await git(["rev-parse", branch], clone)).stdout.trim()).toBe(cacheTip);
+    expect(
+      (await git(["for-each-ref", "--format=%(refname)", "refs/sandbar/reseed"], clone))
+        .stdout,
+    ).toBe("");
+  });
+
   it("replaces an unmarked clone left before its initial checkout completed", async () => {
     const branch = "sandbar/issue-83-incomplete-checkout";
     const layout = layoutFor(dir);
