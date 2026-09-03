@@ -171,6 +171,9 @@ export type Terminal =
       readonly type: "HARD-ERROR";
       readonly reason: string;
       readonly commits: readonly { sha: string }[];
+      // A failed provider may have committed away from the issue branch before
+      // failing. The private clone is then the only repository with that work.
+      readonly strandedHead: HeadMismatch | null;
     };
 
 export type InnerLoopConfig = {
@@ -234,6 +237,7 @@ export type InnerLoopOptions = {
 type SandboxCycleOutcome = {
   readonly verdict: Verdict;
   readonly accumulatedCommits: readonly { sha: string }[];
+  readonly strandedHead?: HeadMismatch | null;
 };
 
 export async function runInnerLoop(
@@ -241,10 +245,14 @@ export async function runInnerLoop(
   opts: InnerLoopOptions,
 ): Promise<Terminal> {
   let retriesUsed = 0;
+  let strandedHead: HeadMismatch | null = null;
   for (;;) {
     const outcome = await runSandboxCycle(issue, opts);
+    if (outcome.strandedHead != null) strandedHead = outcome.strandedHead;
     const decision = decideAfterTerminal(outcome.verdict, retriesUsed);
-    if (decision.kind === "surface") return toTerminal(outcome);
+    if (decision.kind === "surface") {
+      return toTerminal({ ...outcome, strandedHead });
+    }
     retriesUsed = decision.nextRetriesUsed;
     const reason = outcome.verdict.type === "HARD-ERROR" ? outcome.verdict.reason : "";
     console.error(
@@ -291,6 +299,7 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
         type: "HARD-ERROR",
         reason: verdict.reason,
         commits: accumulatedCommits,
+        strandedHead: outcome.strandedHead ?? null,
       };
   }
 }
@@ -306,6 +315,7 @@ async function runSandboxCycle(
   let stack: Stack | null = null;
   let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
+  let preparedWorktreePath: string | null = null;
 
   // Everything from here to a standing sandbox + gate stack is SETUP (#82), and
   // until it was measured it was the largest block of a cycle with nothing
@@ -366,6 +376,7 @@ async function runSandboxCycle(
       hooks: opts.hooks,
       copyToWorktree: [...opts.copyToWorktree],
     });
+    preparedWorktreePath = worktreePath;
     worktreeMs = worktreeTimer();
 
     // The sandbox's siblings (#44). Everything about them is derived from the
@@ -587,12 +598,23 @@ async function runSandboxCycle(
     // Setup failure or any other unhandled exception inside the cycle.
     // Surface as HARD-ERROR so the outer loop can decide whether to retry
     // with a fresh sandbox.
+    let strandedHead: HeadMismatch | null = null;
+    if (preparedWorktreePath !== null) {
+      try {
+        strandedHead = await headMismatch(preparedWorktreePath, issue.branch);
+      } catch (inspectError) {
+        // Recovery inspection must not replace the infrastructure error that
+        // selected this terminal, but its own failure must remain visible.
+        console.error("Could not inspect issue clone after HARD-ERROR:", inspectError);
+      }
+    }
     return {
       verdict: {
         type: "HARD-ERROR",
         reason: err instanceof Error ? err.message : String(err),
       },
       accumulatedCommits: accumulated,
+      strandedHead,
     };
   } finally {
     // Stack first: its containers bind-mount the worktree read-write, and

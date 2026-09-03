@@ -1032,7 +1032,7 @@ describe("finalizeOne", () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "hard-error", issue: i, hasCommits: true },
+      { kind: "hard-error", issue: i, hasCommits: true, strandedHead: null },
       adapter,
       LABELS,
     );
@@ -1049,7 +1049,7 @@ describe("finalizeOne", () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "hard-error", issue: i, hasCommits: false },
+      { kind: "hard-error", issue: i, hasCommits: false, strandedHead: null },
       adapter,
       LABELS,
     );
@@ -1068,12 +1068,44 @@ describe("finalizeOne", () => {
       deleteError: "ref locked",
     });
     const action = await finalizeOne(
-      { kind: "hard-error", issue: issue(45), hasCommits: false },
+      {
+        kind: "hard-error",
+        issue: issue(45),
+        hasCommits: false,
+        strandedHead: null,
+      },
       adapter,
       LABELS,
     );
 
     expect(action.kind).toBe("delete-failed");
+  });
+
+  it("hard-error with stranded work preserves the issue clone and its liveness branch", async () => {
+    const { adapter, calls } = makeAdapter();
+    const action = await finalizeOne(
+      {
+        kind: "hard-error",
+        issue: issue(45),
+        hasCommits: false,
+        strandedHead: {
+          branch: "sandbar/issue-45-example",
+          headRef: null,
+          headSha: "abc9999",
+          branchSha: "abc1111",
+        },
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({
+      kind: "delete-failed",
+      error: expect.stringContaining("preserved issue clone"),
+    });
+    expect(calls.worktreeRemoves).toEqual([]);
+    expect(calls.deletes).toEqual([]);
+    expect(calls.forceDeletes).toEqual([]);
   });
 
   it("fresh-attempt: removes worktree + force-deletes branch (its tip has commits not on source), no push, no comment, no labels", async () => {
@@ -1314,7 +1346,12 @@ describe("finalizeAll", () => {
       { kind: "merged", issue: issue(10) },
       { kind: "needs-info", issue: issue(11), questions: "?" },
       { kind: "merge-gate-red", issue: issue(12) },
-      { kind: "hard-error", issue: issue(13), hasCommits: true },
+      {
+        kind: "hard-error",
+        issue: issue(13),
+        hasCommits: true,
+        strandedHead: null,
+      },
     ];
 
     const results = await finalizeAll(inputs, adapter, LABELS);

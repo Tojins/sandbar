@@ -113,6 +113,7 @@ export function terminalFinalizeInputs(
           kind: "hard-error",
           issue: o.issue,
           hasCommits: t.commits.length > 0,
+          strandedHead: t.strandedHead,
         });
         break;
       default: {

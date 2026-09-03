@@ -58,7 +58,12 @@ describe("terminalFinalizeInputs", () => {
       },
       {
         issue: issue("5"),
-        terminal: { type: "HARD-ERROR", reason: "podman", commits: [] },
+        terminal: {
+          type: "HARD-ERROR",
+          reason: "podman",
+          commits: [],
+          strandedHead: null,
+        },
       },
       {
         issue: issue("6"),
@@ -115,13 +120,45 @@ describe("terminalFinalizeInputs", () => {
       },
       {
         issue: issue("5"),
-        terminal: { type: "HARD-ERROR", reason: "podman", commits: [] },
+        terminal: {
+          type: "HARD-ERROR",
+          reason: "podman",
+          commits: [],
+          strandedHead: null,
+        },
       },
     ]);
     expect(late.map((i) => "hasCommits" in i && i.hasCommits)).toEqual([
       true,
       false,
     ]);
+  });
+
+  it("carries stranded repository state through a HARD-ERROR handoff", () => {
+    const strandedHead = {
+      branch: "sandbar/issue-5-hard-error",
+      headRef: null,
+      headSha: "deadbeef",
+      branchSha: "cafebabe",
+    };
+    const [input] = terminalFinalizeInputs([
+      {
+        issue: issue("5"),
+        terminal: {
+          type: "HARD-ERROR",
+          reason: "container died",
+          commits: [],
+          strandedHead,
+        },
+      },
+    ]);
+
+    expect(input).toEqual({
+      kind: "hard-error",
+      issue: issue("5"),
+      hasCommits: false,
+      strandedHead,
+    });
   });
 });
 

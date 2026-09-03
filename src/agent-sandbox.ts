@@ -1256,13 +1256,16 @@ const worktreeCreate = (
         ["fetch", repoDir, `+refs/heads/${branch}:refs/heads/${branch}`],
         worktreePath,
       );
-      await execGit(["config", ISSUE_CLONE_MARKER, branch], worktreePath);
       try {
         await execGit(["checkout", branch], worktreePath);
       } catch (e) {
         if (!(e instanceof WorktreeError) || !e.message.includes("did not match")) throw e;
         await execGit(["checkout", "-b", branch, baseBranch ?? "HEAD"], worktreePath);
       }
+      // The marker is the clone's eligibility token for reuse. Install it only
+      // after checkout has produced a complete workspace; a timeout or failed
+      // checkout then leaves unmarked debris that the next attempt replaces.
+      await execGit(["config", ISSUE_CLONE_MARKER, branch], worktreePath);
       return { path: worktreePath, branch };
     })(),
     WORKTREE_TIMEOUT_MS,

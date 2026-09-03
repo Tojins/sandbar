@@ -1905,6 +1905,24 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     }
   });
 
+  it("replaces an unmarked clone left before its initial checkout completed", async () => {
+    const branch = "sandbar/issue-83-incomplete-checkout";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    const clone = worktreePathFor(layout.worktreesDir, branch);
+    await git(["clone", "--local", "--no-checkout", dir, clone], dir);
+    expect((await stat(join(clone, ".git"))).isDirectory()).toBe(true);
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect((await git(["symbolic-ref", "HEAD"], clone)).stdout.trim()).toBe(
+      `refs/heads/${branch}`,
+    );
+    expect(
+      (await git(["config", "--get", "sandbar.issueBranch"], clone)).stdout.trim(),
+    ).toBe(branch);
+  });
+
   it("sweeps an unmarked orphan outside the branch being prepared", async () => {
     const branch = "sandbar/issue-83-general-sweep";
     const layout = layoutFor(dir);

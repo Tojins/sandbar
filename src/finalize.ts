@@ -484,6 +484,7 @@ export type FinalizeInput =
       readonly kind: "hard-error";
       readonly issue: IssueRef;
       readonly hasCommits: boolean;
+      readonly strandedHead: StrandedHead | null;
     }
   // Silent-noop under the retry cap: discard the branch + worktree so the
   // next cycle's implementer starts fresh against current source. The issue
@@ -917,11 +918,18 @@ export async function finalizeOne(
     }
     case "hard-error": {
       if (input.hasCommits) {
-        await adapter.removeWorktreeFor(input.issue.branch);
+        await removeIssueCloneUnlessPreserved(input, adapter);
         await adapter.pushBranch(input.issue.branch);
         return { kind: "pushed" };
       }
-      await adapter.removeWorktreeFor(input.issue.branch);
+      await removeIssueCloneUnlessPreserved(input, adapter);
+      if (input.strandedHead !== null) {
+        return {
+          kind: "delete-failed",
+          error:
+            "kept the cache branch so the preserved issue clone and its stranded work remain recoverable",
+        };
+      }
       const r = await adapter.deleteBranch(input.issue.branch);
       return r.ok
         ? { kind: "deleted-local" }
