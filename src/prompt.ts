@@ -49,6 +49,8 @@ const exec = promisify(execFile);
 const CODING_STANDARDS = loadTemplate("coding-standards");
 const REVIEWER_TPL = loadTemplate("reviewer");
 const REVIEWER_FOLLOWUP_TPL = loadTemplate("reviewer-followup");
+const REVIEWER_FOLLOWUP_LISTING_TPL = loadTemplate("reviewer-followup-listing");
+const REVIEWER_FOLLOWUP_VERIFY_TPL = loadTemplate("reviewer-followup-verify");
 const REVIEWER_PRIOR_ROUNDS_TPL = loadTemplate("reviewer-prior-rounds");
 const REVIEWER_PROJECT_STANDARDS_TPL = loadTemplate("reviewer-project-standards");
 const IMPLEMENTER_TPL = loadTemplate("implementer");
@@ -572,14 +574,17 @@ async function buildReviewerSlotInputs(
   ).trim();
 
   const followup = followupReviewContext(inputs.priorRounds);
-  const changedSinceDiff = followup.mode === "verify"
-    ? (
-        await readGit(
-          ["diff", `${followup.anchor}..HEAD`],
-          worktreePath,
-          `changes since the last follow-up review for ${inputs.issue.branch}, anchored at ${followup.anchor}`,
-        )
-      ).trim()
+  const changedSince = followup.mode === "verify"
+    ? {
+        anchor: followup.anchor,
+        diff: (
+          await readGit(
+            ["diff", `${followup.anchor}..HEAD`],
+            worktreePath,
+            `changes since the last follow-up review for ${inputs.issue.branch}, anchored at ${followup.anchor}`,
+          )
+        ).trim(),
+      }
     : undefined;
 
   const codingStandardsPath = resolveCodingStandardsPath(
@@ -587,7 +592,7 @@ async function buildReviewerSlotInputs(
     inputs.codingStandardsPath,
   );
 
-  return { ...inputs, codingStandardsPath, commits, diff, changedSinceDiff };
+  return { ...inputs, codingStandardsPath, commits, diff, changedSince };
 }
 
 // Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
@@ -597,7 +602,10 @@ async function buildReviewerSlotInputs(
 export type ReviewerSlotRender = ReviewerPromptInputs & {
   readonly commits: string;
   readonly diff: string;
-  readonly changedSinceDiff?: string;
+  readonly changedSince?: {
+    readonly anchor: string;
+    readonly diff: string;
+  };
 };
 
 export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
@@ -642,15 +650,14 @@ function renderReviewerTemplate(
         rounds: inputs.priorRounds.map(renderPriorReviewRound).join("\n\n"),
       });
 
-  const followup = followupReviewContext(inputs.priorRounds);
-  const followupMode = followup.mode === "list"
-    ? "This is the only pass that reviews the whole branch for tests, spec and standards. Anything you do not raise now is not raised later. List every finding you would block on. There is no limit on length."
-    : "An earlier pass listed this branch's tests, spec and standards findings; the history above carries them. Review only two things:\n1. The lines changed since that review, in the \"changed since\" diff below, on all three dimensions, exactly as at a listing.\n2. Whether the branch delivers what the issue asks. An unmet requirement blocks wherever it is.\nRaise nothing else. If you request changes, you may add findings outside these two under `### Non-blocking`; they never affect a verdict, now or later.";
+  const followupMode = inputs.changedSince
+    ? REVIEWER_FOLLOWUP_VERIFY_TPL
+    : REVIEWER_FOLLOWUP_LISTING_TPL;
 
-  const changedSinceDiff = followup.mode === "verify"
-    ? `## Changed since the last follow-up review\n\n${inputs.changedSinceDiff
-      ? `\`\`\`diff\n${inputs.changedSinceDiff}\n\`\`\``
-      : `(empty — no changes since \`${followup.anchor}\`)`}`
+  const changedSinceDiff = inputs.changedSince
+    ? `## Changed since the last follow-up review\n\n${inputs.changedSince.diff
+      ? `\`\`\`diff\n${inputs.changedSince.diff}\n\`\`\``
+      : `(empty — no changes since \`${inputs.changedSince.anchor}\`)`}`
     : "";
 
   return render(template, {

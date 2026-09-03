@@ -357,7 +357,10 @@ describe("renderReviewerFollowupSlot", () => {
       priorRounds,
       commits: "a1 first",
       diff: "whole branch",
-      changedSinceDiff: "diff --git a/x b/x\n+new line",
+      changedSince: {
+        anchor: "abc1234",
+        diff: "diff --git a/x b/x\n+new line",
+      },
     });
     expect(slot).toContain(
       "An earlier pass listed this branch's tests, spec and standards findings; the history above carries them. " +
@@ -369,6 +372,16 @@ describe("renderReviewerFollowupSlot", () => {
     expect(slot).toContain("## Changed since the last follow-up review\n\n```diff\n" +
       "diff --git a/x b/x\n+new line\n```");
     expect(slot).toContain("An entry under `### Non-blocking` is checked but never blocks.");
+  });
+
+  it("distinguishes an empty changed-since diff from an uncomputed one", () => {
+    const slot = renderReviewerFollowupSlot({
+      ...baseInputs,
+      commits: "a1 first",
+      diff: "whole branch",
+      changedSince: { anchor: "abc1234", diff: "" },
+    });
+    expect(slot).toContain("(empty — no changes since `abc1234`)");
   });
 
   it("requires test findings to identify a deletion the suite cannot detect", () => {
@@ -442,11 +455,6 @@ describe("followupReviewContext (#107)", () => {
     ["no history", [], { mode: "list", anchor: null }],
     ["correctness-only history", [correctnessOnly(1, "head-1")], { mode: "list", anchor: null }],
     ["one listing", [reviewed(1, "listing")], { mode: "verify", anchor: "listing" }],
-    [
-      "listing then harness-failed follow-up (no history entry)",
-      [reviewed(1, "listing")],
-      { mode: "verify", anchor: "listing" },
-    ],
     [
       "listing followed by two verifies",
       [reviewed(1, "listing"), reviewed(2, "verify-1"), reviewed(3, "verify-2")],

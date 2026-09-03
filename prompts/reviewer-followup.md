@@ -39,12 +39,12 @@ run gate commands. Read-only investigation only.
 
 If a dimension requests changes, put only its actionable findings under its
 exact heading: `### Correctness`, `### Tests`, `### Spec`, or `### Standards`.
-Omit headings for dimensions that pass. In verify mode, `### Non-blocking` is
-also allowed only as described above.
+Omit headings for dimensions that pass. `### Non-blocking` is allowed only
+where the instructions above explicitly permit it.
 
 ## Verdict
 
-Your output is only the actionable findings allowed by the mode above under
+Your output is only the actionable findings the instructions above allow under
 their exact headings, followed by the verdict token. Do not include a summary,
 what you checked, other observations, or a restatement of the change. When
 approving, emit the verdict token alone.
