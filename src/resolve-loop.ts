@@ -154,10 +154,12 @@ export type ResolveAgentRun = {
   // can go and look at (`podman ps -a`, `podman logs`) rather than describing
   // an anonymous process that is already gone.
   readonly container: string;
-  // A runtime spawn error or terminal failure reported by the provider. The
-  // spawn error wins if both are ever present.
+  // A narrow runtime, provider, or stream-parse explanation. The raw streams
+  // remain separate above and the classifier gives a spawn error precedence.
   readonly detail?: string;
+  // The discriminated end classification shared with the sandbox wrapper.
   readonly cause: AgentRunCause;
+  // Whether this caller should accept the run as an answer or halt as infra.
   readonly verdict: "answer" | "infra";
   readonly usage?: AgentUsage;
   readonly toolCalls: number;
@@ -582,12 +584,8 @@ const VERDICT_PROSE: Record<ResolveAttemptVerdict, string> = {
   "silent-noop": "the agent left no merge and no commit",
 };
 
-// An attempt that produced NO AGENT SPEECH did not answer — it failed to run.
-// An in-band provider failure after speech does not erase that evidence; the
-// loop still verifies any promise against the worktree and gate. See the
-// header for why that is thrown rather than re-prompted, and why the timeout
-// is the one end that is exempt: it burned the whole budget in the container,
-// so it is a spent attempt whatever it printed.
+// The cause rules and the merger's explicit silent-run policy are owned by
+// agent-run-end.ts; this adapter consumes only its judgement (#114).
 export function isInfraFailure(run: ResolveAgentRun): boolean {
   return run.verdict === "infra";
 }

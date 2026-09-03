@@ -281,6 +281,19 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(run.detail).toContain("stream parse failed");
     expect(run.stdout).toContain("tool_use");
   });
+
+  it("stops ingesting after the first parser shape error", () => {
+    const raw = [
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", name: "Bash", input: null }] },
+      }),
+      JSON.stringify({ type: "result", result: "must not become speech" }),
+    ].join("\n");
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("claude", "m"));
+    expect(run.cause).toBe("parse-error");
+    expect(run.output).toBe("");
+  });
 });
 
 describe("resolve provider invocation (#74)", () => {
@@ -331,8 +344,33 @@ describe("resolve provider invocation (#74)", () => {
         "agent --print",
       ]);
       expect(argv).toContain("/git-common:/git-common");
-      expect(argv).toContain("--image-volume=ignore");
-      expect(argv).not.toContain("--init");
     },
   );
+
+  it("pins the complete resolve-container argv", () => {
+    const argv = buildResolveRunArgv({
+      container: "resolve-1",
+      cwd: "/worktree",
+      extraMounts: ["/git-common"],
+      image: "sandbox-image",
+      command: "agent --print",
+      credentials: {},
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+    });
+    expect(argv).toEqual([
+      "run", "--rm", "-i", "--image-volume=ignore",
+      "--name", "resolve-1",
+      "--userns=keep-id", "--user", "1000:1000",
+      "-v", "/worktree:/workspace", "-v", "/git-common:/git-common",
+      "-w", "/workspace", "-e", "HOME=/tmp",
+      "--label", "sandbar=true",
+      "-e", "GIT_AUTHOR_NAME=sandbar-bot",
+      "-e", "GIT_AUTHOR_EMAIL=bot@example.test",
+      "-e", "GIT_COMMITTER_NAME=sandbar-bot",
+      "-e", "GIT_COMMITTER_EMAIL=bot@example.test",
+      "--entrypoint", "/bin/sh", "sandbox-image", "-c", "agent --print",
+    ]);
+    expect(argv).not.toContain("--init");
+  });
 });

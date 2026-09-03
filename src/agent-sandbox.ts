@@ -46,6 +46,9 @@
 //        then died must not be recorded as having spent nothing), and both
 //        timeout paths kill the exec they stop waiting for (#41).
 //        See invokeAgent.
+//   F10 — `agent-run-end.ts` owns end classification. This wrapper supplies
+//         `retryable` for silence because its same-session nudge can recover;
+//         it maps the classifier's exit diagnostic into AgentError.
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.

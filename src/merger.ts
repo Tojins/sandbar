@@ -2289,8 +2289,6 @@ export function parseCapturedAgentRun(
     failure: speech.failure,
     spawnError: run.end === "spawn-error" ? run.detail : undefined,
     parseError,
-    stderr: run.stderr,
-    stdout: run.stdout,
     silentRunRecovery: "infra",
   });
   return {

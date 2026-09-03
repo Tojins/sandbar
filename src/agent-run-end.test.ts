@@ -1,55 +1,72 @@
 import { describe, expect, it } from "vitest";
-import {
-  type AgentRunEnd,
-  classifyAgentRunEnd,
-} from "./agent-run-end.js";
+import { classifyAgentRunEnd } from "./agent-run-end.js";
 
 describe("classifyAgentRunEnd (#114)", () => {
-  const ends: readonly AgentRunEnd[] = ["exit", "timeout", "signal", "spawn-error"];
-  const bools = [false, true] as const;
-  const policies = ["retryable", "infra"] as const;
+  type Row = readonly [
+    end: "exit" | "timeout" | "signal" | "spawn-error",
+    exitCode: 0 | 1 | null,
+    speech: boolean,
+    failure: boolean,
+    policy: "retryable" | "infra",
+    cause: "clean" | "silent" | "provider-failure" | "spawn-error" | "timeout" | "signal",
+    verdict: "answer" | "infra",
+  ];
+  const matrix = [
+    ["exit", 0, false, false, "retryable", "silent", "answer"],
+    ["exit", 0, false, false, "infra", "silent", "infra"],
+    ["exit", 0, false, true, "retryable", "provider-failure", "infra"],
+    ["exit", 0, false, true, "infra", "provider-failure", "infra"],
+    ["exit", 0, true, false, "retryable", "clean", "answer"],
+    ["exit", 0, true, false, "infra", "clean", "answer"],
+    ["exit", 0, true, true, "retryable", "provider-failure", "answer"],
+    ["exit", 0, true, true, "infra", "provider-failure", "answer"],
+    ["exit", 1, false, false, "retryable", "provider-failure", "infra"],
+    ["exit", 1, false, false, "infra", "provider-failure", "infra"],
+    ["exit", 1, false, true, "retryable", "provider-failure", "infra"],
+    ["exit", 1, false, true, "infra", "provider-failure", "infra"],
+    ["exit", 1, true, false, "retryable", "provider-failure", "answer"],
+    ["exit", 1, true, false, "infra", "provider-failure", "answer"],
+    ["exit", 1, true, true, "retryable", "provider-failure", "answer"],
+    ["exit", 1, true, true, "infra", "provider-failure", "answer"],
+    ["timeout", null, false, false, "retryable", "timeout", "answer"],
+    ["timeout", null, false, false, "infra", "timeout", "answer"],
+    ["timeout", null, false, true, "retryable", "timeout", "answer"],
+    ["timeout", null, false, true, "infra", "timeout", "answer"],
+    ["timeout", null, true, false, "retryable", "timeout", "answer"],
+    ["timeout", null, true, false, "infra", "timeout", "answer"],
+    ["timeout", null, true, true, "retryable", "timeout", "answer"],
+    ["timeout", null, true, true, "infra", "timeout", "answer"],
+    ["signal", null, false, false, "retryable", "signal", "infra"],
+    ["signal", null, false, false, "infra", "signal", "infra"],
+    ["signal", null, false, true, "retryable", "signal", "infra"],
+    ["signal", null, false, true, "infra", "signal", "infra"],
+    ["signal", null, true, false, "retryable", "signal", "answer"],
+    ["signal", null, true, false, "infra", "signal", "answer"],
+    ["signal", null, true, true, "retryable", "signal", "answer"],
+    ["signal", null, true, true, "infra", "signal", "answer"],
+    ["spawn-error", null, false, false, "retryable", "spawn-error", "infra"],
+    ["spawn-error", null, false, false, "infra", "spawn-error", "infra"],
+    ["spawn-error", null, false, true, "retryable", "spawn-error", "infra"],
+    ["spawn-error", null, false, true, "infra", "spawn-error", "infra"],
+    ["spawn-error", null, true, false, "retryable", "spawn-error", "infra"],
+    ["spawn-error", null, true, false, "infra", "spawn-error", "infra"],
+    ["spawn-error", null, true, true, "retryable", "spawn-error", "infra"],
+    ["spawn-error", null, true, true, "infra", "spawn-error", "infra"],
+  ] as const satisfies readonly Row[];
 
-  // Exhaustive over every register that can change the judgement. This table
-  // makes a policy edit touch all invocation shapes instead of changing one
-  // wrapper unnoticed.
-  for (const end of ends) {
-    for (const nonzero of bools) {
-      for (const hasSpeech of bools) {
-        for (const hasFailure of bools) {
-          for (const silentRunRecovery of policies) {
-            const label = [end, nonzero ? "exit-1" : "exit-0", hasSpeech ? "speech" : "silent", hasFailure ? "failure" : "no-failure", silentRunRecovery].join(" / ");
-            it(label, () => {
-              const actual = classifyAgentRunEnd({
-                end,
-                exitCode: end === "exit" ? (nonzero ? 1 : 0) : null,
-                signal: end === "signal" ? "SIGKILL" : null,
-                spoken: hasSpeech ? "answer" : "",
-                failure: hasFailure ? "provider said why" : undefined,
-                stderr: "stderr detail",
-                stdout: "raw stdout",
-                silentRunRecovery,
-              });
-              const cause = end === "spawn-error"
-                ? "spawn-error"
-                : end === "timeout"
-                  ? "timeout"
-                  : end === "signal"
-                    ? "signal"
-                    : nonzero || hasFailure
-                      ? "provider-failure"
-                      : hasSpeech
-                        ? "clean"
-                        : "silent";
-              const verdict = end !== "spawn-error" && (end === "timeout" || hasSpeech || (cause === "silent" && silentRunRecovery === "retryable"))
-                ? "answer"
-                : "infra";
-              expect({ cause: actual.cause, verdict: actual.verdict }).toEqual({ cause, verdict });
-            });
-          }
-        }
-      }
-    }
-  }
+  it.each(matrix)("%s / exit-%s / speech-%s / failure-%s / %s", (
+    end, exitCode, hasSpeech, hasFailure, silentRunRecovery, cause, verdict,
+  ) => {
+    const actual = classifyAgentRunEnd({
+      end,
+      exitCode,
+      signal: end === "signal" ? "SIGKILL" : null,
+      spoken: hasSpeech ? "answer" : "",
+      failure: hasFailure ? "provider said why" : undefined,
+      silentRunRecovery,
+    });
+    expect({ cause: actual.cause, verdict: actual.verdict }).toEqual({ cause, verdict });
+  });
 
   it("makes parse errors infrastructure ahead of every process result", () => {
     expect(classifyAgentRunEnd({
@@ -63,7 +80,6 @@ describe("classifyAgentRunEnd (#114)", () => {
       cause: "parse-error",
       verdict: "infra",
       detail: "shape broke",
-      diagnostic: "shape broke",
     });
   });
 
@@ -108,7 +124,18 @@ describe("classifyAgentRunEnd (#114)", () => {
       silentRunRecovery: "infra",
     });
     expect(classified).toMatchObject({
-      cause: "spawn-error", detail: "ENOENT", diagnostic: "ENOENT",
+      cause: "spawn-error", detail: "ENOENT",
     });
+  });
+
+  it("does not expose a blank provider failure as narrow detail", () => {
+    const classified = classifyAgentRunEnd({
+      end: "exit", exitCode: 0, signal: null, spoken: "", failure: "   ",
+      silentRunRecovery: "infra",
+    });
+    expect({ cause: classified.cause, verdict: classified.verdict }).toEqual({
+      cause: "provider-failure", verdict: "infra",
+    });
+    expect(classified.detail).toBeUndefined();
   });
 });
