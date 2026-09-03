@@ -49,6 +49,11 @@
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
+// Issue workspaces are standalone hardlink clones (#98), so no container sees
+// the host cache. Clean crash leftovers are reusable, but reuse first retains
+// an off-branch HEAD under refs/sandbar/stranded/* and restores the issue
+// branch; otherwise a fresh attempt would inherit the prior attempt's detached
+// HEAD or scratch branch.
 //
 // This container is also the ANCHOR of the sandbox stack's network namespace
 // (#44): joiners attach with `--network container:<name>`, so its name is
@@ -68,8 +73,9 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { onCleanup } from "./cleanup.js";
 import { resolveSandboxEnv } from "./env.js";
+import { MERGER_WORKTREE_NAME } from "./merger-worktree.js";
 import { RESOURCE_PREFIX } from "./naming.js";
-import type { RepoLayout } from "./repo-cache.js";
+import { SOURCE_WORKTREE_NAME, type RepoLayout } from "./repo-cache.js";
 import { startGapTimer, startTimer } from "./timing.js";
 import { normalizeClaudeResult, normalizeCodexUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
@@ -1086,6 +1092,18 @@ const isOnIssueBranch = async (
   }
 };
 
+const restoreIssueBranch = async (
+  worktreePath: string,
+  branch: string,
+): Promise<void> => {
+  const head = (await execGit(["rev-parse", "--verify", "HEAD"], worktreePath)).trim();
+  // The private clone is the only repository guaranteed to contain commits
+  // made on a detached HEAD or scratch branch. Retain that object before
+  // returning the reusable clone to its issue branch (#27, #98).
+  await execGit(["update-ref", `refs/sandbar/stranded/${head}`, head], worktreePath);
+  await execGit(["checkout", branch], worktreePath);
+};
+
 // Clean-reuse refresh: ff-only from origin, gated (on-branch, fetch-ok,
 // strictly-behind); never reset --hard. Optional on sandbar's path.
 const fastForwardFromOrigin = async (
@@ -1218,6 +1236,9 @@ const worktreeCreate = (
               `Reusing worktree at ${worktreePath} (branch '${branch}') — worktree has uncommitted changes`,
             );
           } else {
+            if (!(await isOnIssueBranch(worktreePath, branch))) {
+              await restoreIssueBranch(worktreePath, branch);
+            }
             await fastForwardFromOrigin(worktreePath, branch);
           }
           return { path: worktreePath, branch };
@@ -1274,7 +1295,7 @@ const pruneStaleIssueClones = async (
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
   for (const entry of entries) {
-    if (entry === "source" || entry === "merger") continue;
+    if (entry === SOURCE_WORKTREE_NAME || entry === MERGER_WORKTREE_NAME) continue;
     const path = join(worktreesDir, entry);
     let isDirectory = false;
     try {

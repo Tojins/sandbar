@@ -10,8 +10,11 @@
 //
 // Every ordinary kind calls removeWorktreeFor — sandbox.close() in the inner
 // loop usually has already removed the issue clone, but crash leftovers still
-// need deterministic cleanup. Reviewer-write handoffs deliberately preserve a
-// dirty clone because uncommitted evidence cannot travel through a push.
+// need deterministic cleanup. Reviewer-write handoffs deliberately preserve
+// the clone because committed rewrites may not push fast-forward and
+// uncommitted evidence cannot travel through a push. They park the issue before
+// attempting that push and report rejection in the handoff comment, so a
+// reviewer's rewind cannot abort the rest of the finalise pass.
 //
 // `git branch -d` is escalated to `-D` only where the caller owns the certainty
 // that the work is preserved elsewhere. For `merged`/`chunk-landed`/
@@ -548,6 +551,7 @@ export type FinalizeAction =
   | { readonly kind: "deleted-local" }
   | { readonly kind: "delete-failed"; readonly error: string }
   | { readonly kind: "pushed" }
+  | { readonly kind: "parked-local" }
   // A human-handoff terminal landed on an already-CLOSED issue, so the label
   // flip + comment were skipped. Its clone is reclaimed unless it contains
   // evidence the corresponding open-issue handoff would preserve. See #16.
@@ -878,15 +882,24 @@ export async function finalizeOne(
       // Keep the clone: uncommitted reviewer writes cannot travel through a
       // push, and deleting it would destroy the evidence this terminal exists
       // to hand to a human.
-      await adapter.pushBranch(input.issue.branch);
+      const r = await adapter.editLabels(n, [READY_FOR_AGENT_LABEL], [labels.agentStuck]);
+      requireFlip(r, n);
+      let pushFailure: string | null = null;
+      try {
+        await adapter.pushBranch(input.issue.branch);
+      } catch (err) {
+        pushFailure = err instanceof Error ? err.message : String(err);
+      }
       await adapter.postComment(
         n,
         `${BOT_COMMENT_PREFIX} stopped because the read-only reviewer changed the issue repository. ` +
-          `The write is contained to this issue and its managed clone has been preserved for human inspection.\n\n${input.latestReviewerProse}`,
+          `The write is contained to this issue and its managed clone has been preserved for human inspection.` +
+          (pushFailure === null
+            ? ""
+            : ` The changed branch could not be pushed (${pushFailure}); inspect the preserved clone for the authoritative state.`) +
+          `\n\n${input.latestReviewerProse}`,
       );
-      const r = await adapter.editLabels(n, [READY_FOR_AGENT_LABEL], [labels.agentStuck]);
-      requireFlip(r, n);
-      return { kind: "pushed" };
+      return { kind: pushFailure === null ? "pushed" : "parked-local" };
     }
     case "hard-error": {
       if (input.hasCommits) {

@@ -749,6 +749,8 @@ export async function run(
             ? `delete failed (${r.action.error})`
             : r.action.kind === "pushed"
               ? "pushed branch"
+              : r.action.kind === "parked-local"
+                ? "parked; branch preserved locally"
               : r.action.kind === "skipped-closed"
                 ? "skipped (issue already closed)"
                 : "no action";

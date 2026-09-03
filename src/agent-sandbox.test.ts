@@ -1076,7 +1076,7 @@ describe("createSandbox integration (local provider)", () => {
     await rm(path, { recursive: true, force: true });
   });
 
-  it("preserves a clean clone when HEAD leaves the issue branch", async () => {
+  it("pins a stranded HEAD and restores the issue branch when reusing a clean clone", async () => {
     const branch = "sandbar/issue-98-stranded-head";
     await git(["branch", branch], dir);
     const sandbox = await createSandbox({
@@ -1087,11 +1087,18 @@ describe("createSandbox integration (local provider)", () => {
     });
     const path = sandbox.worktreePath;
     await git(["checkout", "--detach"], path);
+    const stranded = (await git(["rev-parse", "HEAD"], path)).stdout.trim();
 
     const closed = await sandbox.close();
 
     expect(closed).toEqual({ preservedWorktreePath: path });
-    expect(existsSync(join(path, ".git"))).toBe(true);
+    await prepareWorktree({ branch, layout: layoutFor(dir), copyToWorktree: [] });
+    expect((await git(["symbolic-ref", "HEAD"], path)).stdout.trim()).toBe(
+      `refs/heads/${branch}`,
+    );
+    expect(
+      (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], path)).stdout.trim(),
+    ).toBe(stranded);
     await rm(path, { recursive: true, force: true });
   });
 

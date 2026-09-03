@@ -28,6 +28,11 @@
 // substituting prose. The implementer prompt also receives the configured
 // coding-standards path here; prompt.ts probes it in the issue worktree so a
 // branch can introduce the standards it is expected to follow (#78).
+// Each implementer invocation publishes its private clone's issue ref to the
+// host cache on success (#98). After an invocation failure the same publish is
+// recovery-only: its failure is logged and may not replace the provider error.
+// Reviewer invocations instead snapshot the tip and status; any mutation parks
+// the issue and preserves the clone rather than running another reviewer.
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -695,18 +700,8 @@ async function runImplementer(
   // agent leg, which is what every #77 idea trading implementer minutes for
   // reviewer rounds is spending (#82).
   const implementerTimer = startTimer();
-  const runAgent = async (
-    options: Parameters<Sandbox["run"]>[0],
-  ): ReturnType<Sandbox["run"]> => {
-    try {
-      return await sandbox.run(options);
-    } finally {
-      // Publish even when the CLI times out or exits after committing. The
-      // clean clone may be removed during HARD-ERROR teardown, so this is the
-      // last point at which those commits are recoverable (#98).
-      await sandbox.syncBranchToCache();
-    }
-  };
+  const runAgent = (options: Parameters<Sandbox["run"]>[0]) =>
+    runSandboxAndPublish(sandbox, options, issue.id);
   const run = await runAgent({
     name: `implementer-${issue.id}-attempt-${action.attempt}`,
     agent: buildAgentProvider(config.implementerAgent, config.implementerModelId),
@@ -815,6 +810,31 @@ async function runImplementer(
     );
   }
   return { kind: "implementer-result", signal, dirtyPaths, offBranch };
+}
+
+export async function runSandboxAndPublish(
+  sandbox: Sandbox,
+  options: Parameters<Sandbox["run"]>[0],
+  issueId: string,
+): ReturnType<Sandbox["run"]> {
+  try {
+    const result = await sandbox.run(options);
+    await sandbox.syncBranchToCache();
+    return result;
+  } catch (agentError) {
+    // A failed invocation may still have committed. Try to publish it, but a
+    // second failure must not replace the agent/provider error that selects
+    // and explains the HARD-ERROR path (#41, #67, #98).
+    try {
+      await sandbox.syncBranchToCache();
+    } catch (publishError) {
+      console.error(
+        `Could not publish issue=${issueId} after implementer failure (continuing with original error):`,
+        publishError,
+      );
+    }
+    throw agentError;
+  }
 }
 
 async function runGate1(

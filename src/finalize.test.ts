@@ -44,6 +44,7 @@ type Calls = {
 };
 
 type Script = {
+  pushError?: string;
   deleteOk?: boolean;
   deleteError?: string;
   forceDeleteOk?: boolean;
@@ -70,6 +71,7 @@ function makeAdapter(
   const adapter: FinalizeAdapter = {
     async pushBranch(branch) {
       calls.pushes.push(branch);
+      if (script.pushError !== undefined) throw new SandbarError(script.pushError);
     },
     async deleteBranch(branch) {
       calls.deletes.push(branch);
@@ -977,6 +979,29 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
+  });
+
+  it("reviewer-wrote: parks and comments when a rewound branch cannot be pushed", async () => {
+    const { adapter, calls } = makeAdapter({ pushError: "non-fast-forward" });
+    const i = issue(45);
+
+    const action = await finalizeOne(
+      {
+        kind: "reviewer-wrote",
+        issue: i,
+        latestReviewerProse: "Reviewer rewound the branch.",
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "parked-local" });
+    expect(calls.worktreeRemoves).toEqual([]);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+    ]);
+    expect(calls.comments[0]!.body).toContain("non-fast-forward");
+    expect(calls.comments[0]!.body).toContain("authoritative state");
   });
 
   it("reviewer-wrote on a CLOSED issue skips tracker writes and preserves the clone", async () => {
