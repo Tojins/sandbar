@@ -897,47 +897,70 @@ class ReviewerWriteDetected extends Error {
   }
 }
 
+export type ReviewerSnapshot = {
+  readonly tip: string | null;
+  readonly dirtyPaths: readonly string[];
+  readonly headRef: string | null;
+};
+
+export function reviewerSnapshotChanged(
+  before: ReviewerSnapshot,
+  after: ReviewerSnapshot,
+): boolean {
+  return (
+    before.tip !== after.tip ||
+    JSON.stringify(before.dirtyPaths) !== JSON.stringify(after.dirtyPaths) ||
+    before.headRef !== after.headRef
+  );
+}
+
+export async function enforceReviewerSnapshot(
+  sandbox: Pick<Sandbox, "preserveWorktree" | "syncBranchToCache">,
+  before: ReviewerSnapshot,
+  after: ReviewerSnapshot,
+  transcript: string,
+): Promise<void> {
+  if (!reviewerSnapshotChanged(before, after)) return;
+  sandbox.preserveWorktree();
+  // Deleting the issue ref is itself a reviewer write. There is then no ref
+  // to publish, but the preserved clone still contains the evidence.
+  if (after.tip !== null) await sandbox.syncBranchToCache();
+  const renderedTranscript = transcript.trim() || "(reviewer emitted no output)";
+  throw new ReviewerWriteDetected(
+    {
+      kind: "reviewer-wrote",
+      detail:
+        `Reviewer changed git state. Branch tip before: ${before.tip}; ` +
+        `after: ${after.tip}. HEAD before: ${before.headRef}; ` +
+        `after: ${after.headRef}. Status after:\n` +
+        (after.dirtyPaths.length > 0
+          ? after.dirtyPaths.join("\n")
+          : "(clean worktree)") +
+        `\n\nReviewer transcript:\n${renderedTranscript}`,
+    },
+    transcript,
+  );
+}
+
 async function runReviewer(
   action: Extract<LoopAction, { kind: "run-reviewer" }>,
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
   const { issue, sandbox, opts, config } = ctx;
-  type ReviewSnapshot = readonly [string | null, readonly string[], string | null];
-  const snapshot = (): Promise<ReviewSnapshot> =>
-    Promise.all([
+  const snapshot = async (): Promise<ReviewerSnapshot> => {
+    const [tip, dirtyPaths, headRef] = await Promise.all([
       branchTip(sandbox.worktreePath, issue.branch),
       dirtyWorktreePaths(sandbox.worktreePath),
       symbolicHeadRef(sandbox.worktreePath),
-    ]) as Promise<ReviewSnapshot>;
+    ]);
+    return { tip, dirtyPaths, headRef };
+  };
   const detectWrite = async (
-    before: ReviewSnapshot,
+    before: ReviewerSnapshot,
     transcript: string,
   ): Promise<void> => {
     const after = await snapshot();
-    if (
-      before[0] === after[0] &&
-      JSON.stringify(before[1]) === JSON.stringify(after[1]) &&
-      before[2] === after[2]
-    ) {
-      return;
-    }
-    sandbox.preserveWorktree();
-    // Deleting the issue ref is itself a reviewer write. There is then no ref
-    // to publish, but the preserved clone still contains the evidence.
-    if (after[0] !== null) await sandbox.syncBranchToCache();
-    const renderedTranscript = transcript.trim() || "(reviewer emitted no output)";
-    throw new ReviewerWriteDetected(
-      {
-        kind: "reviewer-wrote",
-        detail:
-          `Reviewer changed git state. Branch tip before: ${before[0]}; ` +
-          `after: ${after[0]}. HEAD before: ${before[2]}; ` +
-          `after: ${after[2]}. Status after:\n` +
-          (after[1].length > 0 ? after[1].join("\n") : "(clean worktree)") +
-          `\n\nReviewer transcript:\n${renderedTranscript}`,
-      },
-      transcript,
-    );
+    await enforceReviewerSnapshot(sandbox, before, after, transcript);
   };
 
   const reviewerPromptInputs = {

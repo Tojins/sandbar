@@ -11,6 +11,9 @@
 //     fault.
 // "Nothing" is retried once before it is believed (flake vs fault; the retry
 // costs no budget), and the transcript of every invocation is kept whole.
+// Repository mutation is outside that result model: the I/O caller may reject
+// with its reviewer-write signal, which must escape immediately so no second
+// reviewer runs against state the first reviewer altered (#98).
 //
 // A review ROUND first applies that policy to correctness. A correctness
 // rejection finishes the round immediately; an approval asks the runner for a
@@ -31,9 +34,10 @@ export const REVIEWER_MAX_INVOCATIONS = 2;
 // bounded; the transcript keeps everything.
 export const REVIEWER_DETAIL_TAIL_CHARS = 2000;
 
-// One invocation's raw result. Never a rejection: the caller adapts its
-// sandbox's throw into this shape, which is what keeps the classification below
-// pure and table-testable without an error-shaped fixture.
+// One invocation's raw review result. Ordinary sandbox failures are adapted
+// into this shape, which keeps classification pure and table-testable without
+// an error-shaped fixture. A detected reviewer write is the sole rejection: it
+// is repository mutation, not a review outcome, and must bypass the retry.
 export type ReviewerRun = {
   // Everything the agent emitted — its stdout when the run completed, its
   // partial output when it failed (`agentPartialOutput`).
@@ -177,8 +181,9 @@ export type ReviewerRunOptions = {
 };
 
 // Invoke the reviewer until one invocation yields a verdict, or the invocation
-// budget runs out. `invoke` is given the 1-based invocation number and must not
-// reject — see ReviewerRun.
+// budget runs out. `invoke` is given the 1-based invocation number. It returns
+// ReviewerRun for completed and ordinary failed invocations, but may reject to
+// report a reviewer write; that rejection deliberately bypasses this retry loop.
 export async function runReviewerInvocations(
   invoke: (invocation: number) => Promise<ReviewerRun>,
   opts: ReviewerRunOptions = {},

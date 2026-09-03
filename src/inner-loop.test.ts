@@ -1,7 +1,51 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { Sandbox } from "./agent-sandbox.js";
-import { runSandboxAndPublish } from "./inner-loop.js";
+import {
+  enforceReviewerSnapshot,
+  reviewerSnapshotChanged,
+  runSandboxAndPublish,
+  type ReviewerSnapshot,
+} from "./inner-loop.js";
+
+const snapshot = (
+  over: Partial<ReviewerSnapshot> = {},
+): ReviewerSnapshot => ({
+  tip: "tip-a",
+  dirtyPaths: [],
+  headRef: "refs/heads/sandbar/issue-98-example",
+  ...over,
+});
+
+describe("reviewer write detection", () => {
+  it.each([
+    ["nothing changed", snapshot(), false],
+    ["branch tip changed", snapshot({ tip: "tip-b" }), true],
+    ["branch ref was deleted", snapshot({ tip: null }), true],
+    ["worktree became dirty", snapshot({ dirtyPaths: ["M src/x.ts"] }), true],
+    ["HEAD moved", snapshot({ headRef: null }), true],
+  ])("classifies %s", (_name, after, changed) => {
+    expect(reviewerSnapshotChanged(snapshot(), after)).toBe(changed);
+  });
+
+  it("preserves a deleted issue ref without trying to publish it", async () => {
+    const sandbox = {
+      preserveWorktree: vi.fn(),
+      syncBranchToCache: vi.fn(),
+    };
+
+    await expect(
+      enforceReviewerSnapshot(
+        sandbox,
+        snapshot(),
+        snapshot({ tip: null }),
+        "partial reviewer output",
+      ),
+    ).rejects.toThrow("Reviewer changed git state");
+    expect(sandbox.preserveWorktree).toHaveBeenCalledOnce();
+    expect(sandbox.syncBranchToCache).not.toHaveBeenCalled();
+  });
+});
 
 describe("runSandboxAndPublish", () => {
   it("preserves the agent failure when recovery publishing also fails", async () => {
