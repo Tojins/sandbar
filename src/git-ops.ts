@@ -443,6 +443,26 @@ export async function branchTip(
   }
 }
 
+// The symbolic position of HEAD, including an unborn branch whose ref does not
+// yet exist. Unlike `headRef` above this deliberately uses symbolic-ref: the
+// reviewer mutation snapshot needs to distinguish a detached HEAD (null) from
+// HEAD still naming a branch after that branch ref was deleted (#98).
+export async function symbolicHeadRef(
+  worktreePath: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await exec(
+      "git",
+      ["symbolic-ref", "--quiet", "HEAD"],
+      { cwd: worktreePath },
+    );
+    return stdout.trim() || null;
+  } catch (err) {
+    if (isGitExit(err, 1)) return null;
+    throw err;
+  }
+}
+
 // null when HEAD is exactly `refs/heads/<branch>`; otherwise where it actually
 // is, for the re-prompt.
 export async function headMismatch(

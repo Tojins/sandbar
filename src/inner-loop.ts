@@ -66,6 +66,7 @@ import {
   dirtyWorktreePaths,
   ensureIssueBranch,
   headMismatch,
+  symbolicHeadRef,
 } from "./git-ops.js";
 import {
   HARD_ERROR_MAX_RETRIES,
@@ -901,11 +902,12 @@ async function runReviewer(
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
   const { issue, sandbox, opts, config } = ctx;
-  type ReviewSnapshot = readonly [string | null, readonly string[]];
+  type ReviewSnapshot = readonly [string | null, readonly string[], string | null];
   const snapshot = (): Promise<ReviewSnapshot> =>
     Promise.all([
       branchTip(sandbox.worktreePath, issue.branch),
       dirtyWorktreePaths(sandbox.worktreePath),
+      symbolicHeadRef(sandbox.worktreePath),
     ]) as Promise<ReviewSnapshot>;
   const detectWrite = async (
     before: ReviewSnapshot,
@@ -914,7 +916,8 @@ async function runReviewer(
     const after = await snapshot();
     if (
       before[0] === after[0] &&
-      JSON.stringify(before[1]) === JSON.stringify(after[1])
+      JSON.stringify(before[1]) === JSON.stringify(after[1]) &&
+      before[2] === after[2]
     ) {
       return;
     }
@@ -928,7 +931,8 @@ async function runReviewer(
         kind: "reviewer-wrote",
         detail:
           `Reviewer changed git state. Branch tip before: ${before[0]}; ` +
-          `after: ${after[0]}. Status after:\n` +
+          `after: ${after[0]}. HEAD before: ${before[2]}; ` +
+          `after: ${after[2]}. Status after:\n` +
           (after[1].length > 0 ? after[1].join("\n") : "(clean worktree)") +
           `\n\nReviewer transcript:\n${renderedTranscript}`,
       },

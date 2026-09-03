@@ -11,6 +11,7 @@ import {
   dirtyWorktreePaths,
   ensureIssueBranch,
   headMismatch,
+  symbolicHeadRef,
 } from "./git-ops.js";
 
 const exec = promisify(execFile);
@@ -202,6 +203,18 @@ describe("headMismatch (#27)", () => {
     await inWt("checkout", "-q", "-b", "my-work");
     const m = await headMismatch(wt, "sandbar/issue-1-x");
     expect(m?.headRef).toBe("refs/heads/my-work");
+  });
+
+  it("reports symbolic HEAD movement even when the tree and issue ref stay unchanged", async () => {
+    expect(await symbolicHeadRef(wt)).toBe("refs/heads/sandbar/issue-1-x");
+    await inWt("checkout", "-q", "--detach");
+    expect(await dirtyWorktreePaths(wt)).toEqual([]);
+    expect(await symbolicHeadRef(wt)).toBeNull();
+  });
+
+  it("reports an unborn symbolic HEAD after its issue ref is deleted", async () => {
+    await inWt("update-ref", "-d", "refs/heads/sandbar/issue-1-x");
+    expect(await symbolicHeadRef(wt)).toBe("refs/heads/sandbar/issue-1-x");
   });
 
   // A sha comparison would call this on-branch. It is one commit away from the
