@@ -1054,14 +1054,17 @@ const isOnIssueBranch = async (
 };
 
 const restoreIssueBranch = async (
+  repoDir: string,
   worktreePath: string,
   branch: string,
 ): Promise<void> => {
   const head = (await execGit(["rev-parse", "--verify", "HEAD"], worktreePath)).trim();
-  // The private clone is the only repository guaranteed to contain commits
-  // made on a detached HEAD or scratch branch. Retain that object before
-  // returning the reusable clone to its issue branch (#27, #98).
-  await execGit(["update-ref", `refs/sandbar/stranded/${head}`, head], worktreePath);
+  const strandedRef = `refs/sandbar/stranded/${head}`;
+  // Publish the durable pin into the host cache before returning the reusable
+  // clone to its issue branch. Finalise may reclaim the clone after a later
+  // on-branch cycle, so a clone-only pin would eventually lose the work.
+  await execGit(["update-ref", strandedRef, head], worktreePath);
+  await execGit(["fetch", worktreePath, `+${strandedRef}:${strandedRef}`], repoDir);
   await execGit(["checkout", branch], worktreePath);
 };
 
@@ -1224,7 +1227,7 @@ const worktreeCreate = (
             );
           } else {
             if (!(await isOnIssueBranch(worktreePath, branch))) {
-              await restoreIssueBranch(worktreePath, branch);
+              await restoreIssueBranch(repoDir, worktreePath, branch);
             }
             await fastForwardFromOrigin(worktreePath, branch);
           }

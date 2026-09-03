@@ -1087,7 +1087,11 @@ describe("createSandbox integration (local provider)", () => {
     });
     const path = sandbox.worktreePath;
     await git(["checkout", "--detach"], path);
+    await writeFile(join(path, "stranded.txt"), "off branch\n");
+    await git(["add", "stranded.txt"], path);
+    await git(["commit", "-m", "stranded work"], path);
     const stranded = (await git(["rev-parse", "HEAD"], path)).stdout.trim();
+    expect((await git(["rev-parse", branch], path)).stdout.trim()).not.toBe(stranded);
 
     const closed = await sandbox.close();
 
@@ -1098,6 +1102,14 @@ describe("createSandbox integration (local provider)", () => {
     );
     expect(
       (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], path)).stdout.trim(),
+    ).toBe(stranded);
+    expect(
+      (
+        await git(
+          ["rev-parse", `refs/sandbar/stranded/${stranded}`],
+          layoutFor(dir).repoDir,
+        )
+      ).stdout.trim(),
     ).toBe(stranded);
 
     const retry = await createSandbox({
@@ -1112,6 +1124,14 @@ describe("createSandbox integration (local provider)", () => {
       (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], path)).stdout.trim(),
     ).toBe(stranded);
     await rm(path, { recursive: true, force: true });
+    expect(
+      (
+        await git(
+          ["cat-file", "-t", `refs/sandbar/stranded/${stranded}`],
+          layoutFor(dir).repoDir,
+        )
+      ).stdout.trim(),
+    ).toBe("commit");
   });
 
   // #27 follow-up. The commit range is anchored at `refs/heads/<branch>`, not at

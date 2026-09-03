@@ -228,9 +228,8 @@ export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
 // the correction, so for them this note is the ONLY place the work is recorded.
 //
 // The prose branches on `headRef`, and that distinction is not cosmetic. A
-// DETACHED head leaves the commits unreachable, so the preserved clone is the
-// only repository that can resolve them. A scratch BRANCH is a real local ref
-// in that clone and survives gc indefinitely —
+// DETACHED head leaves the commits unreachable until reuse publishes a durable
+// pin into the host cache. A scratch BRANCH is pinned there the same way —
 // telling that reader their work is about to be pruned would send them to
 // perform an urgent rescue of something in no danger, and telling them to
 // `git branch <name> <sha>` would have them create a second name for a commit
@@ -240,18 +239,16 @@ export const STRANDED_COMMITS_NOTE = (m: StrandedHead): string =>
     ? `\n\n---\n\n**Work was left off \`${m.branch}\`.** This run committed on a ` +
       `detached HEAD at \`${m.headSha}\`, so none of it is on the branch and ` +
       `nothing above includes it. The managed issue clone was preserved, and ` +
-      `its private object store is the only repository that contains these ` +
-      `unreferenced commits. Before removing that clone or running \`git gc\` ` +
-      `inside it, recover them there with ` +
+      `on its next reuse Sandbar pins this commit in the host cache. Recover ` +
+      `it from the preserved clone or host cache with ` +
       `\`git branch <rescue-name> ${m.headSha}\`, then fold ` +
       `them into \`${m.branch}\` with \`cherry-pick\`/\`merge\` — not ` +
       `\`branch -f\`, unless \`${m.branch}\` is an ancestor of ${m.headSha}.`
     : `\n\n---\n\n**Work was left off \`${m.branch}\`.** This run committed on ` +
       `\`${m.headRef}\` (at \`${m.headSha}\`) instead, so none of it is on the ` +
-      `branch and nothing above includes it. That ref is a normal local branch ` +
-      `inside the preserved managed issue clone and is not at risk — this ` +
-      `handoff does not delete that clone — but it is local to the machine ` +
-      `that ran sandbar. Fold it into \`${m.branch}\` with ` +
+      `branch and nothing above includes it. The managed issue clone was ` +
+      `preserved, and on its next reuse Sandbar pins this commit in the host ` +
+      `cache. Fold it into \`${m.branch}\` with ` +
       `\`cherry-pick\`/\`merge\`.`;
 
 // The implementer committed off the issue branch and stayed off it after being
