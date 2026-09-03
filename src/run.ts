@@ -180,7 +180,7 @@ import {
   realVerifyAdapter,
   verifiedLandingOptionsFrom,
 } from "./forge-verify.js";
-import { startKeepawake, stopKeepawake } from "./keepawake.js";
+import { startKeepawake } from "./keepawake.js";
 import { runInnerLoop, type Terminal } from "./inner-loop.js";
 import { requiredAgentProviders } from "./agent-providers.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
@@ -310,6 +310,28 @@ export async function run(
 
   installCleanupTraps();
 
+  // THE WAKE LOCK IS FIRST, and that is the whole of #117's ordering (#35's
+  // registry is LIFO, so first registered is last released).
+  //
+  // It used to be taken here at step fifteen, after preflight, both sweeps, the
+  // image builds and the uid check, and released by an `onCleanup` registered
+  // there too — which put it AHEAD of the lock release and the log tree's
+  // `run-end` marker in the drain. On 2026-09-03 that cost a run 50 minutes:
+  // `exit: relaunch` was printed at 16:33:29.043, the host entered `System
+  // Idle` sleep at 16:33:29.049, and `run-end` did not land until 17:23:42 —
+  // two seconds after a human touched the keyboard. The run was not over when
+  // its exit line was printed, and the lock was.
+  //
+  // Registered before the single-instance lock deliberately. A wake lock is a
+  // request to the HOST, not a claim on the workdir, so a launch that goes on
+  // to lose the lock has taken nothing it has to give back, and covering
+  // preflight and the image builds — which is where the minutes are — needs it
+  // held before either. It is reported once the log tree exists rather than
+  // here, because #70's boundary is the lock and this sits above it; the status
+  // replays, so nothing is lost by waiting.
+  const wakeLock = startKeepawake();
+  onCleanup(() => wakeLock.stop());
+
   // The lock comes BEFORE preflight (#32). Preflight is not read-only: it
   // fetches, and it `git branch -D`s every `sandbar/issue-*` branch it finds
   // merged. That delete was the one operation in the whole startup path that
@@ -372,6 +394,15 @@ export async function run(
   await runLogger.appendOrchestrator(driverIdentity);
   let cleanupReason = "normal-exit";
   onCleanup(() => runLogger.finalize(cleanupReason));
+  // Whether the host can sleep under this run is an OUTCOME, and before #117 it
+  // was in no record at all — not the log, not stdout — so "was the lock held
+  // during run X?" could only be answered by reproducing the powershell call by
+  // hand. Log-only: it is a fact about the host, not a titled rendering, and
+  // #70 keeps stdout for the latter. The sink stays attached for the life of
+  // the run, so a child that dies four hours in says so here too.
+  wakeLock.onStatus((line) => {
+    void runLogger.appendOrchestrator(line);
+  });
 
   // THE one site that emits a terminal (#70), and it is declared up here
   // because the startup stops below reach it as well as the cycle loop does:
@@ -699,9 +730,6 @@ export async function run(
   } catch (err) {
     return await stopAtStartup("image-uid-check-failed", err);
   }
-
-  startKeepawake();
-  onCleanup(stopKeepawake);
 
   const runState = newRunState({
     maxTotalIssues: config.maxTotalIssues,

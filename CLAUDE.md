@@ -269,6 +269,24 @@ and used to announce themselves in four different ways, the halt in none at all.
   `src/cleanup.ts` may trap a signal or exit on one. Anything created in a
   loop registers with `registerDisposable` and withdraws itself when its
   idempotence latch flips (#55).
+- **The host must not sleep while sandbar is working (#117).** On WSL2 the
+  *Windows* host suspends the VM under a running series, and the failure was
+  never the request — it was WHEN it is held: every sleep observed on this
+  repo's host began within minutes of a run ending, one of them 6 ms after the
+  `exit: relaunch` line, all `Kernel-Power` reason `System Idle`. Two holders,
+  no handshake, because overlapping ES_SYSTEM_REQUIRED requests ARE one request
+  to Windows: `run()` takes one FIRST — ahead of the single-instance lock, so
+  #35's LIFO drain releases it LAST, after teardown and after `run-end` — and
+  `scripts/sandbar-launch.mjs` runs `dist/keepawake-hold.js` for the whole
+  series, because #65's exit-75 seam is between two processes and no per-run
+  holder can span it. A lock is HELD only when the OS has confirmed it (the
+  script prints its marker after `SetThreadExecutionState` returns a non-zero
+  previous state), it is released by EOF ON STDIN so it cannot outlive its
+  owner, and every held / refused / lost / released transition is a line in
+  `orchestrator.log` — before this the module logged nothing at all and "was
+  the lock held during run X?" was unanswerable. `src/keepawake.ts` and
+  `src/keepawake-hold.ts` headers own the rest, including why the launcher runs
+  a program instead of making a call.
 - **Credentials are a value, not a path (#38).** `config.env` is an allowlist
   record (empty value ⇒ inherit from `process.env`); `readEnvFile` is the
   opt-in loader. `src/env.ts`. A credential whose vendor interface is a FILE is

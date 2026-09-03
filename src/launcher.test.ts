@@ -21,7 +21,7 @@
 // runs, and moving the test out of `src/` would put the suite in two places to
 // buy a dangling import in a file nobody executes.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { constants, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -33,6 +33,7 @@ import {
   PIN_FILE,
   driverPaths,
   ensureDriver,
+  holdWakeLock,
   installArgv,
   installDriver,
   installNeeded,
@@ -449,7 +450,11 @@ describe("ensureDriver (#66)", () => {
     );
 
     expect(spawned).toBe(0);
-    expect(result).toEqual({ spec: PIN, cli: paths.cli });
+    expect(result).toEqual({
+      spec: PIN,
+      cli: paths.cli,
+      wakeLock: paths.wakeLock,
+    });
   });
 
   it("refuses a pin file that names nothing installable", () => {
@@ -633,5 +638,159 @@ describe("main — the relaunch loop (#65, #66)", () => {
 
     expect(installs).toEqual([moved]);
     expect(d.launches).toHaveLength(2);
+  });
+});
+
+// #117. The wake lock is the one child that must outlive a call: every sleep
+// observed on this repo's host began within minutes of a run ending, and one of
+// them 6 ms after the driver released its own. #65's seam is between two driver
+// processes, so the property is about THIS file — one lock, taken before the
+// first launch, still held across every relaunch, released when the loop is
+// done — and it is a property no per-run holder can have.
+describe("the series-long wake lock (#117)", () => {
+  let root: string;
+  let paths: ReturnType<typeof driverPaths>;
+
+  const stampInstalled = () => {
+    mkdirSync(dirname(paths.cli), { recursive: true });
+    writeFileSync(paths.cli, "#!/usr/bin/env node\n");
+    writeFileSync(paths.stamp, `${PIN}\n`);
+  };
+
+  // Records the holds, and gives each one back a child whose release is
+  // observable. `on` is present because `holdWakeLock` attaches an error
+  // handler to the async `spawn` it does not get from `spawnSync`.
+  const holder = () => {
+    const holds: unknown[][] = [];
+    const children: Array<{ ended: boolean; killed: boolean }> = [];
+    return {
+      holds,
+      children,
+      hold: ((...args: unknown[]) => {
+        holds.push(args);
+        const child = { ended: false, killed: false };
+        children.push(child);
+        return {
+          on: () => {},
+          stdin: { end: () => void (child.ended = true) },
+          kill: () => void (child.killed = true),
+        };
+      }) as never,
+    };
+  };
+
+  const driver = (...exits: Array<Record<string, unknown>>) => {
+    const launches: unknown[][] = [];
+    return {
+      launches,
+      run: ((...args: unknown[]) => {
+        launches.push(args);
+        return exits[launches.length - 1] ?? { status: 0 };
+      }) as never,
+    };
+  };
+
+  const io = (over: Record<string, unknown>) => ({
+    log: () => {},
+    spawn: (() => {
+      throw new Error("no install expected");
+    }) as never,
+    root,
+    ...over,
+  });
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-launcher-"));
+    paths = driverPaths(root);
+    writeFileSync(join(root, PIN_FILE), `${PIN}\n`);
+    stampInstalled();
+    // The holder program the driver ships. Its EXISTENCE is the capability
+    // probe, so every test that expects a lock has to put it there.
+    writeFileSync(paths.wakeLock, "// held\n");
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("holds ONE lock across every relaunch, and releases it at the end", () => {
+    const d = driver(
+      { status: EXIT_CODE_RELAUNCH },
+      { status: EXIT_CODE_RELAUNCH },
+      { status: 0 },
+    );
+    const h = holder();
+    expect(main([], io({ run: d.run, hold: h.hold }))).toBe(0);
+    expect(d.launches).toHaveLength(3);
+    // One hold for three launches is the whole point: a lock re-taken per
+    // iteration would lapse in exactly the seam that cost 50 minutes.
+    expect(h.holds).toHaveLength(1);
+    expect(h.holds[0]?.[0]).toBe(process.execPath);
+    expect(h.holds[0]?.[1]).toEqual([paths.wakeLock]);
+    // stdin is the lock's lifeline, on both sides of the pipe.
+    expect(h.holds[0]?.[2]).toMatchObject({
+      stdio: ["pipe", "inherit", "inherit"],
+    });
+    expect(h.children[0]).toEqual({ ended: true, killed: true });
+  });
+
+  it("releases the lock when the driver dies by a signal", () => {
+    const d = driver({ status: null, signal: "SIGKILL" });
+    const h = holder();
+    main([], io({ run: d.run, hold: h.hold }));
+    expect(h.children[0]?.ended).toBe(true);
+  });
+
+  it("releases the lock when a launch throws", () => {
+    // `finally`, not a release before each `return`: there are six ways out of
+    // that loop and a leaked wake lock is a host that will not sleep again.
+    const h = holder();
+    expect(() =>
+      main(
+        [],
+        io({
+          run: (() => ({ error: new Error("boom") })) as never,
+          hold: h.hold,
+        }),
+      ),
+    ).toThrow(LaunchError);
+    expect(h.children[0]?.ended).toBe(true);
+  });
+
+  it("takes no lock for --install-only, which is not a series", () => {
+    const d = driver({ status: 0 });
+    const h = holder();
+    expect(main(["--install-only"], io({ run: d.run, hold: h.hold }))).toBe(0);
+    expect(h.holds).toHaveLength(0);
+  });
+
+  it("says so and runs anyway when the pinned driver predates the holder", () => {
+    // `sandbar.pin` LAGS this checkout always (#66), so this is the ordinary
+    // state for a release or two after the feature lands — a fact, never a
+    // refusal to launch.
+    rmSync(paths.wakeLock);
+    const logged: string[] = [];
+    const d = driver({ status: 0 });
+    const h = holder();
+    expect(
+      main(
+        [],
+        io({
+          run: d.run,
+          hold: h.hold,
+          log: (m: string) => void logged.push(m),
+        }),
+      ),
+    ).toBe(0);
+    expect(h.holds).toHaveLength(0);
+    expect(d.launches).toHaveLength(1);
+    expect(logged.join("\n")).toContain("wake-lock: NOT held");
+  });
+
+  it("probes for the holder beside the driver's own bin", () => {
+    expect(paths.wakeLock).toBe(
+      join(paths.dir, "node_modules", "@offergeist", "sandbar", "dist", "keepawake-hold.js"),
+    );
+    expect(holdWakeLock(join(root, "nope.js"), { log: () => {} })).toBeNull();
   });
 });

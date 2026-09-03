@@ -70,7 +70,7 @@
 // runs only when this file IS the program, so importing it cannot start a
 // series.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -150,6 +150,12 @@ export function driverPaths(root) {
     // the symlink is one more thing that can be absent on a half-install, and
     // the file it points at is the thing that has to exist.
     cli: join(pkg, "dist", "cli.js"),
+    // The series-long wake lock (#117), run as a child for the whole loop. Its
+    // EXISTENCE is the capability probe: `sandbar.pin` lags this checkout
+    // always (#66), so this launcher will run against drivers that predate the
+    // file, and a version comparison would be a second statement of the same
+    // fact that can disagree with it.
+    wakeLock: join(pkg, "dist", "keepawake-hold.js"),
     manifest: join(dir, "package.json"),
     stamp: join(dir, "installed-pin"),
   };
@@ -210,8 +216,63 @@ function seams(io) {
   return {
     spawn: io.spawn ?? spawnSync,
     run: io.run ?? spawnSync,
+    // The wake lock is the one child that must OUTLIVE a call (#117), so it is
+    // the async `spawn` and a seam of its own: a test that could not tell it
+    // from `run` could not assert that exactly one is held for a whole series
+    // of relaunches, which is the entire property.
+    hold: io.hold ?? spawn,
     log: io.log ?? say,
   };
+}
+
+// The series-long wake lock (#117). On this repo's WSL2 host every observed
+// sleep began within minutes of a run ending, and one of them 6 ms after the
+// driver released its own lock — so the seam #65 opens between two driver
+// processes is exactly where the machine sleeps, and only this process spans
+// it. Held once, before the first launch, released when the loop is done.
+//
+// It is a CHILD rather than a call because this file cannot make the call: it
+// is synchronous by decision, it runs before the driver it would import
+// exists, and it is blocked inside `spawnSync` for hours at a time, so it
+// could neither await a confirmation nor notice the lock dying. The child has
+// a live event loop and inherits stdout, so it reports its own status.
+//
+// A missing program is a driver older than the feature, not a failure: the pin
+// LAGS this checkout always (#66). Say so and carry on unlocked — a launcher
+// that refused to run on the pin it was given would be a worse bargain than a
+// host that may sleep.
+export function holdWakeLock(program, io = {}) {
+  const { hold, log } = seams(io);
+  if (!existsSync(program)) {
+    log(
+      "wake-lock: NOT held — the pinned driver predates it " +
+        `(${program} is missing). Move ${PIN_FILE} to pick it up.`,
+    );
+    return null;
+  }
+  const child = hold(process.execPath, [program], {
+    // stdin is the lock's lifeline: this process holding the write end IS the
+    // lock, and its death — clean or not — closes the pipe and releases it.
+    // stdout and stderr are inherited so the child's own status lines reach
+    // the terminal without needing an event loop turn here.
+    stdio: ["pipe", "inherit", "inherit"],
+  });
+  // Async `spawn` reports a failure by event, and this process is about to
+  // stop turning its loop, so the handler is a best effort by construction.
+  // The only reachable cause is `process.execPath` being unrunnable, which is
+  // not a state this script could still be executing in.
+  child.on?.("error", (err) => log(`wake-lock: NOT held — ${err.message}`));
+  return child;
+}
+
+function releaseWakeLock(child) {
+  if (!child) return;
+  try {
+    child.stdin?.end();
+    child.kill?.();
+  } catch {
+    // A lock that is already gone is the outcome this asks for.
+  }
 }
 
 // Throws LaunchError on every outcome that is not "there is a driver at
@@ -307,7 +368,7 @@ export function ensureDriver(root, io = {}) {
   } else {
     seams(io).log(`driver ${spec} already installed at ${paths.dir}`);
   }
-  return { spec, cli: paths.cli };
+  return { spec, cli: paths.cli, wakeLock: paths.wakeLock };
 }
 
 // Not exported: `main` is the only caller, and this file lives at a fixed depth
@@ -331,56 +392,71 @@ export function main(argv, { root = repoRoot(), ...io } = {}) {
   // starts, and so it is never forwarded: the one launch it could reach is the
   // one it returns ahead of.
   const installOnly = argv.includes("--install-only");
-  for (;;) {
-    // Re-read every iteration, so a pin edited between cycles is honoured at
-    // the next relaunch rather than at the next series.
-    const { spec, cli } = ensureDriver(root, io);
-    if (installOnly) return 0;
-    log(`running ${spec}`);
-    // `cwd: root` rather than this process's own, and that is a decision. The
-    // config resolves against the process cwd (cli.ts) and `config.cwd`
-    // defaults to it, so the driver's cwd decides which repository a series
-    // operates on — and the answer must be the repo whose `sandbar.pin` chose
-    // the driver, not wherever the launcher happened to be invoked. Under
-    // `npm run sandbar` the two agree (npm runs scripts from the package
-    // root); invoked directly from a subdirectory, or through a symlink, they
-    // do not, and the old shell loop would have gone looking for a config that
-    // is not there. The one visible cost is that a RELATIVE `--config` passed
-    // through now resolves against the root as well — absolute paths are
-    // unaffected, and pinning it here at least makes the resolution the same
-    // on every launch of a series.
-    const child = run(process.execPath, [cli, ...argv], {
-      cwd: root,
-      stdio: "inherit",
-    });
-    if (child.error) {
-      throw new LaunchError(`could not run ${cli}: ${child.error.message}`);
-    }
-    // A driver killed by a signal is not a LaunchError: the launcher proceeded
-    // exactly as asked and the DRIVER died, which is the distinction that class
-    // exists to draw — printing it as one operator-addressed line and exiting 1
-    // makes an OOM-killed run indistinguishable from a pin that names nothing.
-    // So it is reported as a shell reports one, `128 + signal`, which is what
-    // the shell loop this file replaced already returned and what
-    // `cleanup.ts`'s own SIGINT/SIGTERM exits (130, 143) already look like. It
-    // stops the loop by construction: no signal maps onto 75.
-    if (child.status === null) {
-      const signal = child.signal ?? null;
-      const number = signal === null ? undefined : SIGNALS[signal];
-      if (number === undefined) {
-        // Nothing to encode — `spawnSync` answered neither a code nor a signal
-        // this platform names, so there is no verdict and no exit code that
-        // would mean one.
-        throw new LaunchError(
-          `the driver at ${cli} exited with neither a status nor a signal ` +
-            `this platform names (${JSON.stringify(signal)}).`,
-        );
+  // Taken once, below, and released in the `finally` — so it spans every
+  // relaunch seam, which is the whole reason it lives here and not in `run()`
+  // (#117). `try`/`finally` rather than a release before each `return`: there
+  // are six ways out of this loop including two throws, and a wake lock that
+  // leaks on one of them is a host that will not sleep again until it reboots.
+  let wakeLock = null;
+  try {
+    for (;;) {
+      // Re-read every iteration, so a pin edited between cycles is honoured at
+      // the next relaunch rather than at the next series.
+      const { spec, cli, wakeLock: holder } = ensureDriver(root, io);
+      if (installOnly) return 0;
+      // After the first `ensureDriver`, because the program being run is the
+      // driver's. That leaves the FIRST install uncovered, deliberately: it is a
+      // human-initiated command whose install lasts seconds, against a seam that
+      // recurs unattended every time a cycle lands a merge.
+      if (wakeLock === null) wakeLock = holdWakeLock(holder, io);
+      log(`running ${spec}`);
+      // `cwd: root` rather than this process's own, and that is a decision. The
+      // config resolves against the process cwd (cli.ts) and `config.cwd`
+      // defaults to it, so the driver's cwd decides which repository a series
+      // operates on — and the answer must be the repo whose `sandbar.pin` chose
+      // the driver, not wherever the launcher happened to be invoked. Under
+      // `npm run sandbar` the two agree (npm runs scripts from the package
+      // root); invoked directly from a subdirectory, or through a symlink, they
+      // do not, and the old shell loop would have gone looking for a config that
+      // is not there. The one visible cost is that a RELATIVE `--config` passed
+      // through now resolves against the root as well — absolute paths are
+      // unaffected, and pinning it here at least makes the resolution the same
+      // on every launch of a series.
+      const child = run(process.execPath, [cli, ...argv], {
+        cwd: root,
+        stdio: "inherit",
+      });
+      if (child.error) {
+        throw new LaunchError(`could not run ${cli}: ${child.error.message}`);
       }
-      log(`the driver was killed by ${signal} (exiting ${128 + number})`);
-      return 128 + number;
+      // A driver killed by a signal is not a LaunchError: the launcher proceeded
+      // exactly as asked and the DRIVER died, which is the distinction that class
+      // exists to draw — printing it as one operator-addressed line and exiting 1
+      // makes an OOM-killed run indistinguishable from a pin that names nothing.
+      // So it is reported as a shell reports one, `128 + signal`, which is what
+      // the shell loop this file replaced already returned and what
+      // `cleanup.ts`'s own SIGINT/SIGTERM exits (130, 143) already look like. It
+      // stops the loop by construction: no signal maps onto 75.
+      if (child.status === null) {
+        const signal = child.signal ?? null;
+        const number = signal === null ? undefined : SIGNALS[signal];
+        if (number === undefined) {
+          // Nothing to encode — `spawnSync` answered neither a code nor a signal
+          // this platform names, so there is no verdict and no exit code that
+          // would mean one.
+          throw new LaunchError(
+            `the driver at ${cli} exited with neither a status nor a signal ` +
+              `this platform names (${JSON.stringify(signal)}).`,
+          );
+        }
+        log(`the driver was killed by ${signal} (exiting ${128 + number})`);
+        return 128 + number;
+      }
+      if (child.status !== EXIT_CODE_RELAUNCH) return child.status;
+      log(`relaunching (exit ${EXIT_CODE_RELAUNCH})`);
     }
-    if (child.status !== EXIT_CODE_RELAUNCH) return child.status;
-    log(`relaunching (exit ${EXIT_CODE_RELAUNCH})`);
+  } finally {
+    releaseWakeLock(wakeLock);
   }
 }
 
