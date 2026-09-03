@@ -167,6 +167,35 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     expect(prompt).toContain(ADDED_LINE);
     expect(prompt).not.toContain("(empty — no changes against");
   });
+
+  it("anchors the verify diff at the newest follow-up-reviewed head", async () => {
+    await commitOnBranch();
+    const listingHead = (await git(worktree, "rev-parse", "HEAD")).stdout.trim();
+    const laterLine = "the-line-added-after-the-listing";
+    await writeFile(join(worktree, "c.txt"), `${laterLine}\n`);
+    await git(worktree, "add", "-A");
+    await git(worktree, "commit", "-qm", "fix-after-listing");
+
+    const prompt = (await buildReviewerPrompts({
+      ...reviewerInputs(),
+      priorRounds: [{
+        round: 1,
+        head: listingHead,
+        correctness: { verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>" },
+        followup: {
+          verdict: "CHANGES-REQUESTED",
+          prose: "### Tests\n\nAdd coverage.\n<verdict>CHANGES-REQUESTED</verdict>",
+        },
+      }],
+    })).followup;
+
+    const changedSince = prompt.slice(
+      prompt.indexOf("## Changed since the last follow-up review"),
+      prompt.indexOf("## Coding standards"),
+    );
+    expect(changedSince).toContain(laterLine);
+    expect(changedSince).not.toContain(ADDED_LINE);
+  });
 });
 
 describe("a failed read is never rendered as an empty slot (#40)", () => {

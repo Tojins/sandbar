@@ -31,6 +31,9 @@
 // Successful review rounds accumulate here beside the commits they judged and
 // are handed to both cold reviewer prompts on later rounds (#88). Harness
 // failures add no entry, and a fresh HARD-ERROR cycle resets the history.
+// That history also switches the follow-up from its one whole-branch listing
+// to a review anchored at the newest earlier follow-up head; the round record
+// exposes that list/verify mode without storing another piece of state (#107).
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -105,6 +108,7 @@ import {
   type PriorReviewRound,
   buildPrompt,
   buildReviewerPrompts,
+  followupReviewContext,
 } from "./prompt.js";
 
 export const FAILURE_TAIL_LINES = 200;
@@ -145,6 +149,7 @@ export function reviewRoundLine(args: {
   } | null;
   readonly correctness: FinishedReviewRoundDecision["correctness"];
   readonly followup: FinishedReviewRoundDecision["followup"];
+  readonly followupMode?: "list" | "verify";
   readonly durationField: string;
 }): string {
   return (
@@ -152,7 +157,8 @@ export function reviewRoundLine(args: {
     (args.failed
       ? `pass=${args.failed.pass} harness-failed invocations=${args.failed.invocations} `
       : "") +
-    `correctness=${args.correctness} followup=${args.followup} ` +
+    `correctness=${args.correctness} followup=${args.followup}` +
+    (args.followupMode ? ` mode=${args.followupMode}` : "") + " " +
     args.durationField +
     (args.failed ? " (round not consumed)" : "")
   );
@@ -927,6 +933,7 @@ async function runReviewer(
   // This is the unit every #77 §3.A idea removes, and at 10.2 minutes measured
   // end to end it is ~60% of an issue.
   const roundTimer = startTimer();
+  const followupMode = followupReviewContext(ctx.priorReviewRounds).mode;
   const reviewerPrompts = await buildReviewerPrompts(reviewerPromptInputs);
   const runPass = async (
     pass: ReviewerPass,
@@ -1068,6 +1075,7 @@ async function runReviewer(
     failed,
     correctness: decision.correctness,
     followup: decision.followup,
+    followupMode: followup === undefined ? undefined : followupMode,
     durationField: durationField(roundTimer()),
   });
   if (failed) console.error(`  ${line}`);
