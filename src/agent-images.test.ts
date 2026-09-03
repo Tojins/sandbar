@@ -426,6 +426,40 @@ describe("run-owned agent images", () => {
     }
   });
 
+  it("stages one cached artifact concurrently without sharing a partial file", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "sandbar-agent-cache-race-"));
+    const bytes = "concurrent standalone fixture";
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const packages = {
+      ...AGENT_PROVIDER_PACKAGES,
+      codex: {
+        version: "test",
+        artifacts: {
+          x64: [{ variant: "static" as const, url: "fixture", sha256 }],
+          arm64: [{ variant: "static" as const, url: "fixture", sha256 }],
+        },
+      },
+    };
+    const adapters = {
+      arch: "x64",
+      cacheRoot,
+      packages,
+      libc: "glibc",
+      fetch: async () => new Response(bytes),
+    } as const;
+    try {
+      const [first, second] = await Promise.all([
+        prepareAgentArtifacts(["codex"], () => {}, adapters),
+        prepareAgentArtifacts(["codex"], () => {}, adapters),
+      ]);
+      await Promise.all([first.verify(), second.verify()]);
+      await Promise.all([first.dispose(), second.dispose()]);
+      expect(await readdir(join(cacheRoot, sha256))).toEqual(["download"]);
+    } finally {
+      await rm(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
   it("replaces a corrupted sha-addressed cache entry", async () => {
     const cacheRoot = await mkdtemp(join(tmpdir(), "sandbar-agent-cache-corrupt-"));
     const bytes = "pinned standalone fixture";

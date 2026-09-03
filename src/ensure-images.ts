@@ -709,7 +709,13 @@ export async function prepareAgentArtifacts(
         if (!cached) {
           await rm(downloaded, { force: true });
           log(`Downloading agent tool ${identity}...`);
-          const partial = join(artifactRoot, `download-${process.pid}.partial`);
+          // Two base variants can prepare the same static artifact concurrently
+          // in one process. Give each transfer its own directory: a PID-only
+          // name lets one successful rename remove the other's open path.
+          const partialRoot = await mkdtemp(
+            join(artifactRoot, `download-${process.pid}-`),
+          );
+          const partial = join(partialRoot, "download.partial");
           try {
             const response = await fetchArtifact(artifact.url, {
               signal: AbortSignal.timeout(AGENT_ARTIFACT_DOWNLOAD_TIMEOUT_MS),
@@ -729,7 +735,7 @@ export async function prepareAgentArtifacts(
             }
             await rename(partial, downloaded);
           } finally {
-            await rm(partial, { force: true });
+            await rm(partialRoot, { recursive: true, force: true });
           }
         }
         const destination = join(root, name);
