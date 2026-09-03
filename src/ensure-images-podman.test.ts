@@ -18,7 +18,6 @@ import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
 import type { BuiltImage } from "./config.js";
-import type { FinishedHook } from "./gate-stack-podman.test-util.js";
 import {
   ImageBuildError,
   buildImage,
@@ -28,7 +27,10 @@ import {
 } from "./ensure-images.js";
 import { variantImageTag } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
-import { podmanTestScope } from "./podman-test-scope.test-util.js";
+import {
+  type FinishedHook,
+  podmanTestScope,
+} from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);

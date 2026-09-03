@@ -61,11 +61,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { TestContext } from "vitest";
-
 import type { Stack } from "./gate-stack.js";
 import { type RunScope, stackContainerNameFor } from "./naming.js";
-import { podmanTestStackId } from "./podman-test-scope.test-util.js";
+import {
+  type FinishedHook,
+  podmanTestStackId,
+} from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -136,8 +137,6 @@ export const initStackRepo = async (): Promise<string> => {
   return repo;
 };
 
-export type FinishedHook = TestContext["onTestFinished"];
-
 // Per-test state for concurrent gate-stack cases. `hold` both returns the
 // stack to the test and registers it for stop-before-worktree cleanup.
 export const gateStackFixture = async (
@@ -148,12 +147,22 @@ export const gateStackFixture = async (
   repo: string;
   stackId: string;
   cName: (name: string) => string;
+  inspectOf: (name: string, field: string) => Promise<string>;
+  idOf: (name: string) => Promise<string>;
+  maybeIdOf: (name: string) => Promise<string | null>;
   hold: (stack: Stack) => Stack;
 }> => {
   const repo = await initStackRepo();
   const stackId = podmanTestStackId("podmantest", taskId);
   const cName = (name: string): string =>
     stackContainerNameFor(scope, stackId, name);
+  const inspectOf = async (name: string, field: string): Promise<string> =>
+    (
+      await exec(RUNTIME, ["inspect", "--format", field, cName(name)])
+    ).stdout.trim();
+  const idOf = (name: string): Promise<string> => inspectOf(name, "{{.Id}}");
+  const maybeIdOf = (name: string): Promise<string | null> =>
+    idOf(name).catch(() => null);
   let held: Stack | null = null;
   onTestFinished(async () => {
     if (held) await held.stop();
@@ -163,6 +172,9 @@ export const gateStackFixture = async (
     repo,
     stackId,
     cName,
+    inspectOf,
+    idOf,
+    maybeIdOf,
     hold: (stack) => (held = stack),
   };
 };

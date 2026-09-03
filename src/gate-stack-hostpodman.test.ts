@@ -103,7 +103,7 @@ afterAll(async () => {
 // Why `boundedPodman` does its own timing instead of passing node's `timeout:`
 // option (#26). This is about PODMAN, not about node, and it was discovered by
 // running it — which is the only reason the option looks safe in a diff. The
-// The sibling assertions about the in-container process surviving the client's
+// sibling assertions about the in-container process surviving the client's
 // death held under a remote client too; #79 deleted them as podman's own
 // behaviour. This file keeps only the local-client result sandbar relies on.
 describe.runIf(available)("podman exec under a killed local client", () => {

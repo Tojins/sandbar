@@ -11,8 +11,7 @@
 // does NOT do in the other case.
 
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
@@ -21,12 +20,13 @@ import { resolveGateStack } from "./config.js";
 import { type Stack, startStack } from "./gate-stack.js";
 import {
   buildVariantImage,
-  type FinishedHook,
   IMAGE,
+  initStackRepo,
 } from "./gate-stack-podman.test-util.js";
 import { networkNameFor, podNameFor, stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
+  type FinishedHook,
   podmanTestScope,
   podmanTestStackId,
 } from "./podman-test-scope.test-util.js";
@@ -60,8 +60,7 @@ async function standaloneFixture(taskId: string, onTestFinished: FinishedHook) {
     stackContainerNameFor(SCOPE, stackId, name);
   const podName = podNameFor(SCOPE, stackId);
   const networkName = networkNameFor(SCOPE, stackId);
-  const repo = await mkdtemp(join(tmpdir(), "sandbar-gate45-"));
-  const git = (...args: string[]) => exec("git", args, { cwd: repo });
+  const repo = await initStackRepo();
   const idOf = async (name: string): Promise<string | null> =>
     await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", gName(name)])
       .then((result) => result.stdout.trim())
@@ -85,12 +84,6 @@ async function standaloneFixture(taskId: string, onTestFinished: FinishedHook) {
       ],
     });
 
-  await git("init", "-q", "-b", "main");
-  await git("config", "user.email", "t@t");
-  await git("config", "user.name", "t");
-  await writeFile(join(repo, "marker.txt"), "committed\n");
-  await git("add", "-A");
-  await git("commit", "-qm", "init");
   onTestFinished(async () => {
     await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", podName]).catch(
       () => {},

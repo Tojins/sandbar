@@ -111,7 +111,7 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
   it.concurrent(
     "the timed-out work is reaped: an issue container is recreated, only the step's container touched",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, stackId, cName, hold } = await gateStackFixture(
+      const { repo, stackId, cName, maybeIdOf, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
@@ -165,11 +165,7 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
         }),
       );
 
-      const idOf = async (name: string): Promise<string | null> =>
-        await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", cName(name)])
-          .then((r) => r.stdout.trim())
-          .catch(() => null);
-      const heldBefore = await idOf("held");
+      const heldBefore = await maybeIdOf("held");
       expect(heldBefore).not.toBeNull();
 
       expect((await stack.runGate()).failedStep).toBe("hangs-in-held");
@@ -178,7 +174,7 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
       // a new id is what proves the reap happened, and `assertIssueContainersAlive`
       // would otherwise find it missing on the next gate run and report an
       // infrastructure failure this reap had caused.
-      const heldAfter = await idOf("held");
+      const heldAfter = await maybeIdOf("held");
       expect(heldAfter).not.toBeNull();
       expect(heldAfter).not.toBe(heldBefore);
       const { stdout } = await exec(RUNTIME, [
@@ -193,7 +189,7 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
       // teardown, so the bystander is still there. (Its id is NOT compared —
       // every gate run recreates attempt containers anyway, so a change
       // proves nothing either way.)
-      expect(await idOf("runner")).not.toBeNull();
+      expect(await maybeIdOf("runner")).not.toBeNull();
 
       // …and the stack still works, which is the point of recreating rather
       // than leaving a hole where the container was.

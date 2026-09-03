@@ -187,6 +187,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
+import type { TestContext } from "vitest";
 
 import { cleanupOrphanContainers } from "./containers.js";
 import { sweepBranchImages } from "./ensure-images.js";
@@ -194,6 +195,8 @@ import { type RunScope, runScope } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
+
+export type FinishedHook = TestContext["onTestFinished"];
 
 // A file scope separates vitest processes; this second token separates tests
 // running concurrently inside one process. Keep the readable prefix while

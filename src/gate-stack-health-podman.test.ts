@@ -84,16 +84,6 @@ describe.runIf(available)(
         ],
       });
 
-    const inspectOf = async (
-      cName: (name: string) => string,
-      name: string,
-      field: string,
-    ): Promise<string> =>
-      (
-        await exec(RUNTIME, ["inspect", "--format", field, cName(name)])
-      ).stdout.trim();
-    const idOf = (cName: (name: string) => string, name: string) =>
-      inspectOf(cName, name, "{{.Id}}");
     const wedge = async (repo: string): Promise<void> => {
       await mkdir(join(repo, "out"), { recursive: true });
       await writeFile(join(repo, WEDGE), "x\n");
@@ -106,7 +96,7 @@ describe.runIf(available)(
     it.concurrent(
       "a running, healthy issue container is left exactly where it is",
       async ({ expect, task, onTestFinished }) => {
-        const { repo, stackId, cName, hold } = await gateStackFixture(
+        const { repo, stackId, inspectOf, idOf, hold } = await gateStackFixture(
           SCOPE,
           task.id,
           onTestFinished,
@@ -121,19 +111,19 @@ describe.runIf(available)(
           }),
         );
         expect((await stack.runGate()).ok).toBe(true);
-        const before = await idOf(cName, "svc");
+        const before = await idOf("svc");
 
         // The argv podman was handed is the consumer's declared `command`
         // verbatim, stored as `["CMD", …]` — no `CMD-SHELL` wrapper and no
         // re-split by a shell, which is the whole reason `readiness.command` is
         // argv like `step.command` and `postReadyCommands`.
         const registered = JSON.parse(
-          await inspectOf(cName, "svc", "{{json .Config.Healthcheck}}"),
+          await inspectOf("svc", "{{json .Config.Healthcheck}}"),
         ) as { Test?: string[] };
         expect(registered.Test).toEqual(["CMD", ...WEDGE_PROBE]);
 
         expect((await stack.runGate()).ok).toBe(true);
-        expect(await idOf(cName, "svc")).toBe(before);
+        expect(await idOf("svc")).toBe(before);
       },
       240_000,
     );
@@ -149,7 +139,7 @@ describe.runIf(available)(
     it.concurrent(
       "waits out a transiently unhealthy issue container instead of escalating",
       async ({ expect, task, onTestFinished }) => {
-        const { repo, stackId, cName, hold } = await gateStackFixture(
+        const { repo, stackId, idOf, hold } = await gateStackFixture(
           SCOPE,
           task.id,
           onTestFinished,
@@ -164,7 +154,7 @@ describe.runIf(available)(
           }),
         );
         expect((await stack.runGate()).ok).toBe(true);
-        const before = await idOf(cName, "svc");
+        const before = await idOf("svc");
 
         await wedge(repo);
         const started = Date.now();
@@ -180,7 +170,7 @@ describe.runIf(available)(
         // It WAITED. Without this the test passes just as happily with the
         // whole check deleted, since a gate that never looks is also green.
         expect(Date.now() - started).toBeGreaterThan(2_500);
-        expect(await idOf(cName, "svc")).toBe(before);
+        expect(await idOf("svc")).toBe(before);
       },
       240_000,
     );
@@ -194,7 +184,7 @@ describe.runIf(available)(
     it.concurrent(
       "a persistently unhealthy issue container is recreated on its running image, then throws",
       async ({ expect, task, onTestFinished }) => {
-        const { repo, stackId, cName, hold } = await gateStackFixture(
+        const { repo, stackId, inspectOf, idOf, hold } = await gateStackFixture(
           SCOPE,
           task.id,
           onTestFinished,
@@ -218,8 +208,8 @@ describe.runIf(available)(
           }),
         );
         expect((await stack.runGate()).ok).toBe(true);
-        const before = await idOf(cName, "svc");
-        expect(await inspectOf(cName, "svc", "{{.ImageName}}")).toBe(ALIAS);
+        const before = await idOf("svc");
+        expect(await inspectOf("svc", "{{.ImageName}}")).toBe(ALIAS);
 
         await wedge(repo);
         let caught: unknown = null;
@@ -257,8 +247,8 @@ describe.runIf(available)(
         // D4 happened, and it happened on the RUNNING variant. `rejects` alone
         // passes with the recreate deleted; an id-only assertion passes with
         // the image regression present.
-        expect(await idOf(cName, "svc")).not.toBe(before);
-        expect(await inspectOf(cName, "svc", "{{.ImageName}}")).toBe(ALIAS);
+        expect(await idOf("svc")).not.toBe(before);
+        expect(await inspectOf("svc", "{{.ImageName}}")).toBe(ALIAS);
       },
       300_000,
     );

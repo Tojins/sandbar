@@ -325,7 +325,7 @@ describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
     "issue containers keep their id and their state across gate runs",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, stackId, cName, hold } = await gateStackFixture(
+      const { repo, stackId, cName, idOf, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
@@ -394,11 +394,6 @@ describe.runIf(available)("gate stack against real podman", () => {
       // still execs fine. Both regressions — the 15s-per-attempt bringup, and
       // gating an earlier attempt's source — pass an ok-only assertion. So
       // observe identity and state directly.
-      const idOf = async (name: string): Promise<string> =>
-        (
-          await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", cName(name)])
-        ).stdout.trim();
-
       const dbIdBefore = await idOf("db");
       const runnerIdBefore = await idOf("runner");
 

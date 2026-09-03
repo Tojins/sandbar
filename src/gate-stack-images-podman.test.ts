@@ -56,7 +56,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
   it.concurrent(
     "a changed image recreates the issue container, and an unchanged one leaves it alone",
     async ({ expect, task, onTestFinished }) => {
-      const { repo, stackId, cName, hold } = await gateStackFixture(
+      const { repo, stackId, inspectOf, hold } = await gateStackFixture(
         SCOPE,
         task.id,
         onTestFinished,
@@ -103,11 +103,6 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
           }),
         }),
       );
-
-      const inspectOf = async (name: string, field: string): Promise<string> =>
-        (
-          await exec(RUNTIME, ["inspect", "--format", field, cName(name)])
-        ).stdout.trim();
 
       expect((await stack.runGate()).ok).toBe(true);
       // Exactly the two containers' images — this stack's own, and only its

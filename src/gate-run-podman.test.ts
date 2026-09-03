@@ -26,7 +26,6 @@ import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
 import type { RunConfig } from "./config.js";
-import type { FinishedHook } from "./gate-stack-podman.test-util.js";
 import {
   GATE_EXIT_GREEN,
   GATE_EXIT_NO_VERDICT,
@@ -41,7 +40,10 @@ import {
   stackContainerNameFor,
 } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
-import { podmanTestScope } from "./podman-test-scope.test-util.js";
+import {
+  type FinishedHook,
+  podmanTestScope,
+} from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
