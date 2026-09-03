@@ -626,7 +626,7 @@ function renderReviewerTemplate(
 
 function reviewFindings(pass: ParsedVerdict): string {
   return pass.prose
-    .replace(new RegExp(`<verdict>\\s*${pass.verdict}\\s*</verdict>`, "g"), "")
+    .replace(/<verdict>[\s\S]*?<\/verdict>/g, "")
     .trim();
 }
 
