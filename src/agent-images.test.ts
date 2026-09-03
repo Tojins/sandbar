@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -405,6 +405,41 @@ describe("run-owned agent images", () => {
       await second.verify("codex");
       await second.dispose();
       expect(fetches).toBe(1);
+    } finally {
+      await rm(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces a corrupted sha-addressed cache entry", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "sandbar-agent-cache-corrupt-"));
+    const bytes = "pinned standalone fixture";
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const packages = {
+      ...AGENT_PROVIDER_PACKAGES,
+      codex: {
+        version: "test",
+        artifacts: {
+          x64: [{ variant: "static" as const, url: "fixture", sha256 }],
+          arm64: [{ variant: "static" as const, url: "fixture", sha256 }],
+        },
+      },
+    };
+    const artifactRoot = join(cacheRoot, sha256);
+    await mkdir(artifactRoot, { recursive: true });
+    await writeFile(join(artifactRoot, "download"), "corrupted cache entry");
+    let fetches = 0;
+    try {
+      const prepared = await prepareAgentArtifacts(["codex"], () => {}, {
+        arch: "x64", cacheRoot, packages,
+        fetch: async () => {
+          fetches += 1;
+          return new Response(bytes);
+        },
+      });
+      await prepared.verify("codex");
+      expect(fetches).toBe(1);
+      expect(await readFile(join(artifactRoot, "download"), "utf8")).toBe(bytes);
+      await prepared.dispose();
     } finally {
       await rm(cacheRoot, { recursive: true, force: true });
     }
