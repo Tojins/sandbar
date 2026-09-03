@@ -35,7 +35,6 @@ export type AgentRunClassification = {
 export type AgentRunEndInput = {
   readonly end: AgentRunEnd;
   readonly exitCode: number | null;
-  readonly signal: string | null;
   readonly spoken: string;
   readonly failure?: string;
   readonly spawnError?: string;

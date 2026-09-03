@@ -60,7 +60,6 @@ describe("classifyAgentRunEnd (#114)", () => {
     const actual = classifyAgentRunEnd({
       end,
       exitCode,
-      signal: end === "signal" ? "SIGKILL" : null,
       spoken: hasSpeech ? "answer" : "",
       failure: hasFailure ? "provider said why" : undefined,
       silentRunRecovery,
@@ -72,7 +71,6 @@ describe("classifyAgentRunEnd (#114)", () => {
     expect(classifyAgentRunEnd({
       end: "exit",
       exitCode: 0,
-      signal: null,
       spoken: "partial",
       parseError: "shape broke",
       silentRunRecovery: "retryable",
@@ -84,7 +82,7 @@ describe("classifyAgentRunEnd (#114)", () => {
   });
 
   it("uses the provider, stderr, speech, stdout-tail detail ladder", () => {
-    const base = { end: "exit" as const, exitCode: 1, signal: null, silentRunRecovery: "infra" as const };
+    const base = { end: "exit" as const, exitCode: 1, silentRunRecovery: "infra" as const };
     expect(classifyAgentRunEnd({
       ...base, spoken: "speech", failure: "provider", stderr: "stderr", stdout: "stdout",
     }).diagnostic).toBe("provider");
@@ -104,7 +102,6 @@ describe("classifyAgentRunEnd (#114)", () => {
     const classified = classifyAgentRunEnd({
       end: "exit",
       exitCode: 125,
-      signal: null,
       spoken: "",
       stderr: "podman failed",
       silentRunRecovery: "infra",
@@ -117,7 +114,6 @@ describe("classifyAgentRunEnd (#114)", () => {
     const classified = classifyAgentRunEnd({
       end: "spawn-error",
       exitCode: null,
-      signal: null,
       spoken: "",
       failure: "provider",
       spawnError: "ENOENT",
@@ -130,7 +126,7 @@ describe("classifyAgentRunEnd (#114)", () => {
 
   it("does not expose a blank provider failure as narrow detail", () => {
     const classified = classifyAgentRunEnd({
-      end: "exit", exitCode: 0, signal: null, spoken: "", failure: "   ",
+      end: "exit", exitCode: 0, spoken: "", failure: "   ",
       silentRunRecovery: "infra",
     });
     expect({ cause: classified.cause, verdict: classified.verdict }).toEqual({

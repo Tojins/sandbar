@@ -44,7 +44,6 @@ function agentRun(over: Partial<ResolveAgentRun> = {}): ResolveAgentRun {
   const classification = classifyAgentRunEnd({
     end: over.end ?? "exit",
     exitCode: over.exitCode ?? 0,
-    signal: over.signal ?? null,
     spoken: output,
     failure: (over.exitCode ?? 0) !== 0 ? over.detail : undefined,
     silentRunRecovery: "infra",

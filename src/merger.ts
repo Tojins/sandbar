@@ -2284,7 +2284,6 @@ export function parseCapturedAgentRun(
   const classification = classifyAgentRunEnd({
     end: run.end,
     exitCode: run.exitCode,
-    signal: run.signal,
     spoken: speech.spoken,
     failure: speech.failure,
     spawnError: run.end === "spawn-error" ? run.detail : undefined,

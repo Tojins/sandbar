@@ -204,7 +204,6 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       const classification = classifyAgentRunEnd({
         end,
         exitCode,
-        signal: entry.signal ?? null,
         spoken: entry.stdout,
         stderr: entry.stderr,
         silentRunRecovery: "infra",

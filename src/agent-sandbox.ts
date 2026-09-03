@@ -1873,7 +1873,6 @@ const invokeAgent = (
         const classification = classifyAgentRunEnd({
           end: "exit",
           exitCode: execResult.exitCode,
-          signal: null,
           spoken: speech.spoken,
           failure: speech.failure,
           stderr: execResult.stderr,
