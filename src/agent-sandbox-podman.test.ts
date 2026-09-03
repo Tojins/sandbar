@@ -102,6 +102,12 @@ const delay = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));
 
 describe.runIf(available)("the sandbox container against real podman", () => {
+  // Rootless podman 4.9 can race two simultaneous keep-id container creates
+  // while both runtimes write `ping_group_range`, rejecting one with EINVAL.
+  // Serialize only that short create operation; the two test bodies and their
+  // deliberate orphan/reaping waits still overlap.
+  let previousStart: Promise<void> = Promise.resolve();
+
   // The production argv, verbatim, with `--init` kept or filtered out — the
   // only axis this file has. Taking that axis rather than a list of flags to
   // drop is what lets the container's NAME state which variant it is without
@@ -127,7 +133,11 @@ describe.runIf(available)("the sandbox container against real podman", () => {
       devices: [],
       cpus: undefined,
     }).filter((a) => init === "with-init" || a !== "--init");
-    await exec(RUNTIME, args);
+    const started = previousStart.then(async () => {
+      await exec(RUNTIME, args);
+    });
+    previousStart = started.catch(() => {});
+    await started;
     return name;
   };
 
