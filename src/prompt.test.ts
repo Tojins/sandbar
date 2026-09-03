@@ -336,6 +336,12 @@ describe("renderReviewerFollowupSlot", () => {
     expect(slot).toMatch(/1\. Test quality and coverage[\s\S]*2\. Spec conformance[\s\S]*3\. Project standards/);
   });
 
+  it("requires test findings to identify a deletion the suite cannot detect", () => {
+    const slot = renderFollowup();
+    expect(slot).toContain("a production line no test covers");
+    expect(slot).toMatch(/a test\s+line whose deletion changes nothing/);
+  });
+
   it("carries the chunk base needed by a cold follow-up", () => {
     const slot = renderReviewerFollowupSlot({
       ...baseInputs,
