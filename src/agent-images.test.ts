@@ -244,6 +244,19 @@ describe("run-owned agent images", () => {
     expect(selectedAgentArtifact(pin, "x64", "glibc").variant).toBe("static");
   });
 
+  it("keeps recipe file names independent of the selected architecture", () => {
+    const x64 = agentToolsContainerfile("base", ["claude", "codex"], {
+      arch: "x64", libc: "glibc",
+    });
+    const arm64 = agentToolsContainerfile("base", ["claude", "codex"], {
+      arch: "arm64", libc: "glibc",
+    });
+    const copyLines = (recipe: string) => recipe
+      .split("\n")
+      .filter((line) => line.startsWith("COPY "));
+    expect(copyLines(x64)).toEqual(copyLines(arm64));
+  });
+
   it("rejects missing and duplicate architecture/libc artifacts", () => {
     const artifact = AGENT_PROVIDER_PACKAGES.claude.artifacts.x64[0]!;
     const pin = {
