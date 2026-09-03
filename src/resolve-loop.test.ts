@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { MergerGateOutput } from "./merger.js";
+import { classifyAgentRunEnd } from "./agent-run-end.js";
 import { SandbarError } from "./errors.js";
 import {
   RESOLVE_MAX_ATTEMPTS,
@@ -39,15 +40,26 @@ type AgentResult = ResolveAgentRun;
 // spell out an exit code or a signal.
 function agentRun(over: Partial<ResolveAgentRun> = {}): ResolveAgentRun {
   const stdout = over.stdout ?? "";
+  const output = over.output ?? stdout;
+  const classification = classifyAgentRunEnd({
+    end: over.end ?? "exit",
+    exitCode: over.exitCode ?? 0,
+    signal: over.signal ?? null,
+    spoken: output,
+    failure: (over.exitCode ?? 0) !== 0 ? over.detail : undefined,
+    silentRunRecovery: "infra",
+  });
   return {
     stdout,
-    output: stdout,
+    output,
     stderr: "",
     end: "exit",
     exitCode: 0,
     signal: null,
     durationMs: 1234,
     container: "sandbar-wdeadbeef-resolve-1-uuid",
+    cause: classification.cause,
+    verdict: classification.verdict,
     ...over,
   };
 }

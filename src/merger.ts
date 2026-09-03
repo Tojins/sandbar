@@ -215,6 +215,12 @@
 // `runResolveAgent` runs the configured provider in a NAMED, run-scoped
 // container. The same provider object owns its argv and line parser; credential
 // keys come from `PROVIDER_CREDENTIALS`, so no vendor detail is re-spelled here.
+// It deliberately does not route through createSandbox/invokeAgent: each
+// attempt needs a fresh conversation, a wall-clock kill of the whole container,
+// and byte-verbatim stdout/stderr capture before judgement. The shared end
+// classification lives in agent-run-end.ts; the lifecycles stay different.
+// Unlike the long-lived sandbox's `sleep infinity` pid 1, this short-lived
+// `--rm` container runs the agent as pid 1, so #42's `--init` does not transfer.
 // `captureAgentRun` keeps both raw streams for the byte-verbatim attempt log,
 // then `parseCapturedAgentRun` puts only parsed agent speech in the output
 // register that the resolve promise parser may read. It answers with the exit
@@ -300,6 +306,7 @@ import {
   createAgentSpeechAccumulator,
   type AgentProvider,
 } from "./agent-sandbox.js";
+import { classifyAgentRunEnd } from "./agent-run-end.js";
 import { SandbarError } from "./errors.js";
 import { type PullRequestRef, ensurePullRequest } from "./forge-pr.js";
 import { dirtyWorktreePaths, fetchOriginChunkBranch } from "./git-ops.js";
@@ -2114,7 +2121,7 @@ export type RealAdapterDeps = {
   readonly runStackGate: () => Promise<GateResult>;
 };
 
-type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "usage" | "toolCalls">;
+type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "usage" | "toolCalls" | "cause" | "verdict">;
 
 // The default merge subject, and it names an ISSUE — which is why anything
 // that is not one issue's branch (a chunk, #64) carries its own
@@ -2263,16 +2270,37 @@ export function parseCapturedAgentRun(
   agent: AgentProvider,
 ): ResolveAgentRun {
   const speech = createAgentSpeechAccumulator();
+  let parseError: string | undefined;
   for (const line of run.stdout.split(/\r?\n/)) {
-    speech.ingest(agent.parseStreamLine(line));
+    try {
+      speech.ingest(agent.parseStreamLine(line));
+    } catch (err) {
+      parseError = `${agent.name} stream parse failed on a JSON line: ${err instanceof Error ? err.message : String(err)}`;
+      break;
+    }
   }
+  // A fresh merger container has no same-session re-ask. Re-spending a silent
+  // run is not recovery, so #67 classifies it as infrastructure here (#114).
+  const classification = classifyAgentRunEnd({
+    end: run.end,
+    exitCode: run.exitCode,
+    signal: run.signal,
+    spoken: speech.spoken,
+    failure: speech.failure ?? run.detail,
+    parseError,
+    stderr: run.stderr,
+    stdout: run.stdout,
+    silentRunRecovery: "infra",
+  });
   return {
     ...run,
     // Both supported providers emit structured transport here. Resolve
     // promises therefore have no raw fallback: only events their provider
     // parser classified as agent speech may reach parseResolveSignal (#74).
     output: speech.spoken,
-    detail: run.detail ?? speech.failure,
+    cause: classification.cause,
+    verdict: classification.verdict,
+    ...(classification.detail ? { detail: classification.detail } : {}),
     ...(speech.usage === undefined ? {} : { usage: speech.usage }),
     toolCalls: speech.toolCalls,
   };
@@ -2292,6 +2320,7 @@ export function buildResolveRunArgv(args: {
     "run",
     "--rm",
     "-i",
+    "--image-volume=ignore",
     "--name",
     args.container,
     "--userns=keep-id",

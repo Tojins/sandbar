@@ -246,6 +246,21 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(run.detail).toBe("terminal fault");
     expect(isInfraFailure(run)).toBe(false);
   });
+
+  it("carries a parser shape error as infra data so capture can be logged", () => {
+    const provider = buildAgentProvider("claude", "m");
+    const run = parseCapturedAgentRun(
+      captured(JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", name: "Bash", input: null }] },
+      })),
+      provider,
+    );
+    expect(run.cause).toBe("parse-error");
+    expect(run.verdict).toBe("infra");
+    expect(run.detail).toContain("stream parse failed");
+    expect(run.stdout).toContain("tool_use");
+  });
 });
 
 describe("resolve provider invocation (#74)", () => {
@@ -296,6 +311,8 @@ describe("resolve provider invocation (#74)", () => {
         "agent --print",
       ]);
       expect(argv).toContain("/git-common:/git-common");
+      expect(argv).toContain("--image-volume=ignore");
+      expect(argv).not.toContain("--init");
     },
   );
 });

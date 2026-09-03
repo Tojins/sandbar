@@ -73,6 +73,7 @@ import type { RepoLayout } from "./repo-cache.js";
 import { startGapTimer, startTimer } from "./timing.js";
 import { normalizeClaudeResult, normalizeCodexUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
+import { classifyAgentRunEnd } from "./agent-run-end.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -1864,7 +1865,19 @@ const invokeAgent = (
         },
       })
       .then((execResult) => {
-        if (execResult.exitCode !== 0) {
+        // The persistent sandbox can cheaply re-ask in the same provider
+        // session, so a silent successful exit is retryable here (#114).
+        const classification = classifyAgentRunEnd({
+          end: "exit",
+          exitCode: execResult.exitCode,
+          signal: null,
+          spoken: speech.spoken,
+          failure: speech.failure,
+          stderr: execResult.stderr,
+          stdout: execResult.stdout,
+          silentRunRecovery: "retryable",
+        });
+        if (execResult.exitCode !== 0 || classification.verdict === "infra") {
           // Four-tier detail: the reported failure → stderr → parsed speech →
           // last 20 stdout lines. The reported failure leads because it is the
           // provider naming its own give-up cause, and this is the path a codex
@@ -1873,48 +1886,11 @@ const invokeAgent = (
           // one sentence a human needs. A provider that reports nothing in-band
           // is unaffected: claudeCode never emits `failure`, so stderr still
           // leads for it, exactly as before #72.
-          let detail = speech.failure ?? "";
-          if (!detail.trim()) detail = execResult.stderr;
-          if (!detail.trim()) detail = speech.spoken;
-          if (!detail.trim()) {
-            detail = execResult.stdout
-              .split("\n")
-              .filter((l) => l.trim())
-              .slice(-20)
-              .join("\n");
-          }
-          settleReject(
-            new AgentError(`${agent.name} exited with code ${execResult.exitCode}:\n${detail}`),
-          );
-          return;
-        }
-        const spoken = speech.spoken;
-        // A process that exited 0 having ANNOUNCED a terminal failure, and said
-        // nothing else, did not answer — #67's rule for the resolve loop, held
-        // here: an attempt that captured no answer is an infra failure, not an
-        // answer, and must not launder itself into "the agent tried and failed"
-        // and spend the budget doing it.
-        //
-        // This is a guard, not the codex credential path — that one exits 1 and
-        // is caught above (verified at the AGENT_PROVIDER_PACKAGES.codex pin:
-        // no key prints `turn.failed` and exits 1). It is here because an exit
-        // code is not a contract the CLI states, and the two ways of being
-        // wrong are not symmetrical. Read as an answer, a silent terminal
-        // failure is an implementer attempt
-        // with no promise tag: a nudge, a spent attempt, and eight more of them
-        // across every issue in the plan, parking each with empty transcripts.
-        // Read as infra it is a HARD-ERROR on a run that had nothing to say
-        // anyway — two fresh sandboxes, then NEEDS-HUMAN quoting the cause.
-        //
-        // Guarded on `spoken`, so an agent that reviewed the code and then hit
-        // a failure on the way out keeps its review. That is #41's own rule for
-        // the non-zero-exit path (`agentPartialOutput`), and the reason it is
-        // the same rule: what the agent said is evidence whatever happened to
-        // the process afterwards.
-        if (!spoken && speech.failure !== undefined) {
           settleReject(
             new AgentError(
-              `${agent.name} reported a failed turn and produced no output:\n${speech.failure}`,
+              classification.cause === "provider-failure" && execResult.exitCode === 0
+                ? `${agent.name} reported a failed turn and produced no output:\n${classification.detail}`
+                : `${agent.name} exited with code ${execResult.exitCode}:\n${classification.detail}`,
             ),
           );
           return;

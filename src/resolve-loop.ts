@@ -69,6 +69,7 @@ import { loadTemplate, render } from "./prompts.js";
 import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
 import { formatUsageFields } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
+import type { AgentRunCause, AgentRunEnd } from "./agent-run-end.js";
 
 export const RESOLVE_MAX_ATTEMPTS = 4;
 
@@ -130,7 +131,7 @@ export type ResolveMode =
 // sandbar's own SIGTERM at RESOLVE_AGENT_TIMEOUT_MS and nothing else; `signal` is anything
 // else that killed the process (an OOM kill, an operator's Ctrl-C reaching the
 // group); `spawn-error` is a runtime that never produced a process at all.
-export type ResolveAgentEnd = "exit" | "timeout" | "signal" | "spawn-error";
+export type ResolveAgentEnd = AgentRunEnd;
 
 // What one invocation actually did. The token parser only ever needed
 // `output`; every other field here exists so that an attempt which produced
@@ -156,6 +157,8 @@ export type ResolveAgentRun = {
   // A runtime spawn error or terminal failure reported by the provider. The
   // spawn error wins if both are ever present.
   readonly detail?: string;
+  readonly cause: AgentRunCause;
+  readonly verdict: "answer" | "infra";
   readonly usage?: AgentUsage;
   readonly toolCalls: number;
 };
@@ -586,9 +589,7 @@ const VERDICT_PROSE: Record<ResolveAttemptVerdict, string> = {
 // is the one end that is exempt: it burned the whole budget in the container,
 // so it is a spent attempt whatever it printed.
 export function isInfraFailure(run: ResolveAgentRun): boolean {
-  if (run.end === "spawn-error") return true;
-  if (run.end === "timeout") return false;
-  return run.output.trim() === "";
+  return run.verdict === "infra";
 }
 
 // How much of stderr rides along in the halt message. The whole of it is on

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { classifyAgentRunEnd } from "./agent-run-end.js";
 
 import { SandbarError } from "./errors.js";
 import type { PushOutcome, VerifyAdapter } from "./forge-verify.js";
@@ -198,15 +199,27 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       ) {
         merging = entry.leavesConflict;
       }
+      const end = entry.end ?? "exit";
+      const exitCode = entry.exitCode ?? 0;
+      const classification = classifyAgentRunEnd({
+        end,
+        exitCode,
+        signal: entry.signal ?? null,
+        spoken: entry.stdout,
+        stderr: entry.stderr,
+        silentRunRecovery: "infra",
+      });
       return {
         stdout: entry.stdout,
         output: entry.stdout,
         stderr: entry.stderr ?? "",
-        end: entry.end ?? "exit",
-        exitCode: entry.exitCode ?? 0,
+        end,
+        exitCode,
         signal: entry.signal ?? null,
         durationMs: 5_000,
         container: `sandbar-wdeadbeef-resolve-${aIdx}-uuid`,
+        cause: classification.cause,
+        verdict: classification.verdict,
       };
     },
     async isMergeInProgress() {
