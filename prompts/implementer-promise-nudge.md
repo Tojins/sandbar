@@ -1,5 +1,6 @@
-Your last message ended without a `<promise>` tag. The orchestrator reads only
-the tag — prose does not count — so it cannot see this attempt's outcome.
+Your last message carried no recognised `<promise>` token. The orchestrator
+reads only the exact tokens below — prose does not count, and neither does a
+tag around any other word — so it cannot see this attempt's outcome.
 
 Reply with exactly one tag and nothing else:
 

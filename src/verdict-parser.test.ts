@@ -116,6 +116,15 @@ describe("parseVerdict", () => {
 });
 
 describe("stripVerdictTokens", () => {
+  // The strip and the parse share one global regex: `replace` must leave
+  // `lastIndex` at 0 for the parse that follows, and vice versa.
+  it("strip then parse, and parse then strip, see the same tokens", () => {
+    const stdout = "fine.\n<verdict>APPROVED</verdict>";
+    expect(stripVerdictTokens(stdout)).toBe("fine.\n");
+    expect(parseVerdict(stdout)?.verdict).toBe("APPROVED");
+    expect(stripVerdictTokens(stdout)).toBe("fine.\n");
+  });
+
   it("removes every well-formed token and nothing else", () => {
     expect(
       stripVerdictTokens(
