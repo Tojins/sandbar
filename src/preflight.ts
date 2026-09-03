@@ -129,14 +129,24 @@
 // at every plan for the label re-applied mid-run, which no preflight sees.
 //   - discarded — the branch's upstream is `[gone]` (PR merged+deleted upstream
 //                 while local is behind). Local commits would be orphaned.
-//   - unmerged  — everything else: maps to a CLOSED issue, or one the tracker
-//                 could not be asked about. Nothing will ever re-queue it, so
-//                 it stays a hard error.
+//   - unmerged  — everything else: the issue reads CLOSED. Nothing will ever
+//                 re-queue it, so it stays a hard error.
 // The open/closed fact comes from `fetchIssueStates`, the same strongly
-// consistent GraphQL batch the planner uses for its CLOSED guard (#16), and it
-// fails CLOSED like the two label listings beside it: an unanswerable tracker
-// turns a parked branch back into an `unmerged` refusal, never into a silent
-// pass.
+// consistent GraphQL batch the planner uses for its CLOSED guard (#16).
+//
+// A tracker that could not be ASKED is its own answer, not a fourth reading of
+// CLOSED. Both issue lookups (`fetchOpenReadyIssueNumbers`,
+// `fetchOpenIssueNumbers`) answer in two states, the way `fetchChunkRef` buys
+// "origin has no such branch" apart from "origin could not be asked" (#64),
+// and an unanswered lookup empties BOTH sets — so every issue branch in the
+// cache falls past `resumable` and `parked` at once. Collapsing that into
+// `unmerged` printed a list of parked branches under `git branch -D <name>`:
+// destructive advice about work whose parking comment says the branch IS the
+// work, produced by an expired token rather than by anything about the
+// branches. The run is still refused — the classification genuinely is unknown
+// — but under a message that names the tracker as the cause and touches
+// nothing. `discarded` is unaffected and stays a hard error either way: it is
+// derived from `%(upstream:track)`, a git fact no tracker outage can blur.
 // `sandbar/chunk-*` branches (#58) are listed by the same globs — one shape
 // each of `SANDBAR_BRANCH_REFGLOBS` — but take none of those four: see
 // `classifySandbarBranches`. They are still DELETED once merged, which is the
@@ -318,6 +328,11 @@ export type RepoState = {
   readonly sourceBranch: string;
   readonly hasOriginBranch: boolean;
   readonly unmergedIssueBranches: readonly string[];
+  // Whether the tracker actually answered the two issue lookups the four-way
+  // split is built from. False turns the `unmerged` list from "these issues are
+  // closed" into "these could not be classified" — same refusal, different
+  // message, and no `git branch -D` advice about branches nothing has judged.
+  readonly issueStatesKnown: boolean;
   readonly discardedIssueBranches: readonly string[];
   // Stranded branches that map to a still-open `ready-for-agent` issue — not a
   // failure (resumed, not refused). Carried on the state purely so runPreflight
@@ -490,12 +505,31 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
   }
   if (s.unmergedIssueBranches.length > 0) {
     const list = s.unmergedIssueBranches.map((b) => `  - ${b}`).join("\n");
-    out.push({
-      ok: false,
-      message:
-        `Unmerged \`sandbar/issue-*\` branches found:\n${list}\n` +
-        "Merge them, push them for review, or delete with `git branch -D <name>`.",
-    });
+    // Same refusal either way; the difference is whether anything actually
+    // judged these branches. With the tracker silent the list is just "every
+    // issue branch in the cache", so it gets no disposal advice at all — the
+    // one instruction it could carry, `git branch -D`, would destroy a parked
+    // branch over an expired token.
+    out.push(
+      s.issueStatesKnown
+        ? {
+            ok: false,
+            message:
+              `Unmerged \`sandbar/issue-*\` branches found:\n${list}\n` +
+              "Merge them, push them for review, or delete with `git branch -D <name>`.",
+          }
+        : {
+            ok: false,
+            message:
+              "`sandbar/issue-*` branches could not be classified: " +
+              `${repoSlug(s.configuredRepo)} did not answer the issue lookups, ` +
+              "so a branch whose issue is CLOSED cannot be told from one that " +
+              `is merely parked:\n${list}\n` +
+              "Nothing was changed. Fix whatever stopped `gh` from reaching " +
+              "the tracker — the checks above may already name it — and " +
+              "re-run. Do not delete these on the strength of this message.",
+          },
+    );
   }
   if (s.discardedIssueBranches.length > 0) {
     const list = s.discardedIssueBranches
@@ -602,7 +636,8 @@ export async function gatherState(
 
   const originUrl = await readOriginUrl(repoDir);
   const parsedOrigin = originUrl === null ? null : parseRepoFromRemoteUrl(originUrl);
-  const openReadyIssues = await fetchOpenReadyIssueNumbers(cfg.repo);
+  const readyLookup = await fetchOpenReadyIssueNumbers(cfg.repo);
+  const openReadyIssues = lookedUp(readyLookup);
   const chunkMemberIssues =
     knownChunkMemberIssues ??
     (await fetchChunkMemberIssueNumbers(repoDir));
@@ -616,13 +651,13 @@ export async function gatherState(
       ? []
       : [number];
   });
-  const openIssues = await fetchOpenIssueNumbers(cfg.repo, undecided);
+  const openLookup = await fetchOpenIssueNumbers(cfg.repo, undecided);
   const { unmerged, discarded, resumable, parked } = classifySandbarBranches({
     branches,
     upstreamTracks,
     openReadyIssues,
     chunkMemberIssues,
-    openIssues,
+    openIssues: lookedUp(openLookup),
   });
 
   return {
@@ -637,6 +672,9 @@ export async function gatherState(
     sourceBranch: cfg.sourceBranch,
     hasOriginBranch,
     unmergedIssueBranches: unmerged,
+    // Both halves, because either one failing empties a set the classification
+    // reads and sends its branches to `unmerged` (see the header).
+    issueStatesKnown: readyLookup.ok && openLookup.ok,
     discardedIssueBranches: discarded,
     resumableIssueBranches: resumable,
     parkedIssueBranches: parked,
@@ -694,48 +732,68 @@ function statDetail(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// What a tracker lookup answers, in the two states the header argues for: the
+// numbers, or the fact that the question never got an answer. An empty set is
+// a legitimate FIRST state (no issue is queued) and says nothing about
+// reachability, which is exactly the conflation that put parked branches under
+// `git branch -D`.
+type IssueNumberLookup =
+  | { readonly ok: true; readonly numbers: ReadonlySet<number> }
+  | { readonly ok: false };
+
+const NO_NUMBERS: ReadonlySet<number> = new Set();
+
+function lookedUp(l: IssueNumberLookup): ReadonlySet<number> {
+  return l.ok ? l.numbers : NO_NUMBERS;
+}
+
 // The set of issue numbers currently in the planner queue (open +
 // `ready-for-agent`). Reuses the planner's own candidate query so the resume
 // classification can never desync from what the next cycle actually picks up.
-// Fail-closed to an empty set: a gh hiccup just means no branch is treated as
-// resumable (they fall back to the existing hard error), and the ghAuthOk /
-// sandboxGhTokenOk invariants report the real problem.
+// A gh hiccup answers `ok: false`: no branch is treated as resumable, and the
+// caller carries the distinction to `checkInvariants` rather than letting the
+// empty set impersonate "nothing is queued".
 async function fetchOpenReadyIssueNumbers(
   repo: RepoRef,
-): Promise<ReadonlySet<number>> {
+): Promise<IssueNumberLookup> {
   try {
     const candidates = await fetchCandidates(repo);
-    return new Set(candidates.map((c) => c.number));
+    return { ok: true, numbers: new Set(candidates.map((c) => c.number)) };
   } catch {
-    return new Set();
+    return { ok: false };
   }
 }
 
 // Which of `numbers` are OPEN on the tracker, through the planner's own
-// strongly consistent batch lookup (#16). Fail-closed to an empty set like the
-// sibling lookups above: a branch the tracker cannot vouch for as open is
-// classified `unmerged` and refused, which is what it was before this lookup
-// existed.
+// strongly consistent batch lookup (#16). Same two states as the sibling above,
+// for the same reason: a branch the tracker cannot vouch for is not a branch
+// the tracker called closed. Nothing to ask is `ok: true` — the caller only
+// asks about numbers the two label listings left undecided.
 async function fetchOpenIssueNumbers(
   repo: RepoRef,
   numbers: readonly number[],
-): Promise<ReadonlySet<number>> {
-  if (numbers.length === 0) return new Set();
+): Promise<IssueNumberLookup> {
+  if (numbers.length === 0) return { ok: true, numbers: NO_NUMBERS };
   try {
     const facts = await fetchIssueStates(numbers, repo);
-    return new Set(
-      [...facts].flatMap(([n, f]) => (f.state === "OPEN" ? [n] : [])),
-    );
+    return {
+      ok: true,
+      numbers: new Set(
+        [...facts].flatMap(([n, f]) => (f.state === "OPEN" ? [n] : [])),
+      ),
+    };
   } catch {
-    return new Set();
+    return { ok: false };
   }
 }
 
 // The issues already landed on a chunk branch (#60), through the planner's own
-// query for the same reason as above. Fail-closed the same way, and the failure
-// costs the same nothing: a leftover member branch is then classified as it
-// would have been before chunks existed — a hard `unmerged` error — rather than
-// silently reaped on a query that did not answer.
+// query for the same reason as above. This one stays a plain fail-closed set,
+// and the difference from its two neighbours is the ref space rather than a
+// change of mind: it reads local git refs, so a failure here is not a tracker
+// outage and does not blind the four-way split — a leftover member branch whose
+// issue is open still classifies as `parked` off the lookups above, and only
+// the safe local reap is skipped.
 async function fetchChunkMemberIssueNumbers(
   repoDir: string,
 ): Promise<ReadonlySet<number>> {

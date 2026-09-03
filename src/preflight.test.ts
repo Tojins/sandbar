@@ -21,6 +21,7 @@ const cleanState: RepoState = {
   sourceBranch: "main",
   hasOriginBranch: true,
   unmergedIssueBranches: [],
+  issueStatesKnown: true,
   discardedIssueBranches: [],
   resumableIssueBranches: [],
   parkedIssueBranches: [],
@@ -295,6 +296,53 @@ describe("checkInvariants", () => {
     expect(f.length).toBe(1);
     expect(f[0]).toContain("sandbar/issue-42-foo");
     expect(f[0]).toContain("sandbar/issue-43-bar");
+    expect(f[0]).toContain("git branch -D");
+  });
+
+  // The tracker cannot be asked ⇒ both issue lookups empty ⇒ every issue branch
+  // in the cache lands in `unmerged`. Still a refusal, but the message must not
+  // tell the operator to delete branches nothing has judged: that is how an
+  // expired token proposed destroying a parked branch.
+  it("does not offer `git branch -D` when the tracker could not be asked", () => {
+    const f = failures({
+      ...cleanState,
+      issueStatesKnown: false,
+      unmergedIssueBranches: ["sandbar/issue-98-parked", "sandbar/issue-99-parked"],
+    });
+    expect(f.length).toBe(1);
+    expect(f[0]).toContain("could not be classified");
+    expect(f[0]).toContain("sandbar/issue-98-parked");
+    expect(f[0]).toContain("sandbar/issue-99-parked");
+    expect(f[0]).not.toContain("git branch -D");
+    expect(f[0]).not.toContain("Unmerged");
+    // The tracker, not the branches, is what the operator has to fix.
+    expect(f[0]).toContain("acme/app");
+  });
+
+  it("still refuses when the tracker could not be asked", () => {
+    // Fail-closed is unchanged: an unclassifiable branch is never a silent pass.
+    const f = failures({
+      ...cleanState,
+      issueStatesKnown: false,
+      unmergedIssueBranches: ["sandbar/issue-98-parked"],
+    });
+    expect(f.length).toBe(1);
+  });
+
+  it("says nothing about branches when the tracker is silent and there are none", () => {
+    expect(failures({ ...cleanState, issueStatesKnown: false })).toEqual([]);
+  });
+
+  // `discarded` is derived from `%(upstream:track)` alone, so a silent tracker
+  // does not blur it and it keeps its own message and its own advice.
+  it("keeps the discarded complaint intact when the tracker could not be asked", () => {
+    const f = failures({
+      ...cleanState,
+      issueStatesKnown: false,
+      discardedIssueBranches: ["sandbar/issue-43-bar"],
+    });
+    expect(f.length).toBe(1);
+    expect(f[0]).toContain("Discarded");
     expect(f[0]).toContain("git branch -D");
   });
 

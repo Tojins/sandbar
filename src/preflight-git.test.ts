@@ -345,6 +345,37 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const state = await gatherState(cfg(layoutAt(target)));
 
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
+      // …and the shim's `gh` failed, so nothing JUDGED that branch: the state
+      // carries the distinction so `checkInvariants` can refuse without
+      // proposing `git branch -D` over a branch that may well be parked.
+      expect(state.issueStatesKnown).toBe(false);
+    });
+
+    // The other half of the same fact, through a `gh` that answers: both
+    // lookups succeed, issue 7 is simply not among the open ones, and the
+    // identical `unmerged` list is now a verdict rather than an outage.
+    it("reports the issue states as known when gh answers", async () => {
+      // Only the two shapes the lookups make: `gh issue list --json …` and
+      // `gh api graphql`. Empty answers on both — the point is that they
+      // ANSWERED, not what they said.
+      const ghScript = [
+        "#!/bin/sh",
+        'case "$1" in',
+        '  issue) echo "[]" ;;',
+        `  api) echo '{"data":{"repository":{}}}' ;;`,
+        "  *) exit 0 ;;",
+        "esac",
+        "",
+      ].join("\n");
+      await writeFile(join(shimBin, "gh"), ghScript, { mode: 0o755 });
+      await git(target, "checkout", "-q", "-b", "sandbar/issue-7-target");
+      await git(target, "commit", "-q", "--allow-empty", "-m", "work");
+      await git(target, "checkout", "-q", "main");
+
+      const state = await gatherState(cfg(layoutAt(target)));
+
+      expect(state.issueStatesKnown).toBe(true);
+      expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
     });
 
     // A chunk branch (#58) is unmerged for exactly as long as the human
