@@ -281,12 +281,17 @@ and used to announce themselves in four different ways, the halt in none at all.
   series, because #65's exit-75 seam is between two processes and no per-run
   holder can span it. A lock is HELD only when the OS has confirmed it (the
   script prints its marker after `SetThreadExecutionState` returns a non-zero
-  previous state), it is released by EOF ON STDIN so it cannot outlive its
-  owner, and every held / refused / lost / released transition is a line in
-  `orchestrator.log` — before this the module logged nothing at all and "was
-  the lock held during run X?" was unanswerable. `src/keepawake.ts` and
-  `src/keepawake-hold.ts` headers own the rest, including why the launcher runs
-  a program instead of making a call.
+  previous state), and it is released by EOF ON STDIN so it cannot outlive its
+  owner — which is also what makes the `process.exit` paths that run no cleanup
+  safe. Every held / refused / lost / released transition of the RUN's holder
+  is a line in `orchestrator.log` and on stdout; the SERIES holder predates
+  every log tree and reaches the terminal only. Before this the module logged
+  nothing at all and "was the lock held during run X?" was unanswerable. Two
+  ordering rules the module headers own the rest of: the release is registered
+  immediately after `runLogger.finalize` so #35's LIFO drain puts it after
+  every teardown and before `run-end`, and its log writes are AWAITED in that
+  cleanup action, because `process.exit` grants no event-loop turn and a
+  fire-and-forget `appendFile` reached the log on the exit-0 path alone.
 - **Credentials are a value, not a path (#38).** `config.env` is an allowlist
   record (empty value ⇒ inherit from `process.env`); `readEnvFile` is the
   opt-in loader. `src/env.ts`. A credential whose vendor interface is a FILE is

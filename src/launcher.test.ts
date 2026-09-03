@@ -787,6 +787,64 @@ describe("the series-long wake lock (#117)", () => {
     expect(logged.join("\n")).toContain("wake-lock: NOT held");
   });
 
+  it("re-takes a holder that died mid-series, and says so", () => {
+    // `main` is synchronous end to end, so `child.on(\"exit\")` can never fire
+    // and `exitCode` stays null: a lock that crashed in hour one would leave
+    // the rest of the series unlocked and silent. The liveness probe at the
+    // top of each iteration is the only moment there is to notice.
+    const d = driver({ status: EXIT_CODE_RELAUNCH }, { status: 0 });
+    const h = holder();
+    const logged: string[] = [];
+    // The real probe reads `/proc/<pid>/stat` for a `Z`, which a test cannot
+    // make true on demand for a process it did not fork — so the probe is a
+    // seam, exactly like `hold` and `run`.
+    let living = true;
+    const run = ((...args: unknown[]) => {
+      living = false;
+      return d.run(...(args as []));
+    }) as never;
+
+    expect(
+      main(
+        [],
+        io({
+          run,
+          hold: h.hold,
+          alive: () => living,
+          log: (m: string) => void logged.push(m),
+        }),
+      ),
+    ).toBe(0);
+    expect(h.holds).toHaveLength(2);
+    expect(logged.join("\n")).toContain("wake-lock: LOST");
+    // Both are released: the dead one's release is a no-op, and the live one
+    // must not be left behind.
+    expect(h.children.every((c) => c.ended)).toBe(true);
+  });
+
+  it("says so and runs anyway when the holder cannot be spawned at all", () => {
+    // `spawn` throws SYNCHRONOUSLY on argument and option faults. Uncaught,
+    // that escapes `main`, is not a `LaunchError`, and stops the series — for
+    // a wake lock. Same bargain as an older pin: say so, run anyway.
+    const d = driver({ status: 0 });
+    const logged: string[] = [];
+    expect(
+      main(
+        [],
+        io({
+          run: d.run,
+          hold: (() => {
+            throw new TypeError("ERR_INVALID_ARG_TYPE");
+          }) as never,
+          log: (m: string) => void logged.push(m),
+        }),
+      ),
+    ).toBe(0);
+    expect(d.launches).toHaveLength(1);
+    expect(logged.join("\n")).toContain("wake-lock: NOT held");
+    expect(logged.join("\n")).toContain("ERR_INVALID_ARG_TYPE");
+  });
+
   it("probes for the holder beside the driver's own bin", () => {
     expect(paths.wakeLock).toBe(
       join(paths.dir, "node_modules", "@offergeist", "sandbar", "dist", "keepawake-hold.js"),

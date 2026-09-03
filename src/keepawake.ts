@@ -108,6 +108,11 @@ export interface WakeLock {
   // replay is the point: `run.ts` takes the lock before the log tree exists
   // (#70 wants it covering preflight and the image builds too), so the sink
   // arrives after the first status and would otherwise miss it.
+  //
+  // ADDITIVE. A second caller does not displace the first: this module's whole
+  // complaint is that a wake lock used to fail by saying nothing, and a
+  // subscribe-shaped call that silently unhooks the existing subscriber is
+  // that failure with a new name.
   onStatus(sink: (line: string) => void): void;
   // For tests and for `keepawake-hold.ts`, which has to keep a process alive
   // exactly as long as the lock is worth holding.
@@ -155,7 +160,7 @@ export function startKeepawake(io: WakeLockIo = {}): WakeLock {
   const isWsl2 = io.isWsl2 ?? defaultIsWsl2;
 
   const lines: string[] = [];
-  let sink: ((line: string) => void) | null = null;
+  const sinks: Array<(line: string) => void> = [];
   let current: WakeLockStatus | null = null;
   let child: ChildProcess | null = null;
   let stopping = false;
@@ -165,7 +170,7 @@ export function startKeepawake(io: WakeLockIo = {}): WakeLock {
     current = status;
     const line = formatWakeLockStatus(status);
     lines.push(line);
-    sink?.(line);
+    for (const sink of sinks) sink(line);
   };
 
   const take = (): void => {
@@ -193,9 +198,12 @@ export function startKeepawake(io: WakeLockIo = {}): WakeLock {
     child = started;
 
     started.stdout?.on("data", (chunk: Buffer | string) => {
+      if (held) return;
       out += String(chunk);
-      if (!held && out.includes(HELD_MARKER)) {
+      if (out.includes(HELD_MARKER)) {
         held = true;
+        // Nothing reads it again, and the script blocks for hours after this.
+        out = "";
         report({ kind: "held" });
       }
     });
@@ -255,8 +263,12 @@ export function startKeepawake(io: WakeLockIo = {}): WakeLock {
       child = null;
       if (!c) return;
       try {
-        // EOF is what the script waits for; the kill is a belt for a child
-        // that is wedged somewhere before the read.
+        // Both, and the ORDER is not the interesting part: `end()` queues an
+        // async shutdown while `kill` is a syscall, so on this path the signal
+        // is what normally lands first. EOF is what makes the lock SAFE rather
+        // than what makes `stop()` work — it is the release that happens when
+        // nobody calls `stop()` at all, which is every `process.exit` that runs
+        // no cleanup, and a SIGKILL.
         c.stdin?.end();
         c.kill("SIGTERM");
       } catch {
@@ -268,7 +280,7 @@ export function startKeepawake(io: WakeLockIo = {}): WakeLock {
       if (wasHeld) report({ kind: "released" });
     },
     onStatus(next: (line: string) => void): void {
-      sink = next;
+      sinks.push(next);
       for (const line of lines) next(line);
     },
     status: () => current,

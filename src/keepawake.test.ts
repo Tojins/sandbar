@@ -126,6 +126,34 @@ describe("startKeepawake — the lock is confirmed, not assumed", () => {
     expect(line).not.toContain("\n");
   });
 
+  it("reports an ASYNC spawn failure — the realistic one — as a refusal", () => {
+    // A WSL2 host without interop on PATH fails here, not in the synchronous
+    // throw above: node reports ENOENT by event, after the spawn returned.
+    const child = new FakeChild();
+    const lock = startKeepawake(ioWith([child]));
+    child.emit("error", new Error("spawn powershell.exe ENOENT"));
+    expect(lock.status()).toMatchObject({ kind: "refused" });
+    expect(linesOf(lock)[0]).toContain("ENOENT");
+  });
+
+  it("keeps a late error off a lock that is already held", () => {
+    const child = new FakeChild();
+    const lock = startKeepawake(ioWith([child]));
+    child.confirm();
+    child.emit("error", new Error("EPIPE"));
+    expect(lock.status()).toEqual({ kind: "held" });
+  });
+
+  it("bounds the stderr it quotes, because this goes inside one log line", () => {
+    const child = new FakeChild();
+    const lock = startKeepawake(ioWith([child]));
+    child.stderr.emit("data", Buffer.from("x".repeat(1000)));
+    child.die(1);
+    const line = linesOf(lock)[0] ?? "";
+    expect(line).toContain("…");
+    expect(line.length).toBeLessThan(400);
+  });
+
   it("names the signal when the child was killed rather than exited", () => {
     const child = new FakeChild();
     const lock = startKeepawake(ioWith([child]));
@@ -157,8 +185,10 @@ describe("startKeepawake — a lock that dies is noticed and retaken", () => {
   });
 
   it("gives up rather than becoming a spawn loop", () => {
-    // Six children: the first plus MAX_RETAKES. A seventh spawn is the failure
-    // this bound exists to stop, and `ioWith` throws on it.
+    // Six children: the first plus exactly MAX_RETAKES. A seventh spawn is the
+    // failure this bound exists to stop — `ioWith` throws on it, and `take`
+    // catches that into a `refused`, so what actually pins the bound is the
+    // FINAL status being a give-up rather than another attempt.
     const kids = Array.from({ length: 6 }, () => new FakeChild());
     const lock = startKeepawake(ioWith(kids));
     for (const kid of kids) {
@@ -189,6 +219,21 @@ describe("startKeepawake — release", () => {
     expect(linesOf(lock)).not.toContain("wake-lock: released");
   });
 
+  it("cannot leave an orphan when it races a retake", () => {
+    // `take()` assigns `child` with no await between the spawn and the
+    // assignment, and the exit handler returns early once `stopping` is set —
+    // so the child a retake was about to install is the one `stop()` holds.
+    const first = new FakeChild();
+    const second = new FakeChild();
+    const lock = startKeepawake(ioWith([first, second]));
+    first.confirm();
+    first.die(0);
+    second.confirm();
+    lock.stop();
+    expect(second.stdinEnded).toBe(true);
+    expect(second.killed).toBe("SIGTERM");
+  });
+
   it("is idempotent, and a child dying after it is not a loss", () => {
     const child = new FakeChild();
     const lock = startKeepawake(ioWith([child]));
@@ -202,6 +247,22 @@ describe("startKeepawake — release", () => {
 });
 
 describe("startKeepawake — reporting", () => {
+  it("does not unhook a sink when a second one is added", () => {
+    // `run.ts` reports to the log and to stdout; a subscribe-shaped call that
+    // silently dropped the first subscriber would be this module's own
+    // complaint — failing by saying nothing — with a new name.
+    const child = new FakeChild();
+    const lock = startKeepawake(ioWith([child]));
+    const first: string[] = [];
+    const second: string[] = [];
+    lock.onStatus((l) => first.push(l));
+    lock.onStatus((l) => second.push(l));
+    child.confirm();
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(1);
+  });
+
+
   it("replays what happened before a sink was attached", () => {
     // The case `run.ts` is in: the lock is taken above #70's boundary, so the
     // log tree it reports into does not exist yet.

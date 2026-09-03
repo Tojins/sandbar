@@ -221,6 +221,10 @@ function seams(io) {
     // from `run` could not assert that exactly one is held for a whole series
     // of relaunches, which is the entire property.
     hold: io.hold ?? spawn,
+    // Seamed for the same reason `hold` is: "a holder that died is noticed" is
+    // a safety property, and the real probe answers off `/proc`, which a test
+    // cannot make say `Z` on demand for a process it did not fork.
+    alive: io.alive ?? wakeLockAlive,
     log: io.log ?? say,
   };
 }
@@ -237,6 +241,13 @@ function seams(io) {
 // could neither await a confirmation nor notice the lock dying. The child has
 // a live event loop and inherits stdout, so it reports its own status.
 //
+// That blockage is also why a dead holder is found by POLLING rather than by
+// an event: `child.on("exit")` can never fire in this process and `exitCode`
+// stays null, so `wakeLockAlive` reads `/proc` once per iteration instead —
+// see it for why `kill(pid, 0)` is not the probe. Nothing is noticed DURING a
+// launch, which is the price of a synchronous launcher and is bounded by how
+// long one driver run lasts.
+//
 // A missing program is a driver older than the feature, not a failure: the pin
 // LAGS this checkout always (#66). Say so and carry on unlocked — a launcher
 // that refused to run on the pin it was given would be a worse bargain than a
@@ -250,19 +261,54 @@ export function holdWakeLock(program, io = {}) {
     );
     return null;
   }
-  const child = hold(process.execPath, [program], {
-    // stdin is the lock's lifeline: this process holding the write end IS the
-    // lock, and its death — clean or not — closes the pipe and releases it.
-    // stdout and stderr are inherited so the child's own status lines reach
-    // the terminal without needing an event loop turn here.
-    stdio: ["pipe", "inherit", "inherit"],
-  });
+  let child;
+  try {
+    child = hold(process.execPath, [program], {
+      // stdin is the lock's lifeline: this process holding the write end IS
+      // the lock, and its death — clean or not — closes the pipe and releases
+      // it. stdout and stderr are inherited so the child's own status lines
+      // reach the terminal without needing an event loop turn here.
+      stdio: ["pipe", "inherit", "inherit"],
+    });
+  } catch (err) {
+    // `spawn` throws SYNCHRONOUSLY on argument and option faults, and an
+    // uncaught one here would escape `main`, fail to be a `LaunchError` and
+    // stop the series — for a wake lock. Same bargain as the missing program
+    // above: say so, run anyway.
+    log(`wake-lock: NOT held — ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
   // Async `spawn` reports a failure by event, and this process is about to
   // stop turning its loop, so the handler is a best effort by construction.
   // The only reachable cause is `process.execPath` being unrunnable, which is
   // not a state this script could still be executing in.
   child.on?.("error", (err) => log(`wake-lock: NOT held — ${err.message}`));
   return child;
+}
+
+// Whether the holder is still alive, decided SYNCHRONOUSLY — which is the
+// whole difficulty. This process sits inside `spawnSync` for hours, so its
+// event loop never turns: `child.on("exit")` can never fire, and `exitCode`
+// stays null. `kill(pid, 0)` is no use either, because an unreaped child is a
+// zombie and answers "alive". So read the state field out of `/proc/<pid>/stat`
+// and treat `Z` as dead. Anything unreadable is treated as ALIVE: a probe that
+// cannot answer must not become a reason to spawn a second lock.
+//
+// Called once per iteration rather than continuously — the only moment this
+// process is running is between two driver launches, and that is exactly the
+// seam a fresh lock would be taken for.
+function wakeLockAlive(child) {
+  const pid = child?.pid;
+  if (typeof pid !== "number") return true;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    // The state letter is the field after the parenthesised comm, which may
+    // itself contain spaces and parentheses — so split at the LAST ')'.
+    const after = stat.slice(stat.lastIndexOf(")") + 1).trim();
+    return after.charAt(0) !== "Z";
+  } catch {
+    return true;
+  }
 }
 
 function releaseWakeLock(child) {
@@ -385,7 +431,7 @@ function repoRoot() {
 // temporary directory holding a pin and a fake install; production passes
 // neither it nor the seams.
 export function main(argv, { root = repoRoot(), ...io } = {}) {
-  const { run, log } = seams(io);
+  const { run, alive, log } = seams(io);
   // `--install-only` is for the hand paths — `sandbar gate`, or a config load —
   // which need the driver present but are not a series. Deliberately not a
   // `--config`-style flag: it configures nothing, it stops the loop before it
@@ -408,6 +454,21 @@ export function main(argv, { root = repoRoot(), ...io } = {}) {
       // driver's. That leaves the FIRST install uncovered, deliberately: it is a
       // human-initiated command whose install lasts seconds, against a seam that
       // recurs unattended every time a cycle lands a merge.
+      //
+      // Re-taken when the holder has DIED. Held once and never checked, a lock
+      // that crashed in hour one would leave the rest of the series unlocked
+      // and silent, which is #117's own complaint wearing the launcher's
+      // clothes. This is the only moment there is to notice.
+      if (wakeLock !== null && !alive(wakeLock)) {
+        log("wake-lock: LOST — the holder is gone; retaking");
+        // Released before it is dropped, even though a dead holder needs no
+        // release. The probe only ever answers "dead" on an explicit `Z` and
+        // treats anything unreadable as alive, so this is unreachable today —
+        // but the alternative is a reference dropped on the floor, and the one
+        // thing this file must never do is leak a lock nobody can reach.
+        releaseWakeLock(wakeLock);
+        wakeLock = null;
+      }
       if (wakeLock === null) wakeLock = holdWakeLock(holder, io);
       log(`running ${spec}`);
       // `cwd: root` rather than this process's own, and that is a decision. The

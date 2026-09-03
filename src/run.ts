@@ -310,27 +310,18 @@ export async function run(
 
   installCleanupTraps();
 
-  // THE WAKE LOCK IS FIRST, and that is the whole of #117's ordering (#35's
-  // registry is LIFO, so first registered is last released).
+  // THE WAKE LOCK IS TAKEN FIRST (#117), before the single-instance lock and
+  // therefore before preflight and the image builds — which is where the
+  // minutes are. A wake lock is a request to the HOST, not a claim on the
+  // workdir, so a launch that goes on to lose the lock has taken nothing it
+  // has to give back, and nothing here needs the lock to be won first.
   //
-  // It used to be taken here at step fifteen, after preflight, both sweeps, the
-  // image builds and the uid check, and released by an `onCleanup` registered
-  // there too — which put it AHEAD of the lock release and the log tree's
-  // `run-end` marker in the drain. On 2026-09-03 that cost a run 50 minutes:
-  // `exit: relaunch` was printed at 16:33:29.043, the host entered `System
-  // Idle` sleep at 16:33:29.049, and `run-end` did not land until 17:23:42 —
-  // two seconds after a human touched the keyboard. The run was not over when
-  // its exit line was printed, and the lock was.
-  //
-  // Registered before the single-instance lock deliberately. A wake lock is a
-  // request to the HOST, not a claim on the workdir, so a launch that goes on
-  // to lose the lock has taken nothing it has to give back, and covering
-  // preflight and the image builds — which is where the minutes are — needs it
-  // held before either. It is reported once the log tree exists rather than
-  // here, because #70's boundary is the lock and this sits above it; the status
-  // replays, so nothing is lost by waiting.
+  // Its RELEASE is registered further down, beside the log tree's, and the
+  // ordering there is the actual fix — see that site. Between here and there
+  // sit two `process.exit` calls that run no cleanup at all (`GH_TOKEN`, and
+  // losing the lock), and neither leaks: the lock's lifetime is the stdin pipe,
+  // so a process that dies without releasing releases anyway.
   const wakeLock = startKeepawake();
-  onCleanup(() => wakeLock.stop());
 
   // The lock comes BEFORE preflight (#32). Preflight is not read-only: it
   // fetches, and it `git branch -D`s every `sandbar/issue-*` branch it finds
@@ -394,14 +385,59 @@ export async function run(
   await runLogger.appendOrchestrator(driverIdentity);
   let cleanupReason = "normal-exit";
   onCleanup(() => runLogger.finalize(cleanupReason));
+
+  // THE WAKE LOCK IS RELEASED HERE, and #35's LIFO drain is the whole of #117's
+  // ordering: registered immediately after `finalize`, it drains immediately
+  // BEFORE it — so every teardown registered later (the image removal below,
+  // and every lazy `registerDisposable` a cycle adds) has already run while the
+  // host was still forbidden to sleep, and `run-end` is still the last line in
+  // the log.
+  //
+  // It used to be registered at step fifteen, after the image builds, which put
+  // it ahead of every teardown, ahead of the lock release and ahead of the
+  // `run-end` marker. On 2026-09-03 that cost a run 50 minutes: `exit:
+  // relaunch` was printed at 16:33:29.043, the host entered `System Idle` sleep
+  // at 16:33:29.049, and `run-end` did not land until 17:23:42 — two seconds
+  // after a human touched the keyboard. The run was not over when its exit line
+  // was printed, and the lock was.
+  //
+  // What is left uncovered is the microsecond between this and the process
+  // exiting, plus the relaunch seam itself; `scripts/sandbar-launch.mjs` holds
+  // its own for the whole series precisely because no per-run holder can span
+  // an exit (#65).
+  //
+  // `await statusWrites` is not decoration. `appendFile` needs a real event
+  // loop turn, and every non-zero exit — including 75, the relaunch this issue
+  // was written about — leaves the drain for `process.exit`, which grants none:
+  // a fire-and-forget append of the `released` line reached the log on the
+  // exit-0 path alone. The chain is awaited so the last thing the lock says is
+  // in the record it is claimed to be in.
+  let statusWrites: Promise<void> = Promise.resolve();
+  onCleanup(async () => {
+    wakeLock.stop();
+    await statusWrites;
+  });
+
   // Whether the host can sleep under this run is an OUTCOME, and before #117 it
   // was in no record at all — not the log, not stdout — so "was the lock held
   // during run X?" could only be answered by reproducing the powershell call by
-  // hand. Log-only: it is a fact about the host, not a titled rendering, and
-  // #70 keeps stdout for the latter. The sink stays attached for the life of
-  // the run, so a child that dies four hours in says so here too.
+  // hand. Both streams, in the shape of #69's driver-identity line: the log
+  // owns it (#70), and the terminal additionally renders it, because "is this
+  // host going to sleep under my run?" is a question asked while standing at
+  // one. Bounded by construction — one `held` plus at most `MAX_RETAKES`
+  // losses — so it cannot become the trace stdout must never carry.
+  //
+  // The appends are CHAINED rather than fired: two of them racing would
+  // interleave in an append-only file, and a bare `void` on a rejected write
+  // reaches `installCleanupTraps`'s `unhandledRejection` trap, which exits 1 —
+  // turning a failed log write into a relaunch that never happens.
   wakeLock.onStatus((line) => {
-    void runLogger.appendOrchestrator(line);
+    console.log(line);
+    statusWrites = statusWrites
+      .then(() => runLogger.appendOrchestrator(line))
+      .catch((err: unknown) => {
+        console.error(`Could not log wake-lock status: ${String(err)}`);
+      });
   });
 
   // THE one site that emits a terminal (#70), and it is declared up here

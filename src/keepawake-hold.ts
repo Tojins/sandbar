@@ -33,31 +33,51 @@
 // this driver hold a lock for me?" without a version comparison that could
 // disagree with the file it is describing.
 
+import type { EventEmitter } from "node:events";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { startKeepawake } from "./keepawake.js";
+import { startKeepawake, type WakeLock, type WakeLockIo } from "./keepawake.js";
 
-export function holdUntilStdinCloses(): void {
-  const lock = startKeepawake();
-  lock.onStatus((line) => console.log(`sandbar launcher: ${line}`));
+// Everything this program touches outside `keepawake.ts`, seamed for the same
+// reason `sandbar-launch.mjs` seams its two: the one behaviour here — release
+// on stdin EOF — is the whole safety property, and a property nothing
+// exercises is a claim. Production passes none of them.
+export interface HoldIo extends WakeLockIo {
+  stdin?: EventEmitter & { resume(): void };
+  signals?: EventEmitter;
+  exit?: (code: number) => void;
+  log?: (line: string) => void;
+}
+
+export function holdUntilStdinCloses(io: HoldIo = {}): WakeLock {
+  const stdin = io.stdin ?? process.stdin;
+  const signals = io.signals ?? process;
+  const exit = io.exit ?? ((code: number) => process.exit(code));
+  const log = io.log ?? ((line: string) => console.log(line));
+
+  const lock = startKeepawake(io);
+  // Prefixed like the launcher's own lines because that is whose stdout this
+  // is inheriting; an operator reading a terminal sees one voice, not two.
+  lock.onStatus((line) => log(`sandbar launcher: ${line}`));
 
   const release = (): void => {
     lock.stop();
-    process.exit(0);
+    exit(0);
   };
 
   // `end` is the launcher going away. `resume()` is required or the stream
   // stays paused and `end` never fires.
-  process.stdin.resume();
-  process.stdin.on("end", release);
-  process.stdin.on("close", release);
+  stdin.resume();
+  stdin.on("end", release);
+  stdin.on("close", release);
   // Deliberately NOT `installCleanupTraps` (#35): that registry belongs to a
   // run, and this process owns exactly one resource. A signal here means the
   // launcher's whole process group was signalled, and the lock goes with it.
-  process.on("SIGINT", release);
-  process.on("SIGTERM", release);
+  signals.on("SIGINT", release);
+  signals.on("SIGTERM", release);
+  return lock;
 }
 
 // Only when this file IS the program — importing it must not take a lock. The
