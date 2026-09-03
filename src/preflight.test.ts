@@ -320,13 +320,17 @@ describe("checkInvariants", () => {
   });
 
   it("still refuses when the tracker could not be asked", () => {
-    // Fail-closed is unchanged: an unclassifiable branch is never a silent pass.
-    const f = failures({
+    // Fail-closed is unchanged, and that is about the RESULT rather than the
+    // message: an unclassifiable branch must not produce a passing Invariant
+    // beside the complaint, which is what a "warn and continue" softening of
+    // this would look like from the outside.
+    const results = checkInvariants({
       ...cleanState,
       issueStatesKnown: false,
       unmergedIssueBranches: ["sandbar/issue-98-parked"],
     });
-    expect(f.length).toBe(1);
+    expect(results.every((r) => !r.ok)).toBe(true);
+    expect(results.length).toBe(1);
   });
 
   it("says nothing about branches when the tracker is silent and there are none", () => {

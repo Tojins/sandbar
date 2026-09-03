@@ -9,7 +9,7 @@
 // again. Real git, not a fake exec, because the assertions are about refs that
 // did or did not move.
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -109,6 +109,16 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // pre-#72 config produces.
     agentProviders: ["claude"] as readonly AgentProviderName[],
   });
+
+  // Replaces the failing `gh` the suite installs. `writeFile`'s `mode` applies
+  // only when it CREATES the file and `beforeEach` has already made this one,
+  // so the mode is set explicitly rather than through an option Node ignores
+  // here — otherwise the shim is silently whatever the first write left.
+  const writeGhShim = async (lines: readonly string[]) => {
+    const gh = join(shimBin, "gh");
+    await writeFile(gh, [...lines, ""].join("\n"));
+    await chmod(gh, 0o755);
+  };
 
   it("fetches origin member refs before later preflight checks", async () => {
     await git(target, "update-ref", "refs/heads/sandbar/member-7", "HEAD");
@@ -358,16 +368,14 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       // Only the two shapes the lookups make: `gh issue list --json …` and
       // `gh api graphql`. Empty answers on both — the point is that they
       // ANSWERED, not what they said.
-      const ghScript = [
+      await writeGhShim([
         "#!/bin/sh",
         'case "$1" in',
         '  issue) echo "[]" ;;',
         `  api) echo '{"data":{"repository":{}}}' ;;`,
         "  *) exit 0 ;;",
         "esac",
-        "",
-      ].join("\n");
-      await writeFile(join(shimBin, "gh"), ghScript, { mode: 0o755 });
+      ]);
       await git(target, "checkout", "-q", "-b", "sandbar/issue-7-target");
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
@@ -375,6 +383,30 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const state = await gatherState(cfg(layoutAt(target)));
 
       expect(state.issueStatesKnown).toBe(true);
+      expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
+    });
+
+    // The case neither of the two above can fail on: ONE lookup down. A working
+    // `gh issue list` beside a failing `gh api graphql` is what a half-degraded
+    // tracker looks like, and reading `issueStatesKnown` off either half alone
+    // passes both tests above while putting `git branch -D` back under a branch
+    // no lookup judged. The conjunction is the assertion.
+    it("reports the issue states as unknown when only one lookup answers", async () => {
+      await writeGhShim([
+        "#!/bin/sh",
+        'case "$1" in',
+        '  issue) echo "[]" ;;',
+        "  api) exit 1 ;;",
+        "  *) exit 0 ;;",
+        "esac",
+      ]);
+      await git(target, "checkout", "-q", "-b", "sandbar/issue-7-target");
+      await git(target, "commit", "-q", "--allow-empty", "-m", "work");
+      await git(target, "checkout", "-q", "main");
+
+      const state = await gatherState(cfg(layoutAt(target)));
+
+      expect(state.issueStatesKnown).toBe(false);
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
     });
 

@@ -129,8 +129,9 @@
 // at every plan for the label re-applied mid-run, which no preflight sees.
 //   - discarded — the branch's upstream is `[gone]` (PR merged+deleted upstream
 //                 while local is behind). Local commits would be orphaned.
-//   - unmerged  — everything else: the issue reads CLOSED. Nothing will ever
-//                 re-queue it, so it stays a hard error.
+//   - unmerged  — everything else: the issue reads CLOSED, or the branch
+//                 carries no issue number at all. Nothing will ever re-queue
+//                 it, so it stays a hard error.
 // The open/closed fact comes from `fetchIssueStates`, the same strongly
 // consistent GraphQL batch the planner uses for its CLOSED guard (#16).
 //
@@ -138,8 +139,13 @@
 // CLOSED. Both issue lookups (`fetchOpenReadyIssueNumbers`,
 // `fetchOpenIssueNumbers`) answer in two states, the way `fetchChunkRef` buys
 // "origin has no such branch" apart from "origin could not be asked" (#64),
-// and an unanswered lookup empties BOTH sets — so every issue branch in the
-// cache falls past `resumable` and `parked` at once. Collapsing that into
+// and a `gh` that cannot be reached fails both at once — so every issue branch
+// in the cache falls past `resumable` and `parked` together. Either one
+// failing ALONE is enough to make the split unreliable (a failed ready listing
+// demotes a resumable branch to `parked`, and the remaining lookup then answers
+// authoritatively about the rest), which is why `issueStatesKnown` is the
+// conjunction rather than the open/closed half alone: a conservative choice,
+// not a mechanical consequence. Collapsing that into
 // `unmerged` printed a list of parked branches under `git branch -D <name>`:
 // destructive advice about work whose parking comment says the branch IS the
 // work, produced by an expired token rather than by anything about the
@@ -525,9 +531,10 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
               `${repoSlug(s.configuredRepo)} did not answer the issue lookups, ` +
               "so a branch whose issue is CLOSED cannot be told from one that " +
               `is merely parked:\n${list}\n` +
-              "Nothing was changed. Fix whatever stopped `gh` from reaching " +
-              "the tracker — the checks above may already name it — and " +
-              "re-run. Do not delete these on the strength of this message.",
+              "None of the branches above was touched. Fix whatever stopped " +
+              "`gh` from reaching the tracker — the checks above may already " +
+              "name it — and re-run. Do not delete these on the strength of " +
+              "this message.",
           },
     );
   }
@@ -789,11 +796,13 @@ async function fetchOpenIssueNumbers(
 
 // The issues already landed on a chunk branch (#60), through the planner's own
 // query for the same reason as above. This one stays a plain fail-closed set,
-// and the difference from its two neighbours is the ref space rather than a
-// change of mind: it reads local git refs, so a failure here is not a tracker
-// outage and does not blind the four-way split — a leftover member branch whose
-// issue is open still classifies as `parked` off the lookups above, and only
-// the safe local reap is skipped.
+// and the difference from its two neighbours is what it reads rather than a
+// change of mind: origin's chunk and member refs in the CACHE, which preflight
+// has just fetched, so a failure here is git's and not a tracker outage. It
+// does not blind the four-way split either — a leftover member branch whose
+// issue is open classifies as `parked` off the lookups above, and one whose
+// issue is closed is still the hard `unmerged` error it was before chunks
+// existed. Only the safe local reap is skipped.
 async function fetchChunkMemberIssueNumbers(
   repoDir: string,
 ): Promise<ReadonlySet<number>> {
