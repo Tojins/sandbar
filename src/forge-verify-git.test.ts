@@ -15,7 +15,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -182,10 +182,13 @@ describe("realVerifyAdapter git primitives (real repos)", () => {
     // Resolved via git rather than assumed at `.git/MERGE_HEAD`: in a linked
     // worktree — which is what the merger actually runs in — the merge state
     // lives under `.git/worktrees/<name>/`, so the naive path is absent either
-    // way and would make this assertion pass for the wrong reason.
-    expect(existsSync(await git(work, "rev-parse", "--git-path", "MERGE_HEAD"))).toBe(
-      false,
-    );
+    // way and would make this assertion pass for the wrong reason. `--git-path`
+    // answers RELATIVE to the repo it ran in, so it is resolved against `work`
+    // here: read against `process.cwd()` it names the test runner's own repo,
+    // and an operator whose checkout is mid-merge fails this test on a stranger.
+    expect(
+      existsSync(resolve(work, await git(work, "rev-parse", "--git-path", "MERGE_HEAD"))),
+    ).toBe(false);
     // Still on a usable HEAD, not mid-merge.
     await expect(git(work, "status", "--porcelain")).resolves.not.toContain("UU");
   });
