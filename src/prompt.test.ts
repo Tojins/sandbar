@@ -433,11 +433,13 @@ describe("reviewer prior-round history (#88)", () => {
   it("preserves a harness-failure hole because only reviewed rounds are supplied", () => {
     const round3 = { ...followupRejection, round: 3, head: "3333333" };
     const [correctness, followup] = renderBoth([correctnessRejection, round3]);
+    const expected =
+      "## Prior review rounds\n\nThe following rounds reviewed earlier heads of this branch, in order:\n\n" +
+      "### Round 1 — head=1111111\ncorrectness: CHANGES-REQUESTED\nNull input crashes.\n\n" +
+      "### Round 3 — head=3333333\ncorrectness: APPROVED\n" +
+      "followup: CHANGES-REQUESTED\n### Tests\n\nThe error branch is uncovered.";
     for (const slot of [correctness, followup]) {
-      expect(slot).toContain("### Round 1 — head=1111111");
-      expect(slot).toContain("### Round 3 — head=3333333");
-      expect(slot).not.toContain("### Round 2 —");
-      expect(slot).not.toMatch(/harness.failed/i);
+      expect(slot).toContain(expected);
     }
   });
 
