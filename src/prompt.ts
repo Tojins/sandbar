@@ -573,18 +573,17 @@ async function buildReviewerSlotInputs(
     )
   ).trim();
 
+  // The follow-up's mode and anchor are one fact read off #88's history
+  // (#107), derived again by the renderer; only the diff payload needs git.
   const followup = followupReviewContext(inputs.priorRounds);
-  const changedSince = followup.mode === "verify"
-    ? {
-        anchor: followup.anchor,
-        diff: (
-          await readGit(
-            ["diff", `${followup.anchor}..HEAD`],
-            worktreePath,
-            `changes since the last follow-up review for ${inputs.issue.branch}, anchored at ${followup.anchor}`,
-          )
-        ).trim(),
-      }
+  const changedSinceDiff = followup.mode === "verify"
+    ? (
+        await readGit(
+          ["diff", `${followup.anchor}..HEAD`],
+          worktreePath,
+          `changes since the last follow-up review for ${inputs.issue.branch}, anchored at ${followup.anchor}`,
+        )
+      ).trim()
     : undefined;
 
   const codingStandardsPath = resolveCodingStandardsPath(
@@ -592,7 +591,7 @@ async function buildReviewerSlotInputs(
     inputs.codingStandardsPath,
   );
 
-  return { ...inputs, codingStandardsPath, commits, diff, changedSince };
+  return { ...inputs, codingStandardsPath, commits, diff, changedSinceDiff };
 }
 
 // Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
@@ -602,10 +601,11 @@ async function buildReviewerSlotInputs(
 export type ReviewerSlotRender = ReviewerPromptInputs & {
   readonly commits: string;
   readonly diff: string;
-  readonly changedSince?: {
-    readonly anchor: string;
-    readonly diff: string;
-  };
+  // `git diff <anchor>..HEAD`, required exactly when `priorRounds` puts the
+  // follow-up in verify mode (#107). Not a source of the mode: the renderer
+  // reads that off `priorRounds`, and a verify render without this field is
+  // refused rather than shown as "no changes" (#40).
+  readonly changedSinceDiff?: string;
 };
 
 export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
@@ -614,6 +614,39 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
 
 export function renderReviewerFollowupSlot(inputs: ReviewerSlotRender): string {
   return renderReviewerTemplate(REVIEWER_FOLLOWUP_TPL, inputs);
+}
+
+// The two #107 slots of the follow-up template. Listing mode until an entry
+// in #88's history carries a follow-up verdict; verify mode anchored at the
+// newest one that does, with the lines changed since it as a second diff. The
+// diff payload is the one thing the async builder alone can supply, so its
+// absence in verify mode is a caller error and throws — an empty diff means
+// git said nothing changed, never that nothing was read.
+function renderFollowupSlots(
+  inputs: ReviewerSlotRender,
+): { readonly followupMode: string; readonly changedSinceDiff: string } {
+  const followup = followupReviewContext(inputs.priorRounds);
+  if (followup.mode === "list") {
+    return {
+      followupMode: section(REVIEWER_FOLLOWUP_LISTING_TPL),
+      changedSinceDiff: "",
+    };
+  }
+  if (inputs.changedSinceDiff === undefined) {
+    throw new Error(
+      `reviewer follow-up prompt: verify mode anchored at ${followup.anchor} ` +
+        "was rendered without its changed-since diff",
+    );
+  }
+  const body = inputs.changedSinceDiff
+    ? `\`\`\`diff\n${inputs.changedSinceDiff}\n\`\`\``
+    : `(empty — no changes since \`${followup.anchor}\`)`;
+  return {
+    followupMode: section(REVIEWER_FOLLOWUP_VERIFY_TPL),
+    changedSinceDiff: section(
+      `## Changed since the last follow-up review\n\n${body}`,
+    ),
+  };
 }
 
 function renderReviewerTemplate(
@@ -650,16 +683,6 @@ function renderReviewerTemplate(
         rounds: inputs.priorRounds.map(renderPriorReviewRound).join("\n\n"),
       });
 
-  const followupMode = inputs.changedSince
-    ? REVIEWER_FOLLOWUP_VERIFY_TPL
-    : REVIEWER_FOLLOWUP_LISTING_TPL;
-
-  const changedSinceDiff = inputs.changedSince
-    ? `## Changed since the last follow-up review\n\n${inputs.changedSince.diff
-      ? `\`\`\`diff\n${inputs.changedSince.diff}\n\`\`\``
-      : `(empty — no changes since \`${inputs.changedSince.anchor}\`)`}`
-    : "";
-
   return render(template, {
     branch: issue.branch,
     baseRef: base.ref,
@@ -670,8 +693,11 @@ function renderReviewerTemplate(
     commits: section(commitsBlock),
     diff: section(diffBlock),
     priorRounds: section(priorRounds),
-    followupMode: section(followupMode),
-    changedSinceDiff: section(changedSinceDiff),
+    // Only the follow-up template has these two slots. Supplying them to the
+    // correctness template too would let a future `{{followupMode}}` in
+    // `reviewer.md` render silently; withholding them makes `render` throw
+    // instead, which keeps the correctness pass strict every round (#107).
+    ...(template === REVIEWER_FOLLOWUP_TPL ? renderFollowupSlots(inputs) : {}),
     codingStandards: CODING_STANDARDS,
     projectStandards: projectStandardsSlot(codingStandardsPath),
     conventionsRef: conventionsRef(claudeMdPath, contextMdPath),

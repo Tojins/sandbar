@@ -340,27 +340,32 @@ describe("renderReviewerFollowupSlot", () => {
       "There is no limit on length.",
     );
     expect(slot).not.toContain("## Changed since the last follow-up review");
+    // The restriction half of the ride-along contract: a listing pass has no
+    // permission above it, so this sentence is what forbids `### Non-blocking`.
+    expect(slot).toMatch(
+      /`### Non-blocking` is allowed only\s+where the instructions above explicitly permit it\./,
+    );
   });
 
+  // One follow-up verdict in #88's history is what puts the pass in verify
+  // mode, anchored at that round's head (#107).
+  const afterListing: readonly PriorReviewRound[] = [{
+    round: 2,
+    head: "abc1234",
+    correctness: { verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>" },
+    followup: {
+      verdict: "CHANGES-REQUESTED",
+      prose: "### Tests\n\nMissing coverage.\n<verdict>CHANGES-REQUESTED</verdict>",
+    },
+  }];
+
   it("renders the exact verify contract and changed-since diff", () => {
-    const priorRounds: readonly PriorReviewRound[] = [{
-      round: 2,
-      head: "abc1234",
-      correctness: { verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>" },
-      followup: {
-        verdict: "CHANGES-REQUESTED",
-        prose: "### Tests\n\nMissing coverage.\n<verdict>CHANGES-REQUESTED</verdict>",
-      },
-    }];
     const slot = renderReviewerFollowupSlot({
       ...baseInputs,
-      priorRounds,
+      priorRounds: afterListing,
       commits: "a1 first",
       diff: "whole branch",
-      changedSince: {
-        anchor: "abc1234",
-        diff: "diff --git a/x b/x\n+new line",
-      },
+      changedSinceDiff: "diff --git a/x b/x\n+new line",
     });
     expect(slot).toContain(
       "An earlier pass listed this branch's tests, spec and standards findings; the history above carries them. " +
@@ -377,11 +382,38 @@ describe("renderReviewerFollowupSlot", () => {
   it("renders an empty changed-since diff as no changes since the anchor", () => {
     const slot = renderReviewerFollowupSlot({
       ...baseInputs,
+      priorRounds: afterListing,
       commits: "a1 first",
       diff: "whole branch",
-      changedSince: { anchor: "abc1234", diff: "" },
+      changedSinceDiff: "",
     });
     expect(slot).toContain("(empty — no changes since `abc1234`)");
+  });
+
+  it("refuses a verify render without its changed-since diff rather than claiming no changes", () => {
+    expect(() =>
+      renderReviewerFollowupSlot({
+        ...baseInputs,
+        priorRounds: afterListing,
+        commits: "a1 first",
+        diff: "whole branch",
+      }),
+    ).toThrow(/verify mode anchored at abc1234 was rendered without its changed-since diff/);
+  });
+
+  it("keeps both mode blocks and the changed-since diff out of the correctness prompt", () => {
+    for (const changedSinceDiff of ["diff --git a/x b/x\n+new line", undefined]) {
+      const slot = renderReviewerSlot({
+        ...baseInputs,
+        priorRounds: afterListing,
+        commits: "a1 first",
+        diff: "whole branch",
+        changedSinceDiff,
+      });
+      expect(slot).not.toContain("## Changed since the last follow-up review");
+      expect(slot).not.toContain("This is the only pass that reviews the whole branch");
+      expect(slot).not.toContain("An earlier pass listed this branch's");
+    }
   });
 
   it("requires test findings to identify a deletion the suite cannot detect", () => {
@@ -486,8 +518,17 @@ describe("reviewer prior-round history (#88)", () => {
       prose: "### Tests\n\nThe error branch is uncovered.\n<verdict>CHANGES-REQUESTED</verdict>",
     },
   };
+  // A history carrying a follow-up verdict puts the follow-up in verify mode,
+  // which requires the changed-since payload (#107); these tests read only
+  // the history block, so an empty diff stands in.
   const renderBoth = (priorRounds: readonly PriorReviewRound[]) => {
-    const inputs = { ...baseInputs, priorRounds, commits: "a1 first", diff: "diff" };
+    const inputs = {
+      ...baseInputs,
+      priorRounds,
+      commits: "a1 first",
+      diff: "diff",
+      changedSinceDiff: "",
+    };
     return [renderReviewerSlot(inputs), renderReviewerFollowupSlot(inputs)] as const;
   };
 
