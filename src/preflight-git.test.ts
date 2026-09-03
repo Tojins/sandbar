@@ -23,6 +23,7 @@ import {
   gatherState,
   readConfigStaleness,
   runPreflight,
+  syncKeptIssueBranches,
 } from "./preflight.js";
 import { type RepoLayout, ensureRepoCache, repoLayout } from "./repo-cache.js";
 
@@ -753,5 +754,91 @@ describe("readConfigStaleness — the config the checkout is missing (#66)", () 
     expect(
       await readConfigStaleness({ layout, sourceBranch: "main", configPath }),
     ).toMatchObject({ behind: 0, touchingConfig: 0 });
+  });
+});
+
+// #112 — the branches preflight keeps are brought level with origin's copy,
+// and a diverged one is what it refuses over. The per-branch decision is
+// git-ops.ts's and tested there; this is the loop and its two outputs.
+describe("syncKeptIssueBranches — kept branches follow origin's copy (#112)", () => {
+  let root: string;
+  let origin: string;
+  let work: string;
+  let cache: string;
+
+  const tip = async (repo: string, ref: string): Promise<string> =>
+    (await git(repo, "rev-parse", "--verify", ref)).stdout.trim();
+  const pushOn = async (branch: string, msg: string): Promise<string> => {
+    await git(work, "checkout", "-q", "-B", branch);
+    await git(work, "commit", "-q", "--allow-empty", "-m", msg);
+    await git(work, "push", "-q", "origin", branch);
+    return tip(work, "HEAD");
+  };
+  const cacheBranchAt = (branch: string, sha: string) =>
+    git(cache, "branch", "--no-track", branch, sha);
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-112-pre-"));
+    origin = join(root, "origin.git");
+    work = join(root, "work");
+    cache = join(root, "cache.git");
+    await mkdir(origin);
+    await git(origin, "init", "-q", "--bare", "-b", "main");
+    await git(root, "clone", "-q", origin, work);
+    await git(work, "config", "user.email", "t@t");
+    await git(work, "config", "user.name", "t");
+    await git(work, "commit", "-q", "--allow-empty", "-m", "init");
+    await git(work, "push", "-q", "-u", "origin", "main");
+    await mkdir(cache);
+    await git(cache, "init", "-q", "--bare");
+    await git(cache, "remote", "add", "origin", origin);
+    await git(cache, "fetch", "-q", "origin");
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("fast-forwards the behind ones, reports them, and lists the diverged one", async () => {
+    const behind = "sandbar/issue-1-behind";
+    const level = "sandbar/issue-2-level";
+    const split = "sandbar/issue-3-split";
+    const b1 = await pushOn(behind, "b1");
+    const b2 = await pushOn(behind, "b2");
+    const l1 = await pushOn(level, "l1");
+    const s1 = await pushOn(split, "s1");
+    const s2 = await pushOn(split, "s2");
+    await git(cache, "fetch", "-q", "origin");
+    await cacheBranchAt(behind, b1);
+    await cacheBranchAt(level, l1);
+    await cacheBranchAt(split, s1);
+    // The cache's own commit on `split`, unrelated to origin's s2.
+    const wt = join(root, "wt");
+    await git(cache, "worktree", "add", "-q", wt, split);
+    await exec("git", ["config", "user.email", "t@t"], { cwd: wt });
+    await exec("git", ["config", "user.name", "t"], { cwd: wt });
+    await exec("git", ["commit", "-q", "--allow-empty", "-m", "cache-only"], { cwd: wt });
+    const cacheOnly = await tip(wt, "HEAD");
+    await git(cache, "worktree", "remove", "--force", wt);
+
+    const result = await syncKeptIssueBranches(cache, [behind, level, split]);
+
+    expect(await tip(cache, behind)).toBe(b2);
+    expect(await tip(cache, level)).toBe(l1);
+    expect(await tip(cache, split)).toBe(cacheOnly);
+    expect(result.diverged).toEqual([{ branch: split, local: cacheOnly, origin: s2 }]);
+    expect(result.lines).toHaveLength(2);
+    expect(result.lines[0]).toContain(`${behind} fast-forwarded`);
+    expect(result.lines[1]).toContain(`${split} has diverged`);
+  });
+
+  it("has nothing to say and nothing to refuse when every kept branch is level", async () => {
+    const l1 = await pushOn("sandbar/issue-4-level", "l1");
+    await git(cache, "fetch", "-q", "origin");
+    await cacheBranchAt("sandbar/issue-4-level", l1);
+
+    const result = await syncKeptIssueBranches(cache, ["sandbar/issue-4-level"]);
+
+    expect(result).toEqual({ lines: [], diverged: [] });
   });
 });

@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SandbarError } from "./errors.js";
 import {
   ChunkBaseMissingError,
+  IssueBranchDivergedError,
   dirtyWorktreePaths,
   ensureIssueBranch,
   headMismatch,
@@ -475,7 +476,8 @@ describe("ensureIssueBranch — the chunk tip is the other seed (#61)", () => {
 
     const again = await ensureIssueBranch(cache, MEMBER, "main", CHUNK);
 
-    expect(again).toEqual(first);
+    // Same base; the resume additionally reports what origin's copy said (#112).
+    expect(again).toMatchObject(first);
     // And the accumulated commit is still there — the resume did not re-seed.
     expect((await git(cache, "rev-parse", `${MEMBER}~1`)).stdout.trim()).toBe(tip);
   });
@@ -602,6 +604,10 @@ describe("ensureIssueBranch — a failed fetch falls back to the cached tip (#61
     expect(base).toEqual({
       ref: `refs/remotes/origin/${CHUNK.branch}`,
       chunkBranch: CHUNK.branch,
+      // The same unreachable origin could not be asked for its copy of the
+      // issue branch either, and the seed says so rather than staying quiet
+      // about it (#112).
+      originSync: { kind: "origin-unreadable", detail: expect.any(String) },
     });
     expect(
       (await git(cache, "ls-tree", "--name-only", "sandbar/issue-11-member")).stdout,
@@ -754,5 +760,210 @@ describe("ensureIssueBranch — a non-root member with no chunk branch refuses (
     await expect(
       ensureIssueBranch(cache, "not-a-sandbar-branch", "main", REROOTED),
     ).rejects.toBeInstanceOf(ChunkBaseMissingError);
+  });
+});
+
+// #112 — origin's copy of the issue branch. Finalise's parking comment says
+// "push a fix on the branch and re-queue"; the cache's copy of that branch is
+// therefore stale the moment the human does, and a resume that read only the
+// cache built eight commits over the fix and had its push rejected. Real repos
+// again, because every claim is git's: what a fast-forward is, what `merge
+// --ff-only` does to a worktree's index, that `ls-remote --exit-code` says 2
+// for a ref origin does not have and something else for an origin it cannot
+// reach.
+describe("ensureIssueBranch — origin's copy of the branch (#112)", () => {
+  const B = "sandbar/issue-12-thing";
+  let root: string;
+  let origin: string;
+  let work: string;
+  let cache: string;
+
+  const git = (repo: string, ...args: string[]) => exec("git", args, { cwd: repo });
+  const tip = async (repo: string, ref: string): Promise<string> =>
+    (await git(repo, "rev-parse", "--verify", ref)).stdout.trim();
+  const hasRef = (repo: string, ref: string): Promise<boolean> =>
+    git(repo, "show-ref", "--verify", "--quiet", ref).then(
+      () => true,
+      () => false,
+    );
+
+  // A commit on `B` in the working clone, pushed to origin. Not `--allow-empty`
+  // for the worktree case: a tree change is what shows the checkout moved.
+  let n = 0;
+  const pushOnBranch = async (): Promise<string> => {
+    n += 1;
+    await git(work, "checkout", "-q", "-B", B);
+    await writeFile(join(work, `f${n}.txt`), `${n}\n`);
+    await git(work, "add", "-A");
+    await git(work, "commit", "-qm", `push ${n}`);
+    await git(work, "push", "-q", "origin", B);
+    return tip(work, "HEAD");
+  };
+  // The cache's branch at origin's current copy, the state a park leaves.
+  const cacheLevelWithOrigin = async (): Promise<string> => {
+    await git(cache, "fetch", "-q", "origin", `+refs/heads/${B}:refs/remotes/origin/${B}`);
+    await git(cache, "branch", "--no-track", B, `refs/remotes/origin/${B}`);
+    return tip(cache, `refs/heads/${B}`);
+  };
+  // A commit on the cache's branch that origin never saw — a run that died
+  // before its push — made through a worktree, then the worktree removed.
+  const commitInCache = async (): Promise<string> => {
+    const wt = join(root, "wt-cache");
+    await git(cache, "worktree", "add", "-q", wt, B);
+    await exec("git", ["config", "user.email", "t@t"], { cwd: wt });
+    await exec("git", ["config", "user.name", "t"], { cwd: wt });
+    await exec("git", ["commit", "-q", "--allow-empty", "-m", "unpushed"], { cwd: wt });
+    await git(cache, "worktree", "remove", "--force", wt);
+    return tip(cache, `refs/heads/${B}`);
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-112-"));
+    origin = join(root, "origin.git");
+    work = join(root, "work");
+    cache = join(root, "cache.git");
+    await mkdir(origin);
+    await git(origin, "init", "-q", "--bare", "-b", "main");
+    await git(root, "clone", "-q", origin, work);
+    await git(work, "config", "user.email", "t@t");
+    await git(work, "config", "user.name", "t");
+    await writeFile(join(work, "a.txt"), "a\n");
+    await git(work, "add", "-A");
+    await git(work, "commit", "-qm", "init");
+    await git(work, "push", "-q", "-u", "origin", "main");
+    await mkdir(cache);
+    await git(cache, "init", "-q", "--bare");
+    await git(cache, "remote", "add", "origin", origin);
+    await git(cache, "fetch", "-q", "origin");
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("leaves a branch level with origin alone", async () => {
+    await pushOnBranch();
+    const before = await cacheLevelWithOrigin();
+
+    const base = await ensureIssueBranch(cache, B, "main");
+
+    expect(base.originSync).toEqual({ kind: "in-sync", tip: before });
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(before);
+  });
+
+  // The #98 shape: parked at c1, the human pushes c2, re-queues.
+  it("fast-forwards a branch origin has moved ahead of", async () => {
+    await pushOnBranch();
+    const c1 = await cacheLevelWithOrigin();
+    const c2 = await pushOnBranch();
+
+    const base = await ensureIssueBranch(cache, B, "main");
+
+    expect(base.originSync).toEqual({ kind: "fast-forwarded", from: c1, to: c2 });
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(c2);
+    expect(base).toMatchObject({ ref: "origin/main", chunkBranch: null });
+  });
+
+  // A stranded worktree still has the branch checked out. Moving the ref under
+  // it would leave the worktree's index describing c1 as uncommitted changes
+  // against c2; the fast-forward has to go THROUGH the worktree.
+  it("fast-forwards through the worktree that holds the branch, leaving it clean", async () => {
+    await pushOnBranch();
+    await cacheLevelWithOrigin();
+    const wt = join(root, "wt");
+    await git(cache, "worktree", "add", "-q", wt, B);
+    const c2 = await pushOnBranch();
+
+    const base = await ensureIssueBranch(cache, B, "main");
+
+    expect(base.originSync).toMatchObject({ kind: "fast-forwarded", to: c2 });
+    expect(await tip(wt, "HEAD")).toBe(c2);
+    expect((await git(wt, "status", "--porcelain")).stdout).toBe("");
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(c2);
+  });
+
+  it("keeps a branch the cache is ahead of — a run that died before its push", async () => {
+    const c1 = await pushOnBranch();
+    await cacheLevelWithOrigin();
+    const c2 = await commitInCache();
+
+    const base = await ensureIssueBranch(cache, B, "main");
+
+    expect(base.originSync).toEqual({ kind: "local-ahead", local: c2, origin: c1 });
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(c2);
+  });
+
+  it("refuses a diverged branch, naming both tips, and moves nothing", async () => {
+    await pushOnBranch();
+    await cacheLevelWithOrigin();
+    const local = await commitInCache();
+    const remote = await pushOnBranch();
+
+    const err = await ensureIssueBranch(cache, B, "main").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(IssueBranchDivergedError);
+    const message = (err as Error).message;
+    expect(message).toContain(local.slice(0, 7));
+    expect(message).toContain(remote.slice(0, 7));
+    expect(message).toContain(cache);
+    expect(err).not.toBeInstanceOf(SandbarError);
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(local);
+  });
+
+  it("keeps a branch origin has no copy of, and drops a stale cached one", async () => {
+    await git(cache, "branch", "--no-track", B, "origin/main");
+    const before = await commitInCache();
+    // A remote-tracking ref left by an earlier fetch of a branch since deleted
+    // on origin: not to be read as origin's current answer.
+    await git(cache, "update-ref", `refs/remotes/origin/${B}`, "origin/main");
+
+    const base = await ensureIssueBranch(cache, B, "main");
+
+    expect(base.originSync).toEqual({ kind: "origin-absent" });
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(before);
+    expect(await hasRef(cache, `refs/remotes/origin/${B}`)).toBe(false);
+  });
+
+  it("continues from the cache's copy when origin cannot be asked, and says so", async () => {
+    await pushOnBranch();
+    const before = await cacheLevelWithOrigin();
+    await git(cache, "remote", "set-url", "origin", join(root, "nowhere.git"));
+
+    const base = await ensureIssueBranch(cache, B, "main");
+
+    expect(base.originSync).toMatchObject({ kind: "origin-unreadable" });
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(before);
+  });
+
+  // `rm -rf .sandbar` costs agent time, never correctness (#38): a parked
+  // branch the cache has lost is on origin, and that is where it resumes from.
+  it("cuts a missing branch from origin's copy when origin has one", async () => {
+    const c1 = await pushOnBranch();
+
+    const base = await ensureIssueBranch(cache, B, "main");
+
+    expect(base.originSync).toEqual({ kind: "resumed-from-origin", tip: c1 });
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(c1);
+    expect(base).toMatchObject({ ref: "origin/main", chunkBranch: null });
+  });
+
+  // A copy the base already contains is a leftover of work that landed; a
+  // re-opened issue starts fresh rather than on a tip behind the source branch.
+  it("seeds fresh when origin's copy is already contained in the base", async () => {
+    await git(work, "push", "-q", "origin", `main:refs/heads/${B}`);
+
+    const base = await ensureIssueBranch(cache, B, "main");
+
+    expect(base.originSync).toBeUndefined();
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(await tip(cache, "origin/main"));
+  });
+
+  it("seeds fresh and says so when origin cannot be asked about a missing branch", async () => {
+    await git(cache, "remote", "set-url", "origin", join(root, "nowhere.git"));
+
+    const base = await ensureIssueBranch(cache, B, "main");
+
+    expect(base.originSync).toMatchObject({ kind: "origin-unreadable" });
+    expect(await tip(cache, `refs/heads/${B}`)).toBe(await tip(cache, "origin/main"));
   });
 });

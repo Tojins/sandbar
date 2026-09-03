@@ -109,19 +109,24 @@
 //                 stranded work from an interrupted run (killed after the issue
 //                 agents finished but before/inside the merger). NOT an error:
 //                 the planner re-picks the issue and the inner loop continues
-//                 from the branch's existing commits (ensureIssueBranch keeps
-//                 them), so a killed run just restarts and finishes.
+//                 from the branch's commits, so a killed run just restarts and
+//                 finishes.
 //   - parked    — the branch maps to an issue that is still OPEN but not
 //                 `ready-for-agent`: parked by finalise (`needs-info`,
 //                 `agent-stuck`) or held back by a human with a label of their
-//                 own. NOT an error either, and the branch is KEPT, because it
-//                 is the resume copy. `ensureIssueBranch` reads only the
-//                 cache's local head — a missing one is seeded fresh from the
-//                 source branch, never from origin's copy of the issue branch —
-//                 so a preflight that refused over it forced the operator to
-//                 destroy exactly the branch finalise's parking comment told
-//                 them to push a fix on and re-queue. Announced every run so a
-//                 branch the operator has actually abandoned is not silent.
+//                 own. NOT an error either, and the branch is KEPT: a preflight
+//                 that refused over it forced the operator to destroy exactly
+//                 the branch finalise's parking comment told them to push a fix
+//                 on and re-queue. Announced every run so a branch the operator
+//                 has actually abandoned is not silent.
+// Both are measured against ORIGIN'S copy of the branch before the run goes on
+// (#112, `syncIssueBranchWithOrigin` in git-ops.ts): the parking comment says
+// "push a fix on the branch", so origin is where the fix is, and the cache's
+// copy was a stale tip that one run built eight commits over. A branch behind
+// origin is fast-forwarded here and announced; one that has DIVERGED refuses the
+// run naming both tips, because which side wins is the operator's call and this
+// terminal is where they are standing. `ensureIssueBranch` runs the same sync
+// at every plan for the label re-applied mid-run, which no preflight sees.
 //   - discarded — the branch's upstream is `[gone]` (PR merged+deleted upstream
 //                 while local is behind). Local commits would be orphaned.
 //   - unmerged  — everything else: maps to a CLOSED issue, or one the tracker
@@ -179,6 +184,11 @@ import {
   rootIssueFromChunkBranch,
 } from "./naming.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
+import {
+  describeIssueBranchOriginSync,
+  issueBranchDivergedMessage,
+  syncIssueBranchWithOrigin,
+} from "./git-ops.js";
 import { RUNTIME } from "./runtime.js";
 import {
   fetchCandidates,
@@ -1008,6 +1018,35 @@ export class PreflightError extends Error {
   }
 }
 
+// Run `syncIssueBranchWithOrigin` over the branches preflight keeps (#112).
+// `lines` is what runPreflight prints — one per branch that moved, was kept
+// ahead, or whose origin could not be asked — and `diverged` is what it
+// refuses over. Exported for the git-backed test; the decision per branch is
+// git-ops.ts's and tested there.
+export async function syncKeptIssueBranches(
+  repoDir: string,
+  branches: readonly string[],
+): Promise<{
+  readonly lines: readonly string[];
+  readonly diverged: readonly {
+    readonly branch: string;
+    readonly local: string;
+    readonly origin: string;
+  }[];
+}> {
+  const lines: string[] = [];
+  const diverged: { branch: string; local: string; origin: string }[] = [];
+  for (const branch of branches) {
+    const sync = await syncIssueBranchWithOrigin(repoDir, branch);
+    if (sync.kind === "diverged") {
+      diverged.push({ branch, local: sync.local, origin: sync.origin });
+    }
+    const line = describeIssueBranchOriginSync(branch, sync);
+    if (line !== null) lines.push(line);
+  }
+  return { lines, diverged };
+}
+
 export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   // Fetch before the cleanup pass so that merged-on-origin branches can be
   // reaped even when the cache has not seen origin recently. Into the CACHE:
@@ -1052,13 +1091,22 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
     console.log(`Cleaned up merged issue branches: ${deleted.join(", ")}`);
   }
   const state = await gatherState(cfg, chunkMemberIssues);
+  // The branches this run keeps are brought level with origin's copy first
+  // (#112), so the two announcements below describe the tips the run will
+  // actually resume from, and a diverged one is refused alongside the
+  // invariants rather than one cycle in.
+  const synced = await syncKeptIssueBranches(cfg.layout.repoDir, [
+    ...state.resumableIssueBranches,
+    ...state.parkedIssueBranches,
+  ]);
+  for (const line of synced.lines) console.log(line);
   if (state.resumableIssueBranches.length > 0) {
     console.log(
       `Resuming ${state.resumableIssueBranches.length} stranded issue ` +
         `branch(es) from an interrupted run: ` +
         `${state.resumableIssueBranches.join(", ")}. The planner will re-pick ` +
         "the matching open `ready-for-agent` issue(s) and the inner loop " +
-        "continues from each branch's existing commits.",
+        "continues from each branch's commits.",
     );
   }
   if (state.parkedIssueBranches.length > 0) {
@@ -1066,7 +1114,8 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
       `Keeping ${state.parkedIssueBranches.length} parked issue branch(es): ` +
         `${state.parkedIssueBranches.join(", ")}. Each maps to an open issue ` +
         "that is not `ready-for-agent`; re-applying the label resumes from " +
-        "the branch's commits, `git branch -D` in the cache abandons them.",
+        "the branch's commits — origin's copy of them, which the cache now " +
+        "matches. Deleting the branch on origin is what abandons them.",
     );
   }
   // The other half of the #34 agreement check, and it is emitted BEFORE the
@@ -1104,7 +1153,12 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   }
 
   const results = checkInvariants(state);
-  const failures = results.flatMap((r) => (r.ok ? [] : [r.message]));
+  const failures = [
+    ...results.flatMap((r) => (r.ok ? [] : [r.message])),
+    ...synced.diverged.map((d) =>
+      issueBranchDivergedMessage(cfg.layout.repoDir, d.branch, d.local, d.origin),
+    ),
+  ];
   if (failures.length > 0) throw new PreflightError(failures);
 
   // The FIRST of the two soft checks that read the OPERATOR'S checkout, on

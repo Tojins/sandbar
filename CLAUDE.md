@@ -197,7 +197,12 @@ and used to announce themselves in four different ways, the halt in none at all.
   origin, never local —
   `origin/<sourceBranch>`, or the chunk tip for a chained chunk member (#61) —
   and both prompt builders receive the same base `ensureIssueBranch` used.
-  The seeding fallback guard and the re-rooting argument are
+  An issue branch that already exists is measured against ORIGIN'S copy first
+  and fast-forwarded to it, a diverged one refuses (that issue at plan time,
+  the run at preflight), and one the cache lacks is cut from origin's copy when
+  origin has one the base does not contain (#112) — the parking comment says
+  "push a fix on the branch", so origin owns the issue branch too.
+  The seeding fallback guard, the origin sync and the re-rooting argument are
   `src/git-ops.ts`'s.
 - **A chunk is derived, never declared (#54 §2, #58).** A chunk is a connected
   component of the *review-gated* issues under the `## Blocked by` graph,

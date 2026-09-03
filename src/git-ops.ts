@@ -15,6 +15,14 @@
 // A re-queued chunk member (#94) is seeded from the chunk tip under the same
 // issue-branch name. Its next atomic landing therefore fast-forwards the
 // durable origin member ref, preserving containment across rework.
+//
+// An issue branch that already exists is measured against ORIGIN'S copy before
+// it is resumed, and one the cache lacks is cut from origin's copy when origin
+// has one the base does not contain (#112) — see "Origin's copy of an issue
+// branch" below. `syncIssueBranchWithOrigin` is that rule, and it has two
+// callers for the reason `fetchOriginChunkBranch` does: the seeding here, and
+// preflight, which runs it over every branch it keeps so a diverged one refuses
+// the run at the terminal rather than one cycle in.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -49,6 +57,10 @@ export type IssueBranchBase = {
   // does not carry yet. The prompt layer reads this to tell the agent that the
   // work under its feet is a chunk's rather than the source branch's.
   readonly chunkBranch: string | null;
+  // What origin's copy of the issue branch had to say when the branch already
+  // existed, or was resumed from it (#112). Absent for a branch cut fresh from
+  // `ref`, where there is nothing to report.
+  readonly originSync?: IssueBranchOriginSync;
 };
 
 export function sourceBranchBase(sourceBranch: string): IssueBranchBase {
@@ -151,6 +163,251 @@ export async function fetchOriginChunkBranch(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Origin's copy of an issue branch (#112)
+// ---------------------------------------------------------------------------
+//
+// Nothing in the state directory is authoritative (#38), and the issue branch
+// was the one ref exempt from that by omission: `ensureIssueBranch` returned as
+// soon as `refs/heads/<branch>` existed in the cache, while finalise's parking
+// comments tell the human to push a fix ON THAT BRANCH and re-queue. Doing what
+// the comment said resumed the run from the cache's stale tip, stacked eight
+// commits over the human's fix, and had the park's push rejected as a
+// non-fast-forward two hours later. So an existing branch is measured against
+// `origin/<branch>` first, and a MISSING one is cut from origin's copy when
+// origin has one that the base does not already contain — which is what makes
+// `rm -rf .sandbar` cost agent time and never correctness for a parked issue,
+// and what makes "delete the branch on origin" the one way to abandon it.
+//
+// The answers, and only one of them is a refusal:
+//   - in-sync          — the two tips are equal.
+//   - fast-forwarded   — the cache's tip is an ancestor of origin's: someone
+//                        pushed on the branch since the park. Moved through
+//                        `merge --ff-only` inside a worktree that has the branch
+//                        checked out — moving the ref under it would leave its
+//                        index describing the old tip as uncommitted changes —
+//                        and through `update-ref` with the old-value guard
+//                        otherwise.
+//   - local-ahead      — origin's tip is an ancestor of the cache's: a run that
+//                        committed and died before its push, which is what a
+//                        resumable branch has always been. Kept.
+//   - diverged         — neither contains the other. The cache's extra commits
+//                        are a run's unpushed work and origin's are a human's;
+//                        choosing is not sandbar's call. `ensureIssueBranch`
+//                        throws `IssueBranchDivergedError` for that ONE issue —
+//                        not a `SandbarError`, on `ChunkBaseMissingError`'s
+//                        grounds — and preflight refuses the run up front for a
+//                        branch it would keep, naming both tips.
+//   - resumed-from-origin — the cache had no branch and origin's copy is not
+//                        contained in the base: the branch is created at
+//                        origin's tip. Contained means the work landed and the
+//                        branch on origin is a leftover, so the seed is fresh.
+//   - origin-absent    — origin was reached and has no such branch: an
+//                        interrupted run that never pushed. Kept, or seeded
+//                        fresh.
+//   - origin-unreadable — origin could not be asked. Kept (or seeded fresh) and
+//                        said so; the push at the end of the issue will judge.
+//                        Told apart from `origin-absent` the way the merger
+//                        tells `ChunkRefLookup`'s states apart: `ls-remote
+//                        --exit-code` exits 2 for "reached origin, no such
+//                        ref" and anything else for "could not ask".
+// This sync is the one reader of `refs/remotes/origin/sandbar/issue-*`, so a
+// stale one is dropped when origin answers that the branch is gone rather than
+// left behind as a cached yes.
+
+export type IssueBranchOriginSync =
+  | { readonly kind: "in-sync"; readonly tip: string }
+  | { readonly kind: "fast-forwarded"; readonly from: string; readonly to: string }
+  | { readonly kind: "local-ahead"; readonly local: string; readonly origin: string }
+  | { readonly kind: "diverged"; readonly local: string; readonly origin: string }
+  | { readonly kind: "resumed-from-origin"; readonly tip: string }
+  | { readonly kind: "origin-absent" }
+  | { readonly kind: "origin-unreadable"; readonly detail: string };
+
+type OriginIssueBranchLookup =
+  | { readonly kind: "present"; readonly ref: string }
+  | { readonly kind: "absent" }
+  | { readonly kind: "unreadable"; readonly detail: string };
+
+const errorMessage = (err: unknown): string =>
+  err instanceof Error ? err.message : String(err);
+
+const revParse = async (cwd: string, ref: string): Promise<string> =>
+  (await exec("git", ["rev-parse", "--verify", "--quiet", ref], { cwd })).stdout.trim();
+
+const isAncestor = async (
+  cwd: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> => {
+  try {
+    await exec("git", ["merge-base", "--is-ancestor", ancestor, descendant], { cwd });
+    return true;
+  } catch (err) {
+    if (isGitExit(err, 1)) return false;
+    throw err;
+  }
+};
+
+const fetchOriginIssueBranch = async (
+  repoDir: string,
+  branch: string,
+): Promise<OriginIssueBranchLookup> => {
+  const remoteRef = `refs/remotes/origin/${branch}`;
+  try {
+    await exec(
+      "git",
+      ["fetch", "origin", `+refs/heads/${branch}:${remoteRef}`, "--quiet"],
+      { cwd: repoDir },
+    );
+    return { kind: "present", ref: remoteRef };
+  } catch (fetchErr) {
+    const probe = await exec(
+      "git",
+      ["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`],
+      { cwd: repoDir },
+    ).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    if (probe !== null && isGitExit(probe, 2)) {
+      await exec("git", ["update-ref", "-d", remoteRef], { cwd: repoDir });
+      return { kind: "absent" };
+    }
+    return { kind: "unreadable", detail: errorMessage(probe ?? fetchErr) };
+  }
+};
+
+// The worktree that has `branch` checked out, if any. The bare cache lists
+// itself first (`bare`, no `branch` line) and every linked worktree after it.
+const worktreeHoldingBranch = async (
+  repoDir: string,
+  branch: string,
+): Promise<string | null> => {
+  const { stdout } = await exec("git", ["worktree", "list", "--porcelain"], {
+    cwd: repoDir,
+  });
+  let path: string | null = null;
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
+    else if (line === `branch refs/heads/${branch}` && path !== null) return path;
+  }
+  return null;
+};
+
+const fastForwardCacheBranch = async (
+  repoDir: string,
+  branch: string,
+  from: string,
+  to: string,
+): Promise<void> => {
+  const worktree = await worktreeHoldingBranch(repoDir, branch);
+  if (worktree === null) {
+    await exec("git", ["update-ref", `refs/heads/${branch}`, to, from], {
+      cwd: repoDir,
+    });
+    return;
+  }
+  try {
+    await exec("git", ["merge", "--ff-only", to], { cwd: worktree });
+  } catch (err) {
+    // A dirty leftover is a resumable run's uncommitted work, and git refusing
+    // to overwrite it is the right answer; what it needs is a message naming
+    // the worktree rather than git's line about "local changes".
+    throw new Error(
+      `${branch} is behind origin's copy (${from.slice(0, 7)} → ${to.slice(0, 7)}) ` +
+        `but could not be fast-forwarded in the worktree that has it checked ` +
+        `out, ${worktree}: ${errorMessage(err)}`,
+      { cause: err },
+    );
+  }
+};
+
+export async function syncIssueBranchWithOrigin(
+  repoDir: string,
+  branch: string,
+): Promise<IssueBranchOriginSync> {
+  const lookup = await fetchOriginIssueBranch(repoDir, branch);
+  if (lookup.kind === "absent") return { kind: "origin-absent" };
+  if (lookup.kind === "unreadable") {
+    return { kind: "origin-unreadable", detail: lookup.detail };
+  }
+  const local = await revParse(repoDir, `refs/heads/${branch}`);
+  const origin = await revParse(repoDir, lookup.ref);
+  if (local === origin) return { kind: "in-sync", tip: local };
+  if (await isAncestor(repoDir, local, origin)) {
+    await fastForwardCacheBranch(repoDir, branch, local, origin);
+    return { kind: "fast-forwarded", from: local, to: origin };
+  }
+  if (await isAncestor(repoDir, origin, local)) {
+    return { kind: "local-ahead", local, origin };
+  }
+  return { kind: "diverged", local, origin };
+}
+
+// One spelling of the refusal, for the throw below and for preflight's failure
+// list. `repoDir` is named because the commands only make sense run there.
+export const issueBranchDivergedMessage = (
+  repoDir: string,
+  branch: string,
+  local: string,
+  origin: string,
+): string =>
+  `${branch} has diverged from origin's copy: sandbar's cache (${repoDir}) ` +
+  `holds ${local.slice(0, 7)} and origin holds ${origin.slice(0, 7)}, and ` +
+  `neither contains the other. The cache's extra commits are a run's unpushed ` +
+  `work and origin's are someone's, so sandbar will not choose. To take ` +
+  `origin's: \`git -C ${repoDir} branch -f ${branch} origin/${branch}\`. To ` +
+  `keep the cache's: \`git -C ${repoDir} push --force-with-lease origin ` +
+  `${branch}\`. Then re-queue the issue.`;
+
+// The one line the outcomes worth a line share, for the orchestrator log and
+// preflight's stdout. Null for the two that say nothing happened.
+export const describeIssueBranchOriginSync = (
+  branch: string,
+  sync: IssueBranchOriginSync,
+): string | null => {
+  switch (sync.kind) {
+    case "in-sync":
+    case "origin-absent":
+      return null;
+    case "fast-forwarded":
+      return (
+        `${branch} fast-forwarded to origin's copy ` +
+        `${sync.from.slice(0, 7)}..${sync.to.slice(0, 7)}`
+      );
+    case "local-ahead":
+      return (
+        `${branch} kept: the cache holds commits origin does not ` +
+        `(${sync.origin.slice(0, 7)}..${sync.local.slice(0, 7)}, unpushed work of an earlier run)`
+      );
+    case "diverged":
+      return (
+        `${branch} has diverged from origin's copy ` +
+        `(cache ${sync.local.slice(0, 7)}, origin ${sync.origin.slice(0, 7)})`
+      );
+    case "resumed-from-origin":
+      return `${branch} resumed from origin's copy at ${sync.tip.slice(0, 7)}`;
+    case "origin-unreadable":
+      return (
+        `${branch}: origin could not be asked for its copy, continuing from ` +
+        `the cache's (${sync.detail.split("\n")[0] ?? sync.detail})`
+      );
+  }
+};
+
+export class IssueBranchDivergedError extends Error {
+  constructor(
+    readonly branch: string,
+    readonly local: string,
+    readonly origin: string,
+    repoDir: string,
+  ) {
+    super(issueBranchDivergedMessage(repoDir, branch, local, origin));
+    this.name = "IssueBranchDivergedError";
+  }
+}
+
 // Create the issue's branch if it doesn't already exist, and report the base it
 // is measured against either way. Seeding from origin (not a local branch) means
 // a per-issue worktree never inherits in-progress state from the host's working
@@ -236,22 +493,45 @@ export async function ensureIssueBranch(
   const base = chunk
     ? await chunkOrSourceBase(repoDir, branch, chunk, sourceBranch)
     : sourceBranchBase(sourceBranch);
+  let exists = true;
   try {
     await exec(
       "git",
       ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
       { cwd: repoDir },
     );
-    return base; // exists
   } catch (err) {
     if (!isGitExit(err, 1)) throw err;
+    exists = false;
+  }
+  if (exists) {
+    const originSync = await syncIssueBranchWithOrigin(repoDir, branch);
+    if (originSync.kind === "diverged") {
+      throw new IssueBranchDivergedError(
+        branch,
+        originSync.local,
+        originSync.origin,
+        repoDir,
+      );
+    }
+    return { ...base, originSync };
   }
   // --no-track: don't write upstream config (a) we never `git pull` these
   // branches and (b) parallel `git branch` calls race on `.git/config`.
-  await exec("git", ["branch", "--no-track", branch, base.ref], {
-    cwd: repoDir,
-  });
-  return base;
+  const create = (ref: string) =>
+    exec("git", ["branch", "--no-track", branch, ref], { cwd: repoDir });
+  const lookup = await fetchOriginIssueBranch(repoDir, branch);
+  if (lookup.kind === "present" && !(await isAncestor(repoDir, lookup.ref, base.ref))) {
+    await create(lookup.ref);
+    return {
+      ...base,
+      originSync: { kind: "resumed-from-origin", tip: await revParse(repoDir, lookup.ref) },
+    };
+  }
+  await create(base.ref);
+  return lookup.kind === "unreadable"
+    ? { ...base, originSync: { kind: "origin-unreadable", detail: lookup.detail } }
+    : base;
 }
 
 async function chunkOrSourceBase(

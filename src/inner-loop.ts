@@ -57,6 +57,7 @@ import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
 import {
   type HeadMismatch,
   type IssueBranchBase,
+  describeIssueBranchOriginSync,
   dirtyWorktreePaths,
   ensureIssueBranch,
   headMismatch,
@@ -328,6 +329,17 @@ async function runSandboxCycle(
       config.sourceBranch,
       issue.chunk ?? null,
     );
+    // What origin's copy of the branch had to say (#112): a fast-forward, a
+    // resume from origin, unpushed work kept, or an origin that could not be
+    // asked. An outcome, so it is in the log (#70); nothing for the common
+    // in-sync and fresh-seed cases.
+    const originLine =
+      base.originSync === undefined
+        ? null
+        : describeIssueBranchOriginSync(issue.branch, base.originSync);
+    if (originLine !== null && opts.onOrchestratorLog) {
+      await opts.onOrchestratorLog(`issue=${issue.id} ${originLine}`);
+    }
     // Logged for a chunk member either way. The second line is now true by
     // construction rather than by assumption — `ensureIssueBranch` gives the
     // source branch to a chunk member only when that member IS the root, and
