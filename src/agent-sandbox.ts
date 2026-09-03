@@ -63,7 +63,7 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { rm, stat } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { onCleanup } from "./cleanup.js";
@@ -1121,8 +1121,18 @@ const fastForwardFromOrigin = async (
 
 const ISSUE_CLONE_MARKER = "sandbar.issueBranch";
 
-const issueCloneMarker = async (path: string): Promise<string> =>
-  gitConfigOrEmpty(["config", "--local", "--get", ISSUE_CLONE_MARKER], path);
+const issueCloneMarker = async (path: string): Promise<string> => {
+  try {
+    if (!(await stat(join(path, ".git"))).isDirectory()) return "";
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw err;
+  }
+  return gitConfigOrEmpty(
+    ["config", "--local", "--get", ISSUE_CLONE_MARKER],
+    path,
+  );
+};
 
 const syncIssueBranchToCache = async (
   repoDir: string,
@@ -1133,6 +1143,22 @@ const syncIssueBranchToCache = async (
     ["fetch", worktreePath, `+refs/heads/${branch}:refs/heads/${branch}`],
     repoDir,
   );
+};
+
+const hasLocalBranch = async (
+  repoDir: string,
+  branch: string,
+): Promise<boolean> => {
+  try {
+    await execGit(
+      ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+      repoDir,
+    );
+    return true;
+  } catch (err) {
+    if (err instanceof WorktreeError && err.exitCode === 1) return false;
+    throw err;
+  }
 };
 
 // Each issue gets a self-contained local clone. A local clone hardlinks object
@@ -1173,6 +1199,14 @@ const worktreeCreate = (
         ["fetch", repoDir, "+refs/remotes/origin/*:refs/remotes/origin/*"],
         worktreePath,
       );
+      // A clone maps the cache's local branches to remote-tracking refs, and
+      // the origin/* copy above may overwrite that name with an old branch
+      // still present on the forge. Import the seed ensureIssueBranch authored
+      // as a LOCAL ref before checkout, so DWIM can never select the old copy.
+      await execGit(
+        ["fetch", repoDir, `+refs/heads/${branch}:refs/heads/${branch}`],
+        worktreePath,
+      );
       const originUrl = await gitConfigOrEmpty(["config", "--get", "remote.origin.url"], repoDir);
       if (originUrl) {
         await execGit(["config", "remote.origin.url", originUrl], worktreePath);
@@ -1199,6 +1233,59 @@ const worktreeRemove = (
   worktreePath: string,
 ): Promise<void> =>
   rm(worktreePath, { recursive: true, force: true });
+
+// Clones have no central worktree registry. Sweep only directories that cannot
+// belong to a live issue: unmarked debris, or a marked clone whose branch no
+// longer exists in the cache. A concurrently prepared sibling has its branch
+// seeded before it reaches this function, so parallel issue setup stays safe.
+// `source` and `merger` have separate lifecycles and are never issue clones.
+const pruneStaleIssueClones = async (
+  repoDir: string,
+  worktreesDir: string,
+): Promise<void> => {
+  let entries: string[];
+  try {
+    entries = await readdir(worktreesDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  }
+  for (const entry of entries) {
+    if (entry === "source" || entry === "merger") continue;
+    const path = join(worktreesDir, entry);
+    let isDirectory = false;
+    try {
+      isDirectory = (await stat(path)).isDirectory();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    if (!isDirectory) continue;
+    const branch = await issueCloneMarker(path);
+    const branchIsLive = branch !== "" && (await hasLocalBranch(repoDir, branch));
+    if (!branchIsLive) await rm(path, { recursive: true, force: true });
+  }
+};
+
+// prepareWorktree runs once per planned issue in parallel. Keep the sweep and
+// clone creation atomic with respect to one another so no sweep can mistake a
+// sibling clone that has created `.git` but not installed its marker yet for
+// debris. Hooks run after this short critical section and remain parallel.
+let issueCloneSetupTail = Promise.resolve();
+const withIssueCloneSetupLock = async <T>(
+  operation: () => Promise<T>,
+): Promise<T> => {
+  const previous = issueCloneSetupTail;
+  let release!: () => void;
+  issueCloneSetupTail = new Promise<void>((resolveLock) => {
+    release = resolveLock;
+  });
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+};
 
 // ---------------------------------------------------------------------------
 // copyToWorktree — Linux COW with plain `cp -R` fallback; skip missing sources
@@ -1854,12 +1941,17 @@ export const prepareWorktree = async (
 ): Promise<string> => {
   const { repoDir, worktreesDir, hostCwd } = options.layout;
 
-  const { path: worktreePath } = await worktreeCreate(
-    repoDir,
-    options.branch,
-    worktreesDir,
-    options.baseBranch,
-  );
+  const { path: worktreePath } = await withIssueCloneSetupLock(async () => {
+    await pruneStaleIssueClones(repoDir, worktreesDir).catch((err) => {
+      console.error("Stale issue-clone sweep failed (continuing):", err);
+    });
+    return worktreeCreate(
+      repoDir,
+      options.branch,
+      worktreesDir,
+      options.baseBranch,
+    );
+  });
 
   try {
     if (options.copyToWorktree && options.copyToWorktree.length > 0) {

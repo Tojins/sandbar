@@ -9,6 +9,7 @@
 // again. Real git, not a fake exec, because the assertions are about refs that
 // did or did not move.
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -138,10 +139,16 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("deletes the merged branch in the named repo", async () => {
-      const deleted = await deleteMergedSandbarBranches(cfg(layoutAt(target)));
+      const layout = layoutAt(target);
+      const leftover = join(layout.worktreesDir, "sandbar-issue-1-merged");
+      await mkdir(leftover, { recursive: true });
+      await writeFile(join(leftover, "clone-leftover"), "stale\n");
+
+      const deleted = await deleteMergedSandbarBranches(cfg(layout));
 
       expect(deleted).toEqual(["sandbar/issue-1-merged"]);
       expect(await hasBranch(target, "sandbar/issue-1-merged")).toBe(false);
+      expect(existsSync(leftover)).toBe(false);
     });
 
     it("does not touch the identically-named branch in the launch directory", async () => {

@@ -159,7 +159,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 
@@ -980,16 +980,12 @@ export async function deleteMergedSandbarBranches(
     if (!landedInChunk && !(await isBranchMerged(repoDir, branch, cfg.sourceBranch))) {
       continue;
     }
-    // A leftover worktree (from a crash or a non-merged terminal whose
-    // finalize ran before the corresponding fix landed) holds the branch and
-    // makes `git branch -D` fail. Remove it best-effort first.
-    await runOk(repoDir, "git", [
-      "worktree",
-      "remove",
-      "--force",
-      worktreePathFor(cfg.layout.worktreesDir, branch),
-    ]);
-    await runOk(repoDir, "git", ["worktree", "prune"]);
+    // Issue repositories are standalone clone directories (#98), not cache
+    // worktree registrations. Clear a crash leftover before deleting its ref.
+    await rm(worktreePathFor(cfg.layout.worktreesDir, branch), {
+      recursive: true,
+      force: true,
+    });
     // Use -D rather than -d: when the branch is merged only into
     // origin/sourceBranch (not local), git's safety check refuses -d even
     // though the commits are demonstrably preserved on a remote ref.

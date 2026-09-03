@@ -695,16 +695,24 @@ async function runImplementer(
   // agent leg, which is what every #77 idea trading implementer minutes for
   // reviewer rounds is spending (#82).
   const implementerTimer = startTimer();
-  const run = await sandbox.run({
+  const runAgent = async (
+    options: Parameters<Sandbox["run"]>[0],
+  ): ReturnType<Sandbox["run"]> => {
+    try {
+      return await sandbox.run(options);
+    } finally {
+      // Publish even when the CLI times out or exits after committing. The
+      // clean clone may be removed during HARD-ERROR teardown, so this is the
+      // last point at which those commits are recoverable (#98).
+      await sandbox.syncBranchToCache();
+    }
+  };
+  const run = await runAgent({
     name: `implementer-${issue.id}-attempt-${action.attempt}`,
     agent: buildAgentProvider(config.implementerAgent, config.implementerModelId),
     prompt,
     completionSignal: PROMISE_COMPLETION_SIGNALS,
   });
-  // The issue repository is private to its sandbox (#98). Publish agent work
-  // to the host-only cache before any cache-based commit collection or later
-  // merge lifecycle reads the branch.
-  await sandbox.syncBranchToCache();
   if (opts.attemptLogger) {
     await opts.attemptLogger.writeAttempt(issue.id, action.attempt, run.stdout);
   }
@@ -742,7 +750,7 @@ async function runImplementer(
   // next attempt either, and swallowing it would hide the infra fault.
   if (signal.kind === "NO-SIGNAL" && signal.missingTag) {
     const nudgeTimer = startTimer();
-    const nudge = await sandbox.run({
+    const nudge = await runAgent({
       name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
       agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
         continueSession: true,
@@ -751,7 +759,6 @@ async function runImplementer(
       // Any of the three tags ends the wait, not just COMPLETE.
       completionSignal: PROMISE_COMPLETION_SIGNALS,
     });
-    await sandbox.syncBranchToCache();
     accumulated.push(...nudge.commits);
     attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
     attemptToolCalls += nudge.toolCalls;

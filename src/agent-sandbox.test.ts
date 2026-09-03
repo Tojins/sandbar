@@ -1822,6 +1822,73 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     }
   });
 
+  it("checks out the cache seed when origin still carries an older issue branch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-explicit-seed-"));
+    const origin = join(root, "origin.git");
+    const checkout = join(root, "checkout");
+    try {
+      await git(["init", "--bare", origin], root);
+      await git(["clone", origin, checkout], root);
+      await git(["config", "user.name", "Test Host"], checkout);
+      await git(["config", "user.email", "host@test.com"], checkout);
+      await writeFile(join(checkout, "content.txt"), "old\n");
+      await git(["add", "."], checkout);
+      await git(["commit", "-m", "old source"], checkout);
+      await git(["push", "-u", "origin", "HEAD:main"], checkout);
+      const branch = "sandbar/issue-83-explicit-seed";
+      await git(["push", "origin", `HEAD:refs/heads/${branch}`], checkout);
+
+      await writeFile(join(checkout, "content.txt"), "new seed\n");
+      await git(["commit", "-am", "new source"], checkout);
+      await git(["branch", branch], checkout);
+      const seededTip = (await git(["rev-parse", branch], checkout)).stdout.trim();
+
+      const worktreePath = await prepareWorktree({
+        branch,
+        layout: layoutFor(checkout),
+        copyToWorktree: [],
+      });
+
+      expect((await git(["rev-parse", "HEAD"], worktreePath)).stdout.trim()).toBe(
+        seededTip,
+      );
+      expect(await readFile(join(worktreePath, "content.txt"), "utf8")).toBe(
+        "new seed\n",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("sweeps an unmarked orphan outside the branch being prepared", async () => {
+    const branch = "sandbar/issue-83-general-sweep";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    const orphan = join(layout.worktreesDir, "abandoned-clone");
+    await mkdir(orphan, { recursive: true });
+    await writeFile(join(orphan, "leftover"), "garbage");
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect(existsSync(orphan)).toBe(false);
+  });
+
+  it("sweeps a marked clone after its cache branch was removed", async () => {
+    const branch = "sandbar/issue-83-marked-sweep";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    const orphan = join(layout.worktreesDir, "sandbar-issue-999-old-title");
+    await git(["clone", "--local", "--no-checkout", dir, orphan], dir);
+    await git(
+      ["config", "sandbar.issueBranch", "sandbar/issue-999-old-title"],
+      orphan,
+    );
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect(existsSync(orphan)).toBe(false);
+  });
+
   it("reuses the clone against its pinned forge origin when the operator remote changes", async () => {
     const root = await mkdtemp(join(tmpdir(), "asb-fetch-failure-"));
     const origin = join(root, "origin.git");
