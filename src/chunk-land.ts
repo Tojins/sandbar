@@ -5,7 +5,7 @@
 // members on `sandbar/chunk-<root>-<slug>` and pushed it, #62 opened the DRAFT
 // pull request a human reviews. Everything since then has been true of a chunk
 // that never lands: the branch grows, the PR is re-bodied, the members sit OPEN
-// under `in-chunk`, and nothing reaches the source branch. This module is what
+// under `needs-review`, and nothing reaches the source branch. This module is what
 // closes that loop.
 //
 // ---------------------------------------------------------------------------
@@ -26,11 +26,12 @@
 // branch (`forge-pr.ts`), so the PR is a unique handle on the chunk — which an
 // issue is not.
 //
-// `land` is HARDCODED, on the same ground as `AUTO_LAND_LABEL` in `lanes.ts`
-// and `IN_CHUNK_LABEL` in `chunks.ts`: the configurable labels (`LabelConfig`)
-// name a host's own handoff conventions, and this one is protocol — a human
-// addressing sandbar. The SPELLING is declared in `chunks.ts` beside
-// `IN_CHUNK_LABEL` and re-exported below: the PR body that invites the label,
+// `land` is HARDCODED on the same ground as `AUTO_LAND_LABEL` in `lanes.ts`:
+// the configurable labels (`LabelConfig`) name a host's own handoff conventions,
+// while this one is protocol — a human addressing sandbar. Its SPELLING is
+// declared in `chunks.ts` beside the display-only `NEEDS_REVIEW_LABEL`, which
+// remains hardcoded because making it configurable is outside #93's scope, and
+// re-exported below: the PR body that invites the label,
 // the code that reads it and the code that takes it off again are three
 // modules, and finalise names it in prose as well — one declaration is what
 // stops those four coming to disagree. (It also keeps the import graph a DAG:
@@ -101,12 +102,12 @@
 // What the wrap-up does, and the order it does it in
 // ---------------------------------------------------------------------------
 //
-// Close every member explicitly, drop `in-chunk`, take `land` back off the
+// Close every member explicitly, drop `needs-review`, take `land` back off the
 // pull request, close it, delete the chunk branch on origin.
 //
 // "EVERY MEMBER" MEANS EVERY MEMBER ON THE BRANCH, and that is narrower than
 // every member of the chunk. The list arrives already filtered —
-// `LandedChunk.members` is the `in-chunk` members and nothing else — because a
+// `LandedChunk.members` is the git-derived branch members and nothing else — because a
 // chunk grows one LAYER per cycle (#61), so a chunk of three sitting under
 // review with one layer landed and the rest still queued is its ordinary
 // shape, and closing the queued issues would destroy them while telling a
@@ -119,9 +120,8 @@
 // demonstrably on the source branch by then, so the branch is not a recovery
 // point for anything, and KEEPING it would make the reconciler pick the same
 // chunk up every cycle forever, name nothing again, and never resolve. What it
-// costs is the one case where the emptiness is wrong — a member carrying
-// `in-chunk` that the derivation did not name, from a run that pushed the chunk
-// branch and died before finalise labelled it — where the issue is left OPEN,
+// costs is the one case where the emptiness is wrong — a missing or manually
+// deleted origin member ref that no longer records a member — where the issue is left OPEN,
 // off the queue, with no branch left for anything to retry from. That is why
 // both the pull request and the orchestrator's console SAY the list was empty
 // rather than reporting a clean landing: it is the only thing that can be done
@@ -136,12 +136,11 @@
 // `CHUNK_LANDED_PR_COMMENT`) is that the next cycle's reconciler finds the
 // branch and retries exactly the closes that failed. The reconciler matches a
 // branch to a chunk BY NAME, and the name is `sandbar/chunk-<root>-<slug>` —
-// derived every cycle from a graph of OPEN issues. Close the root and it
-// leaves that graph; the survivors re-root under a different member, on a
-// branch nothing on origin is called, and the kept branch matches no chunk at
-// all: it is reconciled as a chunk with no members, which closes nothing and
-// deletes it. The member that would not close is then OPEN, still carrying
-// `in-chunk`, on no queue, with nothing left to find it through.
+// derived every cycle from the queue plus the issues named by fetched chunk
+// history. Closing the root therefore no longer removes it immediately, but
+// dependents-first remains the recovery-safe order: if history is repaired,
+// lost, or the root is closed manually before a later run, every member left
+// open still includes the root and re-derives the same branch name.
 //
 // Closing dependents first and stopping leaves a set that cannot degrade that
 // way: everything still open is the failed member plus every member it is
@@ -156,12 +155,8 @@
 // trailer would ever fire and a chunk would land with five issues left open.
 // The close is sandbar's to make, as it already is for an auto-lane merge.
 //
-// The label drop follows the close and never precedes it. `in-chunk` is what
-// keeps a member out of the planner's queue; an OPEN member that lost the label
-// before a failed close is an issue on NO queue at all, which is the #8 failure
-// this codebase keeps re-deriving. Closed first, the label is decoration —
-// `fetchChunkMembers` lists open issues only — so losing the drop costs
-// nothing.
+// The display-label drop follows the close. Membership is already irrelevant
+// once the issue is closed, so losing the drop is harmless decoration.
 //
 // THE BRANCH DELETE IS LAST AND IT IS CONDITIONAL. Deleting it is what stops
 // reconciliation firing on this chunk again, so a chunk whose members did not
@@ -200,13 +195,16 @@ import { promisify } from "node:util";
 
 import {
   type ChunkMember,
-  IN_CHUNK_LABEL,
+  NEEDS_REVIEW_LABEL,
   LAND_LABEL,
   type LandedChunk,
 } from "./chunks.js";
 import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
-import { rootIssueFromChunkBranch } from "./naming.js";
+import {
+  memberBranchName,
+  rootIssueFromChunkBranch,
+} from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 import {
   type ResolveAttemptSummary,
@@ -231,7 +229,7 @@ export type ChunkLandTarget = {
   // The root issue's title where a member list is known, else the pull
   // request's own title. Names the chunk in the merge commit and in prose.
   readonly title: string;
-  // The members whose work is ON the branch, ascending — the `in-chunk` ones,
+  // The members whose work is ON the branch, ascending — the git-derived ones,
   // which is what `LandedChunk.members` carries and why it is filtered there.
   // This list is what the wrap-up CLOSES, so a component member that has never
   // been worked must not be in it. EMPTY is a real answer, not a failure: see
@@ -397,7 +395,7 @@ export const CHUNK_MEMBER_CLOSED_COMMENT = (args: {
     (others.length > 0
       ? `: ${others.map((m) => `#${m.number}`).join(", ")}`
       : "") +
-    `. Its \`${IN_CHUNK_LABEL}\` label is dropped — the commits live on ` +
+    `. Its \`${NEEDS_REVIEW_LABEL}\` label is dropped — the commits live on ` +
     `\`${args.sourceBranch}\` from here, and the chunk branch is retired once every ` +
     `issue on it has closed.`
   );
@@ -450,8 +448,8 @@ export const CHUNK_LANDED_PR_COMMENT = (args: {
       "",
       "Still OPEN — sandbar stopped at the first issue it could not close, so " +
         "this is that one and everything the rest of the chunk is built on top " +
-        `of. They keep their \`${IN_CHUNK_LABEL}\` label, so they stay off the ` +
-        "agent queue:",
+        "of. Their origin member refs remain contained by the kept chunk branch, " +
+        "so they stay off the agent queue:",
       "",
       ...list(args.unclosed),
       "",
@@ -583,7 +581,10 @@ export type ChunkWrapupAdapter = {
   // merge — the label is the queue either way.
   removePullRequestLabel(pr: number, label: string): Promise<void>;
   closePullRequest(pr: number): Promise<void>;
-  deleteChunkBranch(chunkBranch: string): Promise<void>;
+  deleteChunkBranch(
+    chunkBranch: string,
+    memberIssues: readonly number[],
+  ): Promise<void>;
 };
 
 /**
@@ -661,15 +662,28 @@ export function chunkForgeWrites(deps: {
         ["pr", "close", String(pr), "--repo", slug()],
         `failed to close pull request #${pr}`,
       ),
-    async deleteChunkBranch(chunkBranch) {
+    async deleteChunkBranch(chunkBranch, memberIssues) {
       // Fully qualified, and not `--force`-anything: `git push --delete` has no
       // force to give. It is safe on the one precondition every caller
       // establishes first — the branch's commits are contained in
       // `origin/<sourceBranch>`, so nothing is lost with the ref.
       try {
+        // Delete only the strict membership set this wrap-up closed. Older
+        // chunks kept for a failed close may be ancestors of this branch; their
+        // member refs remain their recovery record and must survive.
+        const memberRefs = memberIssues.map(
+          (number) => `refs/heads/${memberBranchName(number)}`,
+        );
         await exec(
           "git",
-          ["push", "origin", "--delete", `refs/heads/${chunkBranch}`],
+          [
+            "push",
+            "--atomic",
+            "origin",
+            "--delete",
+            `refs/heads/${chunkBranch}`,
+            ...memberRefs,
+          ],
           { cwd: deps.gitCwd },
         );
       } catch (err) {
@@ -758,12 +772,12 @@ export async function wrapUpLandedChunk(
       break;
     }
     try {
-      await adapter.removeLabel(member.number, IN_CHUNK_LABEL);
+      await adapter.removeLabel(member.number, NEEDS_REVIEW_LABEL);
     } catch (err) {
-      // Benign, and said so: `fetchChunkMembers` lists OPEN issues, so a
-      // closed one carrying the label is invisible to the planner either way.
+      // Benign, and said so: the planner never reads this display label, and
+      // the issue is already closed.
       residue.push(
-        `#${member.number} is closed but kept its \`${IN_CHUNK_LABEL}\` label (harmless): ${detail(err)}`,
+        `#${member.number} is closed but kept its \`${NEEDS_REVIEW_LABEL}\` label (harmless): ${detail(err)}`,
       );
     }
   }
@@ -828,8 +842,8 @@ export async function wrapUpLandedChunk(
 
   // Conditional, and the condition is the members rather than the pull
   // request: keeping the branch is what makes the next run reconcile this
-  // chunk again, and a member left OPEN under `in-chunk` is the one residue
-  // worth another attempt. A PR that would not close is cosmetic by
+  // chunk again, and a member left OPEN with its origin ref contained is the
+  // one residue worth another attempt. A PR that would not close is cosmetic by
   // comparison, and a branch kept for it would re-run the whole wrap-up every
   // cycle forever. `closesComplete` is vacuously true for a chunk that named
   // no member at all, which deletes the branch too — see the header for why
@@ -837,7 +851,10 @@ export async function wrapUpLandedChunk(
   let branchDeleted = false;
   if (closesComplete) {
     try {
-      await adapter.deleteChunkBranch(target.branch);
+      await adapter.deleteChunkBranch(
+        target.branch,
+        target.members.map((member) => member.number),
+      );
       branchDeleted = true;
     } catch (err) {
       residue.push(
@@ -872,7 +889,7 @@ export async function wrapUpLandedChunk(
 //                failed. Operator-actionable, and honestly described as
 //                temporary.
 //   * UNTIDY   — the branch retired and a line was left behind anyway: an
-//                `in-chunk` label that would not come off a CLOSED issue, a
+//                `needs-review` label that would not come off a CLOSED issue, a
 //                pull request that would not close or lose its `land`. NOTHING
 //                will retry these — the branch a retry would be found through
 //                is gone — so they are cosmetic by construction, and telling a
@@ -969,8 +986,8 @@ export const CHUNK_LANDED_UNNAMED_BANNER = (args: {
   "none:\n" +
   args.chunks.map((c) => `  ${c.target.branch}`).join("\n") +
   "\nUsually that means they were closed by hand already. If any issue is still " +
-  `open under \`${IN_CHUNK_LABEL}\` for one of these, close it yourself — the ` +
-  "branch is deleted, so no later run will find it.";
+  "open, inspect the retained origin `sandbar/member-*` refs and close the " +
+  "matching issue yourself — the chunk branch is deleted, so no later run will find it.";
 
 export const CHUNK_RESIDUE_RETIRED_BANNER = (args: ResidueBanner): string =>
   banner(

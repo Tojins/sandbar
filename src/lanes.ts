@@ -18,13 +18,13 @@
 // `postLaneOverrideNotices` says so on the issue itself.
 //
 // The graph is whatever the caller passes — for the planner, the
-// `ready-for-agent` OPEN candidate list, including the `in-chunk` members
-// `fetchChunkMembers` lists back in. A blocker OUTSIDE that set contributes
+// `ready-for-agent` OPEN candidate list plus the git-derived chunk members the
+// planner fetches back in. A blocker OUTSIDE that set contributes
 // no gating (there is no lane to read); that is sound because an eligible
 // issue's blockers are each CLOSED — landed work, which for a review-gated
 // blocker means a human reviewed and landed its chunk, the approval this
-// inheritance waits for — or `in-chunk` in the set (plan-resolver.ts's two
-// clauses).
+// inheritance waits for — or present on the same chunk branch
+// (`plan-resolver.ts`'s two clauses).
 //
 // Cycles in `## Blocked by` are hostile input; the breadth-first walk visits
 // each issue at most once, so a cycle terminates (a cyclic pair is deadlocked

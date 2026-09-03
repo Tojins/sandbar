@@ -31,6 +31,21 @@ export function swallowPatternGrowth(
   );
 }
 
+// The other direction: a budget above the actual count. A conversion that
+// forgot its decrement leaves slack, and slack is headroom for a new swallow in
+// a file already converted — and a baseline that overstates the work left,
+// which is the todo list #99 says it is.
+export function swallowPatternSlack(
+  counts: Readonly<Record<string, number>>,
+  baseline: Readonly<Record<string, number>>,
+): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(baseline).filter(
+      ([file, budget]) => budget > (counts[file] ?? 0),
+    ),
+  );
+}
+
 describe("production error-swallow ratchet", () => {
   it("counts swallow forms while excluding an explicit rethrow", () => {
     expect(
@@ -53,7 +68,16 @@ describe("production error-swallow ratchet", () => {
     ).toEqual({ "grown.ts": 2, "new.ts": 1 });
   });
 
-  it("does not let any production file grow its swallow-pattern count", async () => {
+  it("reports baseline entries above their file's actual count", () => {
+    expect(
+      swallowPatternSlack(
+        { "same.ts": 1, "shrunk.ts": 1 },
+        { "same.ts": 1, "shrunk.ts": 2, "gone.ts": 1 },
+      ),
+    ).toEqual({ "shrunk.ts": 2, "gone.ts": 1 });
+  });
+
+  it("keeps every production file's swallow-pattern count exactly at its baseline", async () => {
     const files = (await readdir(SRC))
       .filter(
         (file) =>
@@ -71,8 +95,7 @@ describe("production error-swallow ratchet", () => {
         ]),
       ),
     );
-    const growth = swallowPatternGrowth(counts, ERROR_SWALLOW_BASELINE);
-
-    expect(growth).toEqual({});
+    expect(swallowPatternGrowth(counts, ERROR_SWALLOW_BASELINE)).toEqual({});
+    expect(swallowPatternSlack(counts, ERROR_SWALLOW_BASELINE)).toEqual({});
   });
 });

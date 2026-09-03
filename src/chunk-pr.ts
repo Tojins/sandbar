@@ -13,7 +13,7 @@
 // a draft PR disables GitHub's merge button while leaving review completely
 // functional. Sandbar composes chunk branches and means to land them itself, so
 // a merge from the PR page is a landing the orchestrator does not know about —
-// issues left open, `in-chunk` labels left applied, a chunk branch nobody
+// issues left open, `needs-review` labels left applied, a chunk branch nobody
 // retires. Draft state makes the accident hard and leaves the deliberate act
 // available: a human can mark the PR ready and merge it by hand in two steps.
 // That override is TOLERATED, not fought — `forge-pr.ts` re-titles and
@@ -38,7 +38,7 @@
 // A chunk grows one member per cycle, so a body rebuilt from the merge phase's
 // own knowledge would describe the newest member alone and drop the ones a
 // reviewer is looking at right above it. `ChunkTarget.landed` (the planner's
-// snapshot of the members carrying `in-chunk`) is the other half, and
+// snapshot of git-derived branch members) is the other half, and
 // `chunkMembersOnBranch` is where the two are put together.
 
 import { type ChunkMember, LAND_LABEL } from "./chunks.js";
@@ -50,13 +50,12 @@ export type ChunkPullRequestContent = {
 
 /**
  * Every member whose work is on the chunk branch: the ones that were already
- * there (the planner's `in-chunk` snapshot) plus the ones that landed now.
+ * there (the planner's git snapshot) plus the ones that landed now.
  *
  * Ascending and deduped by issue number, with the LANDING side's title winning
  * a collision — it was read from the tracker this cycle, and the snapshot's
- * copy is a cycle older. The two lists are disjoint in practice (an issue
- * landing now does not yet carry `in-chunk`); the tie-break is here so that a
- * re-run over a member whose label flip failed cannot double-list it.
+ * copy is a cycle older. The two lists are disjoint in practice, but the
+ * tie-break keeps overlapping snapshots from listing a member twice.
  */
 export function chunkMembersOnBranch(
   alreadyOnBranch: readonly ChunkMember[],

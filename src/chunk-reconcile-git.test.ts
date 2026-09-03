@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { findLandedChunkBranches } from "./chunk-reconcile.js";
+import { readChunkMembers } from "./plan-resolver.js";
 
 const exec = promisify(execFile);
 
@@ -34,12 +35,13 @@ describe("findLandedChunkBranches (real git)", () => {
   let root: string;
   let origin: string;
   let cache: string;
+  let work: string;
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "sandbar-recon-"));
     origin = join(root, "origin.git");
     cache = join(root, "cache.git");
-    const work = join(root, "work");
+    work = join(root, "work");
     await exec("git", ["init", "-b", "main", work], { env: GIT_ENV });
     await writeFile(join(work, "a.txt"), "a");
     await git(work, "add", ".");
@@ -80,6 +82,27 @@ describe("findLandedChunkBranches (real git)", () => {
     expect(await findLandedChunkBranches(cache, "main")).toEqual([
       "sandbar/chunk-42-landed",
     ]);
+  });
+
+  it("fetches member refs beside chunk refs before deriving membership", async () => {
+    // Push from the work repository so the cache cannot learn this ref as a
+    // push-side remote-tracking update. The reconciler's fetch is therefore
+    // the only operation that can make the membership record visible there.
+    await git(
+      work,
+      "push",
+      "origin",
+      "sandbar/chunk-42-landed:refs/heads/sandbar/member-42",
+    );
+
+    await findLandedChunkBranches(cache, "main");
+
+    expect(await readChunkMembers(cache)).toEqual(
+      new Map([
+        ["sandbar/chunk-42-landed", new Set([42])],
+        ["sandbar/chunk-77-open", new Set([42])],
+      ]),
+    );
   });
 
   it("says nothing has landed when the repository has no chunk branch at all", async () => {

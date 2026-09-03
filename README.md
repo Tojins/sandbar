@@ -549,16 +549,18 @@ dependency; relabelling the issue alone will not do it.
 > Its issues are merged onto `sandbar/chunk-<root>-<slug>`, which is pushed to
 > origin and opened as a **draft pull request** against your source branch —
 > that PR is what a human reviews, and nothing on the branch reaches the source
-> branch until they land it. A landed member keeps its issue open and carries
-> the `in-chunk` label, which is what takes it out of the queue and unblocks
-> whatever was queued behind it — so a chunk grows one *layer* per cycle, and
-> the members worked in any one cycle are always siblings.
+> branch until they land it. A landed member keeps its issue open; a dedicated
+> `sandbar/member-<n>` ref is pushed atomically with the chunk branch, and containment by
+> `origin/sandbar/chunk-*` is what takes it out of the queue and
+> unblocks whatever was queued behind it, so a chunk grows one *layer* per
+> cycle and the members worked in any one cycle are always siblings. Sandbar
+> adds `needs-review` only as a display cue for humans.
 >
 > **You land a chunk by putting the `land` label on its pull request.** The next
 > run merges the chunk branch into your source branch — in the same pass, under
 > the same gate and the same forge verification as that cycle's ordinary work —
 > pushes it, closes every issue whose commits are on the branch, drops their
-> `in-chunk` labels, closes the pull request and deletes the branch. Approving
+> `needs-review` labels, closes the pull request and deletes the branch. Approving
 > is deliberately *not* the trigger, so approve-now-land-later works: nothing
 > moves until the label is on. If that cycle has just landed another member on
 > the branch, the landing waits for the next one — what reaches your source
@@ -569,9 +571,10 @@ dependency; relabelling the issue alone will not do it.
 > later run finds the branch already contained in your source branch and does
 > the same wrap-up without the merge.
 >
-> Three things this needs from you: the `in-chunk` and `land` labels have to
-> exist in the repo (sandbar never creates labels, and neither name is
-> configurable), the `gh` credentials have to be allowed to open, edit, comment
+> The `land` label has to exist in the repo (sandbar never creates it and its
+> name is not configurable). The optional `needs-review` label makes landed
+> members visible to humans but is not required for correctness. The `gh`
+> credentials have to be allowed to open, edit, comment
 > on and close pull requests, to file issues and to delete branches on origin,
 > and whoever reviews those branches has to know they are theirs to land — the
 > draft PR says as much on itself, but nothing notifies them.
@@ -596,24 +599,13 @@ dependency; relabelling the issue alone will not do it.
 > A review you dismiss is never filed at all, and a review whose threads you
 > resolve before sandbar next runs is dropped if it had no body of its own.
 >
-> And one thing to avoid: **don't close a chunk's issues one at a time while
-> others are still queued behind them.** The branch name is derived from the
-> chunk's root and sandbar only ever sees open issues, so closing a member
-> re-derives the chunk under whichever member is left at the front, and
-> therefore under a branch name nobody has pushed. What sandbar does then
-> depends on which member you are looking at, and only one of the two cases is
-> loud:
->
-> - A member queued *behind* that new front one is refused, one issue at a time,
->   rather than built on a tree missing the work it depends on.
-> - The new front member itself is indistinguishable, to sandbar, from the root
->   of a brand-new chunk — so it is worked from your source branch and lands on
->   a fresh chunk branch, while the closed member's commits stay behind on the
->   old one. Nothing reports this, because nothing about it looks wrong.
->
-> So: land a chunk branch and close all of its issues together. If you have
-> already closed one, reopen it — that restores the chunk's original root and
-> its branch name along with it.
+> Keep the origin `sandbar/member-*` refs beside a live chunk branch. They are the
+> durable membership record: deleting one by hand can hide that member from
+> planning and wrap-up. Sandbar removes those refs atomically with the chunk
+> branch after every member has closed. Closing an issue by hand does not hide
+> it — git-derived members are fetched by number without an open-state filter.
+> Do not retitle a chunk's root issue while its chunk is live; rename it back if
+> you already have, because the title slug is part of the derived branch name.
 >
 > The one review-gated issue sandbar will not work is one that belongs to no
 > chunk — its blockers straddle two different chunks, it sits downstream of an

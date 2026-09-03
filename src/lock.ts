@@ -25,6 +25,11 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import lockfile from "proper-lockfile";
 
+// Deliberately a local copy of errors.ts's `isErrno`, not an import: this
+// module has NO relative imports, and lock.test.ts depends on that — its
+// takeover tests spawn a second plain `node` on this file's SOURCE, which
+// cannot resolve a `.js` specifier to a `.ts` file without a loader hook. A
+// one-line probe is cheaper than that hook (#99 review, round 6).
 const isEnoent = (err: unknown): boolean =>
   typeof err === "object" && err !== null &&
   (err as { code?: unknown }).code === "ENOENT";

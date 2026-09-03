@@ -28,11 +28,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { IN_CHUNK_LABEL } from "./chunks.js";
 import {
   buildPlan,
   fetchCandidates,
-  fetchChunkMembers,
 } from "./plan-resolver.js";
 
 const CONFIGURED = { owner: "acme", name: "app" };
@@ -52,8 +50,8 @@ describe("fetchCandidates names the configured repo (#34)", () => {
     // directory's `origin` — which is what real gh does when the flag is
     // absent. Modelling the fallback rather than printing a sentinel is what
     // lets the assertions below be about the WRONG repo instead of about the
-    // absence of a right one. `body` carries the `--label` it was asked for,
-    // which is the only thing that distinguishes the two listings (#59).
+    // absence of a right one. `body` carries the `--label` it was asked for so
+    // the assertion also pins the queue selector.
     await writeFile(
       join(shimBin, "gh"),
       [
@@ -63,9 +61,8 @@ describe("fetchCandidates names the configured repo (#34)", () => {
         "while [ $# -gt 0 ]; do",
         '  case "$1" in',
         '    --repo) seen="$2"; shift 2 ;;',
-        "    # Captured for #59: the two listings differ in this flag alone, and",
-        "    # a wrong label returns an empty list rather than an error — the",
-        "    # feature would simply be off, with nothing to notice.",
+        "    # Capture the queue selector: a wrong label returns an empty list",
+        "    # rather than an error, so the queue would silently disappear.",
         '    --label) label="$2"; shift 2 ;;',
         "    *) shift ;;",
         "  esac",
@@ -134,20 +131,10 @@ describe("fetchCandidates names the configured repo (#34)", () => {
     expect(candidates[0]?.title).not.toBe("(no-remote)");
   });
 
-  // #59 — the two listings share every argument but `--label`, which is the
-  // whole difference between "the queue" and "what has already landed on a
-  // chunk branch". Pinned here rather than left to the union in `buildPlan`:
-  // a wrong label is an empty list, not an error, so the only symptom would be
-  // a feature that quietly does nothing.
-  it("lists the queue on `ready-for-agent` and chunk members on `in-chunk`", async () => {
+  it("lists the queue on `ready-for-agent`", async () => {
     const queue = await fetchCandidates(CONFIGURED);
-    const members = await fetchChunkMembers(CONFIGURED);
 
     expect(queue[0]?.body).toBe("ready-for-agent");
-    expect(members[0]?.body).toBe(IN_CHUNK_LABEL);
-    // And the chunk-member listing names the configured repo too — it is a
-    // second `gh issue list`, and #34 applies to it identically.
-    expect(members[0]?.title).toBe("acme/app");
   });
 });
 
@@ -159,6 +146,7 @@ describe("fetchCandidates names the configured repo (#34)", () => {
 // asserted is that the union reaches the real listing path at all.
 describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
   let shimBin: string;
+  let repoDir: string;
   let originalPath: string | undefined;
 
   const FILED = {
@@ -170,6 +158,8 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
 
   beforeEach(async () => {
     shimBin = await mkdtemp(join(tmpdir(), "sandbar-extra-"));
+    repoDir = await mkdtemp(join(tmpdir(), "sandbar-plan-repo-"));
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repoDir });
     // An EMPTY queue and an empty chunk-member listing — the state a
     // just-filed issue is invisible in — with authoritative facts that know
     // both it and its blocker, which is how the real GraphQL batch answers.
@@ -194,10 +184,11 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
     if (originalPath === undefined) delete process.env["PATH"];
     else process.env["PATH"] = originalPath;
     await rm(shimBin, { recursive: true, force: true });
+    await rm(repoDir, { recursive: true, force: true });
   });
 
   it("plans an issue the listing has not caught up with", async () => {
-    const r = await buildPlan(CONFIGURED, { extraCandidates: [FILED] });
+    const r = await buildPlan(CONFIGURED, { repoDir, extraCandidates: [FILED] });
     expect(r.plan.map((p) => p.id)).toEqual(["50"]);
   });
 
@@ -206,11 +197,56 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
     // plan is dropped like any other candidate. Modelled by asking for #10,
     // which the batch above reports CLOSED.
     const closed = { ...FILED, number: 10, body: "" };
-    const r = await buildPlan(CONFIGURED, { extraCandidates: [closed] });
+    const r = await buildPlan(CONFIGURED, { repoDir, extraCandidates: [closed] });
     expect(r.plan).toEqual([]);
   });
 
   it("plans nothing when nothing is handed in", async () => {
-    expect((await buildPlan(CONFIGURED)).plan).toEqual([]);
+    expect((await buildPlan(CONFIGURED, { repoDir })).plan).toEqual([]);
+  });
+});
+
+describe("buildPlan loads git-derived members into the candidate graph (#93)", () => {
+  let shimBin: string;
+  let repoDir: string;
+  let originalPath: string | undefined;
+
+  beforeEach(async () => {
+    shimBin = await mkdtemp(join(tmpdir(), "sandbar-member-shim-"));
+    repoDir = await mkdtemp(join(tmpdir(), "sandbar-member-repo-"));
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repoDir });
+    execFileSync("git", ["config", "user.email", "sandbar@example.test"], { cwd: repoDir });
+    execFileSync("git", ["config", "user.name", "Sandbar Test"], { cwd: repoDir });
+    execFileSync("git", ["commit", "--allow-empty", "-qm", "base"], { cwd: repoDir });
+    execFileSync("git", ["checkout", "-qb", "member"], { cwd: repoDir });
+    execFileSync("git", ["commit", "--allow-empty", "-qm", "work"], { cwd: repoDir });
+    execFileSync("git", ["checkout", "-q", "main"], { cwd: repoDir });
+    execFileSync("git", ["merge", "--no-ff", "member", "-m", "Merge sandbar/issue-60: Root"], { cwd: repoDir });
+    execFileSync("git", ["update-ref", "refs/remotes/origin/sandbar/member-60", "member"], { cwd: repoDir });
+    execFileSync("git", ["update-ref", "refs/remotes/origin/sandbar/chunk-60-root", "HEAD"], { cwd: repoDir });
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", "HEAD~1"], { cwd: repoDir });
+    await writeFile(join(shimBin, "gh"), [
+      "#!/bin/sh",
+      'case "$1 $2" in',
+      '  "issue list") printf "[]" ;;',
+      '  "api graphql") printf \'{"data":{"repository":{"i60":{"number":60,"title":"Root","body":"","state":"CLOSED","labels":{"nodes":[]}}}}}\' ;;',
+      "esac",
+    ].join("\n") + "\n", { mode: 0o755 });
+    originalPath = process.env["PATH"];
+    process.env["PATH"] = `${shimBin}:${originalPath ?? ""}`;
+  });
+
+  afterEach(async () => {
+    if (originalPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = originalPath;
+    await rm(shimBin, { recursive: true, force: true });
+    await rm(repoDir, { recursive: true, force: true });
+  });
+
+  it("reports a member found only through origin chunk history", async () => {
+    const result = await buildPlan(CONFIGURED, { repoDir, defaultLane: "review" });
+    expect(result.plan).toEqual([]);
+    expect(result.landedChunks[0]?.members).toEqual([{ number: 60, title: "Root" }]);
+    expect(result.landedChunks[0]?.branch).toBe("sandbar/chunk-60-root");
   });
 });

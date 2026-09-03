@@ -129,6 +129,25 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // pre-#72 config produces.
     agentProviders: ["claude"] as readonly AgentProviderName[],
   });
+  // What `runPreflight` hands `gatherState` once its own `gh` checks pass.
+  const GH_READY = { hasGh: true, ghAuthOk: true } as const;
+
+  it("fetches origin member refs before later preflight checks", async () => {
+    await git(target, "update-ref", "refs/heads/sandbar/member-7", "HEAD");
+
+    await runPreflight(
+      cfg(layoutAt(target)) as Parameters<typeof runPreflight>[0],
+    ).catch(() => undefined);
+
+    await expect(
+      git(
+        target,
+        "show-ref",
+        "--verify",
+        "refs/remotes/origin/sandbar/member-7",
+      ),
+    ).resolves.toBeDefined();
+  });
 
   // The highest-stakes half, and the one that qualified #32's fix: #32 put this
   // delete under the single-instance lock, and the lock is taken on
@@ -199,10 +218,10 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     // #60 — the second ground for deleting an issue branch, and the crash
-    // window it exists for: a run that died between the chunk push and the
-    // label flip, or a flip whose delete failed, leaves a member's issue branch
-    // behind. Nothing will ever pick it up again (the planner drops `in-chunk`
-    // issues), so left alone it is one dead ref per member a chunk ever landed.
+    // window it exists for: a run that died between the chunk push and local
+    // issue-branch deletion leaves that branch behind. Nothing will ever pick
+    // it up again (the planner drops git-derived members), so left alone it is
+    // one dead ref per member a chunk ever landed.
     //
     // The set-up is what the merger produces: a member's commits on a branch
     // that is NOT on main, and origin's chunk branch carrying them.
@@ -219,12 +238,12 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       );
     };
 
-    it("deletes an `in-chunk` member's branch once origin's chunk branch carries it", async () => {
+    it("deletes a chunk member's branch once origin's chunk branch carries it", async () => {
       await landMemberOnChunk();
 
       const deleted = await deleteMergedSandbarBranches({
         ...cfg(layoutAt(target)),
-        inChunkIssues: new Set([7]),
+        chunkMemberIssues: new Set([7]),
       });
 
       expect([...deleted].sort()).toEqual([
@@ -233,9 +252,9 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       ]);
     });
 
-    it("keeps it when the issue is not `in-chunk`, whatever origin carries", async () => {
-      // The label is the claim that the landing happened; without it this is
-      // an ordinary in-flight branch and deleting it would discard live work.
+    it("keeps it when chunk history does not name the issue, whatever origin carries", async () => {
+      // The member ref is the claim that the landing happened; without it this
+      // is an ordinary in-flight branch whose deletion could discard live work.
       await landMemberOnChunk();
 
       const deleted = await deleteMergedSandbarBranches(cfg(layoutAt(target)));
@@ -245,15 +264,15 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("keeps it when no chunk branch on origin actually carries the commits", async () => {
-      // The label alone is a previous run's word for it. Ancestry is this
-      // run's verification, and without it nothing is force-deleted.
+      // The supplied membership set selects the branch, but ancestry is this
+      // run's verification; without it nothing is force-deleted.
       await git(target, "checkout", "-q", "-b", "sandbar/issue-7-member");
       await git(target, "commit", "-q", "--allow-empty", "-m", "member work");
       await git(target, "checkout", "-q", "main");
 
       const deleted = await deleteMergedSandbarBranches({
         ...cfg(layoutAt(target)),
-        inChunkIssues: new Set([7]),
+        chunkMemberIssues: new Set([7]),
       });
 
       expect(deleted).toEqual(["sandbar/issue-1-merged"]);
@@ -277,7 +296,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
 
       const deleted = await deleteMergedSandbarBranches({
         ...cfg(layoutAt(target)),
-        inChunkIssues: new Set([7]),
+        chunkMemberIssues: new Set([7]),
       });
 
       expect(deleted).toEqual(["sandbar/issue-1-merged"]);
@@ -366,18 +385,18 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("withholds tracker-backed classifications when gh auth fails", async () => {
+      // A `gh` that fails every tracker query, so a classification could only
+      // come from asking — which the prerequisites say not to do.
       await writeFile(
         join(shimBin, "gh"),
-        [
-          "#!/bin/sh",
-          'if [ "$1 $2" = "auth status" ]; then exit 1; fi',
-          'if [ "$1 $2" = "issue list" ]; then exit 73; fi',
-          "exit 1",
-        ].join("\n"),
+        ["#!/bin/sh", "exit 73"].join("\n"),
         { mode: 0o755 },
       );
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), {
+        hasGh: true,
+        ghAuthOk: false,
+      });
 
       expect(state.ghAuthOk).toBe(false);
       expect(state.unmergedIssueBranches).toEqual([]);
@@ -393,7 +412,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
     });
@@ -409,7 +428,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.unmergedIssueBranches).toEqual([]);
       expect(state.discardedIssueBranches).toEqual([]);
@@ -420,32 +439,38 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // an issue that has landed on a chunk branch is neither: not `unmerged`
     // (its commits are published under the chunk's name, so refusing the run
     // over it would refuse over nothing) and not `resumable` (the planner
-    // drops `in-chunk` issues by label, so no inner loop will ever continue
-    // it). It exists only when a run died between the chunk push and the label
-    // flip, and the delete pass reaps it as soon as it can verify containment.
-    it("takes none of the three for the issue branch of an `in-chunk` member", async () => {
-      // A `gh` that answers the planner's two list queries by label, so
-      // `fetchChunkMembers` really returns #7 — the shared shim answers the
-      // other cases with an explicit empty issue list.
-      await writeFile(
-        join(shimBin, "gh"),
-        [
-          "#!/bin/sh",
-          'label=""; prev=""',
-          'for a in "$@"; do if [ "$prev" = "--label" ]; then label="$a"; fi; prev="$a"; done',
-          'if [ "$label" = "in-chunk" ]; then',
-          '  echo \'[{"number":7,"title":"t","body":"","labels":[{"name":"in-chunk"}]}]\'',
-          "else",
-          "  echo '[]'",
-          "fi",
-        ].join("\n"),
-        { mode: 0o755 },
-      );
+    // drops issues named by chunk history, so no inner loop will ever continue
+    // it). It exists only when a run died between the chunk push and local
+    // branch deletion, and the delete pass reaps it after verifying containment.
+    it("takes none of the three for a git-derived chunk member's issue branch", async () => {
       await git(target, "checkout", "-q", "-b", "sandbar/issue-7-member");
       await git(target, "commit", "-q", "--allow-empty", "-m", "member work");
       await git(target, "checkout", "-q", "main");
+      await git(target, "checkout", "-q", "-b", "chunk");
+      await git(
+        target,
+        "merge",
+        "--no-ff",
+        "sandbar/issue-7-member",
+        "-m",
+        "Merge sandbar/issue-7: member",
+      );
+      const chunkTip = (await git(target, "rev-parse", "HEAD")).stdout.trim();
+      await git(
+        target,
+        "update-ref",
+        "refs/remotes/origin/sandbar/member-7",
+        "sandbar/issue-7-member",
+      );
+      await git(
+        target,
+        "update-ref",
+        "refs/remotes/origin/sandbar/chunk-7-member",
+        chunkTip,
+      );
+      await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.unmergedIssueBranches).toEqual([]);
       expect(state.discardedIssueBranches).toEqual([]);
@@ -472,7 +497,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         "https://github.com/acme/app.git",
       );
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.originUrl).toBe("https://github.com/acme/app-fork.git");
       expect(state.originRepo).toEqual({ owner: "acme", name: "app-fork" });
@@ -484,7 +509,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // fixture repo built with a self-remote is exactly that shape — so this is
     // also the default state of every other test in this file.
     it("reports a remote it cannot read as a repo without guessing", async () => {
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.originUrl).toBe(target);
       expect(state.originRepo).toBeNull();
@@ -504,7 +529,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         "git@gitserver.internal:/srv/git/app.git",
       );
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.originUrl).toBe("git@gitserver.internal:/srv/git/app.git");
       expect(state.originRepo).toBeNull();
@@ -512,14 +537,14 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("reads origin/<sourceBranch> from the named repo", async () => {
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
       expect(state.hasOriginBranch).toBe(true);
 
       // A repo with no `origin/main` at all — the invariant must be about the
       // repo it was pointed at, not about the one the process stands in.
       const bare = await mkdtemp(join(tmpdir(), "sandbar-empty-"));
       await git(bare, "init", "-q", "-b", "main");
-      const empty = await gatherState(cfg(layoutAt(bare, target)));
+      const empty = await gatherState(cfg(layoutAt(bare, target)), GH_READY);
       expect(empty.hasOriginBranch).toBe(false);
       await rm(bare, { recursive: true, force: true });
     });
@@ -538,7 +563,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
           { container: "gate", hostPath: present },
           { container: "gate", hostPath: absent },
         ],
-      });
+      }, GH_READY);
 
       expect(state.missingMountSources).toEqual([
         {
@@ -558,7 +583,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const state = await gatherState({
         ...cfg(layoutAt(target)),
         mountSources: [{ container: "db", hostPath: dangling }],
-      });
+      }, GH_READY);
 
       expect(state.missingMountSources).toEqual([
         {
@@ -570,7 +595,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("reports nothing when the stack declares no absolute sources", async () => {
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
       expect(state.missingMountSources).toEqual([]);
     });
 
@@ -583,7 +608,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         const state = await gatherState({
           ...cfg(layoutAt(target)),
           env: makeEnvReader({ [key]: "v" }),
-        });
+        }, GH_READY);
         expect(state.uncredentialledProviders).toEqual([]);
       }
     });
@@ -593,7 +618,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         ...cfg(layoutAt(target)),
         agentProviders: ["claude", "codex"],
         env: makeEnvReader({ ANTHROPIC_API_KEY: "v" }),
-      });
+      }, GH_READY);
       expect(state.uncredentialledProviders).toEqual(["codex"]);
     });
 
@@ -610,14 +635,14 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         const missing = await gatherState({
           ...cfg(layoutAt(target)),
           env: makeEnvReader({ [KEY]: "" }),
-        });
+        }, GH_READY);
         expect(missing.uncredentialledProviders).toEqual(["claude"]);
 
         process.env[KEY] = "from-the-host";
         const inherited = await gatherState({
           ...cfg(layoutAt(target)),
           env: makeEnvReader({ [KEY]: "" }),
-        });
+        }, GH_READY);
         expect(inherited.uncredentialledProviders).toEqual([]);
       } finally {
         if (saved === undefined) delete process.env[KEY];
@@ -630,7 +655,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         ...cfg(layoutAt(target)),
         agentProviders: ["codex"],
         env: makeEnvReader({ OPENAI_API_KEY: "v" }),
-      });
+      }, GH_READY);
       expect(state.uncredentialledProviders).toEqual([]);
     });
   });

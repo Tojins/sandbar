@@ -13,7 +13,7 @@
 //      thing done to them.
 //   2. Which issues are on each of those branches? The plan's derivation
 //      answers that, and nothing else can: `LandedChunk` is built from the
-//      candidate graph, which lists `in-chunk` members back in precisely so
+//      candidate graph, which lists git-derived branch members back in so
 //      this question has an answer.
 //   3. Is there an open pull request for it? Asked per branch rather than by
 //      listing the repository's pull requests, because the branches here are
@@ -74,6 +74,7 @@ import { hasExitCode } from "./errors.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
+  ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
@@ -108,8 +109,8 @@ async function capture(
  * Origin's chunk branches whose tips are already contained in
  * `origin/<sourceBranch>`, as branch names.
  *
- * Fetches first, and with the same refspecs preflight uses: preflight runs once
- * at startup and this runs every cycle, so a chunk a human merged twenty
+ * Fetches first, with the same chunk and member refspecs preflight uses:
+ * preflight runs once at startup and this runs every cycle, so a chunk a human merged twenty
  * minutes into a run is invisible without it. `--prune` on those same
  * destinations is what stops a branch somebody deleted on origin answering
  * "yes, still there" out of a stale cache — which would send the wrap-up to
@@ -136,6 +137,7 @@ export async function findLandedChunkBranches(
       "--prune",
       sourceBranch,
       ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+      ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
       "--quiet",
     ],
     repoDir,

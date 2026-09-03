@@ -11,7 +11,7 @@ import {
   type ChunkWrapupAdapter,
   type PullRequestSummary,
 } from "./chunk-land.js";
-import { IN_CHUNK_LABEL, type LandedChunk } from "./chunks.js";
+import { NEEDS_REVIEW_LABEL, type LandedChunk } from "./chunks.js";
 import { reconcileLandedChunks } from "./chunk-reconcile.js";
 
 type Recorded = { readonly op: string; readonly arg: string };
@@ -43,8 +43,8 @@ function fakeAdapter(
       async closePullRequest(p) {
         record("closePullRequest", String(p));
       },
-      async deleteChunkBranch(b) {
-        record("deleteChunkBranch", b);
+      async deleteChunkBranch(b, members) {
+        record("deleteChunkBranch", `${b} [${members.join(",")}]`);
       },
     },
   };
@@ -108,7 +108,7 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(prQueries).toBe(0);
   });
 
-  it("closes the members, drops in-chunk, closes the PR and deletes the branch", async () => {
+  it("closes the members, drops needs-review, closes the PR and deletes the branch", async () => {
     const { adapter, calls } = fakeAdapter();
     const r = await run(
       ["sandbar/chunk-42-c"],
@@ -121,13 +121,13 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(r.reconciled[0]?.residue).toEqual([]);
     expect(calls.map((c) => `${c.op} ${c.arg}`)).toEqual([
       "closeIssue 42",
-      `removeLabel 42:${IN_CHUNK_LABEL}`,
+      `removeLabel 42:${NEEDS_REVIEW_LABEL}`,
       "closeIssue 43",
-      `removeLabel 43:${IN_CHUNK_LABEL}`,
+      `removeLabel 43:${NEEDS_REVIEW_LABEL}`,
       "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
       "closePullRequest 9",
-      "deleteChunkBranch sandbar/chunk-42-c",
+      "deleteChunkBranch sandbar/chunk-42-c [42,43]",
     ]);
     expect(r.reconciled[0]?.branchDeleted).toBe(true);
   });
@@ -140,7 +140,7 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(calls.some((c) => c.op.endsWith("PullRequest"))).toBe(false);
     expect(calls.at(-1)).toEqual({
       op: "deleteChunkBranch",
-      arg: "sandbar/chunk-42-c",
+      arg: "sandbar/chunk-42-c [42]",
     });
   });
 
@@ -154,7 +154,7 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(r.closedIssues).toEqual([]);
     expect(r.reconciled[0]?.residue).toEqual([]);
     expect(calls).toEqual([
-      { op: "deleteChunkBranch", arg: "sandbar/chunk-42-c" },
+      { op: "deleteChunkBranch", arg: "sandbar/chunk-42-c []" },
     ]);
   });
 
