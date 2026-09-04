@@ -2130,7 +2130,7 @@ export type RealAdapterDeps = {
   readonly runStackGate: () => Promise<GateResult>;
 };
 
-type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "usage" | "toolCalls" | "cause" | "verdict">;
+type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "usage" | "toolCalls" | "rateLimit" | "cause" | "verdict">;
 
 // The default merge subject, and it names an ISSUE — which is why anything
 // that is not one issue's branch (a chunk, #64) carries its own
@@ -2271,6 +2271,11 @@ export function captureAgentRun(
   });
 }
 
+// Codex merger quota remains the deliberate #109 gap: its `--rm` container
+// uses HOME=/tmp, so the rollout disappears before it can be read. Its vendor
+// message therefore follows the existing halt path. Claude quota state is on
+// stdout and is retained by the shared accumulator.
+//
 // Interpret a completed capture through the SAME provider object that built
 // its command. Raw streams stay on the returned run for #67's attempt log;
 // only this parsed speech register is eligible to carry a resolve promise.
@@ -2298,6 +2303,7 @@ export function parseCapturedAgentRun(
     spawnError: run.end === "spawn-error" ? run.detail : undefined,
     parseError,
     silentRunRecovery: "infra",
+    rateLimit: speech.rateLimit,
   });
   return {
     ...run,
@@ -2309,6 +2315,7 @@ export function parseCapturedAgentRun(
     verdict: classification.verdict,
     ...(classification.detail === undefined ? {} : { detail: classification.detail }),
     ...(speech.usage === undefined ? {} : { usage: speech.usage }),
+    ...(speech.rateLimit === undefined ? {} : { rateLimit: speech.rateLimit }),
     toolCalls: speech.toolCalls,
   };
 }

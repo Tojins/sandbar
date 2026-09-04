@@ -19,12 +19,27 @@
 // leading explanation.
 
 export type AgentRunEnd = "exit" | "timeout" | "signal" | "spawn-error";
-export type AgentRunCause = "clean" | "silent" | "provider-failure" | "spawn-error" | "timeout" | "signal" | "parse-error";
+export type AgentRunCause = "clean" | "silent" | "provider-failure" | "quota" | "spawn-error" | "timeout" | "signal" | "parse-error";
 export type SilentRunRecovery = "retryable" | "infra";
+
+export type RateLimitMeasurement = {
+  readonly status: "allowed" | "allowed_warning" | "rejected";
+  readonly window: string;
+  readonly utilization?: number;
+  readonly resetsAt?: number;
+};
+
+export const formatRateLimitFields = (
+  measurement: RateLimitMeasurement | undefined,
+): string => measurement === undefined ? "" :
+  ` quotaStatus=${measurement.status} quotaWindow=${measurement.window}` +
+  (measurement.utilization === undefined ? "" : ` quotaUtilization=${measurement.utilization}`) +
+  (measurement.resetsAt === undefined ? "" : ` quotaResetsAt=${measurement.resetsAt}`);
 
 export type AgentRunClassification = {
   readonly cause: AgentRunCause;
-  readonly verdict: "answer" | "infra";
+  readonly verdict: "answer" | "infra" | "quota";
+  readonly rateLimit?: RateLimitMeasurement;
   // A provider or runtime's own narrow explanation. Consumers may add their
   // own presentation around it without accidentally embedding raw streams.
   readonly detail?: string;
@@ -42,6 +57,7 @@ export type AgentRunEndInput = {
   readonly stderr?: string;
   readonly stdout?: string;
   readonly silentRunRecovery: SilentRunRecovery;
+  readonly rateLimit?: RateLimitMeasurement;
 };
 
 const exitDetail = (input: AgentRunEndInput): string => {
@@ -65,6 +81,12 @@ export function classifyAgentRunEnd(input: AgentRunEndInput): AgentRunClassifica
       verdict: "infra",
       ...(input.spawnError === undefined ? {} : { detail: input.spawnError }),
     };
+  }
+  if (
+    input.rateLimit?.status === "rejected" &&
+    (input.end !== "exit" || input.exitCode !== 0 || input.failure !== undefined)
+  ) {
+    return { cause: "quota", verdict: "quota", rateLimit: input.rateLimit };
   }
   if (input.end === "timeout") {
     return { cause: "timeout", verdict: "answer" };

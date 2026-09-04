@@ -73,6 +73,10 @@ describe("terminalFinalizeInputs", () => {
           commits: [],
         },
       },
+      {
+        issue: issue("7"),
+        terminal: { type: "QUOTA", provider: "codex", window: "seven_day", resetsAt: 42 },
+      },
     ];
     expect(terminalFinalizeInputs(outcomes).map((i) => i.kind)).toEqual([
       "needs-info",
@@ -81,6 +85,7 @@ describe("terminalFinalizeInputs", () => {
       "review-budget-exhausted",
       "hard-error",
       "reviewer-wrote",
+      "quota",
     ]);
   });
 

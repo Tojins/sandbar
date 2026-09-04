@@ -164,6 +164,24 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(parseResolveSignal(run.output ?? "")).toEqual({ kind: "COMMITTED" });
   });
 
+  it("carries a failed Claude quota capture to the attempt sink", () => {
+    const raw = JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "rejected", rateLimitType: "five_hour", resetsAt: 123,
+        unifiedWindows: { five_hour: { utilization: 1, resetsAt: 123 } },
+      },
+    });
+    const run = parseCapturedAgentRun(
+      { ...captured(raw), exitCode: 1 },
+      buildAgentProvider("claude", "m"),
+    );
+    expect(run).toMatchObject({
+      verdict: "quota",
+      rateLimit: { status: "rejected", window: "five_hour", resetsAt: 123 },
+    });
+  });
+
   it("carries usage and all four Codex tool item types beside resolve speech", () => {
     const raw = [
       ...["command_execution", "file_change", "mcp_tool_call", "web_search"].map(

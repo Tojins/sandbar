@@ -98,8 +98,8 @@ an exit condition fires.
    of those approvals inside the same round. `src/reviewer-run.ts` owns the
    order, the aggregation and what a failed reviewer invocation means (#41).
    Terminals: `DONE | NEEDS-INFO |
-   NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | HARD-ERROR`
-   (infra-only).
+   NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | QUOTA |
+   HARD-ERROR` (infra-only).
 
 3. **Merge** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
    + `src/forge-verify.ts` + `src/chunk-land.ts`) — procedural, in a dedicated
@@ -132,12 +132,13 @@ an exit condition fires.
 
 ### Exit conditions (`src/exit-conditions.ts`)
 
-First of: **plan-empty** (exit 0) · **relaunch** (#65, exit 75 after any cycle
+First of: **plan-empty** (exit 0) · **quota** (#109, exit 4; outranks relaunch) ·
+**relaunch** (#65, exit 75 after any cycle
 that landed merges, when `config.relaunchAfterLanding`) · **stuck-same-plan**
 (exit 2) · **stuck-zero-dones** (exit 2) · **budget** (`maxTotalIssues`,
 default 50, exit 3) · **halted** (exit 1) · **iteration-ceiling**.
 
-All seven are one type, `TerminalExit`, and the run ends with exactly one
+All eight are one type, `TerminalExit`, and the run ends with exactly one
 `Exit (<tag>): <reason>` on stdout whichever fired (#70) — `formatExitLine` is
 the only spelling of it, `EXIT_TAGS` is exhaustive over the union, and a table
 test asserts every tag has a line. `applyCycle` owns only the four that judge a
@@ -348,7 +349,7 @@ and used to announce themselves in four different ways, the halt in none at all.
   Preflight refuses per routed provider across all three roles. The resolve
   invocation uses the same provider boundary for argv, credential env and
   parsed output while keeping its raw streams verbatim in attempt logs. A
-  provider's parser answers in FIVE registers and the rule no new one may break
+  provider's parser answers in SIX registers and the rule no new one may break
   is that they stay apart: `text`/`result` is the agent's SPEECH and the only
   thing a run returns (#41 — "completed with output" is what `reviewer-run.ts`
   reads as a verdict, so codex's `reasoning` is dropped and parsed speech keeps
@@ -363,7 +364,11 @@ and used to announce themselves in four different ways, the halt in none at all.
   reason buried under a dozen tracing lines — and, since no CLI documents its
   exit codes, #67's rule for a terminal failure under an exit-0 process: infra,
   not an answer (read as an answer it is a nudge, an attempt, and eight more of
-  them). **The branch owns the environment; the run owns the tools (#75).**
+  them). The sixth register is rate-limit state (#109), a measurement that
+  cannot itself trip completion: Claude supplies it on stdout and Codex through
+  the still-live sandbox's rollout. A rejected measurement plus a failed
+  invocation closes that provider for the run and produces QUOTA without an
+  agent retry. **The branch owns the environment; the run owns the tools (#75).**
   After resolving the declared sandbox image or a per-branch variant, the
   driver appends git, the uid-1000 agent user and exactly the routed standalone
   CLIs. `AGENT_PROVIDER_PACKAGES` owns each release artifact and per-architecture

@@ -33,6 +33,7 @@ import {
   type SandboxProvider,
   SANDBOX_REPO_DIR,
   AgentError,
+  AgentQuotaError,
   AgentIdleTimeoutError,
   agentPartialOutput,
   agentPartialUsage,
@@ -43,6 +44,7 @@ import {
   defaultImageName,
   killOnAbort,
   parseCodexJsonLine,
+  parseCodexRolloutLine,
   parseStreamJsonLine,
   prepareWorktree,
   reclaimIssueClone,
@@ -289,6 +291,54 @@ describe("parseStreamJsonLine", () => {
 
   it("returns [] for an unknown top-level type", () => {
     expect(parseStreamJsonLine(JSON.stringify({ type: "future_event" }))).toEqual([]);
+  });
+});
+
+describe("rate-limit measurements (#109)", () => {
+  it("reads Claude's rejected event without turning it into speech", () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "rejected", rateLimitType: "five_hour", resetsAt: 123,
+        unifiedWindows: { five_hour: { utilization: 1, resetsAt: 123 } },
+      },
+    }))).toEqual([{ type: "rate_limit", measurement: {
+      status: "rejected", window: "five_hour", utilization: 1, resetsAt: 123,
+    } }]);
+  });
+
+  it("reads Codex's last token-count quota shape", () => {
+    expect(parseCodexRolloutLine(JSON.stringify({
+      type: "event_msg", payload: { type: "token_count", rate_limits: {
+        rate_limit_reached_type: "seven_day",
+        primary: { rate_limit_type: "seven_day", used_percent: 100, resets_at: 456 },
+      } },
+    }))).toEqual([{ type: "rate_limit", measurement: {
+      status: "rejected", window: "seven_day", utilization: 1, resetsAt: 456,
+    } }]);
+  });
+
+  it("takes a reached secondary window's evidence, never primary's", () => {
+    expect(parseCodexRolloutLine(JSON.stringify({
+      type: "event_msg", payload: { type: "token_count", rate_limits: {
+        rate_limit_reached_type: "secondary",
+        primary: { used_percent: 10, window_minutes: 300, resets_at: 111 },
+        secondary: { used_percent: 100, window_minutes: 10080, resets_at: 222 },
+      } },
+    }))).toEqual([{ type: "rate_limit", measurement: {
+      status: "rejected", window: "secondary", utilization: 1, resetsAt: 222,
+    } }]);
+  });
+
+  it("omits window evidence when a reached window cannot be identified", () => {
+    expect(parseCodexRolloutLine(JSON.stringify({
+      type: "event_msg", payload: { type: "token_count", rate_limits: {
+        rate_limit_reached_type: "unexpected_window",
+        primary: { used_percent: 10, window_minutes: 300, resets_at: 111 },
+      } },
+    }))).toEqual([{ type: "rate_limit", measurement: {
+      status: "rejected", window: "unexpected_window",
+    } }]);
   });
 });
 
@@ -872,7 +922,10 @@ describe("registerShutdown", () => {
 // `live` is a parameter so a caller can watch the children this provider
 // spawned: #41's idle timeout is supposed to kill the exec it stops waiting
 // for, and "the run rejected" is true whether or not it did.
-function makeLocalProvider(live: Set<ChildProcess> = new Set()): SandboxProvider & {
+function makeLocalProvider(
+  live: Set<ChildProcess> = new Set(),
+  rolloutProbe: "run" | "reject" | "hang" = "run",
+): SandboxProvider & {
   capturedEnv?: Record<string, string>;
   capturedMounts?: readonly Mount[];
 } {
@@ -898,6 +951,13 @@ function makeLocalProvider(live: Set<ChildProcess> = new Set()): SandboxProvider
         containerName: "fake-sandbox-container",
         exec: (command, execOpts) =>
           new Promise((resolveExec, rejectExec) => {
+            if (command.includes("/sessions;")) {
+              if (rolloutProbe === "reject") {
+                rejectExec(new Error("probe exec failed"));
+                return;
+              }
+              if (rolloutProbe === "hang") return;
+            }
             const proc = spawn("sh", ["-c", command], {
               cwd: execOpts?.cwd ?? worktreePath,
               env: { ...process.env },
@@ -988,6 +1048,17 @@ function scriptedAgent(shellScript: string): AgentProvider {
   };
 }
 
+function scriptedCodexAgent(shellScript: string): AgentProvider {
+  return {
+    name: "codex",
+    env: {},
+    buildPrintCommand() {
+      return { command: shellScript, stdin: "" };
+    },
+    parseStreamLine: parseCodexJsonLine,
+  };
+}
+
 const git = (args: string[], cwd: string) =>
   execFileP("git", args, { cwd, env: { ...process.env, LC_ALL: "C" } });
 
@@ -1055,6 +1126,155 @@ describe("createSandbox integration (local provider)", () => {
       expect(log.stdout.trim()).toBe(run.commits[0]!.sha);
     } finally {
       await sandbox.close();
+    }
+  });
+
+  it("ingests Codex's post-invocation rollout measurement", async () => {
+    const branch = "sandbar/issue-109-codex-allowed";
+    await git(["branch", branch], dir);
+    const codexHome = await mkdtemp(join(tmpdir(), "asb-codex-home-"));
+    cleanups.push(codexHome);
+    const oldCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    const rollout = join(codexHome, "sessions", "2026", "09", "04", "rollout-test.jsonl");
+    await mkdir(dirname(rollout), { recursive: true });
+    const rolloutLine = JSON.stringify({
+      type: "event_msg", payload: { type: "token_count", rate_limits: {
+        rate_limit_reached_type: null,
+        primary: { rate_limit_type: "seven_day", used_percent: 25, resets_at: 456 },
+      } },
+    });
+    expect(parseCodexRolloutLine(rolloutLine)).toHaveLength(1);
+    await writeFile(rollout, rolloutLine + "\n");
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
+    });
+    try {
+      const run = await sandbox.run({
+        agent: scriptedCodexAgent(`printf '%s\\n' '${JSON.stringify({
+          type: "item.completed", item: { type: "agent_message", text: "done" },
+        })}'`),
+        prompt: "go", completionSignal: [],
+      });
+      expect(run.rateLimit).toEqual({
+        status: "allowed", window: "seven_day", utilization: 0.25, resetsAt: 456,
+      });
+    } finally {
+      await sandbox.close();
+      if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = oldCodexHome;
+    }
+  });
+
+  it("preserves a completed Codex answer when the rollout probe cannot exec", async () => {
+    const branch = "sandbar/issue-109-codex-probe-failure";
+    await git(["branch", branch], dir);
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(new Set(), "reject"), layout: layoutFor(dir),
+    });
+    try {
+      const run = await sandbox.run({
+        agent: scriptedCodexAgent(`printf '%s\\n' '${JSON.stringify({
+          type: "item.completed", item: { type: "agent_message", text: "done" },
+        })}'`),
+        prompt: "go",
+        completionSignal: [],
+      });
+      expect(run.stdout).toBe("done");
+      expect(run.rateLimit).toBeUndefined();
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  it("preserves a completed Codex answer when the rollout probe never settles", async () => {
+    const branch = "sandbar/issue-109-codex-probe-timeout";
+    await git(["branch", branch], dir);
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(new Set(), "hang"), layout: layoutFor(dir),
+    });
+    try {
+      const run = await sandbox.run({
+        agent: scriptedCodexAgent(`printf '%s\\n' '${JSON.stringify({
+          type: "item.completed", item: { type: "agent_message", text: "done" },
+        })}'`),
+        prompt: "go",
+        completionSignal: [],
+        idleTimeoutSeconds: 0.05,
+      });
+      expect(run.stdout).toBe("done");
+      expect(run.rateLimit).toBeUndefined();
+    } finally {
+      await sandbox.close();
+    }
+  }, 15_000);
+
+  it.each(["missing", "malformed"] as const)(
+    "preserves Codex's existing failure classification when its rollout is %s",
+    async (shape) => {
+      const branch = `sandbar/issue-109-codex-${shape}`;
+      await git(["branch", branch], dir);
+      const codexHome = await mkdtemp(join(tmpdir(), "asb-codex-home-"));
+      cleanups.push(codexHome);
+      const oldCodexHome = process.env.CODEX_HOME;
+      process.env.CODEX_HOME = codexHome;
+      if (shape === "malformed") {
+        const rollout = join(codexHome, "sessions", "2026", "09", "04", "rollout-test.jsonl");
+        await mkdir(dirname(rollout), { recursive: true });
+        await writeFile(rollout, "not-json\n");
+      }
+      const sandbox = await createSandbox({
+        env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
+      });
+      try {
+        const err = await sandbox.run({
+          agent: scriptedCodexAgent(`printf '%s\\n' '${JSON.stringify({
+            type: "turn.failed", error: { message: "ordinary provider failure" },
+          })}'; exit 1`),
+          prompt: "go", completionSignal: [],
+        }).then(() => null, (e: unknown) => e);
+        expect(err).toBeInstanceOf(AgentError);
+        expect(err).not.toBeInstanceOf(AgentQuotaError);
+        expect((err as Error).message).toContain("ordinary provider failure");
+      } finally {
+        await sandbox.close();
+        if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = oldCodexHome;
+      }
+    },
+  );
+
+  it("turns a failed Codex invocation with a reached rollout window into quota", async () => {
+    const branch = "sandbar/issue-109-codex-rejected";
+    await git(["branch", branch], dir);
+    const codexHome = await mkdtemp(join(tmpdir(), "asb-codex-home-"));
+    cleanups.push(codexHome);
+    const oldCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    const rollout = join(codexHome, "sessions", "2026", "09", "04", "rollout-test.jsonl");
+    await mkdir(dirname(rollout), { recursive: true });
+    await writeFile(rollout, JSON.stringify({
+      type: "event_msg", payload: { type: "token_count", rate_limits: {
+        rate_limit_reached_type: "seven_day",
+        primary: { rate_limit_type: "seven_day", used_percent: 100, resets_at: 789 },
+      } },
+    }) + "\n");
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
+    });
+    try {
+      const err = await sandbox.run({
+        agent: scriptedCodexAgent("exit 1"), prompt: "go", completionSignal: [],
+      }).then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(AgentQuotaError);
+      expect(err).toMatchObject({
+        provider: "codex",
+        measurement: { status: "rejected", window: "seven_day", resetsAt: 789 },
+      });
+    } finally {
+      await sandbox.close();
+      if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = oldCodexHome;
     }
   });
 
@@ -1806,6 +2026,12 @@ describe("createSandbox integration (local provider)", () => {
       // review and the run died", and the two are handled differently.
       const agent = scriptedAgent(
         `printf '%s\\n' '${JSON.stringify({
+          type: "rate_limit_event",
+          rate_limit_info: {
+            status: "allowed", rateLimitType: "five_hour", resetsAt: 42,
+            unifiedWindows: { five_hour: { utilization: 0.98, resetsAt: 42 } },
+          },
+        })}' '${JSON.stringify({
           type: "assistant",
           message: { content: [{ type: "text", text: "partial review findings" }] },
         })}' '${JSON.stringify({
@@ -1827,6 +2053,12 @@ describe("createSandbox integration (local provider)", () => {
       expect(agentPartialUsage(err).usage).toEqual({
         inputTokens: 12,
         resolvedModel: "claude-opus",
+      });
+      expect(agentPartialUsage(err).rateLimit).toEqual({
+        status: "allowed",
+        window: "five_hour",
+        utilization: 0.98,
+        resetsAt: 42,
       });
 
       // And the half the message never covered: the run stopped waiting for the

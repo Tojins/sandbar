@@ -12,9 +12,10 @@
 //                           an internal failure.
 //   (g) iteration-ceiling — MAX_ITERATIONS cycles without any of the above.
 //                           Defensive; the conditions above terminate first.
+//   (h) quota             — a provider subscription window closed (exit 4).
 //
-// applyCycle owns (b)–(e) and is a judgement about a COMPLETED cycle. (a), (f)
-// and (g) are none of them — they fire before a cycle has run, in the middle of
+// applyCycle owns (b)–(e) and is a judgement about a COMPLETED cycle. (a), (f),
+// (g) and (h) are none of them — they fire before a cycle has run, in the middle of
 // one, or in place of one — so the orchestrator reaches them itself and there
 // is no applyCycle arm to find them in.
 //
@@ -26,7 +27,7 @@
 // orchestrator uses to trim the plan so no cycle can push issuesAttempted past
 // the cap mid-run.
 //
-// ALL SEVEN ARE `TerminalExit`s, and `formatExitLine` is the one spelling of
+// ALL EIGHT ARE `TerminalExit`s, and `formatExitLine` is the one spelling of
 // the line an operator reads (#70). That is why (a), (f) and (g) are here
 // despite having no applyCycle arm: before #70 the stops the orchestrator owned
 // each announced themselves in their own words — and one of them, the halt, in
@@ -54,6 +55,7 @@ export const EXIT_CODE_SUCCESS = 0;
 export const EXIT_CODE_HALTED = 1;
 export const EXIT_CODE_STUCK = 2;
 export const EXIT_CODE_BUDGET = 3;
+export const EXIT_CODE_QUOTA = 4;
 // "Landed work; relaunch me to continue" (#65). A launcher that loops on
 // exactly this code closes the staleness window a self-hosted series opens: a
 // cycle that lands orchestrator commits leaves the running process driving on
@@ -97,6 +99,7 @@ export const EXIT_CODE_RELAUNCH = 75;
 // fails the set-equality assertion, and a row naming no tag fails to compile.
 export const EXIT_TAGS = [
   "plan-empty",
+  "quota",
   "relaunch",
   "stuck-same-plan",
   "stuck-zero-dones",
@@ -136,6 +139,21 @@ export function planEmptyExit(): TerminalExit {
     tag: "plan-empty",
     reason: "no unblocked issues to work on, and no chunk waiting to land",
     exitCode: EXIT_CODE_SUCCESS,
+  };
+}
+
+export function quotaExit(args: {
+  provider: "claude" | "codex";
+  window: string;
+  resetsAt?: number;
+}): TerminalExit {
+  const reset = args.resetsAt === undefined
+    ? "an unknown time"
+    : new Date(args.resetsAt * 1000).toISOString();
+  return {
+    tag: "quota",
+    reason: `${args.provider} ${args.window} quota window closed; resets at ${reset}`,
+    exitCode: EXIT_CODE_QUOTA,
   };
 }
 
