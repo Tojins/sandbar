@@ -44,6 +44,47 @@ describe("renderIssueText", () => {
     expect(text).toContain("anonymous comment");
   });
 
+  it.each([
+    {
+      name: "an exact prefix",
+      body: "**Sandbar:** agent question",
+      heading: "### Sandbar (orchestrator, not a human) — 2026-06-11T12:46:13Z",
+    },
+    {
+      name: "a prefix after leading whitespace",
+      body: " \n **Sandbar:** agent question",
+      heading: "### Sandbar (orchestrator, not a human) — 2026-06-11T12:46:13Z",
+    },
+    {
+      name: "an ordinary human comment",
+      body: "human answer",
+      heading: "### operator — 2026-06-11T12:46:13Z",
+    },
+    {
+      name: "a quoted sandbar comment",
+      body: "> **Sandbar:** agent question\n\nhuman answer",
+      heading: "### operator — 2026-06-11T12:46:13Z",
+    },
+    {
+      name: "an inline sandbar mention",
+      body: "I am replying to **Sandbar:** with an answer",
+      heading: "### operator — 2026-06-11T12:46:13Z",
+    },
+  ])("attributes $name from the trimmed body's strict prefix", ({ body, heading }) => {
+    const text = renderIssueText("9", {
+      comments: [
+        {
+          author: { login: "operator" },
+          createdAt: "2026-06-11T12:46:13Z",
+          body,
+        },
+      ],
+    });
+
+    expect(text).toContain(heading);
+    expect(text).toContain(body.trim());
+  });
+
   it("keeps body before comments (spec first, discussion after)", () => {
     const text = renderIssueText("9", {
       title: "t",

@@ -19,12 +19,6 @@ counts: it is an explicit decision to let you choose. What does *not* count on
 its own is an image you cannot see — a pasted screenshot reaches you as a URL
 you can neither authenticate to nor render.
 
-Comments beginning `**Sandbar:**` are the orchestrator's own, posted on your
-behalf under the operator's account. They are not a human's answer, and one of
-them quotes the "no prototype needed" phrase while *asking* for it — do not read
-that back as consent. Only a human's own comment, written after that one, counts
-as a decision.
-
 Non-trivial UI impact **and** no prototype → stop now and emit
 `<promise>NEEDS-UI-PROTOTYPE</promise>` followed by a `<ui-impact>` block
 covering (a) what visible UI this change would create or alter, (b) which design
