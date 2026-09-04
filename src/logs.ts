@@ -3,12 +3,9 @@
 // At run start, makes `<baseDir>/run-<UTC-ISO>/` and exposes:
 //
 //   appendOrchestrator(line)              → run-<UTC>/orchestrator.log
-//   cycle(n).writePlan(plan)              → run-<UTC>/cycle-<n>/plan.json
-//   cycle(n).appendMerger(line)           → run-<UTC>/cycle-<n>/merger.log
-//   cycle(n).writeMergerGate(id, gate)    → run-<UTC>/cycle-<n>/merger-gate-<id>.{out,err,meta.json,containers.log}
-//   cycle(n).writeResolveAttempt(k, rec)  → run-<UTC>/cycle-<n>/resolve-<k>-attempt-<m>.log
-//   cycle(n).writeAttempt(id, m, content) → run-<UTC>/cycle-<n>/issue-<id>/attempt-<m>.log
-//   cycle(n).writeAttemptReviewer(...)    → run-<UTC>/cycle-<n>/issue-<id>/attempt-<m>-reviewer.log
+//   plans.jsonl                           → one trigger + plan per recompute
+//   issue-<id>/                           → all attempts for one issue
+//   landing-<n>/                          → one serialized landing's artefacts
 //
 // Append-style writers are unbuffered (Node uses O_APPEND), so SIGINT/SIGTERM
 // and uncaught exceptions don't lose lines that already returned. finalize()
@@ -33,7 +30,7 @@
 // both phases and every image build. All of it is here and none of it is on
 // stdout, which is the same split this header already describes: the log is
 // where a cost question is answered long after the fact, and a terminal
-// rendering of ~130 lines per cycle instead of ~50 would be unreadable.
+// rendering of ~130 lines per landing instead of ~50 would be unreadable.
 //
 // One spelling, `durationMs=<int>`, produced by `timing.ts`; the gate's
 // per-step numbers nest inside a single `steps=` field because step names are
@@ -111,15 +108,18 @@ export type MergerGateRecord = {
   readonly containerLogs: string;
 };
 
-export type CycleLogger = AttemptLogger & {
-  readonly cycleDir: string;
-  writePlan(plan: unknown): Promise<void>;
+export type IssueLogger = AttemptLogger & {
+  readonly dir: string;
+};
+
+export type LandingLogger = {
+  readonly dir: string;
   appendMerger(line: string): Promise<void>;
   writeMergerGate(issueId: string, gate: MergerGateRecord): Promise<void>;
   // One resolve-loop attempt's captured stdout and stderr (#67), keyed like the
   // gate artefact beside it: an issue id for an issue branch, `chunk-<root>`
   // for a chunk, `verify-round-<n>` for a forge-red round — so a chunk and its
-  // own root issue resolving in one cycle cannot overwrite each other.
+  // own root issue resolving in one landing cannot overwrite each other.
   //
   // ANSWERS WITH THE PATH IT WROTE. The abandon comment points a human at these
   // files, and the alternative is the merger composing the same filename a
@@ -133,7 +133,12 @@ export type CycleLogger = AttemptLogger & {
 export type RunLogger = {
   readonly runDir: string;
   appendOrchestrator(line: string): Promise<void>;
-  cycle(n: number): CycleLogger;
+  writePlan(
+    trigger: "launch" | "slot-freed" | "landing-finished" | "terminal-finalized",
+    plan: unknown,
+  ): Promise<void>;
+  issue(issueId: string): Promise<IssueLogger>;
+  landing(n: number): LandingLogger;
   finalize(reason: string): Promise<void>;
 };
 
@@ -160,7 +165,8 @@ export async function startRunLogger(
     `[${new Date().toISOString()}] run-start\n`,
   );
 
-  const cycleCache = new Map<number, CycleLogger>();
+  const issueCache = new Map<string, Promise<IssueLogger>>();
+  const landingCache = new Map<number, LandingLogger>();
 
   const logger: RunLogger = {
     runDir,
@@ -170,12 +176,25 @@ export async function startRunLogger(
         `[${new Date().toISOString()}] ${line}\n`,
       );
     },
-    cycle(n) {
-      const cached = cycleCache.get(n);
+    async writePlan(trigger, plan) {
+      await appendFile(
+        join(runDir, "plans.jsonl"),
+        `${JSON.stringify({ trigger, plan })}\n`,
+      );
+    },
+    issue(issueId) {
+      const cached = issueCache.get(issueId);
       if (cached) return cached;
-      const c = makeCycleLogger(runDir, n);
-      cycleCache.set(n, c);
-      return c;
+      const created = makeIssueLogger(runDir, issueId);
+      issueCache.set(issueId, created);
+      return created;
+    },
+    landing(n) {
+      const cached = landingCache.get(n);
+      if (cached) return cached;
+      const created = makeLandingLogger(runDir, n);
+      landingCache.set(n, created);
+      return created;
     },
     async finalize(reason) {
       await appendFile(
@@ -187,44 +206,42 @@ export async function startRunLogger(
   return logger;
 }
 
-function makeCycleLogger(runDir: string, n: number): CycleLogger {
-  const cycleDir = join(runDir, `cycle-${n}`);
-  let cycleDirReady: Promise<void> | null = null;
-  const ensureCycleDir = (): Promise<void> => {
-    if (!cycleDirReady) {
-      cycleDirReady = mkdir(cycleDir, { recursive: true }).then(() => undefined);
-    }
-    return cycleDirReady;
+async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLogger> {
+  const dir = join(runDir, `issue-${issueId}`);
+  await mkdir(dir, { recursive: true });
+  return {
+    dir,
+    async writeAttempt(_issueId, attempt, content) {
+      await writeFile(join(dir, `attempt-${attempt}.log`), content);
+    },
+    async writeAttemptReviewer(_issueId, attempt, content) {
+      await writeFile(join(dir, `attempt-${attempt}-reviewer.log`), content);
+    },
   };
-  const issueDirsReady = new Map<string, Promise<void>>();
-  const ensureIssueDir = async (issueId: string): Promise<string> => {
-    await ensureCycleDir();
-    const dir = join(cycleDir, `issue-${issueId}`);
-    let p = issueDirsReady.get(issueId);
-    if (!p) {
-      p = mkdir(dir, { recursive: true }).then(() => undefined);
-      issueDirsReady.set(issueId, p);
+}
+
+function makeLandingLogger(runDir: string, n: number): LandingLogger {
+  const landingDir = join(runDir, `landing-${n}`);
+  let landingDirReady: Promise<void> | null = null;
+  const ensureLandingDir = (): Promise<void> => {
+    if (!landingDirReady) {
+      landingDirReady = mkdir(landingDir, { recursive: true }).then(() => undefined);
     }
-    await p;
-    return dir;
+    return landingDirReady;
   };
 
   return {
-    cycleDir,
-    async writePlan(plan) {
-      await ensureCycleDir();
-      await writeFile(join(cycleDir, "plan.json"), JSON.stringify(plan, null, 2));
-    },
+    dir: landingDir,
     async appendMerger(line) {
-      await ensureCycleDir();
+      await ensureLandingDir();
       await appendFile(
-        join(cycleDir, "merger.log"),
+        join(landingDir, "merger.log"),
         `[${new Date().toISOString()}] ${line}\n`,
       );
     },
     async writeMergerGate(issueId, gate) {
-      await ensureCycleDir();
-      const base = join(cycleDir, `merger-gate-${issueId}`);
+      await ensureLandingDir();
+      const base = join(landingDir, `merger-gate-${issueId}`);
       await writeFile(`${base}.out`, gate.stdout);
       await writeFile(`${base}.err`, gate.stderr);
       // Its own file, never appended to `.err`: `summarizeGateFailure`
@@ -244,8 +261,8 @@ function makeCycleLogger(runDir: string, n: number): CycleLogger {
       );
     },
     async writeResolveAttempt(key, record) {
-      await ensureCycleDir();
-      const path = join(cycleDir, `resolve-${key}-attempt-${record.attempt}.log`);
+      await ensureLandingDir();
+      const path = join(landingDir, `resolve-${key}-attempt-${record.attempt}.log`);
       // A header before the streams, because the streams are what a container
       // that died at startup does NOT have: on the failure this file exists for,
       // everything below the header is empty and the header is the whole
@@ -267,17 +284,6 @@ function makeCycleLogger(runDir: string, n: number): CycleLogger {
         `${header}\n--- stdout ---\n${record.stdout}\n--- stderr ---\n${record.stderr}\n`,
       );
       return path;
-    },
-    async writeAttempt(issueId, attempt, content) {
-      const dir = await ensureIssueDir(issueId);
-      await writeFile(join(dir, `attempt-${attempt}.log`), content);
-    },
-    async writeAttemptReviewer(issueId, attempt, content) {
-      const dir = await ensureIssueDir(issueId);
-      await writeFile(
-        join(dir, `attempt-${attempt}-reviewer.log`),
-        content,
-      );
     },
   };
 }

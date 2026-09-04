@@ -648,6 +648,11 @@ export type RunConfig = {
   readonly maxReviewRounds?: number;
   readonly maxTotalIssues?: number;
 
+  // Number of issue inner loops that may execute concurrently. DONE issues
+  // release their slot while they wait for the serialized landing path.
+  // Default: 3.
+  readonly maxParallelIssues?: number;
+
   // Overrides any subset of the default label vocabulary; unset keys fall back
   // to DEFAULT_LABELS.
   readonly labels?: Partial<LabelConfig>;
@@ -679,43 +684,6 @@ export type RunConfig = {
   // Turn on `verified` when anything downstream of the source branch trusts it
   // without re-checking (a deploy on push, a release job).
   readonly mergeMode?: MergeModeConfig;
-
-  // Exit with EXIT_CODE_RELAUNCH (75) after any cycle in which the merger
-  // landed merges, instead of continuing on what the run resolved at launch
-  // (#65). For a repo whose launcher LOOPS on exactly that code — the shape a
-  // self-hosted repo needs, because there the landed commits are the
-  // orchestrator's own inputs, and a run that keeps cycling drives slice N+1 of
-  // a queued series against inputs from before slice N. Judge and judged from
-  // different eras is the #37 genus of silent false verdict, arriving through
-  // the launcher.
-  //
-  // #66 changed what a relaunch is worth, and the three objects it used to
-  // refresh no longer behave alike. `dist/` stopped moving: a self-hosted
-  // driver is an installed release the repo pins, so a relaunch re-runs the
-  // same bytes unless a human moves the pin between cycles — the launcher
-  // re-reads it every iteration on purpose, which is the one way a series can
-  // change drivers under itself, and it takes a deliberate edit to a committed
-  // file. IMAGES are why this flag survives — `ensureImages`
-  // runs once per run (run.ts) against a source worktree at
-  // `origin/<sourceBranch>`, so a landed `Containerfile` reaches a series
-  // through the relaunch and through nothing else.
-  //
-  // The CONFIG is the one to state carefully, because the obvious reading is
-  // wrong. It is `import()`ed once at launch (cli.ts), so a relaunch does
-  // re-read it — but out of the operator's CHECKOUT, and sandbar never pulls
-  // into that. A landed `gateStack` change therefore takes effect when a human
-  // pulls it, not when the run relaunches. Deliberate: the checkout is theirs
-  // to move, and #66 removed the launcher's `git pull` precisely so a series
-  // could run while they hold local commits. Preflight warns when the commits
-  // the checkout is missing touch the config file, so the gap is reported
-  // rather than silent.
-  //
-  // EXPLICIT config, not detection, and that is a decision: deriving
-  // self-hostedness (is the driver inside the operated repo?) false-positives
-  // for every consumer running the package from `node_modules`, whose
-  // non-looping launcher would then stop after the first landing cycle. A flag
-  // the host sets is one line and cannot misfire. Default: false.
-  readonly relaunchAfterLanding?: boolean;
 
   // Which landing lane an issue takes when it carries no `auto-land` label
   // (#57, §1 of #54): "auto" — the gate is the last word, what sandbar has
@@ -862,6 +830,7 @@ export const DEFAULT_MAX_IMPL_ATTEMPTS = 8;
 // review — the thing a human needs to finish the branch by hand.
 export const DEFAULT_MAX_REVIEW_ROUNDS = 8;
 export const DEFAULT_MAX_TOTAL_ISSUES = 50;
+export const DEFAULT_MAX_PARALLEL_ISSUES = 3;
 export const DEFAULT_INTEGRATION_BRANCH = "sandbar/integration";
 // 20 minutes. Covers a queued runner plus a browser suite; a repo whose CI is
 // genuinely slower should raise it rather than have sandbar park good cycles.
@@ -1744,6 +1713,15 @@ function requireLane(value: unknown): Lane {
   );
 }
 
+function requirePositiveInteger(field: string, value: unknown): number {
+  if (!Number.isInteger(value) || (value as number) < 1) {
+    throw new SandbarError(
+      `config.${field} must be a positive integer (got ${String(value)}).`,
+    );
+  }
+  return value as number;
+}
+
 // #121 renamed the second reviewer pass, and a renamed field is exactly #66's
 // silent failure: the config is IMPORTED, so a host still saying
 // `reviewerFollowupModelId` would have it spread through `...config` and never
@@ -1901,11 +1879,14 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     maxImplAttempts: config.maxImplAttempts ?? DEFAULT_MAX_IMPL_ATTEMPTS,
     maxReviewRounds: config.maxReviewRounds ?? DEFAULT_MAX_REVIEW_ROUNDS,
     maxTotalIssues: config.maxTotalIssues ?? DEFAULT_MAX_TOTAL_ISSUES,
+    maxParallelIssues: requirePositiveInteger(
+      "maxParallelIssues",
+      config.maxParallelIssues ?? DEFAULT_MAX_PARALLEL_ISSUES,
+    ),
     copyToWorktree: config.copyToWorktree ?? [],
     labels: { ...DEFAULT_LABELS, ...config.labels },
     gateStack,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
-    relaunchAfterLanding: config.relaunchAfterLanding ?? false,
     defaultLane: requireLane(config.defaultLane),
   };
 }

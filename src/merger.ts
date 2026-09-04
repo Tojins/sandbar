@@ -965,10 +965,10 @@ export type MergerResolveAttemptSink = (
 ) => Promise<string | null>;
 
 export type RunMergerOptions = {
-  // Full set of issues in this cycle (typically the plan's DONE branches).
+  // Full set of planner-visible ongoing issues in this run.
   // The resolve loop loads the bodies of all *other* entries so the agent has
   // multi-issue context when reasoning about an integration failure.
-  readonly cycleIssues?: readonly IssueRef[];
+  readonly ongoingIssues?: readonly IssueRef[];
   readonly projectAnchor?: string;
   readonly promptExtension?: PromptExtension;
   // Test seam for the duration fields this module logs (#82). Absent ⇒
@@ -1293,7 +1293,7 @@ export async function runMergerWithAdapter(
   // held by a sentinel rather than stated. Narrowed once, inside
   // `landRequestedChunks`, which is the only thing that reads it.
   const chunkLanding = opts.chunkLanding;
-  const cycle = opts.cycleIssues ?? issues;
+  const cycle = opts.ongoingIssues ?? issues;
   const projectAnchor = opts.projectAnchor ?? "";
   const closeRetries = opts.closeRetries ?? CLOSE_MAX_RETRIES;
   const sleep = opts.sleep ?? defaultSleep;
@@ -1670,7 +1670,7 @@ export async function runMergerWithAdapter(
     request: ChunkLandTarget,
     landedNow: readonly ChunkMember[],
     sourceBranch: string,
-    reason: "arrived" | "rework",
+    reason: "ongoing" | "rework",
   ): Promise<void> => {
     if (request.pullRequest > 0) {
       await adapter.commentOnPullRequest(
@@ -1686,7 +1686,7 @@ export async function runMergerWithAdapter(
     deferredChunks.push({ target: request, landedNow });
     await emit(
       `chunk ${request.branch}: not landed (` +
-        (reason === "rework" ? "queued for rework: " : "grew this cycle: ") +
+        (reason === "rework" ? "queued for rework: " : "ongoing member work: ") +
         `${landedNow.map((m) => `#${m.number}`).join(", ")}); \`${LAND_LABEL}\` kept`,
     );
   };
@@ -1705,19 +1705,6 @@ export async function runMergerWithAdapter(
   // a destination exists because a request does.
   const landRequestedChunks = async (): Promise<MergedChunkUnit[]> => {
     if (!chunkLanding) return [];
-    // What Phase A put on each chunk branch a moment ago, by branch. Read from
-    // `chunkLanded` rather than from the plan because that list is the record
-    // of what actually reached ORIGIN — a member whose push failed is not on
-    // the branch and is no reason to defer anything.
-    const grewThisCycle = new Map<string, ChunkMember[]>();
-    for (const landing of chunkLanded) {
-      const members = grewThisCycle.get(landing.chunkBranch) ?? [];
-      members.push({
-        number: issueNumberOf(landing.issue),
-        title: landing.issue.title,
-      });
-      grewThisCycle.set(landing.chunkBranch, members);
-    }
     const onHead: MergedChunkUnit[] = [];
     for (const request of chunkLanding.requests) {
       const pending: ChunkLandingUnit = {
@@ -1729,15 +1716,11 @@ export async function runMergerWithAdapter(
           await deferChunk(request, request.rework, pending.sourceBranch, "rework");
           continue;
         }
-        // Grew under the request, in this very cycle (#61's layer landing, one
-        // phase up). The plan read this chunk's members BEFORE phase 2, so the
-        // wrap-up would close what was on the branch then and delete the branch
-        // that carries the rest — while putting commits on the source branch
-        // that the pull request did not carry when a human labelled it.
-        // Nothing is merged and the label is left alone.
-        const landedNow = grewThisCycle.get(request.branch);
-        if (landedNow) {
-          await deferChunk(request, landedNow, pending.sourceBranch, "arrived");
+        const targeting = cycle
+          .filter((issue) => issue.chunk?.branch === request.branch)
+          .map((issue) => ({ number: issueNumberOf(issue), title: issue.title }));
+        if (targeting.length > 0) {
+          await deferChunk(request, targeting, pending.sourceBranch, "ongoing");
           continue;
         }
         const found = await adapter.fetchChunkRef(request.branch);

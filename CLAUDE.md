@@ -52,17 +52,20 @@ values and top-level await survive. Exactly one configuration flag (`--config`),
 no search up the directory tree, `.mjs`, and the default export is the object,
 not a factory. Rationale in `src/cli.ts` and `src/config.ts` headers.
 
-## Architecture — the four-phase outer loop
+## Architecture — continuous pool and serialized landing
 
-The orchestrator (`src/run.ts`) cycles plan → execute → merge → finalise until
-an exit condition fires.
+The orchestrator (`src/run.ts`) recomputes the complete plan whenever an
+execution slot frees. Planner-visible **ongoing** work lasts from admission
+through landing or parking; an execution **slot** lasts only while the inner
+loop runs. DONE work therefore queues for the one serialized landing path
+without consuming one of `maxParallelIssues` slots.
 
 1. **Plan** (`src/plan-resolver.ts` + `src/chunk-reconcile.ts`) — purely
    deterministic, no LLM: lists issues labelled `ready-for-agent`, parses
-   `## Blocked by` sections, selects the top-K unblocked issues (default 3) by
-   number. Each candidate also gets a **lane** (`src/lanes.ts`, #57) and, when
-   review-gated, a `chunk` target (#61) that tells phase 2 what to seed from
-   and phase 3 where to land. Ahead of the plan proper two passes make the
+   `## Blocked by` sections, selects up to `maxParallelIssues` unblocked issues
+   by number. Each candidate also gets a **lane** (`src/lanes.ts`, #57) and, when
+   review-gated, a `chunk` target (#61) that tells execution what to seed from
+   and the landing path where to land. Ahead of the plan proper two passes make the
    tracker agree with the forge and with git: the **chunk-review scan**
    (`src/chunk-follow-up.ts`, #95) routes each changes-requested review on a
    chunk PR to its landed member(s) and re-queues them, and the **reconciler**
@@ -105,7 +108,7 @@ an exit condition fires.
    NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | QUOTA |
    HARD-ERROR` (infra-only).
 
-3. **Merge** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
+3. **Landing** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
    + `src/forge-verify.ts` + `src/chunk-land.ts`) — procedural, in a dedicated
    ephemeral worktree detached at `origin/<sourceBranch>` (never the operator's
    checkout, #10). Per DONE branch in issue order: `git merge --no-ff`, with
@@ -114,9 +117,9 @@ an exit condition fires.
    word); the check-reading safety argument — its invariant: no unknown verdict
    ever lands — is in the `src/forge-verify.ts` and `src/merger.ts` headers. An
    issue carrying a `chunk` lands on its chunk branch instead (#60) and each
-   pushed chunk gets a **draft PR** per cycle (#62): `src/chunk-pr.ts` is the
+   pushed chunk gets a **draft PR** updated at each landing (#62): `src/chunk-pr.ts` is the
    prose, `src/forge-pr.ts` the `gh pr` create-or-update both PR kinds share. A
-   **`land` label on that PR** (#64) makes the next cycle merge
+   **`land` label on that PR** (#64) makes the next landing merge
    `origin/<chunk>` in the SAME source pass, ahead of the auto lane's branches,
    so one gate-2 and one landing cover both; the wrap-up then closes the
    members whose landing-only member refs it contains, drops `needs-review`,
@@ -131,23 +134,32 @@ an exit condition fires.
    `labels.needsInfo`/`labels.agentStuck`, plus `needs-review` for a
    chunk-landed member, are the only labels sandbar applies — `land` (#64) it only ever
    REMOVES, from a pull request a human labelled).
-   Runs in **two passes straddling the merge** (#30): Phase-2 terminals are
-   finalised before Phase 3 so a merge-phase throw cannot discard them.
+   A terminal is finalised before its landing is attempted. Handoffs that decide
+   to remove `ready-for-agent` read that state back before the issue ceases to
+   be ongoing; quota and infrastructure terminals deliberately remain queued.
 
 ### Exit conditions (`src/exit-conditions.ts`)
 
-First of: **plan-empty** (exit 0) · **quota** (#109, exit 4; outranks relaunch) ·
-**relaunch** (#65, exit 75 after any cycle
-that landed merges, when `config.relaunchAfterLanding`) · **stuck-same-plan**
-(exit 2) · **stuck-zero-dones** (exit 2) · **budget** (`maxTotalIssues`,
-default 50, exit 3) · **halted** (exit 1) · **iteration-ceiling**.
+The pool exits plan-empty only when no issue, landing, or plan remains. Provider
+quota stops new admissions and drains running and landing work before exit 4.
+`maxTotalIssues` counts admissions. Relaunch (75) is evaluated at quiescence,
+before admitting newly-unblocked work, and requires a landing in this process.
+After six consecutive no-progress observations — issue terminals or a
+human-requested landing pass that only defers unchanged requests — admissions stop immediately;
+already-running issues drain and are finalised before the run exits stuck. A
+LANDING, for both of those, is any of a source-branch merge, a chunk landed on
+the source branch, or a DONE branch landed on its chunk branch — the last one
+because on a review-lane host it is the only way work ever leaves the pool;
+only the first two move the source branch and trigger the in-process image
+rebuild. `src/exit-conditions.ts`'s header owns the precedence and
+`src/scheduler.ts`'s the decision that applies it.
 
-All eight are one type, `TerminalExit`, and the run ends with exactly one
+All seven are one type, `TerminalExit`, and the run ends with exactly one
 `Exit (<tag>): <reason>` on stdout whichever fired (#70) — `formatExitLine` is
 the only spelling of it, `EXIT_TAGS` is exhaustive over the union, and a table
-test asserts every tag has a line. `applyCycle` owns only the four that judge a
-completed cycle; plan-empty, halted and the ceiling are the orchestrator's own
-and used to announce themselves in four different ways, the halt in none at all.
+test asserts every tag has a line. The pool owns run-wide starts, ongoing work,
+landings, and the terminal-without-landing backstop; `run.ts` selects one exit
+from that state and provider or landing outcomes.
 
 ## Key invariants — where the details live
 
@@ -271,13 +283,11 @@ and used to announce themselves in four different ways, the halt in none at all.
   that could not be asked — leaves it on for the next run. That last one is why
   `fetchChunkRef` answers in three states (`ChunkRefLookup`), buying "origin
   has no such branch" apart from "origin could not be asked" with an
-  `ls-remote` probe. A request for a chunk PHASE A JUST GREW is DEFERRED rather
-  than honoured or parked (#61 plans a layer per cycle): landing it would put
-  commits a review never covered on the source branch, so the label stays and
-  the next quiet cycle lands it. A member queued for #94 rework defers the same
-  request until it leaves `ready-for-agent`; unlike new work that just arrived,
-  the deferral does not claim the PR description was updated or that one quiet
-  cycle clears it. Members are closed EXPLICITLY (a `Closes #N` trailer only
+  `ls-remote` probe. A request is DEFERRED while any ongoing issue targets that
+  chunk: landing it could put commits a review never covered on the source
+  branch, so the label stays until the issue lands or parks. Tracker-visible
+  rework independently defers the same request until the member leaves
+  `ready-for-agent`. Members are closed EXPLICITLY (a `Closes #N` trailer only
   fires on GitHub's own merge of that PR, and sandbar composes the merge
   locally), in `LandedChunk.closeOrder` — dependents first, ROOT LAST — and the
   loop stops at the first failure. Git-derived members are fetched by number
@@ -285,7 +295,7 @@ and used to announce themselves in four different ways, the halt in none at all.
   or change the derived branch name; dependents-first still leaves the safest
   retry set if refs are repaired or changed by hand. The chunk branch
   is deleted only once every close worked — a kept branch is what makes
-  `src/chunk-reconcile.ts` retry the remainder next cycle, and therefore what
+  `src/chunk-reconcile.ts` retry the remainder at the next recompute, and therefore what
   `run.ts` halts on (`chunkResidue` splits a wrap-up's leftovers on exactly
   that question, `unnamed` included; only the merge-phase report halts, since
   the reconciler IS the retry). The reconciler is also the answer to a
@@ -443,11 +453,11 @@ and used to announce themselves in four different ways, the halt in none at all.
   evidence only, and absent stays absent rather than becoming zero. This closes
   three defects the
   first attempt to assemble a timing table found: a cohort's terminals all
-  carried the SETTLE instant in plan order (so "which issue held the cycle" and
+  carried the SETTLE instant in plan order (so "which issue held the cohort" and
   "how long did the others idle" were unanswerable, and an outcome reached
   eight minutes earlier existed in the log only if every sibling survived — a
   #70 hole, fixed by having the task that terminated write its own line and
-  rethrow), the largest block of a cycle had nothing inside it (6m41s from
+  rethrow), the largest block of a run had nothing inside it (6m41s from
   `plan:` to the first `gate-1` line), and an image rebuild — which changes what
   every container in the run executes — was announced to a terminal and nowhere
   else. `GateResult` carries `durationMs` plus a per-phase `steps` split filled
@@ -481,7 +491,7 @@ and used to announce themselves in four different ways, the halt in none at all.
   are normalised to Claude's disjoint one.
 - **The resolve loop leaves a trace, and a container that never ran halts
   (#67).** Every attempt's stdout AND stderr go to
-  `cycle-N/resolve-<key>-attempt-<k>.log`, keyed like the gate artefact beside
+  `landing-N/resolve-<key>-attempt-<k>.log`, keyed like the gate artefact beside
   it, and the merger log line carries the container, the exit code, the
   duration and which of timeout / clean exit / signal ended it. An attempt that
   captured NO agent speech is an infra failure, not an answer: the loop throws
@@ -494,7 +504,7 @@ and used to announce themselves in four different ways, the halt in none at all.
   log paths. `src/resolve-loop.ts`'s header owns the argument.
 - **The version collision is settled before the agent is asked (#68).** Every
   commit here moves `version` in `package.json` and its two mirrors in
-  `package-lock.json` (AGENTS.md), so two branches landing in one cycle conflict
+  `package-lock.json` (AGENTS.md), so two branches in one landing batch conflict
   there BY CONSTRUCTION. `resolveVersionCollision` in `src/merger.ts` resolves
   it mechanically ahead of `runResolveLoop`, at `max(ours, theirs)` bumped once
   — a value neither side carries — and commits the merge itself when nothing
@@ -562,9 +572,8 @@ run it, and around again only on exit 75.
 - **Nothing refreshes that checkout, and that is the price of #66.** The
   launcher's `git pull` is gone — which is what lets a series run while the
   operator holds local commits — so a landed `gateStack` change starts judging
-  branches when a human pulls it, NOT one relaunch later; `relaunchAfterLanding`
-  survives for the images, not for the config (`exit-conditions.ts`,
-  `config.ts`). Unreported that is silent for an unbounded number of relaunches,
+  branches when a human pulls it, NOT one relaunch later. Unreported that is
+  silent for an unbounded long-running process,
   so preflight's `staleConfigWarning` counts the commits the checkout is behind
   `origin/<sourceBranch>` that touch the config FILE — narrower than "behind" on
   purpose, since after every landing a checkout is behind and a warning that

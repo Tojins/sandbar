@@ -145,7 +145,7 @@ describe("resolveConfig", () => {
     expect(r.labels).toEqual(DEFAULT_LABELS);
     // Off by default (#65): only a host whose launcher loops on
     // EXIT_CODE_RELAUNCH wants a landing cycle to end the process.
-    expect(r.relaunchAfterLanding).toBe(false);
+    expect(r.maxParallelIssues).toBe(3);
     // The auto lane (#57): the pre-lane behaviour, so a host that never sets
     // this — and this repo — is routed exactly as it was before lanes existed.
     expect(r.defaultLane).toBe(DEFAULT_LANE);
@@ -194,10 +194,14 @@ describe("resolveConfig", () => {
     expect(r.maxReviewRounds).toBe(r.maxImplAttempts);
   });
 
-  it("passes relaunchAfterLanding through when set (#65)", () => {
-    const r = resolveConfig({ ...minimal, relaunchAfterLanding: true });
-    expect(r.relaunchAfterLanding).toBe(true);
-  });
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "refuses invalid maxParallelIssues %s (#87)",
+    (maxParallelIssues) => {
+      expect(() => resolveConfig({ ...minimal, maxParallelIssues })).toThrow(
+        /config\.maxParallelIssues.*positive integer/,
+      );
+    },
+  );
 
   // The comparison itself is `requires-sandbar.test.ts`'s, which drives both
   // versions directly. What is asserted HERE is only what wiring it into

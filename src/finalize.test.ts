@@ -144,6 +144,9 @@ function makeAdapter(
       calls.stateChecks.push(n);
       return script.issueState ?? "OPEN";
     },
+    async issueLabels() {
+      return [];
+    },
   };
   return { adapter, calls };
 }

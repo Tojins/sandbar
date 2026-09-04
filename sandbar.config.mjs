@@ -6,9 +6,8 @@
 // working tree. The old launcher was `git pull --ff-only && npm run build &&
 // node dist/cli.js` in a loop, which meant the orchestrator AND the gate stack
 // were whatever a human had saved; the loop now re-reads the pin and loops on
-// EXIT_CODE_RELAUNCH (75) alone, which `relaunchAfterLanding` below is what
-// produces. Why the relaunch survives the pin — the Containerfile is still
-// resolved once per run — is RunConfig's to state.
+// EXIT_CODE_RELAUNCH (75) alone. The continuous pool emits that code only at
+// quiescence after a landing, before it admits newly-unblocked work.
 //
 // THIS FILE is the residual, and it is deliberate rather than overlooked: the
 // config resolves against the process cwd and `sandbar.env` against this file's
@@ -366,22 +365,6 @@ export default {
   implementerEffort: "high",
   reviewerQualityEffort: "high",
   mergerEffort: "high",
-
-  // Exit 75 after any cycle that lands merges, so `scripts/sandbar-launch.mjs`
-  // re-reads the pin and relaunches (#65). Explicit rather than detected — see
-  // RunConfig — and still set here after #66, for the Containerfile: images are
-  // resolved once per run from a worktree at origin/main, so a landed image
-  // change reaches a series through the relaunch and through nothing else.
-  //
-  // What it does NOT buy is a fresh copy of THIS FILE. The relaunch re-imports
-  // it, but out of this checkout, and nothing pulls into a checkout any more —
-  // that was the launcher's `git pull`, deleted by #66 so a series can run while
-  // the operator holds local commits. So a gate-stack change that lands on main
-  // starts judging branches when a human pulls it here, not one relaunch later;
-  // preflight says so when the commits this checkout is missing touch this file.
-  // Budgets and stuck counters are per-run and reset across runs by design, so
-  // the relaunch resets them exactly as a human re-launch would.
-  relaunchAfterLanding: true,
 
   // No `mergeMode`: the default `{ kind: "direct" }` is what this repo wants,
   // and restating a default is noise (see RunConfig's deviations-only rule).

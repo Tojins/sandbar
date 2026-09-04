@@ -174,6 +174,7 @@ import {
   deriveChunks,
   landedChunksOf,
 } from "./chunks.js";
+import { DEFAULT_MAX_PARALLEL_ISSUES } from "./config.js";
 import {
   DEFAULT_LANE,
   type Lane,
@@ -195,7 +196,6 @@ const exec = promisify(execFile);
 
 const WAITING_LABEL = "waiting";
 const READY_LABEL = "ready-for-agent";
-const DEFAULT_K = 3;
 
 export type IssueState = "OPEN" | "CLOSED";
 
@@ -284,7 +284,7 @@ export function resolvePlan(
   candidates: readonly IssueSummary[],
   issueFacts: ReadonlyMap<number, IssueFacts>,
   excluded: ReadonlySet<number> = new Set(),
-  k: number = DEFAULT_K,
+  k: number = DEFAULT_MAX_PARALLEL_ISSUES,
   defaultLane: Lane = DEFAULT_LANE,
   chunkMembers: ReadonlyMap<string, ReadonlySet<number>> = new Map(),
 ): PlanResolution {
@@ -371,12 +371,14 @@ export function resolvePlan(
   };
 
   const heldForReview: number[] = [];
-  const eligible = candidates.filter((c) => {
+  const eligibleApartFromSchedulerExclusion = (
+    c: IssueSummary,
+    recordReviewHold: boolean,
+  ): boolean => {
     // Drop issues this run already merged, and issues the live tracker now
     // reports CLOSED — both guard against the stale-listing re-pick described in
     // the module header (#16). Unknown state (absent from the map) is treated
     // as OPEN so a single state-fetch miss never silently drops a ready issue.
-    if (excluded.has(c.number)) return false;
     const authoritative = issueFacts.get(c.number);
     if (authoritative?.state === "CLOSED") return false;
     // When the batch knows this issue it owns both directions of queue
@@ -422,13 +424,28 @@ export function resolvePlan(
     // branch — the one outcome the lane exists to prevent. Asking the same
     // question the answer is built from costs nothing and cannot drift.
     if (lanes.get(c.number)?.lane === "review" && chunkTargetOf(c.number) === null) {
-      heldForReview.push(c.number);
+      if (recordReviewHold) heldForReview.push(c.number);
       return false;
     }
     return true;
-  });
+  };
+  const eligible = candidates.filter((c) =>
+    !excluded.has(c.number) && eligibleApartFromSchedulerExclusion(c, true)
+  );
   const sorted = [...eligible].sort((a, b) => a.number - b.number);
-  const eligibleNumbers = new Set(eligible.map((c) => c.number));
+  // Human-requested rework follows the planner's eligibility rules except for
+  // scheduler exclusion. An ongoing issue is excluded from re-admission but
+  // must still defer its chunk's landing; a CLOSED, waiting or blocked member
+  // cannot be worked and therefore must not hold the request open forever.
+  const trackerReadyNumbers = new Set(
+    candidates
+      .filter((c) => {
+        const authoritative = issueFacts.get(c.number);
+        return eligibleApartFromSchedulerExclusion(c, false) &&
+          authoritative?.labels.includes(READY_LABEL);
+      })
+      .map((c) => c.number),
+  );
   const plan = sorted.slice(0, k).map((c) => ({
     id: String(c.number),
     title: c.title,
@@ -445,10 +462,7 @@ export function resolvePlan(
       chunks,
       chunkIssues,
       new Set(candidates.map((c) => c.number).filter(isOnDerivedChunk)),
-      new Set(candidates.map((c) => c.number).filter((n) =>
-        eligibleNumbers.has(n) &&
-        issueFacts.get(n)?.labels.includes(READY_LABEL),
-      )),
+      trackerReadyNumbers,
     ),
     chunkNameDrifts: [...chunkMembers.keys()].flatMap((existing) => {
       const root = rootIssueFromChunkBranch(existing);
@@ -659,7 +673,7 @@ export async function buildPlan(
   options: BuildPlanOptions,
 ): Promise<PlanResolution> {
   const excluded = options.excluded ?? new Set<number>();
-  const k = options.k ?? DEFAULT_K;
+  const k = options.k ?? DEFAULT_MAX_PARALLEL_ISSUES;
   // One containment reading serves planning and reconciliation. A member ref
   // retained with an older chunk after a failed close can also be inherited by
   // every later chunk based on the landed source, so this intentionally does
