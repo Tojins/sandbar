@@ -4,9 +4,9 @@
 // lives here and is table-driven tested in inner-loop-machine.test.ts.
 //
 // Impl-attempt exhaustion carries a `cause` so the human-handoff names the
-// real blocker (#17): `gate-red` vs `reviewer-blocked`. Each advanceAttempt
-// caller supplies the exhaustion verdict because only it knows which case
-// it's in.
+// real blocker (#17): `gate-red`, `no-signal-exhausted`, or
+// `reviewer-blocked`. Each advanceAttempt caller supplies the exhaustion
+// verdict because only it knows which case it's in.
 //
 // The two budgets bind together, not independently (#71). `reviewRoundsUsed`
 // only ever advances in `onReviewerResult`, which advances `attempt` too, so
@@ -123,9 +123,9 @@ export type Verdict =
       // human-handoff message is accurate (#17):
       //   gate-red — ran out of attempts with the last gate failing;
       //     `failureTrace` carries the gate trace.
-      //   no-signal-exhausted — the implementer never emitted a promise token
-      //     across the attempt budget; no gate ran and the transcripts are the
-      //     evidence a human needs.
+      //   no-signal-exhausted — the last attempt did not produce an actionable
+      //     promise signal; `failureTrace` carries its parser correction and
+      //     any gate trace preserved from an earlier attempt.
       //   reviewer-blocked — ran out of attempts while the gate was GREEN and
       //     the reviewer's last verdict was CHANGES-REQUESTED;
       //     `latestReviewerProse` carries that report (so the human is pointed
@@ -556,8 +556,15 @@ function onImplementerResult(
       },
     };
   }
-  // NO-SIGNAL — either re-prompt for next attempt or exhaust the budget. No
-  // gate ran on this route, so it has its own honest terminal cause (#116).
+  // NO-SIGNAL — either re-prompt for next attempt or exhaust the budget. This
+  // route has its own cause because the deciding attempt did not run a gate,
+  // while its trace preserves any gate failure from an earlier attempt (#116).
+  const correction = signal.missingTag
+    ? "The final implementer attempt emitted no <promise> token."
+    : `The final implementer signal failed validation:\n${signal.reprompt}`;
+  const failureTrace = state.lastFailureTrace
+    ? `Last gate failure:\n${state.lastFailureTrace}\n\n${correction}`
+    : correction;
   return advanceAttempt(
     state,
     {
@@ -568,8 +575,7 @@ function onImplementerResult(
     {
       type: "NEEDS-HUMAN",
       cause: "no-signal-exhausted",
-      failureTrace:
-        `The implementer emitted no <promise> token across ${state.maxAttempts} attempts.`,
+      failureTrace,
       latestReviewerProse: null,
       strandedHead: null,
     },

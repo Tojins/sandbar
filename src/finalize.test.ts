@@ -734,7 +734,7 @@ describe("finalizeOne", () => {
     ]);
   });
 
-  it("needs-human no-signal exhaustion points at transcripts and says no gate ran", async () => {
+  it("needs-human no-signal exhaustion points at transcripts without guessing why", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     await finalizeOne(
@@ -742,15 +742,18 @@ describe("finalizeOne", () => {
         kind: "needs-human",
         issue: i,
         cause: "no-signal-exhausted",
-        failureTrace: "The implementer emitted no <promise> token across 8 attempts.",
+        failureTrace: "The final implementer signal failed validation: guard correction",
         latestReviewerProse: null,
       },
       adapter,
       LABELS,
     );
 
-    expect(calls.comments[0]!.body).toContain("no gate ran");
+    expect(calls.comments[0]!.body).toContain("actionable completion signal");
     expect(calls.comments[0]!.body).toContain("attempt transcripts");
+    expect(calls.comments[0]!.body).toContain("guard correction");
+    expect(calls.comments[0]!.body).not.toContain("never emitted");
+    expect(calls.comments[0]!.body).not.toContain("no gate ran");
     expect(calls.comments[0]!.body).not.toContain("Last failure trace");
   });
 

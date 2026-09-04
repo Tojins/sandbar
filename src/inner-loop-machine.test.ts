@@ -49,7 +49,7 @@ function drive(
 const complete: ParseSignal = { kind: "COMPLETE" };
 const noSignal = (reprompt?: string): ParseSignal => ({
   kind: "NO-SIGNAL",
-  ...(reprompt !== undefined ? { reprompt } : {}),
+  ...(reprompt !== undefined ? { reprompt } : { missingTag: true }),
 });
 const needsInfo = (questions: string): ParseSignal => ({
   kind: "NEEDS-INFO",
@@ -653,13 +653,13 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN",
       cause: "no-signal-exhausted",
-      failureTrace: "The implementer emitted no <promise> token across 2 attempts.",
+      failureTrace: "The final implementer attempt emitted no <promise> token.",
       latestReviewerProse: null,
       strandedHead: null,
     });
   });
 
-  it("NO-SIGNAL exhaustion does not misreport an older gate trace", () => {
+  it("NO-SIGNAL exhaustion preserves an older gate trace", () => {
     const { verdict } = drive({ maxAttempts: 3, maxReviewRounds: 3 }, [
       impl(complete),
       judged(gate1Red("recorded trace"), approved("discarded")),
@@ -669,7 +669,24 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN",
       cause: "no-signal-exhausted",
-      failureTrace: "The implementer emitted no <promise> token across 3 attempts.",
+      failureTrace:
+        "Last gate failure:\nrecorded trace\n\n" +
+        "The final implementer attempt emitted no <promise> token.",
+      latestReviewerProse: null,
+      strandedHead: null,
+    });
+  });
+
+  it("NO-SIGNAL guard exhaustion carries the parser correction", () => {
+    const correction =
+      "You declared <promise>COMPLETE</promise> but made no commits this run.";
+    const { verdict } = drive({ maxAttempts: 1, maxReviewRounds: 3 }, [
+      impl(noSignal(correction)),
+    ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "no-signal-exhausted",
+      failureTrace: `The final implementer signal failed validation:\n${correction}`,
       latestReviewerProse: null,
       strandedHead: null,
     });

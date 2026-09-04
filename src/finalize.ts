@@ -215,8 +215,9 @@ export const NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE = (
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} exhausted the attempt budget because the implementer ` +
-  `never emitted a \`<promise>\` token, so no gate ran. Inspect the attempt ` +
-  `transcripts, fix the provider or push a fix on \`${branch}\`, then drop ` +
+  `did not produce an actionable completion signal on the final attempt. ` +
+  `Inspect the attempt transcripts and summary below, fix the provider or push ` +
+  `a fix on \`${branch}\`, then drop ` +
   `\`${stuckLabel}\` and re-apply \`${readyLabel}\` when ready.\n\n` +
   `<details><summary>Attempt summary</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
