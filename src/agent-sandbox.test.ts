@@ -924,7 +924,7 @@ describe("registerShutdown", () => {
 // for, and "the run rejected" is true whether or not it did.
 function makeLocalProvider(
   live: Set<ChildProcess> = new Set(),
-  failRolloutProbe = false,
+  rolloutProbe: "run" | "reject" | "hang" = "run",
 ): SandboxProvider & {
   capturedEnv?: Record<string, string>;
   capturedMounts?: readonly Mount[];
@@ -951,9 +951,12 @@ function makeLocalProvider(
         containerName: "fake-sandbox-container",
         exec: (command, execOpts) =>
           new Promise((resolveExec, rejectExec) => {
-            if (failRolloutProbe && command.includes("/sessions;")) {
-              rejectExec(new Error("probe exec failed"));
-              return;
+            if (command.includes("/sessions;")) {
+              if (rolloutProbe === "reject") {
+                rejectExec(new Error("probe exec failed"));
+                return;
+              }
+              if (rolloutProbe === "hang") return;
             }
             const proc = spawn("sh", ["-c", command], {
               cwd: execOpts?.cwd ?? worktreePath,
@@ -1167,7 +1170,7 @@ describe("createSandbox integration (local provider)", () => {
     const branch = "sandbar/issue-109-codex-probe-failure";
     await git(["branch", branch], dir);
     const sandbox = await createSandbox({
-      env: {}, branch, sandbox: makeLocalProvider(new Set(), true), layout: layoutFor(dir),
+      env: {}, branch, sandbox: makeLocalProvider(new Set(), "reject"), layout: layoutFor(dir),
     });
     try {
       const run = await sandbox.run({
@@ -1183,6 +1186,28 @@ describe("createSandbox integration (local provider)", () => {
       await sandbox.close();
     }
   });
+
+  it("preserves a completed Codex answer when the rollout probe never settles", async () => {
+    const branch = "sandbar/issue-109-codex-probe-timeout";
+    await git(["branch", branch], dir);
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(new Set(), "hang"), layout: layoutFor(dir),
+    });
+    try {
+      const run = await sandbox.run({
+        agent: scriptedCodexAgent(`printf '%s\\n' '${JSON.stringify({
+          type: "item.completed", item: { type: "agent_message", text: "done" },
+        })}'`),
+        prompt: "go",
+        completionSignal: [],
+        idleTimeoutSeconds: 0.05,
+      });
+      expect(run.stdout).toBe("done");
+      expect(run.rateLimit).toBeUndefined();
+    } finally {
+      await sandbox.close();
+    }
+  }, 15_000);
 
   it.each(["missing", "malformed"] as const)(
     "preserves Codex's existing failure classification when its rollout is %s",
