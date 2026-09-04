@@ -119,7 +119,7 @@ export function convertedReviewIds(
 }
 
 // ---------------------------------------------------------------------------
-// Which reviews are still owed an issue
+// Which reviews are still owed rework
 // ---------------------------------------------------------------------------
 
 export type PendingFollowUp = {
@@ -195,9 +195,8 @@ export function routeFollowUp(
 }
 
 // A human's words, rendered so they cannot be mistaken for sandbar's markup.
-// Every line is blockquoted — which is also what keeps a heading inside them
-// from ending the `## Blocked by` section above, since that section ends only
-// at a `##` immediately after a newline.
+// Every line is blockquoted so the review remains visually distinct from the
+// routing instructions around it.
 const quote = (text: string): readonly string[] =>
   text.replace(/\r\n/g, "\n").split("\n").map((line) => `> ${line}`);
 
@@ -421,49 +420,56 @@ export function realAdapter(args: {
       return parseReviewState(stdout);
     },
     async memberPaths(chunk) {
-      const result = new Map<number, ReadonlySet<string>>();
       const chunkRef = `refs/remotes/origin/${chunk.branch}`;
-      const { stdout: mergesOut } = await exec(
-        "git", ["rev-list", "--first-parent", "--merges", chunkRef],
-        { cwd: args.repoDir },
+      const memberRefs = chunk.members.map(
+        (member) => `refs/remotes/origin/${memberBranchName(member.number)}`,
       );
-      const merges = mergesOut.trim().split("\n").filter(Boolean);
-      for (const member of chunk.members) {
-        const memberRef =
-          `refs/remotes/origin/${memberBranchName(member.number)}`;
-        const { stdout: memberShaOut } = await exec(
-          "git",
-          ["rev-parse", memberRef],
-          { cwd: args.repoDir },
-        );
-        const memberSha = memberShaOut.trim();
-        let paths: ReadonlySet<string> | undefined;
-        for (const merge of merges) {
-          const { stdout: parentsOut } = await exec(
-            "git", ["rev-list", "--parents", "-n", "1", merge],
+      const [{ stdout: mergesOut }, { stdout: memberShasOut }] =
+        await Promise.all([
+          exec(
+            "git",
+            ["rev-list", "--parents", "--first-parent", "--merges", chunkRef],
             { cwd: args.repoDir },
-          );
-          const [, firstParent, ...otherParents] = parentsOut
-            .trim()
-            .split(/\s+/);
-          if (!firstParent || !otherParents.includes(memberSha)) continue;
-          const { stdout: pathsOut } = await exec(
-            "git", ["diff", "--name-only", firstParent, merge],
-            { cwd: args.repoDir },
-          );
-          paths = new Set(
-            pathsOut.split("\n").map((p) => p.trim()).filter(Boolean),
-          );
-          break;
+          ),
+          exec("git", ["rev-parse", ...memberRefs], { cwd: args.repoDir }),
+        ]);
+      const mergeByMemberSha = new Map<string, [string, string]>();
+      for (const line of mergesOut.trim().split("\n").filter(Boolean)) {
+        const [merge, firstParent, ...otherParents] = line.trim().split(/\s+/);
+        if (!merge || !firstParent) continue;
+        for (const parent of otherParents) {
+          if (!mergeByMemberSha.has(parent)) {
+            mergeByMemberSha.set(parent, [firstParent, merge]);
+          }
         }
-        if (!paths) {
-          throw new SandbarError(
-            `Could not find member #${member.number}'s merge on ${chunk.branch}`,
-          );
-        }
-        result.set(member.number, paths);
       }
-      return result;
+      const memberShas = memberShasOut.trim().split("\n");
+      if (memberShas.length !== chunk.members.length) {
+        throw new SandbarError(
+          `Resolved ${memberShas.length} member refs for ${chunk.members.length} ` +
+            `members on ${chunk.branch}`,
+        );
+      }
+      const entries = await Promise.all(
+        chunk.members.map(async (member, index) => {
+          const merge = mergeByMemberSha.get(memberShas[index] ?? "");
+          if (!merge) {
+            throw new SandbarError(
+              `Could not find member #${member.number}'s merge on ${chunk.branch}`,
+            );
+          }
+          const { stdout } = await exec(
+            "git",
+            ["diff", "--name-only", merge[0], merge[1]],
+            { cwd: args.repoDir },
+          );
+          const paths = new Set(
+            stdout.split("\n").map((path) => path.trim()).filter(Boolean),
+          );
+          return [member.number, paths] as const;
+        }),
+      );
+      return new Map(entries);
     },
     async requeueMember(issueNumber, comment) {
       await exec("gh", [
@@ -548,7 +554,6 @@ export async function routeChunkReviewFollowUps(args: {
       try {
         pathsByMember ??= await args.adapter.memberPaths(chunk);
       } catch (err) {
-        if (err instanceof SandbarError) throw err;
         throw new SandbarError(
           `Could not read the member merges on chunk ${chunk.branch}, so ` +
             `sandbar cannot route review ${pending.review.url}: ` +
@@ -598,7 +603,7 @@ export async function routeChunkReviewFollowUps(args: {
             `review requesting changes on chunk ${chunk.branch} ` +
             `(${pending.review.url}), but could not record it ` +
             `on pull request #${state.number}. That comment is what stops the ` +
-            `next cycle filing the same issue again, so post it by hand — the ` +
+            `next cycle routing the same review again, so post it by hand — the ` +
             `body needs to contain ${followUpMarker(pending.review.id)} — or ` +
             `let sandbar retry it: ` +
             `${err instanceof Error ? err.message : String(err)}`,

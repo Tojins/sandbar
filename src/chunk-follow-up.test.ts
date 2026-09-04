@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { LandedChunk } from "./chunks.js";
-import { type ChangesRequestedReview, type ChunkPullRequestState, type ReviewThread, convertedReviewIds, followUpMarker, ledgerComment, memberReviewComment, pendingFollowUps, routeFollowUp, unresolvedThreadsFor } from "./chunk-follow-up.js";
+import { type ChangesRequestedReview, type ChunkFollowUpAdapter, type ChunkPullRequestState, type ReviewThread, convertedReviewIds, followUpMarker, ledgerComment, memberReviewComment, pendingFollowUps, routeChunkReviewFollowUps, routeFollowUp, unresolvedThreadsFor } from "./chunk-follow-up.js";
+import { SandbarError } from "./errors.js";
 
 const review = (id: string, body = ""): ChangesRequestedReview => ({ id, url: `https://example.test/reviews/${id}`, author: "alice", body });
 const thread = (id: string, path: string): ReviewThread => ({ path, isResolved: false, comments: [{ author: "alice", body: `fix ${path}`, url: `https://example.test/${path}`, reviewId: id }] });
@@ -51,5 +52,53 @@ describe("review prose", () => {
   it("records every routed member and the review marker on the PR", () => {
     const out = ledgerComment({ review: review("r"), issueNumbers: [40, 44], branch: chunk.branch });
     expect(out).toContain("#40 and #44"); expect(out).toContain("re-queued them"); expect(out).toContain(followUpMarker("r"));
+  });
+});
+
+describe("routeChunkReviewFollowUps", () => {
+  const state: ChunkPullRequestState = {
+    number: 7,
+    url: "https://example.test/pull/7",
+    comments: [],
+    reviews: [review("PRR_a")],
+    threads: [thread("PRR_a", "root.ts")],
+  };
+  const candidate = {
+    number: 40,
+    title: "Root",
+    body: "body",
+    labels: ["ready-for-agent"],
+  };
+  const adapter = (
+    overrides: Partial<ChunkFollowUpAdapter> = {},
+  ): ChunkFollowUpAdapter => ({
+    reviewState: async () => state,
+    memberPaths: async () => new Map([[40, new Set(["root.ts"])]]),
+    requeueMember: async () => candidate,
+    postLedgerComment: async () => {},
+    ...overrides,
+  });
+
+  it("does no writes for no chunks, no PR, or an already-ledgered review", async () => {
+    const writes: string[] = [];
+    const inert = adapter({
+      requeueMember: async () => { writes.push("requeue"); return candidate; },
+      postLedgerComment: async () => { writes.push("ledger"); },
+    });
+    expect(await routeChunkReviewFollowUps({ chunks: [], adapter: inert })).toEqual([]);
+    expect(await routeChunkReviewFollowUps({ chunks: [chunk], adapter: adapter({ reviewState: async () => null, requeueMember: inert.requeueMember, postLedgerComment: inert.postLedgerComment }) })).toEqual([]);
+    expect(await routeChunkReviewFollowUps({ chunks: [chunk], adapter: adapter({ reviewState: async () => ({ ...state, comments: [followUpMarker("PRR_a")] }), requeueMember: inert.requeueMember, postLedgerComment: inert.postLedgerComment }) })).toEqual([]);
+    expect(writes).toEqual([]);
+  });
+
+  it.each([
+    ["review reading", adapter({ reviewState: async () => { throw new Error("read failed"); } }), /Could not read the reviews.*read failed/s],
+    ["member-path discovery", adapter({ memberPaths: async () => { throw new Error("paths failed"); } }), /cannot route review.*paths failed/s],
+    ["member requeueing", adapter({ requeueMember: async () => { throw new Error("queue failed"); } }), /not ledgered.*next cycle retries.*queue failed/s],
+    ["ledger posting", adapter({ postLedgerComment: async () => { throw new Error("ledger failed"); } }), /Re-queued #40.*pull request #7.*sandbar:chunk-follow-up review=PRR_a.*ledger failed/s],
+  ])("fails loudly with actionable context at the %s boundary", async (_name, failing, message) => {
+    const promise = routeChunkReviewFollowUps({ chunks: [chunk], adapter: failing });
+    await expect(promise).rejects.toBeInstanceOf(SandbarError);
+    await expect(promise).rejects.toThrow(message);
   });
 });

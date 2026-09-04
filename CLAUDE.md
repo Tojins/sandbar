@@ -235,7 +235,7 @@ and used to announce themselves in four different ways, the halt in none at all.
   carries is `PlanResolution.landedChunks`, the only answer the whole
   candidate graph can give: member refs contained by the exact chunk branch,
   which is the set a landing
-  closes (#64) and whose tips a follow-up is blocked by (#63) — never the whole
+  closes (#64) and whose members and tips route review rework (#95) — never the whole
   component, since a member that has never been worked has no commits
   anywhere. De-queueing alone is broader and fail-safe: a member ref contained
   by any fetched chunk branch is never reimplemented after title drift or re-rooting,
