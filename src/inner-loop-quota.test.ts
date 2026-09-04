@@ -228,6 +228,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+      specGaps: [],
     });
     expect(seams.createSandbox).toHaveBeenCalledOnce();
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
@@ -236,6 +237,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+      specGaps: [],
     });
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
 
@@ -277,6 +279,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       config: config("codex"), hooks: {}, copyToWorktree: [], quotaState: state,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+      specGaps: [],
     });
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
 
@@ -284,6 +287,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+      specGaps: [],
     });
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
   });

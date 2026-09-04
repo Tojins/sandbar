@@ -2,8 +2,11 @@
 //
 // The reviewer signals its decision with `<verdict>APPROVED</verdict>` or
 // `<verdict>CHANGES-REQUESTED</verdict>`. The reviewer is strictly advisory —
-// it never commits — so the verdict is the only signal that travels back to
-// the inner loop alongside its free-form prose.
+// it never commits — so the verdict and its optional declared specification
+// gap are the only structured signals that travel back to the inner loop
+// alongside its free-form prose. A gap records a question the issue left open
+// and the answer the correctness reviewer applied (#108); it is evidence only
+// and never changes the verdict.
 //
 // Convergence relies on each pass having a sharp bar. The correctness prompt
 // requires a located, concrete defect and otherwise APPROVES; the quality pass
@@ -22,23 +25,30 @@
 // when several are emitted, so a token quoted before the real one loses to it.
 // `token-scan.ts` owns the scan and the argument.
 
-import { lastToken, literalTokenPattern } from "./token-scan.js";
+import {
+  lastToken,
+  literalTokenPattern,
+  temperedBlockPattern,
+} from "./token-scan.js";
 
 export type Verdict = "APPROVED" | "CHANGES-REQUESTED";
 
 export type ParsedVerdict = {
   readonly verdict: Verdict;
   readonly prose: string;
+  readonly specGap: string | null;
 };
 
 export const VERDICT_TOKENS: readonly Verdict[] = ["APPROVED", "CHANGES-REQUESTED"];
 
 const VERDICT_TOKEN_ALL = literalTokenPattern("verdict", VERDICT_TOKENS);
+const SPEC_GAP_BLOCK = (): RegExp => temperedBlockPattern("spec-gap");
 
 export function parseVerdict(stdout: string): ParsedVerdict | null {
   const token = lastToken(stdout, VERDICT_TOKEN_ALL);
   if (token === null) return null;
-  return { verdict: token as Verdict, prose: stdout };
+  const specGap = lastToken(stdout, SPEC_GAP_BLOCK());
+  return { verdict: token as Verdict, prose: stdout, specGap };
 }
 
 // The prose with every well-formed verdict token removed — what a later

@@ -156,14 +156,25 @@ describe("finalizeKindForSkip", () => {
 });
 
 describe("mergeFinalizeInputs", () => {
+  it("carries DONE review gaps onto a merged finalize input", () => {
+    const gaps = [{ round: 2, text: "Question? Applied answer." }];
+    const { inputs } = mergeFinalizeInputs(
+      summary({ merged: [issue("1")] }),
+      new Map(),
+      [{ issue: issue("1"), terminal: { type: "DONE", commits: [], specGaps: gaps } }],
+    );
+    expect(inputs).toEqual([{ kind: "merged", issue: issue("1"), specGaps: gaps }]);
+  });
+
   it("turns merged issues into merged inputs", () => {
     const { inputs } = mergeFinalizeInputs(
       summary({ merged: [issue("1"), issue("2")] }),
       new Map(),
+      [],
     );
     expect(inputs).toEqual([
-      { kind: "merged", issue: issue("1") },
-      { kind: "merged", issue: issue("2") },
+      { kind: "merged", issue: issue("1"), specGaps: [] },
+      { kind: "merged", issue: issue("2"), specGaps: [] },
     ]);
   });
 
@@ -176,6 +187,7 @@ describe("mergeFinalizeInputs", () => {
         ],
       }),
       new Map(),
+      [],
     );
     expect(inputs.map((i) => i.kind)).toEqual([
       "merge-conflict",
@@ -187,8 +199,11 @@ describe("mergeFinalizeInputs", () => {
     const { inputs, bumpedSilentNoop } = mergeFinalizeInputs(
       summary({ skipped: [{ issue: issue("7"), reason: "silent-noop" }] }),
       new Map(),
+      [],
     );
-    expect(inputs).toEqual([{ kind: "fresh-attempt", issue: issue("7") }]);
+    expect(inputs).toEqual([
+      { kind: "fresh-attempt", issue: issue("7"), specGaps: [] },
+    ]);
     expect(bumpedSilentNoop.get("7")).toBe(1);
   });
 
@@ -197,12 +212,14 @@ describe("mergeFinalizeInputs", () => {
     const { inputs, bumpedSilentNoop } = mergeFinalizeInputs(
       summary({ skipped: [{ issue: issue("7"), reason: "silent-noop" }] }),
       prior,
+      [],
     );
     expect(inputs).toEqual([
       {
         kind: "silent-noop-exhausted",
         issue: issue("7"),
         attempts: SILENT_NOOP_RETRY_LIMIT,
+        specGaps: [],
       },
     ]);
     expect(bumpedSilentNoop.get("7")).toBe(SILENT_NOOP_RETRY_LIMIT);
@@ -213,6 +230,7 @@ describe("mergeFinalizeInputs", () => {
     mergeFinalizeInputs(
       summary({ skipped: [{ issue: issue("7"), reason: "silent-noop" }] }),
       prior,
+      [],
     );
     expect(prior.get("7")).toBe(1);
   });
@@ -227,6 +245,7 @@ describe("mergeFinalizeInputs", () => {
         skipped: [{ issue: issue("1"), reason: "conflict" }],
       }),
       new Map(),
+      [],
     );
     expect(inputs.map((i) => [i.kind, i.issue.id])).toEqual([
       ["merged", "3"],
@@ -243,12 +262,14 @@ describe("mergeFinalizeInputs", () => {
         ],
       }),
       new Map(),
+      [],
     );
     expect(inputs).toEqual([
       {
         kind: "chunk-landed",
         issue: issue("4"),
         chunkBranch: "sandbar/chunk-4-thing",
+        specGaps: [],
       },
     ]);
   });
@@ -271,6 +292,7 @@ describe("mergeFinalizeInputs", () => {
         ],
       }),
       new Map(),
+      [],
     );
     expect(inputs.map((i) => [i.kind, i.issue.id])).toEqual([
       ["merged", "3"],
@@ -287,6 +309,7 @@ describe("mergeFinalizeInputs", () => {
         skipped: [{ issue: issue("2"), reason: "gate-red" }],
       }),
       new Map(),
+      [],
     );
     expect(bumpedSilentNoop.size).toBe(0);
   });

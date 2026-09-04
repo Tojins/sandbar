@@ -17,14 +17,29 @@ import {
   NO_PROTOTYPE_NEEDED_PHRASE,
   READY_FOR_AGENT_LABEL as READY_FOR_AGENT,
   REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE,
+  SPEC_GAPS_COMMENT,
   finalizeAll,
-  finalizeOne,
+  finalizeOne as finalizeOneImpl,
   issueNumberOf,
 } from "./finalize.js";
 import type { IssueRef } from "./merger.js";
 
 const LABELS: LabelConfig = DEFAULT_LABELS;
 const { needsInfo: NEEDS_INFO, agentStuck: AGENT_STUCK } = DEFAULT_LABELS;
+
+// Most tests exercise terminal-specific behavior and predate the cross-cutting
+// spec-gap field. Keep their fixtures terse while the focused tests below pass
+// explicit gap lists through the real entry point.
+const finalizeOne = (
+  input: Omit<FinalizeInput, "specGaps"> & Partial<Pick<FinalizeInput, "specGaps">>,
+  adapter: FinalizeAdapter,
+  labels: LabelConfig,
+) =>
+  finalizeOneImpl(
+    { ...input, specGaps: input.specGaps ?? [] } as FinalizeInput,
+    adapter,
+    labels,
+  );
 
 function issue(n: number, title = `t-${n}`): IssueRef {
   return {
@@ -261,6 +276,33 @@ describe("comment templates", () => {
 });
 
 describe("finalizeOne", () => {
+  it("posts one ordered spec-gap comment before a merged terminal's effects", async () => {
+    const { adapter, calls } = makeAdapter();
+    const gaps = [
+      { round: 2, text: "Which source? Use the request record." },
+      { round: 5, text: "What fallback? Emit no measurement." },
+    ];
+    await finalizeOne(
+      { kind: "merged", issue: issue(45), specGaps: gaps },
+      adapter,
+      LABELS,
+    );
+    expect(calls.comments).toEqual([{ n: 45, body: SPEC_GAPS_COMMENT(gaps) }]);
+    expect(calls.comments[0]!.body).toMatch(
+      /Review round 2[\s\S]*Use the request record[\s\S]*Review round 5[\s\S]*Emit no measurement/,
+    );
+  });
+
+  it("posts no spec-gap comment when the list is empty", async () => {
+    const { adapter, calls } = makeAdapter();
+    await finalizeOne(
+      { kind: "merged", issue: issue(45), specGaps: [] },
+      adapter,
+      LABELS,
+    );
+    expect(calls.comments).toEqual([]);
+  });
+
   it("quota reclaims then pushes and comments without editing labels", async () => {
     const { adapter, calls } = makeAdapter();
     const order: string[] = [];
@@ -1451,6 +1493,7 @@ describe("finalizeOne", () => {
         cause: "gate-red",
         failureTrace: "boom",
         latestReviewerProse: null,
+        specGaps: [{ round: 1, text: "must not be posted" }],
       },
       adapter,
       LABELS,
@@ -1493,13 +1536,14 @@ describe("finalizeAll", () => {
   it("processes inputs in order and returns one result per input", async () => {
     const { adapter, calls } = makeAdapter();
     const inputs: FinalizeInput[] = [
-      { kind: "merged", issue: issue(10) },
-      { kind: "needs-info", issue: issue(11), questions: "?" },
-      { kind: "merge-gate-red", issue: issue(12) },
+      { kind: "merged", issue: issue(10), specGaps: [] },
+      { kind: "needs-info", issue: issue(11), questions: "?", specGaps: [] },
+      { kind: "merge-gate-red", issue: issue(12), specGaps: [] },
       {
         kind: "hard-error",
         issue: issue(13),
         hasCommits: true,
+        specGaps: [],
       },
     ];
 

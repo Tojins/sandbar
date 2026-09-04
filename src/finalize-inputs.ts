@@ -16,6 +16,9 @@
 // silent-noop retry counter is the one piece of carried state, so it is passed
 // in as a read-only map and the bumped entries come back out rather than being
 // mutated in place — the caller decides when they become durable.
+// Correctness-review specification gaps (#108) ride on every Terminal. The
+// terminal builder copies them directly; the merge builder joins its merger
+// outcomes back to Phase-2 outcomes by issue id so DONE gaps survive landing.
 
 import type { FinalizeInput } from "./finalize.js";
 import type { Terminal } from "./inner-loop.js";
@@ -80,6 +83,7 @@ export function terminalFinalizeInputs(
           issue: o.issue,
           questions: t.questions,
           strandedHead: t.strandedHead,
+          specGaps: t.specGaps,
         });
         break;
       case "NEEDS-UI-PROTOTYPE":
@@ -89,6 +93,7 @@ export function terminalFinalizeInputs(
           uiImpact: t.uiImpact,
           hasCommits: t.commits.length > 0,
           strandedHead: t.strandedHead,
+          specGaps: t.specGaps,
         });
         break;
       case "NEEDS-HUMAN":
@@ -99,6 +104,7 @@ export function terminalFinalizeInputs(
           failureTrace: t.failureTrace,
           latestReviewerProse: t.latestReviewerProse,
           strandedHead: t.strandedHead,
+          specGaps: t.specGaps,
         });
         break;
       case "NEEDS-HUMAN-REVIEW":
@@ -106,6 +112,7 @@ export function terminalFinalizeInputs(
           kind: t.cause === "reviewer-wrote" ? "reviewer-wrote" : "review-budget-exhausted",
           issue: o.issue,
           latestReviewerProse: t.latestReviewerProse,
+          specGaps: t.specGaps,
         });
         break;
       case "HARD-ERROR":
@@ -113,6 +120,7 @@ export function terminalFinalizeInputs(
           kind: "hard-error",
           issue: o.issue,
           hasCommits: t.commits.length > 0,
+          specGaps: t.specGaps,
         });
         break;
       case "QUOTA":
@@ -122,6 +130,7 @@ export function terminalFinalizeInputs(
           provider: t.provider,
           window: t.window,
           ...(t.resetsAt === undefined ? {} : { resetsAt: t.resetsAt }),
+          specGaps: t.specGaps,
         });
         break;
       default: {
@@ -142,6 +151,8 @@ export type MergeFinalizeInputs = {
   readonly bumpedSilentNoop: ReadonlyMap<string, number>;
 };
 
+type FinalizeKindInputShape = { readonly issue: IssueRef };
+
 /**
  * Phase-4 inputs for what the merger did with the cycle's DONE branches.
  *
@@ -155,35 +166,45 @@ export type MergeFinalizeInputs = {
 export function mergeFinalizeInputs(
   summary: MergerSummary,
   silentNoopAttempts: ReadonlyMap<string, number>,
+  outcomes: readonly IssueOutcome[],
 ): MergeFinalizeInputs {
   const inputs: FinalizeInput[] = [];
   const bumpedSilentNoop = new Map<string, number>();
+  const gapsByIssue = new Map(
+    outcomes.map(({ issue, terminal }) => [issue.id, terminal.specGaps]),
+  );
+  const withGaps = <T extends FinalizeKindInputShape>(
+    input: T,
+  ): T & Pick<FinalizeInput, "specGaps"> => ({
+    ...input,
+    specGaps: gapsByIssue.get(input.issue.id) ?? [],
+  });
   for (const m of summary.merged) {
-    inputs.push({ kind: "merged", issue: m });
+    inputs.push(withGaps({ kind: "merged", issue: m }));
   }
   for (const s of summary.skipped) {
     if (s.reason === "silent-noop") {
       const attempts = (silentNoopAttempts.get(s.issue.id) ?? 0) + 1;
       bumpedSilentNoop.set(s.issue.id, attempts);
-      inputs.push(
+      inputs.push(withGaps(
         attempts < SILENT_NOOP_RETRY_LIMIT
           ? { kind: "fresh-attempt", issue: s.issue }
           : { kind: "silent-noop-exhausted", issue: s.issue, attempts },
-      );
+      ));
       continue;
     }
-    inputs.push({ kind: finalizeKindForSkip(s.reason), issue: s.issue });
+    inputs.push(withGaps({ kind: finalizeKindForSkip(s.reason), issue: s.issue }));
   }
   // #60, and LAST. The display-label edit is best-effort since #93, but the
   // required issue comment can still throw. `finalizeAll` is fail-fast, so a
   // chunk-landed input must not abandon an ordinary handoff after the merger
   // has already stripped that issue's queue label (#8, #33).
   for (const c of summary.chunkLanded) {
-    inputs.push({
+    inputs.push(withGaps({
       kind: "chunk-landed",
       issue: c.issue,
       chunkBranch: c.chunkBranch,
-    });
+    }));
   }
   return { inputs, bumpedSilentNoop };
 }

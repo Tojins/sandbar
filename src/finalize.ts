@@ -79,6 +79,7 @@ import type { LabelConfig } from "./config.js";
 import { SandbarError, isExitCode } from "./errors.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { IssueRef } from "./merger.js";
+import type { SpecGap } from "./inner-loop.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
@@ -424,7 +425,7 @@ export const CHUNK_LANDED_COMMENT_TEMPLATE = (chunkBranch: string): string =>
   `before the chunk lands. The local issue branch was deleted — \`${chunkBranch}\` carries ` +
   `its commits.`;
 
-export type FinalizeInput =
+type FinalizeKindInput =
   | { readonly kind: "merged"; readonly issue: IssueRef }
   // #60 — a review-gated issue whose branch landed on its chunk's branch, which
   // is now on origin. NOT a close: nothing has reached the source branch and
@@ -527,6 +528,18 @@ export type FinalizeInput =
       readonly issue: IssueRef;
       readonly attempts: number;
     };
+
+export type FinalizeInput = FinalizeKindInput & {
+  // Correctness-review decisions caused by missing specification, in the order
+  // the rounds declared them. Evidence only: this field affects no terminal,
+  // label, branch lifecycle, or state-machine decision (#108).
+  readonly specGaps: readonly SpecGap[];
+};
+
+export const SPEC_GAPS_COMMENT = (gaps: readonly SpecGap[]): string =>
+  `${BOT_COMMENT_PREFIX} the correctness reviewer recorded the following ` +
+  `specification gap${gaps.length === 1 ? "" : "s"} and the decision it applied:` +
+  gaps.map((gap) => `\n\n### Review round ${gap.round}\n\n${gap.text}`).join("");
 
 export type FinalizeAdapter = {
   pushBranch(branch: string): Promise<void>;
@@ -685,12 +698,24 @@ export async function finalizeOne(
   // mid-run — in both cases the handoff write would contradict the closed
   // state. Reclaim ordinary clones, preserve evidence clones, and skip the
   // issue-facing side effects.
+  //
+  // Correctness-review specification gaps (#108) are a separate required issue
+  // comment, posted once per issue and terminal after that closed-handoff guard
+  // and before terminal dispatch. This deliberately includes `merged`, whose
+  // old arm wrote no comment. The ordered records are evidence only; they do not
+  // select an arm or alter any terminal side effect.
   if (HANDOFF_KINDS.has(input.kind)) {
     const n = issueNumberOf(input.issue);
     if ((await adapter.issueState(n)) === "CLOSED") {
       await reclaimClone(input, adapter);
       return { kind: "skipped-closed" };
     }
+  }
+  if (input.specGaps.length > 0) {
+    await adapter.postComment(
+      issueNumberOf(input.issue),
+      SPEC_GAPS_COMMENT(input.specGaps),
+    );
   }
   switch (input.kind) {
     case "merged": {

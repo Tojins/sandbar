@@ -90,7 +90,8 @@ an exit condition fires.
    reviewer is strictly advisory and read-only. After a clean, on-branch
    COMPLETE, gate-1 and the reviewer run concurrently against the same commit
    (#123). A reviewer write always parks; otherwise a red gate discards the
-   review without spending a round or updating reviewer prose. One review round
+   review result without spending a round or updating reviewer prose, while any
+   declared specification gap remains run evidence (#108). One review round
    is up to two sequential COLD calls (#19, #121): tests/standards first on
    `reviewerQualityAgent`/`reviewerQualityModelId`, then — only after its
    approval — correctness/spec on `reviewerAgent`/`reviewerModelId`; the state
@@ -398,7 +399,10 @@ and used to announce themselves in four different ways, the halt in none at all.
   and sandbar cannot know which account the operator meant to spend.
 - **Token contracts.** Implementer: `<promise>COMPLETE|NEEDS-INFO|
   NEEDS-UI-PROTOTYPE</promise>`; resolve loop: `COMMITTED|ABANDON`; anything
-  else re-prompts. Reviewer: `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`.
+  else re-prompts. Reviewer: optional free-text `<spec-gap>` (correctness pass
+  only), then `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`. The gap records
+  the unanswered specification question and the answer the reviewer applied;
+  it is posted at finalise and never feeds a loop decision (#108).
   A run without a verdict token is a reviewer harness failure, never a
   fabricated CHANGES-REQUESTED (#41, #83). A token is one of those LITERAL
   strings and nothing else (#113): a tag quoted in prose, an unclosed opener,
