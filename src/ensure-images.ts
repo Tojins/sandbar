@@ -3,9 +3,9 @@
 //
 // Builds are skipped when the tag already exists. We shell out to
 // `podman build` directly rather than via a sandbox-provider helper, to keep
-// the build context scoped (the upstream CLI set context = cwd for a custom
-// Dockerfile path, which would tar the whole repo). `stdinContext` builds with
-// NO context at all (`podman build -t <tag> - < file`).
+// the build context explicit. It defaults to the Containerfile's directory,
+// while a deploy recipe can name the repo root (or another repo-relative
+// directory). `stdinContext` builds with NO context at all.
 //
 // EVERY build entry point RECORDS what it did (#82). All three of them —
 // `ensureImages`, `createAgentImages` and `createBranchImages` — hand an
@@ -75,7 +75,7 @@
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { createReadStream, createWriteStream } from "node:fs";
 import { copyFile, link, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -90,7 +90,11 @@ import {
   type AgentProviderPackage,
   type AgentProviderName,
 } from "./agent-providers.js";
-import type { BuiltImage, ResolvedGateStack } from "./config.js";
+import {
+  type BuiltImage,
+  type ResolvedGateStack,
+  effectiveImageBuildContext,
+} from "./config.js";
 import type { RuntimeExec, SweepResult } from "./containers.js";
 import { SandbarError, isExitCode } from "./errors.js";
 import { IMAGE_INPUTS_LABEL, fingerprintImageInputs } from "./image-inputs.js";
@@ -295,7 +299,10 @@ export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
     args.push("-");
   } else {
     const containerfile = containerfilePath(image, opts?.root ?? "");
-    args.push("-f", containerfile, dirname(containerfile));
+    const context = effectiveImageBuildContext(image);
+    const root = opts?.root ?? "";
+    const contextPath = isAbsolute(context) || !root ? context || "." : join(root, context);
+    args.push("-f", containerfile, contextPath);
   }
   return args;
 }

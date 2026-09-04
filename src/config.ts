@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import {
   type AgentProviderName,
@@ -264,6 +264,9 @@ export type GateStep = {
 export type BuiltImage = {
   readonly tag: string;
   readonly containerfile: string;
+  // Repo-relative build context. Defaults to the containerfile's directory;
+  // `"."` and `""` both name the repo root.
+  readonly context?: string;
   // Optional named stage of a multi-stage Containerfile. It is part of the
   // rebuildOn fingerprint because two targets are different image inputs even
   // when every file and build argument is identical.
@@ -312,6 +315,16 @@ export type BuiltImage = {
   // browser image do not want the same ceiling.
   readonly buildTimeoutMs?: number;
 };
+
+// One internal spelling for the effective filesystem build context. Explicit
+// values are trimmed here as well as at the config boundary so direct users of
+// buildArgv cannot diverge from containment validation; the repo root is "".
+export function effectiveImageBuildContext(image: BuiltImage): string {
+  const context = image.context?.trim();
+  if (context !== undefined) return context === "." ? "" : context;
+  const defaultContext = dirname(image.containerfile);
+  return defaultContext === "." ? "" : defaultContext;
+}
 
 export type GateStackConfig = {
   readonly containers: readonly StackContainer[];
@@ -1456,10 +1469,7 @@ function resolveRebuildOn(img: BuiltImage): readonly string[] {
         "relative to the repo root.",
     );
   }
-  // `dirname` of the containerfile, normalised to "" for the repo root — which
-  // is what `buildArgv` passes podman as the context.
-  const slash = img.containerfile.lastIndexOf("/");
-  const context = slash === -1 ? "" : img.containerfile.slice(0, slash);
+  const context = effectiveImageBuildContext(img);
   const out: string[] = [];
   for (const raw of paths) {
     const path = raw.trim();
@@ -1485,8 +1495,7 @@ function resolveRebuildOn(img: BuiltImage): readonly string[] {
           "path (`package-lock.json`, `packages/api/bun.lock`).",
       );
     }
-    // The build context is the containerfile's OWN directory (see
-    // `buildArgv`), so a declared path outside it cannot be `COPY`d and the
+    // A declared path outside the build context cannot be `COPY`d and the
     // image cannot be a function of it. Unchecked, that config passes
     // everything else here, changes its fingerprint on every edit, pays a
     // variant build per gate run, and produces an image byte-identical to the
@@ -1496,11 +1505,9 @@ function resolveRebuildOn(img: BuiltImage): readonly string[] {
       throw new SandbarError(
         `config.images: entry '${img.tag}' declares \`rebuildOn\` path ` +
           `'${path}', which is outside its build context ('${context}/'). ` +
-          "The context is the containerfile's own directory, so that path " +
-          "cannot be COPYd into the image and the image cannot be a function " +
-          "of it — sandbar would rebuild on every change and produce the same " +
-          "image. Move the containerfile up to the directory that holds the " +
-          "inputs, or list inputs from inside its own.",
+          "That path cannot be COPYd into the image and the image cannot be a " +
+          "function of it — sandbar would rebuild on every change and produce " +
+          "the same image. List inputs from inside the context or widen it.",
       );
     }
     if (!out.includes(path)) out.push(path);
@@ -1534,6 +1541,34 @@ export function resolveImages(
         `config.images: entry '${img.tag}' has no containerfile.`,
       );
     }
+    let context = img.context;
+    if (context !== undefined) {
+      context = effectiveImageBuildContext(img);
+      if (context.startsWith("/")) {
+        throw new SandbarError(
+          `config.images: entry '${img.tag}' has an absolute build context ` +
+            `('${context}'). Contexts are repo-relative.`,
+        );
+      }
+      const segments = context.split("/");
+      if (
+        context &&
+        segments.some(
+          (segment) => segment === "" || segment === "." || segment === "..",
+        )
+      ) {
+        throw new SandbarError(
+          `config.images: entry '${img.tag}' has a build context with a '.', ` +
+            `'..' or empty segment ('${context}'). It must stay inside the repo.`,
+        );
+      }
+      if (img.stdinContext) {
+        throw new SandbarError(
+          `config.images: entry '${img.tag}' sets both \`context\` and ` +
+            "`stdinContext`. A stdin-context build has no filesystem context; drop one.",
+        );
+      }
+    }
     if (img.target !== undefined && !img.target.trim()) {
       throw new SandbarError(
         `config.images: entry '${img.tag}' has an empty target.`,
@@ -1551,11 +1586,12 @@ export function resolveImages(
         );
       }
     }
-    resolved.push({
+    const normalized = {
       ...img,
+      ...(context === undefined ? {} : { context }),
       ...(img.target === undefined ? {} : { target: img.target.trim() }),
-      rebuildOn: resolveRebuildOn(img),
-    });
+    };
+    resolved.push({ ...normalized, rebuildOn: resolveRebuildOn(normalized) });
   }
   // A consumer listing images at all must still build the sandbox image: it is
   // what the agent and the merger's resolve agent run in, and its absence is a
