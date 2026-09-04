@@ -125,7 +125,16 @@ export default {
       // worktree from inside the sandbox, and the gate mounts the worktree. So
       // the image bakes no dependency of the repo and needs no `rebuildOn`
       // (#37): there is no baked lockfile for a branch to make stale.
-      onWorktreeReady: [{ command: "npm ci", timeoutMs: 600_000 }],
+      //
+      // `--no-audit` because the audit is a SECOND service on the setup path and
+      // nothing here reads its answer: the gate never runs `npm audit`, so no
+      // verdict depends on it, while a stalled advisory lookup is charged to
+      // every issue in the plan. Measured on 2026-09-04, warm cache: the install
+      // itself is 0.8s, the bulk-advisory POST answered once in 35s and then
+      // twice not at all inside 90s, and `npm audit` on this lockfile ran
+      // 100s–180s+ at 0.2s of CPU. Two worktrees paid 302s each for it that
+      // morning against this 600s bound, after two days flat at ~2.5s.
+      onWorktreeReady: [{ command: "npm ci --no-audit", timeoutMs: 600_000 }],
     },
   },
 
