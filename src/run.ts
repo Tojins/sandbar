@@ -1,4 +1,4 @@
-// Sandbar orchestrator — four-phase loop.
+// Sandbar orchestrator — continuous execution pool plus serialized landing.
 //
 //   Phase 1 (Plan):            Deterministic resolver picks the unblocked
 //                              `ready-for-agent` issues by parsing each body's
@@ -60,8 +60,8 @@
 //                              finalises the merger's own outcomes after.
 //
 // A per-run log tree at <cwd>/<workDir>/logs/run-<UTC-ISO>/ captures decisions
-// and agent output: orchestrator.log at the run root, plan.json + merger.log
-// + issue-<id>/attempt-<m>.log per cycle.
+// and agent output: orchestrator.log and plans.jsonl at the run root,
+// issue-<id>/ for execution, and landing-<n>/ for landing artefacts.
 // HARD-ERROR retries are mirrored from stderr into orchestrator.log, and the
 // terminal that exhausts those retries appends its full reason verbatim. That
 // reason is the only diagnosis for an infrastructure failure that can happen
@@ -113,17 +113,10 @@
 // verdict, or this complaint" has to be above them. `driver-identity.ts` owns
 // what it can and cannot claim.
 //
-// Outer-loop termination is governed by exit-conditions.ts: plan-empty →
-// success, repeated-plan-with-zero-DONEs or two consecutive zero-DONE cycles
-// → stuck, issuesAttempted hits maxTotalIssues → budget — and, with
-// config.relaunchAfterLanding, any cycle that landed merges → exit
-// EXIT_CODE_RELAUNCH so a looping launcher can start the next cycle from
-// re-resolved inputs (#65). Which inputs those are narrowed with #66 and is
-// `exit-conditions.ts`'s to state: the driver is a pinned release and does not
-// move at all, images ARE re-resolved from origin/<sourceBranch>, and the
-// config file is re-imported from the operator's checkout, which nothing
-// refreshes. MAX_ITERATIONS is a defensive ceiling — the conditions above
-// terminate first.
+// Termination is governed by exit-conditions.ts. Plan-empty requires a
+// quiescent pool; maxTotalIssues counts admissions; quota drains work already
+// running; and relaunch is checked only at post-landing quiescence, before a
+// newly-unblocked issue starts. MAX_ITERATIONS remains a defensive ceiling.
 
 import { realpathSync } from "node:fs";
 
@@ -164,7 +157,6 @@ import { durationField, startTimer } from "./timing.js";
 import { SandbarError, faultDetail } from "./errors.js";
 import {
   type TerminalExit,
-  applyCycle,
   budgetExit,
   formatExitLine,
   haltedExit,
@@ -172,7 +164,7 @@ import {
   newRunState,
   planEmptyExit,
   quotaExit,
-  planFingerprint,
+  relaunchExit,
   remainingBudget,
 } from "./exit-conditions.js";
 import { createRunQuotaState } from "./inner-loop.js";
@@ -844,8 +836,8 @@ export async function run(
       finalizeAdapter,
       config.labels,
     );
-    for (const input of inputs) {
-      const issueNum = issueNumberOf(input.issue);
+    for (const result of finalizeResults) {
+      const issueNum = issueNumberOf(result.input.issue);
       const observed = await finalizeAdapter.issueLabels(issueNum);
       if (observed.includes("ready-for-agent")) {
         throw new SandbarError(
@@ -924,6 +916,18 @@ export async function run(
     codingStandardsPath: config.codingStandardsPath,
   };
 
+  type IssueOutcome = { issue: PlannedIssue; terminal: Terminal };
+  type ExecutionEvent =
+    | { readonly status: "fulfilled"; readonly value: IssueOutcome }
+    | { readonly status: "rejected"; readonly issue: PlannedIssue; readonly reason: unknown };
+  const active = new Map<string, Promise<ExecutionEvent>>();
+  const completedEvents: ExecutionEvent[] = [];
+  const ongoingIssues = new Map<string, PlannedIssue>();
+  const startedThisRun = new Set<number>();
+  let landingsThisRun = 0;
+  let quotaPending: TerminalExit | null = null;
+  const retryQueue: PlannedIssue[] = [];
+
   // -------------------------------------------------------------------------
   // Main loop
   // -------------------------------------------------------------------------
@@ -951,7 +955,7 @@ export async function run(
       }
 
       const budget = remainingBudget(runState);
-      if (budget === 0) {
+      if (budget === 0 && active.size === 0) {
         // The same `budgetExit` applyCycle returns, rather than the second
         // hand-written copy of its reason this used to print in different
         // words at the top of a cycle (#70).
@@ -969,7 +973,7 @@ export async function run(
       // Phase 1: Plan
       // ---------------------------------------------------------------------
       const planOptions = {
-        excluded: mergedThisRun,
+        excluded: new Set([...mergedThisRun, ...startedThisRun]),
         defaultLane: config.defaultLane,
         repoDir: layout.repoDir,
       };
@@ -1136,15 +1140,43 @@ export async function run(
         await runLogger.appendOrchestrator(`plan: land requested — ${named}`);
       }
 
+      // Quiescence is the only relaunch boundary left (#87). Evaluate it
+      // before admitting work: once a new issue starts the boundary is gone.
+      if (
+        landingsThisRun > 0 &&
+        active.size === 0 &&
+        ongoingIssues.size === 0 &&
+        (resolution.plan.length > 0 || landRequests.length > 0)
+      ) {
+        terminalExit = await announceExit(relaunchExit(landingsThisRun));
+        break;
+      }
+
       // `PlannedIssue`, not a structural subset of it: a planned review-gated
       // issue carries the CHUNK it lands on (#60), and a narrower annotation
       // here would drop that field on the way to phase 3 without an error —
       // the merger would then land a chunk member on the source branch.
-      const issues: PlannedIssue[] = [...resolution.plan].slice(
+      const retryIssues = quotaPending
+        ? []
+        : retryQueue.splice(
+            0,
+            Math.max(0, (config.maxParallelIssues ?? 3) - active.size),
+          );
+      const issues: PlannedIssue[] = resolution.plan
+        .filter((issue) => !startedThisRun.has(Number(issue.id)))
+        .slice(
         0,
-        Math.min(budget, config.maxParallelIssues),
+        Math.min(
+          budget,
+          quotaPending
+            ? 0
+            : Math.max(
+                0,
+                (config.maxParallelIssues ?? 3) - active.size - retryIssues.length,
+              ),
+        ),
       );
-      const fingerprint = planFingerprint(issues.map((i) => i.id));
+      const executionIssues = [...retryIssues, ...issues];
       await cycleLogger.writePlan(issues);
       await runLogger.appendOrchestrator(
         `plan: ${issues.length} unblocked issue(s) — ${issues.map((i) => `#${i.id}`).join(", ") || "none"}`,
@@ -1178,7 +1210,12 @@ export async function run(
       // unblocks whatever was waiting on them. Exiting `success` here would
       // strand a chunk a human explicitly asked for, on the one cycle where
       // there is nothing else to distract from it.
-      if (issues.length === 0 && landRequests.length === 0) {
+      if (
+        executionIssues.length === 0 &&
+        landRequests.length === 0 &&
+        active.size === 0 &&
+        ongoingIssues.size === 0
+      ) {
         // No line of its own: the `Exit (plan-empty): …` at the bottom says
         // exactly this and is the line every other terminal prints too (#70).
         terminalExit = await announceExit(planEmptyExit());
@@ -1236,8 +1273,13 @@ export async function run(
       // split (#70) doing the job it exists for, which is why "just move the
       // console.log too" is the wrong fix.
       const phase2Timer = startTimer();
-      const settled = await Promise.allSettled(
-        issues.map(async (issue) => {
+      for (const issue of executionIssues) {
+        if (!startedThisRun.has(Number(issue.id))) {
+          startedThisRun.add(Number(issue.id));
+          runState.issuesAttempted += 1;
+        }
+        ongoingIssues.set(issue.id, issue);
+        const task: Promise<ExecutionEvent> = (async () => {
           const issueTimer = startTimer();
           try {
             const terminal = await runInnerLoop(issue, {
@@ -1257,23 +1299,41 @@ export async function run(
             await runLogger.appendOrchestrator(
               formatTerminalLine(issue.id, terminal, durationField(issueTimer())),
             );
-            return { issue, terminal };
+            return { status: "fulfilled" as const, value: { issue, terminal } };
           } catch (err) {
             await runLogger.appendOrchestrator(
               `terminal #${issue.id} REJECTED ${durationField(issueTimer())}: ` +
                 `${err instanceof Error ? err.message : String(err)}`,
             );
-            throw err;
+            return { status: "rejected" as const, issue, reason: err };
           }
-        }),
-      );
+        })().then((event) => {
+          completedEvents.push(event);
+          return event;
+        });
+        active.set(issue.id, task);
+      }
+
+      // A recompute with no new candidate can still have running work. Wait
+      // only for the next freed slot; siblings remain live and the next full
+      // plan is built immediately around them.
+      if (completedEvents.length === 0 && active.size > 0) {
+        await Promise.race(active.values());
+        await Promise.resolve();
+      }
+      const settled = completedEvents.splice(0);
+      for (const event of settled) {
+        const id = event.status === "fulfilled"
+          ? event.value.issue.id
+          : event.issue.id;
+        active.delete(id);
+      }
       await runLogger.appendOrchestrator(
-        `phase-2 end issues=${issues.length} ${durationField(phase2Timer())}`,
+        `slot freed active=${active.size} ${durationField(phase2Timer())}`,
       );
 
-      type IssueOutcome = { issue: typeof issues[number]; terminal: Terminal };
       const outcomes: IssueOutcome[] = [];
-      for (const [i, s] of settled.entries()) {
+      for (const s of settled) {
         if (s.status === "fulfilled") {
           outcomes.push(s.value);
           const issue = s.value.issue;
@@ -1286,8 +1346,9 @@ export async function run(
           console.log(`  #${issue.id} (${issue.branch}): ${t.type}`);
         } else {
           console.error(
-            `  ✗ #${issues[i]!.id} (${issues[i]!.branch}) failed: ${s.reason}`,
+            `  ✗ #${s.issue.id} (${s.issue.branch}) failed: ${s.reason}`,
           );
+          ongoingIssues.delete(s.issue.id);
         }
       }
 
@@ -1330,6 +1391,11 @@ export async function run(
       // once and nobody stored has no such fallback.
       // ---------------------------------------------------------------------
       await runFinalize("agent terminals", terminalFinalizeInputs(outcomes));
+      for (const outcome of outcomes) {
+        if (outcome.terminal.type !== "DONE") {
+          ongoingIssues.delete(outcome.issue.id);
+        }
+      }
 
       // ---------------------------------------------------------------------
       // Phase 3: Merge (procedural, in an isolated worktree off origin)
@@ -1445,7 +1511,7 @@ export async function run(
             (line) => cycleLogger.appendMerger(line),
             (issueId, gate) => cycleLogger.writeMergerGate(issueId, gate),
             {
-              cycleIssues: issues,
+              cycleIssues: [...ongoingIssues.values()],
               projectAnchor,
               // #67: every resolve attempt's stdout and stderr, beside the
               // gate artefact it was prompted from. The writer answers with
@@ -1571,6 +1637,16 @@ export async function run(
         for (const [issueId, attempts] of bumpedSilentNoop) {
           runState.silentNoopAttemptsByIssue.set(issueId, attempts);
         }
+        const freshAttempts = new Set(
+          inputs
+            .filter((input) => input.kind === "fresh-attempt")
+            .map((input) => input.issue.id),
+        );
+        for (const input of inputs) {
+          if (input.kind === "fresh-attempt") {
+            retryQueue.push(input.issue as PlannedIssue);
+          }
+        }
         // Merged-and-closed only. A chunk landing (#60) is deliberately NOT
         // added: `excluded` means "this run already merged it to the source
         // branch". Git membership de-queues a chunk member without tracker lag.
@@ -1626,6 +1702,9 @@ export async function run(
           );
         }
         await runFinalize("merge outcomes", inputs);
+        for (const issue of completedIssues) {
+          if (!freshAttempts.has(issue.id)) ongoingIssues.delete(issue.id);
+        }
       }
 
       // Reports about DURABLE work with tracker state left wrong, all printed
@@ -1734,28 +1813,33 @@ export async function run(
 
       if (haltReasons.length > 0) halt = true;
 
-      const cycleExit = selectCompletedCycleExit({
+      const selectedExit = selectCompletedCycleExit({
         mergerQuota,
         haltReasons: halt ? haltReasons : [],
         terminals: outcomes.map((outcome) => outcome.terminal),
-        otherwise: () => {
-          const decision = applyCycle(runState, {
-            planFingerprint: fingerprint,
-            planSize: issues.length,
-            doneCount: completedIssues.length,
-            landedMerges:
-              mergerSummary && mergerSummary.pushed
-                ? mergerSummary.merged.length + mergerSummary.mergedChunks.length
-                : 0,
-          });
-          return decision.kind === "exit" ? decision : null;
-        },
+        otherwise: () =>
+          runState.issuesAttempted >= runState.maxTotalIssues
+            ? budgetExit(runState.issuesAttempted, runState.maxTotalIssues)
+            : null,
       });
+      const landedNow = mergerSummary && mergerSummary.pushed
+        ? mergerSummary.merged.length + mergerSummary.mergedChunks.length
+        : 0;
+      landingsThisRun += landedNow;
+      if (selectedExit?.tag === "quota") quotaPending = selectedExit;
+      const cycleExit = selectedExit?.tag === "quota" && active.size > 0
+        ? null
+        : selectedExit;
       if (cycleExit) {
         // announceExit owns both stdout and the run record. Quota is selected
         // before the lazy applyCycle fallback, so landed work cannot turn it
         // into relaunch and cannot spend another cycle's accounting.
         terminalExit = await announceExit(cycleExit);
+        break;
+      }
+
+      if (quotaPending && active.size === 0) {
+        terminalExit = await announceExit(quotaPending);
         break;
       }
     }

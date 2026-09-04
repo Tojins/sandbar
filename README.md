@@ -262,10 +262,10 @@ sits in).
 | `maxImplAttempts` | `8` |
 | `maxReviewRounds` | `8` — equal to `maxImplAttempts` on purpose; see below |
 | `maxTotalIssues` | `50` |
+| `maxParallelIssues` | `3` — concurrent inner-loop slots |
 | `labels` | `{ needsInfo: "needs-info", agentStuck: "agent-stuck" }` (override any subset) |
 | `requiresSandbar` | *(unset)* — no version check; see below |
 | `mergeMode` | `{ kind: "direct" }` — see below |
-| `relaunchAfterLanding` | `false` — see below |
 | `defaultLane` | `"auto"` — see below |
 | `codingStandardsPath` | *(unset)* — no conventional path; see below |
 
@@ -468,63 +468,18 @@ is a program and may legitimately carry extra data — a computed tag, a table y
 map into `gateStack`, a note to the next reader — so an allowlist would outlaw
 the file's whole point to buy a check the file can just state.
 
-### `relaunchAfterLanding` — self-hosted runs that stay current
+### Continuous pool and landing queue
 
-If the repo sandbar operates on is also where sandbar's own inputs come from —
-sandbar itself is the motivating case, but any repo whose landings change how
-its own runs behave qualifies — a run that keeps cycling goes stale mid-series:
-sandbar pushes merges to origin, but the process keeps driving with the config
-(the gate stack that judges every branch!) and the images it resolved at launch.
-In a queued chain of orchestrator issues, slice N+1 is then judged by inputs
-that predate slice N — the same genus of silent false verdict `rebuildOn` exists
-to prevent, arriving through the launcher.
+The cycle does not get shorter; it disappears. Up to `maxParallelIssues`
+inner loops run at once. As soon as one terminates, its slot is refilled from a
+fresh full plan while DONE work waits without consuming a slot. Landings remain
+serialized and take every DONE branch queued when the landing starts, so one
+gate-2 can still cover several branches. An issue's work lands when the landing
+queue reaches it, and capacity that used to idle becomes work.
 
-`relaunchAfterLanding: true` makes any cycle in which the merger landed merges
-finalise normally and then exit with `EXIT_CODE_RELAUNCH` (**75**, exported
-from the package root) instead of continuing: "landed work; relaunch me to
-continue". The launcher becomes a loop:
-
-```sh
-while :; do
-  npx sandbar
-  c=$?; [ "$c" -eq 75 ] || exit "$c"
-done
-```
-
-The contract is: loop **only** on the relaunch code; propagate every other exit.
-The semantics hold because:
-
-- **No spin.** The relaunch code requires a landing, i.e. progress. A cycle
-  that lands nothing exits through the normal conditions, whose codes break
-  the loop. A landing that also exhausts `maxTotalIssues` relaunches rather
-  than stopping — budgets are per-run and reset across runs by design, so the
-  relaunched process starts fresh exactly as a human re-launch would.
-- **State is already per-run.** The relaunched process re-acquires the lock
-  (released on exit), same workdir, same podman scope.
-- Cost: one extra launch at series end (the relaunch that finds the plan empty
-  and exits 0).
-
-What a relaunch re-reads is **your checkout, not origin**. Images are re-resolved
-from `origin/<sourceBranch>`, so a landed `Containerfile` change is picked up on
-its own; the config file is imported again from wherever you keep it, so a landed
-*config* change is picked up only once that file is in your checkout. Sandbar
-never pulls into your working tree — it is yours, and a run that moved your refs
-would be a worse bargain than a stale gate stack. Preflight makes the gap visible
-instead: when the commits your checkout is missing include ones that touch the
-config file, the run opens with a warning naming the file and both counts.
-
-What the relaunch does **not** buy you is a newer driver. If your launcher also
-upgrades sandbar in that loop — `git pull && npm run build`, or an unpinned
-install — then the code producing your verdicts is whatever was on disk at that
-instant, which for a working tree means uncommitted edits included. Sandbar's
-own launcher used to do exactly that and no longer does: it installs the
-release named in a committed `sandbar.pin` and runs that, so a series is driven
-by a version somebody chose. Pin your driver and move the pin deliberately.
-
-It is **explicit config, not detection**, on purpose: deriving self-hostedness
-(is the driver inside the operated repo?) false-positives for every consumer
-running the package from `node_modules`, whose non-looping launcher would then
-stop after the first landing cycle. Leave it off unless your launcher loops.
+After a landing leaves the run quiescent, a non-empty recompute exits 75 before
+starting another issue. Images are refreshed in-process; the relaunch lets the
+launcher re-import configuration without interrupting any work.
 
 ### `defaultLane` — who gets the last word on a landing
 

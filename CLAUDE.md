@@ -52,10 +52,13 @@ values and top-level await survive. Exactly one configuration flag (`--config`),
 no search up the directory tree, `.mjs`, and the default export is the object,
 not a factory. Rationale in `src/cli.ts` and `src/config.ts` headers.
 
-## Architecture — the four-phase outer loop
+## Architecture — continuous pool and serialized landing
 
-The orchestrator (`src/run.ts`) cycles plan → execute → merge → finalise until
-an exit condition fires.
+The orchestrator (`src/run.ts`) recomputes the complete plan whenever an
+execution slot frees. Planner-visible **ongoing** work lasts from admission
+through landing or parking; an execution **slot** lasts only while the inner
+loop runs. DONE work therefore queues for the one serialized landing path
+without consuming one of `maxParallelIssues` slots.
 
 1. **Plan** (`src/plan-resolver.ts` + `src/chunk-reconcile.ts`) — purely
    deterministic, no LLM: lists issues labelled `ready-for-agent`, parses
@@ -105,7 +108,7 @@ an exit condition fires.
    NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | QUOTA |
    HARD-ERROR` (infra-only).
 
-3. **Merge** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
+3. **Landing** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
    + `src/forge-verify.ts` + `src/chunk-land.ts`) — procedural, in a dedicated
    ephemeral worktree detached at `origin/<sourceBranch>` (never the operator's
    checkout, #10). Per DONE branch in issue order: `git merge --no-ff`, with
@@ -131,16 +134,15 @@ an exit condition fires.
    `labels.needsInfo`/`labels.agentStuck`, plus `needs-review` for a
    chunk-landed member, are the only labels sandbar applies — `land` (#64) it only ever
    REMOVES, from a pull request a human labelled).
-   Runs in **two passes straddling the merge** (#30): Phase-2 terminals are
-   finalised before Phase 3 so a merge-phase throw cannot discard them.
+   A terminal is finalised before its landing is attempted, and tracker labels
+   are read back before the issue ceases to be ongoing.
 
 ### Exit conditions (`src/exit-conditions.ts`)
 
-First of: **plan-empty** (exit 0) · **quota** (#109, exit 4; outranks relaunch) ·
-**relaunch** (#65, exit 75 after any cycle
-that landed merges, when `config.relaunchAfterLanding`) · **stuck-same-plan**
-(exit 2) · **stuck-zero-dones** (exit 2) · **budget** (`maxTotalIssues`,
-default 50, exit 3) · **halted** (exit 1) · **iteration-ceiling**.
+The pool exits plan-empty only when no issue, landing, or plan remains. Provider
+quota stops new admissions and drains running and landing work before exit 4.
+`maxTotalIssues` counts admissions. Relaunch (75) is evaluated at quiescence,
+before admitting newly-unblocked work, and requires a landing in this process.
 
 All eight are one type, `TerminalExit`, and the run ends with exactly one
 `Exit (<tag>): <reason>` on stdout whichever fired (#70) — `formatExitLine` is
@@ -557,9 +559,8 @@ run it, and around again only on exit 75.
 - **Nothing refreshes that checkout, and that is the price of #66.** The
   launcher's `git pull` is gone — which is what lets a series run while the
   operator holds local commits — so a landed `gateStack` change starts judging
-  branches when a human pulls it, NOT one relaunch later; `relaunchAfterLanding`
-  survives for the images, not for the config (`exit-conditions.ts`,
-  `config.ts`). Unreported that is silent for an unbounded number of relaunches,
+  branches when a human pulls it, NOT one relaunch later. Unreported that is
+  silent for an unbounded long-running process,
   so preflight's `staleConfigWarning` counts the commits the checkout is behind
   `origin/<sourceBranch>` that touch the config FILE — narrower than "behind" on
   purpose, since after every landing a checkout is behind and a warning that

@@ -29,6 +29,7 @@ vi.mock("./logs.js", () => ({
     finalize: vi.fn(),
     cycle: vi.fn(() => ({
       cycleDir: "/tmp/run-quota-test/cycle-1",
+      issueDir: vi.fn(async (id: string) => `/tmp/run-quota-test/issue-${id}`),
       writePlan: vi.fn(), appendMerger: vi.fn(), writeMergerGate: vi.fn(),
       writeAttempt: vi.fn(), writeResolveAttempt: vi.fn(),
     })),
@@ -104,7 +105,7 @@ import { run } from "./run.js";
 const config: RunConfig = {
   ghOwner: "o", ghRepo: "r", cwd: "/tmp", workDir: "sandbar-run-quota-test",
   sandboxImage: "image", botName: "bot", botEmail: "bot@example.com",
-  sandboxHooks: {}, env: { GH_TOKEN: "token" }, relaunchAfterLanding: true,
+  sandboxHooks: {}, env: { GH_TOKEN: "token" },
   gateStack: {
     containers: [{ name: "app", image: "image", mountWorktree: "/work", hold: true }],
     steps: [{ name: "test", in: "app", command: ["true"] }],
