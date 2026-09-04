@@ -64,8 +64,8 @@ without consuming one of `maxParallelIssues` slots.
    deterministic, no LLM: lists issues labelled `ready-for-agent`, parses
    `## Blocked by` sections, selects up to `maxParallelIssues` unblocked issues
    by number. Each candidate also gets a **lane** (`src/lanes.ts`, #57) and, when
-   review-gated, a `chunk` target (#61) that tells phase 2 what to seed from
-   and phase 3 where to land. Ahead of the plan proper two passes make the
+   review-gated, a `chunk` target (#61) that tells execution what to seed from
+   and the landing path where to land. Ahead of the plan proper two passes make the
    tracker agree with the forge and with git: the **chunk-review scan**
    (`src/chunk-follow-up.ts`, #95) routes each changes-requested review on a
    chunk PR to its landed member(s) and re-queues them, and the **reconciler**
@@ -447,11 +447,11 @@ from that state and provider or landing outcomes.
   evidence only, and absent stays absent rather than becoming zero. This closes
   three defects the
   first attempt to assemble a timing table found: a cohort's terminals all
-  carried the SETTLE instant in plan order (so "which issue held the cycle" and
+  carried the SETTLE instant in plan order (so "which issue held the cohort" and
   "how long did the others idle" were unanswerable, and an outcome reached
   eight minutes earlier existed in the log only if every sibling survived — a
   #70 hole, fixed by having the task that terminated write its own line and
-  rethrow), the largest block of a cycle had nothing inside it (6m41s from
+  rethrow), the largest block of a run had nothing inside it (6m41s from
   `plan:` to the first `gate-1` line), and an image rebuild — which changes what
   every container in the run executes — was announced to a terminal and nowhere
   else. `GateResult` carries `durationMs` plus a per-phase `steps` split filled

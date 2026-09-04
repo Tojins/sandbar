@@ -98,7 +98,7 @@
 // the tags, the reasons and the line; `announceExit` below is the single site
 // that emits it, to BOTH streams — the log so `exit: <tag>` is greppable
 // however far the run got, stdout so a human reading a terminal gets the same
-// answer. It is reached by the startup stops as well as by the cycle loop, and
+// answer. It is reached by the startup stops as well as by the scheduler loop, and
 // a terminal path that does not call it prints nothing, which is the failure
 // this issue is named after. Nothing else in this file may format that line: a
 // `console.log` per call site is the same hand-pairing `logs.ts`'s invariant
@@ -256,7 +256,7 @@ export function maxRecomputesFor(maxTotalIssues: number): number {
 // so its pod, network and containers can never collide with an issue's.
 const MERGER_STACK_ID = "merger";
 
-// A leaked resource is recoverable — the next cycle's `startStack` force-removes
+// A leaked resource is recoverable — the next namesake `startStack` force-removes
 // a namesake before creating one — so a failed sweep is not fatal. It is also
 // not silent: it leaks a pod, its invisible infra container and its network, and
 // the operator is the only one who can tell whether that matters.
@@ -272,7 +272,7 @@ async function reportSweepFailures(
   if (result.failures.length === 0) return;
   console.warn(
     `Could not remove ${result.failures.length} orphaned sandbar resource(s). ` +
-      "They will be retried next cycle; clear them by hand if they persist:\n" +
+      "They will be retried when the pool is next quiescent; clear them by hand if they persist:\n" +
       result.failures.join("\n"),
   );
   await log(
@@ -553,7 +553,7 @@ export async function run(
   });
 
   // THE one site that emits a terminal (#70), and it is declared up here
-  // because the startup stops below reach it as well as the cycle loop does:
+  // because the startup stops below reach it as well as the scheduler loop does:
   // an operator greps `orchestrator.log` for how the run ended without knowing
   // yet how far it got, so a run refused by preflight and a run that exhausted
   // its budget must leave the same shape of line. It also owns
@@ -896,8 +896,8 @@ export async function run(
   // hand.
   let terminalExit: TerminalExit | null = null;
 
-  // One Phase-4 pass. Called twice per cycle (#30): once for the agent
-  // terminals before the merge, once for the merger's own outcomes after. The
+  // One finalization pass. Called before a landing for agent terminals and
+  // after it for the merger's own outcomes (#30). The
   // `label` is only there so the two are distinguishable in the console and the
   // orchestrator log.
   //
@@ -966,7 +966,7 @@ export async function run(
   const mergedThisRun = new Set<number>();
 
   // One adapter for the whole run, like `repo` itself: the chunk-review scan
-  // (#95) reads and writes the same repository every cycle.
+  // (#95) reads and writes the same repository at every recompute.
   const followUpAdapter = realChunkFollowUpAdapter({
     repo,
     repoDir: layout.repoDir,
@@ -1154,7 +1154,7 @@ export async function run(
       // it does — closing members, dropping `needs-review` — changes the answer to
       // every question the plan asked, so the plan is REBUILT when it acted.
       //
-      // Rebuilt rather than left stale for the next cycle: closing a member
+      // Rebuilt immediately rather than left stale for the next recompute: closing a member
       // unblocks its dependents, and a run whose plan came out empty exits
       // `success` right below. Without the re-plan a chunk somebody merged by
       // hand would reconcile, unblock three issues, and stop the run anyway.
@@ -1194,13 +1194,13 @@ export async function run(
       // its own chunks: three chunks reconciling with one stray label is one
       // chunk with bookkeeping left over, and calling it three sends a human
       // looking for leftovers that are not there. The claim differs too — a
-      // KEPT branch really is retried next cycle, while a retired chunk's
+      // KEPT branch really is retried at the next recompute, while a retired chunk's
       // leftovers are reached through a branch that no longer exists, so
       // promising a retry for those is promising nothing.
       //
       // Neither halts. See `chunk-reconcile.ts`'s header: this pass IS the
       // retry the merge phase halts to defer to, and it runs again at the top
-      // of the next cycle, so stopping the run in front of it would spend the
+      // of every recompute, so stopping the run in front of it would spend the
       // whole run on a repair that repairs itself.
       const reconcileResidue = chunkResidue(reconciliation.reconciled);
       // The twin of the merge phase's own report, one phase down and for the
@@ -1368,7 +1368,7 @@ export async function run(
       }
 
       // ---------------------------------------------------------------------
-      // Phase 2: Execute (inner-loop ralph)
+      // Execute (inner-loop ralph)
       // ---------------------------------------------------------------------
 
       // THE TERMINAL LINE IS WRITTEN BY THE TASK THAT TERMINATED (#82).
@@ -1404,7 +1404,7 @@ export async function run(
               hooks: config.sandboxHooks,
               copyToWorktree: config.copyToWorktree,
               branchImages,
-              // Sandbox-sibling logs land beside this cycle's attempt
+              // Sandbox-sibling logs land beside this issue's attempt
               // transcripts (#44 D4), so the offline artefact of what the
               // agent's stack was doing sits next to the transcript of what the
               // agent did.
@@ -1504,7 +1504,7 @@ export async function run(
         // from it (#20). createMergerWorktree and
         // startStack each register their own teardown as a disposable (#55); we
         // also tear both down in the finally below. One stack serves gate-2 for
-        // every branch in the cycle — its issue-lifecycle containers start once.
+        // every branch in the landing batch — its issue-lifecycle containers start once.
         let mergerWorktree: MergerWorktree | null = null;
         let mergerStack: Stack | null = null;
         try {
@@ -1522,7 +1522,7 @@ export async function run(
             // gate-2 needs this as much as gate-1 does (#37): the merge result
             // is a tree neither branch had, and two branches that each touched
             // the lockfile compose into a third lockfile. Resolved per gate
-            // run, so each merge in the cycle is gated against its own.
+            // run, so each merge in the landing is gated against its own.
             images: (only) => branchImages.resolve(mergerWorktreePath, only),
           });
           const stackForGate2 = mergerStack;
@@ -1682,7 +1682,7 @@ export async function run(
             // BRANCH: `merged` is always empty on this path. `chunkLanded`
             // (#60) may not be, and that is not a contradiction — those commits
             // are on origin's chunk branch and the issues receive `needs-review`
-            // label whether the cycle went on to halt or not.
+            // label whether the landing went on to halt or not.
             haltPartial = err.partial;
             if (haltPartial && haltPartial.merged.length > 0) {
               throw new Error(
@@ -1966,7 +1966,7 @@ export async function run(
     }
 
   } catch (err) {
-    // A sandbar-internal failure escaped a cycle (a required git/gh side-effect
+    // A sandbar-internal failure escaped the scheduler (a required git/gh side-effect
     // that could not be completed, or an unexpected bug). FAIL LOUD: this is
     // the LAST thing printed — no success banner after it to push it up the
     // scrollback — then run cleanup and exit non-zero. SandbarError is an

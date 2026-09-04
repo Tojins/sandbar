@@ -30,7 +30,7 @@
 // both phases and every image build. All of it is here and none of it is on
 // stdout, which is the same split this header already describes: the log is
 // where a cost question is answered long after the fact, and a terminal
-// rendering of ~130 lines per cycle instead of ~50 would be unreadable.
+// rendering of ~130 lines per landing instead of ~50 would be unreadable.
 //
 // One spelling, `durationMs=<int>`, produced by `timing.ts`; the gate's
 // per-step numbers nest inside a single `steps=` field because step names are
@@ -119,7 +119,7 @@ export type LandingLogger = {
   // One resolve-loop attempt's captured stdout and stderr (#67), keyed like the
   // gate artefact beside it: an issue id for an issue branch, `chunk-<root>`
   // for a chunk, `verify-round-<n>` for a forge-red round — so a chunk and its
-  // own root issue resolving in one cycle cannot overwrite each other.
+  // own root issue resolving in one landing cannot overwrite each other.
   //
   // ANSWERS WITH THE PATH IT WROTE. The abandon comment points a human at these
   // files, and the alternative is the merger composing the same filename a
