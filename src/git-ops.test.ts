@@ -12,6 +12,7 @@ import {
   IssueBranchDivergedError,
   dirtyWorktreePaths,
   ensureIssueBranch,
+  fastForwardOffBranchHead,
   headMismatch,
   symbolicHeadRef,
 } from "./git-ops.js";
@@ -199,12 +200,14 @@ describe("headMismatch (#27)", () => {
     expect(m?.headSha).not.toBe(m?.branchSha);
     const tip = (await git("rev-parse", "sandbar/issue-1-x")).stdout.trim();
     expect(m?.branchSha).toBe(tip);
+    expect(m?.branchIsAncestor).toBe(true);
   });
 
   it("reports a scratch branch the agent created for itself", async () => {
     await inWt("checkout", "-q", "-b", "my-work");
     const m = await headMismatch(wt, "sandbar/issue-1-x");
     expect(m?.headRef).toBe("refs/heads/my-work");
+    expect(m?.branchIsAncestor).toBe(true);
   });
 
   it("reports symbolic HEAD movement even when the tree and issue ref stay unchanged", async () => {
@@ -226,6 +229,28 @@ describe("headMismatch (#27)", () => {
     const m = await headMismatch(wt, "sandbar/issue-1-x");
     expect(m).not.toBeNull();
     expect(m?.headSha).toBe(m?.branchSha);
+    expect(m?.branchIsAncestor).toBe(true);
+  });
+
+  it("reports false when HEAD is older than the issue branch", async () => {
+    await writeFile(join(wt, "new.ts"), "export const b = 2;\n");
+    await inWt("add", "-A");
+    await inWt("commit", "-qm", "branch work");
+    await inWt("checkout", "-q", "--detach", "HEAD^");
+    const m = await headMismatch(wt, "sandbar/issue-1-x");
+    expect(m?.branchIsAncestor).toBe(false);
+  });
+
+  it("reports false when HEAD and the issue branch have diverged", async () => {
+    await writeFile(join(wt, "branch.ts"), "export const b = 2;\n");
+    await inWt("add", "-A");
+    await inWt("commit", "-qm", "branch work");
+    await inWt("checkout", "-q", "--detach", "HEAD^");
+    await writeFile(join(wt, "other.ts"), "export const c = 3;\n");
+    await inWt("add", "-A");
+    await inWt("commit", "-qm", "other work");
+    const m = await headMismatch(wt, "sandbar/issue-1-x");
+    expect(m?.branchIsAncestor).toBe(false);
   });
 
   it("reports a missing branch ref rather than throwing", async () => {
@@ -235,7 +260,54 @@ describe("headMismatch (#27)", () => {
     const m = await headMismatch(wt, "no-such-branch");
     expect(m?.branchSha).toBeNull();
     expect(m?.headSha).not.toBeNull();
+    expect(m?.branchIsAncestor).toBe(false);
   });
+
+  it.each(["detached at the branch tip", "on an agent-owned descendant branch"])(
+    "fast-forwards safely when HEAD is %s without touching the tree",
+    async (shape) => {
+      const issueTipBefore = (
+        await inWt("rev-parse", "refs/heads/sandbar/issue-1-x")
+      ).stdout.trim();
+      let agentBranchTip: string | null = null;
+      if (shape === "detached at the branch tip") {
+        await inWt("checkout", "-q", "--detach");
+      } else {
+        await inWt("checkout", "-q", "-b", "agent-work");
+        await writeFile(join(wt, "committed.ts"), "export const c = 3;\n");
+        await inWt("add", "-A");
+        await inWt("commit", "-qm", "agent work");
+        agentBranchTip = (await inWt("rev-parse", "agent-work")).stdout.trim();
+      }
+      await writeFile(join(wt, "pending.ts"), "export const pending = true;\n");
+      const dirtyBefore = await dirtyWorktreePaths(wt);
+      const mismatch = await headMismatch(wt, "sandbar/issue-1-x");
+      if (mismatch === null) throw new Error("expected mismatch");
+      expect(mismatch.branchIsAncestor).toBe(true);
+
+      const expectedCommits = mismatch.headSha === issueTipBefore
+        ? []
+        : [{ sha: mismatch.headSha }];
+      await expect(fastForwardOffBranchHead(wt, mismatch)).resolves.toEqual({
+        fromSha: issueTipBefore,
+        toSha: mismatch.headSha,
+        commits: expectedCommits,
+      });
+
+      expect(await symbolicHeadRef(wt)).toBe(
+        "refs/heads/sandbar/issue-1-x",
+      );
+      expect(
+        (await inWt("rev-parse", "refs/heads/sandbar/issue-1-x")).stdout.trim(),
+      ).toBe(mismatch.headSha);
+      expect(await dirtyWorktreePaths(wt)).toEqual(dirtyBefore);
+      if (agentBranchTip !== null) {
+        expect((await inWt("rev-parse", "agent-work")).stdout.trim()).toBe(
+          agentBranchTip,
+        );
+      }
+    },
+  );
 
   // Regression: the first cut used `git symbolic-ref -q HEAD` and read "exit 1
   // with empty stderr" as "detached". `-q` suppresses only git's OWN message —
