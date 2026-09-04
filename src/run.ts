@@ -218,7 +218,9 @@ import { type PlannedIssue, buildPlan } from "./plan-resolver.js";
 import {
   absoluteMountSources,
   PreflightError,
+  readConfigStaleness,
   runPreflight,
+  staleConfigWarning,
 } from "./preflight.js";
 import { buildProjectAnchor } from "./prompt.js";
 import {
@@ -746,21 +748,25 @@ export async function run(
   // Registered for cleanup HERE, before the first stack exists, so LIFO order
   // puts the image removal after every container that could still be running
   // one of them.
-  const branchImages: BranchImages = createBranchImages({
-    images: config.images,
-    scope,
-    baseFingerprints,
-    onImage: recordImage,
-    // D3, re-asked for anything the branch rebuilds. The startup check below
-    // covers the declared images once; a variant is built from a Containerfile
-    // the branch may have edited, so its uid is not the one that was probed.
-    worktreeMountingTags: worktreeMountingTagsOf(config.gateStack),
-    hostUid: process.getuid?.() ?? 0,
-  });
+  const makeBranchImages = (fingerprints: ReadonlyMap<string, string>): BranchImages =>
+    createBranchImages({
+      images: config.images,
+      scope,
+      baseFingerprints: fingerprints,
+      onImage: recordImage,
+      worktreeMountingTags: worktreeMountingTagsOf(config.gateStack),
+      hostUid: process.getuid?.() ?? 0,
+    });
+  let branchImages = makeBranchImages(baseFingerprints);
+  const branchImageRuns = [branchImages];
+  const agentImageRuns = [agentImages];
   onCleanup(async () => {
     // Augmented images are FROM-children of branch variants. Remove leaves
     // first so podman can then remove their parents.
-    const tags = [...agentImages.builtTags(), ...branchImages.builtTags()];
+    const tags = [
+      ...agentImageRuns.flatMap((images) => [...images.builtTags()]),
+      ...branchImageRuns.flatMap((images) => [...images.builtTags()]),
+    ];
     if (tags.length === 0) return;
     const failures = await removeBranchImages(tags);
     if (failures.length > 0) {
@@ -971,6 +977,16 @@ export async function run(
       console.log(`\n=== Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
       await runLogger.appendOrchestrator(`cycle ${iteration} start`);
       const cycleLogger = runLogger.cycle(iteration);
+
+      const configWarning = staleConfigWarning(await readConfigStaleness({
+        layout,
+        sourceBranch: config.sourceBranch,
+        configPath: options.configPath ?? null,
+      }));
+      if (configWarning) {
+        console.warn(configWarning);
+        await runLogger.appendOrchestrator(configWarning);
+      }
 
       // ---------------------------------------------------------------------
       // Phase 1: Plan
@@ -1832,6 +1848,22 @@ export async function run(
       terminalsSinceLanding = landedNow > 0
         ? 0
         : terminalsSinceLanding + settled.length;
+      if (landedNow > 0) {
+        sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
+        baseFingerprints = await ensureImages(config.images, sourceWorktree, {
+          onImage: recordImage,
+        });
+        agentImages = await createAgentImages({
+          declaredBaseTag: config.sandboxImage,
+          providers: requiredAgentProviders(config),
+          scope,
+          onImage: recordImage,
+        });
+        branchImages = makeBranchImages(baseFingerprints);
+        agentImageRuns.push(agentImages);
+        branchImageRuns.push(branchImages);
+        innerLoopCfg.agentImages = agentImages;
+      }
       if (selectedExit?.tag === "quota") quotaPending = selectedExit;
       const cycleExit = selectedExit?.tag === "quota" && active.size > 0
         ? null
