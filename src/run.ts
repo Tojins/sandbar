@@ -984,6 +984,49 @@ export async function run(
   let landingNumber = 0;
   const maxRecomputes = maxRecomputesFor(config.maxTotalIssues);
 
+  // Consume freed-slot results through the same finalization path whether the
+  // landing path is healthy or already halted. DONE has no terminal handoff;
+  // when `finishDone` is true its branch is simply left for the next run rather
+  // than sent through the failed landing path again.
+  const finalizeSettled = async (
+    settled: readonly ExecutionEvent[],
+    finishDone = false,
+  ): Promise<IssueOutcome[]> => {
+    const outcomes: IssueOutcome[] = [];
+    for (const event of settled) {
+      if (event.status === "fulfilled") {
+        outcomes.push({ issue: event.issue, terminal: event.value });
+        console.log(
+          `  #${event.issue.id} (${event.issue.branch}): ${event.value.type}`,
+        );
+      } else {
+        console.error(
+          `  ✗ #${event.issue.id} (${event.issue.branch}) failed: ${event.reason}`,
+        );
+        pool.finish(event.issue);
+      }
+    }
+    await runFinalize("agent terminals", terminalFinalizeInputs(outcomes));
+    for (const outcome of outcomes) {
+      if (finishDone || outcome.terminal.type !== "DONE") {
+        pool.finish(outcome.issue);
+      }
+    }
+    return outcomes;
+  };
+
+  const drainAfterLandingHalt = async (): Promise<void> => {
+    while (
+      pool.activeCount > 0 ||
+      pool.hasCompleted ||
+      pool.hasPendingTerminals
+    ) {
+      if (!pool.hasPendingTerminals) await pool.waitForFreedSlot();
+      const drained = pool.takeLandingBatch();
+      if (drained.length > 0) await finalizeSettled(drained, true);
+    }
+  };
+
   // -------------------------------------------------------------------------
   // Main loop
   // -------------------------------------------------------------------------
@@ -991,18 +1034,21 @@ export async function run(
   try {
     for (let iteration = 1; iteration <= maxRecomputes; iteration++) {
       // -----------------------------------------------------------------------
-      // Between-cycle orphan sweep. Phase 2/3/4 already tear down their own
+      // Between-recompute orphan sweep. Phase 2/3/4 already tear down their own
       // resources in finally blocks, and startStack registers its teardown
       // BEFORE creating any podman resource — but a signal in the window where
       // the pod exists and the process is already unwinding can still leave a
       // pod, its invisible infra container or a network behind, which would
-      // then collide with the next cycle's create. Cheap insurance.
+      // then collide with a later stack create. Cheap insurance.
       // -----------------------------------------------------------------------
-      if (iteration > 1) {
+      // A slot-free recompute commonly has sibling stacks still running under
+      // this same scope. The sweep cannot distinguish those live resources
+      // from debris, so its licence exists only when the pool is quiescent.
+      if (iteration > 1 && pool.isQuiescent) {
         const cycleOrphans = await cleanupOrphanContainers(scope);
         if (cycleOrphans.removed.length > 0) {
           await runLogger.appendOrchestrator(
-            `swept ${cycleOrphans.removed.length} orphan(s) between cycles: ${cycleOrphans.removed.join(", ")}`,
+            `swept ${cycleOrphans.removed.length} orphan(s) at quiescence: ${cycleOrphans.removed.join(", ")}`,
           );
         }
         await reportSweepFailures(cycleOrphans, (line) =>
@@ -1376,25 +1422,7 @@ export async function run(
       );
       const landingLogger = runLogger.landing(++landingNumber);
 
-      const outcomes: IssueOutcome[] = [];
-      for (const s of settled) {
-        if (s.status === "fulfilled") {
-          outcomes.push({ issue: s.issue, terminal: s.value });
-          const issue = s.issue;
-          const t = s.value;
-          // The one place stdout prints the branch name (#70): a parked
-          // issue's branch is what a human needs to stand on, and it appears
-          // nowhere else in the run's output — not in the finalise line, not in
-          // orchestrator.log. The parking comment names it too, from this same
-          // issue, but that is on the tracker rather than here.
-          console.log(`  #${issue.id} (${issue.branch}): ${t.type}`);
-        } else {
-          console.error(
-            `  ✗ #${s.issue.id} (${s.issue.branch}) failed: ${s.reason}`,
-          );
-          pool.finish(s.issue);
-        }
-      }
+      const outcomes = await finalizeSettled(settled);
 
       const completedIssues = outcomes
         .filter((o) => o.terminal.type === "DONE")
@@ -1434,13 +1462,6 @@ export async function run(
       // costs a `git branch -D` — not the commits. The prose an agent produced
       // once and nobody stored has no such fallback.
       // ---------------------------------------------------------------------
-      await runFinalize("agent terminals", terminalFinalizeInputs(outcomes));
-      for (const outcome of outcomes) {
-        if (outcome.terminal.type !== "DONE") {
-          pool.finish(outcome.issue);
-        }
-      }
-
       // ---------------------------------------------------------------------
       // Phase 3: Merge (procedural, in an isolated worktree off origin)
       // ---------------------------------------------------------------------
@@ -1656,7 +1677,20 @@ export async function run(
               );
             }
           } else {
-            throw err;
+            // Bring-up failures and unexpected landing faults have no partial
+            // merger state to reconcile, but they share the same lifecycle
+            // boundary: stop admissions, drain sibling inner loops, and then
+            // announce one halted exit instead of tearing live work down.
+            const trace = err instanceof Error
+              ? `\n${err.stack ?? err.message}`
+              : `\n${String(err)}`;
+            console.error(`Merger halted unexpectedly:${trace}`);
+            halt = true;
+            haltReasons.push("merger-halted");
+            cleanupReason = "merger-halted";
+            await runLogger.appendOrchestrator(
+              `merger halted unexpectedly:${trace}`,
+            );
           }
         } finally {
           // Stack first: its containers bind-mount the worktree.
@@ -1886,6 +1920,11 @@ export async function run(
       }
       if (selectedExit?.tag === "quota") quotaPending = selectedExit;
       if (selectedExit?.tag === "halted") {
+        // No new admission occurs between selecting this halt and leaving the
+        // loop. Let every sibling reach a terminal and persist its handoff;
+        // DONE branches remain queued for a later run because this landing path
+        // has already proved unsafe to reuse.
+        await drainAfterLandingHalt();
         terminalExit = await announceExit(selectedExit);
         break;
       }

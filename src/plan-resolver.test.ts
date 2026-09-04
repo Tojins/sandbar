@@ -819,29 +819,24 @@ describe("resolvePlan git membership safety (#93)", () => {
     expect(result.plan[0]!.chunk).not.toBeNull();
   });
 
+  it("retains authoritative rework even when scheduler exclusion prevents a restart", () => {
+    const result = resolvePlan(
+      [issue(47, "", { title: "Root" })],
+      facts({ 47: { labels: ["ready-for-agent"] } }),
+      new Set([47]), 3, "review", membersOn(47, "Root", 47),
+    );
+
+    expect(result.plan).toEqual([]);
+    expect(result.landedChunks[0]?.rework).toEqual([
+      { number: 47, title: "Root" },
+    ]);
+  });
+
   it.each([
     {
       name: "closed",
       candidate: issue(47, "", { title: "Root" }),
       issueFacts: facts({ 47: { state: "CLOSED", labels: ["ready-for-agent"] } }),
-      excluded: new Set<number>(),
-    },
-    {
-      name: "excluded",
-      candidate: issue(47, "", { title: "Root" }),
-      issueFacts: facts({ 47: { labels: ["ready-for-agent"] } }),
-      excluded: new Set([47]),
-    },
-    {
-      name: "waiting",
-      candidate: issue(47, "", { title: "Root", labels: ["waiting"] }),
-      issueFacts: facts({ 47: { labels: ["ready-for-agent"] } }),
-      excluded: new Set<number>(),
-    },
-    {
-      name: "blocked",
-      candidate: issue(47, "## Blocked by\n- #99\n", { title: "Root" }),
-      issueFacts: facts({ 47: { labels: ["ready-for-agent"] } }),
       excluded: new Set<number>(),
     },
   ])("does not defer landing for a $name member the planner will not work", ({

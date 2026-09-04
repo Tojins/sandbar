@@ -107,6 +107,7 @@ import { AgentQuotaError } from "./agent-sandbox.js";
 import { MergerError } from "./merger.js";
 import { ensureImages } from "./ensure-images.js";
 import { createAgentImages } from "./agent-tools.js";
+import { cleanupOrphanContainers } from "./containers.js";
 import { run } from "./run.js";
 
 const config: RunConfig = {
@@ -268,6 +269,9 @@ describe("run quota orchestration (#109)", () => {
         : Promise.resolve({ type: "DONE", commits: [{ sha: candidate.id }] }));
     seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) => {
       if (seams.merger.mock.calls.length === 1) {
+        // Startup is the only safe sweep so far: issue #1 still owns live
+        // resources under the run scope during this landing.
+        expect(cleanupOrphanContainers).toHaveBeenCalledTimes(1);
         expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["1", "2", "3"]);
         slow.resolve({ type: "DONE", commits: [{ sha: "1" }] });
       }
@@ -298,6 +302,35 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["1", "2"]);
     expect(vi.mocked(console.log).mock.calls.flat().join("\n"))
       .not.toContain("Running the merge phase for those alone");
+  });
+
+  it("drains and finalizes siblings before announcing a landing halt", async () => {
+    const first = issue("1");
+    const sibling = issue("2");
+    const slow = deferred<{
+      type: "NEEDS-INFO"; questions: string; strandedHead: null;
+    }>();
+    seams.plan.mockResolvedValue(resolution([first, sibling]));
+    seams.innerLoop.mockImplementation((candidate: ReturnType<typeof issue>) =>
+      candidate.id === "1"
+        ? Promise.resolve({ type: "DONE", commits: [{ sha: "1" }] })
+        : slow.promise);
+    seams.merger.mockImplementation(async () => {
+      slow.resolve({ type: "NEEDS-INFO", questions: "answer", strandedHead: null });
+      throw new Error("landing failed");
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 2 })).rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(seams.finalize.mock.calls.some(([inputs]) =>
+      inputs.some((input: { kind: string; issue: { id: string } }) =>
+        input.kind === "needs-info" && input.issue.id === "2")))
+      .toBe(true);
+    expect(seams.logLines.findIndex((line) => line.startsWith("finalise #2 needs-info")))
+      .toBeLessThan(seams.logLines.findIndex((line) => line.startsWith("exit: halted")));
   });
 
   it("exits stuck after the global terminal-without-landing backstop", async () => {

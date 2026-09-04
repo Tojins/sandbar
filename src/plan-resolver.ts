@@ -428,7 +428,20 @@ export function resolvePlan(
     return true;
   });
   const sorted = [...eligible].sort((a, b) => a.number - b.number);
-  const eligibleNumbers = new Set(eligible.map((c) => c.number));
+  // Human-requested rework is tracker state, not scheduler eligibility. In
+  // particular, a continuous-pool run excludes every issue it already started
+  // from admission, but a human may re-apply `ready-for-agent` after that
+  // issue landed on its chunk. Preserve that authoritative signal so a `land`
+  // request cannot close the chunk over requested work (#87, #94).
+  const trackerReadyNumbers = new Set(
+    candidates
+      .map((c) => c.number)
+      .filter((n) => {
+        const authoritative = issueFacts.get(n);
+        return authoritative?.state !== "CLOSED" &&
+          authoritative?.labels.includes(READY_LABEL);
+      }),
+  );
   const plan = sorted.slice(0, k).map((c) => ({
     id: String(c.number),
     title: c.title,
@@ -445,10 +458,7 @@ export function resolvePlan(
       chunks,
       chunkIssues,
       new Set(candidates.map((c) => c.number).filter(isOnDerivedChunk)),
-      new Set(candidates.map((c) => c.number).filter((n) =>
-        eligibleNumbers.has(n) &&
-        issueFacts.get(n)?.labels.includes(READY_LABEL),
-      )),
+      trackerReadyNumbers,
     ),
     chunkNameDrifts: [...chunkMembers.keys()].flatMap((existing) => {
       const root = rootIssueFromChunkBranch(existing);
