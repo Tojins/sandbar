@@ -197,8 +197,8 @@ export default {
   // one) is entirely yours.
   env: readEnvFile(new URL("sandbar.env", import.meta.url)),
 
-  // Everything else is OPTIONAL — see the tables below for the defaults.
-  // Omit any line you're happy with.
+  // Everything else is OPTIONAL — see sandbar.config.example.mjs for every
+  // field and its default. Omit any line you're happy with.
 };
 ```
 

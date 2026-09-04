@@ -2,8 +2,14 @@ import { readFileSync } from "node:fs";
 
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import { resolveConfig, type RunConfig } from "./config.js";
 
-function optionalRunConfigFields(source: string): string[] {
+type RunConfigFields = {
+  readonly required: readonly string[];
+  readonly optional: readonly string[];
+};
+
+function runConfigFields(source: string): RunConfigFields {
   const sourceFile = ts.createSourceFile(
     "config.ts",
     source,
@@ -19,34 +25,49 @@ function optionalRunConfigFields(source: string): string[] {
     throw new Error("config.ts must declare RunConfig as an object type");
   }
 
-  return declaration.type.members.flatMap((member) => {
-    if (!ts.isPropertySignature(member) || member.questionToken === undefined) {
-      return [];
-    }
+  const required: string[] = [];
+  const optional: string[] = [];
+  for (const member of declaration.type.members) {
+    if (!ts.isPropertySignature(member)) continue;
     if (!ts.isIdentifier(member.name)) {
-      throw new Error("RunConfig optional fields must use identifier names");
+      throw new Error("RunConfig fields must use identifier names");
     }
-    return [member.name.text];
-  });
+    (member.questionToken === undefined ? required : optional).push(
+      member.name.text,
+    );
+  }
+  return { required, optional };
 }
 
 describe("sandbar.config.example.mjs", () => {
-  it("keeps every optional RunConfig field discoverable", () => {
+  it("keeps required fields active and every optional field discoverable", async () => {
     const configSource = readFileSync(new URL("config.ts", import.meta.url), "utf8");
-    const exampleSource = readFileSync(
-      new URL("../sandbar.config.example.mjs", import.meta.url),
-      "utf8",
-    );
+    const exampleUrl = new URL("../sandbar.config.example.mjs", import.meta.url);
+    const exampleSource = readFileSync(exampleUrl, "utf8");
+    const fields = runConfigFields(configSource);
     const documentedFields = new Set(
       [...exampleSource.matchAll(/^\s*\/\/\s*([A-Za-z_$][\w$]*)\s*:/gm)].map(
         (match) => match[1],
       ),
     );
+    const example = (
+      (await import(exampleUrl.href)) as { readonly default: RunConfig }
+    ).default;
 
     expect(
-      optionalRunConfigFields(configSource).filter(
-        (field) => !documentedFields.has(field),
-      ),
+      fields.required.filter((field) => !Object.hasOwn(example, field)),
     ).toEqual([]);
+    expect(
+      fields.optional.filter((field) => !documentedFields.has(field)),
+    ).toEqual([]);
+    expect(() => resolveConfig(example)).not.toThrow();
+  });
+
+  it("is included in the published package manifest", () => {
+    const packageJson = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { readonly files: readonly string[] };
+
+    expect(packageJson.files).toContain("sandbar.config.example.mjs");
   });
 });
