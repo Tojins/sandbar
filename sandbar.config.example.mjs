@@ -117,6 +117,9 @@ export default {
   // Direct mode gates locally and pushes the result. Use verified mode when a
   // forge CI verdict must also pass before the source branch moves.
   // mergeMode: { kind: "direct" },
+  // Verified mode requires a non-empty list of check-run names exactly as the
+  // forge reports them.
+  // mergeMode: { kind: "verified", requiredChecks: ["tests"] },
 
   // `auto` lets the gate decide. `review` lands connected review-gated issues
   // on a draft chunk pull request. An issue's `auto-land` label overrides the
