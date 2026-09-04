@@ -9,6 +9,8 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./git-ops.js")>(),
   dirtyWorktreePaths: vi.fn(async () => []),
   headMismatch: vi.fn(async () => null),
+  branchTip: vi.fn(async () => "implemented-sha"),
+  symbolicHeadRef: vi.fn(async () => "refs/heads/test"),
   ensureIssueBranch: vi.fn(async () => ({
     ref: "origin/main",
     sha: "base-sha",
@@ -27,7 +29,10 @@ vi.mock("./agent-sandbox.js", async (importOriginal) => {
 vi.mock("./gate-stack.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./gate-stack.js")>(),
   startStack: vi.fn(async () => ({
-    runGate: vi.fn(),
+    runGate: vi.fn(async () => ({
+      ok: true, stdout: "", stderr: "", exitCode: 0, failedStep: null,
+      durationMs: 1, steps: [], containerLogs: "",
+    })),
     stop: vi.fn(),
   })),
 }));
@@ -47,6 +52,10 @@ vi.mock("./ensure-images.js", async (importOriginal) => ({
 vi.mock("./prompt.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./prompt.js")>(),
   buildPrompt: vi.fn(async () => "implement"),
+  buildReviewerPrompts: vi.fn(async () => ({
+    quality: "quality review",
+    correctness: "correctness review",
+  })),
 }));
 
 import { AgentQuotaError } from "./agent-sandbox.js";
@@ -102,8 +111,11 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     seams.createSandbox.mockReset().mockImplementation(async () => ({
       run: seams.sandboxRun,
       syncBranchToCache: vi.fn(async () => undefined),
+      preserveWorktree: vi.fn(),
       close: vi.fn(),
       containerName: "sandbox",
+      branch: "test",
+      worktreePath: "/tmp/issue-109-worktree",
     }));
   });
 
@@ -143,6 +155,40 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     await expect(runInnerLoop(issue("111"), {
       config: config("codex"), hooks: {}, copyToWorktree: [], quotaState: state,
     })).resolves.toMatchObject({ type: "NEEDS-INFO" });
+    expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces reviewer quota after one invocation without the reviewer retry", async () => {
+    const state = createRunQuotaState();
+    const measurement = {
+      status: "rejected" as const,
+      window: "five_hour",
+      resetsAt: 42,
+    };
+    seams.sandboxRun
+      .mockResolvedValueOnce({
+        stdout: "<promise>COMPLETE</promise>",
+        headBefore: "base-sha",
+        headAfter: "implemented-sha",
+        signalMs: 1,
+        maxGapMs: 1,
+        toolCalls: 0,
+        commits: [{ sha: "implemented-sha" }],
+      })
+      .mockRejectedValueOnce(new AgentQuotaError("claude", measurement));
+
+    await expect(runInnerLoop(issue("112"), {
+      config: config("codex"), hooks: {}, copyToWorktree: [], quotaState: state,
+    })).resolves.toEqual({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
+
+    await expect(runInnerLoop(issue("113"), {
+      config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
+    })).resolves.toEqual({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
   });
 });
