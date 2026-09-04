@@ -105,6 +105,12 @@ const config: RunConfig = {
   ghOwner: "o", ghRepo: "r", cwd: "/tmp", workDir: "sandbar-run-quota-test",
   sandboxImage: "image", botName: "bot", botEmail: "bot@example.com",
   sandboxHooks: {}, env: { GH_TOKEN: "token" }, relaunchAfterLanding: true,
+  promptExtensions: {
+    implementer: { text: "implementer only" },
+    reviewer: { text: "correctness only" },
+    reviewerQuality: { text: "quality only" },
+    merger: { path: "docs/MERGER.md" },
+  },
   gateStack: {
     containers: [{ name: "app", image: "image", mountWorktree: "/work", hold: true }],
     steps: [{ name: "test", in: "app", command: ["true"] }],
@@ -145,6 +151,12 @@ describe("run quota orchestration (#109)", () => {
     await expect(run(config)).rejects.toThrow("EXIT:4");
     expect(exit).toHaveBeenCalledWith(4);
     expect(seams.merger).toHaveBeenCalledOnce();
+    expect(seams.innerLoop.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      config: expect.objectContaining({ promptExtensions: config.promptExtensions }),
+    }));
+    expect(seams.merger.mock.calls[0]?.[4]).toEqual(expect.objectContaining({
+      promptExtension: config.promptExtensions?.merger,
+    }));
     expect(seams.logLines).toContain(
       "exit: quota — claude five_hour quota window closed; resets at 1970-01-01T00:00:42.000Z",
     );

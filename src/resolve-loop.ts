@@ -66,6 +66,8 @@ import {
 import type { MergerGateOutput } from "./merger.js";
 import { durationField, startTimer } from "./timing.js";
 import { loadTemplate, render } from "./prompts.js";
+import { promptExtensionSlot } from "./prompt.js";
+import type { PromptExtension } from "./config.js";
 import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
 import { formatUsageFields } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
@@ -232,6 +234,9 @@ export type ResolveAttemptSummary = {
 };
 
 export type ResolveAdapter = {
+  // Probe against the live worktree at prompt-build time: a branch being
+  // merged may have introduced or amended a configured path extension.
+  worktreeFileExists(path: string): boolean;
   // `attempt` is passed so the invocation can be NAMED after it — the
   // container name is the handle on a failure that produced nothing else, and
   // an anonymous one leaves an operator grepping `podman events` by timestamp.
@@ -291,6 +296,7 @@ export type ResolveLoopDeps = {
   // Pre-built project anchor — fetched once by the caller and reused across
   // all attempts (large, static).
   readonly projectAnchor: string;
+  readonly promptExtension?: PromptExtension;
   // Sha of HEAD captured before `git merge --no-ff` started. The loop refuses
   // to report "resolved" if HEAD still equals this after an attempt's gate
   // passes — that means no commit was produced (silent abort). Optional for
@@ -378,8 +384,15 @@ export async function runResolveLoop(
   }
 
   for (let attempt = 1; attempt <= RESOLVE_MAX_ATTEMPTS; attempt++) {
+    const promptExtension =
+      deps.promptExtension && "path" in deps.promptExtension
+        ? adapter.worktreeFileExists(deps.promptExtension.path)
+          ? deps.promptExtension
+          : undefined
+        : deps.promptExtension;
     const prompt = buildResolvePromptBody({
       projectAnchor: deps.projectAnchor,
+      promptExtension,
       // Passed through undefined and defaulted once, in the builder: two
       // `?? SOURCE_TARGET_PHRASE` on one value is two places to change it.
       target: deps.target,
@@ -696,6 +709,7 @@ function formatConflictDigest(d: {
 
 export type ResolvePromptInputs = {
   readonly projectAnchor: string;
+  readonly promptExtension?: PromptExtension;
   readonly primaryIssue: IssueRef;
   readonly primaryIssueAnchor: string;
   readonly relatedIssueAnchors: readonly {
@@ -713,6 +727,9 @@ export type ResolvePromptInputs = {
 
 export function buildResolvePromptBody(inputs: ResolvePromptInputs): string {
   const parts: string[] = [inputs.projectAnchor];
+
+  const extension = promptExtensionSlot(inputs.promptExtension);
+  if (extension) parts.push(extension);
 
   parts.push(
     [

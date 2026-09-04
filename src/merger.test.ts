@@ -122,6 +122,9 @@ type Script = {
   // Per-issue number of leading close attempts that throw before one succeeds.
   // A value >= total attempts means the close never succeeds. Default 0.
   closeFailsBeforeSuccess?: Record<number, number>;
+  // Files visible only after the scripted merge, matching a branch-authored
+  // prompt extension entering the merger worktree.
+  promptExtensionPaths?: string[];
 };
 
 function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
@@ -174,6 +177,9 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
   let otherUnmerged: string[] = [];
 
   const adapter: MergerAdapter = {
+    worktreeFileExists: (path) =>
+      calls.order.includes("merge") &&
+      (script.promptExtensionPaths ?? []).includes(path),
     async mergeNoFf(i) {
       const r = script.merges[mIdx++];
       calls.merges.push(i.branch);
@@ -456,6 +462,19 @@ describe("runMergerWithAdapter — clean-merge happy paths", () => {
 });
 
 describe("runMergerWithAdapter — conflict enters resolve loop", () => {
+  it("probes a branch-local merger path after merging and includes only then", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+      promptExtensionPaths: ["docs/MERGER.md"],
+    });
+    await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, {
+      promptExtension: { path: "docs/MERGER.md" },
+    });
+    expect(calls.agentPrompts[0]).toContain("@docs/MERGER.md");
+  });
+
   it("conflict + agent COMMITTED + gate green: keeps merge, pushes, closes", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["conflict"],

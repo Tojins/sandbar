@@ -8,7 +8,7 @@ copies only `origin/*` for the source repository, so the bare local name
 
 Issue #{{issueId}}: {{issueTitle}}
 
-{{chunkBase}}{{commits}}{{diff}}{{priorRounds}}## Review process
+{{chunkBase}}{{commits}}{{diff}}{{priorRounds}}{{projectStandards}}## Review process
 
 Gate-1 is green and this round's tests-and-standards pass has already approved.
 Review these two dimensions, using the project conventions in

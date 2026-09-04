@@ -37,6 +37,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { SandbarError, isErrno, isExitCode } from "./errors.js";
+import type { PromptExtension } from "./config.js";
 import type { IssueBranchBase } from "./git-ops.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
@@ -175,10 +176,9 @@ export type PromptInputs = {
   readonly base: IssueBranchBase;
   readonly extraReprompt?: string;
   readonly latestReviewerProse?: string;
-  // Optional host extension to the built-in coding standards. Its existence is
-  // probed in `worktreePath`, because a branch may add the file it asks the
-  // implementer (and later the reviewer) to follow (#78).
-  readonly codingStandardsPath?: string;
+  // Host addition to this role's prompt. A path is probed in `worktreePath`,
+  // because a branch may add the file it asks the implementer to follow.
+  readonly promptExtension?: PromptExtension;
   // What came up beside the agent this sandbox cycle (#44 D8). Absent for a
   // consumer that declares no `inSandbox` container, and an empty array is the
   // same thing — the slot renders to "" either way.
@@ -215,9 +215,9 @@ export type ReviewerPromptInputs = {
   // What the branch was seeded from, and what the commit list and diff below
   // are measured against (#61). Same value the implementer was given.
   readonly base: IssueBranchBase;
-  // Optional project standards file that *extends* the built-in coding
-  // standards. Absent for hosts that rely on the built-in standards alone.
-  readonly codingStandardsPath?: string;
+  // Independent additions for the correctness and quality reviewer roles.
+  readonly reviewerPromptExtension?: PromptExtension;
+  readonly reviewerQualityPromptExtension?: PromptExtension;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   // Successful reviews earlier in this sandbox cycle (#88). A harness failure
@@ -298,8 +298,20 @@ export async function buildReviewerPrompts(
   const assemble = (slot: string): string =>
     [projectAnchor, issueAnchor, slot].join("\n\n---\n\n");
   return {
-    quality: assemble(renderReviewerQualitySlot(slotInputs)),
-    correctness: assemble(renderReviewerSlot(slotInputs)),
+    quality: assemble(renderReviewerQualitySlot({
+      ...slotInputs,
+      promptExtension: resolvePromptExtension(
+        inputs.worktreePath,
+        inputs.reviewerQualityPromptExtension,
+      ),
+    })),
+    correctness: assemble(renderReviewerSlot({
+      ...slotInputs,
+      promptExtension: resolvePromptExtension(
+        inputs.worktreePath,
+        inputs.reviewerPromptExtension,
+      ),
+    })),
   };
 }
 
@@ -390,14 +402,14 @@ async function buildAttemptSlot(
     `the work done so far on ${inputs.issue.branch}, anchored at ${base.ref}`,
   );
 
-  const codingStandardsPath = resolveCodingStandardsPath(
+  const promptExtension = resolvePromptExtension(
     worktreePath,
-    inputs.codingStandardsPath,
+    inputs.promptExtension,
   );
 
   return renderAttemptSlot({
     ...inputs,
-    codingStandardsPath,
+    promptExtension,
     claudeMdPath: anchor.claudeMdPath,
     ...(anchor.contextMdPath ? { contextMdPath: anchor.contextMdPath } : {}),
     diff,
@@ -475,7 +487,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     orchestratorNote: section(orchestratorNote),
     escalation: section(escalation),
     codingStandards: CODING_STANDARDS,
-    projectStandards: projectStandardsSlot(inputs.codingStandardsPath),
+    projectStandards: promptExtensionSlot(inputs.promptExtension),
     conventionsRef: conventionsRef(inputs.claudeMdPath, inputs.contextMdPath),
     baseRef: base.ref,
   });
@@ -582,19 +594,18 @@ async function buildReviewerSlotInputs(
       ).trim()
     : undefined;
 
-  const codingStandardsPath = resolveCodingStandardsPath(
-    worktreePath,
-    inputs.codingStandardsPath,
-  );
-
-  return { ...inputs, codingStandardsPath, commits, diff, changedSinceDiff };
+  return { ...inputs, commits, diff, changedSinceDiff };
 }
 
 // Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
 // shape without mocking git. Each invocation stays cold across rounds, while
 // the runner supplies the earlier rounds' decisions as explicit prompt data
 // (#88); this preserves fresh investigation without reviewer amnesia.
-export type ReviewerSlotRender = ReviewerPromptInputs & {
+export type ReviewerSlotRender = Omit<
+  ReviewerPromptInputs,
+  "reviewerPromptExtension" | "reviewerQualityPromptExtension"
+> & {
+  readonly promptExtension?: PromptExtension;
   readonly commits: string;
   readonly diff: string;
   // `git diff <anchor>..HEAD`, required exactly when `priorRounds` puts the
@@ -649,7 +660,7 @@ function renderReviewerTemplate(
   template: string,
   inputs: ReviewerSlotRender,
 ): string {
-  const { issue, base, sourceBranch, codingStandardsPath, claudeMdPath, contextMdPath, commits, diff } =
+  const { issue, base, sourceBranch, promptExtension, claudeMdPath, contextMdPath, commits, diff } =
     inputs;
 
   // Same slot as the implementer's, aimed at the other half of the mistake: an
@@ -696,7 +707,7 @@ function renderReviewerTemplate(
     // every round it runs (#107, #121).
     ...(template === REVIEWER_QUALITY_TPL ? renderQualitySlots(inputs) : {}),
     codingStandards: CODING_STANDARDS,
-    projectStandards: projectStandardsSlot(codingStandardsPath),
+    projectStandards: promptExtensionSlot(promptExtension),
     conventionsRef: conventionsRef(claudeMdPath, contextMdPath),
   });
 }
@@ -726,22 +737,24 @@ function conventionsRef(claudeMdPath: string, contextMdPath?: string): string {
     : `@${claudeMdPath}`;
 }
 
-// Only emit the host extension when the agent can resolve it in the issue
-// worktree. That lets a branch introduce its own standards while keeping a
-// configured-but-absent path out of both roles' prompts (#34, #78).
-function resolveCodingStandardsPath(
+// Only emit a path extension when the agent can resolve it in its worktree.
+// Text was fixed when config loaded and always survives unchanged (#34, #91).
+export function resolvePromptExtension(
   worktreePath: string,
-  configured?: string,
-): string | undefined {
-  return configured && existsSync(resolve(worktreePath, configured))
-    ? configured
-    : undefined;
+  configured?: PromptExtension,
+): PromptExtension | undefined {
+  if (!configured || "text" in configured) return configured;
+  return existsSync(resolve(worktreePath, configured.path)) ? configured : undefined;
 }
 
-function projectStandardsSlot(codingStandardsPath?: string): string {
+export function promptExtensionSlot(extension?: PromptExtension): string {
   return section(
-    codingStandardsPath
-      ? render(REVIEWER_PROJECT_STANDARDS_TPL, { codingStandardsPath })
+    extension
+      ? "path" in extension
+        ? render(REVIEWER_PROJECT_STANDARDS_TPL, {
+            promptExtensionPath: extension.path,
+          })
+        : `### Project prompt extension\n\n${extension.text}`
       : "",
   );
 }

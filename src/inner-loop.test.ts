@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 const innerLoopMocks = vi.hoisted(() => ({
   buildPrompt: vi.fn(async () => "implementer prompt"),
+  buildReviewerPrompts: vi.fn(),
   dirtyWorktreePaths: vi.fn(async () => [] as string[]),
   headMismatch: vi.fn(async () => null),
 }));
@@ -9,6 +10,7 @@ const innerLoopMocks = vi.hoisted(() => ({
 vi.mock("./prompt.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./prompt.js")>()),
   buildPrompt: innerLoopMocks.buildPrompt,
+  buildReviewerPrompts: innerLoopMocks.buildReviewerPrompts,
 }));
 
 vi.mock("./git-ops.js", async (importOriginal) => ({
@@ -27,6 +29,7 @@ import {
   runGateAndReviewer,
   runImplementer,
   runInnerLoop,
+  runReviewer,
   runSandboxAndPublish,
   type ReviewerSnapshot,
 } from "./inner-loop.js";
@@ -53,6 +56,7 @@ describe("silent implementer attempt policy (#116)", () => {
   const runPath = (
     first: ReturnType<typeof sandboxResult>,
     nudge: ReturnType<typeof sandboxResult>,
+    promptExtensions?: Parameters<typeof runImplementer>[1]["config"]["promptExtensions"],
   ) => {
     const writes: string[] = [];
     const lines: string[] = [];
@@ -74,6 +78,7 @@ describe("silent implementer attempt policy (#116)", () => {
         implementerAgent: "codex",
         implementerModelId: "model",
         maxImplAttempts: 8,
+        promptExtensions,
       },
       anchorOpts: {},
       base: { ref: "origin/main" },
@@ -130,6 +135,67 @@ describe("silent implementer attempt policy (#116)", () => {
     });
     expect(writes).toEqual(["", `\n${spoken}`]);
     expect(lines.at(-1)).toContain("commits=0");
+  });
+
+  it("hands only the implementer extension to the implementer prompt", async () => {
+    innerLoopMocks.buildPrompt.mockClear();
+    const implementer = { text: "implementer only" } as const;
+    const { pending } = runPath(
+      sandboxResult("done", false),
+      sandboxResult("unused", false),
+      {
+        implementer,
+        reviewer: { text: "correctness only" },
+        reviewerQuality: { text: "quality only" },
+        merger: { text: "merger only" },
+      },
+    );
+    await pending;
+    expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ promptExtension: implementer }),
+      expect.anything(),
+    );
+  });
+});
+
+describe("role prompt-extension wiring (#91)", () => {
+  it("hands the two reviewer extensions independently to the prompt builder", async () => {
+    const reviewer = { text: "correctness only" } as const;
+    const reviewerQuality = { text: "quality only" } as const;
+    const stop = new Error("stop after prompt construction");
+    innerLoopMocks.buildReviewerPrompts.mockRejectedValueOnce(stop);
+    const ctx = {
+      issue: { id: "91", title: "extensions", branch: "sandbar/issue-91" },
+      sandbox: { worktreePath: "/worktree" },
+      opts: {},
+      config: {
+        repo: "owner/repo",
+        layout: { repoDir: "/repo" },
+        sourceBranch: "main",
+        claudeMdPath: "CLAUDE.md",
+        promptExtensions: {
+          implementer: { text: "implementer only" },
+          reviewer,
+          reviewerQuality,
+          merger: { text: "merger only" },
+        },
+      },
+      base: { ref: "origin/main" },
+      accumulated: [{ sha: "abc123" }],
+      priorReviewRounds: [],
+    } as unknown as Parameters<typeof runReviewer>[1];
+
+    await expect(runReviewer({
+      kind: "run-gate-and-reviewer",
+      attempt: 1,
+      reviewRound: 1,
+    }, ctx)).rejects.toBe(stop);
+    expect(innerLoopMocks.buildReviewerPrompts).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reviewerPromptExtension: reviewer,
+        reviewerQualityPromptExtension: reviewerQuality,
+      }),
+    );
   });
 });
 

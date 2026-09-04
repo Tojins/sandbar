@@ -265,9 +265,8 @@
 // The scope is `version-conflict.ts`'s to state and is deliberately narrow —
 // per file, and only when every hunk in it is a lone version line AND the two
 // reconstructed sides differ at nothing but the paths npm mirrors. Everything
-// else in those files still goes to the agent untouched, which is why
-// `prompts/resolve-conflict.md` states the same `max + 1` rule for the case it
-// still sees.
+// else in those files still goes to the agent untouched. This host supplies
+// the rule for that residual case through its merger-only prompt extension.
 //
 // Two things this must not do, both already owned elsewhere. It does not make
 // the lockfile consistent — `npmInstall` against the merged tree does that, on
@@ -282,7 +281,7 @@ import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -342,6 +341,7 @@ import {
   formatResolveAttempts,
   runResolveLoop,
 } from "./resolve-loop.js";
+import type { PromptExtension } from "./config.js";
 import {
   type Clock as TimingClock,
   durationField,
@@ -970,6 +970,7 @@ export type RunMergerOptions = {
   // multi-issue context when reasoning about an integration failure.
   readonly cycleIssues?: readonly IssueRef[];
   readonly projectAnchor?: string;
+  readonly promptExtension?: PromptExtension;
   // Test seam for the duration fields this module logs (#82). Absent ⇒
   // `performance.now`. See `timing.ts` for why the clock is injectable at all.
   readonly clock?: TimingClock;
@@ -1010,6 +1011,7 @@ type MergeAttemptDeps = {
   readonly adapter: MergerAdapter;
   readonly emit: (line: string) => Promise<void>;
   readonly projectAnchor: string;
+  readonly promptExtension?: PromptExtension;
   readonly resolveLog: ResolveLogger;
   readonly onGateRed?: MergerGateOutputSink | undefined;
   // Bound to a KEY by the caller (#67) — `attemptMerge` already carries the one
@@ -1163,6 +1165,7 @@ async function attemptMerge(
       adapter,
       {
         projectAnchor,
+        promptExtension: deps.promptExtension,
         preMergeSha,
         target: describeMergeTarget(target),
         ...(onAttempt ? { onAttempt } : {}),
@@ -1236,6 +1239,7 @@ async function attemptMerge(
       adapter,
       {
         projectAnchor,
+        promptExtension: deps.promptExtension,
         preMergeSha,
         target: describeMergeTarget(target),
         ...(onAttempt ? { onAttempt } : {}),
@@ -1410,6 +1414,7 @@ export async function runMergerWithAdapter(
     adapter,
     emit,
     projectAnchor,
+    promptExtension: opts.promptExtension,
     resolveLog,
     onGateRed,
     resolveSinkFor,
@@ -1903,6 +1908,7 @@ export async function runMergerWithAdapter(
         mergedIssues: landingIssues,
         cycleIssues: cycle,
         projectAnchor,
+        promptExtension: opts.promptExtension,
         // Keyed by ROUND (#67): each round runs a fresh resolve loop whose
         // attempts start again at 1, so a single key would have round 2
         // overwrite round 1's capture attempt for attempt.
@@ -2488,6 +2494,9 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     }
   };
   return {
+    worktreeFileExists(path) {
+      return existsSync(resolve(cwd, path));
+    },
     // The six writes a chunk wrap-up makes, from the one place they are
     // spelled (#64) — `closeIssue` and `removeLabel` among them, which the auto
     // lane has used since long before chunks existed and which are the same two

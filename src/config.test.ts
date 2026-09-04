@@ -150,8 +150,36 @@ describe("resolveConfig", () => {
     // this — and this repo — is routed exactly as it was before lanes existed.
     expect(r.defaultLane).toBe(DEFAULT_LANE);
     expect(r.defaultLane).toBe("auto");
-    // No conventional value → stays undefined.
-    expect(r.codingStandardsPath).toBeUndefined();
+    expect(r.promptExtensions).toEqual({});
+  });
+
+  it("refuses the removed codingStandardsPath by name", () => {
+    expect(() => resolveConfig({ ...minimal, codingStandardsPath: "STANDARDS.md" } as RunConfig))
+      .toThrow(/config\.codingStandardsPath.*config\.promptExtensions/);
+  });
+
+  it("accepts the explicit prompt-extension union", () => {
+    expect(resolveConfig({
+      ...minimal,
+      promptExtensions: { implementer: { path: "RULES.md" }, merger: { text: "merge rule" } },
+    }).promptExtensions).toEqual({
+      implementer: { path: "RULES.md" }, merger: { text: "merge rule" },
+    });
+  });
+
+  it.each([
+    ["a non-object collection", "merger", /must be an object keyed by agent role/],
+    ["an array collection", [], /must be an object keyed by agent role/],
+    ["an unknown role", { operator: { text: "x" } }, /unknown role "operator"/],
+    ["a non-object role value", { merger: "x" }, /merger must be \{ text \} or \{ path \}/],
+    ["an array role value", { merger: [] }, /merger must be \{ text \} or \{ path \}/],
+    ["both union fields", { merger: { text: "x", path: "RULES.md" } }, /exactly \{ text: string \} or \{ path: string \}/],
+    ["an extra field", { merger: { text: "x", extra: true } }, /exactly \{ text: string \} or \{ path: string \}/],
+    ["a non-string text", { merger: { text: 1 } }, /exactly \{ text: string \} or \{ path: string \}/],
+    ["a non-string path", { merger: { path: false } }, /exactly \{ text: string \} or \{ path: string \}/],
+  ])("refuses %s in promptExtensions", (_label, promptExtensions, message) => {
+    expect(() => resolveConfig({ ...minimal, promptExtensions } as RunConfig))
+      .toThrow(message);
   });
 
   it("defaults the two per-issue budgets to the same number (#71)", () => {

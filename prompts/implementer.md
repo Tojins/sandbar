@@ -81,8 +81,7 @@ Before emitting the done signal, inspect everything you are about to promise
 with `git diff {{baseRef}}...HEAD` and `git log {{baseRef}}..HEAD`, then:
 
 1. Check the diff against every coding standard above.
-2. Re-read {{conventionsRef}} and update prose your commits falsified, including
-   module headers, architecture documents, and READMEs.
+2. Re-read {{conventionsRef}} and update prose your commits falsified.
 3. Check every per-commit ritual those conventions require, including version
    bumps and changelog entries.
 4. Check that the diff does not contradict settled choices recorded in those

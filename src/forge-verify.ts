@@ -130,6 +130,7 @@ import {
   type ResolveLogger,
   runResolveLoop,
 } from "./resolve-loop.js";
+import type { PromptExtension } from "./config.js";
 import type { RepoRef } from "./repo-ref.js";
 
 const execFileAsync = promisify(execFile);
@@ -724,6 +725,7 @@ export type VerifiedLandingOptions = {
   // Every issue in the cycle, for the resolve loop's cross-branch context.
   readonly cycleIssues: readonly IssueRef[];
   readonly projectAnchor: string;
+  readonly promptExtension?: PromptExtension;
   readonly maxRounds?: number;
   // Where a forge-red round's resolve attempts are captured (#67). A FUNCTION
   // OF THE ROUND: every round runs a fresh resolve loop whose attempts start
@@ -1040,6 +1042,7 @@ export async function runVerifiedLanding(
       deps.resolve,
       {
         projectAnchor: opts.projectAnchor,
+        promptExtension: opts.promptExtension,
         preMergeSha: sha,
         ...(attemptSink ? { onAttempt: attemptSink } : {}),
       },

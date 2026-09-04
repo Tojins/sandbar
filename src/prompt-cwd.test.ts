@@ -270,7 +270,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       sourceBranch: "main",
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
-      codingStandardsPath: "CODING_STANDARDS.md",
+      reviewerQualityPromptExtension: { path: "CODING_STANDARDS.md" },
       priorRounds: [],
     })).quality;
 
@@ -290,7 +290,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       sourceBranch: "main",
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
-      codingStandardsPath: "CODING_STANDARDS.md",
+      reviewerQualityPromptExtension: { path: "CODING_STANDARDS.md" },
       priorRounds: [],
     })).quality;
 
@@ -308,7 +308,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
         worktreePath: launchedFrom,
         lastFailureTrace: "",
         base: sourceBranchBase("main"),
-        codingStandardsPath: "CODING_STANDARDS.md",
+        promptExtension: { path: "CODING_STANDARDS.md" },
       },
       {
         repo: CONFIGURED,
@@ -334,7 +334,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
         worktreePath: launchedFrom,
         lastFailureTrace: "",
         base: sourceBranchBase("main"),
-        codingStandardsPath: "CODING_STANDARDS.md",
+        promptExtension: { path: "CODING_STANDARDS.md" },
       },
       {
         repo: CONFIGURED,

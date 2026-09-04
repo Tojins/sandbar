@@ -1,4 +1,3 @@
-### Project standards
+### Project prompt extension
 
-This project extends the coding standards above with @{{codingStandardsPath}}.
-Where the two conflict, the project's standards win.
+Read and follow @{{promptExtensionPath}}.

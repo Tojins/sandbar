@@ -43,8 +43,8 @@ A host repo supplies one committed `sandbar.config.mjs` at its root, its own
 `Containerfile`(s), anchor docs (`CLAUDE.md`, `CONTEXT.md`, optional ADR dir),
 and a **gate stack** (`config.gateStack`, #24) — the containers and steps that
 produce a verdict about a commit. Coding standards for the implementer and
-reviewer ship built-in (`prompts/coding-standards.md`); a host may extend them via
-`config.codingStandardsPath`. Sandbar then drives a GitHub-Issues-driven
+reviewer ship built-in (`prompts/coding-standards.md`); a host may add per-role
+instructions via `config.promptExtensions`. Sandbar then drives a GitHub-Issues-driven
 coding-agent loop against that host.
 
 **The config file is a PROGRAM, not data** — imported, never parsed, so computed
@@ -499,8 +499,8 @@ and used to announce themselves in four different ways, the halt in none at all.
   only when every hunk is a lone version line AND the two reconstructed sides
   differ at nothing but the paths npm mirrors — the second check is what keeps
   a dependency's identically-shaped `"version"` line out of it. Anything else
-  reaches the agent untouched, and `prompts/resolve-conflict.md` states the same
-  `max + 1` rule for when it does.
+  reaches the agent untouched; sandbar's merger-only prompt extension carries
+  the same `max + 1` rule without shipping that convention to consumers.
 - **A run opens by naming what is driving it (#69).** One line on stdout and in
   `orchestrator.log`: version, the tree `dist/` was built from, the config
   file's path, and whether either tree is dirty. Two trees because there are
