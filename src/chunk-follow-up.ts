@@ -17,12 +17,12 @@
 // member's threads. A body-only review goes to the fallback tip.
 //
 // Idempotence remains the PR ledger from #63, keyed by the review node id. The
-// PR node is strongly consistent, unlike label-scoped issue search, and the
-// label flip cannot be the record: after rework lands the label disappears and
-// the review would look unhandled again. Member comments and label flips happen
-// before the ledger; any failure is loud, so sandbar may repeat a completed
-// prefix but never records feedback it did not queue. Threads remain open for
-// their human reviewer to resolve.
+// PR node is strongly consistent, unlike the label-scoped listing endpoint
+// `fetchCandidates` uses (#96), and the label flip cannot be the record: after
+// rework lands the label disappears and the review would look unhandled again.
+// Member comments and label flips happen before the ledger; any failure is
+// loud, so sandbar may repeat a completed prefix but never records feedback it
+// did not queue. Threads remain open for their human reviewer to resolve.
 //
 // Pure functions own review selection, routing and prose. Git derives the
 // changed paths from each member's merge commit; `gh` reads the review and
@@ -520,7 +520,7 @@ export function realAdapter(args: {
  *
  * Returns the issues it re-queued, in the shape the planner lists candidates in,
  * so the caller can re-plan WITH them (`buildPlan`'s `extraCandidates`) instead
- * of waiting for the search index — see this module's header, and the
+ * of waiting for the listing — see this module's header, and the
  * plan-resolver's.
  *
  * LOUD on failure, like every other tracker write that carries the only copy of

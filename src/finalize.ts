@@ -38,7 +38,7 @@
 //
 // Human-handoff terminals are guarded on live issue state (#16): stamping
 // `agentStuck` + a failure comment on an already-CLOSED issue contradicts its
-// state and reads as "merged work is broken". The planner's stale-search
+// state and reads as "merged work is broken". The planner's stale-listing
 // re-pick (the root cause) is fixed in plan-resolver, but a human can also
 // close an issue mid-run, so finalize re-checks `issueState` before any handoff
 // write and no-ops (skipped-closed) when the issue is closed.
@@ -658,8 +658,8 @@ export async function finalizeOne(
   labels: LabelConfig,
 ): Promise<FinalizeAction> {
   // #16: never write a handoff annotation to an issue that's already CLOSED.
-  // The planner can re-pick a merged+closed issue while the `gh` search backend
-  // lags (root cause fixed in plan-resolver), and a human can close an issue
+  // The planner can re-pick a merged+closed issue while `gh issue list` lags
+  // (root cause fixed in plan-resolver), and a human can close an issue
   // mid-run — in both cases the handoff write would contradict the closed
   // state. Reclaim ordinary clones, preserve evidence clones, and skip the
   // issue-facing side effects.

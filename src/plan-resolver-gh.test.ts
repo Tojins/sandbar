@@ -141,8 +141,8 @@ describe("fetchCandidates names the configured repo (#34)", () => {
 
 // #63 — a follow-up issue filed at the top of a cycle has to be planned in that
 // same cycle, or the cycle that filed it exits plan-empty with the review
-// unanswered. The listing cannot deliver it (`gh issue list` is the lagging
-// search backend, and nothing in the queue is younger), so the scan hands the
+// unanswered. The listing cannot deliver it (`gh issue list` lags, and nothing
+// in the queue is younger), so the scan hands the
 // issue back in. Through the shim rather than a fake, because what is being
 // asserted is that the union reaches the real listing path at all.
 describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
@@ -188,7 +188,7 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
     await rm(repoDir, { recursive: true, force: true });
   });
 
-  it("plans an issue the listing has not caught up with", async () => {
+  it("plans a labelled issue the listing has not caught up with", async () => {
     const r = await buildPlan(CONFIGURED, { repoDir, extraCandidates: [FILED] });
     expect(r.plan.map((p) => p.id)).toEqual(["50"]);
   });
