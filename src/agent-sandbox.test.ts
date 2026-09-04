@@ -922,7 +922,10 @@ describe("registerShutdown", () => {
 // `live` is a parameter so a caller can watch the children this provider
 // spawned: #41's idle timeout is supposed to kill the exec it stops waiting
 // for, and "the run rejected" is true whether or not it did.
-function makeLocalProvider(live: Set<ChildProcess> = new Set()): SandboxProvider & {
+function makeLocalProvider(
+  live: Set<ChildProcess> = new Set(),
+  failRolloutProbe = false,
+): SandboxProvider & {
   capturedEnv?: Record<string, string>;
   capturedMounts?: readonly Mount[];
 } {
@@ -948,6 +951,10 @@ function makeLocalProvider(live: Set<ChildProcess> = new Set()): SandboxProvider
         containerName: "fake-sandbox-container",
         exec: (command, execOpts) =>
           new Promise((resolveExec, rejectExec) => {
+            if (failRolloutProbe && command.includes("/sessions;")) {
+              rejectExec(new Error("probe exec failed"));
+              return;
+            }
             const proc = spawn("sh", ["-c", command], {
               cwd: execOpts?.cwd ?? worktreePath,
               env: { ...process.env },
@@ -1153,6 +1160,27 @@ describe("createSandbox integration (local provider)", () => {
       await sandbox.close();
       if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = oldCodexHome;
+    }
+  });
+
+  it("preserves a completed Codex answer when the rollout probe cannot exec", async () => {
+    const branch = "sandbar/issue-109-codex-probe-failure";
+    await git(["branch", branch], dir);
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(new Set(), true), layout: layoutFor(dir),
+    });
+    try {
+      const run = await sandbox.run({
+        agent: scriptedCodexAgent(`printf '%s\\n' '${JSON.stringify({
+          type: "item.completed", item: { type: "agent_message", text: "done" },
+        })}'`),
+        prompt: "go",
+        completionSignal: [],
+      });
+      expect(run.stdout).toBe("done");
+      expect(run.rateLimit).toBeUndefined();
+    } finally {
+      await sandbox.close();
     }
   });
 

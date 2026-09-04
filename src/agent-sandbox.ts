@@ -2083,16 +2083,22 @@ const invokeAgent = (
       .then(async (execResult) => {
         if (agent.name === "codex") {
           // The rollout is inside this still-live sandbox. Missing files or
-          // malformed lines deliberately yield no measurement and preserve the
-          // invocation's old classification (#109).
-          const rollout = await handle.exec(
-            "d=${CODEX_HOME:-$HOME/.codex}/sessions; " +
-              "f=$(find \"$d\" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort | tail -n 1); " +
-              "test -n \"$f\" && tail -n 200 \"$f\" || true",
-            { cwd: sandboxRepoDir },
-          );
-          for (const line of rollout.stdout.split("\n")) {
-            speech.ingest(parseCodexRolloutLine(line));
+          // malformed lines or an exec-level probe failure deliberately yield
+          // no measurement and preserve the invocation's old classification
+          // (#109). This register is evidence only and cannot trip completion.
+          try {
+            const rollout = await handle.exec(
+              "d=${CODEX_HOME:-$HOME/.codex}/sessions; " +
+                "f=$(find \"$d\" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort | tail -n 1); " +
+                "test -n \"$f\" && tail -n 200 \"$f\" || true",
+              { cwd: sandboxRepoDir },
+            );
+            for (const line of rollout.stdout.split("\n")) {
+              speech.ingest(parseCodexRolloutLine(line));
+            }
+          } catch {
+            // The agent result remains authoritative when its optional side
+            // channel cannot be inspected.
           }
         }
         // The persistent sandbox can cheaply re-ask in the same provider
