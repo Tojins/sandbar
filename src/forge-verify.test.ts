@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { SandbarError } from "./errors.js";
 import {
@@ -9,6 +9,7 @@ import {
   type ForgeCheckRun,
   type PullRequestRef,
   type PushOutcome,
+  realClock,
   type VerifiedLandingOptions,
   type VerifiedLandingResult,
   type VerifyAdapter,
@@ -305,6 +306,12 @@ function fakeClock(stepMs: number): Clock & { advance(ms: number): void } {
 
 describe("waitForChecks", () => {
   const opts = { timeoutMs: 60_000, pollIntervalMs: 1_000 };
+
+  it("backs the real deadline with the monotonic clock", () => {
+    const now = vi.spyOn(performance, "now").mockReturnValue(12_345);
+    expect(realClock.now()).toBe(12_345);
+    now.mockRestore();
+  });
 
   it("polls until the checks conclude, then confirms the verdict is stable", async () => {
     const clock = fakeClock(1_000);

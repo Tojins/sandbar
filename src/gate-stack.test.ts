@@ -1790,6 +1790,28 @@ const after = (ms: number, r: BoundedResult) => async (): Promise<BoundedResult>
 };
 
 describe("pollUntilHealthy", () => {
+  it("computes and judges its deadline on the injected monotonic clock", async () => {
+    let now = 10;
+    let probeBudget = 0;
+    const probe: PodmanProbe = async (_args, timeoutMs) => {
+      probeBudget = timeoutMs;
+      now = 1_010;
+      return podmanSaid({ exitCode: null, timedOut: true });
+    };
+
+    expect(
+      (
+        await pollUntilHealthy(
+          "c",
+          probed({ readinessTimeoutMs: 1_000 }),
+          probe,
+          () => now,
+        )
+      ).verdict,
+    ).toBe("abandoned");
+    expect(probeBudget).toBe(1_000);
+  });
+
   // The ordinary case and the cost argument for the whole feature: one probe,
   // no wait, no second call. A loop that slept first would be paying the poll
   // interval at the top of every gate run for every probed issue container.
