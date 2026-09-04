@@ -215,6 +215,7 @@ import {
 } from "./chunk-reconcile.js";
 import { postLaneOverrideNotices } from "./lanes.js";
 import { type PlannedIssue, buildPlan } from "./plan-resolver.js";
+import { ContinuousPool, type SettledIssue } from "./scheduler.js";
 import {
   absoluteMountSources,
   PreflightError,
@@ -925,18 +926,14 @@ export async function run(
   };
 
   type IssueOutcome = { issue: PlannedIssue; terminal: Terminal };
-  type ExecutionEvent =
-    | { readonly status: "fulfilled"; readonly value: IssueOutcome }
-    | { readonly status: "rejected"; readonly issue: PlannedIssue; readonly reason: unknown };
-  const active = new Map<string, Promise<ExecutionEvent>>();
-  const completedEvents: ExecutionEvent[] = [];
-  const pendingTerminals: ExecutionEvent[] = [];
-  const ongoingIssues = new Map<string, PlannedIssue>();
-  const startedThisRun = new Set<number>();
+  type ExecutionEvent = SettledIssue<PlannedIssue, Terminal>;
+  const pool = new ContinuousPool<PlannedIssue, Terminal>(
+    config.maxParallelIssues,
+    (issue) => issue.id,
+  );
   let landingsThisRun = 0;
   let quotaPending: TerminalExit | null = null;
   let terminalsSinceLanding = 0;
-  const retryQueue: PlannedIssue[] = [];
 
   // -------------------------------------------------------------------------
   // Main loop
@@ -965,7 +962,7 @@ export async function run(
       }
 
       const budget = remainingBudget(runState);
-      if (budget === 0 && active.size === 0) {
+      if (budget === 0 && pool.activeCount === 0) {
         // The same `budgetExit` applyCycle returns, rather than the second
         // hand-written copy of its reason this used to print in different
         // words at the top of a cycle (#70).
@@ -993,7 +990,10 @@ export async function run(
       // Phase 1: Plan
       // ---------------------------------------------------------------------
       const planOptions = {
-        excluded: new Set([...mergedThisRun, ...startedThisRun]),
+        excluded: new Set([
+          ...mergedThisRun,
+          ...[...pool.startedIds()].map(Number),
+        ]),
         defaultLane: config.defaultLane,
         repoDir: layout.repoDir,
       };
@@ -1164,8 +1164,8 @@ export async function run(
       // before admitting work: once a new issue starts the boundary is gone.
       if (
         landingsThisRun > 0 &&
-        active.size === 0 &&
-        ongoingIssues.size === 0 &&
+        pool.activeCount === 0 &&
+        pool.ongoingCount === 0 &&
         (resolution.plan.length > 0 || landRequests.length > 0)
       ) {
         terminalExit = await announceExit(relaunchExit(landingsThisRun));
@@ -1176,27 +1176,10 @@ export async function run(
       // issue carries the CHUNK it lands on (#60), and a narrower annotation
       // here would drop that field on the way to phase 3 without an error —
       // the merger would then land a chunk member on the source branch.
-      const retryIssues = quotaPending
-        ? []
-        : retryQueue.splice(
-            0,
-            Math.max(0, (config.maxParallelIssues ?? 3) - active.size),
-          );
-      const issues: PlannedIssue[] = resolution.plan
-        .filter((issue) => !startedThisRun.has(Number(issue.id)))
-        .slice(
-        0,
-        Math.min(
-          budget,
-          quotaPending
-            ? 0
-            : Math.max(
-                0,
-                (config.maxParallelIssues ?? 3) - active.size - retryIssues.length,
-              ),
-        ),
-      );
-      const executionIssues = [...retryIssues, ...issues];
+      const admission = pool.admit(resolution.plan, budget, quotaPending !== null);
+      const executionIssues = [...admission.issues];
+      const issues = executionIssues;
+      runState.issuesAttempted += admission.newStarts;
       await runLogger.writePlan(planTrigger, issues);
       await runLogger.appendOrchestrator(
         `plan: ${issues.length} unblocked issue(s) — ${issues.map((i) => `#${i.id}`).join(", ") || "none"}`,
@@ -1233,8 +1216,8 @@ export async function run(
       if (
         executionIssues.length === 0 &&
         landRequests.length === 0 &&
-        active.size === 0 &&
-        ongoingIssues.size === 0
+        pool.activeCount === 0 &&
+        pool.ongoingCount === 0
       ) {
         // No line of its own: the `Exit (plan-empty): …` at the bottom says
         // exactly this and is the line every other terminal prints too (#70).
@@ -1295,12 +1278,7 @@ export async function run(
       const phase2Timer = startTimer();
       for (const issue of executionIssues) {
         const issueLogger = await runLogger.issue(issue.id);
-        if (!startedThisRun.has(Number(issue.id))) {
-          startedThisRun.add(Number(issue.id));
-          runState.issuesAttempted += 1;
-        }
-        ongoingIssues.set(issue.id, issue);
-        const task: Promise<ExecutionEvent> = (async () => {
+        const task: Promise<Terminal> = (async () => {
           const issueTimer = startTimer();
           try {
             const terminal = await runInnerLoop(issue, {
@@ -1320,61 +1298,47 @@ export async function run(
             await runLogger.appendOrchestrator(
               formatTerminalLine(issue.id, terminal, durationField(issueTimer())),
             );
-            return { status: "fulfilled" as const, value: { issue, terminal } };
+            return terminal;
           } catch (err) {
             await runLogger.appendOrchestrator(
               `terminal #${issue.id} REJECTED ${durationField(issueTimer())}: ` +
                 `${err instanceof Error ? err.message : String(err)}`,
             );
-            return { status: "rejected" as const, issue, reason: err };
+            throw err;
           }
-        })().then((event) => {
-          completedEvents.push(event);
-          return event;
-        });
-        active.set(issue.id, task);
+        })();
+        pool.start(issue, task);
       }
 
       // A recompute with no new candidate can still have running work. Wait
       // only for the next freed slot; siblings remain live and the next full
       // plan is built immediately around them.
       let settled: ExecutionEvent[];
-      if (pendingTerminals.length > 0) {
+      if (pool.hasPendingTerminals) {
         // The preceding slot-free event deliberately yielded back to the top
         // of the loop. Its full recompute and admissions have now happened, so
         // landing can run while the replenished pool keeps executing.
-        settled = pendingTerminals.splice(0);
+        settled = [...pool.takeLandingBatch()];
       } else {
-        if (completedEvents.length === 0 && active.size > 0) {
-          await Promise.race(active.values());
-          await Promise.resolve();
-        }
-        settled = completedEvents.splice(0);
-        for (const event of settled) {
-          const id = event.status === "fulfilled"
-            ? event.value.issue.id
-            : event.issue.id;
-          active.delete(id);
-        }
+        settled = [...await pool.waitForFreedSlot()];
         await runLogger.appendOrchestrator(
-          `slot freed active=${active.size} ${durationField(phase2Timer())}`,
+          `slot freed active=${pool.activeCount} ${durationField(phase2Timer())}`,
         );
-        pendingTerminals.push(...settled);
         // Recompute and refill before finalization/landing. The issues remain
         // planner-excluded in ongoingIssues until those operations finish.
         continue;
       }
       await runLogger.appendOrchestrator(
-        `landing queue start terminals=${settled.length} active=${active.size}`,
+        `landing queue start terminals=${settled.length} active=${pool.activeCount}`,
       );
       const landingLogger = runLogger.landing(iteration);
 
       const outcomes: IssueOutcome[] = [];
       for (const s of settled) {
         if (s.status === "fulfilled") {
-          outcomes.push(s.value);
-          const issue = s.value.issue;
-          const t = s.value.terminal;
+          outcomes.push({ issue: s.issue, terminal: s.value });
+          const issue = s.issue;
+          const t = s.value;
           // The one place stdout prints the branch name (#70): a parked
           // issue's branch is what a human needs to stand on, and it appears
           // nowhere else in the run's output — not in the finalise line, not in
@@ -1385,7 +1349,7 @@ export async function run(
           console.error(
             `  ✗ #${s.issue.id} (${s.issue.branch}) failed: ${s.reason}`,
           );
-          ongoingIssues.delete(s.issue.id);
+          pool.finish(s.issue);
         }
       }
 
@@ -1430,7 +1394,7 @@ export async function run(
       await runFinalize("agent terminals", terminalFinalizeInputs(outcomes));
       for (const outcome of outcomes) {
         if (outcome.terminal.type !== "DONE") {
-          ongoingIssues.delete(outcome.issue.id);
+          pool.finish(outcome.issue);
         }
       }
 
@@ -1548,7 +1512,7 @@ export async function run(
             (line) => landingLogger.appendMerger(line),
             (issueId, gate) => landingLogger.writeMergerGate(issueId, gate),
             {
-              cycleIssues: [...ongoingIssues.values()],
+              cycleIssues: pool.ongoingIssues(),
               projectAnchor,
               // #67: every resolve attempt's stdout and stderr, beside the
               // gate artefact it was prompted from. The writer answers with
@@ -1681,7 +1645,7 @@ export async function run(
         );
         for (const input of inputs) {
           if (input.kind === "fresh-attempt") {
-            retryQueue.push(input.issue as PlannedIssue);
+            pool.retry(input.issue as PlannedIssue);
           }
         }
         // Merged-and-closed only. A chunk landing (#60) is deliberately NOT
@@ -1740,7 +1704,7 @@ export async function run(
         }
         await runFinalize("merge outcomes", inputs);
         for (const issue of completedIssues) {
-          if (!freshAttempts.has(issue.id)) ongoingIssues.delete(issue.id);
+          if (!freshAttempts.has(issue.id)) pool.finish(issue);
         }
       }
 
@@ -1883,7 +1847,7 @@ export async function run(
         innerLoopCfg.agentImages = agentImages;
       }
       if (selectedExit?.tag === "quota") quotaPending = selectedExit;
-      const cycleExit = selectedExit?.tag === "quota" && active.size > 0
+      const cycleExit = selectedExit?.tag === "quota" && pool.activeCount > 0
         ? null
         : selectedExit;
       if (cycleExit) {
@@ -1894,13 +1858,13 @@ export async function run(
         break;
       }
 
-      if (quotaPending && active.size === 0) {
+      if (quotaPending && pool.activeCount === 0) {
         terminalExit = await announceExit(quotaPending);
         break;
       }
       if (
         terminalsSinceLanding >= MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING &&
-        active.size === 0
+        pool.activeCount === 0
       ) {
         terminalExit = await announceExit(stuckExit(terminalsSinceLanding));
         break;

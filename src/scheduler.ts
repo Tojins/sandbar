@@ -1,84 +1,87 @@
-// Pure state for the continuous issue pool (#87).
+// Continuous issue-pool state machine (#87).
 //
-// `ongoing` and `running` deliberately differ. An issue becomes ongoing when
-// first admitted and remains so until it lands or parks; `running` is only the
-// subset currently holding an execution slot. DONE issues wait in `done`
-// without consuming a slot. The orchestrator recomputes a full plan whenever
-// `settle` releases one.
+// Sole owner of admission, active promises, completed terminals waiting for a
+// recompute, planner-visible ongoing membership, retries, and once-per-run
+// starts. I/O stays in run.ts; each method is one atomic transition.
 
-export type PoolState = {
-  readonly width: number;
-  readonly started: ReadonlySet<string>;
-  readonly ongoing: ReadonlySet<string>;
-  readonly running: ReadonlySet<string>;
-  readonly done: ReadonlySet<string>;
-};
+export type SettledIssue<T, R> =
+  | { readonly status: "fulfilled"; readonly issue: T; readonly value: R }
+  | { readonly status: "rejected"; readonly issue: T; readonly reason: unknown };
 
-export function newPoolState(width: number): PoolState {
-  if (!Number.isInteger(width) || width < 1) {
-    throw new RangeError(`pool width must be a positive integer (got ${String(width)})`);
+export type Admission<T> = { readonly issues: readonly T[]; readonly newStarts: number };
+
+export class ContinuousPool<T, R> {
+  readonly #active = new Map<string, Promise<SettledIssue<T, R>>>();
+  readonly #completed: SettledIssue<T, R>[] = [];
+  readonly #pendingTerminals: SettledIssue<T, R>[] = [];
+  readonly #ongoing = new Map<string, T>();
+  readonly #started = new Set<string>();
+  readonly #retries: T[] = [];
+
+  constructor(readonly width: number, readonly idOf: (issue: T) => string) {
+    if (!Number.isInteger(width) || width < 1) {
+      throw new RangeError(`pool width must be a positive integer (got ${String(width)})`);
+    }
   }
-  return {
-    width,
-    started: new Set(),
-    ongoing: new Set(),
-    running: new Set(),
-    done: new Set(),
-  };
-}
 
-export function freeSlots(state: PoolState): number {
-  return state.width - state.running.size;
-}
+  get activeCount(): number { return this.#active.size; }
+  get ongoingCount(): number { return this.#ongoing.size; }
+  get hasPendingTerminals(): boolean { return this.#pendingTerminals.length > 0; }
+  get isQuiescent(): boolean { return this.#active.size === 0 && this.#ongoing.size === 0; }
+  ongoingIssues(): readonly T[] { return [...this.#ongoing.values()]; }
+  startedIds(): ReadonlySet<string> { return new Set(this.#started); }
 
-// Admits candidates in planner order. A previously-started issue is never
-// admitted again, even after it leaves `ongoing`.
-export function admit(state: PoolState, candidates: readonly string[]): PoolState {
-  const started = new Set(state.started);
-  const ongoing = new Set(state.ongoing);
-  const running = new Set(state.running);
-  for (const id of candidates) {
-    if (running.size >= state.width) break;
-    if (started.has(id)) continue;
-    started.add(id);
-    ongoing.add(id);
-    running.add(id);
+  admit(candidates: readonly T[], startBudget: number, closed = false): Admission<T> {
+    if (closed) return { issues: [], newStarts: 0 };
+    const available = Math.max(0, this.width - this.#active.size);
+    const issues = this.#retries.splice(0, available);
+    let newStarts = 0;
+    for (const issue of candidates) {
+      if (issues.length >= available || newStarts >= startBudget) break;
+      const id = this.idOf(issue);
+      if (this.#started.has(id)) continue;
+      this.#started.add(id);
+      this.#ongoing.set(id, issue);
+      issues.push(issue);
+      newStarts += 1;
+    }
+    return { issues, newStarts };
   }
-  return { ...state, started, ongoing, running };
-}
 
-export function settle(
-  state: PoolState,
-  id: string,
-  outcome: "done" | "terminal" | "rejected",
-): PoolState {
-  if (!state.running.has(id)) {
-    throw new RangeError(`issue ${id} is not holding a slot`);
+  start(issue: T, work: Promise<R>): void {
+    const id = this.idOf(issue);
+    if (this.#active.has(id)) throw new RangeError(`issue ${id} already holds a slot`);
+    if (!this.#ongoing.has(id)) this.#ongoing.set(id, issue);
+    const task = work
+      .then<SettledIssue<T, R>>((value) => ({ status: "fulfilled", issue, value }))
+      .catch<SettledIssue<T, R>>((reason: unknown) => ({
+        status: "rejected", issue, reason,
+      }))
+      .then((event) => { this.#completed.push(event); return event; });
+    this.#active.set(id, task);
   }
-  const running = new Set(state.running);
-  const ongoing = new Set(state.ongoing);
-  const done = new Set(state.done);
-  running.delete(id);
-  if (outcome === "done") done.add(id);
-  else ongoing.delete(id);
-  return { ...state, running, ongoing, done };
-}
 
-// Snapshot the landing batch. Numeric issue order makes reporting stable even
-// when inner loops finish in a different order.
-export function landingBatch(state: PoolState): readonly string[] {
-  return [...state.done].sort((a, b) => Number(a) - Number(b));
-}
-
-export function finishLanding(
-  state: PoolState,
-  landedOrParked: readonly string[],
-): PoolState {
-  const ongoing = new Set(state.ongoing);
-  const done = new Set(state.done);
-  for (const id of landedOrParked) {
-    done.delete(id);
-    ongoing.delete(id);
+  async waitForFreedSlot(): Promise<readonly SettledIssue<T, R>[]> {
+    if (this.#completed.length === 0 && this.#active.size > 0) {
+      await Promise.race(this.#active.values());
+      await Promise.resolve();
+    }
+    const settled = this.#completed.splice(0);
+    for (const event of settled) this.#active.delete(this.idOf(event.issue));
+    this.#pendingTerminals.push(...settled);
+    return settled;
   }
-  return { ...state, ongoing, done };
+
+  takeLandingBatch(): readonly SettledIssue<T, R>[] {
+    return this.#pendingTerminals.splice(0).sort(
+      (a, b) => Number(this.idOf(a.issue)) - Number(this.idOf(b.issue)),
+    );
+  }
+
+  finish(issue: T): void { this.#ongoing.delete(this.idOf(issue)); }
+  retry(issue: T): void {
+    const id = this.idOf(issue);
+    if (!this.#ongoing.has(id)) throw new RangeError(`issue ${id} is not ongoing`);
+    if (!this.#retries.some((queued) => this.idOf(queued) === id)) this.#retries.push(issue);
+  }
 }
