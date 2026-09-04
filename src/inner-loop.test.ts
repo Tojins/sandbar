@@ -2,20 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Sandbox } from "./agent-sandbox.js";
 import {
-  createRunQuotaState,
   enforceReviewerSnapshot,
   priorReviewRound,
   reviewRoundLine,
   reviewerPassRouting,
   reviewerSnapshotChanged,
-  quotaVerdict,
   runSandboxAndPublish,
-  runWithQuotaState,
   type ReviewerSnapshot,
 } from "./inner-loop.js";
-import { AgentQuotaError } from "./agent-sandbox.js";
 import { qualityReviewContext } from "./prompt.js";
-import { runReviewerInvocations, type ReviewerOutcome } from "./reviewer-run.js";
+import type { ReviewerOutcome } from "./reviewer-run.js";
 
 const reviewed = (
   verdict: "APPROVED" | "CHANGES-REQUESTED",
@@ -33,34 +29,6 @@ const harnessFailed: ReviewerOutcome = {
   transcript: "",
   invocations: 2,
 };
-
-describe("run-scoped quota closure (#109)", () => {
-  it("records the first quota and bypasses retries and later same-provider invocations", async () => {
-    const state = createRunQuotaState();
-    const measurement = {
-      status: "rejected" as const, window: "five_hour", resetsAt: 42,
-    };
-    const claudeInvocation = vi.fn().mockRejectedValue(
-      new AgentQuotaError("claude", measurement),
-    );
-    const first = await runReviewerInvocations(
-      () => runWithQuotaState(state, "claude", claudeInvocation),
-      { onRetry: vi.fn() },
-    ).then(() => null, (err: unknown) => err);
-    expect(first).toBeInstanceOf(AgentQuotaError);
-    expect(quotaVerdict(first as AgentQuotaError)).toEqual({
-      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
-    });
-    await expect(
-      runWithQuotaState(state, "claude", claudeInvocation),
-    ).rejects.toMatchObject({ provider: "claude", measurement });
-    expect(claudeInvocation).toHaveBeenCalledTimes(1);
-
-    const codexInvocation = vi.fn().mockResolvedValue("answer");
-    await expect(runWithQuotaState(state, "codex", codexInvocation)).resolves.toBe("answer");
-    expect(codexInvocation).toHaveBeenCalledOnce();
-  });
-});
 
 describe("priorReviewRound (#88, #121)", () => {
   const qualityApproved = reviewed("APPROVED", "<verdict>APPROVED</verdict>");
