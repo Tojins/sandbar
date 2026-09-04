@@ -8,15 +8,15 @@
 //                              `chunks.ts` could give no chunk) and saying on
 //                              the issue where an `auto-land` label lost to
 //                              inherited gating. A changes-requested review on
-//                              a chunk's pull request is filed as a follow-up
-//                              issue in that chunk first (#63), and the
+//                              a chunk's pull request is routed to its landed
+//                              member(s) and re-queues them (#95), and the
 //                              RECONCILER (#64) finishes off any chunk branch
 //                              already contained in origin/<sourceBranch> —
 //                              hand-merged, or landed by a run that died
 //                              before it could close the members. The plan is
-//                              rebuilt after either, so a follow-up filed now
-//                              is queued now and a member closed now stops
-//                              blocking its dependents.
+//                              rebuilt after either, so a member re-queued now
+//                              is carried into this cycle and one closed now
+//                              stops blocking its dependents.
 //   Phase 2 (Inner-loop ralph): Each issue runs in its own sandbox up to
 //                              config.maxImplAttempts times; on gate-1 green
 //                              the (strictly-advisory) reviewer runs in the

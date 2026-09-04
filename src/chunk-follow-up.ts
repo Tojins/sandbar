@@ -44,8 +44,10 @@ const exec = promisify(execFile);
 // threads of fifty comments each, plus a hundred issue-comment bodies and fifty
 // review bodies, all of them human prose. Node's default ceiling is 1 MB, and
 // an overflow here does not degrade: it REJECTS the call, which `reviewState`
-// turns into a `SandbarError` that stops the run. Same ceiling `forge-pr` and
-// `forge-verify` give their own gh reads.
+// turns into a `SandbarError` that stops the run. Member-path discovery uses
+// the same explicit ceiling: its history read scales with the host repository's
+// first-parent merges, and a member's changed-path list scales with its tree.
+// Same ceiling `forge-pr` and `forge-verify` give their own reads.
 const MAX_BUFFER = 50 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -429,7 +431,7 @@ export function realAdapter(args: {
           exec(
             "git",
             ["rev-list", "--parents", "--first-parent", "--merges", chunkRef],
-            { cwd: args.repoDir },
+            { cwd: args.repoDir, maxBuffer: MAX_BUFFER },
           ),
           exec("git", ["rev-parse", ...memberRefs], { cwd: args.repoDir }),
         ]);
@@ -461,7 +463,7 @@ export function realAdapter(args: {
           const { stdout } = await exec(
             "git",
             ["diff", "--name-only", merge[0], merge[1]],
-            { cwd: args.repoDir },
+            { cwd: args.repoDir, maxBuffer: MAX_BUFFER },
           );
           const paths = new Set(
             stdout.split("\n").map((path) => path.trim()).filter(Boolean),

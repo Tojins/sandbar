@@ -274,11 +274,9 @@ export type LandedChunk = {
   readonly rework: readonly ChunkMember[];
   // The landed members that no OTHER landed member is blocked by — the tips of
   // what the branch carries, ascending. Non-empty, and a subset of `members`:
-  // it is what a NEW member of the chunk declares under `## Blocked by`
-  // (#63) — naming the tips is what puts it in THIS chunk (by the derivation
-  // above) and behind everything already on the branch, and naming only them
-  // keeps the section down to the edges the chunk's own graph does not already
-  // imply.
+  // the lowest-numbered tip is the deterministic fallback when review feedback
+  // has no uniquely owning member path (#95). That fallback changes only whose
+  // issue history records the rework; every landed member may fix it.
   readonly tips: readonly ChunkMember[];
 };
 

@@ -248,12 +248,13 @@ and used to announce themselves in four different ways, the halt in none at all.
 - **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,
   created or updated after every landing push; sandbar never re-drafts a PR a
   human made ready. `src/chunk-pr.ts` owns the prose and what it may claim.
-- **A changes-requested review on that PR becomes an ISSUE in the same chunk
-  (#63).** One issue per review, bodied with the review's unresolved threads and
-  `## Blocked by` the chunk's tips — which is what joins it to the chunk (#58),
-  gates it (#57) and holds it behind the code the review is about (#59, #61).
-  The idempotence record is a LEDGER COMMENT on the PR, never the follow-up
-  issue's own state, and sandbar never resolves a thread;
+- **A changes-requested review on that PR re-queues its landed member(s)
+  (#95).** Each thread routes to the unique member whose merge brought its path
+  onto the chunk branch, or to the lowest-numbered tip when ownership is absent
+  or ambiguous. Sandbar posts one comment per (member, review), containing only
+  that member's threads, and creates no issue. The idempotence record remains a
+  LEDGER COMMENT on the PR, never the member's queue state, and sandbar never
+  resolves a thread;
   `src/chunk-follow-up.ts`'s header owns both arguments and what the planner
   has to supply the scan.
 - **`land` on the chunk PR is what lands it (#64).** A label rather than an
