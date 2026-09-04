@@ -2001,6 +2001,12 @@ describe("createSandbox integration (local provider)", () => {
       // review and the run died", and the two are handled differently.
       const agent = scriptedAgent(
         `printf '%s\\n' '${JSON.stringify({
+          type: "rate_limit_event",
+          rate_limit_info: {
+            status: "allowed", rateLimitType: "five_hour", resetsAt: 42,
+            unifiedWindows: { five_hour: { utilization: 0.98, resetsAt: 42 } },
+          },
+        })}' '${JSON.stringify({
           type: "assistant",
           message: { content: [{ type: "text", text: "partial review findings" }] },
         })}' '${JSON.stringify({
@@ -2022,6 +2028,12 @@ describe("createSandbox integration (local provider)", () => {
       expect(agentPartialUsage(err).usage).toEqual({
         inputTokens: 12,
         resolvedModel: "claude-opus",
+      });
+      expect(agentPartialUsage(err).rateLimit).toEqual({
+        status: "allowed",
+        window: "five_hour",
+        utilization: 0.98,
+        resetsAt: 42,
       });
 
       // And the half the message never covered: the run stopped waiting for the

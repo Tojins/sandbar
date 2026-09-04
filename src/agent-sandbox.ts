@@ -43,8 +43,8 @@
 //        which reaps nothing (#42). See `sandboxRunArgs`.
 //   F9 — a run that FAILS still carries out whatever the agent had emitted
 //        (`agentPartialOutput`) and what it had spent getting there
-//        (`agentPartialUsage`, #85 — an invocation that burned ten minutes and
-//        then died must not be recorded as having spent nothing), and both
+//        (`agentPartialUsage`, #85/#109 — an invocation that burned ten minutes
+//        and then died must not lose its usage or quota evidence), and both
 //        timeout paths kill the exec they stop waiting for (#41).
 //        See invokeAgent.
 //   F10 — `agent-run-end.ts` owns end classification. This wrapper supplies
@@ -118,6 +118,7 @@ const NO_CONFIG_LOCK_FLAGS = [
 const WORKTREE_TIMEOUT_MS = 30_000;
 const COPY_TO_WORKTREE_TIMEOUT_MS = 60_000;
 const GIT_SETUP_TIMEOUT_MS = 10_000;
+const CODEX_ROLLOUT_PROBE_TIMEOUT_MS = 10_000;
 const COMMIT_COLLECTION_TIMEOUT_MS = 30_000;
 const HOOK_TIMEOUT_MS = 60_000;
 const GIT_SETUP_MAX_RETRIES = 2;
@@ -478,19 +479,24 @@ export class AgentIdleTimeoutError extends Error {
 // EPIPE on stdin) and those must carry the output too. Nothing is mutated and
 // no property name can collide with one the thrown error already has.
 const AGENT_PARTIAL_OUTPUT = new WeakMap<object, string>();
-const AGENT_PARTIAL_USAGE = new WeakMap<object, { usage?: AgentUsage; toolCalls: number }>();
+const AGENT_PARTIAL_USAGE = new WeakMap<object, {
+  usage?: AgentUsage;
+  toolCalls: number;
+  rateLimit?: RateLimitMeasurement;
+}>();
 
 const withPartialOutput = (
   err: unknown,
   partial: string,
   usage: AgentUsage | undefined,
   toolCalls: number,
+  rateLimit: RateLimitMeasurement | undefined,
 ): unknown => {
   if (partial !== "" && typeof err === "object" && err !== null) {
     AGENT_PARTIAL_OUTPUT.set(err, partial);
   }
   if (typeof err === "object" && err !== null) {
-    AGENT_PARTIAL_USAGE.set(err, { usage, toolCalls });
+    AGENT_PARTIAL_USAGE.set(err, { usage, toolCalls, rateLimit });
   }
   return err;
 };
@@ -504,7 +510,7 @@ export const agentPartialOutput = (err: unknown): string => {
 };
 export const agentPartialUsage = (
   err: unknown,
-): { usage?: AgentUsage; toolCalls?: number } =>
+): { usage?: AgentUsage; toolCalls?: number; rateLimit?: RateLimitMeasurement } =>
   typeof err === "object" && err !== null
     ? AGENT_PARTIAL_USAGE.get(err) ?? {}
     : {};
@@ -1994,7 +2000,13 @@ const invokeAgent = (
       // caller cannot tell "the agent never produced a byte" from "the agent
       // produced a full review and then died", and #41 turns on that
       // distinction. Read back with `agentPartialOutput`.
-      rejectRun(withPartialOutput(err, speech.spoken, speech.usage, speech.toolCalls));
+      rejectRun(withPartialOutput(
+        err,
+        speech.spoken,
+        speech.usage,
+        speech.toolCalls,
+        speech.rateLimit,
+      ));
     };
 
     // Two-phase: pre-signal → idle kill timer; post-signal → completion-grace
@@ -2081,17 +2093,26 @@ const invokeAgent = (
         },
       })
       .then(async (execResult) => {
+        // The agent process has ended. Its idle/grace clock must not govern the
+        // optional post-run evidence read below (#109).
+        clearTimer();
         if (agent.name === "codex") {
           // The rollout is inside this still-live sandbox. Missing files or
           // malformed lines or an exec-level probe failure deliberately yield
           // no measurement and preserve the invocation's old classification
           // (#109). This register is evidence only and cannot trip completion.
           try {
-            const rollout = await handle.exec(
-              "d=${CODEX_HOME:-$HOME/.codex}/sessions; " +
-                "f=$(find \"$d\" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort | tail -n 1); " +
-                "test -n \"$f\" && tail -n 200 \"$f\" || true",
-              { cwd: sandboxRepoDir },
+            const rollout = await withTimeout(
+              handle.exec(
+                "d=${CODEX_HOME:-$HOME/.codex}/sessions; " +
+                  "f=$(find \"$d\" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort | tail -n 1); " +
+                  "test -n \"$f\" && tail -n 200 \"$f\" || true",
+                { cwd: sandboxRepoDir },
+              ),
+              CODEX_ROLLOUT_PROBE_TIMEOUT_MS,
+              () => new Error(
+                `Codex rollout probe timed out after ${CODEX_ROLLOUT_PROBE_TIMEOUT_MS}ms`,
+              ),
             );
             for (const line of rollout.stdout.split("\n")) {
               speech.ingest(parseCodexRolloutLine(line));

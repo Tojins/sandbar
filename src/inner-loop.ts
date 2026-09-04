@@ -1237,7 +1237,8 @@ async function runReviewer(
             undefined,
             partial.usage,
             partial.toolCalls,
-            err instanceof AgentQuotaError ? err.measurement : undefined,
+            partial.rateLimit ??
+              (err instanceof AgentQuotaError ? err.measurement : undefined),
           );
           const transcript = agentPartialOutput(err);
           const event = await detectWrite(beforeInvocation, transcript);
