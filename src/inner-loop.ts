@@ -129,7 +129,7 @@ import {
 
 export const FAILURE_TAIL_LINES = 200;
 
-export function requireImplementerAttemptEvidence(
+function requireImplementerAttemptEvidence(
   run: Pick<agentSandbox.SandboxRunResult, "silent" | "commits">,
   nudge: Pick<agentSandbox.SandboxRunResult, "silent" | "commits">,
 ): void {
@@ -140,7 +140,7 @@ export function requireImplementerAttemptEvidence(
   }
 }
 
-export function combinePromiseNudge(
+function combinePromiseNudge(
   run: Pick<agentSandbox.SandboxRunResult, "stdout" | "commits">,
   nudge: Pick<agentSandbox.SandboxRunResult, "stdout" | "commits">,
 ): { readonly stdout: string; readonly commitCount: number } {
@@ -929,7 +929,7 @@ export async function runGateAndReviewer(
   return { kind: "gate-and-reviewer-result", gate, reviewer: reviewer.event };
 }
 
-async function runImplementer(
+export async function runImplementer(
   action: Extract<LoopAction, { kind: "run-implementer" }>,
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
