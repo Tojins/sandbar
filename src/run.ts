@@ -272,6 +272,29 @@ export type RunOptions = {
   readonly configPath?: string;
 };
 
+// The completed-cycle precedence table in one testable place (#109). The
+// fallback is lazy because applyCycle mutates run accounting; quota must not
+// spend that accounting merely to prove it outranks relaunch.
+export function selectCompletedCycleExit(args: {
+  readonly mergerQuota: AgentQuotaError | null;
+  readonly haltReasons: readonly string[];
+  readonly terminals: readonly Terminal[];
+  readonly otherwise: () => TerminalExit | null;
+}): TerminalExit | null {
+  if (args.mergerQuota) {
+    return quotaExit({
+      provider: args.mergerQuota.provider,
+      window: args.mergerQuota.measurement.window,
+      ...(args.mergerQuota.measurement.resetsAt === undefined
+        ? {}
+        : { resetsAt: args.mergerQuota.measurement.resetsAt }),
+    });
+  }
+  if (args.haltReasons.length > 0) return haltedExit(args.haltReasons);
+  const quota = args.terminals.find((terminal) => terminal.type === "QUOTA");
+  return quota?.type === "QUOTA" ? quotaExit(quota) : args.otherwise();
+}
+
 export async function run(
   rawConfig: RunConfig,
   options: RunOptions = {},
@@ -1684,58 +1707,28 @@ export async function run(
 
       if (haltReasons.length > 0) halt = true;
 
-      if (halt) {
-        // Both causes when both fired: naming only the first would hide the
-        // other from exactly the archaeology this line exists for. A merger
-        // that threw is in the list too, and is alone in it — neither report
-        // can reach that path, since a throw leaves no `mergerSummary` to read.
-        //
-        // `announceExit` overwrites `cleanupReason` with the TAG, and that is
-        // the point: `run-end (halted)` is uniform with every other terminal,
-        // and the causes it used to carry are on the `exit:` line above it and
-        // in the report that produced each of them.
-        terminalExit = await announceExit(
-          mergerQuota
-            ? quotaExit({
-                provider: mergerQuota.provider,
-                window: mergerQuota.measurement.window,
-                ...(mergerQuota.measurement.resetsAt === undefined
-                  ? {}
-                  : { resetsAt: mergerQuota.measurement.resetsAt }),
-              })
-            : haltedExit(haltReasons),
-        );
-        break;
-      }
-
-      const quotaTerminal = outcomes.find((o) => o.terminal.type === "QUOTA")
-        ?.terminal;
-      if (quotaTerminal?.type === "QUOTA") {
-        terminalExit = await announceExit(quotaExit(quotaTerminal));
-        break;
-      }
-
-      const decision = applyCycle(runState, {
-        planFingerprint: fingerprint,
-        planSize: issues.length,
-        doneCount: completedIssues.length,
-        // The relaunch trigger (#65). Deliberately `mergerSummary`, never
-        // `haltPartial` — a halt broke out above, and a halt means nothing
-        // landed. A landed-but-unclosed cycle also broke out above (exit 1):
-        // relaunching past an operator-actionable tracker mess would bury it.
-        // A chunk landing counts (#64): it moves the source branch exactly as
-        // a merged issue does, so the inputs this process resolved at launch
-        // are just as stale afterwards — which is the whole of what #65
-        // relaunches for. Which inputs those still are is
-        // `exit-conditions.ts`'s to say, and since #66 the driver is not
-        // among them.
-        landedMerges:
-          mergerSummary && mergerSummary.pushed
-            ? mergerSummary.merged.length + mergerSummary.mergedChunks.length
-            : 0,
+      const cycleExit = selectCompletedCycleExit({
+        mergerQuota,
+        haltReasons: halt ? haltReasons : [],
+        terminals: outcomes.map((outcome) => outcome.terminal),
+        otherwise: () => {
+          const decision = applyCycle(runState, {
+            planFingerprint: fingerprint,
+            planSize: issues.length,
+            doneCount: completedIssues.length,
+            landedMerges:
+              mergerSummary && mergerSummary.pushed
+                ? mergerSummary.merged.length + mergerSummary.mergedChunks.length
+                : 0,
+          });
+          return decision.kind === "exit" ? decision : null;
+        },
       });
-      if (decision.kind === "exit") {
-        terminalExit = await announceExit(decision);
+      if (cycleExit) {
+        // announceExit owns both stdout and the run record. Quota is selected
+        // before the lazy applyCycle fallback, so landed work cannot turn it
+        // into relaunch and cannot spend another cycle's accounting.
+        terminalExit = await announceExit(cycleExit);
         break;
       }
     }

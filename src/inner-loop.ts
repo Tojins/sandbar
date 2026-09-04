@@ -294,6 +294,31 @@ export const assertProviderOpen = (
   if (closed) throw new AgentQuotaError(provider, closed);
 };
 
+// One invocation boundary owns both halves of run-scoped closure: an already
+// closed provider is never called, and the first structural quota failure is
+// recorded before it escapes. Keeping this here prevents implementer and
+// reviewer call sites from drifting on either rule (#109).
+export async function runWithQuotaState<T>(
+  quotaState: RunQuotaState | undefined,
+  provider: AgentProviderName,
+  invoke: () => Promise<T>,
+): Promise<T> {
+  assertProviderOpen(quotaState, provider);
+  try {
+    return await invoke();
+  } catch (err) {
+    if (err instanceof AgentQuotaError) quotaState?.close(err.provider, err.measurement);
+    throw err;
+  }
+}
+
+export const quotaVerdict = (err: AgentQuotaError): Verdict => ({
+  type: "QUOTA",
+  provider: err.provider,
+  window: err.measurement.window,
+  ...(err.measurement.resetsAt === undefined ? {} : { resetsAt: err.measurement.resetsAt }),
+});
+
 export const formatRateLimitFields = (
   measurement: RateLimitMeasurement | undefined,
 ): string => measurement === undefined ? "" :
@@ -728,14 +753,7 @@ async function runSandboxCycle(
     if (err instanceof AgentQuotaError) {
       opts.quotaState?.close(err.provider, err.measurement);
       return {
-        verdict: {
-          type: "QUOTA",
-          provider: err.provider,
-          window: err.measurement.window,
-          ...(err.measurement.resetsAt === undefined
-            ? {}
-            : { resetsAt: err.measurement.resetsAt }),
-        },
+        verdict: quotaVerdict(err),
         accumulatedCommits: accumulated,
       };
     }
@@ -878,17 +896,16 @@ async function runImplementer(
   // agent leg, which is what every #77 idea trading implementer minutes for
   // reviewer rounds is spending (#82).
   const implementerTimer = startTimer();
-  assertProviderOpen(opts.quotaState, config.implementerAgent);
   const runAgent = (options: Parameters<Sandbox["run"]>[0]) =>
     runSandboxAndPublish(sandbox, options, issue.id);
   let run: Awaited<ReturnType<typeof runAgent>>;
   try {
-    run = await runAgent({
+    run = await runWithQuotaState(opts.quotaState, config.implementerAgent, () => runAgent({
       name: `implementer-${issue.id}-attempt-${action.attempt}`,
       agent: buildAgentProvider(config.implementerAgent, config.implementerModelId),
       prompt,
       completionSignal: PROMISE_COMPLETION_SIGNALS,
-    });
+    }));
   } catch (err) {
     if (err instanceof AgentQuotaError && opts.onOrchestratorLog) {
       await opts.onOrchestratorLog(
@@ -1196,8 +1213,7 @@ async function runReviewer(
           );
         };
         try {
-          assertProviderOpen(opts.quotaState, agent);
-          const reviewerRun = await sandbox.run({
+          const reviewerRun = await runWithQuotaState(opts.quotaState, agent, () => sandbox.run({
             name:
               `reviewer-${issue.id}-round-${action.reviewRound}-${pass}` +
               (invocation > 1 ? `-invocation-${invocation}` : ""),
@@ -1208,7 +1224,7 @@ async function runReviewer(
             // A reviewer owns no completion signal. Process exit is the honest
             // end of its single artefact; inherited role contracts are banned.
             completionSignal: [],
-          });
+          }));
           await logPass(
             reviewerRun.maxGapMs,
             reviewerRun.usage,
