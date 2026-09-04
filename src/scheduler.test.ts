@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ContinuousPool } from "./scheduler.js";
+import { ContinuousPool, decideSchedulerAction, type SchedulerSnapshot } from "./scheduler.js";
 
 type Issue = { id: string };
 const issue = (id: string): Issue => ({ id });
@@ -61,5 +61,31 @@ describe("continuous pool", () => {
     pool.recordLandingOutcome(1, 2);
     expect(pool.terminalsSinceLanding).toBe(0);
     expect(pool.landings).toBe(2);
+  });
+});
+
+describe("scheduler decisions", () => {
+  const snapshot = (overrides: Partial<SchedulerSnapshot> = {}): SchedulerSnapshot => ({
+    active: 0, ongoing: 0, hasCompleted: false, hasPendingTerminals: false,
+    hasCandidates: false, hasRetries: false, hasLandRequests: false, hasCapacity: true,
+    budgetRemaining: 10, landings: 0, terminalsSinceLanding: 0,
+    terminalBackstop: 6, quotaClosed: false, ...overrides,
+  });
+
+  it.each([
+    [snapshot({ hasCompleted: true, active: 1, ongoing: 1 }), "recompute"],
+    [snapshot({ hasPendingTerminals: true, ongoing: 1 }), "land"],
+    [snapshot({ quotaClosed: true, hasPendingTerminals: true, ongoing: 1 }), "land"],
+    [snapshot({ quotaClosed: true, active: 1, ongoing: 1 }), "drain"],
+    [snapshot({ quotaClosed: true }), "exit"],
+    [snapshot({ landings: 1, hasCandidates: true }), "exit"],
+    [snapshot({ budgetRemaining: 0 }), "exit"],
+    [snapshot({ terminalsSinceLanding: 6 }), "exit"],
+    [snapshot({ hasCandidates: true }), "admit"],
+    [snapshot({ hasRetries: true, budgetRemaining: 0, ongoing: 1 }), "admit"],
+    [snapshot({ active: 1, ongoing: 1, hasCapacity: false }), "wait"],
+    [snapshot(), "exit"],
+  ] as const)("maps a complete snapshot to %s", (state, kind) => {
+    expect(decideSchedulerAction(state).kind).toBe(kind);
   });
 });

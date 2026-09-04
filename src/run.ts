@@ -216,7 +216,12 @@ import {
 } from "./chunk-reconcile.js";
 import { postLaneOverrideNotices } from "./lanes.js";
 import { type PlannedIssue, buildPlan } from "./plan-resolver.js";
-import { ContinuousPool, type SettledIssue } from "./scheduler.js";
+import {
+  ContinuousPool,
+  decideSchedulerAction,
+  type SchedulerExit,
+  type SettledIssue,
+} from "./scheduler.js";
 import {
   absoluteMountSources,
   PreflightError,
@@ -320,6 +325,24 @@ export async function verifyFinalizedTrackerState(
           `not-ready but observed labels [${observed.join(", ")}].`,
       );
     }
+  }
+}
+
+function schedulerExit(
+  reason: SchedulerExit,
+  pool: ContinuousPool<PlannedIssue, Terminal>,
+  runState: ReturnType<typeof newRunState>,
+  pendingQuota: TerminalExit | null,
+): TerminalExit {
+  switch (reason) {
+    case "plan-empty": return planEmptyExit();
+    case "relaunch": return relaunchExit(pool.landings);
+    case "quota": {
+      if (!pendingQuota) throw new Error("scheduler selected quota without a quota exit");
+      return pendingQuota;
+    }
+    case "budget": return budgetExit(runState.issuesAttempted, runState.maxTotalIssues);
+    case "stuck": return stuckExit(pool.terminalsSinceLanding);
   }
 }
 
@@ -972,14 +995,6 @@ export async function run(
       }
 
       const budget = remainingBudget(runState);
-      if (budget === 0 && pool.isQuiescent) {
-        // The same constructor used after landing, so the two budget checks
-        // cannot drift in their operator-facing reason (#70).
-        terminalExit = await announceExit(
-          budgetExit(runState.issuesAttempted, runState.maxTotalIssues),
-        );
-        break;
-      }
 
       console.log(`\n=== Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
       await runLogger.appendOrchestrator(`cycle ${iteration} start`);
@@ -1169,23 +1184,31 @@ export async function run(
         await runLogger.appendOrchestrator(`plan: land requested — ${named}`);
       }
 
-      // Quiescence is the only relaunch boundary left (#87). Evaluate it
-      // before admitting work: once a new issue starts the boundary is gone.
-      if (
-        pool.landings > 0 &&
-        pool.activeCount === 0 &&
-        pool.ongoingCount === 0 &&
-        (resolution.plan.length > 0 || landRequests.length > 0)
-      ) {
-        terminalExit = await announceExit(relaunchExit(pool.landings));
+      const schedulerAction = decideSchedulerAction({
+        active: pool.activeCount,
+        ongoing: pool.ongoingCount,
+        hasCompleted: pool.hasCompleted,
+        hasPendingTerminals: pool.hasPendingTerminals,
+        hasCandidates: pool.hasUnstarted(resolution.plan),
+        hasRetries: pool.hasRetries,
+        hasLandRequests: landRequests.length > 0,
+        hasCapacity: pool.activeCount < config.maxParallelIssues,
+        budgetRemaining: budget,
+        landings: pool.landings,
+        terminalsSinceLanding: pool.terminalsSinceLanding,
+        terminalBackstop: MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING,
+        quotaClosed: quotaPending !== null,
+      });
+      if (schedulerAction.kind === "exit") {
+        terminalExit = await announceExit(
+          schedulerExit(schedulerAction.reason, pool, runState, quotaPending),
+        );
         break;
       }
 
-      // `PlannedIssue`, not a structural subset of it: a planned review-gated
-      // issue carries the CHUNK it lands on (#60), and a narrower annotation
-      // here would drop that field on the way to phase 3 without an error —
-      // the merger would then land a chunk member on the source branch.
-      const admission = pool.admit(resolution.plan, budget, quotaPending !== null);
+      const admission = schedulerAction.kind === "admit"
+        ? pool.admit(resolution.plan, budget)
+        : { issues: [], newStarts: 0 };
       const executionIssues = [...admission.issues];
       const issues = executionIssues;
       runState.issuesAttempted += admission.newStarts;
@@ -1222,18 +1245,6 @@ export async function run(
       // unblocks whatever was waiting on them. Exiting `success` here would
       // strand a chunk a human explicitly asked for, on the one cycle where
       // there is nothing else to distract from it.
-      if (
-        executionIssues.length === 0 &&
-        landRequests.length === 0 &&
-        pool.activeCount === 0 &&
-        pool.ongoingCount === 0
-      ) {
-        // No line of its own: the `Exit (plan-empty): …` at the bottom says
-        // exactly this and is the line every other terminal prints too (#70).
-        terminalExit = await announceExit(planEmptyExit());
-        break;
-      }
-
       if (issues.length === 0) {
         console.log(
           `No unblocked issues to work on, but ${landRequests.length} chunk(s) are ` +
@@ -1323,19 +1334,17 @@ export async function run(
       // only for the next freed slot; siblings remain live and the next full
       // plan is built immediately around them.
       let settled: ExecutionEvent[];
-      if (pool.hasPendingTerminals && !pool.hasCompleted) {
-        // The preceding slot-free event deliberately yielded back to the top
-        // of the loop. Its full recompute and admissions have now happened, so
-        // landing can run while the replenished pool keeps executing.
+      if (
+        schedulerAction.kind === "land" ||
+        (schedulerAction.kind === "admit" && schedulerAction.next === "land")
+      ) {
         settled = [...pool.takeLandingBatch()];
       } else {
-        settled = [...await pool.waitForFreedSlot()];
+        await pool.waitForFreedSlot();
         await runLogger.appendOrchestrator(
           `slot freed active=${pool.activeCount} ${durationField(phase2Timer())}`,
         );
         nextPlanTrigger = "slot-freed";
-        // Recompute and refill before finalization/landing. The issues remain
-        // planner-excluded in ongoingIssues until those operations finish.
         continue;
       }
       await runLogger.appendOrchestrator(
@@ -1831,10 +1840,7 @@ export async function run(
         mergerQuota,
         haltReasons: halt ? haltReasons : [],
         terminals: outcomes.map((outcome) => outcome.terminal),
-        otherwise: () =>
-          pool.isQuiescent && runState.issuesAttempted >= runState.maxTotalIssues
-            ? budgetExit(runState.issuesAttempted, runState.maxTotalIssues)
-            : null,
+        otherwise: () => null,
       });
       const landedNow = mergerSummary && mergerSummary.pushed
         ? mergerSummary.merged.length + mergerSummary.mergedChunks.length
@@ -1858,25 +1864,8 @@ export async function run(
         innerLoopCfg.agentImages = agentImages;
       }
       if (selectedExit?.tag === "quota") quotaPending = selectedExit;
-      const cycleExit = selectedExit?.tag === "quota" && pool.activeCount > 0
-        ? null
-        : selectedExit;
-      if (cycleExit) {
-        // announceExit owns both stdout and the run record. Quota is selected
-        // before the lazy fallback, so landed work cannot displace it.
-        terminalExit = await announceExit(cycleExit);
-        break;
-      }
-
-      if (quotaPending && pool.activeCount === 0) {
-        terminalExit = await announceExit(quotaPending);
-        break;
-      }
-      if (
-        pool.terminalsSinceLanding >= MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING &&
-        pool.isQuiescent
-      ) {
-        terminalExit = await announceExit(stuckExit(pool.terminalsSinceLanding));
+      if (selectedExit?.tag === "halted") {
+        terminalExit = await announceExit(selectedExit);
         break;
       }
     }

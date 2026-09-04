@@ -261,4 +261,53 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.innerLoop).toHaveBeenCalledTimes(6);
     expect(seams.merger).not.toHaveBeenCalled();
   });
+
+  it("reacquires a slot for silent-noop without spending another start", async () => {
+    const target = issue("87");
+    seams.plan.mockResolvedValue(resolution([target]));
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "abc" }] });
+    seams.merger
+      .mockResolvedValueOnce({
+        ...summary([]),
+        skipped: [{ issue: target, reason: "silent-noop" }],
+      })
+      .mockResolvedValueOnce(summary([target]));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, maxTotalIssues: 1 }))
+      .rejects.toThrow("EXIT:3");
+    expect(exit).toHaveBeenCalledWith(3);
+    expect(seams.innerLoop).toHaveBeenCalledTimes(2);
+    expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["87", "87"]);
+    expect(seams.merger).toHaveBeenCalledTimes(2);
+  });
+
+  it("drains and lands in-flight work before exiting the start budget", async () => {
+    const first = issue("1");
+    const second = issue("2");
+    const slow = deferred<{ type: "DONE"; commits: { sha: string }[] }>();
+    seams.plan.mockResolvedValue(resolution([first, second]));
+    seams.innerLoop.mockImplementation((candidate: ReturnType<typeof issue>) =>
+      candidate.id === "1"
+        ? Promise.resolve({ type: "DONE", commits: [{ sha: "1" }] })
+        : slow.promise);
+    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) => {
+      if (seams.merger.mock.calls.length === 1) {
+        slow.resolve({ type: "DONE", commits: [{ sha: "2" }] });
+      }
+      return summary(batch);
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 2, maxTotalIssues: 2 }))
+      .rejects.toThrow("EXIT:3");
+    expect(exit).toHaveBeenCalledWith(3);
+    expect(seams.innerLoop).toHaveBeenCalledTimes(2);
+    expect(seams.merger.mock.calls.flatMap((call) => call[0]).map((item) => item.id).sort())
+      .toEqual(["1", "2"]);
+  });
 });
