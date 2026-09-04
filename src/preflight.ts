@@ -280,10 +280,11 @@ export type PreflightConfig = {
   // passed an object and no file. Read for one soft warning and nothing else —
   // see `staleConfigWarning` (#66).
   readonly configPath: string | null;
-  // Every agent provider this run will invoke (#72), from
+  // Every agent provider this run will invoke (#72, #126), from
   // `requiredAgentProviders`. Preflight checks a credential for each, so a
   // role routed away from claude refuses HERE rather than as an implementer
-  // attempt dying in-container a cycle later.
+  // attempt dying in-container a cycle later. A disabled UI check contributes
+  // no provider because it contributes no invocation.
   readonly agentProviders: readonly AgentProviderName[];
 };
 
@@ -472,7 +473,7 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
     // Name every routing knob so an operator can find the one responsible even
     // when the merger is the sole role routed away from the default (#74).
     const why =
-      `A role is routed to ${provider} by \`implementerAgent\`, ` +
+      `A role is routed to ${provider} by \`implementerAgent\`, \`uiCheckAgent\`, ` +
       "`reviewerAgent`, `reviewerQualityAgent`, or `mergerAgent`.";
     out.push({
       ok: false,

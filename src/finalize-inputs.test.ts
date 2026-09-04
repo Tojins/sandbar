@@ -84,7 +84,7 @@ describe("terminalFinalizeInputs", () => {
       "needs-human",
       "review-budget-exhausted",
       "hard-error",
-      "reviewer-wrote",
+      "read-only-agent-wrote",
       "quota",
     ]);
   });
@@ -108,6 +108,27 @@ describe("terminalFinalizeInputs", () => {
       failureTrace: "src/a.ts",
       latestReviewerProse: "prose",
     });
+  });
+
+  it("identifies which read-only role changed the repository", () => {
+    const inputs = terminalFinalizeInputs([
+      {
+        issue: issue("126"),
+        terminal: {
+          type: "NEEDS-HUMAN-REVIEW",
+          cause: "ui-checker-wrote",
+          latestReviewerProse: "UI checker changed git state.",
+          commits: [],
+        },
+      },
+    ]);
+    expect(inputs).toEqual([
+      expect.objectContaining({
+        kind: "read-only-agent-wrote",
+        actor: "UI checker",
+        latestReviewerProse: "UI checker changed git state.",
+      }),
+    ]);
   });
 
   // The branch is only worth publishing when there is something on it — see

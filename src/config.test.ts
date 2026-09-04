@@ -17,6 +17,7 @@ import {
   DEFAULT_MAX_REVIEW_ROUNDS,
   DEFAULT_MAX_TOTAL_ISSUES,
   DEFAULT_IMPLEMENTER_MODEL_ID,
+  DEFAULT_UI_PROTOTYPE_CHECK,
   DEFAULT_REVIEWER_MODEL_ID,
   DEFAULT_REVIEWER_QUALITY_MODEL_ID,
   DEFAULT_MERGER_MODEL_ID,
@@ -128,6 +129,8 @@ describe("resolveConfig", () => {
     expect(r.workDir).toBe(DEFAULT_WORK_DIR);
     expect(r.sourceBranch).toBe(DEFAULT_SOURCE_BRANCH);
     expect(r.implementerModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
+    expect(r.uiPrototypeCheck).toBe(DEFAULT_UI_PROTOTYPE_CHECK);
+    expect(r.uiCheckModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
     expect(r.reviewerModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
     expect(r.reviewerQualityModelId).toBe(DEFAULT_REVIEWER_QUALITY_MODEL_ID);
     expect(r.mergerModelId).toBe(DEFAULT_MERGER_MODEL_ID);
@@ -151,6 +154,7 @@ describe("resolveConfig", () => {
     expect(r.defaultLane).toBe(DEFAULT_LANE);
     expect(r.defaultLane).toBe("auto");
     expect(r.promptExtensions).toEqual({});
+    expect(r.uiCheckAgent).toBe(r.implementerAgent);
   });
 
   it("refuses the removed codingStandardsPath by name", () => {
@@ -286,6 +290,78 @@ describe("resolveConfig", () => {
     expect(r.reviewerModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
   });
 
+  it("defaults UI-check routing to the implementer and can disable the call (#126)", () => {
+    const inherited = resolveConfig({
+      ...minimal,
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+    });
+    expect(inherited.uiPrototypeCheck).toBe(true);
+    expect(inherited.uiCheckAgent).toBe("codex");
+    expect(inherited.uiCheckModelId).toBe("gpt-5.6-sol");
+
+    const split = resolveConfig({
+      ...minimal,
+      uiCheckAgent: "codex",
+      uiCheckModelId: "gpt-5.6-sol",
+      uiCheckEffort: "low",
+    });
+    expect(split.uiCheckAgent).toBe("codex");
+    expect(split.uiCheckModelId).toBe("gpt-5.6-sol");
+    expect(split.uiCheckEffort).toBe("low");
+    expect(resolveConfig({ ...minimal, uiPrototypeCheck: false }).uiPrototypeCheck)
+      .toBe(false);
+  });
+
+  it("validates UI-check fields only where invocation requires it (#126)", () => {
+    expect(() =>
+      resolveConfig({ ...minimal, uiPrototypeCheck: "yes" as never }),
+    ).toThrow(/config\.uiPrototypeCheck must be a boolean/);
+    expect(() =>
+      resolveConfig({ ...minimal, uiCheckAgent: "codex" }),
+    ).toThrow(/config\.uiCheckAgent is "codex"[\s\S]*config\.uiCheckModelId/);
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        implementerModelId: "opus",
+        uiCheckAgent: "codex",
+      }),
+    ).toThrow(/config\.uiCheckAgent is "codex"[\s\S]*config\.uiCheckModelId/);
+    const backToClaude = resolveConfig({
+      ...minimal,
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+      uiCheckAgent: "claude",
+    });
+    expect(backToClaude.uiCheckModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        uiPrototypeCheck: false,
+        uiCheckAgent: "codex",
+      }),
+    ).not.toThrow();
+  });
+
+  it("inherits the implementer model only for a UI check on the same provider (#126)", () => {
+    const sameProvider = resolveConfig({
+      ...minimal,
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+      uiCheckAgent: "codex",
+    });
+    expect(sameProvider.uiCheckModelId).toBe("gpt-5.6-sol");
+
+    const splitProvider = resolveConfig({
+      ...minimal,
+      uiPrototypeCheck: false,
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+      uiCheckAgent: "claude",
+    });
+    expect(splitProvider.uiCheckModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
+  });
+
   // #72 — the vendor knob beside the tiering one. Defaulting both to "claude"
   // is what makes the field a no-op for every config written before it.
   it("defaults all agent roles to claude (#72, #74)", () => {
@@ -330,15 +406,18 @@ describe("resolveConfig", () => {
     const r = resolveConfig({
       ...minimal,
       implementerEffort: "high",
+      uiCheckEffort: "medium",
       reviewerQualityEffort: "high",
       mergerEffort: "xhigh",
     });
     expect(r.implementerEffort).toBe("high");
+    expect(r.uiCheckEffort).toBe("medium");
     expect(r.reviewerQualityEffort).toBe("high");
     expect(r.mergerEffort).toBe("xhigh");
     expect(r.reviewerEffort).toBeUndefined();
     const none = resolveConfig(minimal);
     expect(none.implementerEffort).toBeUndefined();
+    expect(none.uiCheckEffort).toBeUndefined();
     expect(none.reviewerEffort).toBeUndefined();
     expect(none.reviewerQualityEffort).toBeUndefined();
     expect(none.mergerEffort).toBeUndefined();
@@ -350,6 +429,9 @@ describe("resolveConfig", () => {
   it("refuses an empty or non-string reasoning effort (#130)", () => {
     expect(() => resolveConfig({ ...minimal, implementerEffort: "" })).toThrow(
       /config\.implementerEffort/,
+    );
+    expect(() => resolveConfig({ ...minimal, uiCheckEffort: "" })).toThrow(
+      /config\.uiCheckEffort/,
     );
     expect(() =>
       resolveConfig({ ...minimal, reviewerEffort: 3 as never }),

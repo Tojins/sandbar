@@ -1,6 +1,7 @@
 // Pure inner-loop state machine — no I/O. The runner calls step(state, event)
 // and executes the returned action; `terminate` ends the loop. Every decision
-// (promise routing, concurrent gate/reviewer routing, budget exhaustion)
+// (one pre-attempt UI classification, promise routing, concurrent
+// gate/reviewer routing, budget exhaustion)
 // lives here and is table-driven tested in inner-loop-machine.test.ts.
 //
 // Impl-attempt exhaustion carries a `cause` so the human-handoff names the
@@ -51,6 +52,7 @@
 
 import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";
+import type { UiCheckResult } from "./ui-check-parser.js";
 
 export const HARD_ERROR_MAX_RETRIES = 2;
 
@@ -58,6 +60,7 @@ export const NEEDS_HUMAN_REVIEW_BUDGET_EXHAUSTED_MESSAGE =
   "Review-round budget exhausted without an APPROVED verdict.";
 
 export type LoopPhase =
+  | "needs-ui-check"
   | "needs-implementer"
   | "needs-gate-and-reviewer"
   | "terminated";
@@ -104,12 +107,10 @@ export type Verdict =
       readonly strandedHead: HeadMismatch | null;
     }
   | {
-      // #21 — the implementer judged the issue to imply non-trivial
-      // user-visible UI with no prototype to work from. Immediate terminal:
-      // no gate, no reviewer, no further attempts (a second attempt would
-      // re-read the same issue and reach the same conclusion), and no
-      // retry-with-fresh-sandbox — the blocker is a missing human artifact,
-      // not anything the loop can produce.
+      // #21/#126 — either the pre-attempt checker, or an implementer that
+      // discovered UI work later, judged the issue to imply non-trivial
+      // user-visible UI with no prototype. Immediate terminal: no gate or
+      // reviewer. The classification itself spends no attempt.
       readonly type: "NEEDS-UI-PROTOTYPE";
       readonly uiImpact: string;
       // As NEEDS-INFO above, and the case is sharper here: #21 accepts a LATE
@@ -164,7 +165,7 @@ export type Verdict =
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
-      readonly cause?: "reviewer-wrote";
+      readonly cause?: "reviewer-wrote" | "ui-checker-wrote";
     }
   | { readonly type: "HARD-ERROR"; readonly reason: string }
   | {
@@ -175,6 +176,7 @@ export type Verdict =
     };
 
 export type LoopAction =
+  | { readonly kind: "run-ui-check" }
   | {
       readonly kind: "run-implementer";
       readonly attempt: number;
@@ -190,6 +192,8 @@ export type LoopAction =
   | { readonly kind: "terminate"; readonly verdict: Verdict };
 
 export type LoopEvent =
+  | { readonly kind: "ui-check-result"; readonly result: UiCheckResult }
+  | { readonly kind: "ui-checker-wrote"; readonly detail: string }
   | {
       readonly kind: "implementer-result";
       readonly signal: ParseSignal;
@@ -236,6 +240,7 @@ export type StepResult = {
 export type InitialStateOptions = {
   readonly maxAttempts: number;
   readonly maxReviewRounds: number;
+  readonly uiPrototypeCheck: boolean;
 };
 
 export function initialState(opts: InitialStateOptions): LoopState {
@@ -260,11 +265,12 @@ export function initialState(opts: InitialStateOptions): LoopState {
     lastDirtyPaths: null,
     lastOffBranch: false,
     lastReviewerHarnessFailed: false,
-    phase: "needs-implementer",
+    phase: opts.uiPrototypeCheck ? "needs-ui-check" : "needs-implementer",
   };
 }
 
 export function initialAction(state: LoopState): LoopAction {
+  if (state.phase === "needs-ui-check") return { kind: "run-ui-check" };
   return {
     kind: "run-implementer",
     attempt: state.attempt,
@@ -280,6 +286,34 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
   }
 
   switch (event.kind) {
+    case "ui-checker-wrote":
+      if (state.phase !== "needs-ui-check") {
+        throw new Error(
+          `ui-checker-wrote event in phase ${state.phase}; expected needs-ui-check`,
+        );
+      }
+      return terminate(state, {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "ui-checker-wrote",
+        latestReviewerProse: event.detail,
+      });
+
+    case "ui-check-result":
+      if (state.phase !== "needs-ui-check") {
+        throw new Error(
+          `ui-check-result event in phase ${state.phase}; expected needs-ui-check`,
+        );
+      }
+      if (event.result.kind === "PROTOTYPE-NEEDED") {
+        return terminate(state, {
+          type: "NEEDS-UI-PROTOTYPE",
+          uiImpact: event.result.uiImpact,
+          strandedHead: null,
+        });
+      }
+      const nextState: LoopState = { ...state, phase: "needs-implementer" };
+      return { state: nextState, action: initialAction(nextState) };
+
     case "implementer-result":
       if (state.phase !== "needs-implementer") {
         throw new Error(

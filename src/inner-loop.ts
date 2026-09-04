@@ -15,8 +15,12 @@
 // container's netns, so it must exist first, and they must be up before a
 // consumer's `onSandboxReady` hook runs.
 //
-// Two deliberate exceptions to "all branching lives in the SM" stay within
-// one action each. The promise nudge in runImplementer gives an implementer
+// The UI-prototype decision (#126) is its own first action when enabled. It is
+// a cold agent call in the existing issue sandbox and spends neither an
+// implementation attempt nor a review round. A fresh HARD-ERROR cycle rebuilds
+// the state and therefore asks again. Two deliberate exceptions to "all
+// branching lives in the SM" stay within one action each. The promise nudge
+// in runImplementer gives an implementer
 // that ends with no `<promise>` tag at all one `--continue` follow-up before
 // the NO-SIGNAL reaches the SM
 // — the SM never sees the nudge, only the re-parsed result. The full argument
@@ -47,8 +51,8 @@
 // Gate-1 and the reviewer are dispatched together after COMPLETE (#123). The
 // machine discards a review under a red gate except for reviewer mutation,
 // which still parks. Reviewer history is recorded only after a green gate.
-// Reviewer invocations snapshot the tip and status; any mutation parks the
-// issue and preserves the clone rather than running another reviewer.
+// UI-check and reviewer invocations snapshot the tip and status; any mutation
+// parks the issue and preserves the clone rather than trusting that call.
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -102,6 +106,7 @@ import {
 import type { AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
+import { parseUiCheck } from "./ui-check-parser.js";
 import { loadTemplate } from "./prompts.js";
 import {
   type SandboxContainerStatus,
@@ -128,6 +133,7 @@ import {
   type PriorReviewRound,
   buildPrompt,
   buildReviewerPrompts,
+  buildUiCheckPrompt,
   qualityReviewContext,
 } from "./prompt.js";
 
@@ -314,7 +320,7 @@ export type Terminal =
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
-      readonly cause?: "reviewer-wrote";
+      readonly cause?: "reviewer-wrote" | "ui-checker-wrote";
       readonly commits: readonly { sha: string }[];
       readonly specGaps: readonly SpecGap[];
     }
@@ -403,6 +409,7 @@ export type InnerLoopConfig = {
   readonly implementerModelId: string;
   readonly reviewerModelId: string;
   readonly reviewerQualityModelId: string;
+  readonly uiCheckModelId: string;
   // Which CLI each role runs (#72). Paired with the model id above rather than
   // folded into it: the two are independent choices, and every provider takes
   // whatever id it is handed. `agent-providers.ts` owns the set and the
@@ -412,12 +419,17 @@ export type InnerLoopConfig = {
   // The quality pass's CLI (#121). Resolution defaults it to `reviewerAgent`,
   // so this is a distinct provider only where the host asked for one.
   readonly reviewerQualityAgent: AgentProviderName;
+  // The pre-attempt UI classifier (#126), defaulted during config resolution
+  // to the implementer's provider and model but routed independently here.
+  readonly uiCheckAgent: AgentProviderName;
   // Reasoning effort per call (#130), the third per-call knob beside the model
   // id and the CLI. Absent is a value — the CLI's default — and stays absent
   // on the log line.
   readonly implementerEffort?: string | undefined;
   readonly reviewerEffort?: string | undefined;
   readonly reviewerQualityEffort?: string | undefined;
+  readonly uiCheckEffort?: string | undefined;
+  readonly uiPrototypeCheck: boolean;
   readonly maxImplAttempts: number;
   readonly maxReviewRounds: number;
   readonly sandboxImage: string;
@@ -805,6 +817,7 @@ async function runSandboxCycle(
     let state: LoopState = initialState({
       maxAttempts: config.maxImplAttempts,
       maxReviewRounds: config.maxReviewRounds,
+      uiPrototypeCheck: config.uiPrototypeCheck,
     });
     let action: LoopAction = initialAction(state);
 
@@ -944,6 +957,8 @@ async function executeAction(
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
   switch (action.kind) {
+    case "run-ui-check":
+      return runUiCheck(action, ctx);
     case "run-implementer":
       return runImplementer(action, ctx);
     case "run-gate-and-reviewer":
@@ -951,6 +966,106 @@ async function executeAction(
     case "terminate":
       throw new Error("executeAction called with terminate; runner should exit instead");
   }
+}
+
+export async function runUiCheck(
+  _action: Extract<LoopAction, { kind: "run-ui-check" }>,
+  ctx: ExecuteActionCtx,
+): Promise<
+  Extract<LoopEvent, { kind: "ui-check-result" | "ui-checker-wrote" }>
+> {
+  const { issue, sandbox, opts, config } = ctx;
+  const basePrompt = await buildUiCheckPrompt(issue.id, config.repo);
+  let prompt = basePrompt;
+
+  // One correction at most. Neither invocation owns a completion signal:
+  // process exit is the honest end of this role's single classification.
+  for (let invocation = 1; invocation <= 2; invocation += 1) {
+    const beforeInvocation = await snapshotReadOnlyAgent(
+      sandbox.worktreePath,
+      issue.branch,
+    );
+    const timer = startTimer();
+    const logInvocation = async (
+      maxGapMs: number | undefined,
+      usage: AgentUsage | undefined,
+      toolCalls: number | undefined,
+      peakContext: number | undefined,
+      rateLimit: RateLimitMeasurement | undefined,
+    ): Promise<void> => {
+      if (!opts.onOrchestratorLog) return;
+      await opts.onOrchestratorLog(
+        `issue=${issue.id} ui-check provider=${config.uiCheckAgent} ` +
+          `model=${config.uiCheckModelId}${effortField(config.uiCheckEffort)} ` +
+          `${durationField(timer())}` +
+          formatUsageFields(usage, toolCalls, peakContext) +
+          formatRateLimitFields(rateLimit) +
+          ` invocation=${invocation}` +
+          (maxGapMs === undefined ? "" : ` maxGapMs=${maxGapMs}`),
+      );
+    };
+
+    let run: Awaited<ReturnType<Sandbox["run"]>>;
+    try {
+      run = await runWithQuotaState(opts.quotaState, config.uiCheckAgent, () =>
+        sandbox.run({
+          name: `ui-check-${issue.id}${invocation === 1 ? "" : "-reprompt"}`,
+          agent: buildAgentProvider(config.uiCheckAgent, config.uiCheckModelId, {
+            effort: config.uiCheckEffort,
+          }),
+          prompt,
+          completionSignal: [],
+        }),
+      );
+      await logInvocation(
+        run.maxGapMs,
+        run.usage,
+        run.toolCalls,
+        run.peakContext,
+        run.rateLimit,
+      );
+    } catch (err) {
+      const partial = agentPartialUsage(err);
+      await logInvocation(
+        undefined,
+        partial.usage,
+        partial.toolCalls,
+        partial.peakContext,
+        partial.rateLimit ??
+          (err instanceof AgentQuotaError ? err.measurement : undefined),
+      );
+      const wrote = await enforceReadOnlyAgentSnapshot(
+        sandbox,
+        beforeInvocation,
+        await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch),
+        "UI checker",
+        agentPartialOutput(err),
+      );
+      if (wrote !== null) return { kind: "ui-checker-wrote", detail: wrote };
+      throw err;
+    }
+
+    const wrote = await enforceReadOnlyAgentSnapshot(
+      sandbox,
+      beforeInvocation,
+      await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch),
+      "UI checker",
+      run.stdout,
+    );
+    if (wrote !== null) return { kind: "ui-checker-wrote", detail: wrote };
+    const result = parseUiCheck(run.stdout);
+    if (result.kind !== "NO-SIGNAL") {
+      return { kind: "ui-check-result", result };
+    }
+    if (invocation === 1) {
+      prompt = `${basePrompt}\n\n---\n\n# Required correction\n\n${result.reprompt}`;
+      continue;
+    }
+    throw new AgentError(
+      "UI checker produced no valid classification after its one re-prompt.",
+    );
+  }
+  throw new Error("unreachable UI-check invocation count");
 }
 
 type GateAndReviewerJobs = {
@@ -1227,15 +1342,27 @@ async function runGate1(
   };
 }
 
-export type ReviewerSnapshot = {
+export type ReadOnlyAgentSnapshot = {
   readonly tip: string | null;
   readonly dirtyPaths: readonly string[];
   readonly headRef: string | null;
 };
 
-export function reviewerSnapshotChanged(
-  before: ReviewerSnapshot,
-  after: ReviewerSnapshot,
+export async function snapshotReadOnlyAgent(
+  worktreePath: string,
+  branch: string,
+): Promise<ReadOnlyAgentSnapshot> {
+  const [tip, dirtyPaths, headRef] = await Promise.all([
+    branchTip(worktreePath, branch),
+    dirtyWorktreePaths(worktreePath),
+    symbolicHeadRef(worktreePath),
+  ]);
+  return { tip, dirtyPaths, headRef };
+}
+
+export function readOnlyAgentSnapshotChanged(
+  before: ReadOnlyAgentSnapshot,
+  after: ReadOnlyAgentSnapshot,
 ): boolean {
   return (
     before.tip !== after.tip ||
@@ -1244,28 +1371,50 @@ export function reviewerSnapshotChanged(
   );
 }
 
+export async function enforceReadOnlyAgentSnapshot(
+  sandbox: Pick<Sandbox, "preserveWorktree" | "syncBranchToCache">,
+  before: ReadOnlyAgentSnapshot,
+  after: ReadOnlyAgentSnapshot,
+  role: "Reviewer" | "UI checker",
+  transcript: string,
+): Promise<string | null> {
+  if (!readOnlyAgentSnapshotChanged(before, after)) return null;
+  sandbox.preserveWorktree(
+    `the ${role.toLowerCase()} changed the repository; kept for human inspection`,
+  );
+  // Deleting the issue ref is itself an agent write. There is then no ref to
+  // publish, but the preserved clone still contains the evidence.
+  if (after.tip !== null) await sandbox.syncBranchToCache();
+  const renderedTranscript =
+    transcript.trim() || `(${role.toLowerCase()} emitted no output)`;
+  return (
+    `${role} changed git state. Branch tip before: ${before.tip}; ` +
+    `after: ${after.tip}. HEAD before: ${before.headRef}; ` +
+    `after: ${after.headRef}. Status after:\n` +
+    (after.dirtyPaths.length > 0
+      ? after.dirtyPaths.join("\n")
+      : "(clean worktree)") +
+    `\n\n${role} transcript:\n${renderedTranscript}`
+  );
+}
+
 export async function enforceReviewerSnapshot(
   sandbox: Pick<Sandbox, "preserveWorktree" | "syncBranchToCache">,
-  before: ReviewerSnapshot,
-  after: ReviewerSnapshot,
+  before: ReadOnlyAgentSnapshot,
+  after: ReadOnlyAgentSnapshot,
   transcript: string,
 ): Promise<Extract<ReviewerResult, { kind: "reviewer-wrote" }> | null> {
-  if (!reviewerSnapshotChanged(before, after)) return null;
-  sandbox.preserveWorktree("the reviewer changed the repository; kept for human inspection");
-  // Deleting the issue ref is itself a reviewer write. There is then no ref
-  // to publish, but the preserved clone still contains the evidence.
-  if (after.tip !== null) await sandbox.syncBranchToCache();
-  const renderedTranscript = transcript.trim() || "(reviewer emitted no output)";
+  const detail = await enforceReadOnlyAgentSnapshot(
+    sandbox,
+    before,
+    after,
+    "Reviewer",
+    transcript,
+  );
+  if (detail === null) return null;
   return {
     kind: "reviewer-wrote",
-    detail:
-      `Reviewer changed git state. Branch tip before: ${before.tip}; ` +
-      `after: ${after.tip}. HEAD before: ${before.headRef}; ` +
-      `after: ${after.headRef}. Status after:\n` +
-      (after.dirtyPaths.length > 0
-        ? after.dirtyPaths.join("\n")
-        : "(clean worktree)") +
-      `\n\nReviewer transcript:\n${renderedTranscript}`,
+    detail,
   };
 }
 
@@ -1287,16 +1436,10 @@ export async function runReviewer(
       `cannot review issue #${issue.id} round ${action.reviewRound}: no accumulated HEAD`,
     );
   }
-  const snapshot = async (): Promise<ReviewerSnapshot> => {
-    const [tip, dirtyPaths, headRef] = await Promise.all([
-      branchTip(sandbox.worktreePath, issue.branch),
-      dirtyWorktreePaths(sandbox.worktreePath),
-      symbolicHeadRef(sandbox.worktreePath),
-    ]);
-    return { tip, dirtyPaths, headRef };
-  };
+  const snapshot = (): Promise<ReadOnlyAgentSnapshot> =>
+    snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
   const detectWrite = async (
-    before: ReviewerSnapshot,
+    before: ReadOnlyAgentSnapshot,
     transcript: string,
   ): Promise<Extract<ReviewerResult, { kind: "reviewer-wrote" }> | null> => {
     const after = await snapshot();

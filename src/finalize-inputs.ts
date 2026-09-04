@@ -108,12 +108,22 @@ export function terminalFinalizeInputs(
         });
         break;
       case "NEEDS-HUMAN-REVIEW":
-        inputs.push({
-          kind: t.cause === "reviewer-wrote" ? "reviewer-wrote" : "review-budget-exhausted",
-          issue: o.issue,
-          latestReviewerProse: t.latestReviewerProse,
-          specGaps: t.specGaps,
-        });
+        if (t.cause === undefined) {
+          inputs.push({
+            kind: "review-budget-exhausted",
+            issue: o.issue,
+            latestReviewerProse: t.latestReviewerProse,
+            specGaps: t.specGaps,
+          });
+        } else {
+          inputs.push({
+            kind: "read-only-agent-wrote",
+            issue: o.issue,
+            latestReviewerProse: t.latestReviewerProse,
+            actor: t.cause === "reviewer-wrote" ? "reviewer" : "UI checker",
+            specGaps: t.specGaps,
+          });
+        }
         break;
       case "HARD-ERROR":
         inputs.push({

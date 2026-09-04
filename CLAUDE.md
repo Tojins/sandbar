@@ -78,9 +78,14 @@ without consuming one of `maxParallelIssues` slots.
 
 2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
    planned issue runs in parallel in its own agent sandbox + per-issue gate
-   stack, ralph-style: up to `maxImplAttempts` (default 8) attempts in the
+   stack. After setup, a default-on cold UI classifier runs once against the
+   issue anchor before attempt 1 (#126); hosts with no UI disable it with
+   `uiPrototypeCheck: false`. A missing prototype terminates immediately, while
+   CLEAR enters the ralph-style loop of up to `maxImplAttempts` (default 8) in the
    **same** sandbox so commits accumulate on the issue branch. All transitions
-   live in the pure state machine; `inner-loop.ts` is I/O glue. Two budgets,
+   live in the pure state machine; `inner-loop.ts` is I/O glue. The classifier
+   spends neither an attempt nor a review round and is rerun after a fresh
+   HARD-ERROR cycle. Two budgets,
    impl attempts and `maxReviewRounds` (default 8, equal to `maxImplAttempts`),
    and they are NOT independent (#71): a round is never spent without an
    attempt, so the budget is at most the min of the two — exactly that on the
@@ -90,7 +95,9 @@ without consuming one of `maxParallelIssues` slots.
    exhaust on the same attempt and park the issue with the terminal carrying
    the latest review; `DEFAULT_MAX_REVIEW_ROUNDS`'s comment in `src/config.ts`
    owns the number and the two dogfooding exhaustions behind it (#8, #66). The
-   reviewer is strictly advisory and read-only. After a clean, on-branch
+   UI classifier and reviewer are strictly advisory and read-only; each
+   invocation snapshots branch tip, status and HEAD, and any mutation parks the
+   issue with the managed clone preserved. After a clean, on-branch
    COMPLETE, gate-1 and the reviewer run concurrently against the same commit
    (#123). A reviewer write always parks; otherwise a red gate discards the
    review result without spending a round or updating reviewer prose, while any
@@ -185,9 +192,9 @@ from that state and provider or landing outcomes.
 - **Per-issue git and podman isolation (#98, #28).** Issue and merger trees are
   hardlink clones of the host-only bare cache; no container mounts the cache,
   and each sandbox can write only its own repository. Gate containers get an
-  empty tmpfs over `.git`, while reviewer writes are detected and parked for
-  human inspection. The corollary: an attempt's commits live in the clone until
-  a host-side fetch publishes them, so removing a clone is where work can be
+  empty tmpfs over `.git`, while UI-check and reviewer writes are detected and
+  parked for human inspection. The corollary: an attempt's commits live in the
+  clone until a host-side fetch publishes them, so removing a clone is where work can be
   destroyed — `reclaimIssueClone` (`src/agent-sandbox.ts`) is the ONE spelling
   of that removal, for the sandbox's `close()` and finalize alike: publish the
   branch and pin an off-branch HEAD in the cache first, delete only once the
@@ -342,9 +349,10 @@ from that state and provider or landing outcomes.
   rotated away. Not a bind mount: that would be a writable channel from a
   sandbox back onto the host's credential, with three parallel sandboxes as
   concurrent writers on one file.
-- **A role names its CLI as well as its model (#19, #72, #74, #121).**
+- **A role names its CLI as well as its model (#19, #72, #74, #121, #126).**
   `implementerAgent` / `reviewerAgent` / `mergerAgent`, all defaulting to
-  `claude`, plus `reviewerQualityAgent` defaulting to `reviewerAgent`, beside
+  `claude`, plus `uiCheckAgent` defaulting to `implementerAgent` and
+  `reviewerQualityAgent` defaulting to `reviewerAgent`, beside
   model ids that are per call: the reviewer's two passes are independently
   routed since nothing resumes a session between them, and
   `assertRoleModelIdNamed` therefore runs per PASS against that pass's own
@@ -366,7 +374,8 @@ from that state and provider or landing outcomes.
   NAME→factory map, each provider's credential and `requiredAgentProviders`;
   its header owns why the set is CLOSED at what the driver can build (a config
   is a program, so a name nothing implements is #66's silent failure).
-  Preflight refuses per routed provider across all three roles. The resolve
+  Preflight refuses per provider a run will actually invoke; the UI-check
+  provider is omitted when `uiPrototypeCheck` is off. The resolve
   invocation uses the same provider boundary for argv, credential env and
   parsed output while keeping its raw streams verbatim in attempt logs. A
   provider's parser answers in SEVEN registers and the rule no new one may break
@@ -412,8 +421,10 @@ from that state and provider or landing outcomes.
   metered key and a subscription picks the metered one ITSELF (both vendors do)
   and the only symptom is a bill. A warning, never a refusal — both configs run,
   and sandbar cannot know which account the operator meant to spend.
-- **Token contracts.** Implementer: `<promise>COMPLETE|NEEDS-INFO|
-  NEEDS-UI-PROTOTYPE</promise>`; resolve loop: `COMMITTED|ABANDON`; anything
+- **Token contracts.** UI check: `<ui-check>CLEAR|PROTOTYPE-NEEDED</ui-check>`,
+  with the latter followed by `<ui-impact>`. Implementer:
+  `<promise>COMPLETE|NEEDS-INFO|NEEDS-UI-PROTOTYPE</promise>`; resolve loop:
+  `COMMITTED|ABANDON`; anything
   else re-prompts. Reviewer: optional free-text `<spec-gap>` (correctness pass
   only), then `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`. The gap records
   the unanswered specification question and the answer the reviewer applied;

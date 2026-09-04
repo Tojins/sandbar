@@ -32,7 +32,9 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // has in chunk-land.ts.
   "git-ops.ts": 1,
   "gate-stack.ts": 7,
-  "inner-loop.ts": 8,
+  // The UI-check invocation (#126) classifies a failed read-only agent write
+  // before rethrowing the original invocation error, mirroring the reviewer.
+  "inner-loop.ts": 9,
   "keepawake-hold.ts": 1,
   "keepawake.ts": 1,
   "lock.ts": 4,

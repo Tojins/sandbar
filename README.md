@@ -274,7 +274,8 @@ The sandbox base-image contract is `/bin/sh`, CA certificates, and either git
 or one of apt/apk/dnf so sandbar can install it. After resolving that image,
 sandbar adds a generated layer containing a uid-1000 `agent` user, git, and
 exactly the standalone agent CLIs routed by `implementerAgent`, `reviewerAgent`,
-`reviewerQualityAgent` and `mergerAgent`, downloaded on the host and verified
+`uiCheckAgent` (only when `uiPrototypeCheck` is enabled),
+`reviewerQualityAgent`, and `mergerAgent`, downloaded on the host and verified
 against per-architecture hashes pinned by the driver. The same happens after resolving a per-branch
 variant, so an older branch's Containerfile cannot remove a CLI selected by the
 current run. Gate containers keep using the unaugmented image: they judge the

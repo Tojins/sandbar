@@ -556,8 +556,13 @@ export type RunConfig = {
   // A role routed to another provider (below) puts THAT vendor's id in the same
   // field: the fields name the model, not the vendor — and must then name it,
   // since the default is a claude alias (`assertRoleModelIdNamed`).
-  // Defaults: implementer/reviewer/reviewer-quality/merger all "opus".
+  // Defaults: implementer/reviewer/reviewer-quality/merger all "opus"; the UI
+  // checker follows the effective implementer model.
   readonly implementerModelId?: string;
+  // The one pre-attempt UI classifier (#126). Its routing follows the
+  // implementer unless explicitly split, while the check itself defaults on.
+  readonly uiPrototypeCheck?: boolean;
+  readonly uiCheckModelId?: string;
   // The correctness pass — the one that ends an issue (#121). `reviewerAgent`
   // is its CLI.
   readonly reviewerModelId?: string;
@@ -570,11 +575,13 @@ export type RunConfig = {
 
   // Which CLI each role runs (#72, #74) — the vendor knob beside the tiering one.
   // `agent-providers.ts` owns the set, the credential each member needs, and
-  // why the set is closed. All default to "claude", so older configs resolve
-  // unchanged. Naming another one obliges the role's model
+  // why the set is closed. The three base roles default to "claude"; UI check
+  // follows the implementer and quality review follows the reviewer. Naming
+  // another one obliges the role's model
   // id: the two knobs are independent, which is what lets a config be moved
   // half-way, and half-way runs `codex exec --model opus` every attempt.
   readonly implementerAgent?: AgentProviderName;
+  readonly uiCheckAgent?: AgentProviderName;
   readonly reviewerAgent?: AgentProviderName;
   // The quality pass's CLI (#121). Defaults to `reviewerAgent`, so a config
   // that says nothing keeps one reviewer vendor. Routing it elsewhere is what
@@ -596,6 +603,7 @@ export type RunConfig = {
   // change, and the level a run used is on its log line (`effort=`) or
   // provably nowhere.
   readonly implementerEffort?: string;
+  readonly uiCheckEffort?: string;
   readonly reviewerEffort?: string;
   readonly reviewerQualityEffort?: string;
   readonly mergerEffort?: string;
@@ -773,6 +781,7 @@ export type ResolvedConfig = Required<
     | "mergeMode"
     | "requiresSandbar"
     | "implementerEffort"
+    | "uiCheckEffort"
     | "reviewerEffort"
     | "reviewerQualityEffort"
     | "mergerEffort"
@@ -783,6 +792,7 @@ export type ResolvedConfig = Required<
   // default), and #82's rule is that an absent measurement never becomes a
   // placeholder.
   readonly implementerEffort?: string;
+  readonly uiCheckEffort?: string;
   readonly reviewerEffort?: string;
   readonly reviewerQualityEffort?: string;
   readonly mergerEffort?: string;
@@ -796,6 +806,7 @@ export const DEFAULT_WORK_DIR = ".sandbar";
 export const DEFAULT_SOURCE_BRANCH = "main";
 export const DEFAULT_CONTAINERFILE_PATH = "Containerfile";
 export const DEFAULT_IMPLEMENTER_MODEL_ID = "opus";
+export const DEFAULT_UI_PROTOTYPE_CHECK = true;
 export const DEFAULT_REVIEWER_MODEL_ID = "opus";
 export const DEFAULT_REVIEWER_QUALITY_MODEL_ID = "opus";
 export const DEFAULT_MERGER_MODEL_ID = "opus";
@@ -1798,6 +1809,13 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   // because THAT has to partition the host identically to proper-lockfile, which
   // resolves symlinks — two different jobs.
   const cwd = resolve(config.cwd ?? DEFAULT_CWD());
+  const uiPrototypeCheck =
+    config.uiPrototypeCheck ?? DEFAULT_UI_PROTOTYPE_CHECK;
+  if (typeof uiPrototypeCheck !== "boolean") {
+    throw new SandbarError(
+      `config.uiPrototypeCheck must be a boolean, got ${JSON.stringify(config.uiPrototypeCheck)}.`,
+    );
+  }
   // Hoisted out of the literal below because the model ids are read against
   // them: a role's CLI and a role's model are independent fields that have to
   // agree, and the RAW id is what says whether the operator named one (#72).
@@ -1805,6 +1823,17 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     "implementerAgent",
     config.implementerAgent,
   );
+  const uiCheckAgent = parseAgentProviderName(
+    "uiCheckAgent",
+    config.uiCheckAgent ?? implementerAgent,
+  );
+  // A model id follows the implementer only while the provider does too. Once
+  // the UI checker is routed elsewhere, its model must be named independently:
+  // an implementer model says nothing about another vendor's id space (#126).
+  const inheritedUiCheckModelId =
+    config.uiCheckAgent === undefined || uiCheckAgent === implementerAgent
+      ? config.implementerModelId
+      : undefined;
   const reviewerAgent = parseAgentProviderName("reviewerAgent", config.reviewerAgent);
   // Defaulted to the correctness pass's CLI rather than to "claude": one
   // reviewer vendor stays one field, and #121's split is opt-in (#72's
@@ -1815,6 +1844,21 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   );
   const mergerAgent = parseAgentProviderName("mergerAgent", config.mergerAgent);
   assertRoleModelIdNamed("implementer", implementerAgent, config.implementerModelId);
+  if (uiPrototypeCheck) {
+    assertRoleModelIdNamed(
+      "uiCheck",
+      uiCheckAgent,
+      config.uiCheckModelId ?? inheritedUiCheckModelId,
+      {
+        agentField:
+          config.uiCheckAgent === undefined ? "implementerAgent" : "uiCheckAgent",
+        modelField:
+          config.uiCheckAgent === undefined
+            ? "implementerModelId"
+            : "uiCheckModelId",
+      },
+    );
+  }
   assertRoleModelIdNamed("reviewer", reviewerAgent, config.reviewerModelId);
   // Per PASS, against that pass's own provider (#121): a config that routes
   // quality away from claude and leaves the model id at the "opus" default is
@@ -1834,6 +1878,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   // CLI's to refuse — see the field's note.
   for (const field of [
     "implementerEffort",
+    "uiCheckEffort",
     "reviewerEffort",
     "reviewerQualityEffort",
     "mergerEffort",
@@ -1855,11 +1900,17 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     sourceBranch,
     images,
     implementerModelId: config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,
+    uiPrototypeCheck,
+    uiCheckModelId:
+      config.uiCheckModelId ??
+      inheritedUiCheckModelId ??
+      DEFAULT_IMPLEMENTER_MODEL_ID,
     reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
     reviewerQualityModelId:
       config.reviewerQualityModelId ?? DEFAULT_REVIEWER_QUALITY_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     implementerAgent,
+    uiCheckAgent,
     reviewerAgent,
     reviewerQualityAgent,
     mergerAgent,

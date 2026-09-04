@@ -500,9 +500,10 @@ type FinalizeKindInput =
       readonly latestReviewerProse: string;
     }
   | {
-      readonly kind: "reviewer-wrote";
+      readonly kind: "read-only-agent-wrote";
       readonly issue: IssueRef;
       readonly latestReviewerProse: string;
+      readonly actor: "reviewer" | "UI checker";
     }
   | {
       readonly kind: "hard-error";
@@ -619,7 +620,7 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
   "needs-ui-prototype",
   "needs-human",
   "review-budget-exhausted",
-  "reviewer-wrote",
+  "read-only-agent-wrote",
   "silent-noop-exhausted",
 ]);
 
@@ -632,8 +633,8 @@ export function finalizationIntendsNotReady(result: FinalizeResult): boolean {
 
 // The one caller that keeps a clone the reclaim rule would remove — see the
 // module header.
-const REVIEWER_WROTE_KEEP =
-  "the reviewer changed the repository; kept for human inspection";
+const READ_ONLY_AGENT_WROTE_KEEP =
+  "a read-only agent changed the repository; kept for human inspection";
 
 const reclaimClone = (
   input: FinalizeInput,
@@ -641,7 +642,7 @@ const reclaimClone = (
 ): Promise<IssueCloneReclaim> =>
   adapter.reclaimIssueClone(
     input.issue.branch,
-    input.kind === "reviewer-wrote" ? REVIEWER_WROTE_KEEP : undefined,
+    input.kind === "read-only-agent-wrote" ? READ_ONLY_AGENT_WROTE_KEEP : undefined,
   );
 
 // What a preserved clone means for the cache branch an arm was about to
@@ -993,9 +994,9 @@ export async function finalizeOne(
       requireFlip(r, n);
       return { kind: "pushed" };
     }
-    case "reviewer-wrote": {
+    case "read-only-agent-wrote": {
       const n = issueNumberOf(input.issue);
-      // Keep the clone: uncommitted reviewer writes cannot travel through a
+      // Keep the clone: uncommitted read-only-agent writes cannot travel through a
       // push, and deleting it would destroy the evidence this terminal exists
       // to hand to a human. Reclaiming still publishes the branch first, which
       // is what the push below reads.
@@ -1008,7 +1009,7 @@ export async function finalizeOne(
       }
       await adapter.postComment(
         n,
-        `${BOT_COMMENT_PREFIX} stopped because the read-only reviewer changed the issue repository. ` +
+        `${BOT_COMMENT_PREFIX} stopped because the read-only ${input.actor} changed the issue repository. ` +
           `The write is contained to this issue and its managed clone has been preserved for human inspection.` +
           (pushFailure === null
             ? ""

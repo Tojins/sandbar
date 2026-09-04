@@ -191,7 +191,9 @@ describe("requiredAgentProviders", () => {
   it("is just claude for the default routing", () => {
     expect(
       requiredAgentProviders({
+        uiPrototypeCheck: true,
         implementerAgent: "claude",
+        uiCheckAgent: "claude",
         reviewerAgent: "claude",
         reviewerQualityAgent: "claude",
         mergerAgent: "claude",
@@ -202,7 +204,9 @@ describe("requiredAgentProviders", () => {
   it("adds the provider a role is routed to", () => {
     expect(
       requiredAgentProviders({
+        uiPrototypeCheck: true,
         implementerAgent: "codex",
+        uiCheckAgent: "codex",
         reviewerAgent: "claude",
         reviewerQualityAgent: "claude",
         mergerAgent: "claude",
@@ -216,7 +220,9 @@ describe("requiredAgentProviders", () => {
   it("does not require claude when no role names it (#74)", () => {
     expect(
       requiredAgentProviders({
+        uiPrototypeCheck: true,
         implementerAgent: "codex",
+        uiCheckAgent: "codex",
         reviewerAgent: "codex",
         reviewerQualityAgent: "codex",
         mergerAgent: "codex",
@@ -231,7 +237,9 @@ describe("requiredAgentProviders", () => {
   it("adds the provider only the reviewer's quality pass names (#121)", () => {
     expect(
       requiredAgentProviders({
+        uiPrototypeCheck: true,
         implementerAgent: "claude",
+        uiCheckAgent: "claude",
         reviewerAgent: "claude",
         reviewerQualityAgent: "codex",
         mergerAgent: "claude",
@@ -243,18 +251,39 @@ describe("requiredAgentProviders", () => {
   // would read as two different failures for one state.
   it("orders by the canonical list, not by which role named it", () => {
     const a = requiredAgentProviders({
+      uiPrototypeCheck: true,
       implementerAgent: "codex",
+      uiCheckAgent: "codex",
       reviewerAgent: "claude",
       reviewerQualityAgent: "claude",
       mergerAgent: "claude",
     });
     const b = requiredAgentProviders({
+      uiPrototypeCheck: true,
       implementerAgent: "claude",
+      uiCheckAgent: "claude",
       reviewerAgent: "codex",
       reviewerQualityAgent: "claude",
       mergerAgent: "claude",
     });
     expect(a).toEqual(b);
+  });
+
+  it("includes the UI-check provider only while the check is enabled (#126)", () => {
+    const roles = {
+      implementerAgent: "claude" as const,
+      uiCheckAgent: "codex" as const,
+      reviewerAgent: "claude" as const,
+      reviewerQualityAgent: "claude" as const,
+      mergerAgent: "claude" as const,
+    };
+    expect(requiredAgentProviders({ ...roles, uiPrototypeCheck: true })).toEqual([
+      "claude",
+      "codex",
+    ]);
+    expect(requiredAgentProviders({ ...roles, uiPrototypeCheck: false })).toEqual([
+      "claude",
+    ]);
   });
 });
 

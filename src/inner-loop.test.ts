@@ -2,36 +2,43 @@ import { describe, expect, it, vi } from "vitest";
 
 const innerLoopMocks = vi.hoisted(() => ({
   buildPrompt: vi.fn(async () => "implementer prompt"),
+  buildUiCheckPrompt: vi.fn(async () => "ui check prompt"),
   buildReviewerPrompts: vi.fn(),
+  branchTip: vi.fn(async () => "tip-a" as string | null),
   dirtyWorktreePaths: vi.fn(async () => [] as string[]),
   headMismatch: vi.fn(async () => null),
+  symbolicHeadRef: vi.fn(async () => "refs/heads/sandbar/issue-126" as string | null),
 }));
 
 vi.mock("./prompt.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./prompt.js")>()),
   buildPrompt: innerLoopMocks.buildPrompt,
+  buildUiCheckPrompt: innerLoopMocks.buildUiCheckPrompt,
   buildReviewerPrompts: innerLoopMocks.buildReviewerPrompts,
 }));
 
 vi.mock("./git-ops.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./git-ops.js")>()),
+  branchTip: innerLoopMocks.branchTip,
   dirtyWorktreePaths: innerLoopMocks.dirtyWorktreePaths,
   headMismatch: innerLoopMocks.headMismatch,
+  symbolicHeadRef: innerLoopMocks.symbolicHeadRef,
 }));
 
-import type { Sandbox } from "./agent-sandbox.js";
+import { withPartialOutput, type Sandbox } from "./agent-sandbox.js";
 import {
   enforceReviewerSnapshot,
   priorReviewRound,
   reviewRoundLine,
   reviewerPassRouting,
-  reviewerSnapshotChanged,
+  readOnlyAgentSnapshotChanged,
   runGateAndReviewer,
   runImplementer,
   runInnerLoop,
   runReviewer,
+  runUiCheck,
   runSandboxAndPublish,
-  type ReviewerSnapshot,
+  type ReadOnlyAgentSnapshot,
 } from "./inner-loop.js";
 import { qualityReviewContext } from "./prompt.js";
 import type { ReviewerOutcome } from "./reviewer-run.js";
@@ -43,6 +50,191 @@ const deferred = <T,>() => {
   });
   return { promise, resolve };
 };
+
+describe("runUiCheck (#126)", () => {
+  const context = (runs: readonly string[], lines: string[] = []) => {
+    innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
+    innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
+    innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
+      "refs/heads/sandbar/issue-126",
+    );
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn()
+        .mockResolvedValueOnce({
+          stdout: runs[0] ?? "",
+          commits: [],
+          maxGapMs: 3,
+          toolCalls: 1,
+        })
+        .mockResolvedValueOnce({
+          stdout: runs[1] ?? "",
+          commits: [],
+          maxGapMs: 4,
+          toolCalls: 2,
+        }),
+      preserveWorktree: vi.fn(),
+      syncBranchToCache: vi.fn(),
+    } as unknown as Sandbox;
+    return {
+      sandbox,
+      ctx: {
+        issue: { id: "126", title: "ui check", branch: "sandbar/issue-126" },
+        sandbox,
+        opts: { onOrchestratorLog: (line: string) => lines.push(line) },
+        config: {
+          repo: { owner: "owner", name: "repo" },
+          uiCheckAgent: "codex",
+          uiCheckModelId: "gpt-5.6-sol",
+          uiCheckEffort: "low",
+        },
+      } as unknown as Parameters<typeof runUiCheck>[1],
+    };
+  };
+
+  it("returns a classification from a cold call with no completion signal", async () => {
+    const lines: string[] = [];
+    const { sandbox, ctx } = context(["<ui-check>CLEAR</ui-check>"], lines);
+    await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).resolves.toEqual({
+      kind: "ui-check-result",
+      result: { kind: "CLEAR" },
+    });
+    expect(sandbox.run).toHaveBeenCalledTimes(1);
+    expect(sandbox.run).toHaveBeenCalledWith(expect.objectContaining({
+      name: "ui-check-126",
+      prompt: "ui check prompt",
+      completionSignal: [],
+    }));
+    const invocation = vi.mocked(sandbox.run).mock.calls[0]![0];
+    expect(invocation.agent.name).toBe("codex");
+    const command = invocation.agent.buildPrintCommand({ prompt: "p" }).command;
+    expect(command).toContain("--model 'gpt-5.6-sol'");
+    expect(command).toContain("-c 'model_reasoning_effort=low'");
+    expect(lines[0]).toMatch(
+      /^issue=126 ui-check provider=codex model=gpt-5\.6-sol effort=low durationMs=\d+ toolCalls=1 invocation=1 maxGapMs=3$/,
+    );
+  });
+
+  it("logs complete success and failed-invocation telemetry", async () => {
+    const successLines: string[] = [];
+    const success = context(["<ui-check>CLEAR</ui-check>"], successLines);
+    vi.mocked(success.sandbox.run).mockReset().mockResolvedValueOnce({
+      stdout: "<ui-check>CLEAR</ui-check>",
+      commits: [],
+      silent: false,
+      maxGapMs: 9,
+      usage: {
+        inputTokens: 1,
+        cachedInputTokens: 2,
+        cacheWriteInputTokens: 3,
+        outputTokens: 4,
+        reasoningTokens: 5,
+        apiMs: 6,
+        resolvedModel: "resolved",
+        models: 2,
+        terminalReason: "end_turn",
+      },
+      toolCalls: 7,
+      peakContext: 8,
+      rateLimit: {
+        status: "allowed_warning",
+        window: "five_hour",
+        utilization: 0.9,
+        resetsAt: 42,
+      },
+    });
+    await runUiCheck({ kind: "run-ui-check" }, success.ctx);
+    expect(successLines[0]).toMatch(
+      /^issue=126 ui-check provider=codex model=gpt-5\.6-sol effort=low durationMs=\d+ tokens=in:1,cached:2,write:3,out:4,reasoning:5 toolCalls=7 peakContext=8 apiMs=6 resolvedModel=resolved models=2 terminalReason=end_turn quotaStatus=allowed_warning quotaWindow=five_hour quotaUtilization=0\.9 quotaResetsAt=42 invocation=1 maxGapMs=9$/,
+    );
+
+    const failureLines: string[] = [];
+    const failure = context([], failureLines);
+    const err = withPartialOutput(
+      new Error("disconnected"),
+      "partial",
+      { inputTokens: 11, outputTokens: 12 },
+      13,
+      14,
+      { status: "rejected", window: "weekly", utilization: 1 },
+    );
+    vi.mocked(failure.sandbox.run).mockReset().mockRejectedValueOnce(err);
+    await expect(runUiCheck({ kind: "run-ui-check" }, failure.ctx)).rejects.toBe(err);
+    expect(failureLines[0]).toMatch(
+      /^issue=126 ui-check provider=codex model=gpt-5\.6-sol effort=low durationMs=\d+ tokens=in:11,out:12 toolCalls=13 peakContext=14 quotaStatus=rejected quotaWindow=weekly quotaUtilization=1 invocation=1$/,
+    );
+  });
+
+  it("offers one cold correction for a malformed answer", async () => {
+    const { sandbox, ctx } = context([
+      "<ui-check>PROTOTYPE-NEEDED</ui-check>",
+      "<ui-check>CLEAR</ui-check>",
+    ]);
+    await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).resolves.toMatchObject({
+      result: { kind: "CLEAR" },
+    });
+    expect(sandbox.run).toHaveBeenCalledTimes(2);
+    expect(sandbox.run).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      name: "ui-check-126-reprompt",
+      prompt: expect.stringContaining("provided no `<ui-impact>` block"),
+      completionSignal: [],
+    }));
+  });
+
+  it("treats a second malformed answer as a harness failure", async () => {
+    const { ctx } = context(["no token", "still no token"]);
+    await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).rejects.toThrow(
+      /no valid classification after its one re-prompt/,
+    );
+  });
+
+  it.each([
+    ["committed", () =>
+      innerLoopMocks.branchTip
+        .mockResolvedValueOnce("tip-a")
+        .mockResolvedValueOnce("tip-b")],
+    ["dirtied", () =>
+      innerLoopMocks.dirtyWorktreePaths
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce(["M src/x.ts"])],
+    ["moved HEAD", () =>
+      innerLoopMocks.symbolicHeadRef
+        .mockResolvedValueOnce("refs/heads/sandbar/issue-126")
+        .mockResolvedValueOnce(null)],
+  ])("parks when the UI checker %s the repository", async (_name, mutate) => {
+    const { sandbox, ctx } = context(["<ui-check>CLEAR</ui-check>"]);
+    mutate();
+    await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).resolves.toMatchObject({
+      kind: "ui-checker-wrote",
+      detail: expect.stringContaining("UI checker changed git state"),
+    });
+    expect(sandbox.preserveWorktree).toHaveBeenCalledWith(
+      expect.stringContaining("ui checker changed the repository"),
+    );
+    expect(sandbox.syncBranchToCache).toHaveBeenCalledOnce();
+  });
+
+  it("parks a failed invocation that changed the repository and keeps its partial transcript", async () => {
+    const { sandbox, ctx } = context([]);
+    innerLoopMocks.dirtyWorktreePaths
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(["M src/x.ts"]);
+    const err = withPartialOutput(
+      new Error("disconnected"),
+      "partial checker transcript",
+    );
+    vi.mocked(sandbox.run).mockReset().mockRejectedValueOnce(err);
+
+    await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).resolves.toMatchObject({
+      kind: "ui-checker-wrote",
+      detail: expect.stringContaining("partial checker transcript"),
+    });
+    expect(sandbox.preserveWorktree).toHaveBeenCalledWith(
+      expect.stringContaining("ui checker changed the repository"),
+    );
+    expect(sandbox.syncBranchToCache).toHaveBeenCalledOnce();
+  });
+});
 
 describe("silent implementer attempt policy (#116)", () => {
   const sandboxResult = (stdout: string, silent: boolean, commits: string[] = []) => ({
@@ -614,8 +806,8 @@ describe("reviewRoundLine (#88, #121)", () => {
 });
 
 const snapshot = (
-  over: Partial<ReviewerSnapshot> = {},
-): ReviewerSnapshot => ({
+  over: Partial<ReadOnlyAgentSnapshot> = {},
+): ReadOnlyAgentSnapshot => ({
   tip: "tip-a",
   dirtyPaths: [],
   headRef: "refs/heads/sandbar/issue-98-example",
@@ -630,7 +822,7 @@ describe("reviewer write detection", () => {
     ["worktree became dirty", snapshot({ dirtyPaths: ["M src/x.ts"] }), true],
     ["HEAD moved", snapshot({ headRef: null }), true],
   ])("classifies %s", (_name, after, changed) => {
-    expect(reviewerSnapshotChanged(snapshot(), after)).toBe(changed);
+    expect(readOnlyAgentSnapshotChanged(snapshot(), after)).toBe(changed);
   });
 
   it("preserves a deleted issue ref without trying to publish it", async () => {

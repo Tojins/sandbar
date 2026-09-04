@@ -1114,13 +1114,14 @@ describe("finalizeOne", () => {
     ]);
   });
 
-  it("reviewer-wrote: leaves the preserved clone in place and publishes the handoff", async () => {
+  it("read-only-agent-wrote: leaves the preserved clone in place and publishes the handoff", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
       {
-        kind: "reviewer-wrote",
+        kind: "read-only-agent-wrote",
         issue: i,
+        actor: "reviewer",
         latestReviewerProse: "Reviewer changed git state. Branch tip before: a; after: b.",
       },
       adapter,
@@ -1133,19 +1134,36 @@ describe("finalizeOne", () => {
       { branch: i.branch, keep: expect.stringContaining("human inspection") },
     ]);
     expect(calls.comments[0]!.body).toContain("preserved for human inspection");
+    expect(calls.comments[0]!.body).toContain("read-only reviewer");
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
   });
 
-  it("reviewer-wrote: parks and comments when a rewound branch cannot be pushed", async () => {
+  it("read-only-agent-wrote names the UI checker in its handoff", async () => {
+    const { adapter, calls } = makeAdapter();
+    await finalizeOne(
+      {
+        kind: "read-only-agent-wrote",
+        issue: issue(126),
+        actor: "UI checker",
+        latestReviewerProse: "UI checker changed git state.",
+      },
+      adapter,
+      LABELS,
+    );
+    expect(calls.comments[0]!.body).toContain("read-only UI checker");
+  });
+
+  it("read-only-agent-wrote: parks and comments when a rewound branch cannot be pushed", async () => {
     const { adapter, calls } = makeAdapter({ pushError: "non-fast-forward" });
     const i = issue(45);
 
     const action = await finalizeOne(
       {
-        kind: "reviewer-wrote",
+        kind: "read-only-agent-wrote",
         issue: i,
+        actor: "reviewer",
         latestReviewerProse: "Reviewer rewound the branch.",
       },
       adapter,
@@ -1163,14 +1181,15 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("authoritative state");
   });
 
-  it("reviewer-wrote: does not park before the handoff comment succeeds", async () => {
+  it("read-only-agent-wrote: does not park before the handoff comment succeeds", async () => {
     const { adapter, calls } = makeAdapter({ postCommentError: "comment failed" });
 
     await expect(
       finalizeOne(
         {
-          kind: "reviewer-wrote",
+          kind: "read-only-agent-wrote",
           issue: issue(45),
+          actor: "reviewer",
           latestReviewerProse: "Reviewer changed git state.",
         },
         adapter,
@@ -1182,13 +1201,14 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toEqual([]);
   });
 
-  it("reviewer-wrote on a CLOSED issue skips tracker writes and preserves the clone", async () => {
+  it("read-only-agent-wrote on a CLOSED issue skips tracker writes and preserves the clone", async () => {
     const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
     const i = issue(45);
     const action = await finalizeOne(
       {
-        kind: "reviewer-wrote",
+        kind: "read-only-agent-wrote",
         issue: i,
+        actor: "reviewer",
         latestReviewerProse: "Reviewer deleted the issue ref.",
       },
       adapter,

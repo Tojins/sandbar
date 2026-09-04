@@ -1,8 +1,8 @@
-// 3-layer prompt assembly for the inner-loop implementer and reviewer:
+// Prompt assembly for the inner-loop roles:
 // project anchor (shared verbatim by both agents), issue anchor
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
-// branch diff, sandbox-stack report #44, gate trace, reviewer prose, UI-impact
-// check #21, and the same coding standards the reviewer applies plus a live
+// branch diff, sandbox-stack report #44, gate trace, reviewer prose, and the
+// same coding standards the reviewer applies plus a live
 // pre-promise diff checklist (#78); reviewer: diff + commits, split into a
 // self-sufficient quality pass (tests and standards) and the correctness pass
 // gated on it (#19, #121), plus every earlier successful review round (#88).
@@ -10,6 +10,8 @@
 // session — which is what lets the two sit on different vendors (#121).
 // After its first whole-branch quality listing, that history also anchors a
 // strict review of only the lines no quality pass has seen yet (#107).
+// The UI checker (#126) is intentionally smaller: issue anchor plus its own
+// decision contract, with no project standards, diff or prior-round history.
 //
 // The issue anchor uses `--json`, NOT the human-readable `--comments` form —
 // that one is TTY-sensitive and, when piped, omits the body. A fetch failure
@@ -57,6 +59,7 @@ const REVIEWER_QUALITY_VERIFY_TPL = loadTemplate("reviewer-quality-verify");
 const REVIEWER_PRIOR_ROUNDS_TPL = loadTemplate("reviewer-prior-rounds");
 const REVIEWER_PROJECT_STANDARDS_TPL = loadTemplate("reviewer-project-standards");
 const IMPLEMENTER_TPL = loadTemplate("implementer");
+const UI_CHECK_TPL = loadTemplate("ui-check");
 const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
 const IMPLEMENTER_REVIEWER_FEEDBACK_TPL = loadTemplate("implementer-reviewer-feedback");
 const IMPLEMENTER_ESCALATION_TPL = loadTemplate("implementer-escalation");
@@ -271,6 +274,17 @@ export async function buildPrompt(
     await buildAttemptSlot(inputs, anchor),
   ];
   return layers.join("\n\n---\n\n");
+}
+
+// One cold, pre-attempt classification (#126). It runs in the issue sandbox so
+// repository paths named by the issue are readable, but only the issue anchor
+// bears on the question. In particular, project standards and branch history
+// are deliberately absent rather than optional slots callers could fill.
+export async function buildUiCheckPrompt(
+  issueId: string,
+  repo: RepoRef,
+): Promise<string> {
+  return [await buildIssueAnchor(issueId, repo), UI_CHECK_TPL].join("\n\n---\n\n");
 }
 
 // Both passes review one immutable, gate-green branch snapshot. Build every
