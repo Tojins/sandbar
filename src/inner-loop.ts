@@ -103,6 +103,7 @@ import {
   continueReviewerSession,
   decideReviewRound,
   runReviewerInvocations,
+  type CompletedReviewerOutcome,
   type FinishedReviewRoundDecision,
   type ReviewerOutcome,
   type ReviewerPass,
@@ -123,11 +124,15 @@ export const FAILURE_TAIL_LINES = 200;
 // The runner-owned projection from pass outcomes to prompt history (#88).
 // A harness failure produced no review, so the whole round contributes no
 // entry; a correctness rejection has no follow-up pass by construction.
+// Completed outcomes only: a detected reviewer write (#98) aborts the round
+// before any history could be recorded, so an abort is not a case this
+// projection answers for — the parameter type says so rather than the body
+// treating "not harness-failed" as "reviewed".
 export function priorReviewRound(
   reviewRound: number,
   head: string,
-  correctness: ReviewerOutcome,
-  followup: ReviewerOutcome | undefined,
+  correctness: CompletedReviewerOutcome,
+  followup: CompletedReviewerOutcome | undefined,
 ): PriorReviewRound | null {
   if (correctness.kind === "harness-failed") return null;
   if (correctness.verdict.verdict === "CHANGES-REQUESTED") {
@@ -1174,21 +1179,25 @@ async function runReviewer(
   // artefact of what the reviewer did or did not say.
   const afterCorrectness = decideReviewRound(correctness);
   let decision: FinishedReviewRoundDecision;
-  let followup: ReviewerOutcome | undefined;
+  // Completed only: the abort arm below returns, so nothing past it holds a
+  // reviewer-write outcome, and `decideReviewRound`/`priorReviewRound` are
+  // both spelled for completed outcomes.
+  let followup: CompletedReviewerOutcome | undefined;
   let failed: { readonly pass: ReviewerPass; readonly invocations: number } | null =
     correctness.kind === "harness-failed"
       ? { pass: "correctness", invocations: correctness.invocations }
       : null;
 
   if (afterCorrectness.kind === "run-followup") {
-    followup = await runPass(
+    const followupOutcome = await runPass(
       "followup",
       reviewerPrompts.followup,
       config.reviewerFollowupModelId,
     );
-    if (followup.kind === "aborted") {
-      return preserveReviewerWrite(followup, "followup", transcripts);
+    if (followupOutcome.kind === "aborted") {
+      return preserveReviewerWrite(followupOutcome, "followup", transcripts);
     }
+    followup = followupOutcome;
     transcripts.push(passTranscript("followup", followup.transcript));
     if (followup.kind === "harness-failed") {
       failed = { pass: "followup", invocations: followup.invocations };
