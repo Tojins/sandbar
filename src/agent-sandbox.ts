@@ -2304,6 +2304,7 @@ export const createSandbox = async (
     maxGapMs: number;
     usage?: AgentUsage;
     toolCalls: number;
+    rateLimit?: RateLimitMeasurement;
   }> => {
     // Read host git identity, then propagate into the sandbox. safe.directory
     // is set per-run (load-bearing: bind mount is owned by a different UID and
@@ -2420,6 +2421,7 @@ export const createSandbox = async (
         maxGapMs: iter.maxGapMs,
         ...(iter.signalMs === undefined ? {} : { signalMs: iter.signalMs }),
         ...(iter.usage === undefined ? {} : { usage: iter.usage }),
+        ...(iter.rateLimit === undefined ? {} : { rateLimit: iter.rateLimit }),
         toolCalls: iter.toolCalls,
       };
     },

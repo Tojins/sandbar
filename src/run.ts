@@ -125,7 +125,6 @@ import { realpathSync } from "node:fs";
 
 import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
 import { AgentQuotaError } from "./agent-sandbox.js";
-import type { RateLimitMeasurement } from "./agent-run-end.js";
 import {
   type SweepResult,
   cleanupOrphanContainers,
@@ -170,6 +169,7 @@ import {
   planFingerprint,
   remainingBudget,
 } from "./exit-conditions.js";
+import { createRunQuotaState } from "./inner-loop.js";
 import {
   type FinalizeInput,
   finalizeAll,
@@ -774,16 +774,7 @@ export async function run(
     maxTotalIssues: config.maxTotalIssues,
     relaunchAfterLanding: config.relaunchAfterLanding,
   });
-  const closedProviders = new Map<"claude" | "codex", RateLimitMeasurement>();
-  const quotaState = {
-    get: (provider: "claude" | "codex") => closedProviders.get(provider),
-    close: (
-      provider: "claude" | "codex",
-      measurement: RateLimitMeasurement,
-    ) => {
-      closedProviders.set(provider, measurement);
-    },
-  };
+  const quotaState = createRunQuotaState();
   // The one stop this run ends on (#70). Every break out of the loop below
   // assigns it what `announceExit` has already emitted, and the process exit
   // code comes off it at the bottom of the function — so "did this stop

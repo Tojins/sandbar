@@ -876,6 +876,7 @@ describe("decideAfterTerminal", () => {
       strandedHead: null,
       },
       { type: "NEEDS-HUMAN-REVIEW", latestReviewerProse: "prose" },
+      { type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42 },
     ];
     for (const v of verdicts) {
       expect(decideAfterTerminal(v, 0)).toEqual({ kind: "surface" });

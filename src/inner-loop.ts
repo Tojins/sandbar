@@ -278,7 +278,15 @@ export type RunQuotaState = {
   close(provider: AgentProviderName, measurement: RateLimitMeasurement): void;
 };
 
-const assertProviderOpen = (
+export const createRunQuotaState = (): RunQuotaState => {
+  const closed = new Map<AgentProviderName, RateLimitMeasurement>();
+  return {
+    get: (provider) => closed.get(provider),
+    close: (provider, measurement) => { closed.set(provider, measurement); },
+  };
+};
+
+export const assertProviderOpen = (
   quotaState: RunQuotaState | undefined,
   provider: AgentProviderName,
 ): void => {

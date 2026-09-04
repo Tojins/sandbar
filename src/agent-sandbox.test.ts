@@ -33,6 +33,7 @@ import {
   type SandboxProvider,
   SANDBOX_REPO_DIR,
   AgentError,
+  AgentQuotaError,
   AgentIdleTimeoutError,
   agentPartialOutput,
   agentPartialUsage,
@@ -1014,6 +1015,17 @@ function scriptedAgent(shellScript: string): AgentProvider {
   };
 }
 
+function scriptedCodexAgent(shellScript: string): AgentProvider {
+  return {
+    name: "codex",
+    env: {},
+    buildPrintCommand() {
+      return { command: shellScript, stdin: "" };
+    },
+    parseStreamLine: parseCodexJsonLine,
+  };
+}
+
 const git = (args: string[], cwd: string) =>
   execFileP("git", args, { cwd, env: { ...process.env, LC_ALL: "C" } });
 
@@ -1081,6 +1093,112 @@ describe("createSandbox integration (local provider)", () => {
       expect(log.stdout.trim()).toBe(run.commits[0]!.sha);
     } finally {
       await sandbox.close();
+    }
+  });
+
+  it("ingests Codex's post-invocation rollout measurement", async () => {
+    const branch = "sandbar/issue-109-codex-allowed";
+    await git(["branch", branch], dir);
+    const codexHome = await mkdtemp(join(tmpdir(), "asb-codex-home-"));
+    cleanups.push(codexHome);
+    const oldCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    const rollout = join(codexHome, "sessions", "2026", "09", "04", "rollout-test.jsonl");
+    await mkdir(dirname(rollout), { recursive: true });
+    const rolloutLine = JSON.stringify({
+      type: "event_msg", payload: { type: "token_count", rate_limits: {
+        rate_limit_reached_type: null,
+        primary: { rate_limit_type: "seven_day", used_percent: 25, resets_at: 456 },
+      } },
+    });
+    expect(parseCodexRolloutLine(rolloutLine)).toHaveLength(1);
+    await writeFile(rollout, rolloutLine + "\n");
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
+    });
+    try {
+      const run = await sandbox.run({
+        agent: scriptedCodexAgent(`printf '%s\\n' '${JSON.stringify({
+          type: "item.completed", item: { type: "agent_message", text: "done" },
+        })}'`),
+        prompt: "go", completionSignal: [],
+      });
+      expect(run.rateLimit).toEqual({
+        status: "allowed", window: "seven_day", utilization: 0.25, resetsAt: 456,
+      });
+    } finally {
+      await sandbox.close();
+      if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = oldCodexHome;
+    }
+  });
+
+  it.each(["missing", "malformed"] as const)(
+    "preserves Codex's existing failure classification when its rollout is %s",
+    async (shape) => {
+      const branch = `sandbar/issue-109-codex-${shape}`;
+      await git(["branch", branch], dir);
+      const codexHome = await mkdtemp(join(tmpdir(), "asb-codex-home-"));
+      cleanups.push(codexHome);
+      const oldCodexHome = process.env.CODEX_HOME;
+      process.env.CODEX_HOME = codexHome;
+      if (shape === "malformed") {
+        const rollout = join(codexHome, "sessions", "2026", "09", "04", "rollout-test.jsonl");
+        await mkdir(dirname(rollout), { recursive: true });
+        await writeFile(rollout, "not-json\n");
+      }
+      const sandbox = await createSandbox({
+        env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
+      });
+      try {
+        const err = await sandbox.run({
+          agent: scriptedCodexAgent(`printf '%s\\n' '${JSON.stringify({
+            type: "turn.failed", error: { message: "ordinary provider failure" },
+          })}'; exit 1`),
+          prompt: "go", completionSignal: [],
+        }).then(() => null, (e: unknown) => e);
+        expect(err).toBeInstanceOf(AgentError);
+        expect(err).not.toBeInstanceOf(AgentQuotaError);
+        expect((err as Error).message).toContain("ordinary provider failure");
+      } finally {
+        await sandbox.close();
+        if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = oldCodexHome;
+      }
+    },
+  );
+
+  it("turns a failed Codex invocation with a reached rollout window into quota", async () => {
+    const branch = "sandbar/issue-109-codex-rejected";
+    await git(["branch", branch], dir);
+    const codexHome = await mkdtemp(join(tmpdir(), "asb-codex-home-"));
+    cleanups.push(codexHome);
+    const oldCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    const rollout = join(codexHome, "sessions", "2026", "09", "04", "rollout-test.jsonl");
+    await mkdir(dirname(rollout), { recursive: true });
+    await writeFile(rollout, JSON.stringify({
+      type: "event_msg", payload: { type: "token_count", rate_limits: {
+        rate_limit_reached_type: "seven_day",
+        primary: { rate_limit_type: "seven_day", used_percent: 100, resets_at: 789 },
+      } },
+    }) + "\n");
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
+    });
+    try {
+      const err = await sandbox.run({
+        agent: scriptedCodexAgent("exit 1"), prompt: "go", completionSignal: [],
+      }).then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(AgentQuotaError);
+      expect(err).toMatchObject({
+        provider: "codex",
+        measurement: { status: "rejected", window: "seven_day", resetsAt: 789 },
+      });
+    } finally {
+      await sandbox.close();
+      if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = oldCodexHome;
     }
   });
 

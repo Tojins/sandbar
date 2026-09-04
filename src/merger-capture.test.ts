@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildAgentProvider } from "./agent-providers.js";
+import { AgentQuotaError } from "./agent-sandbox.js";
 import {
   buildResolveRunArgv,
   captureAgentRun,
@@ -162,6 +163,31 @@ describe("parseCapturedAgentRun (#74)", () => {
     const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("codex", "m"));
     expect(run.stdout).toBe(raw);
     expect(parseResolveSignal(run.output ?? "")).toEqual({ kind: "COMMITTED" });
+  });
+
+  it("turns a failed Claude capture with a rejected quota event into quota", () => {
+    const raw = JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "rejected", rateLimitType: "five_hour", resetsAt: 123,
+        unifiedWindows: { five_hour: { utilization: 1, resetsAt: 123 } },
+      },
+    });
+    expect(() => parseCapturedAgentRun(
+      { ...captured(raw), exitCode: 1 },
+      buildAgentProvider("claude", "m"),
+    )).toThrow(AgentQuotaError);
+    try {
+      parseCapturedAgentRun(
+        { ...captured(raw), exitCode: 1 },
+        buildAgentProvider("claude", "m"),
+      );
+    } catch (err) {
+      expect(err).toMatchObject({
+        provider: "claude",
+        measurement: { status: "rejected", window: "five_hour", resetsAt: 123 },
+      });
+    }
   });
 
   it("carries usage and all four Codex tool item types beside resolve speech", () => {

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Sandbox } from "./agent-sandbox.js";
 import {
+  assertProviderOpen,
+  createRunQuotaState,
   enforceReviewerSnapshot,
   priorReviewRound,
   reviewRoundLine,
@@ -10,6 +12,7 @@ import {
   runSandboxAndPublish,
   type ReviewerSnapshot,
 } from "./inner-loop.js";
+import { AgentQuotaError } from "./agent-sandbox.js";
 import { qualityReviewContext } from "./prompt.js";
 import type { ReviewerOutcome } from "./reviewer-run.js";
 
@@ -29,6 +32,24 @@ const harnessFailed: ReviewerOutcome = {
   transcript: "",
   invocations: 2,
 };
+
+describe("run-scoped quota closure (#109)", () => {
+  it("short-circuits only later invocations on the closed provider", () => {
+    const state = createRunQuotaState();
+    const measurement = {
+      status: "rejected" as const, window: "five_hour", resetsAt: 42,
+    };
+    state.close("claude", measurement);
+
+    expect(() => assertProviderOpen(state, "claude")).toThrow(AgentQuotaError);
+    expect(() => assertProviderOpen(state, "codex")).not.toThrow();
+    try {
+      assertProviderOpen(state, "claude");
+    } catch (err) {
+      expect(err).toMatchObject({ provider: "claude", measurement });
+    }
+  });
+});
 
 describe("priorReviewRound (#88, #121)", () => {
   const qualityApproved = reviewed("APPROVED", "<verdict>APPROVED</verdict>");

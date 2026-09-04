@@ -252,6 +252,52 @@ describe("comment templates", () => {
 });
 
 describe("finalizeOne", () => {
+  it("quota reclaims then pushes and comments without editing labels", async () => {
+    const { adapter, calls } = makeAdapter();
+    const order: string[] = [];
+    const ordered: FinalizeAdapter = {
+      ...adapter,
+      async reclaimIssueClone(branch, keep) {
+        order.push("reclaim");
+        return adapter.reclaimIssueClone(branch, keep);
+      },
+      async pushBranch(branch) {
+        order.push("push");
+        return adapter.pushBranch(branch);
+      },
+      async postComment(n, body) {
+        order.push("comment");
+        return adapter.postComment(n, body);
+      },
+    };
+    const i = issue(45);
+    const action = await finalizeOne({
+      kind: "quota", issue: i, provider: "codex", window: "seven_day", resetsAt: 42,
+    }, ordered, LABELS);
+
+    expect(action).toEqual({ kind: "pushed" });
+    expect(order).toEqual(["reclaim", "push", "comment"]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
+    expect(calls.pushes).toEqual([i.branch]);
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.comments[0]!.body).toContain("`codex`");
+    expect(calls.comments[0]!.body).toContain("`seven_day`");
+    expect(calls.comments[0]!.body).toContain("1970-01-01T00:00:42.000Z");
+    expect(calls.comments[0]!.body).toContain("remains `ready-for-agent`");
+    expect(calls.labelEdits).toEqual([]);
+  });
+
+  it.each(["push", "comment"] as const)(
+    "quota propagates a required %s failure",
+    async (operation) => {
+      const { adapter } = makeAdapter(operation === "push"
+        ? { pushError: "push failed" }
+        : { postCommentError: "comment failed" });
+      await expect(finalizeOne({
+        kind: "quota", issue: issue(45), provider: "claude", window: "five_hour",
+      }, adapter, LABELS)).rejects.toThrow(`${operation} failed`);
+    },
+  );
   it("merged: removes worktree before deleting branch, drops ready-for-agent on the closed issue, no push, no comment", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
