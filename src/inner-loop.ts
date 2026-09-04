@@ -60,7 +60,7 @@ import * as agentSandbox from "./agent-sandbox.js";
 import { AgentQuotaError, agentPartialOutput, agentPartialUsage, podman } from "./agent-sandbox.js";
 import { formatRateLimitFields, type RateLimitMeasurement } from "./agent-run-end.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
-import { formatUsageFields, sumAgentUsage } from "./agent-usage.js";
+import { formatUsageFields, maxContextDepth, sumAgentUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
 
 import type { ChunkTarget } from "./chunks.js";
@@ -965,6 +965,7 @@ async function runImplementer(
   });
   let attemptUsage = run.usage;
   let attemptToolCalls = run.toolCalls;
+  let attemptPeakContext = run.peakContext;
 
   // The promise nudge: output with NO tag at all gets one same-conversation
   // follow-up before it is allowed to cost an attempt. The observed failure is
@@ -1004,6 +1005,7 @@ async function runImplementer(
     accumulated.push(...nudge.commits);
     attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
     attemptToolCalls += nudge.toolCalls;
+    attemptPeakContext = maxContextDepth(attemptPeakContext, nudge.peakContext);
     const combined = `${run.stdout}\n${nudge.stdout}`;
     signal = parsePromise(combined, {
       commitsAccumulated: accumulated.length,
@@ -1048,7 +1050,7 @@ async function runImplementer(
         `signal=${signal.kind} commits=${run.commits.length} ` +
         `provider=${config.implementerAgent} model=${config.implementerModelId} ` +
         `${durationField(implementerMs)}` +
-        formatUsageFields(attemptUsage, attemptToolCalls) +
+        formatUsageFields(attemptUsage, attemptToolCalls, attemptPeakContext) +
         formatRateLimitFields(run.rateLimit) +
         // Absent when parsed speech carried none of the three promise tokens —
         // for example, an idle kill or a plain process exit. Omitted rather
@@ -1239,6 +1241,7 @@ async function runReviewer(
           maxGapMs: number | undefined,
           usage: AgentUsage | undefined,
           toolCalls: number | undefined,
+          peakContext: number | undefined,
           rateLimit: RateLimitMeasurement | undefined,
         ): Promise<void> => {
           if (!opts.onOrchestratorLog) return;
@@ -1247,7 +1250,7 @@ async function runReviewer(
               `round=${action.reviewRound} pass=${pass} invocation=${invocation} ` +
               `provider=${agent} model=${modelId} ` +
               `${durationField(passTimer())}` +
-              formatUsageFields(usage, toolCalls) +
+              formatUsageFields(usage, toolCalls, peakContext) +
               formatRateLimitFields(rateLimit) +
               (maxGapMs === undefined ? "" : ` maxGapMs=${maxGapMs}`),
           );
@@ -1269,6 +1272,7 @@ async function runReviewer(
             reviewerRun.maxGapMs,
             reviewerRun.usage,
             reviewerRun.toolCalls,
+            reviewerRun.peakContext,
             reviewerRun.rateLimit,
           );
           const event = await detectWrite(beforeInvocation, reviewerRun.stdout);
@@ -1284,6 +1288,7 @@ async function runReviewer(
             undefined,
             partial.usage,
             partial.toolCalls,
+            partial.peakContext,
             partial.rateLimit ??
               (err instanceof AgentQuotaError ? err.measurement : undefined),
           );

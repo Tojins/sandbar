@@ -42,6 +42,12 @@
 // the field is omitted rather than written as `0`, because a zero meaning "not
 // measured" is what a stats reader averages.
 //
+// Agent context depth follows the same #82 rules (#124): `peakContext=<int>` is
+// the maximum per-turn input footprint observed during one invocation, a
+// REPORT only, and absent is omitted. It is deliberately separate from the
+// cumulative token-cost buckets and tool-call count even though all three are
+// rendered on the same invocation line.
+//
 // The terminal lines are written by the TASK that terminated rather than by the
 // reporting loop that collects the cohort, which is a coverage fix as much as a
 // timing one: an outcome reached eight minutes before the cohort settled used

@@ -207,6 +207,7 @@ describe("parseCapturedAgentRun (#74)", () => {
       reasoningTokens: 2,
     });
     expect(run.toolCalls).toBe(4);
+    expect(run.peakContext).toBe(20);
     expect(run.output).toBe("");
   });
 

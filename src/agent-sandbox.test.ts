@@ -124,6 +124,24 @@ describe("parseStreamJsonLine", () => {
     expect(parseStreamJsonLine(line)).toEqual([{ type: "text", text: "Hello world" }]);
   });
 
+  it("reads Claude per-turn depth beside speech without folding it into speech", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      message: {
+        usage: {
+          input_tokens: 10,
+          cache_read_input_tokens: 20,
+          cache_creation_input_tokens: 3,
+        },
+        content: [{ type: "text", text: "answer" }],
+      },
+    });
+    expect(parseStreamJsonLine(line)).toEqual([
+      { type: "context_depth", tokens: 33 },
+      { type: "text", text: "answer" },
+    ]);
+  });
+
   it("flushes buffered text before each allowlisted tool_use, preserving order", () => {
     const line = JSON.stringify({
       type: "assistant",
@@ -434,7 +452,7 @@ describe("parseCodexJsonLine", () => {
         outputTokens: 100,
         reasoningTokens: 60,
       },
-    }]);
+    }, { type: "context_depth", tokens: 2025 }]);
   });
 
   it("normalizes a resumed Codex turn as its own near-total cache-hit ledger", () => {
@@ -453,7 +471,7 @@ describe("parseCodexJsonLine", () => {
       cacheWriteInputTokens: 0,
       outputTokens: 5,
       reasoningTokens: 0,
-    } }]);
+    } }, { type: "context_depth", tokens: 15345 }]);
   });
 
   it("drops a turn.completed event whose usage has no numeric fields", () => {
@@ -480,6 +498,7 @@ describe("parseCodexJsonLine", () => {
       inputTokens: 12,
     });
     expect(speech.toolCalls).toBe(0);
+    expect(speech.peakContext).toBe(12);
   });
 
   it("replaces repeated usage measurements instead of summing them", () => {
@@ -489,6 +508,18 @@ describe("parseCodexJsonLine", () => {
       { type: "usage", usage: { inputTokens: 5, outputTokens: 2 } },
     ]);
     expect(speech.usage).toEqual({ inputTokens: 5, outputTokens: 2 });
+  });
+
+  it("retains the maximum context measurement independently of usage", () => {
+    const speech = createAgentSpeechAccumulator();
+    speech.ingest([
+      { type: "context_depth", tokens: 12 },
+      { type: "context_depth", tokens: 30 },
+      { type: "context_depth", tokens: 20 },
+    ]);
+    expect(speech.peakContext).toBe(30);
+    expect(speech.usage).toBeUndefined();
+    expect(speech.spoken).toBe("");
   });
 
   // Reasoning is the model's own thinking, not its speech. Folded into the

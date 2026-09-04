@@ -173,6 +173,7 @@ export type ResolveAgentRun = {
   readonly verdict: "answer" | "infra" | "quota";
   readonly usage?: AgentUsage;
   readonly toolCalls: number;
+  readonly peakContext?: number;
   readonly rateLimit?: RateLimitMeasurement;
 };
 
@@ -407,7 +408,7 @@ export async function runResolveLoop(
       : null;
     await log(
       `resolve-attempt ${attempt} ${describeRunEnd(run)} container=${run.container}` +
-        formatUsageFields(run.usage, run.toolCalls) +
+        formatUsageFields(run.usage, run.toolCalls, run.peakContext) +
         formatRateLimitFields(run.rateLimit) +
         (logPath ? ` log=${logPath}` : ""),
     );
