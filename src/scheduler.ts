@@ -17,6 +17,8 @@ export class ContinuousPool<T, R> {
   readonly #ongoing = new Map<string, T>();
   readonly #started = new Set<string>();
   readonly #retries: T[] = [];
+  #landings = 0;
+  #terminalsSinceLanding = 0;
 
   constructor(readonly width: number, readonly idOf: (issue: T) => string) {
     if (!Number.isInteger(width) || width < 1) {
@@ -28,6 +30,8 @@ export class ContinuousPool<T, R> {
   get ongoingCount(): number { return this.#ongoing.size; }
   get hasPendingTerminals(): boolean { return this.#pendingTerminals.length > 0; }
   get isQuiescent(): boolean { return this.#active.size === 0 && this.#ongoing.size === 0; }
+  get landings(): number { return this.#landings; }
+  get terminalsSinceLanding(): number { return this.#terminalsSinceLanding; }
   ongoingIssues(): readonly T[] { return [...this.#ongoing.values()]; }
   startedIds(): ReadonlySet<string> { return new Set(this.#started); }
 
@@ -83,5 +87,12 @@ export class ContinuousPool<T, R> {
     const id = this.idOf(issue);
     if (!this.#ongoing.has(id)) throw new RangeError(`issue ${id} is not ongoing`);
     if (!this.#retries.some((queued) => this.idOf(queued) === id)) this.#retries.push(issue);
+  }
+
+  recordLandingOutcome(terminals: number, landed: number): void {
+    this.#landings += landed;
+    this.#terminalsSinceLanding = landed > 0
+      ? 0
+      : this.#terminalsSinceLanding + terminals;
   }
 }

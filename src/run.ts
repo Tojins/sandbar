@@ -1,6 +1,6 @@
 // Sandbar orchestrator — continuous execution pool plus serialized landing.
 //
-//   Phase 1 (Plan):            Deterministic resolver picks the unblocked
+//   Recompute:                 Deterministic resolver picks the unblocked
 //                              `ready-for-agent` issues by parsing each body's
 //                              `## Blocked by` section — and routes each by
 //                              LANE (#57), holding back the review-gated ones
@@ -15,9 +15,9 @@
 //                              hand-merged, or landed by a run that died
 //                              before it could close the members. The plan is
 //                              rebuilt after either, so a member re-queued now
-//                              is carried into this cycle and one closed now
+//                              is carried into this recompute and one closed now
 //                              stops blocking its dependents.
-//   Phase 2 (Inner-loop ralph): Each issue runs in its own sandbox up to
+//   Execution pool:           Each issue runs in its own sandbox up to
 //                              config.maxImplAttempts times; on gate-1 green
 //                              the (strictly-advisory) reviewer runs in the
 //                              same sandbox and consumes one of
@@ -36,20 +36,20 @@
 //                              exhaust on the same attempt and the issue parks
 //                              as NEEDS-HUMAN-REVIEW — the terminal that hands
 //                              the human the latest review.
-//   Phase 3 (Merge):           Procedural merger lands DONE branches into
+//   Serialized landing:       Procedural merger lands queued DONE branches into
 //                              the source branch and pushes once — directly,
 //                              or (config.mergeMode = verified, #22) only after
 //                              the forge's checks pass on the merge result.
 //                              A review-gated issue lands on its CHUNK's
 //                              branch instead (#60), which is pushed as it
 //                              goes and carries a DRAFT pull request opened or
-//                              updated per cycle (#62); nothing of it reaches
+//                              updated per landing (#62); nothing of it reaches
 //                              the source branch until a human has reviewed
 //                              the chunk and put `land` on that pull request
 //                              (#64) — at which point the chunk branch is
 //                              merged in the SAME source pass, its members are
 //                              closed, and the branch is deleted.
-//   Phase 4 (Finalise):        Per-issue branch lifecycle — push/delete the
+//   Finalise:                  Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels. Runs in TWO passes (#30): 4a
 //                              finalises the agent terminals BEFORE the merge
@@ -172,6 +172,7 @@ import {
 import { createRunQuotaState } from "./inner-loop.js";
 import {
   type FinalizeInput,
+  type FinalizeResult,
   finalizeAll,
   realAdapter as realFinalizeAdapter,
 } from "./finalize.js";
@@ -305,6 +306,22 @@ export function formatTerminalLine(
 ): string {
   const line = `terminal #${issueId} ${terminal.type} ${elapsed}`;
   return terminal.type === "HARD-ERROR" ? `${line}: ${terminal.reason}` : line;
+}
+
+export async function verifyFinalizedTrackerState(
+  results: readonly FinalizeResult[],
+  issueLabels: (issueNum: number) => Promise<readonly string[]>,
+): Promise<void> {
+  for (const result of results) {
+    const issueNum = issueNumberOf(result.input.issue);
+    const observed = await issueLabels(issueNum);
+    if (observed.includes("ready-for-agent")) {
+      throw new SandbarError(
+        `Tracker read-back mismatch for issue #${issueNum}: sandbar wrote ` +
+          `not-ready but observed labels [${observed.join(", ")}].`,
+      );
+    }
+  }
 }
 
 export async function run(
@@ -845,16 +862,10 @@ export async function run(
       finalizeAdapter,
       config.labels,
     );
-    for (const result of finalizeResults) {
-      const issueNum = issueNumberOf(result.input.issue);
-      const observed = await finalizeAdapter.issueLabels(issueNum);
-      if (observed.includes("ready-for-agent")) {
-        throw new SandbarError(
-          `Tracker read-back mismatch for issue #${issueNum}: sandbar wrote ` +
-            `not-ready but observed labels [${observed.join(", ")}].`,
-        );
-      }
-    }
+    await verifyFinalizedTrackerState(
+      finalizeResults,
+      (issueNum) => finalizeAdapter.issueLabels(issueNum),
+    );
     console.log(`\nFinalise (${label}): ${finalizeResults.length} issue(s).`);
     for (const r of finalizeResults) {
       const issue = r.input.issue;
@@ -931,9 +942,9 @@ export async function run(
     config.maxParallelIssues,
     (issue) => issue.id,
   );
-  let landingsThisRun = 0;
   let quotaPending: TerminalExit | null = null;
-  let terminalsSinceLanding = 0;
+  let nextPlanTrigger: Parameters<typeof runLogger.writePlan>[0] = "launch";
+  let landingNumber = 0;
 
   // -------------------------------------------------------------------------
   // Main loop
@@ -962,7 +973,7 @@ export async function run(
       }
 
       const budget = remainingBudget(runState);
-      if (budget === 0 && pool.activeCount === 0) {
+      if (budget === 0 && pool.isQuiescent) {
         // The same `budgetExit` applyCycle returns, rather than the second
         // hand-written copy of its reason this used to print in different
         // words at the top of a cycle (#70).
@@ -974,7 +985,7 @@ export async function run(
 
       console.log(`\n=== Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
       await runLogger.appendOrchestrator(`cycle ${iteration} start`);
-      const planTrigger = iteration === 1 ? "launch" : "slot-freed";
+      const planTrigger = nextPlanTrigger;
 
       const configWarning = staleConfigWarning(await readConfigStaleness({
         layout,
@@ -1163,12 +1174,12 @@ export async function run(
       // Quiescence is the only relaunch boundary left (#87). Evaluate it
       // before admitting work: once a new issue starts the boundary is gone.
       if (
-        landingsThisRun > 0 &&
+        pool.landings > 0 &&
         pool.activeCount === 0 &&
         pool.ongoingCount === 0 &&
         (resolution.plan.length > 0 || landRequests.length > 0)
       ) {
-        terminalExit = await announceExit(relaunchExit(landingsThisRun));
+        terminalExit = await announceExit(relaunchExit(pool.landings));
         break;
       }
 
@@ -1324,6 +1335,7 @@ export async function run(
         await runLogger.appendOrchestrator(
           `slot freed active=${pool.activeCount} ${durationField(phase2Timer())}`,
         );
+        nextPlanTrigger = "slot-freed";
         // Recompute and refill before finalization/landing. The issues remain
         // planner-excluded in ongoingIssues until those operations finish.
         continue;
@@ -1331,7 +1343,7 @@ export async function run(
       await runLogger.appendOrchestrator(
         `landing queue start terminals=${settled.length} active=${pool.activeCount}`,
       );
-      const landingLogger = runLogger.landing(iteration);
+      const landingLogger = runLogger.landing(++landingNumber);
 
       const outcomes: IssueOutcome[] = [];
       for (const s of settled) {
@@ -1512,7 +1524,7 @@ export async function run(
             (line) => landingLogger.appendMerger(line),
             (issueId, gate) => landingLogger.writeMergerGate(issueId, gate),
             {
-              cycleIssues: pool.ongoingIssues(),
+              ongoingIssues: pool.ongoingIssues(),
               projectAnchor,
               // #67: every resolve attempt's stdout and stderr, beside the
               // gate artefact it was prompted from. The writer answers with
@@ -1702,7 +1714,10 @@ export async function run(
               `\`${LAND_LABEL}\` kept`,
           );
         }
-        await runFinalize("merge outcomes", inputs);
+        await runFinalize(
+          "merge outcomes",
+          inputs.filter((input) => input.kind !== "fresh-attempt"),
+        );
         for (const issue of completedIssues) {
           if (!freshAttempts.has(issue.id)) pool.finish(issue);
         }
@@ -1819,17 +1834,15 @@ export async function run(
         haltReasons: halt ? haltReasons : [],
         terminals: outcomes.map((outcome) => outcome.terminal),
         otherwise: () =>
-          runState.issuesAttempted >= runState.maxTotalIssues
+          pool.isQuiescent && runState.issuesAttempted >= runState.maxTotalIssues
             ? budgetExit(runState.issuesAttempted, runState.maxTotalIssues)
             : null,
       });
       const landedNow = mergerSummary && mergerSummary.pushed
         ? mergerSummary.merged.length + mergerSummary.mergedChunks.length
         : 0;
-      landingsThisRun += landedNow;
-      terminalsSinceLanding = landedNow > 0
-        ? 0
-        : terminalsSinceLanding + settled.length;
+      pool.recordLandingOutcome(settled.length, landedNow);
+      nextPlanTrigger = landedNow > 0 ? "landing-finished" : "terminal-finalized";
       if (landedNow > 0) {
         sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
         baseFingerprints = await ensureImages(config.images, sourceWorktree, {
@@ -1863,10 +1876,10 @@ export async function run(
         break;
       }
       if (
-        terminalsSinceLanding >= MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING &&
-        pool.activeCount === 0
+        pool.terminalsSinceLanding >= MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING &&
+        pool.isQuiescent
       ) {
-        terminalExit = await announceExit(stuckExit(terminalsSinceLanding));
+        terminalExit = await announceExit(stuckExit(pool.terminalsSinceLanding));
         break;
       }
     }

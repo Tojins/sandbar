@@ -496,14 +496,11 @@ describe("the prose (#64)", () => {
     expect(body).not.toMatch(/branch is being deleted/);
   });
 
-  it("says the label was KEPT when the chunk grew under the request", () => {
-    // The one comment here that reports a non-event, so it has to say both
-    // what arrived and that nothing was spent: a reviewer who saw the label
-    // stay and nothing happen would otherwise assume sandbar is broken.
+  it("says the label is kept while member work remains ongoing", () => {
     const body = CHUNK_LAND_DEFERRED_PR_COMMENT({
       chunkBranch: "sandbar/chunk-42-alpha",
       sourceBranch: "main",
-      reason: "arrived",
+      reason: "ongoing",
       landedNow: [{ number: 43, title: "beta" }],
     });
     expect(body).toContain("#43 — beta");
@@ -511,16 +508,16 @@ describe("the prose (#64)", () => {
     expect(body).not.toMatch(/has been removed/);
   });
 
-  it("says queued rework must leave the agent queue before landing resumes", () => {
+  it("says landing resumes when ongoing work lands or parks", () => {
     const body = CHUNK_LAND_DEFERRED_PR_COMMENT({
       chunkBranch: "sandbar/chunk-42-alpha",
       sourceBranch: "main",
-      reason: "rework",
+      reason: "ongoing",
       landedNow: [{ number: 42, title: "alpha" }],
     });
     expect(body).toContain("#42 — alpha");
-    expect(body).toContain("queued for rework");
-    expect(body).toContain("leave the `ready-for-agent` queue");
+    expect(body).toContain("ongoing sandbar work");
+    expect(body).toContain("land or park");
     expect(body).not.toContain("description above now lists");
     expect(body).not.toContain("next cycle");
   });

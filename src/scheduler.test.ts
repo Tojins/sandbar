@@ -51,4 +51,14 @@ describe("continuous pool", () => {
     expect(retry.issues).toEqual([target]);
     expect(retry.newStarts).toBe(0);
   });
+
+  it("resets the terminal backstop only when work lands", () => {
+    const pool = new ContinuousPool<Issue, string>(1, (i) => i.id);
+    pool.recordLandingOutcome(2, 0);
+    pool.recordLandingOutcome(3, 0);
+    expect(pool.terminalsSinceLanding).toBe(5);
+    pool.recordLandingOutcome(1, 2);
+    expect(pool.terminalsSinceLanding).toBe(0);
+    expect(pool.landings).toBe(2);
+  });
 });

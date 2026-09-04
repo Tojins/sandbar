@@ -542,28 +542,21 @@ export const CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT = (args: {
   `The \`${LAND_LABEL}\` label has been removed. Nothing about the chunk changed — ` +
   `re-apply it once the composition has a reason to pass.`;
 
-// The chunk grew in the very cycle it was asked to land (#61 + #64). Nothing
-// was merged and the label is untouched — this comment exists because a human
-// asked for something and did not get it, and the pull request is where they
-// asked.
+// Ongoing work targets the chunk (#87). Nothing is merged and the label is
+// untouched; this comment explains why the human's request remains queued.
 export const CHUNK_LAND_DEFERRED_PR_COMMENT = (args: {
   readonly chunkBranch: string;
   readonly sourceBranch: string;
-  readonly reason: "arrived" | "rework";
+  readonly reason: "ongoing";
   readonly landedNow: readonly ChunkMember[];
 }): string => {
   const members = args.landedNow
     .map((m) => `#${m.number} — ${m.title}`)
     .join(", ");
-  const cause = args.reason === "rework"
-    ? `these members are queued for rework — ${members}`
-    : `these members had just arrived on \`${args.chunkBranch}\` — ${members}`;
-  const resume = args.reason === "rework"
-    ? `Landing resumes after the named issues leave the \`ready-for-agent\` queue.`
-    : `The description above now lists the new work; the next cycle that adds ` +
-      `nothing further lands the chunk.`;
+  const cause = `these members still have ongoing sandbar work — ${members}`;
+  const resume = `Landing resumes after the named issues land or park.`;
   return `${BOT_COMMENT_PREFIX} this chunk is labelled \`${LAND_LABEL}\`, and it was NOT ` +
-    `landed this cycle: ${cause}.\n\nMerging now would move commits onto ` +
+    `landed now: ${cause}.\n\nMerging now would move commits onto ` +
     `\`${args.sourceBranch}\` that this pull request may not yet carry as reviewed, ` +
     `which is the one thing the review lane exists to prevent. Nothing was merged ` +
     `and the \`${LAND_LABEL}\` label is untouched. ${resume} Take the label off if ` +

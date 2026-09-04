@@ -103,6 +103,8 @@ vi.mock("./merger.js", async (importOriginal) => ({
 import type { RunConfig } from "./config.js";
 import { AgentQuotaError } from "./agent-sandbox.js";
 import { MergerError } from "./merger.js";
+import { ensureImages } from "./ensure-images.js";
+import { createAgentImages } from "./agent-tools.js";
 import { run } from "./run.js";
 
 const config: RunConfig = {
@@ -124,9 +126,16 @@ const summary = (merged: ReturnType<typeof issue>[], pushed = true) => ({
   merged, chunkLanded: [], skipped: [], pushed, unclosed: [], mergedChunks: [],
   deferredChunks: [], skippedChunks: [],
 });
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((yes) => { resolve = yes; });
+  return { promise, resolve };
+};
 
 describe("run quota orchestration (#109)", () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
     seams.innerLoop.mockReset(); seams.merger.mockReset(); seams.plan.mockReset();
     seams.logLines.length = 0;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -149,9 +158,30 @@ describe("run quota orchestration (#109)", () => {
     await expect(run(config)).rejects.toThrow("EXIT:4");
     expect(exit).toHaveBeenCalledWith(4);
     expect(seams.merger).toHaveBeenCalledOnce();
+    expect(ensureImages).toHaveBeenCalledTimes(2);
+    expect(createAgentImages).toHaveBeenCalledTimes(2);
     expect(seams.logLines).toContain(
       "exit: quota — claude five_hour quota window closed; resets at 1970-01-01T00:00:42.000Z",
     );
+  });
+
+  it("relaunches only at post-landing quiescence before starting successors", async () => {
+    const done = issue("1");
+    const successor = issue("2");
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValueOnce(resolution([]))
+      .mockResolvedValueOnce(resolution([successor]));
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "abc" }] });
+    seams.merger.mockResolvedValue(summary([done]));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:75");
+    expect(exit).toHaveBeenCalledWith(75);
+    expect(seams.innerLoop).toHaveBeenCalledOnce();
+    expect(seams.innerLoop.mock.calls[0]?.[0].id).toBe("1");
   });
 
   it("captures a merger quota from run() and exits 4 instead of halted", async () => {
@@ -172,5 +202,63 @@ describe("run quota orchestration (#109)", () => {
       "exit: quota — codex seven_day quota window closed; resets at 1970-01-01T00:01:24.000Z",
     );
     expect(seams.logLines.some((line) => line.startsWith("exit: halted"))).toBe(false);
+  });
+
+  it("refills a freed slot before landing while a sibling remains active", async () => {
+    const issues = [issue("1"), issue("2"), issue("3")];
+    const slow = deferred<{ type: "DONE"; commits: { sha: string }[] }>();
+    seams.plan.mockImplementation(async (_repo, options: { excluded?: Set<number> }) =>
+      resolution(issues.filter((candidate) => !options.excluded?.has(Number(candidate.id)))));
+    seams.innerLoop.mockImplementation((candidate: ReturnType<typeof issue>) =>
+      candidate.id === "1"
+        ? slow.promise
+        : Promise.resolve({ type: "DONE", commits: [{ sha: candidate.id }] }));
+    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) => {
+      if (seams.merger.mock.calls.length === 1) {
+        expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["1", "2", "3"]);
+        slow.resolve({ type: "DONE", commits: [{ sha: "1" }] });
+      }
+      return summary(batch);
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 2 })).resolves.toBeUndefined();
+    expect(exit).not.toHaveBeenCalled();
+    expect(seams.merger.mock.calls[0]?.[0].map((candidate: ReturnType<typeof issue>) => candidate.id))
+      .toEqual(["2"]);
+    expect(seams.merger.mock.calls[1]?.[0].map((candidate: ReturnType<typeof issue>) => candidate.id))
+      .toEqual(["1", "3"]);
+  });
+
+  it("continues after a rejected member and admits its successor", async () => {
+    const issues = [issue("1"), issue("2")];
+    seams.plan.mockImplementation(async (_repo, options: { excluded?: Set<number> }) =>
+      resolution(issues.filter((candidate) => !options.excluded?.has(Number(candidate.id)))));
+    seams.innerLoop.mockImplementation((candidate: ReturnType<typeof issue>) =>
+      candidate.id === "1"
+        ? Promise.reject(new Error("member rejected"))
+        : Promise.resolve({ type: "NEEDS-INFO", questions: "answer", strandedHead: null }));
+
+    await expect(run({ ...config, maxParallelIssues: 1 })).resolves.toBeUndefined();
+    expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["1", "2"]);
+  });
+
+  it("exits stuck after the global terminal-without-landing backstop", async () => {
+    const issues = Array.from({ length: 6 }, (_, index) => issue(String(index + 1)));
+    seams.plan.mockImplementation(async (_repo, options: { excluded?: Set<number> }) =>
+      resolution(issues.filter((candidate) => !options.excluded?.has(Number(candidate.id)))));
+    seams.innerLoop.mockResolvedValue({
+      type: "NEEDS-INFO", questions: "answer", strandedHead: null,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 3 })).rejects.toThrow("EXIT:2");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(seams.innerLoop).toHaveBeenCalledTimes(6);
+    expect(seams.merger).not.toHaveBeenCalled();
   });
 });

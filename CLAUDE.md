@@ -117,9 +117,9 @@ without consuming one of `maxParallelIssues` slots.
    word); the check-reading safety argument — its invariant: no unknown verdict
    ever lands — is in the `src/forge-verify.ts` and `src/merger.ts` headers. An
    issue carrying a `chunk` lands on its chunk branch instead (#60) and each
-   pushed chunk gets a **draft PR** per cycle (#62): `src/chunk-pr.ts` is the
+   pushed chunk gets a **draft PR** updated at each landing (#62): `src/chunk-pr.ts` is the
    prose, `src/forge-pr.ts` the `gh pr` create-or-update both PR kinds share. A
-   **`land` label on that PR** (#64) makes the next cycle merge
+   **`land` label on that PR** (#64) makes the next landing merge
    `origin/<chunk>` in the SAME source pass, ahead of the auto lane's branches,
    so one gate-2 and one landing cover both; the wrap-up then closes the
    members whose landing-only member refs it contains, drops `needs-review`,
@@ -144,12 +144,12 @@ quota stops new admissions and drains running and landing work before exit 4.
 `maxTotalIssues` counts admissions. Relaunch (75) is evaluated at quiescence,
 before admitting newly-unblocked work, and requires a landing in this process.
 
-All eight are one type, `TerminalExit`, and the run ends with exactly one
+All seven are one type, `TerminalExit`, and the run ends with exactly one
 `Exit (<tag>): <reason>` on stdout whichever fired (#70) — `formatExitLine` is
 the only spelling of it, `EXIT_TAGS` is exhaustive over the union, and a table
-test asserts every tag has a line. `applyCycle` owns only the four that judge a
-completed cycle; plan-empty, halted and the ceiling are the orchestrator's own
-and used to announce themselves in four different ways, the halt in none at all.
+test asserts every tag has a line. The pool owns run-wide starts, ongoing work,
+landings, and the terminal-without-landing backstop; `run.ts` selects one exit
+from that state and provider or landing outcomes.
 
 ## Key invariants — where the details live
 
@@ -273,13 +273,10 @@ and used to announce themselves in four different ways, the halt in none at all.
   that could not be asked — leaves it on for the next run. That last one is why
   `fetchChunkRef` answers in three states (`ChunkRefLookup`), buying "origin
   has no such branch" apart from "origin could not be asked" with an
-  `ls-remote` probe. A request for a chunk PHASE A JUST GREW is DEFERRED rather
-  than honoured or parked (#61 plans a layer per cycle): landing it would put
-  commits a review never covered on the source branch, so the label stays and
-  the next quiet cycle lands it. A member queued for #94 rework defers the same
-  request until it leaves `ready-for-agent`; unlike new work that just arrived,
-  the deferral does not claim the PR description was updated or that one quiet
-  cycle clears it. Members are closed EXPLICITLY (a `Closes #N` trailer only
+  `ls-remote` probe. A request is DEFERRED while any ongoing issue targets that
+  chunk: landing it could put commits a review never covered on the source
+  branch, so the label stays until the issue lands or parks. Members are closed
+  EXPLICITLY (a `Closes #N` trailer only
   fires on GitHub's own merge of that PR, and sandbar composes the merge
   locally), in `LandedChunk.closeOrder` — dependents first, ROOT LAST — and the
   loop stops at the first failure. Git-derived members are fetched by number
@@ -478,7 +475,7 @@ and used to announce themselves in four different ways, the halt in none at all.
   are normalised to Claude's disjoint one.
 - **The resolve loop leaves a trace, and a container that never ran halts
   (#67).** Every attempt's stdout AND stderr go to
-  `cycle-N/resolve-<key>-attempt-<k>.log`, keyed like the gate artefact beside
+  `landing-N/resolve-<key>-attempt-<k>.log`, keyed like the gate artefact beside
   it, and the merger log line carries the container, the exit code, the
   duration and which of timeout / clean exit / signal ended it. An attempt that
   captured NO agent speech is an infra failure, not an answer: the loop throws

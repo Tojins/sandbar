@@ -133,7 +133,10 @@ export type LandingLogger = {
 export type RunLogger = {
   readonly runDir: string;
   appendOrchestrator(line: string): Promise<void>;
-  writePlan(trigger: "launch" | "slot-freed", plan: unknown): Promise<void>;
+  writePlan(
+    trigger: "launch" | "slot-freed" | "landing-finished" | "terminal-finalized",
+    plan: unknown,
+  ): Promise<void>;
   issue(issueId: string): Promise<IssueLogger>;
   landing(n: number): LandingLogger;
   finalize(reason: string): Promise<void>;

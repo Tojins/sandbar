@@ -951,7 +951,7 @@ describe("runMergerWithAdapter — multi-issue context", () => {
       adapter,
       undefined,
       undefined,
-      { cycleIssues: [issue(40), issue(42), issue(44)] },
+      { ongoingIssues: [issue(40), issue(42), issue(44)] },
     );
 
     expect(calls.bodies).toEqual(["42", "40", "44"]);
@@ -2306,7 +2306,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     expect(summary.chunkLanded.map((c) => c.issue.id)).toEqual(["43"]);
   });
 
-  it("defers landing while a member is queued for rework", async () => {
+  it("defers landing while an ongoing issue targets the chunk", async () => {
     const { adapter, calls } = makeAdapter({ chunkRefs: originHas(42) });
     const log: string[] = [];
     const target = {
@@ -2314,7 +2314,12 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       rework: [{ number: 42, title: "t-42" }],
     };
     const summary = await runMergerWithAdapter(
-      [], adapter, (line) => log.push(line), undefined, landing(target),
+      [], adapter, (line) => log.push(line), undefined, {
+        ...landing(target),
+        ongoingIssues: [
+          { ...issue(42), chunk: { root: 42, branch: "sandbar/chunk-42-c" } },
+        ],
+      },
     );
 
     expect(calls.merges).toEqual([]);
@@ -2323,10 +2328,10 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     ]);
     expect(calls.prLabelRemovals).toEqual([]);
     expect(calls.prComments[0]?.body).toContain("#42 — t-42");
-    expect(calls.prComments[0]?.body).toContain("leave the `ready-for-agent` queue");
+    expect(calls.prComments[0]?.body).toContain("land or park");
     expect(calls.prComments[0]?.body).not.toContain("description above now lists");
     expect(log).toContain(
-      "chunk sandbar/chunk-42-c: not landed (queued for rework: #42); `land` kept",
+      "chunk sandbar/chunk-42-c: not landed (ongoing member work: #42); `land` kept",
     );
   });
 

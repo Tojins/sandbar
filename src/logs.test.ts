@@ -63,12 +63,14 @@ describe("startRunLogger", () => {
     ];
     await logger.writePlan("launch", plan);
     await logger.writePlan("slot-freed", [{ id: "49" }]);
+    await logger.writePlan("landing-finished", []);
 
     const path = join(logger.runDir, "plans.jsonl");
     const body = await readFile(path, "utf8");
     expect(body.trim().split("\n").map((line) => JSON.parse(line))).toEqual([
       { trigger: "launch", plan },
       { trigger: "slot-freed", plan: [{ id: "49" }] },
+      { trigger: "landing-finished", plan: [] },
     ]);
     expect(body).toContain("\n");
   });

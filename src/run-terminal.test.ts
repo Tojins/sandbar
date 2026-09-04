@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Terminal } from "./inner-loop.js";
-import { formatTerminalLine } from "./run.js";
+import { formatTerminalLine, verifyFinalizedTrackerState } from "./run.js";
 
 describe("formatTerminalLine (#115)", () => {
   const terminals: readonly [string, Terminal][] = [
@@ -58,5 +58,29 @@ describe("formatTerminalLine (#115)", () => {
         "durationMs=42",
       ),
     ).toBe(`terminal #115 HARD-ERROR durationMs=42: ${reason}`);
+  });
+});
+
+describe("tracker finalization read-back (#87)", () => {
+  const result = {
+    input: {
+      kind: "needs-info" as const,
+      issue: { id: "87", title: "pool", branch: "sandbar/issue-87-pool" },
+      questions: "which state?",
+      strandedHead: null,
+    },
+    action: { kind: "pushed" as const },
+  };
+
+  it("accepts the intended not-ready state", async () => {
+    await expect(verifyFinalizedTrackerState([result], async () => ["needs-info"]))
+      .resolves.toBeUndefined();
+  });
+
+  it("halts loudly when the queue label remains", async () => {
+    await expect(verifyFinalizedTrackerState(
+      [result],
+      async () => ["ready-for-agent", "needs-info"],
+    )).rejects.toThrow(/Tracker read-back mismatch for issue #87.*not-ready.*ready-for-agent/);
   });
 });
