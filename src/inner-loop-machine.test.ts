@@ -451,6 +451,36 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
     expect(result.action).toMatchObject({ kind: "run-implementer", attempt: 2 });
   });
 
+  it("a quality harness failure preserves the existing quality streak", () => {
+    let state = initialState({ ...defaultOpts, maxQualityRounds: 2 });
+    state = step(state, impl(complete)).state;
+    state = step(
+      state,
+      judged(gate1Red("first quality failure"), approved("discarded")),
+    ).state;
+    expect(state.qualityFailures).toBe(1);
+
+    state = step(state, impl(complete)).state;
+    const failed = step(state, judged(gate1Ok, harnessFailed("idle", "quality")));
+    expect(failed.state.qualityFailures).toBe(1);
+    expect(failed.action).toMatchObject({ kind: "run-implementer", attempt: 3 });
+
+    state = step(failed.state, impl(complete)).state;
+    const exhausted = step(
+      state,
+      judged(gate1Ok, qualityChanges("second quality failure")),
+    );
+    expect(exhausted.action).toEqual({
+      kind: "terminate",
+      verdict: {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "quality-budget-exhausted",
+        roundsUsed: 2,
+        latestReviewerProse: "second quality failure",
+      },
+    });
+  });
+
   it("cannot exhaust the review budget — a maxReviewRounds of 1 survives it", () => {
     // The charge #41 objects to, at its sharpest: with one round to spend, a
     // reviewer that emitted nothing used to end the issue as
@@ -666,6 +696,19 @@ describe("inner-loop-machine — review-round budget exhaustion", () => {
       cause: "quality-budget-exhausted",
       roundsUsed: 2,
       latestReviewerProse: "q2",
+    });
+  });
+
+  it("a non-exhausting quality rejection sends that pass's prose to the implementer", () => {
+    let state = initialState({ ...defaultOpts, maxQualityRounds: 2 });
+    state = step(state, impl(complete)).state;
+    const result = step(
+      state,
+      judged(gate1Ok, qualityChanges("add the missing standards test")),
+    );
+    expect(result.action).toMatchObject({
+      kind: "run-implementer",
+      latestReviewerProse: "add the missing standards test",
     });
   });
 });
@@ -1037,6 +1080,16 @@ describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () =>
     expect(verdict.cause).toBe("uncommittable-worktree");
   });
 
+  it("annotates a repeated dirty-set stop that also exhausts quality", () => {
+    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
+      impl(complete, dirty),
+      impl(complete, dirty),
+    ]);
+    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
+    expect(verdict.cause).toBe("uncommittable-worktree");
+    expect(verdict.qualityBudgetExhausted).toBe(2);
+  });
+
   it("treats a reordered dirty set as unchanged", () => {
     const { actions } = drive(defaultOpts, [
       impl(complete, ["?? a.ts", "?? b.ts"]),
@@ -1158,6 +1211,16 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     expect(verdict.cause).toBe("off-branch-head");
     // The sha is the only handle on the stranded commits once the worktree goes.
     expect(verdict.failureTrace).toContain("dead2");
+  });
+
+  it("annotates a repeated off-branch stop that also exhausts quality", () => {
+    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
+      impl(complete, [], detached("dead1")),
+      impl(complete, [], detached("dead2")),
+    ]);
+    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
+    expect(verdict.cause).toBe("off-branch-head");
+    expect(verdict.qualityBudgetExhausted).toBe(2);
   });
 
   it("counts CONSECUTIVE attempts, so a later relapse gets its own correction", () => {

@@ -115,6 +115,60 @@ describe("terminalFinalizeInputs", () => {
     });
   });
 
+  it("carries a non-null quality exhaustion count onto the handoff", () => {
+    const [input] = terminalFinalizeInputs([
+      {
+        issue: issue("129"),
+        terminal: {
+          type: "NEEDS-HUMAN",
+          cause: "gate-red",
+          failureTrace: "tests failed",
+          latestReviewerProse: "earlier review",
+          qualityBudgetExhausted: 4,
+          strandedHead: null,
+          specGaps: [{ round: 2, text: "gap" }],
+        },
+      },
+    ]);
+    expect(input).toEqual({
+      kind: "needs-human",
+      issue: issue("129"),
+      cause: "gate-red",
+      failureTrace: "tests failed",
+      latestReviewerProse: "earlier review",
+      qualityBudgetExhausted: 4,
+      strandedHead: null,
+      specGaps: [{ round: 2, text: "gap" }],
+    });
+  });
+
+  it.each([
+    ["quality-budget-exhausted", "quality", "quality prose"],
+    ["correctness-budget-exhausted", "correctness", "correctness prose"],
+  ] as const)("maps %s with its complete review handoff payload", (cause, budget, prose) => {
+    const [input] = terminalFinalizeInputs([
+      {
+        issue: issue("129"),
+        terminal: {
+          type: "NEEDS-HUMAN-REVIEW",
+          cause,
+          roundsUsed: 3,
+          latestReviewerProse: prose,
+          commits: [{ sha: "abc" }],
+          specGaps: [{ round: 1, text: "missing requirement" }],
+        },
+      },
+    ]);
+    expect(input).toEqual({
+      kind: "review-budget-exhausted",
+      issue: issue("129"),
+      budget,
+      roundsUsed: 3,
+      latestReviewerProse: prose,
+      specGaps: [{ round: 1, text: "missing requirement" }],
+    });
+  });
+
   it("identifies which read-only role changed the repository", () => {
     const inputs = terminalFinalizeInputs([
       {

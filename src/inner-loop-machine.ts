@@ -516,26 +516,18 @@ function onImplementerResult(
       qualityBudgetExhausted: null,
       strandedHead: offBranch,
     };
-    const charged = chargeQualityFailure(state);
-    if (state.lastOffBranch) {
-      return terminate(charged, {
-        ...exhausted,
-        qualityBudgetExhausted:
-          charged.qualityFailures >= charged.maxQualityRounds
-            ? charged.qualityFailures
-            : null,
-      });
-    }
-    return continueAfterQualityFailure(
+    return transitionAfterQualityFailure(
       state,
-      {
-        // Becomes the NEEDS-HUMAN trace if this was the last attempt, so the
-        // handoff names where the commits went rather than a gate that never ran.
-        failureTrace: trace,
-        extraReprompt: trace,
-        latestReviewerProse: state.latestReviewerProse,
-        offBranch: true,
-      },
+      state.lastOffBranch
+        ? null
+        : {
+            // Becomes the NEEDS-HUMAN trace if this was the last attempt, so the
+            // handoff names where the commits went rather than a gate that never ran.
+            failureTrace: trace,
+            extraReprompt: trace,
+            latestReviewerProse: state.latestReviewerProse,
+            offBranch: true,
+          },
       exhausted,
     );
   }
@@ -559,20 +551,17 @@ function onImplementerResult(
         state.lastDirtyPaths !== null &&
         sameDirtySet(state.lastDirtyPaths, dirtyPaths)
       ) {
-        const charged = chargeQualityFailure(state);
-        return terminate(charged, {
+        const earlyStop: Verdict = {
           type: "NEEDS-HUMAN",
           cause: "uncommittable-worktree",
           failureTrace: trace,
           latestReviewerProse: state.latestReviewerProse,
-          qualityBudgetExhausted:
-            charged.qualityFailures >= charged.maxQualityRounds
-              ? charged.qualityFailures
-              : null,
+          qualityBudgetExhausted: null,
           strandedHead: null,
-        });
+        };
+        return transitionAfterQualityFailure(state, null, earlyStop);
       }
-      return continueAfterQualityFailure(
+      return transitionAfterQualityFailure(
         state,
         {
           // Becomes the NEEDS-HUMAN trace if the budget runs out here, so the
@@ -620,7 +609,7 @@ function onImplementerResult(
   const failureTrace = state.lastFailureTrace
     ? `Last gate failure:\n${state.lastFailureTrace}\n\n${correction}`
     : correction;
-  return continueAfterQualityFailure(
+  return transitionAfterQualityFailure(
     state,
     {
       failureTrace: state.lastFailureTrace,
@@ -658,7 +647,7 @@ function onGateAndReviewerResult(
   }
   if (!gate.ok) {
     const advanced = { ...state, lastFailureTrace: gate.failureTrace };
-    return continueAfterQualityFailure(
+    return transitionAfterQualityFailure(
       advanced,
       {
         failureTrace: gate.failureTrace,
@@ -686,7 +675,7 @@ function onReviewerResult(
       latestReviewerProse: reviewer.prose,
       lastFailureTrace: "",
     };
-    return continueAfterQualityFailure(
+    return transitionAfterQualityFailure(
       reviewingState,
       {
         failureTrace: "",
@@ -778,23 +767,29 @@ function gateRedExhaustion(state: LoopState): Verdict {
   };
 }
 
-function chargeQualityFailure(state: LoopState): LoopState {
-  return { ...state, qualityFailures: state.qualityFailures + 1 };
-}
-
-function continueAfterQualityFailure(
+function transitionAfterQualityFailure(
   state: LoopState,
-  next: Parameters<typeof advanceAttempt>[1],
-  onExhausted: Verdict,
+  // `null` means a dedicated rule (repeated dirt or off-branch HEAD) stops the
+  // loop even if the quality budget still has room.
+  next: Parameters<typeof advanceAttempt>[1] | null,
+  onBudgetExhausted: Verdict,
 ): StepResult {
-  const charged = chargeQualityFailure(state);
-  if (charged.qualityFailures < charged.maxQualityRounds) {
+  const charged = {
+    ...state,
+    qualityFailures: state.qualityFailures + 1,
+  };
+  const budgetExhausted =
+    charged.qualityFailures >= charged.maxQualityRounds;
+  if (!budgetExhausted && next !== null) {
     return advanceAttempt(charged, next);
   }
   const verdict =
-    onExhausted.type === "NEEDS-HUMAN"
-      ? { ...onExhausted, qualityBudgetExhausted: charged.qualityFailures }
-      : onExhausted;
+    budgetExhausted && onBudgetExhausted.type === "NEEDS-HUMAN"
+      ? {
+          ...onBudgetExhausted,
+          qualityBudgetExhausted: charged.qualityFailures,
+        }
+      : onBudgetExhausted;
   return terminate(charged, verdict);
 }
 

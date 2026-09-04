@@ -382,7 +382,8 @@ export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
   `without that pass reaching an \`APPROVED\` verdict. The latest ${budget} ` +
   `pass below is the ` +
   `report the human needs to resolve. Push a fix on \`${branch}\` (or rewrite ` +
-  `the standards if the reviewer was wrong), then drop \`${stuckLabel}\` and ` +
+  `the governing issue or project instructions if the reviewer was wrong), ` +
+  `then drop \`${stuckLabel}\` and ` +
   `re-apply \`${readyLabel}\` when ready.\n\n---\n\n${latestReviewerProse}`;
 };
 
