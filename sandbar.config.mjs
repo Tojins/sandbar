@@ -95,7 +95,7 @@ export default {
   // previous floor, 0.23.0, was the codex routing below (#72) and its
   // subscription credential (#73); 0.24.6 subsumes it. It moves when this file
   // starts asking a newer sandbar for something, not when the pin does.
-  requiresSandbar: "0.24.6",
+  requiresSandbar: "0.28.1",
 
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
@@ -298,23 +298,30 @@ export default {
   // declared in `env`, rather than letting the failure arrive as an
   // implementer dying in-container.
   //
-  // The reviewer is two independently routed passes since #121 — quality
-  // (tests and standards) first, gating correctness (correctness and spec) —
-  // and BOTH stay claude here for now. The split is what #121 built the
-  // `reviewerQualityAgent`/`reviewerQualityModelId` pair for: routing the
-  // quality pass to codex moves ~64% of reviewer rounds off the Claude
-  // subscription window while the deciding verdict stays on Opus, which is
-  // #72's argument — the strongest model belongs where the judgement is, and
-  // after #121 the judgement that ends an issue is correctness's.
+  // The REVIEWER is two independently routed passes since #121, and they are
+  // split across the two vendors: quality (tests and standards) runs first on
+  // codex and gates correctness (correctness and spec), which keeps the
+  // deciding verdict on claude/opus. That is #72's argument applied one level
+  // down — the strongest model belongs where the judgement is, and after #121
+  // the judgement that ends an issue is correctness's — and it moves the ~64%
+  // of reviewer rounds that never reach correctness off the Claude
+  // subscription window, which is the binding constraint on this host (#93
+  // ended `You've hit your session limit`; #109 is open about a closing window
+  // read as a harness failure). Possible only because the passes no longer
+  // share a session: a resumed one cannot cross vendor CLIs.
   //
-  // Why it is not routed in the same commit that built the fields: naming
-  // either field here obliges `requiresSandbar` to rise to that driver, and
-  // `sandbar.pin` LAGS this checkout always — the version being written has not
-  // landed and may never be tagged. A floor above the pin is a driver that
-  // installs and then refuses the config it was installed to read, which
-  // `launcher.test.ts` refuses to let anyone commit. So the routing and the
-  // `requiresSandbar` raise belong to the LATER commit that moves the pin onto
-  // a tag carrying #121, and they go in together.
+  // The thing to watch, and the reason to back these two lines out rather than
+  // tune them: quality's test findings must keep naming a concrete deletion
+  // that leaves the suite green. That mutation-checking is the most valuable
+  // thing the pass does (21 of 26 sampled test findings were substantive,
+  // against 7 of 31 standards findings), and it is exactly what a vendor swap
+  // can quietly lose while still producing confident prose. Reverting is a
+  // two-line edit to this file and needs no landing.
+  //
+  // This pairing is what `requiresSandbar` above had to rise for: these two
+  // fields are meaningless to a driver older than #121, which would spread
+  // them through and ignore them (#66). The pin below therefore had to move
+  // FIRST — it names v0.28.1, the release that carries #121.
   //
   // The merger has the same independent
   // provider/model knobs since #74 and stays on its claude/opus defaults for
@@ -328,6 +335,8 @@ export default {
   // what `requiresSandbar` is checking.
   implementerAgent: "codex",
   implementerModelId: "gpt-5.6-sol",
+  reviewerQualityAgent: "codex",
+  reviewerQualityModelId: "gpt-5.6-sol",
 
   // Exit 75 after any cycle that lands merges, so `scripts/sandbar-launch.mjs`
   // re-reads the pin and relaunches (#65). Explicit rather than detected — see
