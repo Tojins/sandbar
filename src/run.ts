@@ -930,6 +930,7 @@ export async function run(
     | { readonly status: "rejected"; readonly issue: PlannedIssue; readonly reason: unknown };
   const active = new Map<string, Promise<ExecutionEvent>>();
   const completedEvents: ExecutionEvent[] = [];
+  const pendingTerminals: ExecutionEvent[] = [];
   const ongoingIssues = new Map<string, PlannedIssue>();
   const startedThisRun = new Set<number>();
   let landingsThisRun = 0;
@@ -1336,19 +1337,34 @@ export async function run(
       // A recompute with no new candidate can still have running work. Wait
       // only for the next freed slot; siblings remain live and the next full
       // plan is built immediately around them.
-      if (completedEvents.length === 0 && active.size > 0) {
-        await Promise.race(active.values());
-        await Promise.resolve();
-      }
-      const settled = completedEvents.splice(0);
-      for (const event of settled) {
-        const id = event.status === "fulfilled"
-          ? event.value.issue.id
-          : event.issue.id;
-        active.delete(id);
+      let settled: ExecutionEvent[];
+      if (pendingTerminals.length > 0) {
+        // The preceding slot-free event deliberately yielded back to the top
+        // of the loop. Its full recompute and admissions have now happened, so
+        // landing can run while the replenished pool keeps executing.
+        settled = pendingTerminals.splice(0);
+      } else {
+        if (completedEvents.length === 0 && active.size > 0) {
+          await Promise.race(active.values());
+          await Promise.resolve();
+        }
+        settled = completedEvents.splice(0);
+        for (const event of settled) {
+          const id = event.status === "fulfilled"
+            ? event.value.issue.id
+            : event.issue.id;
+          active.delete(id);
+        }
+        await runLogger.appendOrchestrator(
+          `slot freed active=${active.size} ${durationField(phase2Timer())}`,
+        );
+        pendingTerminals.push(...settled);
+        // Recompute and refill before finalization/landing. The issues remain
+        // planner-excluded in ongoingIssues until those operations finish.
+        continue;
       }
       await runLogger.appendOrchestrator(
-        `slot freed active=${active.size} ${durationField(phase2Timer())}`,
+        `landing queue start terminals=${settled.length} active=${active.size}`,
       );
 
       const outcomes: IssueOutcome[] = [];
