@@ -196,7 +196,7 @@ describe("runGateAndReviewer (#123)", () => {
     expect(ctx.specGaps).toEqual([]);
   });
 
-  it("accumulates a correctness gap only when the concurrent gate is green", async () => {
+  it("accumulates every correctness gap independently of the concurrent gate", async () => {
     const ctx = context();
     const reviewer = {
       ...approved,
@@ -222,7 +222,9 @@ describe("runGateAndReviewer (#123)", () => {
       gate: vi.fn(async () => ({ ok: false, failureTrace: "red" })),
       reviewer: vi.fn(async () => reviewer),
     });
-    expect(redCtx.specGaps).toEqual([]);
+    expect(redCtx.specGaps).toEqual([
+      { round: 1, text: "Which clock applies? Use the request clock." },
+    ]);
   });
 
   it("awaits a reviewer beside a red gate, discards its history, and logs the discard", async () => {

@@ -90,7 +90,8 @@ an exit condition fires.
    reviewer is strictly advisory and read-only. After a clean, on-branch
    COMPLETE, gate-1 and the reviewer run concurrently against the same commit
    (#123). A reviewer write always parks; otherwise a red gate discards the
-   review without spending a round or updating reviewer prose. One review round
+   review result without spending a round or updating reviewer prose, while any
+   declared specification gap remains run evidence (#108). One review round
    is up to two sequential COLD calls (#19, #121): tests/standards first on
    `reviewerQualityAgent`/`reviewerQualityModelId`, then — only after its
    approval — correctness/spec on `reviewerAgent`/`reviewerModelId`; the state

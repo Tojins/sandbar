@@ -951,9 +951,9 @@ export async function runGateAndReviewer(
   const reviewer = reviewerResult.value;
   if (gate.ok && reviewer.historyEntry !== null) {
     ctx.priorReviewRounds.push(reviewer.historyEntry);
-    if (typeof reviewer.specGap === "string") {
-      ctx.specGaps.push({ round: action.reviewRound, text: reviewer.specGap });
-    }
+  }
+  if (typeof reviewer.specGap === "string") {
+    ctx.specGaps.push({ round: action.reviewRound, text: reviewer.specGap });
   }
   if (
     !gate.ok &&
