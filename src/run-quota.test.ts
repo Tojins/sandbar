@@ -6,6 +6,8 @@ const seams = vi.hoisted(() => ({
   plan: vi.fn(),
   finalize: vi.fn(async () => []),
   issueLabels: vi.fn(async () => [] as string[]),
+  mergerStackStop: vi.fn(async () => undefined),
+  mergerWorktreeRemove: vi.fn(async () => undefined),
   logLines: [] as string[],
 }));
 
@@ -88,11 +90,13 @@ vi.mock("./finalize.js", async (importOriginal) => ({
   realAdapter: vi.fn(() => ({ issueLabels: seams.issueLabels })), finalizeAll: seams.finalize,
 }));
 vi.mock("./merger-worktree.js", () => ({
-  createMergerWorktree: vi.fn(async () => ({ path: "/tmp/merger", remove: vi.fn() })),
+  createMergerWorktree: vi.fn(async () => ({
+    path: "/tmp/merger", remove: seams.mergerWorktreeRemove,
+  })),
 }));
 vi.mock("./gate-stack.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./gate-stack.js")>(),
-  startStack: vi.fn(async () => ({ runGate: vi.fn(), stop: vi.fn() })),
+  startStack: vi.fn(async () => ({ runGate: vi.fn(), stop: seams.mergerStackStop })),
 }));
 vi.mock("./prompt.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./prompt.js")>(), buildProjectAnchor: vi.fn(async () => "anchor"),
@@ -142,6 +146,9 @@ describe("run quota orchestration (#109)", () => {
     seams.innerLoop.mockReset(); seams.merger.mockReset(); seams.plan.mockReset();
     seams.finalize.mockReset(); seams.finalize.mockResolvedValue([]);
     seams.issueLabels.mockReset(); seams.issueLabels.mockResolvedValue([]);
+    seams.mergerStackStop.mockReset(); seams.mergerStackStop.mockResolvedValue(undefined);
+    seams.mergerWorktreeRemove.mockReset();
+    seams.mergerWorktreeRemove.mockResolvedValue(undefined);
     seams.logLines.length = 0;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -519,4 +526,37 @@ describe("run quota orchestration (#109)", () => {
       line.startsWith("HALTED — internal failure: Error: finalize failed")
     )).toBe(false);
   });
+
+  it.each([
+    ["merger stack", () => seams.mergerStackStop],
+    ["merger worktree", () => seams.mergerWorktreeRemove],
+  ] as const)(
+    "reports failing %s teardown beside a landing failure and preserves the landing failure",
+    async (_resource, cleanup) => {
+      seams.plan.mockResolvedValue(resolution([issue("1")]));
+      seams.innerLoop.mockResolvedValue({
+        type: "DONE", commits: [{ sha: "1" }],
+      });
+      seams.merger.mockRejectedValue(new Error("landing failed"));
+      cleanup().mockRejectedValue(new Error("teardown failed"));
+      const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        throw new Error(`EXIT:${code}`);
+      }) as never);
+
+      await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:1");
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(seams.mergerStackStop).toHaveBeenCalledOnce();
+      expect(seams.mergerWorktreeRemove).toHaveBeenCalledOnce();
+      expect(seams.logLines.some((line) =>
+        line.includes("landing resource cleanup also failed") &&
+        line.includes("teardown failed")
+      )).toBe(true);
+      expect(seams.logLines.some((line) =>
+        line.startsWith("HALTED — internal failure: Error: landing failed")
+      )).toBe(true);
+      expect(seams.logLines.some((line) =>
+        line.startsWith("HALTED — internal failure: Error: teardown failed")
+      )).toBe(false);
+    },
+  );
 });

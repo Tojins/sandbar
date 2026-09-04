@@ -1050,6 +1050,31 @@ export async function run(
     }
   };
 
+  const cleanupLandingResources = async (
+    cleanups: readonly (() => Promise<void>)[],
+    landingFailure: unknown | null,
+  ): Promise<void> => {
+    const cleanupFailures: unknown[] = [];
+    for (const cleanup of cleanups) {
+      // allSettled classifies cleanup failure as data without adding another
+      // catch-and-continue site; the loop remains sequential because the stack
+      // must stop before its bind-mounted worktree is removed.
+      const [result] = await Promise.allSettled([
+        Promise.resolve().then(cleanup),
+      ]);
+      if (result?.status === "rejected") cleanupFailures.push(result.reason);
+    }
+    if (cleanupFailures.length === 0) return;
+    if (landingFailure === null) throw cleanupFailures[0];
+    for (const cleanupErr of cleanupFailures) {
+      const detail = faultDetail(cleanupErr);
+      console.error("Landing resource cleanup also failed:\n" + detail);
+      await runLogger.appendOrchestrator(
+        "landing resource cleanup also failed: " + detail,
+      );
+    }
+  };
+
   // -------------------------------------------------------------------------
   // Main loop
   // -------------------------------------------------------------------------
@@ -1697,9 +1722,20 @@ export async function run(
             unexpectedLandingFailure = { error: err };
           }
         } finally {
-          // Stack first: its containers bind-mount the worktree.
-          if (mergerStack) await mergerStack.stop();
-          if (mergerWorktree) await mergerWorktree.remove();
+          // Stack first: its containers bind-mount the worktree. Both teardown
+          // attempts run even when the first fails. If landing already failed,
+          // teardown is secondary: report it here and preserve that original
+          // failure for the internal-failure boundary below.
+          const stackToStop = mergerStack;
+          const worktreeToRemove = mergerWorktree;
+          const cleanups = [
+            stackToStop ? () => stackToStop.stop() : null,
+            worktreeToRemove ? () => worktreeToRemove.remove() : null,
+          ].filter((cleanup): cleanup is () => Promise<void> => cleanup !== null);
+          await cleanupLandingResources(
+            cleanups,
+            unexpectedLandingFailure?.error ?? null,
+          );
         }
         if (unexpectedLandingFailure) {
           // Cleanup-shaped, so it follows the cleanup rule: the drain reports
