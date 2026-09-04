@@ -129,15 +129,13 @@
 // merger sees only DONE branches, so deriving it there would answer a
 // different question.
 //
-// Two things this module hands the CHUNK-REVIEW SCAN (#63). `landedChunks` on
+// Two things this module hands the CHUNK-REVIEW SCAN (#95). `landedChunks` on
 // the resolution is the derivation's answer to "which chunks have work on
-// origin, and what is at the tip of each" — the scan needs it to know which
-// pull requests to look at and what a follow-up issue declares itself blocked
-// by, and only the whole candidate graph can answer either. `extraCandidates`
-// on `buildPlan` is the way back in: a follow-up filed at the top of a cycle is
-// re-planned WITH it, so it takes its turn in the queue from that cycle rather
-// than the next run — and, in the case that matters, so a cycle cannot file an
-// issue and then exit plan-empty with the review unanswered.
+// origin, which members they contain and what is at each tip" — the scan needs
+// it to identify the PR and route feedback. `extraCandidates` on `buildPlan` is
+// the way back in: members re-queued at the top of a cycle are re-planned WITH
+// their freshly read tracker summaries, rather than waiting for issue search
+// to observe the label flip.
 //
 // `fetchCandidates` NAMES the repository (#34). It used to identify it the way
 // `gh` does by default — from the git remotes of the directory the command runs
@@ -246,9 +244,9 @@ export type PlanResolution = {
   // Here for the same reason `PlannedIssue.chunk` is: the derivation needs the
   // whole candidate graph, and this graph only exists inside this function.
   // Two phases downstream read it and neither could work it out for itself.
-  // The chunk-review scan (`chunk-follow-up.ts`) reads the pull requests to
-  // look at, and names the tips a follow-up issue declares itself blocked by
-  // (#63). The landing (`chunk-land.ts`, #64) reads which issues a `land`
+  // The chunk-review scan (`chunk-follow-up.ts`) reads the pull requests and
+  // routes their feedback across these members, falling back to their tips
+  // (#95). The landing (`chunk-land.ts`, #64) reads which issues a `land`
   // label is asking it to CLOSE — the merge phase sees the cycle's DONE
   // branches and nothing else — and which ones a reconciled chunk owes a
   // close to.
@@ -625,12 +623,10 @@ export type BuildPlanOptions = {
   readonly k?: number;
   readonly defaultLane?: Lane;
   // Issues to add to the listing, whatever the tracker's search index says
-  // (#63). Exactly one caller: the chunk-review scan files a follow-up issue
+  // (#63, #95). Exactly one caller: the chunk-review scan re-queues members
   // and then re-plans so it is queued from that cycle rather than the next run
-  // — and a
-  // just-created issue is the one candidate the `gh` listing is guaranteed to
-  // be wrong about, because that listing is the lagging search backend and
-  // nothing else in the plan is newer than seconds old.
+  // because that listing is the lagging search backend and can miss a label
+  // flip made seconds ago.
   //
   // Safe because it is additive and authoritative in the same breath: the
   // caller has the issue's number from the create call, and the strongly

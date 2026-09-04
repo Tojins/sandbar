@@ -64,8 +64,8 @@ an exit condition fires.
    review-gated, a `chunk` target (#61) that tells phase 2 what to seed from
    and phase 3 where to land. Ahead of the plan proper two passes make the
    tracker agree with the forge and with git: the **chunk-review scan**
-   (`src/chunk-follow-up.ts`, #63) turns each changes-requested review on a
-   chunk PR into an issue in that chunk, and the **reconciler**
+   (`src/chunk-follow-up.ts`, #95) routes each changes-requested review on a
+   chunk PR to its landed member(s) and re-queues them, and the **reconciler**
    (`src/chunk-reconcile.ts`, #64) finishes off any chunk branch already
    contained in `origin/<sourceBranch>` — hand-merged, or landed by a run that
    died before closing the members. The plan is rebuilt after either acts. All
