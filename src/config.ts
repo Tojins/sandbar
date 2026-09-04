@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import {
   type AgentProviderName,
@@ -315,6 +315,16 @@ export type BuiltImage = {
   // browser image do not want the same ceiling.
   readonly buildTimeoutMs?: number;
 };
+
+// One internal spelling for the effective filesystem build context. Explicit
+// values are trimmed here as well as at the config boundary so direct users of
+// buildArgv cannot diverge from containment validation; the repo root is "".
+export function effectiveImageBuildContext(image: BuiltImage): string {
+  const context = image.context?.trim();
+  if (context !== undefined) return context === "." ? "" : context;
+  const defaultContext = dirname(image.containerfile);
+  return defaultContext === "." ? "" : defaultContext;
+}
 
 export type GateStackConfig = {
   readonly containers: readonly StackContainer[];
@@ -1459,9 +1469,7 @@ function resolveRebuildOn(img: BuiltImage): readonly string[] {
         "relative to the repo root.",
     );
   }
-  const slash = img.containerfile.lastIndexOf("/");
-  const context =
-    img.context ?? (slash === -1 ? "" : img.containerfile.slice(0, slash));
+  const context = effectiveImageBuildContext(img);
   const out: string[] = [];
   for (const raw of paths) {
     const path = raw.trim();
@@ -1535,8 +1543,7 @@ export function resolveImages(
     }
     let context = img.context;
     if (context !== undefined) {
-      context = context.trim();
-      if (context === ".") context = "";
+      context = effectiveImageBuildContext(img);
       if (context.startsWith("/")) {
         throw new SandbarError(
           `config.images: entry '${img.tag}' has an absolute build context ` +

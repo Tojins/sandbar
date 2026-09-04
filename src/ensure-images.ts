@@ -75,7 +75,7 @@
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { createReadStream, createWriteStream } from "node:fs";
 import { copyFile, link, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -90,7 +90,11 @@ import {
   type AgentProviderPackage,
   type AgentProviderName,
 } from "./agent-providers.js";
-import type { BuiltImage, ResolvedGateStack } from "./config.js";
+import {
+  type BuiltImage,
+  type ResolvedGateStack,
+  effectiveImageBuildContext,
+} from "./config.js";
 import type { RuntimeExec, SweepResult } from "./containers.js";
 import { SandbarError, isExitCode } from "./errors.js";
 import { IMAGE_INPUTS_LABEL, fingerprintImageInputs } from "./image-inputs.js";
@@ -295,9 +299,7 @@ export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
     args.push("-");
   } else {
     const containerfile = containerfilePath(image, opts?.root ?? "");
-    const defaultContext = dirname(image.containerfile);
-    const context =
-      image.context ?? (defaultContext === "." ? "" : defaultContext);
+    const context = effectiveImageBuildContext(image);
     const root = opts?.root ?? "";
     args.push("-f", containerfile, root ? join(root, context) : context || ".");
   }

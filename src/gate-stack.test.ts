@@ -1599,8 +1599,22 @@ describe("resolveImages: rebuildOn (#37)", () => {
   it("normalises and validates context independently of rebuildOn", () => {
     expect(img({ context: "." })[0]?.context).toBe("");
     expect(img({ context: "" })[0]?.context).toBe("");
+    expect(
+      resolveImages(
+        [
+          {
+            tag: "sandbar:app",
+            containerfile: "docker/Dockerfile",
+            context: " docker ",
+            rebuildOn: ["docker/package-lock.json"],
+          },
+        ],
+        "sandbar:app",
+      )[0]?.context,
+    ).toBe("docker");
     expect(() => img({ context: "/tmp" })).toThrow(/absolute build context/);
     expect(() => img({ context: "../tmp" })).toThrow(/build context/);
+    expect(() => img({ context: "docker/./build" })).toThrow(/build context/);
     expect(() => img({ context: "a//b" })).toThrow(/build context/);
     expect(() => img({ context: ".", stdinContext: true })).toThrow(
       /both `context`/,

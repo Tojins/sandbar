@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import type { BuiltImage } from "./config.js";
+import { type BuiltImage, resolveImages } from "./config.js";
 import {
   type AgentImages,
   type BuildOptions,
@@ -127,6 +127,18 @@ describe("fingerprintImageInputs", () => {
     expect(await fp(root, { ...IMAGE, context: "" })).not.toBe(await fp(root));
     expect(await fp(root, { ...IMAGE, context: "" })).not.toBe(
       await fp(root, { ...IMAGE, context: "docker" }),
+    );
+    const [normalized] = resolveImages(
+      [{ ...IMAGE, context: " docker ", rebuildOn: ["docker/package-lock.json"] }],
+      IMAGE.tag,
+    );
+    expect(normalized?.context).toBe("docker");
+    expect(await fp(root, normalized!)).toBe(
+      await fp(root, {
+        ...IMAGE,
+        context: "docker",
+        rebuildOn: ["docker/package-lock.json"],
+      }),
     );
   });
 
