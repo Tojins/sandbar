@@ -5,6 +5,7 @@ const seams = vi.hoisted(() => ({
   merger: vi.fn(),
   plan: vi.fn(),
   finalize: vi.fn(async () => []),
+  issueLabels: vi.fn(async () => [] as string[]),
   logLines: [] as string[],
 }));
 
@@ -84,7 +85,7 @@ vi.mock("./inner-loop.js", async (importOriginal) => ({
 }));
 vi.mock("./finalize.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./finalize.js")>(),
-  realAdapter: vi.fn(() => ({})), finalizeAll: seams.finalize,
+  realAdapter: vi.fn(() => ({ issueLabels: seams.issueLabels })), finalizeAll: seams.finalize,
 }));
 vi.mock("./merger-worktree.js", () => ({
   createMergerWorktree: vi.fn(async () => ({ path: "/tmp/merger", remove: vi.fn() })),
@@ -139,6 +140,7 @@ describe("run quota orchestration (#109)", () => {
     vi.clearAllMocks();
     seams.innerLoop.mockReset(); seams.merger.mockReset(); seams.plan.mockReset();
     seams.finalize.mockReset(); seams.finalize.mockResolvedValue([]);
+    seams.issueLabels.mockReset(); seams.issueLabels.mockResolvedValue([]);
     seams.logLines.length = 0;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -165,6 +167,55 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.logLines).toContain(
       "exit: quota — claude five_hour quota window closed; resets at 1970-01-01T00:00:42.000Z",
     );
+  });
+
+  it("stops admissions as soon as the shared provider state closes", async () => {
+    const issues = [issue("1"), issue("2"), issue("3"), issue("4")];
+    seams.plan.mockResolvedValue(resolution(issues));
+    seams.innerLoop.mockImplementation(async (
+      candidate: ReturnType<typeof issue>,
+      options: { quotaState: { close(provider: "claude", measurement: object): void } },
+    ) => {
+      if (candidate.id === "1") {
+        options.quotaState.close("claude", {
+          status: "rejected", window: "five_hour", resetsAt: 42,
+        });
+      }
+      return {
+        type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+        specGaps: [],
+      };
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 3 })).rejects.toThrow("EXIT:4");
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["1", "2", "3"]);
+  });
+
+  it("logs finalized outcomes before a tracker read-back mismatch halts", async () => {
+    const target = issue("87");
+    seams.plan.mockResolvedValue(resolution([target]));
+    seams.innerLoop.mockResolvedValue({
+      type: "NEEDS-INFO", questions: "answer", strandedHead: null,
+    });
+    seams.finalize.mockResolvedValue([{
+      input: {
+        kind: "needs-info", issue: target, questions: "answer", strandedHead: null,
+      },
+      action: { kind: "pushed" },
+    }]);
+    seams.issueLabels.mockResolvedValue(["ready-for-agent", "needs-info"]);
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:1");
+    expect(seams.logLines).toContain("finalise #87 needs-info → pushed branch");
+    expect(seams.logLines.some((line) => line.includes("Tracker read-back mismatch")))
+      .toBe(true);
   });
 
   it("relaunches only at post-landing quiescence before starting successors", async () => {
@@ -245,6 +296,8 @@ describe("run quota orchestration (#109)", () => {
 
     await expect(run({ ...config, maxParallelIssues: 1 })).resolves.toBeUndefined();
     expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["1", "2"]);
+    expect(vi.mocked(console.log).mock.calls.flat().join("\n"))
+      .not.toContain("Running the merge phase for those alone");
   });
 
   it("exits stuck after the global terminal-without-landing backstop", async () => {

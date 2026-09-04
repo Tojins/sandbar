@@ -896,10 +896,6 @@ export async function run(
       finalizeAdapter,
       config.labels,
     );
-    await verifyFinalizedTrackerState(
-      finalizeResults,
-      (issueNum) => finalizeAdapter.issueLabels(issueNum),
-    );
     console.log(`\nFinalise (${label}): ${finalizeResults.length} issue(s).`);
     for (const r of finalizeResults) {
       const issue = r.input.issue;
@@ -930,6 +926,13 @@ export async function run(
         `finalise #${issueNumberOf(issue)} ${r.input.kind} → ${tag}`,
       );
     }
+    // finalizeAll has already performed durable tracker and branch effects.
+    // Record every one before a read-back mismatch halts the run, so the halt
+    // adds its complaint to the outcome record instead of erasing that record.
+    await verifyFinalizedTrackerState(
+      finalizeResults,
+      (issueNum) => finalizeAdapter.issueLabels(issueNum),
+    );
   };
 
   // Issue numbers merged+closed earlier in THIS run. The listing endpoint the
@@ -1198,6 +1201,9 @@ export async function run(
         await runLogger.appendOrchestrator(`plan: land requested — ${named}`);
       }
 
+      const quotaClosed = quotaPending !== null || requiredAgentProviders(config).some(
+        (provider) => quotaState.get(provider) !== undefined,
+      );
       const schedulerAction = decideSchedulerAction({
         active: pool.activeCount,
         ongoing: pool.ongoingCount,
@@ -1211,7 +1217,7 @@ export async function run(
         landings: pool.landings,
         terminalsSinceLanding: pool.terminalsSinceLanding,
         terminalBackstop: MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING,
-        quotaClosed: quotaPending !== null,
+        quotaClosed,
       });
       if (schedulerAction.kind === "exit") {
         terminalExit = await announceExit(
@@ -1259,10 +1265,14 @@ export async function run(
       // unblocks whatever was waiting on them. Exiting `success` here would
       // strand a chunk a human explicitly asked for, on the one cycle where
       // there is nothing else to distract from it.
-      if (issues.length === 0) {
+      if (
+        landRequests.length > 0 &&
+        (schedulerAction.kind === "land" ||
+          (schedulerAction.kind === "admit" && schedulerAction.next === "land"))
+      ) {
         console.log(
-          `No unblocked issues to work on, but ${landRequests.length} chunk(s) are ` +
-            `labelled \`${LAND_LABEL}\`. Running the merge phase for those alone.`,
+          `${landRequests.length} chunk(s) labelled \`${LAND_LABEL}\` are entering ` +
+            "the serialized landing path.",
         );
       }
 

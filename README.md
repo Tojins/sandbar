@@ -481,6 +481,18 @@ After a landing leaves the run quiescent, a non-empty recompute exits 75 before
 starting another issue. Images are refreshed in-process; the relaunch lets the
 launcher re-import configuration without interrupting any work.
 
+Exit 75 (`EXIT_CODE_RELAUNCH`, exported from the package root) is unconditional:
+it no longer depends on a config field. A launcher that wants sandbar to finish
+the queue must loop **only** on 75 and propagate every other exit code:
+
+```sh
+while :; do
+  npx sandbar
+  code=$?
+  [ "$code" -eq 75 ] || exit "$code"
+done
+```
+
 ### `defaultLane` — who gets the last word on a landing
 
 Every issue takes one of two **lanes**:
