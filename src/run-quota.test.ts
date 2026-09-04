@@ -49,13 +49,16 @@ vi.mock("./containers.js", () => ({
 vi.mock("./ensure-images.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./ensure-images.js")>(),
   ensureImages: vi.fn(async () => new Map()),
-  createAgentImages: vi.fn(async () => ({
-    declaredTag: "image", augment: vi.fn(async () => "image"), builtTags: () => [],
-  })),
   createBranchImages: vi.fn(() => ({ resolve: vi.fn(async () => new Map()), builtTags: () => [] })),
   checkWorktreeImageUids: vi.fn(), sweepBranchImages: vi.fn(async () => ({ removed: [], failures: [] })),
   removeBranchImages: vi.fn(async () => []), pulledImagesOf: vi.fn(() => []),
   worktreeMountingTagsOf: vi.fn(() => new Set()), formatImageRecord: vi.fn(() => "image"),
+}));
+vi.mock("./agent-tools.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./agent-tools.js")>(),
+  createAgentImages: vi.fn(async () => ({
+    declaredTag: "image", augment: vi.fn(async () => "image"), builtTags: () => [],
+  })),
 }));
 vi.mock("./plan-resolver.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./plan-resolver.js")>(), buildPlan: seams.plan,

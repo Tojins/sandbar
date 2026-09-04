@@ -11,21 +11,23 @@ import {
   AGENT_PROVIDER_PACKAGES,
 } from "./agent-providers.js";
 import {
-  type BuildOptions,
   type PreparedAgentArtifacts,
   agentToolsContainerfile,
   agentArtifactBinary,
   agentArtifactCacheRoot,
   agentArtifactName,
-  buildArgv,
   createAgentImages,
   detectImageLibcArgv,
   findAgentBinary,
-  formatImageRecord,
   hostAgentArchitecture,
   prepareAgentArtifacts,
   selectedAgentArtifact,
   selectedAgentArtifacts,
+} from "./agent-tools.js";
+import {
+  type BuildOptions,
+  buildArgv,
+  formatImageRecord,
   sweepBranchImages,
 } from "./ensure-images.js";
 import { runScope, variantImageTag } from "./naming.js";

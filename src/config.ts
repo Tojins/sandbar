@@ -1617,7 +1617,7 @@ export function resolveImages(
 // and the branch's files are on disk in time. It is resolved once per sandbox
 // rather than once per attempt, and a failed build falls back to the declared
 // tag rather than wedging the container the fix would be written in;
-// `resolveSandboxImage` in ensure-images.ts carries both halves of that
+// `resolveSandboxImage` in agent-tools.ts carries both halves of that
 // argument.
 export function checkRebuildOnIsUsed(
   images: readonly BuiltImage[],
