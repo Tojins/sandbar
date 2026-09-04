@@ -67,9 +67,9 @@ import type { ChunkTarget } from "./chunks.js";
 import type { ResolvedGateStack } from "./config.js";
 import {
   type AgentImages,
-  type BranchImages,
   resolveSandboxImage,
-} from "./ensure-images.js";
+} from "./agent-tools.js";
+import type { BranchImages } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { formatGateFields, summarizeGateFailure } from "./gate.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";

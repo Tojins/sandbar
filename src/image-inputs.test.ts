@@ -17,10 +17,12 @@ import { afterAll, describe, expect, it } from "vitest";
 import { type BuiltImage, resolveImages } from "./config.js";
 import {
   type AgentImages,
+  resolveSandboxImage,
+} from "./agent-tools.js";
+import {
   type BuildOptions,
   createBranchImages,
   parseInputsLabel,
-  resolveSandboxImage,
 } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { fingerprintImageInputs } from "./image-inputs.js";

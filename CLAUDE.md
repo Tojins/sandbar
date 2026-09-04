@@ -198,7 +198,8 @@ and used to announce themselves in four different ways, the halt in none at all.
   `/sandbar/logs/<name>.log`; there is no restart. `src/sandbox-stack.ts`.
 - **An image that bakes dependencies is a function of the branch (#37, #46).**
   `images[].rebuildOn` + fingerprint labels; an unbuildable image is a gate
-  red, not a HARD-ERROR. `src/image-inputs.ts`, `src/ensure-images.ts` headers.
+  red, not a HARD-ERROR. `src/image-inputs.ts`, `src/ensure-images.ts` and
+  `src/agent-tools.ts` headers.
 - **`sandbar gate` (#45)** is the one standalone runner for the same stack; it
   deliberately suspends D1, the lock, preflight and `sandboxHooks`.
   `src/gate-run.ts` header.
@@ -384,7 +385,7 @@ and used to announce themselves in four different ways, the halt in none at all.
   per session) and an image missing the helper has no command runner at all.
   Installed unconditionally and never paired with a `features.code_mode` pin;
   `agent-providers.ts`'s header owns the probe runs behind that. The
-  augmentation enforces a base contract
+  augmentation (`src/agent-tools.ts`) enforces a base contract
   of `/bin/sh`, CA roots, and git or apt/apk/dnf — no Node/npm runtime. The
   merger uses the same augmented declared image, while gate containers keep the
   unaugmented base because they run no agent. Both pins move with the driver,

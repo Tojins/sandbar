@@ -55,8 +55,8 @@ vi.mock("./sandbox-stack.js", async (importOriginal) => ({
   startSandboxStack: vi.fn(async () => ({ statuses: [], stop: vi.fn() })),
 }));
 
-vi.mock("./ensure-images.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./ensure-images.js")>(),
+vi.mock("./agent-tools.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./agent-tools.js")>(),
   resolveSandboxImage: vi.fn(async () => "test-agent-image"),
 }));
 

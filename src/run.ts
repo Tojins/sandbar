@@ -145,10 +145,12 @@ import {
 } from "./driver-identity.js";
 import {
   type AgentImages,
+  createAgentImages,
+} from "./agent-tools.js";
+import {
   type BranchImages,
   type ImageBuildRecord,
   checkWorktreeImageUids,
-  createAgentImages,
   createBranchImages,
   ensureImages,
   formatImageRecord,

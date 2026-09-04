@@ -20,10 +20,12 @@ import { afterAll, describe, it } from "vitest";
 import type { BuiltImage } from "./config.js";
 import { AGENT_PROVIDER_PACKAGES } from "./agent-providers.js";
 import {
-  ImageBuildError,
   agentToolsContainerfile,
-  buildImage,
   detectImageLibc,
+} from "./agent-tools.js";
+import {
+  ImageBuildError,
+  buildImage,
   ensureImages,
   readInputsLabel,
   sweepBranchImages,
