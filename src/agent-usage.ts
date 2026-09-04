@@ -4,6 +4,16 @@
 // disjoint convention so adding the rendered buckets means the same thing for
 // every provider. Reasoning remains a subset of output. Missing/non-numeric
 // measurements are absent; a reported zero remains a real measurement (#85).
+//
+// Those terminal ledgers are invocation COSTS, not context depths (#124).
+// In particular, cache reads are running totals over API turns, so a long
+// session can report millions of cached tokens without ever holding that many
+// tokens at once. Depth comes from each turn's own usage event and occupies a
+// separate parser register: retain only the maximum of fresh + cache-read +
+// cache-write from Claude assistant events, or input_tokens + cache-write from
+// Codex rollout last_token_usage records because Codex input already includes
+// cached tokens. It is evidence only, never a bound or completion signal, and
+// malformed/unavailable measurements stay absent.
 
 export type AgentUsage = {
   readonly inputTokens?: number;
@@ -19,6 +29,46 @@ export type AgentUsage = {
 
 const finite = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const tokenCount = (value: unknown): number | undefined => {
+  const count = finite(value);
+  return count !== undefined && count >= 0 ? count : undefined;
+};
+
+const optionalTokenCount = (value: unknown): number | undefined =>
+  value === undefined ? 0 : tokenCount(value);
+
+const contextDepth = (...counts: readonly (number | undefined)[]): number | undefined => {
+  if (counts.some((count) => count === undefined)) return undefined;
+  const sum = counts.reduce<number>((total, count) => total + (count ?? 0), 0);
+  return Number.isFinite(sum) ? sum : undefined;
+};
+
+export function normalizeClaudeContextDepth(value: unknown): number | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const usage = value as Record<string, unknown>;
+  return contextDepth(
+    tokenCount(usage.input_tokens),
+    optionalTokenCount(usage.cache_read_input_tokens),
+    optionalTokenCount(usage.cache_creation_input_tokens),
+  );
+}
+
+export function normalizeCodexContextDepth(value: unknown): number | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const usage = value as Record<string, unknown>;
+  return contextDepth(
+    tokenCount(usage.input_tokens),
+    optionalTokenCount(usage.cache_write_input_tokens),
+  );
+}
+
+export function maxContextDepth(
+  ...items: readonly (number | undefined)[]
+): number | undefined {
+  const values = items.filter((item): item is number => item !== undefined);
+  return values.length === 0 ? undefined : Math.max(...values);
+}
 
 const present = (candidate: AgentUsage): AgentUsage | undefined => {
   const usage = Object.fromEntries(
@@ -122,6 +172,7 @@ export function sumAgentUsage(
 export function formatUsageFields(
   usage: AgentUsage | undefined,
   toolCalls?: number,
+  peakContext?: number,
 ): string {
   const tokens = usage === undefined ? [] : [
     ["in", usage.inputTokens],
@@ -134,6 +185,7 @@ export function formatUsageFields(
     ? ""
     : ` tokens=${tokens.map(([name, value]) => `${name}:${value}`).join(",")}`) +
     (toolCalls === undefined ? "" : ` toolCalls=${toolCalls}`) +
+    (peakContext === undefined ? "" : ` peakContext=${peakContext}`) +
     (usage?.apiMs === undefined ? "" : ` apiMs=${usage.apiMs}`) +
     (usage?.resolvedModel === undefined ? "" : ` resolvedModel=${usage.resolvedModel}`) +
     (usage?.models === undefined || usage.models <= 1 ? "" : ` models=${usage.models}`) +

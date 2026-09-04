@@ -5,6 +5,11 @@ const seams = vi.hoisted(() => ({
   createSandbox: vi.fn(),
   dirtyWorktreePaths: vi.fn(async () => [] as string[]),
   preserveWorktree: vi.fn(),
+  partialUsage: new WeakMap<object, {
+    usage?: { inputTokens?: number };
+    toolCalls?: number;
+    peakContext?: number;
+  }>(),
 }));
 
 vi.mock("./git-ops.js", async (importOriginal) => ({
@@ -25,6 +30,10 @@ vi.mock("./agent-sandbox.js", async (importOriginal) => {
     ...actual,
     prepareWorktree: vi.fn(async () => "/tmp/issue-109-worktree"),
     createSandbox: seams.createSandbox,
+    agentPartialUsage: (err: unknown) =>
+      typeof err === "object" && err !== null
+        ? seams.partialUsage.get(err) ?? actual.agentPartialUsage(err)
+        : {},
   };
 });
 
@@ -121,6 +130,89 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       branch: "test",
       worktreePath: "/tmp/issue-109-worktree",
     }));
+  });
+
+  it("logs the larger peak context across an implementer and its promise nudge", async () => {
+    const lines: string[] = [];
+    seams.sandboxRun
+      .mockResolvedValueOnce({
+        stdout: "I need one detail.",
+        headBefore: "base-sha",
+        headAfter: "base-sha",
+        signalMs: 1,
+        maxGapMs: 1,
+        toolCalls: 2,
+        peakContext: 18,
+        commits: [],
+      })
+      .mockResolvedValueOnce({
+        stdout: "<promise>NEEDS-INFO</promise><questions>Which?</questions>",
+        headBefore: "base-sha",
+        headAfter: "base-sha",
+        signalMs: 1,
+        maxGapMs: 1,
+        toolCalls: 1,
+        peakContext: 41,
+        commits: [],
+      });
+
+    await expect(runInnerLoop(issue("124"), {
+      config: config("claude"), hooks: {}, copyToWorktree: [],
+      onOrchestratorLog: (line) => lines.push(line),
+    })).resolves.toMatchObject({ type: "NEEDS-INFO" });
+
+    expect(lines.find((line) => line.includes(" implementer signal="))).toContain(
+      "toolCalls=3 peakContext=41",
+    );
+  });
+
+  it("logs peak context for successful and failed reviewer invocations", async () => {
+    const lines: string[] = [];
+    const reviewerFailure = new Error("reviewer disconnected");
+    seams.partialUsage.set(reviewerFailure, {
+      usage: { inputTokens: 7 }, toolCalls: 2, peakContext: 52,
+    });
+    seams.sandboxRun
+      .mockResolvedValueOnce({
+        stdout: "<promise>COMPLETE</promise>",
+        headBefore: "base-sha",
+        headAfter: "implemented-sha",
+        signalMs: 1,
+        maxGapMs: 1,
+        toolCalls: 1,
+        peakContext: 23,
+        commits: [{ sha: "implemented-sha" }],
+      })
+      .mockRejectedValueOnce(reviewerFailure)
+      .mockResolvedValueOnce({
+        stdout: "<verdict>APPROVED</verdict>",
+        maxGapMs: 2,
+        toolCalls: 3,
+        peakContext: 61,
+        commits: [],
+      })
+      .mockResolvedValueOnce({
+        stdout: "<verdict>APPROVED</verdict>",
+        maxGapMs: 2,
+        toolCalls: 4,
+        peakContext: 73,
+        commits: [],
+      });
+
+    await expect(runInnerLoop(issue("125"), {
+      config: config("codex"), hooks: {}, copyToWorktree: [],
+      onOrchestratorLog: (line) => lines.push(line),
+    })).resolves.toMatchObject({ type: "DONE" });
+
+    expect(lines.find((line) => line.includes("pass=quality invocation=1 "))).toContain(
+      "tokens=in:7 toolCalls=2 peakContext=52",
+    );
+    expect(lines.find((line) => line.includes("pass=quality invocation=2 "))).toContain(
+      "toolCalls=3 peakContext=61",
+    );
+    expect(lines.find((line) => line.includes("pass=correctness invocation=1 "))).toContain(
+      "toolCalls=4 peakContext=73",
+    );
   });
 
   it("surfaces quota without a fresh-sandbox retry and closes only that provider", async () => {

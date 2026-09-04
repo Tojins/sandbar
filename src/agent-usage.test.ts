@@ -1,12 +1,43 @@
 import { describe, expect, it } from "vitest";
 import {
   formatUsageFields,
+  maxContextDepth,
+  normalizeClaudeContextDepth,
   normalizeClaudeResult,
+  normalizeCodexContextDepth,
   normalizeCodexUsage,
   sumAgentUsage,
 } from "./agent-usage.js";
 
 describe("agent usage normalisation", () => {
+  it("normalizes provider-specific per-turn context depth", () => {
+    expect(normalizeClaudeContextDepth({
+      input_tokens: 10,
+      cache_read_input_tokens: 20,
+      cache_creation_input_tokens: 3,
+    })).toBe(33);
+    expect(normalizeCodexContextDepth({
+      input_tokens: 30,
+      cached_input_tokens: 20,
+      cache_write_input_tokens: 3,
+    })).toBe(33);
+    expect(normalizeClaudeContextDepth({ input_tokens: "10" })).toBeUndefined();
+    expect(normalizeClaudeContextDepth({
+      input_tokens: 10,
+      cache_read_input_tokens: "20",
+    })).toBeUndefined();
+    expect(normalizeCodexContextDepth({
+      input_tokens: Number.MAX_VALUE,
+      cache_write_input_tokens: Number.MAX_VALUE,
+    })).toBeUndefined();
+    expect(normalizeCodexContextDepth({ cache_write_input_tokens: 3 })).toBeUndefined();
+  });
+
+  it("keeps the maximum available context depth", () => {
+    expect(maxContextDepth(undefined, 12, 40, 7)).toBe(40);
+    expect(maxContextDepth(undefined)).toBeUndefined();
+  });
+
   it("sums disjoint Claude model ledgers and resolves the largest output model", () => {
     expect(normalizeClaudeResult({ modelUsage: {
       rawA: { inputTokens: 10, cacheReadInputTokens: 20, cacheCreationInputTokens: 3, outputTokens: 8, thinkingTokens: 2, canonicalModel: "model-a" },
@@ -55,5 +86,9 @@ describe("formatUsageFields", () => {
     " tokens=in:910,cached:10272,write:8428,out:53,reasoning:36 toolCalls=37 apiMs=2021 resolvedModel=claude-haiku-4-5 models=2 terminalReason=end_turn"],
   ])("renders %s", (_name, usage, toolCalls, expected) => {
     expect(formatUsageFields(usage, toolCalls)).toBe(expected);
+  });
+
+  it("renders peak context independently of usage and tool calls", () => {
+    expect(formatUsageFields(undefined, undefined, 0)).toBe(" peakContext=0");
   });
 });

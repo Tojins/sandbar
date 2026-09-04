@@ -352,7 +352,7 @@ and used to announce themselves in four different ways, the halt in none at all.
   Preflight refuses per routed provider across all three roles. The resolve
   invocation uses the same provider boundary for argv, credential env and
   parsed output while keeping its raw streams verbatim in attempt logs. A
-  provider's parser answers in SIX registers and the rule no new one may break
+  provider's parser answers in SEVEN registers and the rule no new one may break
   is that they stay apart: `text`/`result` is the agent's SPEECH and the only
   thing a run returns (#41 — "completed with output" is what `reviewer-run.ts`
   reads as a verdict, so codex's `reasoning` is dropped and parsed speech keeps
@@ -367,8 +367,9 @@ and used to announce themselves in four different ways, the halt in none at all.
   reason buried under a dozen tracing lines — and, since no CLI documents its
   exit codes, #67's rule for a terminal failure under an exit-0 process: infra,
   not an answer (read as an answer it is a nudge, an attempt, and eight more of
-  them). The sixth register is rate-limit state (#109), a measurement that
-  cannot itself trip completion: Claude supplies it on stdout and Codex through
+  them). The sixth register is rate-limit state (#109), and the seventh is peak
+  context depth (#124); both are measurements that cannot themselves trip
+  completion: Claude supplies rate limits on stdout and Codex through
   the still-live sandbox's rollout. A rejected measurement plus a failed
   invocation closes that provider for the run and produces QUOTA without an
   agent retry. **The branch owns the environment; the run owns the tools (#75).**
@@ -459,6 +460,11 @@ and used to announce themselves in four different ways, the halt in none at all.
   failure or completion; malformed or unavailable fields are omitted. A line
   spanning multiple fresh CLI invocations sums like buckets across invocations,
   while cached/fresh/output/reasoning buckets are never collapsed together.
+  Context depth is a seventh, separate parser register (#124), rendered as
+  `peakContext=<int>`: the maximum per-turn input footprint observed during an
+  invocation. Cumulative cache reads measure cost, not depth; depth is likewise
+  a report only, never a budget, threshold, adaptive bound or completion input,
+  and an unavailable measurement is absent rather than zero.
   `timing.ts`, `agent-usage.ts`, `gate.ts`, `gate-stack.ts`,
   `ensure-images.ts` and `logs.ts` headers own the rest — `agent-usage.ts`
   specifically owns why the two providers' input conventions are opposite and

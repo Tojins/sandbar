@@ -207,6 +207,9 @@ describe("parseCapturedAgentRun (#74)", () => {
       reasoningTokens: 2,
     });
     expect(run.toolCalls).toBe(4);
+    // Exec's terminal ledger is cumulative; per-turn depth is available only
+    // from the live sandbox's rollout side channel.
+    expect(run.peakContext).toBeUndefined();
     expect(run.output).toBe("");
   });
 

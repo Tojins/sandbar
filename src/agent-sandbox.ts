@@ -15,7 +15,7 @@
 // `config.env` VALUE — so the seam absorbs a file-shaped credential without
 // sandbar learning a path or mounting anything (`CODEX_AUTH_SEED`).
 //
-// A provider's parser answers in six registers and the difference between
+// A provider's parser answers in seven registers and the difference between
 // them is load-bearing: `text`/`result` is the agent's SPEECH and is the only
 // thing a run returns, `failure` is the provider naming a TERMINAL fault of its
 // own, and everything else — including a recoverable one it merely reports — is
@@ -24,9 +24,9 @@
 // uses for the fatal case) will hand a naive parser a `failure` for a
 // reconnect, and `invokeAgent` rejects on a failure, so a blip would arrive at
 // a human as NEEDS-HUMAN. The fourth and fifth, `usage` and the additive tool
-// count, and rate-limit state are measurements only: none is speech or failure
-// and none can trip completion (#85, #109). See `ParsedStreamEvent` and
-// `parseCodexJsonLine`.
+// count, rate-limit state and peak context depth are measurements only: none
+// is speech or failure and none can trip completion (#85, #109, #124). See
+// `ParsedStreamEvent` and `parseCodexJsonLine`.
 //
 // Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
@@ -43,9 +43,10 @@
 //        which reaps nothing (#42). See `sandboxRunArgs`.
 //   F9 — a run that FAILS still carries out whatever the agent had emitted
 //        (`agentPartialOutput`) and what it had spent getting there
-//        (`agentPartialUsage`, #85/#109 — an invocation that burned ten minutes
-//        and then died must not lose its usage or quota evidence), and both
-//        timeout paths kill the exec they stop waiting for (#41).
+//        (`agentPartialUsage`, #85/#109/#124 — an invocation that burned ten
+//        minutes and then died must not lose its usage, depth or quota
+//        evidence), and both timeout paths kill the exec they stop waiting for
+//        (#41).
 //        See invokeAgent.
 //   F10 — `agent-run-end.ts` owns end classification. This wrapper supplies
 //         `retryable` for silence because its same-session nudge can recover;
@@ -92,7 +93,13 @@ import { isErrno } from "./errors.js";
 import { RESOURCE_PREFIX, strandedHeadRef } from "./naming.js";
 import { RESERVED_WORKTREE_NAMES, type RepoLayout } from "./repo-cache.js";
 import { startGapTimer, startTimer } from "./timing.js";
-import { normalizeClaudeResult, normalizeCodexUsage } from "./agent-usage.js";
+import {
+  maxContextDepth,
+  normalizeClaudeContextDepth,
+  normalizeClaudeResult,
+  normalizeCodexContextDepth,
+  normalizeCodexUsage,
+} from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
 import { classifyAgentRunEnd } from "./agent-run-end.js";
 import type { RateLimitMeasurement } from "./agent-run-end.js";
@@ -153,6 +160,7 @@ export type ParsedStreamEvent =
   | { type: "session_id"; sessionId: string }
   | { type: "usage"; usage: AgentUsage }
   | { type: "tool_calls"; count: number }
+  | { type: "context_depth"; tokens: number }
   | { type: "rate_limit"; measurement: RateLimitMeasurement }
   // The provider naming a TERMINAL fault of its own (#72) — its turn ended
   // without reaching an answer. Never folded into the run's output (it is not
@@ -177,7 +185,7 @@ export type AgentProvider = {
   parseStreamLine(line: string): ParsedStreamEvent[];
 };
 
-// One implementation of the provider parser's five-register reduction.
+// One implementation of the provider parser's seven-register reduction.
 // Both the live sandbox invocation and the merger's run-to-completion capture
 // feed this accumulator, so speech, terminal failures and raw transport cannot
 // drift into different meanings on the two agent paths (#74).
@@ -188,6 +196,7 @@ export type AgentSpeechAccumulator = {
   readonly failure: string | undefined;
   readonly usage: AgentUsage | undefined;
   readonly toolCalls: number;
+  readonly peakContext: number | undefined;
   readonly rateLimit: RateLimitMeasurement | undefined;
 };
 
@@ -197,6 +206,7 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
   let failure: string | undefined;
   let usage: AgentUsage | undefined;
   let toolCalls = 0;
+  let peakContext: number | undefined;
   let rateLimit: RateLimitMeasurement | undefined;
   return {
     ingest(events) {
@@ -208,6 +218,9 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
         } else if (event.type === "failure") failure = event.message;
         else if (event.type === "usage") usage = event.usage;
         else if (event.type === "tool_calls") toolCalls += event.count;
+        else if (event.type === "context_depth") {
+          peakContext = maxContextDepth(peakContext, event.tokens);
+        }
         else if (event.type === "rate_limit") rateLimit = event.measurement;
       }
     },
@@ -225,6 +238,9 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
     },
     get toolCalls() {
       return toolCalls;
+    },
+    get peakContext() {
+      return peakContext;
     },
     get rateLimit() {
       return rateLimit;
@@ -365,6 +381,7 @@ export type SandboxRunResult = {
   readonly maxGapMs: number;
   readonly usage?: AgentUsage;
   readonly toolCalls: number;
+  readonly peakContext?: number;
   readonly rateLimit?: RateLimitMeasurement;
 };
 
@@ -487,6 +504,7 @@ const AGENT_PARTIAL_OUTPUT = new WeakMap<object, string>();
 const AGENT_PARTIAL_USAGE = new WeakMap<object, {
   usage?: AgentUsage;
   toolCalls: number;
+  peakContext?: number;
   rateLimit?: RateLimitMeasurement;
 }>();
 
@@ -495,13 +513,14 @@ export const withPartialOutput = (
   partial: string,
   usage: AgentUsage | undefined,
   toolCalls: number,
+  peakContext: number | undefined,
   rateLimit: RateLimitMeasurement | undefined,
 ): unknown => {
   if (partial !== "" && typeof err === "object" && err !== null) {
     AGENT_PARTIAL_OUTPUT.set(err, partial);
   }
   if (typeof err === "object" && err !== null) {
-    AGENT_PARTIAL_USAGE.set(err, { usage, toolCalls, rateLimit });
+    AGENT_PARTIAL_USAGE.set(err, { usage, toolCalls, peakContext, rateLimit });
   }
   return err;
 };
@@ -515,7 +534,7 @@ export const agentPartialOutput = (err: unknown): string => {
 };
 export const agentPartialUsage = (
   err: unknown,
-): { usage?: AgentUsage; toolCalls?: number; rateLimit?: RateLimitMeasurement } =>
+): { usage?: AgentUsage; toolCalls?: number; peakContext?: number; rateLimit?: RateLimitMeasurement } =>
   typeof err === "object" && err !== null
     ? AGENT_PARTIAL_USAGE.get(err) ?? {}
     : {};
@@ -623,8 +642,11 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
     }
     return [];
   }
-  if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
+  if (obj.type === "assistant") {
     const events: ParsedStreamEvent[] = [];
+    const depth = normalizeClaudeContextDepth(obj.message?.usage);
+    if (depth !== undefined) events.push({ type: "context_depth", tokens: depth });
+    if (!Array.isArray(obj.message?.content)) return events;
     const texts: string[] = [];
     for (const block of obj.message.content) {
       if (block.type === "text" && typeof block.text === "string") {
@@ -746,9 +768,12 @@ export const claudeCode = (
 // turn that fails under an exit-0 process: infra, not an answer.
 //
 // A spent subscription is identified structurally (#109), never from this
-// prose: after the invocation the still-live sandbox reads Codex's rollout and
-// feeds its last token_count rate_limits object into the sixth register. A
-// reached window plus this failed turn becomes QUOTA and buys no retry.
+// prose: the still-live sandbox snapshots the rollout byte boundary before the
+// invocation, then reads only newly appended token_count records afterwards.
+// Their rate_limits feed the sixth register; their per-request last_token_usage
+// feeds context depth into the seventh (#124), never the cumulative
+// turn.completed ledger or a previous invocation's larger turn. A reached
+// window plus this failed turn becomes QUOTA and buys no retry.
 //
 // The turn's give-up cause, never empty: the string becomes the whole of an
 // `AgentError` message and so the NEEDS-HUMAN trace a person reads, and "the
@@ -832,17 +857,21 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
   return [];
 };
 
-// Codex deliberately omits quota state from exec JSONL. Its session rollout is
-// the structural side channel: read the last token_count after each invocation
-// and reduce it into the same register Claude fills from stdout (#109).
+// Codex deliberately omits quota state and per-turn usage from exec JSONL. Its
+// session rollout is the structural side channel: reduce each token_count's
+// rate limits and last_token_usage into their separate measurement registers
+// after the invocation (#109, #124).
 export const parseCodexRolloutLine = (line: string): ParsedStreamEvent[] => {
   const parsed = parseTransportJson(line);
   if (parsed === undefined) return [];
   const obj = parsed as any;
   const payload = obj.type === "event_msg" ? obj.payload : obj;
   if (payload?.type !== "token_count") return [];
+  const events: ParsedStreamEvent[] = [];
+  const depth = normalizeCodexContextDepth(payload.info?.last_token_usage);
+  if (depth !== undefined) events.push({ type: "context_depth", tokens: depth });
   const limits = payload.rate_limits ?? payload.info?.rate_limits;
-  if (limits === null || typeof limits !== "object") return [];
+  if (limits === null || typeof limits !== "object") return events;
   const reached = limits.rate_limit_reached_type;
   const candidates = [limits.primary, limits.secondary].filter(
     (v): v is Record<string, unknown> => v !== null && typeof v === "object",
@@ -863,7 +892,7 @@ export const parseCodexRolloutLine = (line: string): ParsedStreamEvent[] => {
         );
   const fallback = reached == null ? candidates[0] : undefined;
   const windowDetails = selected ?? fallback;
-  if (windowDetails === undefined && typeof reached !== "string") return [];
+  if (windowDetails === undefined && typeof reached !== "string") return events;
   const window = typeof reached === "string"
     ? reached
     : typeof windowDetails?.rate_limit_type === "string"
@@ -871,7 +900,7 @@ export const parseCodexRolloutLine = (line: string): ParsedStreamEvent[] => {
       : typeof windowDetails?.window_minutes === "number"
         ? `${windowDetails.window_minutes}_minute`
         : "unknown";
-  return [{
+  events.push({
     type: "rate_limit",
     measurement: {
       status: reached == null ? "allowed" : "rejected",
@@ -883,7 +912,8 @@ export const parseCodexRolloutLine = (line: string): ParsedStreamEvent[] => {
         ? { resetsAt: windowDetails.resets_at }
         : {}),
     },
-  }];
+  });
+  return events;
 };
 
 // The ChatGPT-subscription credential, materialised in-container (#73).
@@ -1948,7 +1978,45 @@ const sandboxGitSetup = async (
 // Agent run loop — two-phase timeout (F5), error tiering (gotcha B)
 // ---------------------------------------------------------------------------
 
-const invokeAgent = (
+type CodexRolloutCursor =
+  | { readonly kind: "unknown" }
+  | { readonly kind: "empty" }
+  | { readonly kind: "existing"; readonly path: string; readonly bytes: number };
+
+const shellLiteral = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
+
+const captureCodexRolloutCursor = async (
+  handle: SandboxHandle,
+  sandboxRepoDir: string,
+): Promise<CodexRolloutCursor> => {
+  const result = await withTimeout(
+      handle.exec(
+        "d=${CODEX_HOME:-$HOME/.codex}/sessions; " +
+          "f=$(find \"$d\" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort | tail -n 1); " +
+          "test -n \"$f\" && printf '%s\\n' \"$f\" && wc -c < \"$f\" || true",
+        { cwd: sandboxRepoDir },
+      ),
+      CODEX_ROLLOUT_PROBE_TIMEOUT_MS,
+      () => new Error(
+        `Codex rollout cursor probe timed out after ${CODEX_ROLLOUT_PROBE_TIMEOUT_MS}ms`,
+      ),
+    ).then(
+      (probe) => probe,
+      // A failed cursor read cannot delimit depth to this invocation. Keep the
+      // post-run probe alive for rate limits, whose verdict never required
+      // invocation scoping (#109, #124).
+      () => undefined,
+    );
+  if (result === undefined) return { kind: "unknown" };
+  const [path, rawBytes] = result.stdout.split("\n");
+  if (!path) return { kind: "empty" };
+  const bytes = Number(rawBytes?.trim());
+  return Number.isSafeInteger(bytes) && bytes >= 0
+    ? { kind: "existing", path, bytes }
+    : { kind: "unknown" };
+};
+
+const invokeAgent = async (
   handle: SandboxHandle,
   sandboxRepoDir: string,
   prompt: string | undefined,
@@ -1965,9 +2033,17 @@ const invokeAgent = (
   maxGapMs: number;
   usage?: AgentUsage;
   toolCalls: number;
+  peakContext?: number;
   rateLimit?: RateLimitMeasurement;
-}> =>
-  new Promise((resolveRun, rejectRun) => {
+}> => {
+  // A resumed Codex session appends to an existing rollout. Snapshot its byte
+  // boundary before starting the process so this invocation cannot inherit an
+  // earlier invocation's larger depth or stale rate-limit evidence (#124).
+  const rolloutCursor = agent.name === "codex"
+    ? await captureCodexRolloutCursor(handle, sandboxRepoDir)
+    : { kind: "unknown" } as const;
+
+  return new Promise((resolveRun, rejectRun) => {
     const speech = createAgentSpeechAccumulator();
     let matchedSignal: string | undefined;
     let signalMs: number | undefined;
@@ -1992,6 +2068,7 @@ const invokeAgent = (
       maxGapMs: number;
       usage?: AgentUsage;
       toolCalls: number;
+      peakContext?: number;
       rateLimit?: RateLimitMeasurement;
     }): void => {
       if (settled) return;
@@ -2012,6 +2089,7 @@ const invokeAgent = (
         speech.spoken,
         speech.usage,
         speech.toolCalls,
+        speech.peakContext,
         speech.rateLimit,
       ));
     };
@@ -2105,15 +2183,20 @@ const invokeAgent = (
         clearTimer();
         if (agent.name === "codex") {
           // The rollout is inside this still-live sandbox. Missing files or
-          // malformed lines or an exec-level probe failure deliberately yield
-          // no measurement and preserve the invocation's old classification
-          // (#109). This register is evidence only and cannot trip completion.
+          // malformed lines or a post-run exec failure preserve the invocation's
+          // old classification. An unknown cursor omits depth while retaining
+          // rate-limit evidence (#109, #124).
           try {
+            const readNewRecords = rolloutCursor.kind === "empty" || rolloutCursor.kind === "unknown"
+              ? "test -n \"$f\" && tail -n 200 \"$f\" || true"
+              : `if test \"$f\" = ${shellLiteral(rolloutCursor.path)}; then ` +
+                `tail -c +${rolloutCursor.bytes + 1} \"$f\" | tail -n 200; ` +
+                "else test -n \"$f\" && tail -n 200 \"$f\" || true; fi";
             const rollout = await withTimeout(
               handle.exec(
                 "d=${CODEX_HOME:-$HOME/.codex}/sessions; " +
                   "f=$(find \"$d\" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort | tail -n 1); " +
-                  "test -n \"$f\" && tail -n 200 \"$f\" || true",
+                  readNewRecords,
                 { cwd: sandboxRepoDir },
               ),
               CODEX_ROLLOUT_PROBE_TIMEOUT_MS,
@@ -2122,7 +2205,10 @@ const invokeAgent = (
               ),
             );
             for (const line of rollout.stdout.split("\n")) {
-              speech.ingest(parseCodexRolloutLine(line));
+              const events = parseCodexRolloutLine(line);
+              speech.ingest(rolloutCursor.kind === "unknown"
+                ? events.filter((event) => event.type !== "context_depth")
+                : events);
             }
           } catch {
             // The agent result remains authoritative when its optional side
@@ -2172,12 +2258,14 @@ const invokeAgent = (
           maxGapMs: gaps.finish(),
           ...(signalMs === undefined ? {} : { signalMs }),
           ...(speech.usage === undefined ? {} : { usage: speech.usage }),
+          ...(speech.peakContext === undefined ? {} : { peakContext: speech.peakContext }),
           ...(speech.rateLimit === undefined ? {} : { rateLimit: speech.rateLimit }),
           toolCalls: speech.toolCalls,
         });
       })
       .catch((err) => settleReject(err));
   });
+};
 
 // ---------------------------------------------------------------------------
 // prepareWorktree / createSandbox — orchestration, lifecycle, commit capture
@@ -2355,6 +2443,7 @@ export const createSandbox = async (
     maxGapMs: number;
     usage?: AgentUsage;
     toolCalls: number;
+    peakContext?: number;
     rateLimit?: RateLimitMeasurement;
   }> => {
     // Read host git identity, then propagate into the sandbox. safe.directory
@@ -2409,16 +2498,17 @@ export const createSandbox = async (
       await execGit(["rev-parse", "--verify", `refs/heads/${branch}`], worktreePath)
     ).trim();
 
-    const { result, signalMs, maxGapMs, usage, toolCalls, rateLimit, silent } = await invokeAgent(
-      providerHandle,
-      sandboxRepoDir,
-      prompt,
-      agent,
-      idleTimeoutMs,
-      completionTimeoutMs,
-      completionSignals,
-      elapsed,
-    );
+    const { result, signalMs, maxGapMs, usage, toolCalls, peakContext, rateLimit, silent } =
+      await invokeAgent(
+        providerHandle,
+        sandboxRepoDir,
+        prompt,
+        agent,
+        idleTimeoutMs,
+        completionTimeoutMs,
+        completionSignals,
+        elapsed,
+      );
 
     // Explicit-branch commit capture: fully-qualified ref, the cache repo,
     // --reverse (oldest-first). Zero commits is an empty list; git faults throw.
@@ -2443,6 +2533,7 @@ export const createSandbox = async (
       maxGapMs,
       ...(signalMs === undefined ? {} : { signalMs }),
       ...(usage === undefined ? {} : { usage }),
+      ...(peakContext === undefined ? {} : { peakContext }),
       ...(rateLimit === undefined ? {} : { rateLimit }),
       toolCalls,
     };
@@ -2474,6 +2565,7 @@ export const createSandbox = async (
         maxGapMs: iter.maxGapMs,
         ...(iter.signalMs === undefined ? {} : { signalMs: iter.signalMs }),
         ...(iter.usage === undefined ? {} : { usage: iter.usage }),
+        ...(iter.peakContext === undefined ? {} : { peakContext: iter.peakContext }),
         ...(iter.rateLimit === undefined ? {} : { rateLimit: iter.rateLimit }),
         toolCalls: iter.toolCalls,
       };

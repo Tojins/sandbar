@@ -650,7 +650,10 @@ describe("runResolveLoop — logging", () => {
   it("emits a log line per attempt and per outcome", async () => {
     const { adapter } = makeAdapter({
       initiallyConflicted: true,
-      agentRuns: [{ stdout: "<promise>COMMITTED</promise>" }],
+      agentRuns: [{
+        stdout: "<promise>COMMITTED</promise>",
+        run: { peakContext: 4321 },
+      }],
       gates: [{ ok: true }],
     });
     const lines: string[] = [];
@@ -664,7 +667,9 @@ describe("runResolveLoop — logging", () => {
         lines.push(line);
       },
     );
-    expect(lines.some((l) => l.startsWith("resolve-attempt 1/"))).toBe(true);
+    expect(lines.find((l) => l.startsWith("resolve-attempt 1 ended="))).toContain(
+      "peakContext=4321",
+    );
     expect(lines.some((l) => l.includes("gate green"))).toBe(true);
     // #82. The install and the re-gate are reported on the GREEN path too —
     // they run on every recovered attempt, which is exactly the case whose cost
