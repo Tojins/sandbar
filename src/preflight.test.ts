@@ -1,13 +1,73 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ResolvedStackContainer } from "./config.js";
 import {
   absoluteMountSources,
+  checkForgeReachability,
   checkInvariants,
   classifySandbarBranches,
   type ConfigStaleness,
   type RepoState,
   staleConfigWarning,
 } from "./preflight.js";
+
+describe("forge reachability gate (#118)", () => {
+  it("retries only the unanswered host check and succeeds when it recovers", async () => {
+    let lookups = 0;
+    const waits: number[] = [];
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await checkForgeReachability(
+      ["GitHub.com", "github.com"],
+      {
+        lookup: async (host) => {
+          expect(host).toBe("github.com");
+          lookups += 1;
+          if (lookups === 1) throw new Error("getaddrinfo EAI_AGAIN");
+        },
+        connect: async (host, port) => {
+          expect([host, port]).toEqual(["github.com", 443]);
+        },
+        wait: async (ms) => {
+          waits.push(ms);
+        },
+        now: () => 0,
+      },
+    );
+
+    expect(result).toEqual({ ok: true });
+    expect(lookups).toBe(2);
+    expect(waits).toEqual([10_000]);
+    expect(warning).toHaveBeenCalledTimes(1);
+    warning.mockRestore();
+  });
+
+  it("reports every failed attempt and the final host reasons", async () => {
+    let now = 0;
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const result = await checkForgeReachability(["github.com", "forge.test"], {
+      lookup: async (host) => {
+        throw new Error(`${host} DNS unavailable`);
+      },
+      connect: async () => undefined,
+      wait: async (ms) => {
+        now += ms;
+      },
+      now: () => now,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      attempts: 6,
+      elapsedMs: 50_000,
+      failures: [
+        "github.com: github.com DNS unavailable",
+        "forge.test: forge.test DNS unavailable",
+      ],
+    });
+    expect(warning).toHaveBeenCalledTimes(6);
+    warning.mockRestore();
+  });
+});
 
 const cleanState: RepoState = {
   hasGit: true,

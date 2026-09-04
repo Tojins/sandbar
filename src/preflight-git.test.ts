@@ -14,7 +14,7 @@ import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentProviderName } from "./agent-providers.js";
 import { makeEnvReader } from "./env.js";
@@ -126,6 +126,12 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
 
     await runPreflight(
       cfg(layoutAt(target)) as Parameters<typeof runPreflight>[0],
+      {
+        lookup: async () => undefined,
+        connect: async () => undefined,
+        wait: async () => undefined,
+        now: () => 0,
+      },
     ).catch(() => undefined);
 
     await expect(
@@ -136,6 +142,52 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         "refs/remotes/origin/sandbar/member-7",
       ),
     ).resolves.toBeDefined();
+  });
+
+  it("reports both failed fetches by name with git's error", async () => {
+    await git(target, "remote", "set-url", "origin", join(target, "missing-origin"));
+
+    const error = await runPreflight(
+      cfg(layoutAt(target)) as Parameters<typeof runPreflight>[0],
+      {
+        lookup: async () => undefined,
+        connect: async () => undefined,
+        wait: async () => undefined,
+        now: () => 0,
+      },
+    ).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("Fetching origin/main failed");
+    expect(String(error)).toContain("sandbar chunk and member refs failed");
+    expect(String(error)).toContain("does not appear to be a git repository");
+  });
+
+  it("refuses an unreachable forge alone before credentials or branches are judged", async () => {
+    let now = 0;
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = await runPreflight(
+      cfg(layoutAt(target)) as Parameters<typeof runPreflight>[0],
+      {
+        lookup: async () => {
+          throw new Error("getaddrinfo EAI_AGAIN");
+        },
+        connect: async () => undefined,
+        wait: async (ms) => {
+          now += ms;
+        },
+        now: () => now,
+      },
+    ).catch((err: unknown) => err);
+
+    expect(String(error)).toContain("after 6 attempts over 50.0s");
+    expect(String(error)).toContain("github.com: getaddrinfo EAI_AGAIN");
+    expect(String(error)).toContain(
+      "No credential was judged and no branch was classified",
+    );
+    expect(String(error)).not.toContain("gh auth login");
+    expect(warning).toHaveBeenCalledTimes(6);
+    warning.mockRestore();
   });
 
   // The highest-stakes half, and the one that qualified #32's fix: #32 put this
