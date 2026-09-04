@@ -29,6 +29,13 @@ export type RateLimitMeasurement = {
   readonly resetsAt?: number;
 };
 
+export const formatRateLimitFields = (
+  measurement: RateLimitMeasurement | undefined,
+): string => measurement === undefined ? "" :
+  ` quotaStatus=${measurement.status} quotaWindow=${measurement.window}` +
+  (measurement.utilization === undefined ? "" : ` quotaUtilization=${measurement.utilization}`) +
+  (measurement.resetsAt === undefined ? "" : ` quotaResetsAt=${measurement.resetsAt}`);
+
 export type AgentRunClassification = {
   readonly cause: AgentRunCause;
   readonly verdict: "answer" | "infra" | "quota";

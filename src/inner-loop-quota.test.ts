@@ -3,11 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const seams = vi.hoisted(() => ({
   sandboxRun: vi.fn(),
   createSandbox: vi.fn(),
+  dirtyWorktreePaths: vi.fn(async () => [] as string[]),
+  preserveWorktree: vi.fn(),
 }));
 
 vi.mock("./git-ops.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./git-ops.js")>(),
-  dirtyWorktreePaths: vi.fn(async () => []),
+  dirtyWorktreePaths: seams.dirtyWorktreePaths,
   headMismatch: vi.fn(async () => null),
   branchTip: vi.fn(async () => "implemented-sha"),
   symbolicHeadRef: vi.fn(async () => "refs/heads/test"),
@@ -108,10 +110,12 @@ const config = (implementerAgent: "claude" | "codex"): InnerLoopConfig => ({
 describe("runInnerLoop run-scoped quota closure (#109)", () => {
   beforeEach(() => {
     seams.sandboxRun.mockReset();
+    seams.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
+    seams.preserveWorktree.mockReset();
     seams.createSandbox.mockReset().mockImplementation(async () => ({
       run: seams.sandboxRun,
       syncBranchToCache: vi.fn(async () => undefined),
-      preserveWorktree: vi.fn(),
+      preserveWorktree: seams.preserveWorktree,
       close: vi.fn(),
       containerName: "sandbox",
       branch: "test",
@@ -189,6 +193,33 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
     });
+    expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves reviewer writes even when that invocation closes quota", async () => {
+    const measurement = {
+      status: "rejected" as const,
+      window: "five_hour",
+      resetsAt: 42,
+    };
+    seams.sandboxRun
+      .mockResolvedValueOnce({
+        stdout: "<promise>COMPLETE</promise>",
+        headBefore: "base-sha",
+        headAfter: "implemented-sha",
+        signalMs: 1,
+        maxGapMs: 1,
+        toolCalls: 0,
+        commits: [{ sha: "implemented-sha" }],
+      })
+      .mockRejectedValueOnce(new AgentQuotaError("claude", measurement));
+    seams.dirtyWorktreePaths.mockResolvedValueOnce([]).mockResolvedValueOnce(["review.txt"]);
+
+    await expect(runInnerLoop(issue("114"), {
+      config: config("codex"), hooks: {}, copyToWorktree: [],
+      quotaState: createRunQuotaState(),
+    })).resolves.toMatchObject({ type: "NEEDS-HUMAN-REVIEW" });
+    expect(seams.preserveWorktree).toHaveBeenCalledOnce();
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
   });
 });

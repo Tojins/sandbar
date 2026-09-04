@@ -836,26 +836,41 @@ export const parseCodexRolloutLine = (line: string): ParsedStreamEvent[] => {
   const candidates = [limits.primary, limits.secondary].filter(
     (v): v is Record<string, unknown> => v !== null && typeof v === "object",
   );
-  const selected = candidates.find((v) =>
-    reached != null && (v.limit_name === reached || v.rate_limit_type === reached),
-  ) ?? candidates[0];
-  if (selected === undefined) return [];
+  const reachedWindowMinutes = reached === "five_hour"
+    ? 5 * 60
+    : reached === "seven_day" || reached === "seven_day_opus"
+      ? 7 * 24 * 60
+      : undefined;
+  const selected = reached === "primary"
+    ? limits.primary
+    : reached === "secondary"
+      ? limits.secondary
+      : candidates.find((v) =>
+          v.limit_name === reached ||
+          v.rate_limit_type === reached ||
+          (reachedWindowMinutes !== undefined && v.window_minutes === reachedWindowMinutes),
+        );
+  const fallback = reached == null ? candidates[0] : undefined;
+  const windowDetails = selected ?? fallback;
+  if (windowDetails === undefined && typeof reached !== "string") return [];
   const window = typeof reached === "string"
     ? reached
-    : typeof selected.rate_limit_type === "string"
-      ? selected.rate_limit_type
-      : typeof selected.window_minutes === "number"
-        ? `${selected.window_minutes}_minute`
+    : typeof windowDetails?.rate_limit_type === "string"
+      ? windowDetails.rate_limit_type
+      : typeof windowDetails?.window_minutes === "number"
+        ? `${windowDetails.window_minutes}_minute`
         : "unknown";
   return [{
     type: "rate_limit",
     measurement: {
       status: reached == null ? "allowed" : "rejected",
       window,
-      ...(typeof selected.used_percent === "number"
-        ? { utilization: selected.used_percent / 100 }
+      ...(typeof windowDetails?.used_percent === "number"
+        ? { utilization: windowDetails.used_percent / 100 }
         : {}),
-      ...(typeof selected.resets_at === "number" ? { resetsAt: selected.resets_at } : {}),
+      ...(typeof windowDetails?.resets_at === "number"
+        ? { resetsAt: windowDetails.resets_at }
+        : {}),
     },
   }];
 };

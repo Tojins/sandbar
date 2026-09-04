@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { MergerGateOutput } from "./merger.js";
 import { classifyAgentRunEnd } from "./agent-run-end.js";
 import { SandbarError } from "./errors.js";
+import { AgentQuotaError } from "./agent-sandbox.js";
 import {
   RESOLVE_MAX_ATTEMPTS,
   type IssueRef,
@@ -812,6 +813,40 @@ describe("runResolveLoop — an attempt that never ran (#67)", () => {
     }).catch(() => undefined);
     expect(records).toHaveLength(1);
     expect(records[0]?.stderr).toBe("boom");
+  });
+});
+
+describe("runResolveLoop — quota capture (#109)", () => {
+  it("writes and reports the attempt before surfacing quota", async () => {
+    const measurement = {
+      status: "rejected" as const,
+      window: "five_hour",
+      utilization: 1,
+      resetsAt: 42,
+    };
+    const { adapter, calls } = makeAdapter({
+      initiallyConflicted: true,
+      agentRuns: [{
+        stdout: "quota transport",
+        run: { exitCode: 1, verdict: "quota", cause: "quota", rateLimit: measurement },
+      }],
+    });
+    const { sink, records } = makeSink();
+    const lines: string[] = [];
+
+    const err = await runResolveLoop(issue(109), [], conflictMode, adapter, {
+      projectAnchor,
+      onAttempt: sink,
+    }, (line) => { lines.push(line); }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AgentQuotaError);
+    expect(err).toMatchObject({ provider: "claude", measurement });
+    expect(records).toHaveLength(1);
+    expect(records[0]?.stdout).toBe("quota transport");
+    expect(lines).toContainEqual(expect.stringContaining(
+      "quotaStatus=rejected quotaWindow=five_hour quotaUtilization=1 quotaResetsAt=42",
+    ));
+    expect(calls.agentRuns).toBe(1);
   });
 });
 

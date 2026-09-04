@@ -69,7 +69,13 @@ import { loadTemplate, render } from "./prompts.js";
 import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
 import { formatUsageFields } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
-import type { AgentRunCause, AgentRunEnd } from "./agent-run-end.js";
+import {
+  formatRateLimitFields,
+  type AgentRunCause,
+  type AgentRunEnd,
+  type RateLimitMeasurement,
+} from "./agent-run-end.js";
+import { AgentQuotaError } from "./agent-sandbox.js";
 
 export const RESOLVE_MAX_ATTEMPTS = 4;
 
@@ -164,9 +170,10 @@ export type ResolveAgentRun = {
   // The discriminated end classification shared with the sandbox wrapper.
   readonly cause: AgentRunCause;
   // Whether this caller should accept the run as an answer or halt as infra.
-  readonly verdict: "answer" | "infra";
+  readonly verdict: "answer" | "infra" | "quota";
   readonly usage?: AgentUsage;
   readonly toolCalls: number;
+  readonly rateLimit?: RateLimitMeasurement;
 };
 
 // Which prompt the attempt was answering — the same three shapes the loop's
@@ -401,8 +408,14 @@ export async function runResolveLoop(
     await log(
       `resolve-attempt ${attempt} ${describeRunEnd(run)} container=${run.container}` +
         formatUsageFields(run.usage, run.toolCalls) +
+        formatRateLimitFields(run.rateLimit) +
         (logPath ? ` log=${logPath}` : ""),
     );
+
+    if (run.verdict === "quota") {
+      if (!run.rateLimit) throw new Error("quota run missing rate-limit measurement");
+      throw new AgentQuotaError("claude", run.rateLimit);
+    }
 
     // One journal entry per attempt, filed once the loop knows what it made of
     // the tree. A closure over this attempt's run so that every `continue` and

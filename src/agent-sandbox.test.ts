@@ -317,6 +317,29 @@ describe("rate-limit measurements (#109)", () => {
       status: "rejected", window: "seven_day", utilization: 1, resetsAt: 456,
     } }]);
   });
+
+  it("takes a reached secondary window's evidence, never primary's", () => {
+    expect(parseCodexRolloutLine(JSON.stringify({
+      type: "event_msg", payload: { type: "token_count", rate_limits: {
+        rate_limit_reached_type: "secondary",
+        primary: { used_percent: 10, window_minutes: 300, resets_at: 111 },
+        secondary: { used_percent: 100, window_minutes: 10080, resets_at: 222 },
+      } },
+    }))).toEqual([{ type: "rate_limit", measurement: {
+      status: "rejected", window: "secondary", utilization: 1, resetsAt: 222,
+    } }]);
+  });
+
+  it("omits window evidence when a reached window cannot be identified", () => {
+    expect(parseCodexRolloutLine(JSON.stringify({
+      type: "event_msg", payload: { type: "token_count", rate_limits: {
+        rate_limit_reached_type: "unexpected_window",
+        primary: { used_percent: 10, window_minutes: 300, resets_at: 111 },
+      } },
+    }))).toEqual([{ type: "rate_limit", measurement: {
+      status: "rejected", window: "unexpected_window",
+    } }]);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -53,7 +53,7 @@ import {
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
 import { AgentQuotaError, agentPartialOutput, agentPartialUsage, podman } from "./agent-sandbox.js";
-import type { RateLimitMeasurement } from "./agent-run-end.js";
+import { formatRateLimitFields, type RateLimitMeasurement } from "./agent-run-end.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 import { formatUsageFields, sumAgentUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
@@ -318,13 +318,6 @@ export const quotaVerdict = (err: AgentQuotaError): Verdict => ({
   window: err.measurement.window,
   ...(err.measurement.resetsAt === undefined ? {} : { resetsAt: err.measurement.resetsAt }),
 });
-
-export const formatRateLimitFields = (
-  measurement: RateLimitMeasurement | undefined,
-): string => measurement === undefined ? "" :
-  ` quotaStatus=${measurement.status} quotaWindow=${measurement.window}` +
-  (measurement.utilization === undefined ? "" : ` quotaUtilization=${measurement.utilization}`) +
-  (measurement.resetsAt === undefined ? "" : ` quotaResetsAt=${measurement.resetsAt}`);
 
 export type InnerLoopConfig = {
   // Every directory this loop touches, as one object (#38). The issue branch it
@@ -1246,10 +1239,10 @@ async function runReviewer(
             partial.toolCalls,
             err instanceof AgentQuotaError ? err.measurement : undefined,
           );
-          if (err instanceof AgentQuotaError) throw err;
           const transcript = agentPartialOutput(err);
           const event = await detectWrite(beforeInvocation, transcript);
           if (event !== null) return { kind: "aborted", event, transcript };
+          if (err instanceof AgentQuotaError) throw err;
           // The bytes the agent had emitted before it failed ride out on the
           // error (#41, agent-sandbox F9). Without them a reviewer that emitted
           // a verdict and then died is indistinguishable from one that emitted
