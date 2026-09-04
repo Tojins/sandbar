@@ -168,7 +168,7 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     expect(prompt).not.toContain("(empty — no changes against");
   });
 
-  it("anchors the verify diff at the newest follow-up-reviewed head", async () => {
+  it("anchors the verify diff at the newest quality-reviewed head", async () => {
     await commitOnBranch();
     const listingHead = (await git(worktree, "rev-parse", "HEAD")).stdout.trim();
     const laterLine = "the-line-added-after-the-listing";
@@ -181,16 +181,15 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
       priorRounds: [{
         round: 1,
         head: listingHead,
-        correctness: { verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>" },
-        followup: {
+        quality: {
           verdict: "CHANGES-REQUESTED",
           prose: "### Tests\n\nAdd coverage.\n<verdict>CHANGES-REQUESTED</verdict>",
         },
       }],
-    })).followup;
+    })).quality;
 
     const changedSince = prompt.slice(
-      prompt.indexOf("## Changed since the last follow-up review"),
+      prompt.indexOf("## Changed since the last quality review"),
       prompt.indexOf("## Coding standards"),
     );
     expect(changedSince).toContain(laterLine);

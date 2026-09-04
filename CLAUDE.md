@@ -88,11 +88,16 @@ an exit condition fires.
    the latest review; `DEFAULT_MAX_REVIEW_ROUNDS`'s comment in `src/config.ts`
    owns the number and the two dogfooding exhaustions behind it (#8, #66). The
    reviewer is strictly advisory and read-only. One review round is up to two
-   sequential calls in the same provider session (#19): correctness first on
-   `reviewerModelId`, then — only after approval — tests/spec/standards on
-   `reviewerFollowupModelId`; the state machine receives their single aggregate
-   result and spends one round. `src/reviewer-run.ts` owns what a failed
-   reviewer invocation means (#41). Terminals: `DONE | NEEDS-INFO |
+   sequential COLD calls (#19, #121): tests/standards first on
+   `reviewerQualityAgent`/`reviewerQualityModelId`, then — only after its
+   approval — correctness/spec on `reviewerAgent`/`reviewerModelId`; the state
+   machine receives their single aggregate result and spends one round. The
+   gate protects the EXPENSIVE pass and the deciding verdict stays on the
+   strongest model: measured, correctness approved 11 of 11 judged rounds after
+   #107 for two thirds of the reviewer minutes, and the second pass discarded 7
+   of those approvals inside the same round. `src/reviewer-run.ts` owns the
+   order, the aggregation and what a failed reviewer invocation means (#41).
+   Terminals: `DONE | NEEDS-INFO |
    NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | HARD-ERROR`
    (infra-only).
 
@@ -313,11 +318,13 @@ and used to announce themselves in four different ways, the halt in none at all.
   rotated away. Not a bind mount: that would be a writable channel from a
   sandbox back onto the host's credential, with three parallel sandboxes as
   concurrent writers on one file.
-- **A role names its CLI as well as its model (#19, #72, #74).**
+- **A role names its CLI as well as its model (#19, #72, #74, #121).**
   `implementerAgent` / `reviewerAgent` / `mergerAgent`, all defaulting to
-  `claude`, beside model ids
-  that are per call: the reviewer has correctness and follow-up ids under its
-  one provider because sessions cannot cross vendor CLIs. The tiering knob and
+  `claude`, plus `reviewerQualityAgent` defaulting to `reviewerAgent`, beside
+  model ids that are per call: the reviewer's two passes are independently
+  routed since nothing resumes a session between them, and
+  `assertRoleModelIdNamed` therefore runs per PASS against that pass's own
+  provider. The tiering knob and
   the vendor knob are independent, and
   every provider takes whatever id its role's field holds — which is why a role
   routed off claude must NAME its model (`assertRoleModelIdNamed`), the default

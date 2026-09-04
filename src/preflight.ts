@@ -441,7 +441,7 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
     // when the merger is the sole role routed away from the default (#74).
     const why =
       `A role is routed to ${provider} by \`implementerAgent\`, ` +
-      "`reviewerAgent`, or `mergerAgent`.";
+      "`reviewerAgent`, `reviewerQualityAgent`, or `mergerAgent`.";
     out.push({
       ok: false,
       message:

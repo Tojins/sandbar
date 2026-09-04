@@ -499,13 +499,16 @@ export type RunConfig = {
   // A role routed to another provider (below) puts THAT vendor's id in the same
   // field: the fields name the model, not the vendor — and must then name it,
   // since the default is a claude alias (`assertRoleModelIdNamed`).
-  // Defaults: implementer/reviewer/reviewer-followup/merger all "opus".
+  // Defaults: implementer/reviewer/reviewer-quality/merger all "opus".
   readonly implementerModelId?: string;
+  // The correctness pass — the one that ends an issue (#121). `reviewerAgent`
+  // is its CLI.
   readonly reviewerModelId?: string;
-  // The checklist pass resumes the correctness review under the same provider,
-  // but may use a cheaper model. Cross-provider resume is intentionally not a
-  // configuration shape: one reviewer role owns one CLI and its session files.
-  readonly reviewerFollowupModelId?: string;
+  // The quality pass (tests and standards), which runs FIRST and gates the
+  // correctness one (#121). Since neither pass resumes the other's session it
+  // may name another vendor's model, paired with `reviewerQualityAgent`.
+  // Renamed from `reviewerFollowupModelId`, which is now refused by name.
+  readonly reviewerQualityModelId?: string;
   readonly mergerModelId?: string;
 
   // Which CLI each role runs (#72, #74) — the vendor knob beside the tiering one.
@@ -516,6 +519,12 @@ export type RunConfig = {
   // half-way, and half-way runs `codex exec --model opus` every attempt.
   readonly implementerAgent?: AgentProviderName;
   readonly reviewerAgent?: AgentProviderName;
+  // The quality pass's CLI (#121). Defaults to `reviewerAgent`, so a config
+  // that says nothing keeps one reviewer vendor. Routing it elsewhere is what
+  // moves ~64% of reviewer rounds off the correctness vendor's rate window
+  // while the deciding verdict stays where it was; it is only possible because
+  // the passes no longer share a session.
+  readonly reviewerQualityAgent?: AgentProviderName;
   readonly mergerAgent?: AgentProviderName;
 
   // Trailer appended to merge commits. Default: a `Co-authored-by:` line built
@@ -739,7 +748,7 @@ export const DEFAULT_SOURCE_BRANCH = "main";
 export const DEFAULT_CONTAINERFILE_PATH = "Containerfile";
 export const DEFAULT_IMPLEMENTER_MODEL_ID = "opus";
 export const DEFAULT_REVIEWER_MODEL_ID = "opus";
-export const DEFAULT_REVIEWER_FOLLOWUP_MODEL_ID = "opus";
+export const DEFAULT_REVIEWER_QUALITY_MODEL_ID = "opus";
 export const DEFAULT_MERGER_MODEL_ID = "opus";
 export const DEFAULT_CLAUDE_MD_PATH = "CLAUDE.md";
 export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
@@ -1631,6 +1640,24 @@ function requireLane(value: unknown): Lane {
   );
 }
 
+// #121 renamed the second reviewer pass, and a renamed field is exactly #66's
+// silent failure: the config is IMPORTED, so a host still saying
+// `reviewerFollowupModelId` would have it spread through `...config` and never
+// read, quietly running the pass on the "opus" default. `requiresSandbar` only
+// catches a config asking for a NEWER driver; this is the opposite direction —
+// an older config on a newer driver — so it is refused here, by name.
+function checkRenamedReviewerField(config: RunConfig): void {
+  const legacy = (config as { readonly reviewerFollowupModelId?: unknown })
+    .reviewerFollowupModelId;
+  if (legacy === undefined) return;
+  throw new SandbarError(
+    "config.reviewerFollowupModelId was renamed to config.reviewerQualityModelId " +
+      "(#121): the checklist pass is now called the quality pass, runs FIRST, and " +
+      "gates the correctness pass. Rename the field — left as it is it would be " +
+      "ignored and the pass would run on the default model.",
+  );
+}
+
 export function resolveConfig(config: RunConfig): ResolvedConfig {
   // FIRST, ahead of every other field (#66). Everything below reads the config
   // as the driver understands it, so a config written for a newer sandbar has
@@ -1642,6 +1669,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   // so a parameter would widen a production signature to buy a test seam the
   // decision already has.
   checkRequiresSandbar(config.requiresSandbar, sandbarVersion());
+  checkRenamedReviewerField(config);
   // Trimmed HERE, not just where it is compared. `resolveMergeMode` tests
   // `integrationBranch === sourceBranch.trim()`, so trimming only in the guard
   // made the guard describe a value that never existed: `" main "` would pass
@@ -1691,15 +1719,29 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     config.implementerAgent,
   );
   const reviewerAgent = parseAgentProviderName("reviewerAgent", config.reviewerAgent);
+  // Defaulted to the correctness pass's CLI rather than to "claude": one
+  // reviewer vendor stays one field, and #121's split is opt-in (#72's
+  // no-op-for-older-configs rule, one level down).
+  const reviewerQualityAgent = parseAgentProviderName(
+    "reviewerQualityAgent",
+    config.reviewerQualityAgent ?? reviewerAgent,
+  );
   const mergerAgent = parseAgentProviderName("mergerAgent", config.mergerAgent);
   assertRoleModelIdNamed("implementer", implementerAgent, config.implementerModelId);
   assertRoleModelIdNamed("reviewer", reviewerAgent, config.reviewerModelId);
-  assertRoleModelIdNamed(
-    "reviewer",
-    reviewerAgent,
-    config.reviewerFollowupModelId,
-    "reviewerFollowupModelId",
-  );
+  // Per PASS, against that pass's own provider (#121): a config that routes
+  // quality away from claude and leaves the model id at the "opus" default is
+  // #72's half-moved config, and the correctness pass's own id says nothing
+  // about it.
+  assertRoleModelIdNamed("reviewer", reviewerQualityAgent, config.reviewerQualityModelId, {
+    // The field the operator actually WROTE. A quality pass that inherited its
+    // provider from `reviewerAgent` has no `reviewerQualityAgent` line, and a
+    // message naming one sends them looking for a field their config does not
+    // contain.
+    agentField:
+      config.reviewerQualityAgent === undefined ? "reviewerAgent" : "reviewerQualityAgent",
+    modelField: "reviewerQualityModelId",
+  });
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
   return {
     ...config,
@@ -1711,11 +1753,12 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     images,
     implementerModelId: config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,
     reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
-    reviewerFollowupModelId:
-      config.reviewerFollowupModelId ?? DEFAULT_REVIEWER_FOLLOWUP_MODEL_ID,
+    reviewerQualityModelId:
+      config.reviewerQualityModelId ?? DEFAULT_REVIEWER_QUALITY_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     implementerAgent,
     reviewerAgent,
+    reviewerQualityAgent,
     mergerAgent,
     coauthorTrailer:
       config.coauthorTrailer ??

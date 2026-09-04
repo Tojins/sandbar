@@ -10,23 +10,27 @@ Issue #{{issueId}}: {{issueTitle}}
 
 {{chunkBase}}{{commits}}{{diff}}{{priorRounds}}## Review process
 
-Gate-1 is green. Review for concrete correctness defects that its checks may
-miss, using the project conventions in {{conventionsRef}} to understand the
-implementation's invariants and settled choices.
+Gate-1 is green and this round's tests-and-standards pass has already approved.
+Review these two dimensions, using the project conventions in
+{{conventionsRef}} to understand the implementation's invariants and settled
+choices:
 
-Review correctness of logic only: does the implementation actually work? Look
-for correctness gaps the tests miss: edge cases, off-by-one errors, broken
-error paths, concurrency hazards, and other state hazards.
+1. Correctness of logic: does the implementation actually work? Look for
+   correctness gaps the tests miss: edge cases, off-by-one errors, broken error
+   paths, concurrency hazards, and other state hazards.
+2. Spec conformance: compare the issue body to the branch, including missing
+   requirements and scope creep. An unmet requirement blocks wherever it is.
+
 Explicitly exclude style, coding standards, test-quality, and test-coverage
-judgments from this pass. A change request must name the defect's location,
-explain the concrete failure, and state the change that clears it. Do not block
-on speculation or preference: if you cannot name a concrete correctness defect,
-APPROVE.
+judgments from this pass — the pass before it owns them. A change request must
+name the defect's location, explain the concrete failure, and state the change
+that clears it. Do not block on speculation or preference: if you cannot name a
+concrete defect on either dimension, APPROVE.
 
-For each finding in the prior-round history from your correctness dimension,
-state whether it is addressed at this head; an unaddressed one blocks. Then
-review this branch as you would with no history at all. The history does not
-narrow what you may find or make new correctness defects non-blocking.
+For each finding in the prior-round history from your correctness and spec
+dimensions, state whether it is addressed at this head; an unaddressed one
+blocks. Then review this branch as you would with no history at all. The history
+does not narrow what you may find or make new defects non-blocking.
 
 A change requested in an earlier round may not be reversed without naming that
 round and explaining why its request was wrong.
@@ -36,16 +40,21 @@ Do not run any command that writes under `.git` (including commit, checkout,
 reset, branch, worktree, gc, or prune), do not modify files, push, or run gate
 commands. Read-only investigation only.
 
+If a dimension requests changes, put only its actionable findings under its
+exact heading: `### Correctness` or `### Spec`. Omit the heading of a dimension
+that passes.
+
 ## Verdict
 
-Your output is only the blocking correctness findings followed by the verdict
-token. Do not include a summary, what you checked, non-blocking observations, or
-a restatement of the change. When approving, emit the verdict token alone.
+Your output is only the blocking findings under their exact headings, followed by
+the verdict token. Do not include a summary, what you checked, non-blocking
+observations, or a restatement of the change. When approving, emit the verdict
+token alone.
 
 End your review with a single verdict token on its own:
 
 - `<verdict>APPROVED</verdict>` — branch meets the bar, ship it.
-- `<verdict>CHANGES-REQUESTED</verdict>` — list the correctness defects above and
-  the implementer will address them in the next round.
+- `<verdict>CHANGES-REQUESTED</verdict>` — list the defects above and the
+  implementer will address them in the next round.
 
 A missing verdict is a failed reviewer invocation and will be retried. Emit exactly one verdict.

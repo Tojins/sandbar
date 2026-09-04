@@ -1,4 +1,4 @@
-# Review follow-up
+# Review — tests and standards
 
 Review the implementation on branch `{{branch}}` against `{{baseRef}}` — the ref
 this branch was seeded from.
@@ -8,26 +8,25 @@ copies only `origin/*` for the source repository, so the bare local name
 
 Issue #{{issueId}}: {{issueTitle}}
 
-{{chunkBase}}{{commits}}{{diff}}{{priorRounds}}{{followupMode}}{{changedSinceDiff}}{{codingStandards}}
+{{chunkBase}}{{commits}}{{diff}}{{priorRounds}}{{qualityMode}}{{changedSinceDiff}}{{codingStandards}}
 
 {{projectStandards}}## Review process
 
-Correctness has already passed. Review only these remaining dimensions, in
-order:
+This is the first of the round's two passes. A correctness pass follows it, and
+only if you approve. Review these two dimensions, in order:
 
 1. Test quality and coverage. A test finding must name a line whose deletion
    leaves the suite green: either a production line no test covers, or a test
    line whose deletion changes nothing.
-2. Spec conformance: compare the issue body to the branch, including missing
-   requirements and scope creep.
-3. Project standards: the coding standards above plus the conventions in
+2. Project standards: the coding standards above plus the conventions in
    {{conventionsRef}}.
 
-Do not search for correctness defects or relitigate the first pass's judgment.
+Do not search for correctness or spec defects: the pass after this one owns
+whether the implementation works and whether it delivers what the issue asks.
 If you independently notice a concrete correctness defect while checking these
 dimensions, however, report it under `### Correctness` and request changes.
 
-For each finding in the prior-round history from your tests, spec, and project
+For each finding in the prior-round history from your tests and project
 standards dimensions, state whether it is addressed at this head; an
 unaddressed one blocks.
 
@@ -40,7 +39,7 @@ reset, branch, worktree, gc, or prune), do not modify files, push, or run gate
 commands. Read-only investigation only.
 
 If a dimension requests changes, put only its actionable findings under its
-exact heading: `### Correctness`, `### Tests`, `### Spec`, or `### Standards`.
+exact heading: `### Correctness`, `### Tests`, or `### Standards`.
 Omit headings for dimensions that pass. `### Non-blocking` is allowed only
 where the instructions above explicitly permit it.
 
@@ -53,7 +52,7 @@ approving, emit the verdict token alone.
 
 End your review with a single verdict token on its own:
 
-- `<verdict>APPROVED</verdict>` — all three dimensions meet the bar.
+- `<verdict>APPROVED</verdict>` — both dimensions meet the bar.
 - `<verdict>CHANGES-REQUESTED</verdict>` — at least one dimension has actionable
   findings under its heading above.
 

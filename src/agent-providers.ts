@@ -3,9 +3,12 @@
 // one place that says what credential each provider needs.
 //
 // The config splits the MODEL per call (`implementerModelId`, correctness
-// `reviewerModelId`, `reviewerFollowupModelId`, and `mergerModelId`); this is
-// the vendor knob beside it. Both reviewer calls share one provider because a
-// resumed session cannot cross vendor CLIs. The pressure that wants the vendor
+// `reviewerModelId`, `reviewerQualityModelId`, and `mergerModelId`); this is
+// the vendor knob beside it. The two reviewer calls used to share one provider
+// because a resumed session cannot cross vendor CLIs; #121 deleted the resume,
+// so `reviewerQualityAgent` is a fourth routing knob — defaulting to
+// `reviewerAgent`, so a config that says nothing still has one reviewer vendor.
+// The pressure that wants the vendor
 // knob is the implementer's: a review round is one bounded sequential chain,
 // while an implementer attempt is a long multi-tool session, up to
 // `maxImplAttempts` of them per issue and several issues per cycle. Splitting
@@ -349,17 +352,22 @@ export function parseAgentProviderName(
 // Every provider a run will actually invoke, deduped and in a stable order —
 // what preflight has to find a credential for.
 //
-// All three roles participate: no provider is unconditional. Requiring the
-// routed set up front is deliberate over discovering a missing credential in
-// the resolve loop, after a run may already have landed work.
+// Every routing knob participates, the reviewer's quality pass included (#121):
+// no provider is unconditional. Requiring the routed set up front is deliberate
+// over discovering a missing credential in the resolve loop, after a run may
+// already have landed work — and for the quality pass it is also what puts its
+// CLI in the sandbox image (#75), a pass that gates every round being a pass
+// whose missing binary is a reviewer that cannot run at all.
 export function requiredAgentProviders(roles: {
   readonly implementerAgent: AgentProviderName;
   readonly reviewerAgent: AgentProviderName;
+  readonly reviewerQualityAgent: AgentProviderName;
   readonly mergerAgent: AgentProviderName;
 }): readonly AgentProviderName[] {
   const named = new Set<AgentProviderName>([
     roles.implementerAgent,
     roles.reviewerAgent,
+    roles.reviewerQualityAgent,
     roles.mergerAgent,
   ]);
   // Ordered by the canonical list, not by insertion: the set feeds a refusal
@@ -382,18 +390,26 @@ export function requiredAgentProviders(roles: {
 // attempts) but it is a whole issue's sandbox bringups spent on a field the
 // config could have been asked about ahead of the lock — and the same
 // half-moved config is what `sandbar.config.mjs`'s own comment tells a human to
-// hold by hand across three edits. `modelField` names the particular call for
-// diagnostics; callers keep it paired with `role`, and config resolution
-// asserts the reviewer role twice because it owns two independently named ids.
+// hold by hand across three edits. `fields` names the particular call for
+// diagnostics; callers keep it paired with `role`, and config resolution asserts
+// the reviewer role twice because since #121 it owns two independently named
+// ids AND two independently routed providers — so the AGENT field is nameable
+// too, and each pass is asserted against its own provider rather than against
+// the role's.
 export function assertRoleModelIdNamed(
   role: "implementer" | "reviewer" | "merger",
   provider: AgentProviderName,
   rawModelId: string | undefined,
-  modelField: string = `${role}ModelId`,
+  fields: {
+    readonly agentField?: string;
+    readonly modelField?: string;
+  } = {},
 ): void {
   if (provider === "claude" || rawModelId !== undefined) return;
+  const agentField = fields.agentField ?? `${role}Agent`;
+  const modelField = fields.modelField ?? `${role}ModelId`;
   throw new SandbarError(
-    `config.${role}Agent is ${JSON.stringify(provider)}, so config.${modelField} ` +
+    `config.${agentField} is ${JSON.stringify(provider)}, so config.${modelField} ` +
       `must name a ${provider} model. Left unset it defaults to a claude alias, ` +
       `which ${provider} would be asked for on every attempt.`,
   );

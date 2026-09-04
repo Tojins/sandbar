@@ -258,7 +258,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       claudeMdPath: "CLAUDE.md",
       codingStandardsPath: "CODING_STANDARDS.md",
       priorRounds: [],
-    })).followup;
+    })).quality;
 
     expect(prompt).toContain("@CODING_STANDARDS.md");
   });
@@ -278,7 +278,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       claudeMdPath: "CLAUDE.md",
       codingStandardsPath: "CODING_STANDARDS.md",
       priorRounds: [],
-    })).followup;
+    })).quality;
 
     expect(prompt).not.toContain("@CODING_STANDARDS.md");
   });

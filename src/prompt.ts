@@ -4,10 +4,12 @@
 // branch diff, sandbox-stack report #44, gate trace, reviewer prose, UI-impact
 // check #21, and the same coding standards the reviewer applies plus a live
 // pre-promise diff checklist (#78); reviewer: diff + commits, split into a
-// correctness pass and a self-sufficient checklist follow-up sharing one
-// provider session (#19), plus every earlier successful review round (#88).
-// After its first whole-branch follow-up listing, that history also anchors a
-// strict review of only the lines no follow-up has seen yet (#107).
+// self-sufficient quality pass (tests and standards) and the correctness pass
+// gated on it (#19, #121), plus every earlier successful review round (#88).
+// Both prompts are self-sufficient because neither pass resumes the other's
+// session — which is what lets the two sit on different vendors (#121).
+// After its first whole-branch quality listing, that history also anchors a
+// strict review of only the lines no quality pass has seen yet (#107).
 //
 // The issue anchor uses `--json`, NOT the human-readable `--comments` form —
 // that one is TTY-sensitive and, when piped, omits the body. A fetch failure
@@ -48,9 +50,9 @@ const exec = promisify(execFile);
 // below substitute into these in-memory strings and stay pure.
 const CODING_STANDARDS = loadTemplate("coding-standards");
 const REVIEWER_TPL = loadTemplate("reviewer");
-const REVIEWER_FOLLOWUP_TPL = loadTemplate("reviewer-followup");
-const REVIEWER_FOLLOWUP_LISTING_TPL = loadTemplate("reviewer-followup-listing");
-const REVIEWER_FOLLOWUP_VERIFY_TPL = loadTemplate("reviewer-followup-verify");
+const REVIEWER_QUALITY_TPL = loadTemplate("reviewer-quality");
+const REVIEWER_QUALITY_LISTING_TPL = loadTemplate("reviewer-quality-listing");
+const REVIEWER_QUALITY_VERIFY_TPL = loadTemplate("reviewer-quality-verify");
 const REVIEWER_PRIOR_ROUNDS_TPL = loadTemplate("reviewer-prior-rounds");
 const REVIEWER_PROJECT_STANDARDS_TPL = loadTemplate("reviewer-project-standards");
 const IMPLEMENTER_TPL = loadTemplate("implementer");
@@ -230,28 +232,28 @@ export type ReviewerPromptInputs = {
 export type PriorReviewRound = {
   readonly round: number;
   readonly head: string;
-  readonly correctness: ParsedVerdict;
-  readonly followup?: ParsedVerdict;
+  // In execution order (#121): quality gates the round, so every recorded round
+  // carries its verdict and only a round quality approved carries correctness.
+  readonly quality: ParsedVerdict;
+  readonly correctness?: ParsedVerdict;
 };
 
-export type FollowupReviewContext =
+export type QualityReviewContext =
   | { readonly mode: "list"; readonly anchor: null }
   | { readonly mode: "verify"; readonly anchor: string };
 
-// A follow-up review is represented by its verdict line in #88's history. A
-// harness failure contributes no such entry, while intervening correctness-only
-// rounds do, so selecting the newest follow-up entry gives both first-ness and
-// the exact last head this pass reviewed without adding runner state (#107).
-export function followupReviewContext(
+// A quality review is represented by its verdict line in #88's history, and the
+// newest such entry gives both first-ness and the exact last head this pass
+// reviewed without adding runner state (#107). Since #121 the quality pass runs
+// first, so a round that produced no quality verdict produced no record at all
+// (`priorReviewRound`) and the newest entry IS the newest quality review — the
+// derivation is unchanged, the scan for it is simply the last element. A round
+// whose quality pass REJECTED still anchors: it listed the whole branch.
+export function qualityReviewContext(
   priorRounds: readonly PriorReviewRound[],
-): FollowupReviewContext {
-  for (let index = priorRounds.length - 1; index >= 0; index -= 1) {
-    const round = priorRounds[index];
-    if (round?.followup !== undefined) {
-      return { mode: "verify", anchor: round.head };
-    }
-  }
-  return { mode: "list", anchor: null };
+): QualityReviewContext {
+  const newest = priorRounds.at(-1);
+  return newest ? { mode: "verify", anchor: newest.head } : { mode: "list", anchor: null };
 }
 
 export async function buildPrompt(
@@ -274,11 +276,13 @@ export async function buildPrompt(
 }
 
 // Both passes review one immutable, gate-green branch snapshot. Build every
-// shared layer and git range once so the resumed follow-up cannot gain a second
-// issue fetch failure point or observe a different prompt surface.
+// shared layer and git range once so the second pass cannot gain a second
+// issue fetch failure point or observe a different prompt surface — and build
+// both even when only the first will run, because the cost is one git read
+// and the alternative is two divergent renderings of the same snapshot.
 export async function buildReviewerPrompts(
   inputs: ReviewerPromptInputs,
-): Promise<Readonly<Record<"correctness" | "followup", string>>> {
+): Promise<Readonly<Record<"quality" | "correctness", string>>> {
   const [projectAnchor, issueAnchor, slotInputs] = await Promise.all([
     buildProjectAnchor(
       {
@@ -296,8 +300,8 @@ export async function buildReviewerPrompts(
   const assemble = (slot: string): string =>
     [projectAnchor, issueAnchor, slot].join("\n\n---\n\n");
   return {
+    quality: assemble(renderReviewerQualitySlot(slotInputs)),
     correctness: assemble(renderReviewerSlot(slotInputs)),
-    followup: assemble(renderReviewerFollowupSlot(slotInputs)),
   };
 }
 
@@ -573,15 +577,15 @@ async function buildReviewerSlotInputs(
     )
   ).trim();
 
-  // The follow-up's mode and anchor are one fact read off #88's history
+  // The quality pass's mode and anchor are one fact read off #88's history
   // (#107), derived again by the renderer; only the diff payload needs git.
-  const followup = followupReviewContext(inputs.priorRounds);
-  const changedSinceDiff = followup.mode === "verify"
+  const quality = qualityReviewContext(inputs.priorRounds);
+  const changedSinceDiff = quality.mode === "verify"
     ? (
         await readGit(
-          ["diff", `${followup.anchor}..HEAD`],
+          ["diff", `${quality.anchor}..HEAD`],
           worktreePath,
-          `changes since the last follow-up review for ${inputs.issue.branch}, anchored at ${followup.anchor}`,
+          `changes since the last quality review for ${inputs.issue.branch}, anchored at ${quality.anchor}`,
         )
       ).trim()
     : undefined;
@@ -602,7 +606,7 @@ export type ReviewerSlotRender = ReviewerPromptInputs & {
   readonly commits: string;
   readonly diff: string;
   // `git diff <anchor>..HEAD`, required exactly when `priorRounds` puts the
-  // follow-up in verify mode (#107). Not a source of the mode: the renderer
+  // quality pass in verify mode (#107). Not a source of the mode: the renderer
   // reads that off `priorRounds`, and a verify render without this field is
   // refused rather than shown as "no changes" (#40).
   readonly changedSinceDiff?: string;
@@ -612,39 +616,39 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
   return renderReviewerTemplate(REVIEWER_TPL, inputs);
 }
 
-export function renderReviewerFollowupSlot(inputs: ReviewerSlotRender): string {
-  return renderReviewerTemplate(REVIEWER_FOLLOWUP_TPL, inputs);
+export function renderReviewerQualitySlot(inputs: ReviewerSlotRender): string {
+  return renderReviewerTemplate(REVIEWER_QUALITY_TPL, inputs);
 }
 
-// The two #107 slots of the follow-up template. Listing mode until an entry
-// in #88's history carries a follow-up verdict; verify mode anchored at the
+// The two #107 slots of the quality template. Listing mode until an entry
+// in #88's history carries a quality verdict; verify mode anchored at the
 // newest one that does, with the lines changed since it as a second diff. The
 // diff payload is the one thing the async builder alone can supply, so its
 // absence in verify mode is a caller error and throws — an empty diff means
 // git said nothing changed, never that nothing was read.
-function renderFollowupSlots(
+function renderQualitySlots(
   inputs: ReviewerSlotRender,
-): { readonly followupMode: string; readonly changedSinceDiff: string } {
-  const followup = followupReviewContext(inputs.priorRounds);
-  if (followup.mode === "list") {
+): { readonly qualityMode: string; readonly changedSinceDiff: string } {
+  const quality = qualityReviewContext(inputs.priorRounds);
+  if (quality.mode === "list") {
     return {
-      followupMode: section(REVIEWER_FOLLOWUP_LISTING_TPL),
+      qualityMode: section(REVIEWER_QUALITY_LISTING_TPL),
       changedSinceDiff: "",
     };
   }
   if (inputs.changedSinceDiff === undefined) {
     throw new Error(
-      `reviewer follow-up prompt: verify mode anchored at ${followup.anchor} ` +
+      `reviewer quality prompt: verify mode anchored at ${quality.anchor} ` +
         "was rendered without its changed-since diff",
     );
   }
   const body = inputs.changedSinceDiff
     ? `\`\`\`diff\n${inputs.changedSinceDiff}\n\`\`\``
-    : `(empty — no changes since \`${followup.anchor}\`)`;
+    : `(empty — no changes since \`${quality.anchor}\`)`;
   return {
-    followupMode: section(REVIEWER_FOLLOWUP_VERIFY_TPL),
+    qualityMode: section(REVIEWER_QUALITY_VERIFY_TPL),
     changedSinceDiff: section(
-      `## Changed since the last follow-up review\n\n${body}`,
+      `## Changed since the last quality review\n\n${body}`,
     ),
   };
 }
@@ -693,11 +697,12 @@ function renderReviewerTemplate(
     commits: section(commitsBlock),
     diff: section(diffBlock),
     priorRounds: section(priorRounds),
-    // Only the follow-up template has these two slots. Supplying them to the
-    // correctness template too would let a future `{{followupMode}}` in
+    // Only the quality template has these two slots. Supplying them to the
+    // correctness template too would let a future `{{qualityMode}}` in
     // `reviewer.md` render silently; withholding them makes `render` throw
-    // instead, which keeps the correctness pass strict every round (#107).
-    ...(template === REVIEWER_FOLLOWUP_TPL ? renderFollowupSlots(inputs) : {}),
+    // instead, which keeps the correctness pass strict over the whole branch
+    // every round it runs (#107, #121).
+    ...(template === REVIEWER_QUALITY_TPL ? renderQualitySlots(inputs) : {}),
     codingStandards: CODING_STANDARDS,
     projectStandards: projectStandardsSlot(codingStandardsPath),
     conventionsRef: conventionsRef(claudeMdPath, contextMdPath),
@@ -708,7 +713,7 @@ function reviewFindings(pass: ParsedVerdict): string {
   return stripVerdictTokens(pass.prose).trim();
 }
 
-function renderPriorReviewPass(name: "correctness" | "followup", pass: ParsedVerdict): string {
+function renderPriorReviewPass(name: "quality" | "correctness", pass: ParsedVerdict): string {
   const findings = reviewFindings(pass);
   return `${name}: ${pass.verdict}${findings ? `\n${findings}` : ""}`;
 }
@@ -716,8 +721,8 @@ function renderPriorReviewPass(name: "correctness" | "followup", pass: ParsedVer
 function renderPriorReviewRound(round: PriorReviewRound): string {
   return [
     `### Round ${round.round} — head=${round.head}`,
-    renderPriorReviewPass("correctness", round.correctness),
-    ...(round.followup ? [renderPriorReviewPass("followup", round.followup)] : []),
+    renderPriorReviewPass("quality", round.quality),
+    ...(round.correctness ? [renderPriorReviewPass("correctness", round.correctness)] : []),
   ].join("\n");
 }
 

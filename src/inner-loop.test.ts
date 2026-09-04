@@ -5,11 +5,12 @@ import {
   enforceReviewerSnapshot,
   priorReviewRound,
   reviewRoundLine,
+  reviewerPassRouting,
   reviewerSnapshotChanged,
   runSandboxAndPublish,
   type ReviewerSnapshot,
 } from "./inner-loop.js";
-import { followupReviewContext } from "./prompt.js";
+import { qualityReviewContext } from "./prompt.js";
 import type { ReviewerOutcome } from "./reviewer-run.js";
 
 const reviewed = (
@@ -29,120 +30,172 @@ const harnessFailed: ReviewerOutcome = {
   invocations: 2,
 };
 
-describe("priorReviewRound (#88)", () => {
-  const correctnessApproved = reviewed("APPROVED", "<verdict>APPROVED</verdict>");
-  const correctnessRejected = reviewed(
-    "CHANGES-REQUESTED",
-    "Null input crashes.\n<verdict>CHANGES-REQUESTED</verdict>",
-  );
-  const followupRejected = reviewed(
+describe("priorReviewRound (#88, #121)", () => {
+  const qualityApproved = reviewed("APPROVED", "<verdict>APPROVED</verdict>");
+  const qualityRejected = reviewed(
     "CHANGES-REQUESTED",
     "### Tests\n\nMissing coverage.\n<verdict>CHANGES-REQUESTED</verdict>",
+  );
+  const correctnessRejected = reviewed(
+    "CHANGES-REQUESTED",
+    "### Correctness\n\nNull input crashes.\n<verdict>CHANGES-REQUESTED</verdict>",
   );
 
   it.each([
     {
-      name: "correctness harness failure",
-      correctness: harnessFailed,
-      followup: undefined,
+      name: "quality harness failure",
+      quality: harnessFailed,
+      correctness: undefined,
       expected: null,
     },
     {
-      name: "correctness rejection",
-      correctness: correctnessRejected,
-      followup: undefined,
+      name: "quality rejection",
+      quality: qualityRejected,
+      correctness: undefined,
       expected: {
         round: 2,
         head: "abc1234",
+        quality: qualityRejected.verdict,
+      },
+    },
+    {
+      name: "correctness harness failure",
+      quality: qualityApproved,
+      correctness: harnessFailed,
+      expected: null,
+    },
+    {
+      name: "reviewed correctness",
+      quality: qualityApproved,
+      correctness: correctnessRejected,
+      expected: {
+        round: 2,
+        head: "abc1234",
+        quality: qualityApproved.verdict,
         correctness: correctnessRejected.verdict,
       },
     },
-    {
-      name: "follow-up harness failure",
-      correctness: correctnessApproved,
-      followup: harnessFailed,
-      expected: null,
-    },
-    {
-      name: "reviewed follow-up",
-      correctness: correctnessApproved,
-      followup: followupRejected,
-      expected: {
-        round: 2,
-        head: "abc1234",
-        correctness: correctnessApproved.verdict,
-        followup: followupRejected.verdict,
-      },
-    },
-  ])("records $name correctly", ({ correctness, followup, expected }) => {
-    expect(priorReviewRound(2, "abc1234", correctness, followup)).toEqual(expected);
+  ])("records $name correctly", ({ quality, correctness, expected }) => {
+    expect(priorReviewRound(2, "abc1234", quality, correctness)).toEqual(expected);
   });
 
-  it("keeps the listing anchor after a follow-up harness failure", () => {
+  // A round whose correctness pass harness-failed contributes no entry at all,
+  // so it cannot move the quality anchor forward (#107).
+  it("keeps the listing anchor after a correctness harness failure", () => {
     const listing = priorReviewRound(
       1,
       "listing-head",
-      correctnessApproved,
-      followupRejected,
+      qualityApproved,
+      correctnessRejected,
     );
     const failed = priorReviewRound(
       2,
       "failed-head",
-      correctnessApproved,
+      qualityApproved,
       harnessFailed,
     );
     const history = [listing, failed].filter(
       (round): round is NonNullable<typeof round> => round !== null,
     );
 
-    expect(followupReviewContext(history)).toEqual({
+    expect(qualityReviewContext(history)).toEqual({
       mode: "verify",
       anchor: "listing-head",
     });
   });
 });
 
-describe("reviewRoundLine (#88)", () => {
+// The pairing the whole issue is about: the cheap pass gates, the expensive one
+// decides. Swapping the two model ids type-checks and leaves every other test
+// green, so this is the assertion that says which pass runs where.
+describe("reviewerPassRouting (#121)", () => {
+  const config = {
+    reviewerAgent: "claude",
+    reviewerModelId: "opus",
+    reviewerQualityAgent: "codex",
+    reviewerQualityModelId: "gpt-5.6-sol",
+  } as const;
+
+  it("puts each pass on its own CLI and model", () => {
+    expect(reviewerPassRouting(config)).toEqual({
+      quality: { agent: "codex", modelId: "gpt-5.6-sol" },
+      correctness: { agent: "claude", modelId: "opus" },
+    });
+  });
+
+  // The default routing, where resolution has already copied `reviewerAgent`
+  // into the quality field: one vendor, two model ids.
+  it("keeps the two passes apart when both run the same CLI", () => {
+    expect(
+      reviewerPassRouting({
+        ...config,
+        reviewerQualityAgent: "claude",
+        reviewerQualityModelId: "claude-sonnet-4-6",
+      }),
+    ).toEqual({
+      quality: { agent: "claude", modelId: "claude-sonnet-4-6" },
+      correctness: { agent: "claude", modelId: "opus" },
+    });
+  });
+});
+
+describe("reviewRoundLine (#88, #121)", () => {
   it.each([
     {
-      name: "correctness-only round",
+      name: "quality-only round",
       failed: null,
-      followup: "NOT-RUN" as const,
-      followupMode: undefined,
+      quality: "CHANGES-REQUESTED" as const,
+      correctness: "SKIPPED" as const,
+      qualityMode: "list" as const,
       expected:
         "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
-        "correctness=CHANGES-REQUESTED followup=NOT-RUN durationMs=123",
+        "quality=CHANGES-REQUESTED correctness=SKIPPED mode=list durationMs=123",
     },
     {
-      name: "first follow-up listing",
+      name: "first quality listing carried to correctness",
       failed: null,
-      followup: "APPROVED" as const,
-      followupMode: "list" as const,
+      quality: "APPROVED" as const,
+      correctness: "APPROVED" as const,
+      qualityMode: "list" as const,
       expected:
         "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
-        "correctness=APPROVED followup=APPROVED mode=list durationMs=123",
+        "quality=APPROVED correctness=APPROVED mode=list durationMs=123",
     },
     {
       name: "completed round",
       failed: null,
-      followup: "CHANGES-REQUESTED" as const,
-      followupMode: "verify" as const,
+      quality: "APPROVED" as const,
+      correctness: "CHANGES-REQUESTED" as const,
+      qualityMode: "verify" as const,
       expected:
         "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
-        "correctness=APPROVED followup=CHANGES-REQUESTED mode=verify durationMs=123",
+        "quality=APPROVED correctness=CHANGES-REQUESTED mode=verify durationMs=123",
+    },
+    {
+      name: "round whose gating pass harness-failed",
+      failed: { pass: "quality" as const, invocations: 2 },
+      quality: "HARNESS-FAILED" as const,
+      correctness: "SKIPPED" as const,
+      qualityMode: "list" as const,
+      expected:
+        "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
+        "pass=quality harness-failed invocations=2 " +
+        "quality=HARNESS-FAILED correctness=SKIPPED mode=list durationMs=123 " +
+        "(round not consumed)",
     },
     {
       name: "harness-failed round",
-      failed: { pass: "followup" as const, invocations: 2 },
-      followup: "HARNESS-FAILED" as const,
-      followupMode: "verify" as const,
+      failed: { pass: "correctness" as const, invocations: 2 },
+      quality: "APPROVED" as const,
+      correctness: "HARNESS-FAILED" as const,
+      qualityMode: "verify" as const,
       expected:
         "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
-        "pass=followup harness-failed invocations=2 " +
-        "correctness=APPROVED followup=HARNESS-FAILED mode=verify durationMs=123 " +
+        "pass=correctness harness-failed invocations=2 " +
+        "quality=APPROVED correctness=HARNESS-FAILED mode=verify durationMs=123 " +
         "(round not consumed)",
     },
-  ])("formats a $name with its reviewed HEAD", ({ failed, followup, followupMode, expected }) => {
+  ])("formats a $name with its reviewed HEAD", ({ failed, quality, correctness, qualityMode, expected }) => {
     expect(
       reviewRoundLine({
         issueId: "88",
@@ -150,9 +203,9 @@ describe("reviewRoundLine (#88)", () => {
         reviewRound: 4,
         head: "abc1234",
         failed,
-        correctness: followup === "NOT-RUN" ? "CHANGES-REQUESTED" : "APPROVED",
-        followup,
-        followupMode,
+        quality,
+        correctness,
+        qualityMode,
         durationField: "durationMs=123",
       }),
     ).toBe(expected);

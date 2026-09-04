@@ -298,9 +298,25 @@ export default {
   // declared in `env`, rather than letting the failure arrive as an
   // implementer dying in-container.
   //
-  // The reviewer stays claude on purpose: it holds the verdict, and #72's
-  // whole argument is that the strongest model belongs where the judgement is,
-  // not where the tokens are. The merger has the same independent
+  // The reviewer is two independently routed passes since #121 — quality
+  // (tests and standards) first, gating correctness (correctness and spec) —
+  // and BOTH stay claude here for now. The split is what #121 built the
+  // `reviewerQualityAgent`/`reviewerQualityModelId` pair for: routing the
+  // quality pass to codex moves ~64% of reviewer rounds off the Claude
+  // subscription window while the deciding verdict stays on Opus, which is
+  // #72's argument — the strongest model belongs where the judgement is, and
+  // after #121 the judgement that ends an issue is correctness's.
+  //
+  // Why it is not routed in the same commit that built the fields: naming
+  // either field here obliges `requiresSandbar` to rise to that driver, and
+  // `sandbar.pin` LAGS this checkout always — the version being written has not
+  // landed and may never be tagged. A floor above the pin is a driver that
+  // installs and then refuses the config it was installed to read, which
+  // `launcher.test.ts` refuses to let anyone commit. So the routing and the
+  // `requiresSandbar` raise belong to the LATER commit that moves the pin onto
+  // a tag carrying #121, and they go in together.
+  //
+  // The merger has the same independent
   // provider/model knobs since #74 and stays on its claude/opus defaults for
   // the reviewer's reason — conflict resolution is judgement — not for
   // compatibility; the codex merger route is driver-supported but unexercised

@@ -18,7 +18,7 @@ import {
   DEFAULT_MAX_TOTAL_ISSUES,
   DEFAULT_IMPLEMENTER_MODEL_ID,
   DEFAULT_REVIEWER_MODEL_ID,
-  DEFAULT_REVIEWER_FOLLOWUP_MODEL_ID,
+  DEFAULT_REVIEWER_QUALITY_MODEL_ID,
   DEFAULT_MERGER_MODEL_ID,
   DEFAULT_SOURCE_BRANCH,
   DEFAULT_WORK_DIR,
@@ -129,7 +129,7 @@ describe("resolveConfig", () => {
     expect(r.sourceBranch).toBe(DEFAULT_SOURCE_BRANCH);
     expect(r.implementerModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
     expect(r.reviewerModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
-    expect(r.reviewerFollowupModelId).toBe(DEFAULT_REVIEWER_FOLLOWUP_MODEL_ID);
+    expect(r.reviewerQualityModelId).toBe(DEFAULT_REVIEWER_QUALITY_MODEL_ID);
     expect(r.mergerModelId).toBe(DEFAULT_MERGER_MODEL_ID);
     expect(r.claudeMdPath).toBe(DEFAULT_CLAUDE_MD_PATH);
     expect(r.contextMdPath).toBe(DEFAULT_CONTEXT_MD_PATH);
@@ -236,7 +236,7 @@ describe("resolveConfig", () => {
     const r = resolveConfig(minimal);
     expect(r.implementerModelId).toBe("opus");
     expect(r.reviewerModelId).toBe("opus");
-    expect(r.reviewerFollowupModelId).toBe("opus");
+    expect(r.reviewerQualityModelId).toBe("opus");
     expect(r.mergerModelId).toBe("opus");
   });
 
@@ -318,21 +318,83 @@ describe("resolveConfig", () => {
     expect(() => resolveConfig({ ...minimal, mergerAgent: "codex" })).toThrow(
       /mergerModelId/,
     );
+    // The quality pass inherits `reviewerAgent` when it names no CLI of its
+    // own (#121), so routing the reviewer role obliges BOTH ids — and the
+    // message names the field the operator WROTE, not the inherited one they
+    // would go looking for and not find.
     expect(() =>
       resolveConfig({
         ...minimal,
         reviewerAgent: "codex",
         reviewerModelId: "gpt-5.6-sol",
       }),
+    ).toThrow(/config\.reviewerAgent is "codex"[\s\S]*config\.reviewerQualityModelId/);
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        reviewerAgent: "codex",
+        reviewerModelId: "gpt-5.6-sol",
+        reviewerQualityModelId: "gpt-5.6-sol",
+      }),
+    ).not.toThrow();
+  });
+
+  // The two passes are independently routed since #121, so the assertion is
+  // per PASS against that pass's own provider: a quality pass on codex under a
+  // claude correctness pass is a half-moved config the correctness id says
+  // nothing about.
+  it("refuses a quality pass routed off claude whose own model id is unset (#121)", () => {
+    expect(() =>
+      resolveConfig({ ...minimal, reviewerQualityAgent: "codex" }),
+    ).toThrow(/config\.reviewerQualityAgent is "codex"/);
+    expect(() =>
+      resolveConfig({ ...minimal, reviewerQualityAgent: "codex" }),
+    ).toThrow(/config\.reviewerQualityModelId/);
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        reviewerQualityAgent: "codex",
+        reviewerQualityModelId: "gpt-5.6-sol",
+      }),
+    ).not.toThrow();
+    // ...and the correctness pass stays on its own claude default while it does.
+    expect(
+      resolveConfig({
+        ...minimal,
+        reviewerQualityAgent: "codex",
+        reviewerQualityModelId: "gpt-5.6-sol",
+      }).reviewerModelId,
+    ).toBe("opus");
+  });
+
+  it("defaults the quality pass's CLI to the reviewer's own (#121)", () => {
+    expect(resolveConfig(minimal).reviewerQualityAgent).toBe("claude");
+    expect(
+      resolveConfig({
+        ...minimal,
+        reviewerAgent: "codex",
+        reviewerModelId: "gpt-5.6-sol",
+        reviewerQualityModelId: "gpt-5.6-sol",
+      }).reviewerQualityAgent,
+    ).toBe("codex");
+  });
+
+  // A renamed field is #66's silent failure by construction: the config is
+  // IMPORTED, so the old spelling would be spread through and never read while
+  // the pass ran on the default model.
+  it("refuses the pre-#121 spelling by name rather than ignoring it", () => {
+    expect(() =>
+      resolveConfig({
+        ...minimal,
+        reviewerFollowupModelId: "claude-sonnet-4-6",
+      } as never),
     ).toThrow(/reviewerFollowupModelId/);
     expect(() =>
       resolveConfig({
         ...minimal,
-        reviewerAgent: "codex",
-        reviewerModelId: "gpt-5.6-sol",
-        reviewerFollowupModelId: "gpt-5.6-sol",
-      }),
-    ).not.toThrow();
+        reviewerFollowupModelId: "claude-sonnet-4-6",
+      } as never),
+    ).toThrow(/reviewerQualityModelId/);
   });
 
   it("merges a partial label override onto the default vocabulary", () => {

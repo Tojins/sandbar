@@ -247,10 +247,11 @@ sits in).
 | `images` | `[{ tag: sandboxImage, containerfile: "Containerfile" }]` — see below |
 | `implementerModelId` | `opus` |
 | `reviewerModelId` | `opus` |
-| `reviewerFollowupModelId` | `opus` |
+| `reviewerQualityModelId` | `opus` |
 | `mergerModelId` | `opus` |
 | `implementerAgent` | `claude` |
 | `reviewerAgent` | `claude` |
+| `reviewerQualityAgent` | the value of `reviewerAgent` |
 | `mergerAgent` | `claude` |
 | `coauthorTrailer` | `Co-authored-by: <botName> <<botEmail>>` |
 | `claudeMdPath` | `CLAUDE.md` |
@@ -268,12 +269,26 @@ sits in).
 | `defaultLane` | `"auto"` — see below |
 | `codingStandardsPath` | *(unset)* — no conventional path; see below |
 
-Each review round runs correctness first on `reviewerModelId`. If correctness
-passes, a checklist pass resumes the same `reviewerAgent` session on
-`reviewerFollowupModelId` to assess tests, issue-spec conformance, and coding
-standards. A correctness failure skips the checklist pass. Both model ids must
-belong to the configured reviewer provider; when that provider is not `claude`,
-both ids must be set explicitly.
+Each review round runs a **quality** pass first, on `reviewerQualityAgent` /
+`reviewerQualityModelId`: test quality and coverage, plus the coding standards.
+Only if it approves does the **correctness** pass run, on `reviewerAgent` /
+`reviewerModelId`: does the implementation work, and does it deliver what the
+issue asks. A quality rejection skips the correctness pass, and both passes must
+approve for the round to approve. The cheap pass gates the expensive one, and
+the pass that ends an issue is the correctness one — which is why the stronger
+model belongs there.
+
+The two passes share no session, so they may run on different vendors:
+`reviewerQualityAgent` defaults to `reviewerAgent`, and naming a different one
+is the supported way to move most reviewer rounds onto a second account's quota
+while the deciding verdict stays where it was. Each pass's model id is checked
+against **its own** provider: a pass routed away from `claude` must set its own
+id explicitly, since the default is a claude alias.
+
+`reviewerFollowupModelId` was the pre-0.28 name of `reviewerQualityModelId`, and
+that pass was the second one rather than the first. A config still carrying the
+old key is refused by name — silently ignoring it would run the pass on the
+default model.
 
 `cwd` is resolved to an absolute path, and it must be a checkout of
 `ghOwner`/`ghRepo`, with an `origin` remote — sandbar pushes branches and merges
@@ -620,8 +635,8 @@ The sandbox base-image contract is `/bin/sh`, CA certificates, and either git
 or one of apt/apk/dnf so sandbar can install it. After resolving that image,
 sandbar adds a generated layer containing a uid-1000 `agent` user, git, and
 exactly the standalone agent CLIs routed by `implementerAgent`, `reviewerAgent`,
-and `mergerAgent`, downloaded on the host and verified against per-architecture
-hashes pinned by the driver. The same happens after resolving a per-branch
+`reviewerQualityAgent` and `mergerAgent`, downloaded on the host and verified
+against per-architecture hashes pinned by the driver. The same happens after resolving a per-branch
 variant, so an older branch's Containerfile cannot remove a CLI selected by the
 current run. Gate containers keep using the unaugmented image: they judge the
 branch environment and run no agent CLI.

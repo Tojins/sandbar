@@ -192,6 +192,7 @@ describe("requiredAgentProviders", () => {
       requiredAgentProviders({
         implementerAgent: "claude",
         reviewerAgent: "claude",
+        reviewerQualityAgent: "claude",
         mergerAgent: "claude",
       }),
     ).toEqual(["claude"]);
@@ -202,6 +203,7 @@ describe("requiredAgentProviders", () => {
       requiredAgentProviders({
         implementerAgent: "codex",
         reviewerAgent: "claude",
+        reviewerQualityAgent: "claude",
         mergerAgent: "claude",
       }),
     ).toEqual(["claude", "codex"]);
@@ -215,9 +217,25 @@ describe("requiredAgentProviders", () => {
       requiredAgentProviders({
         implementerAgent: "codex",
         reviewerAgent: "codex",
+        reviewerQualityAgent: "codex",
         mergerAgent: "codex",
       }),
     ).toEqual(["codex"]);
+  });
+
+  // The quality pass is a routing knob like any other (#121), and the one
+  // whose omission is worst: it gates every round, and a provider missing from
+  // this set is a sandbox image without that CLI (#75) — a reviewer that
+  // cannot start rather than one that answers badly.
+  it("adds the provider only the reviewer's quality pass names (#121)", () => {
+    expect(
+      requiredAgentProviders({
+        implementerAgent: "claude",
+        reviewerAgent: "claude",
+        reviewerQualityAgent: "codex",
+        mergerAgent: "claude",
+      }),
+    ).toEqual(["claude", "codex"]);
   });
 
   // The list feeds a refusal message; an order that moved with the config
@@ -226,11 +244,13 @@ describe("requiredAgentProviders", () => {
     const a = requiredAgentProviders({
       implementerAgent: "codex",
       reviewerAgent: "claude",
+      reviewerQualityAgent: "claude",
       mergerAgent: "claude",
     });
     const b = requiredAgentProviders({
       implementerAgent: "claude",
       reviewerAgent: "codex",
+      reviewerQualityAgent: "claude",
       mergerAgent: "claude",
     });
     expect(a).toEqual(b);
@@ -260,6 +280,18 @@ describe("assertRoleModelIdNamed", () => {
     expect(() => assertRoleModelIdNamed("reviewer", "codex", undefined)).toThrow(
       /config\.reviewerModelId/,
     );
+  });
+
+  // The two reviewer passes are routed independently (#121), so the message
+  // has to name the field that actually carries the routing — `reviewerAgent`
+  // would send an operator to the wrong line.
+  it("names the agent field it was given, not the role's default one", () => {
+    expect(() =>
+      assertRoleModelIdNamed("reviewer", "codex", undefined, {
+        agentField: "reviewerQualityAgent",
+        modelField: "reviewerQualityModelId",
+      }),
+    ).toThrow(/config\.reviewerQualityAgent[\s\S]*config\.reviewerQualityModelId/);
   });
 
   it("accepts a non-claude provider once the role names an id", () => {

@@ -1,5 +1,5 @@
-// Reviewer policy (#19, #41) — what counts as a review, how the two sequential
-// passes compose into one round, and what to do when nothing does.
+// Reviewer policy (#19, #41, #121) — what counts as a review, how the two
+// sequential passes compose into one round, and what to do when nothing does.
 //
 // A reviewer INVOCATION yields a verdict or it yields nothing, and this module
 // is the only place that decides which:
@@ -14,12 +14,29 @@
 // Repository mutation aborts the invocation loop as a typed value, so no
 // second reviewer runs against state the first reviewer altered (#98).
 //
-// A review ROUND first applies that policy to correctness. A correctness
-// rejection finishes the round immediately; an approval asks the runner for a
-// follow-up, and the second outcome completes the AND. This module returns the
-// one event the state machine understands, keeping pass policy out of the I/O
-// runner. Follow-up invocation 1 resumes correctness; every retry is cold so a
-// crashed follow-up cannot accidentally resume its own partial session.
+// A review ROUND first applies that policy to QUALITY — tests and standards.
+// A quality rejection finishes the round immediately; an approval asks the
+// runner for CORRECTNESS, and the second outcome completes the AND. This
+// module returns the one event the state machine understands, keeping pass
+// policy out of the I/O runner.
+//
+// The gate protects the EXPENSIVE pass (#121). #19 ran correctness first so a
+// correctness rejection would skip the checklist's cost; measured, correctness
+// approved 11 of 11 judged rounds after #107 while costing two thirds of all
+// reviewer minutes, and 7 of those approvals were discarded by the second pass
+// in the same round. The pass that rejects is the one that should run first.
+//
+// Both passes are COLD. #19's resume (follow-up invocation 1 continuing the
+// correctness session) pointed at a pass that has not run once the order
+// flipped, so it is gone — which is also what lets the two passes sit on
+// different vendors (#121 §2), since a session cannot cross vendor CLIs.
+//
+// Neither pass's prose is labelled here: both prompts name their own dimension
+// headings (`### Correctness`/`### Spec`, `### Tests`/`### Standards`), which
+// they must, because each pass now carries more than one dimension. Quality may
+// additionally emit `### Correctness` — #19's escalation permission for a
+// defect it happens to notice — so the headings are not a partition and nothing
+// downstream parses them.
 
 import type { LoopEvent } from "./inner-loop-machine.js";
 import { type ParsedVerdict, parseVerdict } from "./verdict-parser.js";
@@ -77,18 +94,19 @@ export type CompletedReviewerOutcome = Exclude<
   { readonly kind: "aborted" }
 >;
 
-export type ReviewerPass = "correctness" | "followup";
+// In execution order (#121).
+export type ReviewerPass = "quality" | "correctness";
 
 export type ReviewRoundDecision =
-  | { readonly kind: "run-followup" }
+  | { readonly kind: "run-correctness" }
   | {
       readonly kind: "finished";
       readonly event: Extract<
         LoopEvent,
         { kind: "reviewer-result" | "reviewer-harness-failed" }
       >;
-      readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED";
-      readonly followup: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED";
+      readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED";
+      readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED";
     };
 
 export type FinishedReviewRoundDecision = Extract<
@@ -96,59 +114,55 @@ export type FinishedReviewRoundDecision = Extract<
   { readonly kind: "finished" }
 >;
 
-export function continueReviewerSession(pass: ReviewerPass, invocation: number): boolean {
-  return pass === "followup" && invocation === 1;
-}
-
-export function decideReviewRound(correctness: CompletedReviewerOutcome): ReviewRoundDecision;
+export function decideReviewRound(quality: CompletedReviewerOutcome): ReviewRoundDecision;
 export function decideReviewRound(
+  quality: CompletedReviewerOutcome,
   correctness: CompletedReviewerOutcome,
-  followup: CompletedReviewerOutcome,
 ): FinishedReviewRoundDecision;
 export function decideReviewRound(
-  correctness: CompletedReviewerOutcome,
-  followup?: CompletedReviewerOutcome,
+  quality: CompletedReviewerOutcome,
+  correctness?: CompletedReviewerOutcome,
 ): ReviewRoundDecision {
-  if (correctness.kind === "harness-failed") {
+  if (quality.kind === "harness-failed") {
     return {
       kind: "finished",
-      event: { kind: "reviewer-harness-failed", detail: `correctness: ${correctness.detail}` },
-      correctness: "HARNESS-FAILED",
-      followup: "SKIPPED",
+      event: { kind: "reviewer-harness-failed", detail: `quality: ${quality.detail}` },
+      quality: "HARNESS-FAILED",
+      correctness: "SKIPPED",
     };
   }
-  const correctnessVerdict = correctness.verdict;
-  if (correctnessVerdict.verdict === "CHANGES-REQUESTED") {
+  const qualityVerdict = quality.verdict;
+  if (qualityVerdict.verdict === "CHANGES-REQUESTED") {
     return {
       kind: "finished",
       event: {
         kind: "reviewer-result",
         verdict: "CHANGES-REQUESTED",
-        prose: `### Correctness\n\n${correctnessVerdict.prose}`,
+        prose: qualityVerdict.prose,
       },
-      correctness: "CHANGES-REQUESTED",
-      followup: "SKIPPED",
+      quality: "CHANGES-REQUESTED",
+      correctness: "SKIPPED",
     };
   }
-  if (followup === undefined) return { kind: "run-followup" };
-  if (followup.kind === "harness-failed") {
+  if (correctness === undefined) return { kind: "run-correctness" };
+  if (correctness.kind === "harness-failed") {
     return {
       kind: "finished",
-      event: { kind: "reviewer-harness-failed", detail: `followup: ${followup.detail}` },
-      correctness: "APPROVED",
-      followup: "HARNESS-FAILED",
+      event: { kind: "reviewer-harness-failed", detail: `correctness: ${correctness.detail}` },
+      quality: "APPROVED",
+      correctness: "HARNESS-FAILED",
     };
   }
-  const followupVerdict = followup.verdict;
+  const correctnessVerdict = correctness.verdict;
   return {
     kind: "finished",
     event: {
       kind: "reviewer-result",
-      verdict: followupVerdict.verdict,
-      prose: followupVerdict.prose,
+      verdict: correctnessVerdict.verdict,
+      prose: correctnessVerdict.prose,
     },
-    correctness: "APPROVED",
-    followup: followupVerdict.verdict,
+    quality: "APPROVED",
+    correctness: correctnessVerdict.verdict,
   };
 }
 

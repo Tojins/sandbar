@@ -8,9 +8,9 @@ import {
 import { sourceBranchBase } from "./git-ops.js";
 import {
   type PriorReviewRound,
-  followupReviewContext,
+  qualityReviewContext,
   renderAttemptSlot,
-  renderReviewerFollowupSlot,
+  renderReviewerQualitySlot,
   renderReviewerSlot,
   renderSandboxStackSlot,
 } from "./prompt.js";
@@ -125,7 +125,7 @@ describe("renderAttemptSlot — implementer standards and pre-promise review (#7
 
   it("carries the reviewer's built-in standards verbatim and host extension", () => {
     const implementer = renderImplementer("docs/CODING_STANDARDS.md");
-    const reviewer = renderReviewerFollowupSlot({
+    const reviewer = renderReviewerQualitySlot({
       ...baseInputs,
       contextMdPath: "AGENTS.md",
       commits: "a1 first",
@@ -178,17 +178,26 @@ describe("renderAttemptSlot — implementer standards and pre-promise review (#7
 });
 
 describe("renderReviewerSlot", () => {
-  it("focuses only correctness and excludes standards boilerplate", () => {
+  // Correctness AND spec, and nothing the quality pass owns (#121): an unmet
+  // requirement is the one finding that can invalidate a whole branch, and it
+  // is not range-limited, so it belongs in the pass that decides the issue.
+  it("covers correctness and spec and excludes standards boilerplate", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first\nb2 second",
       diff: "diff --git a/x b/x\n+hi",
     });
-    expect(slot).toMatch(/correctness of logic only/i);
+    expect(slot).toMatch(/Correctness of logic/i);
+    expect(slot).toMatch(/Spec conformance/i);
+    expect(slot).toMatch(/missing\s+requirements and scope creep/);
+    expect(slot).toContain("`### Correctness`");
+    expect(slot).toContain("`### Spec`");
     expect(slot).toContain("Gate-1 is green");
     expect(slot).toContain("@CLAUDE.md");
-    expect(slot).toMatch(/if you cannot name a concrete correctness defect,\s*APPROVE/i);
+    expect(slot).toMatch(/if you cannot name a\s+concrete defect on either dimension, APPROVE/i);
     expect(slot).not.toContain("## Coding standards");
+    expect(slot).not.toContain("`### Tests`");
+    expect(slot).not.toContain("`### Standards`");
   });
 
   it("does not reference the optional project standards file", () => {
@@ -316,30 +325,43 @@ describe("renderReviewerSlot", () => {
   });
 });
 
-describe("renderReviewerFollowupSlot", () => {
-  const renderFollowup = () =>
-    renderReviewerFollowupSlot({
+describe("renderReviewerQualitySlot", () => {
+  const renderQuality = () =>
+    renderReviewerQualitySlot({
       ...baseInputs,
       contextMdPath: "CONTEXT.md",
       commits: "a1 first",
       diff: "diff --git a/x b/x\n+hi",
     });
 
-  it("is self-sufficient and carries all three ordered dimensions", () => {
-    const slot = renderFollowup();
+  // Two dimensions since #121: spec moved to the correctness pass, which is
+  // what leaves the range rule below with no carve-out to make.
+  it("is self-sufficient and carries both ordered dimensions and no spec one", () => {
+    const slot = renderQuality();
     expect(slot).toContain("## Commits on this branch");
     expect(slot).toContain("## Branch diff");
-    expect(slot).toMatch(/1\. Test quality and coverage[\s\S]*2\. Spec conformance[\s\S]*3\. Project standards/);
+    expect(slot).toMatch(/1\. Test quality and coverage[\s\S]*2\. Project standards/);
+    expect(slot).not.toMatch(/Spec conformance/);
+    expect(slot).not.toContain("`### Spec`");
   });
 
-  it("renders the exact whole-branch listing contract before any follow-up verdict", () => {
-    const slot = renderFollowup();
+  // The premise #19 gave this pass ("correctness has already passed") is false
+  // once it runs first, and a pass told it is second would defer to a judgment
+  // nothing has made.
+  it("says the correctness pass follows it rather than preceded it", () => {
+    const slot = renderQuality();
+    expect(slot).toContain("This is the first of the round's two passes");
+    expect(slot).not.toMatch(/Correctness has already passed/i);
+  });
+
+  it("renders the exact whole-branch listing contract before any quality verdict", () => {
+    const slot = renderQuality();
     expect(slot).toContain(
-      "This is the only pass that reviews the whole branch for tests, spec and standards. " +
+      "This is the only pass that reviews the whole branch for tests and standards. " +
       "Anything you do not raise now is not raised later. List every finding you would block on. " +
       "There is no limit on length.",
     );
-    expect(slot).not.toContain("## Changed since the last follow-up review");
+    expect(slot).not.toContain("## Changed since the last quality review");
     // The restriction half of the ride-along contract: a listing pass has no
     // permission above it, so this sentence is what forbids `### Non-blocking`.
     expect(slot).toMatch(
@@ -347,20 +369,19 @@ describe("renderReviewerFollowupSlot", () => {
     );
   });
 
-  // One follow-up verdict in #88's history is what puts the pass in verify
+  // One quality verdict in #88's history is what puts the pass in verify
   // mode, anchored at that round's head (#107).
   const afterListing: readonly PriorReviewRound[] = [{
     round: 2,
     head: "abc1234",
-    correctness: { verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>" },
-    followup: {
+    quality: {
       verdict: "CHANGES-REQUESTED",
       prose: "### Tests\n\nMissing coverage.\n<verdict>CHANGES-REQUESTED</verdict>",
     },
   }];
 
   it("renders the exact verify contract and changed-since diff", () => {
-    const slot = renderReviewerFollowupSlot({
+    const slot = renderReviewerQualitySlot({
       ...baseInputs,
       priorRounds: afterListing,
       commits: "a1 first",
@@ -368,19 +389,19 @@ describe("renderReviewerFollowupSlot", () => {
       changedSinceDiff: "diff --git a/x b/x\n+new line",
     });
     expect(slot).toContain(
-      "An earlier pass listed this branch's tests, spec and standards findings; the history above carries them. " +
-      "Review only two things:\n1. The lines changed since that review, in the \"changed since\" diff below, " +
-      "on all three dimensions, exactly as at a listing.\n2. Whether the branch delivers what the issue asks. " +
-      "An unmet requirement blocks wherever it is.\nRaise nothing else. If you request changes, you may add " +
-      "findings outside these two under `### Non-blocking`; they never affect a verdict, now or later.",
+      "An earlier pass listed this branch's tests and standards findings; the history above carries them. " +
+      "Review only the lines changed since that review, in the \"changed since\" diff below, " +
+      "on both dimensions, exactly as at a listing. " +
+      "Raise nothing else. If you request changes, you may add " +
+      "findings outside them under `### Non-blocking`; they never affect a verdict, now or later.",
     );
-    expect(slot).toContain("## Changed since the last follow-up review\n\n```diff\n" +
+    expect(slot).toContain("## Changed since the last quality review\n\n```diff\n" +
       "diff --git a/x b/x\n+new line\n```");
     expect(slot).toContain("An entry under `### Non-blocking` is checked but never blocks.");
   });
 
   it("renders an empty changed-since diff as no changes since the anchor", () => {
-    const slot = renderReviewerFollowupSlot({
+    const slot = renderReviewerQualitySlot({
       ...baseInputs,
       priorRounds: afterListing,
       commits: "a1 first",
@@ -392,7 +413,7 @@ describe("renderReviewerFollowupSlot", () => {
 
   it("refuses a verify render without its changed-since diff rather than claiming no changes", () => {
     expect(() =>
-      renderReviewerFollowupSlot({
+      renderReviewerQualitySlot({
         ...baseInputs,
         priorRounds: afterListing,
         commits: "a1 first",
@@ -410,20 +431,20 @@ describe("renderReviewerFollowupSlot", () => {
         diff: "whole branch",
         changedSinceDiff,
       });
-      expect(slot).not.toContain("## Changed since the last follow-up review");
+      expect(slot).not.toContain("## Changed since the last quality review");
       expect(slot).not.toContain("This is the only pass that reviews the whole branch");
       expect(slot).not.toContain("An earlier pass listed this branch's");
     }
   });
 
   it("requires test findings to identify a deletion the suite cannot detect", () => {
-    const slot = renderFollowup();
+    const slot = renderQuality();
     expect(slot).toContain("a production line no test covers");
     expect(slot).toMatch(/a test\s+line whose deletion changes nothing/);
   });
 
-  it("carries the chunk base needed by a cold follow-up", () => {
-    const slot = renderReviewerFollowupSlot({
+  it("carries the chunk base needed by a cold quality pass", () => {
+    const slot = renderReviewerQualitySlot({
       ...baseInputs,
       base: {
         ref: "refs/remotes/origin/sandbar/chunk-1-root",
@@ -437,8 +458,8 @@ describe("renderReviewerFollowupSlot", () => {
     expect(slot).not.toContain("{{");
   });
 
-  it("puts standards and project references only in the follow-up", () => {
-    const slot = renderFollowup();
+  it("puts standards and project references only in the quality pass", () => {
+    const slot = renderQuality();
     expect(slot).toContain("## Coding standards");
     expect(slot).toContain("@docs/CODING_STANDARDS.md");
     expect(slot).toContain("@CLAUDE.md");
@@ -447,7 +468,7 @@ describe("renderReviewerFollowupSlot", () => {
 
   it("keeps built-in standards when no project standards file is provided", () => {
     const { codingStandardsPath: _omit, ...noStandards } = baseInputs;
-    const slot = renderReviewerFollowupSlot({
+    const slot = renderReviewerQualitySlot({
       ...noStandards,
       commits: "a1 first",
       diff: "diff",
@@ -458,12 +479,11 @@ describe("renderReviewerFollowupSlot", () => {
   });
 
   it("requires dimension headings and the existing single-verdict contract", () => {
-    const slot = renderFollowup();
+    const slot = renderQuality();
     expect(slot).toContain("`### Tests`");
-    expect(slot).toContain("`### Spec`");
     expect(slot).toContain("`### Standards`");
     expect(slot).toContain("`### Correctness`");
-    expect(slot).toMatch(/Do not search for correctness defects/);
+    expect(slot).toMatch(/Do not search for correctness or spec defects/);
     expect(slot).toMatch(/independently notice a concrete correctness defect/);
     expect(slot).toContain("<verdict>APPROVED</verdict>");
     expect(slot).toContain("<verdict>CHANGES-REQUESTED</verdict>");
@@ -471,56 +491,74 @@ describe("renderReviewerFollowupSlot", () => {
   });
 });
 
-describe("followupReviewContext (#107)", () => {
+describe("qualityReviewContext (#107, #121)", () => {
   const approved = { verdict: "APPROVED" as const, prose: "<verdict>APPROVED</verdict>" };
-  const correctnessOnly = (round: number, head: string): PriorReviewRound => ({
+  const rejected = {
+    verdict: "CHANGES-REQUESTED" as const,
+    prose: "### Tests\n\nMissing coverage.\n<verdict>CHANGES-REQUESTED</verdict>",
+  };
+  // A round the quality pass REJECTED still listed the whole branch, so it
+  // anchors the next verify exactly as an approving one does — and it is the
+  // shape a recorded round takes when correctness never ran.
+  const qualityOnly = (round: number, head: string): PriorReviewRound => ({
     round,
     head,
-    correctness: approved,
+    quality: rejected,
   });
   const reviewed = (round: number, head: string): PriorReviewRound => ({
-    ...correctnessOnly(round, head),
-    followup: approved,
+    round,
+    head,
+    quality: approved,
+    correctness: approved,
   });
 
   it.each([
     ["no history", [], { mode: "list", anchor: null }],
-    ["correctness-only history", [correctnessOnly(1, "head-1")], { mode: "list", anchor: null }],
     ["one listing", [reviewed(1, "listing")], { mode: "verify", anchor: "listing" }],
+    [
+      "a quality rejection with no correctness pass",
+      [qualityOnly(1, "rejected-head")],
+      { mode: "verify", anchor: "rejected-head" },
+    ],
     [
       "listing followed by two verifies",
       [reviewed(1, "listing"), reviewed(2, "verify-1"), reviewed(3, "verify-2")],
       { mode: "verify", anchor: "verify-2" },
     ],
+    [
+      "a quality rejection after a listing",
+      [reviewed(1, "listing"), qualityOnly(2, "rejected-head")],
+      { mode: "verify", anchor: "rejected-head" },
+    ],
   ] as const)("derives mode and anchor for %s", (_name, rounds, expected) => {
-    expect(followupReviewContext(rounds)).toEqual(expected);
+    expect(qualityReviewContext(rounds)).toEqual(expected);
   });
 });
 
-describe("reviewer prior-round history (#88)", () => {
-  const correctnessRejection = {
+describe("reviewer prior-round history (#88, #121)", () => {
+  const qualityRejection = {
     round: 1,
     head: "1111111",
+    quality: {
+      verdict: "CHANGES-REQUESTED" as const,
+      prose: "### Tests\n\nThe error branch is uncovered.\n<verdict>CHANGES-REQUESTED</verdict>",
+    },
+  };
+  const correctnessRejection = {
+    round: 2,
+    head: "2222222",
+    quality: {
+      verdict: "APPROVED" as const,
+      prose: "<verdict>APPROVED</verdict>",
+    },
     correctness: {
       verdict: "CHANGES-REQUESTED" as const,
       prose: "Null input crashes.\n<verdict>CHANGES-REQUESTED</verdict>",
     },
   };
-  const followupRejection = {
-    round: 2,
-    head: "2222222",
-    correctness: {
-      verdict: "APPROVED" as const,
-      prose: "<verdict>APPROVED</verdict>",
-    },
-    followup: {
-      verdict: "CHANGES-REQUESTED" as const,
-      prose: "### Tests\n\nThe error branch is uncovered.\n<verdict>CHANGES-REQUESTED</verdict>",
-    },
-  };
-  // A history carrying a follow-up verdict puts the follow-up in verify mode,
-  // which requires the changed-since payload (#107); these tests read only
-  // the history block, so an empty diff stands in.
+  // Any history at all puts the quality pass in verify mode, which requires
+  // the changed-since payload (#107); these tests read only the history
+  // block, so an empty diff stands in.
   const renderBoth = (priorRounds: readonly PriorReviewRound[]) => {
     const inputs = {
       ...baseInputs,
@@ -529,26 +567,28 @@ describe("reviewer prior-round history (#88)", () => {
       diff: "diff",
       changedSinceDiff: "",
     };
-    return [renderReviewerSlot(inputs), renderReviewerFollowupSlot(inputs)] as const;
+    return [renderReviewerSlot(inputs), renderReviewerQualitySlot(inputs)] as const;
   };
 
-  it("renders one prior correctness rejection identically in both templates", () => {
-    const [correctness, followup] = renderBoth([correctnessRejection]);
+  it("renders one prior quality rejection identically in both templates", () => {
+    const [correctness, quality] = renderBoth([qualityRejection]);
     const expected =
       "## Prior review rounds\n\nThe following rounds reviewed earlier heads of this branch, in order:\n\n" +
-      "### Round 1 — head=1111111\ncorrectness: CHANGES-REQUESTED\nNull input crashes.";
+      "### Round 1 — head=1111111\nquality: CHANGES-REQUESTED\n### Tests\n\nThe error branch is uncovered.";
     expect(correctness).toContain(expected);
-    expect(followup).toContain(expected);
+    expect(quality).toContain(expected);
     expect(correctness).not.toContain("<verdict>CHANGES-REQUESTED</verdict>\n\n## Review process");
   });
 
-  it("renders both pass lines when correctness approved and follow-up rejected", () => {
-    const [correctness, followup] = renderBoth([followupRejection]);
+  // In execution order, quality first: the round ran that way and a history
+  // that reordered it would misdescribe which finding gated which.
+  it("renders both pass lines when quality approved and correctness rejected", () => {
+    const [correctness, quality] = renderBoth([correctnessRejection]);
     const expected =
-      "### Round 2 — head=2222222\ncorrectness: APPROVED\n" +
-      "followup: CHANGES-REQUESTED\n### Tests\n\nThe error branch is uncovered.";
+      "### Round 2 — head=2222222\nquality: APPROVED\n" +
+      "correctness: CHANGES-REQUESTED\nNull input crashes.";
     expect(correctness).toContain(expected);
-    expect(followup).toContain(expected);
+    expect(quality).toContain(expected);
   });
 
   // The strip recognises exactly what `parseVerdict` does (#113): well-formed
@@ -557,8 +597,8 @@ describe("reviewer prior-round history (#88)", () => {
   // token — which is what #88's round 8 lost.
   it("strips every well-formed verdict token from prior-round prose and nothing else", () => {
     const quotedAndMalformed = {
-      ...correctnessRejection,
-      correctness: {
+      ...qualityRejection,
+      quality: {
         verdict: "CHANGES-REQUESTED" as const,
         prose:
           "Quoted token: <verdict>APPROVED</verdict>.\n" +
@@ -568,40 +608,41 @@ describe("reviewer prior-round history (#88)", () => {
           "<verdict>CHANGES-REQUESTED</verdict>",
       },
     };
-    const [correctness, followup] = renderBoth([quotedAndMalformed]);
+    const [correctness, quality] = renderBoth([quotedAndMalformed]);
     const expected =
-      "correctness: CHANGES-REQUESTED\nQuoted token: .\n" +
+      "quality: CHANGES-REQUESTED\nQuoted token: .\n" +
       "Malformed token: <verdict>changes requested</verdict>.\n" +
       "Quoted regex: `/<verdict>[\\s\\S]*?<\\/verdict>/g`.\n" +
       "The null branch is unhandled.";
-    for (const slot of [correctness, followup]) {
+    for (const slot of [correctness, quality]) {
       expect(slot).toContain(expected);
       expect(slot).not.toContain("The null branch is unhandled.\n<verdict>");
     }
   });
 
   it("renders multiple reviewed rounds in order", () => {
-    const [correctness, followup] = renderBoth([correctnessRejection, followupRejection]);
+    const [correctness, quality] = renderBoth([qualityRejection, correctnessRejection]);
     const expected =
       "## Prior review rounds\n\nThe following rounds reviewed earlier heads of this branch, in order:\n\n" +
-      "### Round 1 — head=1111111\ncorrectness: CHANGES-REQUESTED\nNull input crashes.\n\n" +
-      "### Round 2 — head=2222222\ncorrectness: APPROVED\n" +
-      "followup: CHANGES-REQUESTED\n### Tests\n\nThe error branch is uncovered.";
-    for (const slot of [correctness, followup]) {
+      "### Round 1 — head=1111111\nquality: CHANGES-REQUESTED\n" +
+      "### Tests\n\nThe error branch is uncovered.\n\n" +
+      "### Round 2 — head=2222222\nquality: APPROVED\n" +
+      "correctness: CHANGES-REQUESTED\nNull input crashes.";
+    for (const slot of [correctness, quality]) {
       expect(slot).toContain(expected);
     }
   });
 
   it("gives both passes dimension verification and reversal rules", () => {
-    const [correctness, followup] = renderBoth([]);
-    for (const slot of [correctness, followup]) {
+    const [correctness, quality] = renderBoth([]);
+    for (const slot of [correctness, quality]) {
       expect(slot).toMatch(/For each finding in the prior-round history/);
       expect(slot).toMatch(/may not be reversed without naming that\s+round/);
       expect(slot).toMatch(/When\s+approving, emit the verdict\s+token alone/);
     }
     expect(correctness).toMatch(/review this branch as you would with no history at\s+all/);
     expect(correctness).toMatch(/Do not include a summary, what you checked, non-blocking\s+observations/);
-    expect(followup).toMatch(/Do not include a summary,\s+what you checked, other observations/);
+    expect(quality).toMatch(/Do not include a summary,\s+what you checked, other observations/);
   });
 });
 

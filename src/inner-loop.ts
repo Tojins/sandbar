@@ -18,9 +18,11 @@
 // that ends with no `<promise>` tag at all one `--continue` follow-up before
 // the NO-SIGNAL reaches the SM
 // — the SM never sees the nudge, only the re-parsed result. The full argument
-// is at the call site. A review round is likewise a correctness pass followed,
-// only when approved, by a checklist pass resumed on its separately configured
-// model; the SM receives one aggregate reviewer result and spends one round.
+// is at the call site. A review round is likewise a QUALITY pass followed, only
+// when approved, by the correctness pass on its own separately configured
+// provider and model (#121); the SM receives one aggregate reviewer result and
+// spends one round. Both passes are cold — nothing resumes anything — which is
+// what lets them run on different vendors.
 //
 // What a FAILED reviewer run means is reviewer-run.ts's policy (#41); this
 // file only adapts `sandbox.run`'s throw into the shape that policy
@@ -31,8 +33,8 @@
 // Successful review rounds accumulate here beside the commits they judged and
 // are handed to both cold reviewer prompts on later rounds (#88). Harness
 // failures add no entry, and a fresh HARD-ERROR cycle resets the history.
-// That history also switches the follow-up from its one whole-branch listing
-// to a review anchored at the newest earlier follow-up head; the round record
+// That history also switches the quality pass from its one whole-branch listing
+// to a review anchored at the newest earlier quality head; the round record
 // exposes that list/verify mode without storing another piece of state (#107).
 // Each implementer invocation publishes its private clone's issue ref to the
 // host cache on success (#98). After an invocation failure the same publish is
@@ -100,7 +102,6 @@ import {
 } from "./sandbox-stack.js";
 import {
   REVIEWER_MAX_INVOCATIONS,
-  continueReviewerSession,
   decideReviewRound,
   runReviewerInvocations,
   type CompletedReviewerOutcome,
@@ -116,14 +117,14 @@ import {
   type PriorReviewRound,
   buildPrompt,
   buildReviewerPrompts,
-  followupReviewContext,
+  qualityReviewContext,
 } from "./prompt.js";
 
 export const FAILURE_TAIL_LINES = 200;
 
 // The runner-owned projection from pass outcomes to prompt history (#88).
 // A harness failure produced no review, so the whole round contributes no
-// entry; a correctness rejection has no follow-up pass by construction.
+// entry; a quality rejection has no correctness pass by construction (#121).
 // Completed outcomes only: a detected reviewer write (#98) aborts the round
 // before any history could be recorded, so an abort is not a case this
 // projection answers for — the parameter type says so rather than the body
@@ -131,19 +132,43 @@ export const FAILURE_TAIL_LINES = 200;
 export function priorReviewRound(
   reviewRound: number,
   head: string,
-  correctness: CompletedReviewerOutcome,
-  followup: CompletedReviewerOutcome | undefined,
+  quality: CompletedReviewerOutcome,
+  correctness: CompletedReviewerOutcome | undefined,
 ): PriorReviewRound | null {
-  if (correctness.kind === "harness-failed") return null;
-  if (correctness.verdict.verdict === "CHANGES-REQUESTED") {
-    return { round: reviewRound, head, correctness: correctness.verdict };
+  if (quality.kind === "harness-failed") return null;
+  if (quality.verdict.verdict === "CHANGES-REQUESTED") {
+    return { round: reviewRound, head, quality: quality.verdict };
   }
-  if (followup?.kind !== "reviewed") return null;
+  if (correctness?.kind !== "reviewed") return null;
   return {
     round: reviewRound,
     head,
+    quality: quality.verdict,
     correctness: correctness.verdict,
-    followup: followup.verdict,
+  };
+}
+
+// Which CLI and model each PASS runs on (#121). Extracted as a pure table
+// because it is the one new invariant the runner cannot state for itself: the
+// two passes are argument-shaped in `runReviewer`, and swapping the pairs —
+// quality onto the correctness model, correctness onto the quality one —
+// type-checks and passes every other test in the suite while inverting exactly
+// what this issue is about. `runPass` indexes this and the prompt record by the
+// same pass name, so the pairing has one spelling and one place to get wrong.
+export function reviewerPassRouting(
+  config: Pick<
+    InnerLoopConfig,
+    "reviewerAgent" | "reviewerModelId" | "reviewerQualityAgent" | "reviewerQualityModelId"
+  >,
+): Readonly<
+  Record<ReviewerPass, { readonly agent: AgentProviderName; readonly modelId: string }>
+> {
+  return {
+    quality: {
+      agent: config.reviewerQualityAgent,
+      modelId: config.reviewerQualityModelId,
+    },
+    correctness: { agent: config.reviewerAgent, modelId: config.reviewerModelId },
   };
 }
 
@@ -159,9 +184,11 @@ export function reviewRoundLine(args: {
     readonly pass: ReviewerPass;
     readonly invocations: number;
   } | null;
+  readonly quality: FinishedReviewRoundDecision["quality"];
   readonly correctness: FinishedReviewRoundDecision["correctness"];
-  readonly followup: FinishedReviewRoundDecision["followup"];
-  readonly followupMode?: "list" | "verify";
+  // Not optional: the quality pass runs on every round (#121), so the mode it
+  // ran in is a fact about every round line.
+  readonly qualityMode: "list" | "verify";
   readonly durationField: string;
 }): string {
   return (
@@ -169,8 +196,8 @@ export function reviewRoundLine(args: {
     (args.failed
       ? `pass=${args.failed.pass} harness-failed invocations=${args.failed.invocations} `
       : "") +
-    `correctness=${args.correctness} followup=${args.followup}` +
-    (args.followupMode ? ` mode=${args.followupMode}` : "") + " " +
+    `quality=${args.quality} correctness=${args.correctness}` +
+    ` mode=${args.qualityMode} ` +
     args.durationField +
     (args.failed ? " (round not consumed)" : "")
   );
@@ -258,13 +285,16 @@ export type InnerLoopConfig = {
   readonly env: Record<string, string>;
   readonly implementerModelId: string;
   readonly reviewerModelId: string;
-  readonly reviewerFollowupModelId: string;
+  readonly reviewerQualityModelId: string;
   // Which CLI each role runs (#72). Paired with the model id above rather than
   // folded into it: the two are independent choices, and every provider takes
   // whatever id it is handed. `agent-providers.ts` owns the set and the
   // credential each member needs.
   readonly implementerAgent: AgentProviderName;
   readonly reviewerAgent: AgentProviderName;
+  // The quality pass's CLI (#121). Resolution defaults it to `reviewerAgent`,
+  // so this is a distinct provider only where the host asked for one.
+  readonly reviewerQualityAgent: AgentProviderName;
   readonly maxImplAttempts: number;
   readonly maxReviewRounds: number;
   readonly sandboxImage: string;
@@ -1005,7 +1035,7 @@ export async function enforceReviewerSnapshot(
 }
 
 const passTranscript = (pass: ReviewerPass, transcript: string): string =>
-  `=== ${pass === "followup" ? "follow-up" : pass} pass ===\n${transcript}`;
+  `=== ${pass} pass ===\n${transcript}`;
 
 async function runReviewer(
   action: Extract<LoopAction, { kind: "run-reviewer" }>,
@@ -1050,101 +1080,103 @@ async function runReviewer(
   // This is the unit every #77 §3.A idea removes, and at 10.2 minutes measured
   // end to end it is ~60% of an issue.
   const roundTimer = startTimer();
-  const followupMode = followupReviewContext(ctx.priorReviewRounds).mode;
+  const qualityMode = qualityReviewContext(ctx.priorReviewRounds).mode;
   const reviewerPrompts = await buildReviewerPrompts(reviewerPromptInputs);
-  const runPass = async (
-    pass: ReviewerPass,
-    prompt: string,
-    modelId: string,
-  ): Promise<ReviewerOutcome> => runReviewerInvocations(
-    async (invocation) => {
-      const beforeInvocation = await snapshot();
-      // The retry is a fresh agent run in the SAME sandbox. The sandbox is not
-      // what failed — in the observed case the implementer was working in it
-      // concurrently — and rebuilding it would restart the whole issue from
-      // attempt 1 through the HARD-ERROR path, discarding a green gate to
-      // re-run a reviewer.
-      // One line per INVOCATION, not per round (#82): a round is up to two
-      // sequential calls on two different models under one provider (#19), and
-      // §3.B's pass-order, parallel-pass and per-round-model ideas all need the
-      // two sets of minutes apart. `model=` and `provider=` are on the line for
-      // the same reason — the number is meaningless without knowing which model
-      // spent it, and both are per-call config a stats reader cannot recover.
-      const passTimer = startTimer();
-      // `signalMs` has no reviewer meaning: the reviewer names no completion
-      // signal (#83), so the grace phase it measures is unreachable here.
-      const logPass = async (
-        maxGapMs: number | undefined,
-        usage: AgentUsage | undefined,
-        toolCalls: number | undefined,
-      ): Promise<void> => {
-        if (!opts.onOrchestratorLog) return;
-        await opts.onOrchestratorLog(
-          `issue=${issue.id} attempt=${action.attempt} reviewer ` +
-            `round=${action.reviewRound} pass=${pass} invocation=${invocation} ` +
-            `provider=${config.reviewerAgent} model=${modelId} ` +
-            `${durationField(passTimer())}` +
-            formatUsageFields(usage, toolCalls) +
-            (maxGapMs === undefined ? "" : ` maxGapMs=${maxGapMs}`),
-        );
-      };
-      try {
-        const reviewerRun = await sandbox.run({
-          name:
-            `reviewer-${issue.id}-round-${action.reviewRound}-${pass}` +
-            (invocation > 1 ? `-invocation-${invocation}` : ""),
-          agent: buildAgentProvider(config.reviewerAgent, modelId, {
-            // Only the first follow-up invocation resumes correctness. Any
-            // rerun is cold: a crashed follow-up may itself now be "last".
-            continueSession: continueReviewerSession(pass, invocation),
-          }),
-          prompt,
-          // A reviewer owns no completion signal. Process exit is the honest
-          // end of its single artefact; inherited role contracts are banned.
-          completionSignal: [],
-        });
-        await logPass(
-          reviewerRun.maxGapMs,
-          reviewerRun.usage,
-          reviewerRun.toolCalls,
-        );
-        const event = await detectWrite(beforeInvocation, reviewerRun.stdout);
-        return event === null
-          ? { kind: "run", run: { output: reviewerRun.stdout, error: null } }
-          : { kind: "aborted", event, transcript: reviewerRun.stdout };
-      } catch (err) {
-        // A failed invocation is timed too: an invocation that burned the ten
-        // minutes and died is the expensive case, and one that fell over in a
-        // second is a different fault entirely.
-        const partial = agentPartialUsage(err);
-        await logPass(undefined, partial.usage, partial.toolCalls);
-        const transcript = agentPartialOutput(err);
-        const event = await detectWrite(beforeInvocation, transcript);
-        if (event !== null) return { kind: "aborted", event, transcript };
-        // The bytes the agent had emitted before it failed ride out on the
-        // error (#41, agent-sandbox F9). Without them a reviewer that emitted
-        // a verdict and then died is indistinguishable from one that emitted
-        // nothing, and only the second is a harness fault.
-        return {
-          kind: "run",
-          run: {
-            output: transcript,
-            error: err instanceof Error ? err.message : String(err),
-          },
+  const routing = reviewerPassRouting(config);
+  // Prompt, CLI and model all indexed by the pass name, never passed in
+  // parallel: three arguments in the same order at two call sites is how a
+  // pass ends up reviewed by the other one's prompt.
+  const runPass = async (pass: ReviewerPass): Promise<ReviewerOutcome> => {
+    const { agent, modelId } = routing[pass];
+    const prompt = reviewerPrompts[pass];
+    return runReviewerInvocations(
+      async (invocation) => {
+        const beforeInvocation = await snapshot();
+        // The retry is a fresh agent run in the SAME sandbox. The sandbox is not
+        // what failed — in the observed case the implementer was working in it
+        // concurrently — and rebuilding it would restart the whole issue from
+        // attempt 1 through the HARD-ERROR path, discarding a green gate to
+        // re-run a reviewer.
+        // One line per INVOCATION, not per round (#82): a round is up to two
+        // sequential calls on two independently routed provider/model pairs
+        // (#19, #121), and the pass-order and parallel-pass ideas all need the
+        // two sets of minutes apart. `model=` and `provider=` are on the line for
+        // the same reason — the number is meaningless without knowing which model
+        // spent it, and both are per-call config a stats reader cannot recover.
+        const passTimer = startTimer();
+        // `signalMs` has no reviewer meaning: the reviewer names no completion
+        // signal (#83), so the grace phase it measures is unreachable here.
+        const logPass = async (
+          maxGapMs: number | undefined,
+          usage: AgentUsage | undefined,
+          toolCalls: number | undefined,
+        ): Promise<void> => {
+          if (!opts.onOrchestratorLog) return;
+          await opts.onOrchestratorLog(
+            `issue=${issue.id} attempt=${action.attempt} reviewer ` +
+              `round=${action.reviewRound} pass=${pass} invocation=${invocation} ` +
+              `provider=${agent} model=${modelId} ` +
+              `${durationField(passTimer())}` +
+              formatUsageFields(usage, toolCalls) +
+              (maxGapMs === undefined ? "" : ` maxGapMs=${maxGapMs}`),
+          );
         };
-      }
-    },
-    {
-      onRetry: async (invocation, detail) => {
-        const line =
-          `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-          `pass=${pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} no-review — ` +
-          `${pass === "followup" ? "retrying cold" : "retrying"} (${detail.split("\n")[0]})`;
-        console.error(`  ${line}`);
-        if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
+        try {
+          const reviewerRun = await sandbox.run({
+            name:
+              `reviewer-${issue.id}-round-${action.reviewRound}-${pass}` +
+              (invocation > 1 ? `-invocation-${invocation}` : ""),
+            // Cold, always (#121): neither pass resumes the other's session, so
+            // each is self-sufficient and the two may run on different vendors.
+            agent: buildAgentProvider(agent, modelId),
+            prompt,
+            // A reviewer owns no completion signal. Process exit is the honest
+            // end of its single artefact; inherited role contracts are banned.
+            completionSignal: [],
+          });
+          await logPass(
+            reviewerRun.maxGapMs,
+            reviewerRun.usage,
+            reviewerRun.toolCalls,
+          );
+          const event = await detectWrite(beforeInvocation, reviewerRun.stdout);
+          return event === null
+            ? { kind: "run", run: { output: reviewerRun.stdout, error: null } }
+            : { kind: "aborted", event, transcript: reviewerRun.stdout };
+        } catch (err) {
+          // A failed invocation is timed too: an invocation that burned the ten
+          // minutes and died is the expensive case, and one that fell over in a
+          // second is a different fault entirely.
+          const partial = agentPartialUsage(err);
+          await logPass(undefined, partial.usage, partial.toolCalls);
+          const transcript = agentPartialOutput(err);
+          const event = await detectWrite(beforeInvocation, transcript);
+          if (event !== null) return { kind: "aborted", event, transcript };
+          // The bytes the agent had emitted before it failed ride out on the
+          // error (#41, agent-sandbox F9). Without them a reviewer that emitted
+          // a verdict and then died is indistinguishable from one that emitted
+          // nothing, and only the second is a harness fault.
+          return {
+            kind: "run",
+            run: {
+              output: transcript,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          };
+        }
       },
-    },
-  );
+      {
+        onRetry: async (invocation, detail) => {
+          const line =
+            `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
+            `pass=${pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} no-review — ` +
+            `retrying (${detail.split("\n")[0]})`;
+          console.error(`  ${line}`);
+          if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
+        },
+      },
+    );
+  };
 
   const preserveReviewerWrite = async (
     aborted: Extract<ReviewerOutcome, { kind: "aborted" }>,
@@ -1164,54 +1196,46 @@ async function runReviewer(
     return aborted.event;
   };
 
-  const correctness = await runPass(
-    "correctness",
-    reviewerPrompts.correctness,
-    config.reviewerModelId,
-  );
-  if (correctness.kind === "aborted") {
-    return preserveReviewerWrite(correctness, "correctness", []);
+  const quality = await runPass("quality");
+  if (quality.kind === "aborted") {
+    return preserveReviewerWrite(quality, "quality", []);
   }
 
-  const transcripts = [passTranscript("correctness", correctness.transcript)];
+  const transcripts = [passTranscript("quality", quality.transcript)];
   // Every invocation's output, not just the reviewing one: the observed failure
   // left a 73-byte log for a 15-minute run, and this file is the only offline
   // artefact of what the reviewer did or did not say.
-  const afterCorrectness = decideReviewRound(correctness);
+  const afterQuality = decideReviewRound(quality);
   let decision: FinishedReviewRoundDecision;
   // Completed only: the abort arm below returns, so nothing past it holds a
   // reviewer-write outcome, and `decideReviewRound`/`priorReviewRound` are
   // both spelled for completed outcomes.
-  let followup: CompletedReviewerOutcome | undefined;
+  let correctness: CompletedReviewerOutcome | undefined;
   let failed: { readonly pass: ReviewerPass; readonly invocations: number } | null =
-    correctness.kind === "harness-failed"
-      ? { pass: "correctness", invocations: correctness.invocations }
+    quality.kind === "harness-failed"
+      ? { pass: "quality", invocations: quality.invocations }
       : null;
 
-  if (afterCorrectness.kind === "run-followup") {
-    const followupOutcome = await runPass(
-      "followup",
-      reviewerPrompts.followup,
-      config.reviewerFollowupModelId,
-    );
-    if (followupOutcome.kind === "aborted") {
-      return preserveReviewerWrite(followupOutcome, "followup", transcripts);
+  if (afterQuality.kind === "run-correctness") {
+    const correctnessOutcome = await runPass("correctness");
+    if (correctnessOutcome.kind === "aborted") {
+      return preserveReviewerWrite(correctnessOutcome, "correctness", transcripts);
     }
-    followup = followupOutcome;
-    transcripts.push(passTranscript("followup", followup.transcript));
-    if (followup.kind === "harness-failed") {
-      failed = { pass: "followup", invocations: followup.invocations };
+    correctness = correctnessOutcome;
+    transcripts.push(passTranscript("correctness", correctness.transcript));
+    if (correctness.kind === "harness-failed") {
+      failed = { pass: "correctness", invocations: correctness.invocations };
     }
-    decision = decideReviewRound(correctness, followup);
+    decision = decideReviewRound(quality, correctness);
   } else {
-    decision = afterCorrectness;
+    decision = afterQuality;
   }
 
   const historyEntry = priorReviewRound(
     action.reviewRound,
     head,
+    quality,
     correctness,
-    followup,
   );
   if (historyEntry) ctx.priorReviewRounds.push(historyEntry);
 
@@ -1228,9 +1252,9 @@ async function runReviewer(
     reviewRound: action.reviewRound,
     head,
     failed,
+    quality: decision.quality,
     correctness: decision.correctness,
-    followup: decision.followup,
-    followupMode: followup === undefined ? undefined : followupMode,
+    qualityMode,
     durationField: durationField(roundTimer()),
   });
   if (failed) console.error(`  ${line}`);

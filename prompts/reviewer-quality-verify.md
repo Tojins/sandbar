@@ -1,0 +1,1 @@
+An earlier pass listed this branch's tests and standards findings; the history above carries them. Review only the lines changed since that review, in the "changed since" diff below, on both dimensions, exactly as at a listing. Raise nothing else. If you request changes, you may add findings outside them under `### Non-blocking`; they never affect a verdict, now or later.

@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   REVIEWER_DETAIL_TAIL_CHARS,
   REVIEWER_MAX_INVOCATIONS,
-  continueReviewerSession,
   decideReviewRound,
   type ReviewerOutcome,
   type ReviewerRun,
@@ -29,76 +28,110 @@ const failed = (detail: string): ReviewerOutcome => ({
   invocations: 2,
 });
 
-describe("sequential review round policy", () => {
+describe("sequential review round policy (#19, #121)", () => {
+  const approved = reviewed("<verdict>APPROVED</verdict>");
+  const rejected = (prose: string) =>
+    reviewed(`${prose}\n<verdict>CHANGES-REQUESTED</verdict>`);
+
+  // Every (quality, correctness) pair the round can compose, including the
+  // pairs where the second pass never runs. Quality gates: only its approval
+  // reaches correctness, and only both approvals reach APPROVED.
   it.each([
-    ["correctness", 1, false],
-    ["correctness", 2, false],
-    ["followup", 1, true],
-    ["followup", 2, false],
-  ] as const)("pass=%s invocation=%i continue=%s", (pass, invocation, expected) => {
-    expect(continueReviewerSession(pass, invocation)).toBe(expected);
-  });
-
-  it("correctness harness failure finishes without spending a round", () => {
-    expect(decideReviewRound(failed("idle"))).toEqual({
-      kind: "finished",
-      event: { kind: "reviewer-harness-failed", detail: "correctness: idle" },
-      correctness: "HARNESS-FAILED",
-      followup: "SKIPPED",
-    });
-  });
-
-  it("correctness changes skip follow-up and receive the dimension heading", () => {
-    expect(
-      decideReviewRound(reviewed("broken edge\n<verdict>CHANGES-REQUESTED</verdict>")),
-    ).toEqual({
-      kind: "finished",
-      event: {
-        kind: "reviewer-result",
-        verdict: "CHANGES-REQUESTED",
-        prose:
-          "### Correctness\n\nbroken edge\n<verdict>CHANGES-REQUESTED</verdict>",
+    {
+      name: "quality harness failure",
+      quality: failed("idle"),
+      correctness: undefined,
+      expected: {
+        kind: "finished",
+        event: { kind: "reviewer-harness-failed", detail: "quality: idle" },
+        quality: "HARNESS-FAILED",
+        correctness: "SKIPPED",
       },
-      correctness: "CHANGES-REQUESTED",
-      followup: "SKIPPED",
-    });
-  });
-
-  it("approved correctness requests the follow-up", () => {
-    expect(decideReviewRound(reviewed("<verdict>APPROVED</verdict>"))).toEqual({
-      kind: "run-followup",
-    });
-  });
-
-  it("follow-up harness failure discards the approval and retries the action", () => {
-    expect(
-      decideReviewRound(reviewed("<verdict>APPROVED</verdict>"), failed("crashed")),
-    ).toEqual({
-      kind: "finished",
-      event: { kind: "reviewer-harness-failed", detail: "followup: crashed" },
-      correctness: "APPROVED",
-      followup: "HARNESS-FAILED",
-    });
-  });
-
-  it.each(["APPROVED", "CHANGES-REQUESTED"] as const)(
-    "APPROVED + %s produces the follow-up verdict and prose",
-    (verdict) => {
-      expect(
-        decideReviewRound(
-          reviewed("<verdict>APPROVED</verdict>"),
-          reviewed(`checklist prose\n<verdict>${verdict}</verdict>`),
-        ),
-      ).toEqual({
+    },
+    {
+      name: "quality rejection",
+      quality: rejected("### Tests\n\nno coverage"),
+      correctness: undefined,
+      expected: {
         kind: "finished",
         event: {
           kind: "reviewer-result",
-          verdict,
-          prose: `checklist prose\n<verdict>${verdict}</verdict>`,
+          verdict: "CHANGES-REQUESTED",
+          // Verbatim: the quality prompt names its own dimension headings, so
+          // nothing here may label prose that already carries `### Tests`.
+          prose: "### Tests\n\nno coverage\n<verdict>CHANGES-REQUESTED</verdict>",
         },
+        quality: "CHANGES-REQUESTED",
+        correctness: "SKIPPED",
+      },
+    },
+    {
+      name: "quality approval alone",
+      quality: approved,
+      correctness: undefined,
+      expected: { kind: "run-correctness" },
+    },
+    {
+      name: "correctness harness failure",
+      quality: approved,
+      correctness: failed("crashed"),
+      expected: {
+        kind: "finished",
+        event: { kind: "reviewer-harness-failed", detail: "correctness: crashed" },
+        quality: "APPROVED",
+        correctness: "HARNESS-FAILED",
+      },
+    },
+    {
+      name: "correctness rejection",
+      quality: approved,
+      correctness: rejected("### Spec\n\nrequirement 2 is unmet"),
+      expected: {
+        kind: "finished",
+        event: {
+          kind: "reviewer-result",
+          verdict: "CHANGES-REQUESTED",
+          prose:
+            "### Spec\n\nrequirement 2 is unmet\n<verdict>CHANGES-REQUESTED</verdict>",
+        },
+        quality: "APPROVED",
+        correctness: "CHANGES-REQUESTED",
+      },
+    },
+    {
+      name: "both approvals",
+      quality: approved,
+      correctness: approved,
+      expected: {
+        kind: "finished",
+        event: {
+          kind: "reviewer-result",
+          verdict: "APPROVED",
+          prose: "<verdict>APPROVED</verdict>",
+        },
+        quality: "APPROVED",
         correctness: "APPROVED",
-        followup: verdict,
-      });
+      },
+    },
+  ])("decides $name", ({ quality, correctness, expected }) => {
+    expect(
+      correctness === undefined
+        ? decideReviewRound(quality)
+        : decideReviewRound(quality, correctness),
+    ).toEqual(expected);
+  });
+
+  // The gate is what #121 buys: a quality pass that did not approve must not
+  // let a correctness outcome — however it was obtained — reach the round.
+  it.each([
+    ["harness-failed", failed("idle"), "HARNESS-FAILED"],
+    ["rejecting", rejected("### Tests\n\nno coverage"), "CHANGES-REQUESTED"],
+  ] as const)(
+    "ignores a correctness outcome handed alongside a %s quality pass",
+    (_name, quality, qualityField) => {
+      const decision = decideReviewRound(quality, approved);
+      expect(decision.quality).toBe(qualityField);
+      expect(decision.correctness).toBe("SKIPPED");
     },
   );
 });
