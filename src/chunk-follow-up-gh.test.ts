@@ -44,9 +44,16 @@ describe("the chunk-review scan's real adapter", () => {
     await writeFile(join(bin, "git"), [
       "#!/bin/sh", `log='${log}'`,
       `for a in "$@"; do printf '%s\\0' "$a" >> "$log"; done`, `printf '\\001' >> "$log"`,
-      `case "$1" in`, ` rev-list) printf 'merge44 base44 sha44\\nmerge42 base42 sha42\\n' ;;`,
+      `case "$1" in`,
+      ` rev-list)`,
+      `  printf 'merge44 base44 sha44\\nmerge42 base42 sha42\\n'`,
+      `  if [ "$SANDBAR_TEST_LARGE_GIT_OUTPUT" = history ]; then awk 'BEGIN { for (i = 0; i < 50000; i++) print "filler" i, "base", "parent" i }'; fi`,
+      `  ;;`,
       ` rev-parse) printf 'sha42\\nsha44\\n' ;;`,
-      ` diff) case "$4" in merge42) printf 'src/first.ts\\n' ;; merge44) printf 'src/second.ts\\n' ;; esac ;;`,
+      ` diff)`,
+      `  case "$4" in merge42) printf 'src/first.ts\\n' ;; merge44) printf 'src/second.ts\\n' ;; esac`,
+      `  if [ "$SANDBAR_TEST_LARGE_GIT_OUTPUT" = paths ]; then awk 'BEGIN { for (i = 0; i < 70000; i++) print "generated/path-" i ".ts" }'; fi`,
+      `  ;;`,
       "esac",
     ].join("\n") + "\n", { mode: 0o755 });
     process.env["PATH"] = `${bin}:${oldPath ?? ""}`;
@@ -56,6 +63,7 @@ describe("the chunk-review scan's real adapter", () => {
     if (oldPath === undefined) delete process.env["PATH"];
     else process.env["PATH"] = oldPath;
     delete process.env["SANDBAR_TEST_GRAPHQL"];
+    delete process.env["SANDBAR_TEST_LARGE_GIT_OUTPUT"];
     await rm(bin, { recursive: true, force: true });
   });
 
@@ -96,5 +104,21 @@ describe("the chunk-review scan's real adapter", () => {
     expect(ledger?.[6]).toContain(followUpMarker("PRR_a"));
     expect(ledger?.[6]).toContain("#42 and #44");
     expect(recorded.some((call) => call[0] === "issue" && call[1] === "create")).toBe(false);
+  });
+
+  it.each([
+    ["merge history", "history"],
+    ["changed paths", "paths"],
+  ])("allows %s output beyond Node's default execFile buffer", async (_name, output) => {
+    process.env["SANDBAR_TEST_LARGE_GIT_OUTPUT"] = output;
+    const paths = await realAdapter({
+      repo: { owner: "acme", name: "app" }, repoDir: bin, sourceBranch: "main",
+    }).memberPaths(CHUNK);
+
+    expect(paths.get(42)?.has("src/first.ts")).toBe(true);
+    expect(paths.get(44)?.has("src/second.ts")).toBe(true);
+    if (output === "paths") {
+      expect(paths.get(42)?.has("generated/path-69999.ts")).toBe(true);
+    }
   });
 });
