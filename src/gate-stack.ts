@@ -46,6 +46,8 @@
 // probes. There is deliberately no bound on the gate as a whole (it stops at
 // the first red). The one unbounded shell-out left is not podman:
 // `dirtyWorktreePaths`' `git status` (git-ops.ts).
+// Readiness deadlines use `timing.ts`'s monotonic clock: a wall-clock jump on
+// suspend/resume must neither expire a gate instantly nor extend it silently.
 //
 // Every phase is TIMED and reported, never acted on (#82). `runStackGate` is
 // the only place a step runs, so it is the only place one is timed, and the
@@ -99,7 +101,7 @@ import type {
 import { type ImageMap, ImageBuildError } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { type GateResult, type GateStepTiming, stripAnsi } from "./gate.js";
-import { startTimer } from "./timing.js";
+import { type Clock, monotonicClock, startTimer } from "./timing.js";
 import { dirtyWorktreePaths } from "./git-ops.js";
 import {
   type RunScope,
@@ -1301,6 +1303,9 @@ export type BringUpCtx = {
   // Passed as a closure rather than rebuilt from (scope, stackId) here: the
   // name is the stack's identity, and one place composes it.
   readonly nameOf: (c: ResolvedStackContainer) => string;
+  // Injectable so the deciding readiness deadline can be tested without
+  // replacing the process wall clock.
+  readonly clock?: Clock;
 };
 
 // Start every container, THEN wait for all of them, then run their post-ready
@@ -1351,7 +1356,7 @@ export async function bringUpContainers(
   }
 
   for (const c of containers) {
-    await waitForReady(ctx.nameOf(c), c, ctx.label);
+    await waitForReady(ctx.nameOf(c), c, ctx.label, ctx.clock);
   }
 
   for (const c of containers) {
@@ -1395,14 +1400,15 @@ export async function bringUpContainers(
 // feeds `boundedPodman`'s own `setTimeout`, where 0 and 1 are both "next tick".
 // Kept because a probe budget is meaningfully expressed as at-least-one-tick
 // and a 0 would invite the old reading back.
-function remainingMs(deadline: number): number {
-  return Math.max(1, deadline - Date.now());
+function remainingMs(deadline: number, clock: Clock): number {
+  return Math.max(1, deadline - clock());
 }
 
 async function waitForReady(
   containerName: string,
   c: ResolvedStackContainer,
   label: string,
+  clock: Clock = monotonicClock,
 ): Promise<void> {
   if (c.readiness === null) {
     // No probe was declared, so nothing else ever looks at this container: the
@@ -1420,24 +1426,29 @@ async function waitForReady(
   // No `finally` and nothing to own: since #43 the probe is a bounded
   // `execFile` like every other podman call here, rather than a `podman logs
   // -f` follower whose only bound was this function holding it.
-  await pollUntilReady(containerName, c, c.readiness, label);
+  await pollUntilReady(containerName, c, c.readiness, label, clock);
 }
 
-async function pollUntilReady(
+// Exported with the same probe seam as `pollUntilHealthy`: a real podman cannot
+// deterministically demonstrate a clock step between the loop bound and the
+// per-probe budget, while that ordering is the deadline's contract.
+export async function pollUntilReady(
   containerName: string,
   c: ResolvedStackContainer,
   readiness: NonNullable<ResolvedStackContainer["readiness"]>,
   label: string,
+  clock: Clock = monotonicClock,
+  podman: PodmanProbe = boundedPodman,
 ): Promise<void> {
-  const deadline = Date.now() + c.readinessTimeoutMs;
+  const deadline = clock() + c.readinessTimeoutMs;
   let lastErr = "";
   // Tracked beside the string rather than sniffed out of it: a probe killed at
   // the deadline is the one outcome the health log cannot record, so the error
   // below has to be told, not left to guess (see `lastProbeText`).
   let lastTimedOut = false;
-  while (Date.now() < deadline) {
+  while (clock() < deadline) {
     // Bounded by what is LEFT of the readiness budget, not by the budget: the
-    // loop's `Date.now() < deadline` is only tested between probes, so a single
+    // loop's deadline is only tested between probes, so a single
     // probe that never returns — a curl against a service that accepts and then
     // never answers — hangs the run forever, holding the single-instance lock,
     // with no HARD-ERROR and no teardown. config.ts rejects a NaN
@@ -1446,7 +1457,11 @@ async function pollUntilReady(
     // This is the ONLY bound on a probe. Podman's `--health-timeout` is not
     // passed and would not help if it were: it lets the probe run to
     // completion and then labels the result as having exceeded the bound.
-    const probe = await probeOnce(containerName, remainingMs(deadline));
+    const probe = await probeOnce(
+      containerName,
+      remainingMs(deadline, clock),
+      podman,
+    );
     if (probe.status === "healthy") return;
     // `unhealthy` and `error` are the same thing HERE and are deliberately not
     // separated: nothing has yet been known to work, so a probe that failed and
@@ -1461,19 +1476,19 @@ async function pollUntilReady(
     // container whose entrypoint dies at startup is an EXPECTED failure. Report
     // it immediately with its log instead of polling a corpse for the full
     // timeout and then reporting a misleading "did not become ready".
-    await throwIfDead(containerName, c, label);
+    await throwIfDead(containerName, c, label, DIED_DURING_STARTUP, podman);
     await sleep(READY_POLL_INTERVAL_MS);
   }
   // Read once, here, rather than on every failed poll: this sees the most
   // recent probes podman still holds, and a per-poll read would be a podman
   // call every 500ms for text nobody looks at until now.
-  const entries = await readHealthLog(containerName);
+  const entries = await readHealthLog(containerName, podman);
   throw new ContainerBringupError(
     containerName,
     `${label}: container '${c.name}' (${c.image}) did not become ready ` +
       `within ${c.readinessTimeoutMs}ms (${describeReadiness(readiness)}; ` +
       `last probe: ${lastProbeText(entries, lastErr, lastTimedOut)})`,
-    await logTail(containerName),
+    await logTail(containerName, CONTAINER_LOG_TAIL, podman),
     // Sliced here rather than trusted to be short: podman keeps five by
     // default, but `--health-max-log-count` and containers.conf can raise it,
     // and the heading is a claim about what follows.
@@ -1624,16 +1639,21 @@ export async function pollUntilHealthy(
   containerName: string,
   c: ResolvedStackContainer,
   podman: PodmanProbe = boundedPodman,
+  clock: Clock = monotonicClock,
 ): Promise<{ readonly verdict: HealthVerdict; readonly detail: string }> {
-  const deadline = Date.now() + c.readinessTimeoutMs;
+  const deadline = clock() + c.readinessTimeoutMs;
   let answered = false;
   let killedAtDeadline = false;
   let detail = "";
-  while (Date.now() < deadline) {
-    const probe = await probeOnce(containerName, remainingMs(deadline), podman);
+  while (clock() < deadline) {
+    const probe = await probeOnce(
+      containerName,
+      remainingMs(deadline, clock),
+      podman,
+    );
     if (probe.status === "healthy") return { verdict: "healthy", detail: "" };
     if (probe.status === "error") {
-      if (!(probe.timedOut && Date.now() >= deadline)) {
+      if (!(probe.timedOut && clock() >= deadline)) {
         return { verdict: "abandoned", detail: probe.detail };
       }
       killedAtDeadline = true;
@@ -1782,12 +1802,13 @@ async function throwIfDead(
 async function logTail(
   containerName: string,
   lines = CONTAINER_LOG_TAIL,
+  podman: PodmanProbe = boundedPodman,
 ): Promise<string> {
   // MAX_BUFFER, not node's 1MB default: `--tail 40` bounds the LINE count, not
   // the byte count, and 40 lines of a JSON dump or a minified bundle overflows
   // it — losing the one diagnostic D9 exists to provide, precisely when the log
   // is biggest.
-  const r = await boundedPodman(
+  const r = await podman(
     ["logs", "--tail", String(lines), containerName],
     LOG_READ_TIMEOUT_MS,
   );
@@ -1809,7 +1830,7 @@ async function logTail(
   // case. (`throwIfDead` and `assertIssueContainersAlive` do not reach this:
   // they already know the state and pass GONE_LOG_NOTE without reading.)
   if (!boundedOk(r)) {
-    return (await containerGone(containerName, boundedPodman))
+    return (await containerGone(containerName, podman))
       ? GONE_LOG_NOTE
       : "(logs unavailable)";
   }

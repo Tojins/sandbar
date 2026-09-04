@@ -445,6 +445,9 @@ and used to announce themselves in four different ways, the halt in none at all.
   rules: a duration is a REPORT (no budget, no threshold, no adaptive bound —
   `step.timeoutMs` stays the one bound `gate-stack.ts` has), and an absent
   measurement is ABSENT, never `0`, because a stats reader averages a zero.
+  Every deadline is computed on the monotonic clock (#122), so a wall-clock
+  step cannot move a readiness or forge-verification verdict. This is a
+  separate rule from durations being reports rather than decision inputs.
   Agent invocations additionally record the provider-reported token usage
   available on their terminal wire event (#85): fresh, cached and cache-write
   input, output and reasoning tokens, plus Claude's API duration, resolved

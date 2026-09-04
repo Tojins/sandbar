@@ -103,6 +103,9 @@
 // half-injected clock cannot be written; the belt-and-braces one is
 // `maxPollsFor`, a poll ceiling that fails loud on a clock which does not
 // advance, however it was faked.
+// The real clock is monotonic: suspend/resume and NTP wall-clock steps cannot
+// turn a settle window or CI timeout into an immediate verdict. The poll-count
+// ceiling remains the backstop when that monotonic clock does not advance.
 //
 // Attribution: the landing is always a fast-forward push of commits sandbar
 // authored locally, never a server-side merge. `openPullRequest` adds a PR as
@@ -396,7 +399,7 @@ export type Clock = {
 };
 
 export const realClock: Clock = {
-  now: () => Date.now(),
+  now: () => performance.now(),
   sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
 };
 

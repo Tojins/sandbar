@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_STEP_TIMEOUT_MS,
@@ -30,6 +30,7 @@ import {
   parsePodLabel,
   podCreateArgs,
   type PodmanProbe,
+  pollUntilReady,
   pollUntilHealthy,
   READY_POLL_INTERVAL_MS,
   stepExecArgs,
@@ -1789,7 +1790,98 @@ const after = (ms: number, r: BoundedResult) => async (): Promise<BoundedResult>
   return r;
 };
 
+describe("pollUntilReady", () => {
+  it("computes, budgets, and expires startup readiness on the injected clock", async () => {
+    vi.useFakeTimers();
+    let now = 10;
+    const budgets: number[] = [];
+    const probe: PodmanProbe = async (args, timeoutMs) => {
+      if (args[0] === "healthcheck") {
+        budgets.push(timeoutMs);
+        now = 1_010;
+        return podmanSaid({ exitCode: 1 });
+      }
+      if (args[1] === "--format" && args[2] === "{{.State.Running}}") {
+        return podmanSaid({ stdout: "true\n" });
+      }
+      return podmanSaid({ stdout: "{}" });
+    };
+    const c = probed({ readinessTimeoutMs: 1_000 });
+
+    const waiting = expect(
+      pollUntilReady(
+        "c",
+        c,
+        c.readiness!,
+        "gate stack",
+        () => now,
+        probe,
+      ),
+    ).rejects.toThrow(/did not become ready within 1000ms/);
+    await vi.runAllTimersAsync();
+    await waiting;
+    expect(budgets).toEqual([1_000]);
+    vi.useRealTimers();
+  });
+});
+
 describe("pollUntilHealthy", () => {
+  it("computes and judges its deadline on the injected monotonic clock", async () => {
+    let now = 10;
+    let probeBudget = 0;
+    const probe: PodmanProbe = async (_args, timeoutMs) => {
+      probeBudget = timeoutMs;
+      now = 1_010;
+      return podmanSaid({ exitCode: null, timedOut: true });
+    };
+
+    expect(
+      (
+        await pollUntilHealthy(
+          "c",
+          probed({ readinessTimeoutMs: 1_000 }),
+          probe,
+          () => now,
+        )
+      ).verdict,
+    ).toBe("abandoned");
+    expect(probeBudget).toBe(1_000);
+  });
+
+  it.each([
+    ["at the deadline", 1_010, "unhealthy"],
+    ["with time remaining", 1_009, "abandoned"],
+  ] as const)(
+    "classifies a timed-out probe %s using the injected clock",
+    async (_when, timeoutNow, verdict) => {
+      vi.useFakeTimers();
+      let now = 10;
+      let healthchecks = 0;
+      const probe: PodmanProbe = async (args) => {
+        if (args[0] === "healthcheck") {
+          healthchecks += 1;
+          if (healthchecks === 1) return podmanSaid({ exitCode: 1 });
+          now = timeoutNow;
+          return podmanSaid({ exitCode: null, timedOut: true });
+        }
+        if (args[1] === "--format" && args[2] === "{{.State.Running}}") {
+          return podmanSaid({ stdout: "true\n" });
+        }
+        return podmanSaid({ stdout: "{}" });
+      };
+
+      const polling = pollUntilHealthy(
+        "c",
+        probed({ readinessTimeoutMs: 1_000 }),
+        probe,
+        () => now,
+      );
+      await vi.runAllTimersAsync();
+      expect((await polling).verdict).toBe(verdict);
+      vi.useRealTimers();
+    },
+  );
+
   // The ordinary case and the cost argument for the whole feature: one probe,
   // no wait, no second call. A loop that slept first would be paying the poll
   // interval at the top of every gate run for every probed issue container.

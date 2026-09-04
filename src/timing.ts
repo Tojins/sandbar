@@ -32,8 +32,8 @@
 // The clock is injectable because log lines are asserted by exact string in
 // several suites (`expect(lines).toContain("merged #42")`). A fake clock keeps
 // those assertions exact instead of loosening every one of them to a prefix
-// match. `forge-verify.ts`'s injected `now: () => Date.now()` is the same
-// existing seam idiom.
+// match. `forge-verify.ts`'s injected clock object is the same existing seam
+// idiom.
 //
 // NOTHING IN THE SYSTEM MAY DECIDE ON A DURATION. No budget, no warning
 // threshold, no adaptive bound, no retry that reads one, no verdict that moves
@@ -43,17 +43,22 @@
 // second, undocumented bound beside `step.timeoutMs`, which is the one bound
 // `gate-stack.ts`'s header says exists.
 //
+// EVERY DEADLINE IS COMPUTED ON THE MONOTONIC CLOCK. A deadline does decide
+// when a configured bound has expired, so wall-clock steps must not move it;
+// this is distinct from the rule above that reported durations never decide
+// anything.
+//
 // AN ABSENT MEASUREMENT IS ABSENT. Callers omit the field rather than writing
 // `0` — a zero meaning "not measured" is worse than a missing field, because a
 // stats reader averages it.
 
 export type Clock = () => number;
 
-const defaultClock: Clock = () => performance.now();
+export const monotonicClock: Clock = () => performance.now();
 
 // Start measuring; the returned thunk answers "whole milliseconds since the
 // call to startTimer", and may be called more than once.
-export function startTimer(clock: Clock = defaultClock): () => number {
+export function startTimer(clock: Clock = monotonicClock): () => number {
   const t0 = clock();
   return () => Math.round(clock() - t0);
 }
@@ -68,7 +73,7 @@ export type GapTimer = { line(): void; finish(): number };
 
 // Includes the leading and trailing gaps, so a line-less run reports its whole
 // duration. The clock seam keeps stream timing deterministic in tests (#83).
-export function startGapTimer(clock: Clock = defaultClock): GapTimer {
+export function startGapTimer(clock: Clock = monotonicClock): GapTimer {
   let previous = clock();
   let maxGapMs = 0;
   const observe = (): void => {
