@@ -3,7 +3,9 @@
 // executes its actions, feeds results back as events, and translates the
 // verdict to a Terminal. On HARD-ERROR, decideAfterTerminal may dispose the
 // sandbox and restart from attempt 1 with a fresh one (up to
-// HARD_ERROR_MAX_RETRIES times).
+// HARD_ERROR_MAX_RETRIES times). Every retry is written both to stderr and to
+// the durable orchestrator log; if retries are exhausted, run.ts records the
+// surfaced terminal's full reason instead.
 //
 // Setup ordering is load-bearing: the issue worktree comes FIRST, then agent
 // sandbox + gate stack in parallel (#20 — mount sources are read at container
@@ -389,19 +391,25 @@ type SandboxCycleOutcome = {
 export async function runInnerLoop(
   issue: IssueRef,
   opts: InnerLoopOptions,
+  runCycle: (
+    issue: IssueRef,
+    opts: InnerLoopOptions,
+  ) => Promise<SandboxCycleOutcome> = runSandboxCycle,
 ): Promise<Terminal> {
   let retriesUsed = 0;
   for (;;) {
-    const outcome = await runSandboxCycle(issue, opts);
+    const outcome = await runCycle(issue, opts);
     const decision = decideAfterTerminal(outcome.verdict, retriesUsed);
     if (decision.kind === "surface") {
       return toTerminal(outcome);
     }
     retriesUsed = decision.nextRetriesUsed;
     const reason = outcome.verdict.type === "HARD-ERROR" ? outcome.verdict.reason : "";
-    console.error(
-      `  ${issue.id}: HARD-ERROR (${reason}) — retry ${retriesUsed}/${HARD_ERROR_MAX_RETRIES} with a fresh sandbox.`,
-    );
+    const line =
+      `  ${issue.id}: HARD-ERROR (${reason.split("\n")[0]}) — retry ` +
+      `${retriesUsed}/${HARD_ERROR_MAX_RETRIES} with a fresh sandbox.`;
+    console.error(line);
+    await opts.onOrchestratorLog?.(line);
   }
 }
 

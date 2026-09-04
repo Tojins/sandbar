@@ -62,6 +62,10 @@
 // A per-run log tree at <cwd>/<workDir>/logs/run-<UTC-ISO>/ captures decisions
 // and agent output: orchestrator.log at the run root, plan.json + merger.log
 // + issue-<id>/attempt-<m>.log per cycle.
+// HARD-ERROR retries are mirrored from stderr into orchestrator.log, and the
+// terminal that exhausts those retries appends its full reason verbatim. That
+// reason is the only diagnosis for an infrastructure failure that can happen
+// before an agent transcript exists (#115).
 //
 // IT EXISTS FROM THE MOMENT THE LOCK IS WON (#70), which is fifteen steps
 // earlier than it used to. Everything before `startRunLogger` is unrecorded by
@@ -293,6 +297,15 @@ export function selectCompletedCycleExit(args: {
   if (args.haltReasons.length > 0) return haltedExit(args.haltReasons);
   const quota = args.terminals.find((terminal) => terminal.type === "QUOTA");
   return quota?.type === "QUOTA" ? quotaExit(quota) : args.otherwise();
+}
+
+export function formatTerminalLine(
+  issueId: string,
+  terminal: Terminal,
+  elapsed: string,
+): string {
+  const line = `terminal #${issueId} ${terminal.type} ${elapsed}`;
+  return terminal.type === "HARD-ERROR" ? `${line}: ${terminal.reason}` : line;
 }
 
 export async function run(
@@ -1228,7 +1241,7 @@ export async function run(
               quotaState,
             });
             await runLogger.appendOrchestrator(
-              `terminal #${issue.id} ${terminal.type} ${durationField(issueTimer())}`,
+              formatTerminalLine(issue.id, terminal, durationField(issueTimer())),
             );
             return { issue, terminal };
           } catch (err) {

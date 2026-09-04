@@ -7,6 +7,7 @@ import {
   reviewRoundLine,
   reviewerPassRouting,
   reviewerSnapshotChanged,
+  runInnerLoop,
   runSandboxAndPublish,
   type ReviewerSnapshot,
 } from "./inner-loop.js";
@@ -29,6 +30,70 @@ const harnessFailed: ReviewerOutcome = {
   transcript: "",
   invocations: 2,
 };
+
+describe("runInnerLoop HARD-ERROR logging (#115)", () => {
+  it("writes each recovering retry identically to stderr and the durable log", async () => {
+    const outcomes = [
+      {
+        verdict: { type: "HARD-ERROR" as const, reason: "bringup failed\nstack" },
+        accumulatedCommits: [],
+      },
+      {
+        verdict: { type: "HARD-ERROR" as const, reason: "socket refused" },
+        accumulatedCommits: [],
+      },
+      {
+        verdict: { type: "DONE" as const, commits: [] },
+        accumulatedCommits: [],
+      },
+    ];
+    const runCycle = vi.fn(async () => outcomes.shift()!);
+    const orchestratorLines: string[] = [];
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      await expect(
+        runInnerLoop(
+          { id: "115", title: "logging", branch: "sandbar/issue-115-logging" },
+          {
+            onOrchestratorLog: (line) => orchestratorLines.push(line),
+          } as unknown as Parameters<typeof runInnerLoop>[1],
+          runCycle,
+        ),
+      ).resolves.toEqual({ type: "DONE", commits: [] });
+      expect(orchestratorLines).toEqual([
+        "  115: HARD-ERROR (bringup failed) — retry 1/2 with a fresh sandbox.",
+        "  115: HARD-ERROR (socket refused) — retry 2/2 with a fresh sandbox.",
+      ]);
+      expect(stderr.mock.calls.map(([line]) => line)).toEqual(orchestratorLines);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("surfaces the full reason after the retries are exhausted", async () => {
+    const runCycle = vi.fn(async () => ({
+      verdict: {
+        type: "HARD-ERROR" as const,
+        reason: "bringup failed\nfull stack",
+      },
+      accumulatedCommits: [],
+    }));
+
+    await expect(
+      runInnerLoop(
+        { id: "115", title: "logging", branch: "sandbar/issue-115-logging" },
+        {} as Parameters<typeof runInnerLoop>[1],
+        runCycle,
+      ),
+    ).resolves.toEqual({
+      type: "HARD-ERROR",
+      reason: "bringup failed\nfull stack",
+      commits: [],
+    });
+    expect(runCycle).toHaveBeenCalledTimes(3);
+  });
+});
 
 describe("priorReviewRound (#88, #121)", () => {
   const qualityApproved = reviewed("APPROVED", "<verdict>APPROVED</verdict>");
