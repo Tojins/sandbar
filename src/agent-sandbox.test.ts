@@ -2064,7 +2064,14 @@ describe("createSandbox integration (local provider)", () => {
           },
         })}' '${JSON.stringify({
           type: "assistant",
-          message: { content: [{ type: "text", text: "partial review findings" }] },
+          message: {
+            usage: {
+              input_tokens: 10,
+              cache_read_input_tokens: 20,
+              cache_creation_input_tokens: 3,
+            },
+            content: [{ type: "text", text: "partial review findings" }],
+          },
         })}' '${JSON.stringify({
           type: "result",
           subtype: "error_during_execution",
@@ -2085,6 +2092,7 @@ describe("createSandbox integration (local provider)", () => {
         inputTokens: 12,
         resolvedModel: "claude-opus",
       });
+      expect(agentPartialUsage(err).peakContext).toBe(33);
       expect(agentPartialUsage(err).rateLimit).toEqual({
         status: "allowed",
         window: "five_hour",
