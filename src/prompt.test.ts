@@ -14,6 +14,7 @@ import {
   renderSandboxStackSlot,
 } from "./prompt.js";
 import { parsePromise } from "./promise-parser.js";
+import { parseUiCheck } from "./ui-check-parser.js";
 import { loadTemplate } from "./prompts.js";
 
 const baseInputs = {
@@ -40,37 +41,46 @@ const implementerInputs = {
   diff: "",
 } as const;
 
-// The escalation contract is split across two files — the token/block names
-// live as prose in prompts/implementer.md and as regexes in promise-parser.ts.
-// These pin them together so a rename on one side can't silently make the
-// signal unemittable (#21).
-describe("renderAttemptSlot — UI-prototype escalation contract", () => {
+describe("UI-prototype prompt contracts (#126)", () => {
   const slot = renderAttemptSlot(implementerInputs);
+  const uiCheck = loadTemplate("ui-check");
 
-  it("instructs the agent to assess UI impact before implementing", () => {
-    expect(slot).toContain("## UI impact check — do this first");
-    expect(slot).toContain("non-trivial UI impact");
+  it("keeps only the mid-implementation escalation in the implementer prompt", () => {
+    expect(slot).not.toContain("UI impact check — do this first");
+    expect(slot).toContain("If you realise mid-implementation");
+    expect(slot).toContain("<promise>NEEDS-UI-PROTOTYPE</promise>");
   });
 
   // The loop-forever hazard: finalize's comment tells the human to reply with
   // one exact phrase, and this prompt is what has to recognise it in the next
   // run's issue anchor. Reword either side alone and the issue ping-pongs.
   it("recognises the exact escape phrase finalize's comment asks the human for", () => {
-    expect(slot).toContain(NO_PROTOTYPE_NEEDED_PHRASE);
+    expect(uiCheck).toContain(NO_PROTOTYPE_NEEDED_PHRASE);
     expect(
       NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(42, "impact", "needs-info", "ready-for-agent", null),
     ).toContain(NO_PROTOTYPE_NEEDED_PHRASE);
   });
 
-  it("documents a token + block pair the parser actually accepts", () => {
-    expect(slot).toContain("<promise>NEEDS-UI-PROTOTYPE</promise>");
-    expect(slot).toContain("`<ui-impact>`");
+  it("documents the dedicated token + block pair its parser accepts", () => {
+    expect(uiCheck).toContain("<ui-check>PROTOTYPE-NEEDED</ui-check>");
+    expect(uiCheck).toContain("<ui-check>CLEAR</ui-check>");
+    expect(uiCheck).toContain("`<ui-impact>`");
     const emitted =
       "<ui-impact>\nnew screen, layout invented\n</ui-impact>\n" +
-      "<promise>NEEDS-UI-PROTOTYPE</promise>";
-    expect(parsePromise(emitted, { commitsAccumulated: 0 })).toEqual({
-      kind: "NEEDS-UI-PROTOTYPE",
+      "<ui-check>PROTOTYPE-NEEDED</ui-check>";
+    expect(parseUiCheck(emitted)).toEqual({
+      kind: "PROTOTYPE-NEEDED",
       uiImpact: "new screen, layout invented",
+    });
+  });
+
+  it("retains an implementer token the promise parser accepts for late discovery", () => {
+    const emitted =
+      "<ui-impact>late discovery</ui-impact>\n" +
+      "<promise>NEEDS-UI-PROTOTYPE</promise>";
+    expect(parsePromise(emitted, { commitsAccumulated: 1 })).toEqual({
+      kind: "NEEDS-UI-PROTOTYPE",
+      uiImpact: "late discovery",
     });
   });
 });

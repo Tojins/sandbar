@@ -61,23 +61,31 @@ export default {
 
   // Model names are interpreted by the corresponding role's provider. The two
   // reviewer fields are the final correctness pass and first quality pass.
+  // The UI check inherits the implementer's model unless set separately.
   // implementerModelId: "opus",
+  // uiCheckModelId: undefined,
   // reviewerModelId: "opus",
   // reviewerQualityModelId: "opus",
   // mergerModelId: "opus",
 
-  // The roles default to claude. Leaving the quality reviewer unset makes it
-  // inherit reviewerAgent, including when that field changes.
+  // The roles default to claude. The UI check inherits implementerAgent;
+  // leaving the quality reviewer unset makes it inherit reviewerAgent.
   // implementerAgent: "claude",
+  // uiCheckAgent: undefined,
   // reviewerAgent: "claude",
   // reviewerQualityAgent: undefined,
   // mergerAgent: "claude",
 
   // Unset passes no effort flag, leaving the choice to the provider/CLI.
   // implementerEffort: undefined,
+  // uiCheckEffort: undefined,
   // reviewerEffort: undefined,
   // reviewerQualityEffort: undefined,
   // mergerEffort: undefined,
+
+  // Run one cold UI/prototype classification after sandbox setup and before
+  // attempt 1. Disable this in hosts that cannot ship user-visible UI.
+  // uiPrototypeCheck: true,
 
   // Undefined derives `Co-authored-by: ...` from botName and botEmail.
   // coauthorTrailer: undefined,

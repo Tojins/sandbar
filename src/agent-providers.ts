@@ -2,9 +2,10 @@
 // the release-artifact and protocol-version pin the driver installs, and the
 // one place that says what credential each provider needs.
 //
-// The config splits the MODEL per call (`implementerModelId`, correctness
-// `reviewerModelId`, `reviewerQualityModelId`, and `mergerModelId`); this is
-// the vendor knob beside it, and `*Effort` (#130) is the third per-call knob:
+// The config splits the MODEL per call (`implementerModelId`, `uiCheckModelId`,
+// correctness `reviewerModelId`, `reviewerQualityModelId`, and
+// `mergerModelId`); this is the vendor knob beside it, and `*Effort` (#130) is
+// the third per-call knob:
 // the reasoning effort, passed through `buildAgentProvider` for the provider
 // to spell in its own argv. It exists because the sandbox reads no host
 // config — codex's effort otherwise comes from the server's per-model default,
@@ -12,8 +13,11 @@
 // default so that what a run ran at is in the config and on the log line,
 // never in a dotfile no log records. The two reviewer calls used to share one provider
 // because a resumed session cannot cross vendor CLIs; #121 deleted the resume,
-// so `reviewerQualityAgent` is a fourth routing knob — defaulting to
+// so `reviewerQualityAgent` is a routing knob — defaulting to
 // `reviewerAgent`, so a config that says nothing still has one reviewer vendor.
+// The earlier, single-call UI classifier (#126) similarly names
+// `uiCheckAgent`, defaulting to `implementerAgent`; when its gate is disabled,
+// that provider is absent from `requiredAgentProviders` because no call uses it.
 // The pressure that wants the vendor
 // knob is the implementer's: a review round is one bounded sequential chain,
 // while an implementer attempt is a long multi-tool session, up to
@@ -358,20 +362,24 @@ export function parseAgentProviderName(
 // Every provider a run will actually invoke, deduped and in a stable order —
 // what preflight has to find a credential for.
 //
-// Every routing knob participates, the reviewer's quality pass included (#121):
-// no provider is unconditional. Requiring the routed set up front is deliberate
+// Every invoked routing knob participates, the reviewer's quality pass included
+// (#121); the UI checker participates only when enabled (#126). Requiring the
+// routed set up front is deliberate
 // over discovering a missing credential in the resolve loop, after a run may
 // already have landed work — and for the quality pass it is also what puts its
 // CLI in the sandbox image (#75), a pass that gates every round being a pass
 // whose missing binary is a reviewer that cannot run at all.
 export function requiredAgentProviders(roles: {
+  readonly uiPrototypeCheck: boolean;
   readonly implementerAgent: AgentProviderName;
+  readonly uiCheckAgent: AgentProviderName;
   readonly reviewerAgent: AgentProviderName;
   readonly reviewerQualityAgent: AgentProviderName;
   readonly mergerAgent: AgentProviderName;
 }): readonly AgentProviderName[] {
   const named = new Set<AgentProviderName>([
     roles.implementerAgent,
+    ...(roles.uiPrototypeCheck ? [roles.uiCheckAgent] : []),
     roles.reviewerAgent,
     roles.reviewerQualityAgent,
     roles.mergerAgent,
@@ -403,7 +411,7 @@ export function requiredAgentProviders(roles: {
 // too, and each pass is asserted against its own provider rather than against
 // the role's.
 export function assertRoleModelIdNamed(
-  role: "implementer" | "reviewer" | "merger",
+  role: "implementer" | "uiCheck" | "reviewer" | "merger",
   provider: AgentProviderName,
   rawModelId: string | undefined,
   fields: {

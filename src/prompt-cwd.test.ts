@@ -40,6 +40,7 @@ import {
   buildPrompt,
   buildProjectAnchor,
   buildReviewerPrompts,
+  buildUiCheckPrompt,
 } from "./prompt.js";
 
 const exec = promisify(execFile);
@@ -193,6 +194,14 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     expect(prompt).toContain("Issue #1: acme/app");
     // What the shim resolves on its own. Drop `--repo` and this is the anchor.
     expect(prompt).not.toContain("other/wrong");
+  });
+
+  it("builds the UI check from only the configured issue anchor and role contract", async () => {
+    const prompt = await buildUiCheckPrompt("1", CONFIGURED);
+    expect(prompt).toContain("Issue #1: acme/app");
+    expect(prompt).toContain("# UI prototype check");
+    expect(prompt).not.toContain("Last 10 commits");
+    expect(prompt).not.toContain("Coding standards");
   });
 
   // The @refs the agent resolves inside its sandbox stay repo-relative; it is

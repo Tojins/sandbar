@@ -118,6 +118,47 @@ const asImpl = (a: LoopAction) =>
 const asReviewer = (a: LoopAction) =>
   a as Extract<LoopAction, { kind: "run-gate-and-reviewer" }>;
 
+describe("inner-loop-machine — one pre-attempt UI check (#126)", () => {
+  it("runs before attempt 1 without spending an attempt, then proceeds on CLEAR", () => {
+    let state = initialState({ ...defaultOpts, uiPrototypeCheck: true });
+    expect(initialAction(state)).toEqual({ kind: "run-ui-check" });
+    const result = step(state, {
+      kind: "ui-check-result",
+      result: { kind: "CLEAR" },
+    });
+    state = result.state;
+    expect(result.action).toMatchObject({ kind: "run-implementer", attempt: 1 });
+    expect(state.attempt).toBe(1);
+    expect(state.reviewRoundsUsed).toBe(0);
+  });
+
+  it("terminates before attempt 1 when a prototype is needed", () => {
+    const state = initialState({ ...defaultOpts, uiPrototypeCheck: true });
+    const result = step(state, {
+      kind: "ui-check-result",
+      result: { kind: "PROTOTYPE-NEEDED", uiImpact: "new navigation flow" },
+    });
+    expect(result.action).toEqual({
+      kind: "terminate",
+      verdict: {
+        type: "NEEDS-UI-PROTOTYPE",
+        uiImpact: "new navigation flow",
+        strandedHead: null,
+      },
+    });
+    expect(result.state.attempt).toBe(1);
+    expect(result.state.reviewRoundsUsed).toBe(0);
+  });
+
+  it("starts directly with the implementer when disabled", () => {
+    const state = initialState({ ...defaultOpts, uiPrototypeCheck: false });
+    expect(initialAction(state)).toMatchObject({
+      kind: "run-implementer",
+      attempt: 1,
+    });
+  });
+});
+
 describe("inner-loop-machine — happy paths", () => {
   it("attempt 1 COMPLETE → gate-1 green → APPROVED → DONE", () => {
     const { actions, verdict } = drive(defaultOpts, [

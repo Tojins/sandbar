@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 const innerLoopMocks = vi.hoisted(() => ({
   buildPrompt: vi.fn(async () => "implementer prompt"),
+  buildUiCheckPrompt: vi.fn(async () => "ui check prompt"),
   buildReviewerPrompts: vi.fn(),
   dirtyWorktreePaths: vi.fn(async () => [] as string[]),
   headMismatch: vi.fn(async () => null),
@@ -10,6 +11,7 @@ const innerLoopMocks = vi.hoisted(() => ({
 vi.mock("./prompt.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./prompt.js")>()),
   buildPrompt: innerLoopMocks.buildPrompt,
+  buildUiCheckPrompt: innerLoopMocks.buildUiCheckPrompt,
   buildReviewerPrompts: innerLoopMocks.buildReviewerPrompts,
 }));
 
@@ -30,6 +32,7 @@ import {
   runImplementer,
   runInnerLoop,
   runReviewer,
+  runUiCheck,
   runSandboxAndPublish,
   type ReviewerSnapshot,
 } from "./inner-loop.js";
@@ -43,6 +46,81 @@ const deferred = <T,>() => {
   });
   return { promise, resolve };
 };
+
+describe("runUiCheck (#126)", () => {
+  const context = (runs: readonly string[], lines: string[] = []) => {
+    const sandbox = {
+      run: vi.fn()
+        .mockResolvedValueOnce({
+          stdout: runs[0] ?? "",
+          commits: [],
+          maxGapMs: 3,
+          toolCalls: 1,
+        })
+        .mockResolvedValueOnce({
+          stdout: runs[1] ?? "",
+          commits: [],
+          maxGapMs: 4,
+          toolCalls: 2,
+        }),
+    } as unknown as Sandbox;
+    return {
+      sandbox,
+      ctx: {
+        issue: { id: "126", title: "ui check", branch: "sandbar/issue-126" },
+        sandbox,
+        opts: { onOrchestratorLog: (line: string) => lines.push(line) },
+        config: {
+          repo: { owner: "owner", name: "repo" },
+          uiCheckAgent: "codex",
+          uiCheckModelId: "gpt-5.6-sol",
+          uiCheckEffort: "low",
+        },
+      } as unknown as Parameters<typeof runUiCheck>[1],
+    };
+  };
+
+  it("returns a classification from a cold call with no completion signal", async () => {
+    const lines: string[] = [];
+    const { sandbox, ctx } = context(["<ui-check>CLEAR</ui-check>"], lines);
+    await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).resolves.toEqual({
+      kind: "ui-check-result",
+      result: { kind: "CLEAR" },
+    });
+    expect(sandbox.run).toHaveBeenCalledTimes(1);
+    expect(sandbox.run).toHaveBeenCalledWith(expect.objectContaining({
+      name: "ui-check-126",
+      prompt: "ui check prompt",
+      completionSignal: [],
+    }));
+    expect(lines[0]).toMatch(
+      /^issue=126 ui-check provider=codex model=gpt-5\.6-sol effort=low /,
+    );
+  });
+
+  it("offers one cold correction for a malformed answer", async () => {
+    const { sandbox, ctx } = context([
+      "<ui-check>PROTOTYPE-NEEDED</ui-check>",
+      "<ui-check>CLEAR</ui-check>",
+    ]);
+    await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).resolves.toMatchObject({
+      result: { kind: "CLEAR" },
+    });
+    expect(sandbox.run).toHaveBeenCalledTimes(2);
+    expect(sandbox.run).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      name: "ui-check-126-reprompt",
+      prompt: expect.stringContaining("provided no `<ui-impact>` block"),
+      completionSignal: [],
+    }));
+  });
+
+  it("treats a second malformed answer as a harness failure", async () => {
+    const { ctx } = context(["no token", "still no token"]);
+    await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).rejects.toThrow(
+      /no valid classification after its one re-prompt/,
+    );
+  });
+});
 
 describe("silent implementer attempt policy (#116)", () => {
   const sandboxResult = (stdout: string, silent: boolean, commits: string[] = []) => ({

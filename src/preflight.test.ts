@@ -340,13 +340,14 @@ describe("checkInvariants", () => {
 
   // A provider can be required by the merger alone. The preflight state keeps
   // the deduped providers rather than the role mapping, so the refusal points
-  // at all three knobs and does not send that operator to the other two only.
-  it("names mergerAgent among the routing knobs for a missing credential (#74)", () => {
+  // at every knob and does not send that operator to only the common ones.
+  it("names optional roles among the routing knobs for a missing credential (#74, #126)", () => {
     const f = failures({
       ...cleanState,
       uncredentialledProviders: ["claude"],
     });
     expect(f[0]).toContain("implementerAgent");
+    expect(f[0]).toContain("uiCheckAgent");
     expect(f[0]).toContain("reviewerAgent");
     expect(f[0]).toContain("mergerAgent");
     expect(f[0]).not.toContain("Every run needs one");
