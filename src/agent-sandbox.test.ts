@@ -1259,6 +1259,40 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
+  it("reads context depth when the invocation creates the first rollout", async () => {
+    const branch = "sandbar/issue-124-codex-first-depth";
+    await git(["branch", branch], dir);
+    const codexHome = await mkdtemp(join(tmpdir(), "asb-codex-home-"));
+    cleanups.push(codexHome);
+    const oldCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    const rollout = join(codexHome, "sessions", "2026", "09", "04", "rollout-test.jsonl");
+    const rolloutLine = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "token_count", info: { last_token_usage: { input_tokens: 37_000 } } },
+    });
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
+    });
+    try {
+      const run = await sandbox.run({
+        agent: scriptedCodexAgent(
+          `mkdir -p '${dirname(rollout)}' && ` +
+          `printf '%s\\n' '${rolloutLine}' > '${rollout}' && ` +
+          `printf '%s\\n' '${JSON.stringify({
+            type: "item.completed", item: { type: "agent_message", text: "done" },
+          })}'`,
+        ),
+        prompt: "go", completionSignal: [],
+      });
+      expect(run.peakContext).toBe(37_000);
+    } finally {
+      await sandbox.close();
+      if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = oldCodexHome;
+    }
+  });
+
   it("preserves a completed Codex answer when the rollout probe cannot exec", async () => {
     const branch = "sandbar/issue-109-codex-probe-failure";
     await git(["branch", branch], dir);
