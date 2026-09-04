@@ -24,21 +24,10 @@ import {
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import lockfile from "proper-lockfile";
-
-// Deliberately a local copy of errors.ts's `isErrno`, not an import: this
-// module has NO relative imports, and lock.test.ts depends on that — its
-// takeover tests spawn a second plain `node` on this file's SOURCE, which
-// cannot resolve a `.js` specifier to a `.ts` file without a loader hook. A
-// one-line probe is cheaper than that hook (#99 review, round 6).
-const isEnoent = (err: unknown): boolean =>
-  typeof err === "object" && err !== null &&
-  (err as { code?: unknown }).code === "ENOENT";
+import { isErrno } from "./errors.js";
 
 const staleLockRemovalRefused = (err: unknown): boolean =>
-  typeof err === "object" && err !== null &&
-  ["EACCES", "EPERM", "EROFS"].includes(
-    String((err as { code?: unknown }).code),
-  );
+  ["EACCES", "EPERM", "EROFS"].some((code) => isErrno(err, code));
 
 export type LockPaths = {
   readonly workDir: string;
@@ -76,7 +65,7 @@ async function maybeReleaseStaleLock(paths: LockPaths): Promise<void> {
   try {
     oldPid = Number.parseInt(readFileSync(paths.pidPath, "utf8").trim(), 10);
   } catch (err) {
-    if (!isEnoent(err)) throw err;
+    if (!isErrno(err, "ENOENT")) throw err;
     return;
   }
   // Fail CLOSED on a sidecar we cannot read as a pid: a truncated or garbage
@@ -99,7 +88,7 @@ async function maybeReleaseStaleLock(paths: LockPaths): Promise<void> {
   try {
     unlinkSync(paths.pidPath);
   } catch (err) {
-    if (!isEnoent(err)) throw err;
+    if (!isErrno(err, "ENOENT")) throw err;
   }
 }
 
@@ -151,7 +140,7 @@ export async function acquireLock(paths: LockPaths): Promise<Release> {
     try {
       unlinkSync(paths.pidPath);
     } catch (err) {
-      if (!isEnoent(err)) throw err;
+      if (!isErrno(err, "ENOENT")) throw err;
     } finally {
       // Removing the sidecar comes first so a successor cannot create its own
       // and have this holder unlink it. Releasing the real lock is mandatory
