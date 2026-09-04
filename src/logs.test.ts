@@ -54,25 +54,29 @@ describe("startRunLogger", () => {
     expect(lines[2]).toMatch(/cycle 1 started$/);
   });
 
-  it("cycle().writePlan appends a triggered record to plans.jsonl", async () => {
+  it("writePlan appends explicit triggers in recompute order", async () => {
     const base = await makeBase();
     const logger = await startRunLogger({ baseDir: base });
     const plan = [
       { id: "45", title: "finalize", branch: "sandbar/issue-45-finalize" },
       { id: "47", title: "logs", branch: "sandbar/issue-47-logs" },
     ];
-    await logger.cycle(1).writePlan(plan);
+    await logger.writePlan("launch", plan);
+    await logger.writePlan("slot-freed", [{ id: "49" }]);
 
     const path = join(logger.runDir, "plans.jsonl");
     const body = await readFile(path, "utf8");
-    expect(JSON.parse(body)).toEqual({ trigger: "launch", plan });
+    expect(body.trim().split("\n").map((line) => JSON.parse(line))).toEqual([
+      { trigger: "launch", plan },
+      { trigger: "slot-freed", plan: [{ id: "49" }] },
+    ]);
     expect(body).toContain("\n");
   });
 
-  it("cycle().appendMerger appends timestamped lines to merger.log", async () => {
+  it("landing().appendMerger appends timestamped lines to merger.log", async () => {
     const base = await makeBase();
     const logger = await startRunLogger({ baseDir: base });
-    const c = logger.cycle(2);
+    const c = logger.landing(2);
     await c.appendMerger("merge sandbar/issue-42-foo");
     await c.appendMerger("gate green: 42");
 
@@ -86,10 +90,10 @@ describe("startRunLogger", () => {
     expect(lines[1]).toMatch(/gate green: 42$/);
   });
 
-  it("cycle().writeAttempt writes attempt-<m>.log under issue-<id>/", async () => {
+  it("issue().writeAttempt writes attempt-<m>.log under issue-<id>/", async () => {
     const base = await makeBase();
     const logger = await startRunLogger({ baseDir: base });
-    const c = logger.cycle(3);
+    const c = await logger.issue("47");
     await c.writeAttempt("47", 2, "implementer stdout");
     await c.writeAttemptReviewer("47", 2, "reviewer stdout");
 
@@ -109,7 +113,7 @@ describe("startRunLogger", () => {
   it("writeResolveAttempt files an attempt beside the gate artefact and answers with its path", async () => {
     const base = await makeBase();
     const logger = await startRunLogger({ baseDir: base });
-    const c = logger.cycle(1);
+    const c = logger.landing(1);
 
     const path = await c.writeResolveAttempt("64", {
       attempt: 2,
@@ -139,7 +143,7 @@ describe("startRunLogger", () => {
   it("writes a readable header even when both streams are empty", async () => {
     const base = await makeBase();
     const logger = await startRunLogger({ baseDir: base });
-    const path = await logger.cycle(2).writeResolveAttempt("chunk-42", {
+    const path = await logger.landing(2).writeResolveAttempt("chunk-42", {
       attempt: 1,
       issueId: "42",
       mode: "still-conflicted",

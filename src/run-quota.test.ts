@@ -27,11 +27,14 @@ vi.mock("./logs.js", () => ({
     runDir: "/tmp/run-quota-test",
     appendOrchestrator: vi.fn(async (line: string) => { seams.logLines.push(line); }),
     finalize: vi.fn(),
-    cycle: vi.fn(() => ({
-      cycleDir: "/tmp/run-quota-test/cycle-1",
-      issueDir: vi.fn(async (id: string) => `/tmp/run-quota-test/issue-${id}`),
-      writePlan: vi.fn(), appendMerger: vi.fn(), writeMergerGate: vi.fn(),
-      writeAttempt: vi.fn(), writeResolveAttempt: vi.fn(),
+    writePlan: vi.fn(),
+    issue: vi.fn(async (id: string) => ({
+      dir: `/tmp/run-quota-test/issue-${id}`,
+      writeAttempt: vi.fn(), writeAttemptReviewer: vi.fn(),
+    })),
+    landing: vi.fn(() => ({
+      dir: "/tmp/run-quota-test/landing-1", appendMerger: vi.fn(),
+      writeMergerGate: vi.fn(), writeResolveAttempt: vi.fn(),
     })),
   })),
 }));

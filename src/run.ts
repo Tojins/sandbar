@@ -977,7 +977,7 @@ export async function run(
 
       console.log(`\n=== Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
       await runLogger.appendOrchestrator(`cycle ${iteration} start`);
-      const cycleLogger = runLogger.cycle(iteration);
+      const planTrigger = iteration === 1 ? "launch" : "slot-freed";
 
       const configWarning = staleConfigWarning(await readConfigStaleness({
         layout,
@@ -1197,7 +1197,7 @@ export async function run(
         ),
       );
       const executionIssues = [...retryIssues, ...issues];
-      await cycleLogger.writePlan(issues);
+      await runLogger.writePlan(planTrigger, issues);
       await runLogger.appendOrchestrator(
         `plan: ${issues.length} unblocked issue(s) — ${issues.map((i) => `#${i.id}`).join(", ") || "none"}`,
       );
@@ -1294,6 +1294,7 @@ export async function run(
       // console.log too" is the wrong fix.
       const phase2Timer = startTimer();
       for (const issue of executionIssues) {
+        const issueLogger = await runLogger.issue(issue.id);
         if (!startedThisRun.has(Number(issue.id))) {
           startedThisRun.add(Number(issue.id));
           runState.issuesAttempted += 1;
@@ -1311,8 +1312,8 @@ export async function run(
               // transcripts (#44 D4), so the offline artefact of what the
               // agent's stack was doing sits next to the transcript of what the
               // agent did.
-              sandboxLogBaseDir: await cycleLogger.issueDir(issue.id),
-              attemptLogger: cycleLogger,
+              sandboxLogBaseDir: issueLogger.dir,
+              attemptLogger: issueLogger,
               onOrchestratorLog: (line) => runLogger.appendOrchestrator(line),
               quotaState,
             });
@@ -1366,6 +1367,7 @@ export async function run(
       await runLogger.appendOrchestrator(
         `landing queue start terminals=${settled.length} active=${active.size}`,
       );
+      const landingLogger = runLogger.landing(iteration);
 
       const outcomes: IssueOutcome[] = [];
       for (const s of settled) {
@@ -1543,8 +1545,8 @@ export async function run(
           mergerSummary = await runMergerWithAdapter(
             completedIssues,
             adapter,
-            (line) => cycleLogger.appendMerger(line),
-            (issueId, gate) => cycleLogger.writeMergerGate(issueId, gate),
+            (line) => landingLogger.appendMerger(line),
+            (issueId, gate) => landingLogger.writeMergerGate(issueId, gate),
             {
               cycleIssues: [...ongoingIssues.values()],
               projectAnchor,
@@ -1552,7 +1554,7 @@ export async function run(
               // gate artefact it was prompted from. The writer answers with
               // the path, which is what the abandon comment points at.
               onResolveAttempt: (key, record) =>
-                cycleLogger.writeResolveAttempt(key, record),
+                landingLogger.writeResolveAttempt(key, record),
               ...(verified ? { verified } : {}),
               ...(landRequests.length > 0
                 ? {
