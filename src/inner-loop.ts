@@ -125,7 +125,6 @@ import { durationField, startTimer } from "./timing.js";
 import {
   type ProjectAnchorOptions,
   type PriorReviewRound,
-  type ReviewerPromptInputs,
   buildPrompt,
   buildReviewerPrompts,
   qualityReviewContext,
@@ -408,15 +407,6 @@ export type InnerLoopConfig = {
   readonly adrDir?: string;
   readonly promptExtensions?: PromptExtensions;
 };
-
-export function reviewerPromptExtensions(
-  extensions?: PromptExtensions,
-): Pick<ReviewerPromptInputs, "reviewerPromptExtension" | "reviewerQualityPromptExtension"> {
-  return {
-    reviewerPromptExtension: extensions?.reviewer,
-    reviewerQualityPromptExtension: extensions?.reviewerQuality,
-  };
-}
 
 export type InnerLoopOptions = {
   readonly config: InnerLoopConfig;
@@ -1253,7 +1243,7 @@ export async function enforceReviewerSnapshot(
 const passTranscript = (pass: ReviewerPass, transcript: string): string =>
   `=== ${pass} pass ===\n${transcript}`;
 
-async function runReviewer(
+export async function runReviewer(
   action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
   ctx: ExecuteActionCtx,
 ): Promise<{
@@ -1291,7 +1281,8 @@ async function runReviewer(
     worktreePath: sandbox.worktreePath,
     sourceBranch: config.sourceBranch,
     base: ctx.base,
-    ...reviewerPromptExtensions(config.promptExtensions),
+    reviewerPromptExtension: config.promptExtensions?.reviewer,
+    reviewerQualityPromptExtension: config.promptExtensions?.reviewerQuality,
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
     priorRounds: ctx.priorReviewRounds,
