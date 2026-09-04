@@ -9,12 +9,8 @@ Failing checks: {{failedChecks}}
 
 {{trace}}
 
-The forge runs a superset of, or simply a different environment from, the local
-gate — a different OS image, a real service container, a browser suite, a
-migration replay, a stricter linter. So "the local gate is green" is not
-evidence against this failure; it is the reason the failure is interesting.
-Read the job output for what CI actually did differently before assuming the
-test is flaky.
+"The local gate is green" is not evidence against this failure. Read the job
+output for what CI actually did differently before assuming the test is flaky.
 
 Commit a fix on top of HEAD. The merge commits themselves stay in place; your
 work is a follow-up commit. The orchestrator re-runs the local gate, then pushes
