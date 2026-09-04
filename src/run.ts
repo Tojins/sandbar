@@ -810,7 +810,6 @@ export async function run(
 
   const runState = newRunState({
     maxTotalIssues: config.maxTotalIssues,
-    relaunchAfterLanding: config.relaunchAfterLanding,
   });
   const quotaState = createRunQuotaState();
   // The one stop this run ends on (#70). Every break out of the loop below
@@ -1131,7 +1130,10 @@ export async function run(
       // issue carries the CHUNK it lands on (#60), and a narrower annotation
       // here would drop that field on the way to phase 3 without an error —
       // the merger would then land a chunk member on the source branch.
-      const issues: PlannedIssue[] = [...resolution.plan].slice(0, budget);
+      const issues: PlannedIssue[] = [...resolution.plan].slice(
+        0,
+        Math.min(budget, config.maxParallelIssues),
+      );
       const fingerprint = planFingerprint(issues.map((i) => i.id));
       await cycleLogger.writePlan(issues);
       await runLogger.appendOrchestrator(

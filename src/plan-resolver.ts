@@ -174,6 +174,7 @@ import {
   deriveChunks,
   landedChunksOf,
 } from "./chunks.js";
+import { DEFAULT_MAX_PARALLEL_ISSUES } from "./config.js";
 import {
   DEFAULT_LANE,
   type Lane,
@@ -195,7 +196,6 @@ const exec = promisify(execFile);
 
 const WAITING_LABEL = "waiting";
 const READY_LABEL = "ready-for-agent";
-const DEFAULT_K = 3;
 
 export type IssueState = "OPEN" | "CLOSED";
 
@@ -284,7 +284,7 @@ export function resolvePlan(
   candidates: readonly IssueSummary[],
   issueFacts: ReadonlyMap<number, IssueFacts>,
   excluded: ReadonlySet<number> = new Set(),
-  k: number = DEFAULT_K,
+  k: number = DEFAULT_MAX_PARALLEL_ISSUES,
   defaultLane: Lane = DEFAULT_LANE,
   chunkMembers: ReadonlyMap<string, ReadonlySet<number>> = new Map(),
 ): PlanResolution {
@@ -659,7 +659,7 @@ export async function buildPlan(
   options: BuildPlanOptions,
 ): Promise<PlanResolution> {
   const excluded = options.excluded ?? new Set<number>();
-  const k = options.k ?? DEFAULT_K;
+  const k = options.k ?? DEFAULT_MAX_PARALLEL_ISSUES;
   // One containment reading serves planning and reconciliation. A member ref
   // retained with an older chunk after a failed close can also be inherited by
   // every later chunk based on the landed source, so this intentionally does
