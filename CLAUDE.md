@@ -224,11 +224,13 @@ from that state and provider or landing outcomes.
   deliberately suspends D1, the lock, preflight and `sandboxHooks`.
   `src/gate-run.ts` header.
 - **A gate verdict is about a commit.** The tree must be clean and ≡ HEAD
-  (D1, #24) and HEAD must be `refs/heads/<branch>` (#27) — both re-checked
-  after every implementer attempt; `sandbar gate` is the only caller allowed to
-  suspend D1. Corollary for consumers: gate steps and sandbox siblings must
-  write only into gitignored paths. `src/git-ops.ts`,
-  `src/inner-loop-machine.ts`.
+  (D1, #24) and HEAD must be `refs/heads/<branch>` (#27) — both checked after
+  every implementer attempt. An off-branch HEAD whose issue branch is its
+  ancestor is repaired host-side without spending a correction (#127); an
+  older, diverged, or missing branch still takes #27's re-prompt. `sandbar gate`
+  is the only caller allowed to suspend D1. Corollary for consumers: gate steps
+  and sandbox siblings must write only into gitignored paths. `src/git-ops.ts`,
+  `src/inner-loop.ts`, `src/inner-loop-machine.ts`.
 - **Branch naming is load-bearing.** Three shapes under one prefix,
   `sandbar/issue-<n>-<kebab-slug>` and `sandbar/chunk-<root>-<kebab-slug>`
   (#58), plus origin-only `sandbar/member-<n>` records (#93). Preflight cleanup,

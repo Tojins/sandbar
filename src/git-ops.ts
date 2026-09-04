@@ -1,7 +1,10 @@
-// Thin git wrapper for the inner loop: branch seeding, and the two asserts
+// Thin git wrapper for the inner loop: branch seeding, the two asserts
 // that make a gate verdict a statement about a commit ON THE ISSUE BRANCH —
 // `dirtyWorktreePaths` (tree ≡ HEAD, #24 D1) and `headMismatch` (HEAD ≡
-// refs/heads/<branch>, #27). Neither is optional and neither implies the other.
+// refs/heads/<branch>, #27) — and the one safe repair for the latter (#127).
+// `headMismatch` proves whether the issue branch is an ancestor of HEAD; only
+// that case may advance the branch and reattach HEAD without losing a commit.
+// Neither assert is optional and neither implies the other.
 //
 // One export serves a second caller: `fetchOriginChunkBranch` answers "what is
 // this chunk's tip" for the seeding below AND for the merge phase's choice of
@@ -755,14 +758,18 @@ export async function dirtyWorktreePaths(
 // is no branch it should be on. Nor does it need a second entry point there:
 // nothing runs between the implementer result and gate-1.
 export type HeadMismatch = {
-  // The branch HEAD was supposed to be on — carried so the re-prompt can name
-  // it without the pure state machine having to know the issue.
+  // The branch HEAD was supposed to be on — keeps the mismatch and any human
+  // handoff self-contained.
   readonly branch: string;
   // The ref HEAD points at, or null when HEAD is detached.
   readonly headRef: string | null;
   readonly headSha: string;
   // The issue branch's tip, or null when the ref is missing entirely.
   readonly branchSha: string | null;
+  // True only when the issue branch exists and is an ancestor of HEAD. This is
+  // the host-side proof that advancing it to `headSha` cannot discard history
+  // (#127); a missing branch is deliberately false rather than auto-repaired.
+  readonly branchIsAncestor: boolean;
 };
 
 // The ref HEAD points at, or null when HEAD is detached.
@@ -851,10 +858,74 @@ export async function headMismatch(
     exec("git", ["rev-parse", "HEAD"], { cwd: worktreePath }),
     branchTip(worktreePath, branch),
   ]);
+  let branchIsAncestor = false;
+  if (branchSha !== null) {
+    try {
+      await exec(
+        "git",
+        ["merge-base", "--is-ancestor", `refs/heads/${branch}`, "HEAD"],
+        { cwd: worktreePath },
+      );
+      branchIsAncestor = true;
+    } catch (err) {
+      // `merge-base --is-ancestor` names "not an ancestor" with exit 1. Any
+      // other failure is git/repository infrastructure and must propagate.
+      if (!isExitCode(err, 1)) throw err;
+    }
+  }
   return {
     branch,
     headRef: ref,
     headSha: headSha.stdout.trim(),
     branchSha,
+    branchIsAncestor,
+  };
+}
+
+// Repair the one off-branch shape whose safety `headMismatch` has proved
+// host-side (#127). Advance the issue ref first, then attach HEAD to it: doing
+// those in reverse would momentarily put symbolic HEAD on the old branch tip
+// and make a checkout-style repair rewrite the worktree. `symbolic-ref` changes
+// no files, so staged and unstaged work survive unchanged.
+export async function fastForwardOffBranchHead(
+  worktreePath: string,
+  mismatch: HeadMismatch,
+): Promise<{
+  readonly fromSha: string;
+  readonly toSha: string;
+  readonly commits: readonly { readonly sha: string }[];
+}> {
+  if (!mismatch.branchIsAncestor || mismatch.branchSha === null) {
+    throw new Error(
+      `refusing to fast-forward ${mismatch.branch}: its tip is not a known ancestor of HEAD`,
+    );
+  }
+  // Commit capture normally reads what the issue ref gained during the agent
+  // invocation. These commits were invisible to that read precisely because
+  // the ref had not moved; recover the same oldest-first shape before moving
+  // it so COMPLETE's commit-evidence guard can let this attempt stand.
+  const commits = (
+    await exec(
+      "git",
+      ["rev-list", `${mismatch.branchSha}..${mismatch.headSha}`, "--reverse"],
+      { cwd: worktreePath },
+    )
+  ).stdout.trim();
+  await exec(
+    "git",
+    ["branch", "-f", mismatch.branch, mismatch.headSha],
+    { cwd: worktreePath },
+  );
+  await exec(
+    "git",
+    ["symbolic-ref", "HEAD", `refs/heads/${mismatch.branch}`],
+    { cwd: worktreePath },
+  );
+  return {
+    fromSha: mismatch.branchSha,
+    toSha: mismatch.headSha,
+    commits: commits === ""
+      ? []
+      : commits.split("\n").map((sha) => ({ sha })),
   };
 }

@@ -6,6 +6,7 @@ const innerLoopMocks = vi.hoisted(() => ({
   buildReviewerPrompts: vi.fn(),
   branchTip: vi.fn(async () => "tip-a" as string | null),
   dirtyWorktreePaths: vi.fn(async () => [] as string[]),
+  fastForwardOffBranchHead: vi.fn(),
   headMismatch: vi.fn(async () => null),
   symbolicHeadRef: vi.fn(async () => "refs/heads/sandbar/issue-126" as string | null),
 }));
@@ -21,6 +22,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./git-ops.js")>()),
   branchTip: innerLoopMocks.branchTip,
   dirtyWorktreePaths: innerLoopMocks.dirtyWorktreePaths,
+  fastForwardOffBranchHead: innerLoopMocks.fastForwardOffBranchHead,
   headMismatch: innerLoopMocks.headMismatch,
   symbolicHeadRef: innerLoopMocks.symbolicHeadRef,
 }));
@@ -42,6 +44,7 @@ import {
 } from "./inner-loop.js";
 import { qualityReviewContext } from "./prompt.js";
 import type { ReviewerOutcome } from "./reviewer-run.js";
+import type { HeadMismatch } from "./git-ops.js";
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -249,7 +252,16 @@ describe("silent implementer attempt policy (#116)", () => {
     first: ReturnType<typeof sandboxResult>,
     nudge: ReturnType<typeof sandboxResult>,
     promptExtensions?: Parameters<typeof runImplementer>[1]["config"]["promptExtensions"],
+    mismatch: HeadMismatch | null = null,
   ) => {
+    innerLoopMocks.headMismatch.mockReset().mockResolvedValue(mismatch);
+    innerLoopMocks.fastForwardOffBranchHead.mockReset().mockImplementation(
+      async (_path: string, found: HeadMismatch) => ({
+        fromSha: found.branchSha,
+        toSha: found.headSha,
+        commits: [{ sha: found.headSha }],
+      }),
+    );
     const writes: string[] = [];
     const lines: string[] = [];
     const sandbox = {
@@ -347,6 +359,119 @@ describe("silent implementer attempt policy (#116)", () => {
       expect.objectContaining({ promptExtension: implementer }),
       expect.anything(),
     );
+  });
+
+  it("repairs an ancestor mismatch before building the event and logs the ref move", async () => {
+    const mismatch: HeadMismatch = {
+      branch: "sandbar/issue-116-silent",
+      headRef: null,
+      headSha: "head123",
+      branchSha: "base456",
+      branchIsAncestor: true,
+    };
+    const { pending, sandbox, lines } = runPath(
+      // Off-branch commits are absent from the sandbox's issue-ref capture.
+      // The repair range is what makes this COMPLETE valid without a retry.
+      sandboxResult("<promise>COMPLETE</promise>", false),
+      sandboxResult("unused", false),
+      undefined,
+      mismatch,
+    );
+
+    await expect(pending).resolves.toMatchObject({
+      kind: "implementer-result",
+      signal: { kind: "COMPLETE" },
+      offBranch: null,
+      fastForwarded: { fromSha: "base456", toSha: "head123" },
+    });
+    expect(innerLoopMocks.fastForwardOffBranchHead).toHaveBeenCalledWith(
+      "/unused",
+      mismatch,
+    );
+    expect(sandbox.syncBranchToCache).toHaveBeenCalledTimes(2);
+    expect(innerLoopMocks.fastForwardOffBranchHead.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(sandbox.syncBranchToCache).mock.invocationCallOrder[1]!,
+    );
+    expect(lines).toContain(
+      "issue=116 attempt=1 off-branch-fast-forward from=base456 to=head123",
+    );
+    expect(lines.at(-1)).toContain("commits=1");
+  });
+
+  it("fails the attempt when publishing the repaired tip fails", async () => {
+    const mismatch: HeadMismatch = {
+      branch: "sandbar/issue-116-silent",
+      headRef: null,
+      headSha: "head123",
+      branchSha: "base456",
+      branchIsAncestor: true,
+    };
+    const { pending, sandbox, lines } = runPath(
+      sandboxResult("<promise>COMPLETE</promise>", false),
+      sandboxResult("unused", false),
+      undefined,
+      mismatch,
+    );
+    const publishError = new Error("cache unavailable");
+    vi.mocked(sandbox.syncBranchToCache)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(publishError);
+
+    await expect(pending).rejects.toBe(publishError);
+    expect(innerLoopMocks.fastForwardOffBranchHead).toHaveBeenCalledWith(
+      "/unused",
+      mismatch,
+    );
+    expect(sandbox.syncBranchToCache).toHaveBeenCalledTimes(2);
+    expect(lines).not.toContain(
+      "issue=116 attempt=1 off-branch-fast-forward from=base456 to=head123",
+    );
+  });
+
+  it("reparses a nudge-only COMPLETE after the repair supplies commit evidence", async () => {
+    const mismatch: HeadMismatch = {
+      branch: "sandbar/issue-116-silent",
+      headRef: null,
+      headSha: "head123",
+      branchSha: "base456",
+      branchIsAncestor: true,
+    };
+    const { pending, sandbox } = runPath(
+      sandboxResult("", true),
+      sandboxResult("<promise>COMPLETE</promise>", false),
+      undefined,
+      mismatch,
+    );
+
+    await expect(pending).resolves.toMatchObject({
+      kind: "implementer-result",
+      signal: { kind: "COMPLETE" },
+      fastForwarded: { fromSha: "base456", toSha: "head123" },
+    });
+    expect(sandbox.run).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves a non-ancestor mismatch for the state machine", async () => {
+    const mismatch: HeadMismatch = {
+      branch: "sandbar/issue-116-silent",
+      headRef: null,
+      headSha: "older123",
+      branchSha: "newer456",
+      branchIsAncestor: false,
+    };
+    const { pending } = runPath(
+      sandboxResult("<promise>COMPLETE</promise>", false, ["older123"]),
+      sandboxResult("unused", false),
+      undefined,
+      mismatch,
+    );
+
+    await expect(pending).resolves.toMatchObject({
+      kind: "implementer-result",
+      offBranch: mismatch,
+      fastForwarded: null,
+    });
+    expect(innerLoopMocks.fastForwardOffBranchHead).not.toHaveBeenCalled();
   });
 });
 

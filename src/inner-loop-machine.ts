@@ -17,8 +17,9 @@
 // attempt ends in a verdict and the two counters move together. They come apart
 // wherever an attempt ends WITHOUT a verdict, which spends the attempt and no
 // round: gate-1 red, a NO-SIGNAL re-prompt, COMPLETE over a dirty tree (#24
-// D1), HEAD off the issue branch (#27), and — behind a GREEN gate — a reviewer
-// harness failure (#41, below). So min() is the ceiling, not a floor.
+// D1), a non-ancestor HEAD off the issue branch (#27/#127), and — behind a
+// GREEN gate — a reviewer harness failure (#41, below). A safely repaired
+// ancestor mismatch spends no correction. So min() is the ceiling, not a floor.
 // Which terminal a caller gets when the two are EQUAL — the configured default
 // — is decided here: `onReviewerResult` tests the review budget before it calls
 // advanceAttempt, so the last round ends the issue as NEEDS-HUMAN-REVIEW
@@ -26,7 +27,8 @@
 //
 // A COMPLETE claim is routed on THREE inputs, not one: the promise token, a
 // clean worktree (#24 D1), and HEAD still being the issue branch (#27). The
-// branch check runs FIRST because it subsumes the other: commits on a
+// runner repairs an ancestor mismatch before this event (#127); a surviving
+// mismatch runs FIRST because it subsumes the dirty check: commits on a
 // detached HEAD leave a CLEAN tree, so the gate would go green on a tree the
 // branch does not contain (git-ops.ts spells out the reachable shape).
 // COMPLETE + dirty spends an attempt on a re-prompt to commit rather than
@@ -66,6 +68,7 @@ export type LoopPhase =
   | "terminated";
 
 export type LoopState = {
+  readonly issueBranch: string;
   readonly maxAttempts: number;
   readonly maxReviewRounds: number;
   readonly attempt: number;
@@ -203,8 +206,16 @@ export type LoopEvent =
       // a verdict the merger cannot reproduce from the branch.
       readonly dirtyPaths: readonly string[];
       // Where HEAD is, when it is not `refs/heads/<branch>`; null when it is
-      // (#27). A clean tree says nothing about this — that is the whole gap.
+      // (#27). An ancestor mismatch repaired by the runner arrives as null
+      // (#127). A clean tree says nothing about this — that is the whole gap.
       readonly offBranch: HeadMismatch | null;
+      // The ref advance the runner safely completed before building this event,
+      // or null. It is prompt context only: the repair is free and does not
+      // consume the off-branch correction budget.
+      readonly fastForwarded: {
+        readonly fromSha: string;
+        readonly toSha: string;
+      } | null;
     }
   | {
       readonly kind: "gate-and-reviewer-result";
@@ -238,6 +249,7 @@ export type StepResult = {
 };
 
 export type InitialStateOptions = {
+  readonly issueBranch: string;
   readonly maxAttempts: number;
   readonly maxReviewRounds: number;
   readonly uiPrototypeCheck: boolean;
@@ -255,6 +267,7 @@ export function initialState(opts: InitialStateOptions): LoopState {
     );
   }
   return {
+    issueBranch: opts.issueBranch,
     maxAttempts: opts.maxAttempts,
     maxReviewRounds: opts.maxReviewRounds,
     attempt: 1,
@@ -325,6 +338,7 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
         event.signal,
         event.dirtyPaths,
         event.offBranch,
+        event.fastForwarded,
       );
 
     case "gate-and-reviewer-result":
@@ -365,18 +379,15 @@ export function uncommittedWorkReprompt(
   ].join("\n");
 }
 
-// The re-prompt for a HEAD that is not the issue branch (#27). Exported so the
+// The re-prompt for a non-ancestor HEAD that is not the issue branch (#27/#127).
+// Exported so the
 // wording is asserted where the routing is, and reused verbatim as the
 // NEEDS-HUMAN trace — the shas in it are the only handle on the stranded
 // commits once the worktree (and its HEAD reflog) is removed.
 //
-// It deliberately does NOT tell the agent to run `git branch -f` unconditionally.
-// Nothing here has inspected the two histories: if HEAD was detached at an OLDER
-// commit, or the branch carries commits from an earlier attempt that HEAD does
-// not, forcing the ref silently drops them — trading a visible failure for an
-// invisible one. That is the same reason the orchestrator does not move the ref
-// itself: it would be rewriting history it never authored, on evidence it never
-// gathered.
+// The ancestor case never reaches this function: the runner has gathered that
+// evidence and advanced the ref without rewriting history. Every mismatch left
+// here is unsafe to force because HEAD is older/diverged or the branch is gone.
 export function offBranchHeadReprompt(m: HeadMismatch): string {
   const where =
     m.headRef === null
@@ -390,16 +401,31 @@ export function offBranchHeadReprompt(m: HeadMismatch): string {
     "ever reads that branch, so as things stand your work would be silently",
     "dropped and the issue closed with nothing landed.",
     "",
-    "Get back onto `" + m.branch + "` with your commits on it:",
-    "  - If `" + m.branch + "` is an ancestor of your current HEAD, nothing is at",
-    "    risk: `git branch -f " + m.branch + " HEAD && git checkout " + m.branch + "`.",
-    "  - Otherwise do NOT force the ref — it would discard whatever is on the",
-    "    branch that your HEAD does not have. Check the branch out and bring your",
-    "    commits over with `git cherry-pick` or `git merge`.",
+    "Get back onto `" + m.branch + "` with your commits on it.",
+    "Do not force the ref — it would discard whatever is on the branch that",
+    "your HEAD does not have. Check the branch out and bring your commits over",
+    "with `git cherry-pick` or `git merge`.",
     "",
     "Verify with `git rev-parse --symbolic-full-name HEAD` before you report",
     "again. Do not report COMPLETE until that prints `refs/heads/" + m.branch + "`.",
   ].join("\n");
+}
+
+function offBranchFastForwardedNote(issueBranch: string, fastForwarded: {
+  readonly fromSha: string;
+  readonly toSha: string;
+}): string {
+  return (
+    `The orchestrator moved \`${issueBranch}\` from ${fastForwarded.fromSha} to ` +
+    `the attempt's HEAD at ${fastForwarded.toSha}; HEAD is now on that branch.`
+  );
+}
+
+function joinOrchestratorNotes(
+  ...notes: readonly (string | null)[]
+): string | null {
+  const present = notes.filter((note): note is string => note !== null);
+  return present.length === 0 ? null : present.join("\n\n");
 }
 
 // The orchestrator note for an attempt whose review round produced no review
@@ -464,7 +490,14 @@ function onImplementerResult(
   signal: ParseSignal,
   dirtyPaths: readonly string[],
   offBranch: HeadMismatch | null,
+  fastForwarded: Extract<
+    LoopEvent,
+    { kind: "implementer-result" }
+  >["fastForwarded"],
 ): StepResult {
+  const fastForwardedNote = fastForwarded === null
+    ? null
+    : offBranchFastForwardedNote(state.issueBranch, fastForwarded);
   // These two hand the issue to a human and land nothing, so they are exempt
   // from the off-branch correction below (re-prompting would risk spending the
   // budget on a question the agent had already formed, and would swap a precise
@@ -485,22 +518,23 @@ function onImplementerResult(
       strandedHead: offBranch,
     });
   }
-  // #27 — before anything that treats this attempt's work as real. A detached
+  // #27/#127 — before anything that treats this attempt's work as real. The
+  // runner already repaired an ancestor mismatch for free; only the unsafe
+  // case remains. A detached
   // HEAD leaves a CLEAN tree, so the dirty check below cannot see it, and the
   // gate would go green on a tree `refs/heads/<branch>` does not contain.
   //
   // ONE re-prompt, then terminate — and the asymmetry with the dirty-set rule
-  // above is deliberate. There, "the same paths are still dirty" is what proves
-  // the agent cannot win, because partial progress is possible and worth waiting
-  // for. Here there is no partial progress: either HEAD is the branch or it is
-  // not, and the corrective is two mechanical git commands that were spelled out
-  // in full. An attempt that had those instructions and is still off the branch
-  // is not one that needs another go — and each further attempt buries the
-  // stranded commits under more stranded commits. Note the test is on the
-  // PREVIOUS attempt having been off-branch, not on it having been off-branch in
-  // the same PLACE: a new detached sha is not progress toward being on the
-  // branch, so comparing positions would let an agent grind the whole budget by
-  // committing again.
+  // above is deliberate. The mechanical ancestor case spent no correction
+  // because the runner fixed it. What remains requires the agent to reconcile
+  // histories without discarding branch commits, but the result is still
+  // binary: either HEAD is the issue branch or it is not. An attempt that had
+  // that focused instruction and is still off the branch is not one that needs
+  // another go, and each further attempt can bury the stranded commits under
+  // more stranded commits. The test is on the PREVIOUS attempt having been
+  // off-branch, not on it having been off-branch in the same PLACE: a new
+  // detached sha is not progress toward being on the branch, so comparing
+  // positions would let an agent grind the whole budget by committing again.
   if (offBranch !== null) {
     const trace = offBranchHeadReprompt(offBranch);
     const exhausted: Verdict = {
@@ -559,7 +593,7 @@ function onImplementerResult(
           // human gets the paths rather than "budget exhausted with no green
           // gate" for a run in which the gate never executed.
           failureTrace: trace,
-          extraReprompt: trace,
+          extraReprompt: joinOrchestratorNotes(fastForwardedNote, trace),
           latestReviewerProse: state.latestReviewerProse,
           dirtyPaths,
         },
@@ -579,7 +613,9 @@ function onImplementerResult(
       state: {
         ...state,
         phase: "needs-gate-and-reviewer",
-        extraReprompt: null,
+        // Keep the repair note only long enough to render it if gate/reviewer
+        // routing produces another implementer attempt.
+        extraReprompt: fastForwardedNote,
         lastDirtyPaths: null,
         lastOffBranch: false,
       },
@@ -603,7 +639,7 @@ function onImplementerResult(
     state,
     {
       failureTrace: state.lastFailureTrace,
-      extraReprompt: signal.reprompt,
+      extraReprompt: joinOrchestratorNotes(fastForwardedNote, signal.reprompt),
       latestReviewerProse: state.latestReviewerProse,
     },
     {
@@ -640,7 +676,7 @@ function onGateAndReviewerResult(
       advanced,
       {
         failureTrace: gate.failureTrace,
-        extraReprompt: null,
+        extraReprompt: state.extraReprompt,
         latestReviewerProse: state.latestReviewerProse,
       },
       gateRedExhaustion(advanced),
@@ -679,7 +715,11 @@ function onReviewerResult(
       latestReviewerProse: prose,
       lastFailureTrace: "",
     },
-    { failureTrace: "", extraReprompt: null, latestReviewerProse: prose },
+    {
+      failureTrace: "",
+      extraReprompt: state.extraReprompt,
+      latestReviewerProse: prose,
+    },
     {
       type: "NEEDS-HUMAN",
       cause: "reviewer-blocked",
@@ -719,7 +759,10 @@ function onReviewerHarnessFailed(state: LoopState, detail: string): StepResult {
     { ...state, lastFailureTrace: "" },
     {
       failureTrace: "",
-      extraReprompt: reviewerHarnessFailedReprompt(),
+      extraReprompt: joinOrchestratorNotes(
+        state.extraReprompt,
+        reviewerHarnessFailedReprompt(),
+      ),
       latestReviewerProse: state.latestReviewerProse,
       reviewerHarnessFailed: true,
     },
@@ -749,9 +792,8 @@ function advanceAttempt(
     // attempt can tell "still dirty in a new way" from "changed nothing".
     // Every other route clears it.
     readonly dirtyPaths?: readonly string[];
-    // Same shape for #27: only the off-branch route sets it, so "the previous
-    // attempt was told to get back on the branch" stays a statement about the
-    // attempt immediately before this one.
+    // Same shape for #27/#127: only an unsafe off-branch route sets it. A
+    // host-repaired ancestor mismatch therefore cannot spend this correction.
     readonly offBranch?: boolean;
     // And for #41: only the harness-failure route sets it, so two failures with
     // a real verdict or a gate red between them do not read as consecutive.

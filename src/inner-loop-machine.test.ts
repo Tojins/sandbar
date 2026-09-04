@@ -29,11 +29,17 @@ function drive(
   opts: {
     maxAttempts: number;
     maxReviewRounds: number;
-    uiPrototypeCheck: boolean;
+    uiPrototypeCheck?: boolean;
+    issueBranch?: string;
   },
   script: readonly LoopEvent[],
 ): { readonly actions: readonly LoopAction[]; readonly verdict: Verdict } {
-  let state: LoopState = initialState(opts);
+  let state: LoopState = initialState({
+    issueBranch: opts.issueBranch ?? "sandbar/issue-1-x",
+    maxAttempts: opts.maxAttempts,
+    maxReviewRounds: opts.maxReviewRounds,
+    uiPrototypeCheck: opts.uiPrototypeCheck ?? false,
+  });
   const actions: LoopAction[] = [initialAction(state)];
   for (const event of script) {
     const r = step(state, event);
@@ -97,11 +103,16 @@ const impl = (
   signal: ParseSignal,
   dirtyPaths: readonly string[] = [],
   offBranch: HeadMismatch | null = null,
+  fastForwarded: {
+    readonly fromSha: string;
+    readonly toSha: string;
+  } | null = null,
 ): LoopEvent => ({
   kind: "implementer-result",
   signal,
   dirtyPaths,
   offBranch,
+  fastForwarded,
 });
 
 // A HEAD that is detached, i.e. the #27 shape that leaves a CLEAN tree.
@@ -113,9 +124,11 @@ const detached = (
   headRef: null,
   headSha,
   branchSha,
+  branchIsAncestor: false,
 });
 
 const defaultOpts = {
+  issueBranch: "sandbar/issue-1-x",
   maxAttempts: 8,
   maxReviewRounds: 3,
   uiPrototypeCheck: false,
@@ -1080,6 +1093,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     headRef: "refs/heads/scratch",
     headSha: "aaa1",
     branchSha: "base0",
+    branchIsAncestor: false,
   };
 
   it("does NOT dispatch the gate for COMPLETE over a clean tree off the branch", () => {
@@ -1107,14 +1121,121 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     expect(r.action.extraReprompt).toContain("refs/heads/scratch");
   });
 
-  it("warns against a blind `git branch -f`", () => {
-    // The correction is only safe when the branch is an ancestor of HEAD.
-    // Telling the agent to force the ref unconditionally would swap a visible
-    // failure for a silent one — commits already on the branch, dropped.
+  it("unconditionally warns against `git branch -f`", () => {
+    // The safe ancestor case was repaired before the event was built, so every
+    // mismatch reaching this prose would lose branch history if forced.
     const text = offBranchHeadReprompt(detached());
-    expect(text).toContain("do NOT force the ref");
+    expect(text).toContain("Do not force the ref");
     expect(text).toContain("cherry-pick");
+    expect(text).not.toContain("If `sandbar/issue-1-x` is an ancestor");
   });
+
+  const repaired = { fromSha: "base0", toSha: "head1" } as const;
+  const gatedAfterRepair = () =>
+    step(
+      initialState(defaultOpts),
+      impl(complete, [], null, repaired),
+    );
+
+  it.each([
+    {
+      route: "dirty tree",
+      next: () =>
+        step(
+          initialState(defaultOpts),
+          impl(complete, ["?? pending.ts"], null, repaired),
+        ),
+      routeContext: "?? pending.ts",
+    },
+    {
+      route: "NO-SIGNAL",
+      next: () =>
+        step(
+          initialState(defaultOpts),
+          impl(noSignal("Emit a valid promise token."), [], null, repaired),
+        ),
+      routeContext: "Emit a valid promise token.",
+    },
+    {
+      route: "gate red",
+      next: () => {
+        const gated = gatedAfterRepair();
+        return step(
+          gated.state,
+          judged(gate1Red("gate exploded"), approved("discarded")),
+        );
+      },
+      routeContext: "gate exploded",
+    },
+    {
+      route: "reviewer rejection",
+      next: () => {
+        const gated = gatedAfterRepair();
+        return step(
+          gated.state,
+          judged(gate1Ok, changes("adjust this")),
+        );
+      },
+      routeContext: "adjust this",
+    },
+    {
+      route: "reviewer harness failure",
+      next: () => {
+        const gated = gatedAfterRepair();
+        return step(gated.state, judged(gate1Ok, harnessFailed()));
+      },
+      routeContext: "reviewer could not be run",
+    },
+  ])(
+    "carries the free repair note and $route context into the next attempt",
+    ({ next, routeContext }) => {
+      const result = next();
+      if (result.action.kind !== "run-implementer") {
+        throw new Error("expected next implementer");
+      }
+      expect(result.action.extraReprompt).toContain(
+        "moved `sandbar/issue-1-x` from base0",
+      );
+      expect(result.action.extraReprompt).toContain("HEAD at head1");
+      expect([
+        result.action.extraReprompt,
+        result.action.failureTrace,
+        result.action.latestReviewerProse,
+      ].join("\n")).toContain(routeContext);
+      expect(result.state.lastOffBranch).toBe(false);
+    },
+  );
+
+  it("does not spend the off-branch correction when a repair precedes another route", () => {
+    let state = step(
+      initialState(defaultOpts),
+      impl(noSignal(), [], null, repaired),
+    ).state;
+    expect(state.lastOffBranch).toBe(false);
+    const relapse = step(state, impl(complete, [], detached("head2")));
+    expect(relapse.action.kind).toBe("run-implementer");
+  });
+
+  it.each([
+    ["NEEDS-INFO", needsInfo("which currency?")],
+    ["NEEDS-UI-PROTOTYPE", needsUiPrototype("a new settings screen")],
+  ] as const)(
+    "does not report repaired commits as stranded on a %s escalation",
+    (expectedType, signal) => {
+      const repaired = { fromSha: "base0", toSha: "head1" } as const;
+      const result = drive(defaultOpts, [
+        impl(signal, [], null, repaired),
+      ]);
+      expect(result.verdict.type).toBe(expectedType);
+      if (
+        result.verdict.type !== "NEEDS-INFO" &&
+        result.verdict.type !== "NEEDS-UI-PROTOTYPE"
+      ) {
+        throw new Error("expected escalation");
+      }
+      expect(result.verdict.strandedHead).toBeNull();
+    },
+  );
 
   it("also fires on NO-SIGNAL, replacing the generic hint", () => {
     // An off-branch agent usually reads as "made no commits this run" (commit

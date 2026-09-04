@@ -30,6 +30,15 @@
 // spends one round. Both passes are cold — nothing resumes anything — which is
 // what lets them run on different vendors.
 //
+// The other deliberate runner-side exception is #127's off-branch repair.
+// `headMismatch` has already made the mechanical ancestry decision; when the
+// issue branch is an ancestor of HEAD, runImplementer advances the ref and
+// reattaches HEAD, then must publish that new tip to the cache before it builds
+// the event. The state machine receives the repaired state plus note metadata,
+// while unsafe mismatches still take its existing correction route. This is the
+// same class of glue-owned Git write as the successful implementer publish
+// below, not a branching policy decision.
+//
 // What a FAILED reviewer run means is reviewer-run.ts's policy (#41); this
 // file only adapts `sandbox.run`'s throw into the shape that policy
 // classifies, which is why the try/catch below returns a value instead of
@@ -88,6 +97,7 @@ import {
   describeIssueBranchOriginSync,
   dirtyWorktreePaths,
   ensureIssueBranch,
+  fastForwardOffBranchHead,
   headMismatch,
   symbolicHeadRef,
 } from "./git-ops.js";
@@ -815,6 +825,7 @@ async function runSandboxCycle(
     };
 
     let state: LoopState = initialState({
+      issueBranch: issue.branch,
       maxAttempts: config.maxImplAttempts,
       maxReviewRounds: config.maxReviewRounds,
       uiPrototypeCheck: config.uiPrototypeCheck,
@@ -1169,6 +1180,7 @@ export async function runImplementer(
   let attemptToolCalls = run.toolCalls;
   let attemptCommits = run.commits.length;
   let attemptPeakContext = run.peakContext;
+  let attemptStdout = run.stdout;
 
   // The promise nudge: output with NO tag at all gets one same-conversation
   // follow-up before it is allowed to cost an attempt. The observed failure is
@@ -1211,6 +1223,7 @@ export async function runImplementer(
     attemptToolCalls += nudge.toolCalls;
     attemptPeakContext = maxContextDepth(attemptPeakContext, nudge.peakContext);
     const combined = combinePromiseNudge(run, nudge);
+    attemptStdout = combined.stdout;
     attemptCommits = combined.commitCount;
     signal = parsePromise(combined.stdout, {
       commitsAccumulated: accumulated.length,
@@ -1261,10 +1274,39 @@ export async function runImplementer(
   // a detached HEAD leaves the tree spotless while `refs/heads/<branch>` — the
   // only thing the merger ever reads — has not moved. Read together, both on
   // every signal, so the SM stays the only place that decides what either means.
-  const [dirtyPaths, offBranch] = await Promise.all([
+  const [dirtyPaths, mismatch] = await Promise.all([
     dirtyWorktreePaths(ctx.worktreePath),
     headMismatch(ctx.worktreePath, issue.branch),
   ]);
+  let offBranch = mismatch;
+  let fastForwarded: Extract<
+    LoopEvent,
+    { kind: "implementer-result" }
+  >["fastForwarded"] = null;
+  if (mismatch?.branchIsAncestor) {
+    const repair = await fastForwardOffBranchHead(ctx.worktreePath, mismatch);
+    // The agent run published before this host-side ref move. Publish the
+    // repaired tip now as a required part of the repair: gate/reviewer inspect
+    // this clone, while the merger reads the cache, so proceeding after a
+    // failed sync could approve one tree and land another (#98/#127).
+    await sandbox.syncBranchToCache();
+    fastForwarded = { fromSha: repair.fromSha, toSha: repair.toSha };
+    accumulated.push(...repair.commits);
+    attemptCommits += repair.commits.length;
+    // The ordinary commit collector could not see this range while it lived
+    // only under off-branch HEAD. Re-run the same parse now that those commits
+    // are evidence, so a valid COMPLETE can stand on its original attempt.
+    signal = parsePromise(attemptStdout, {
+      commitsAccumulated: accumulated.length,
+    });
+    offBranch = null;
+    if (opts.onOrchestratorLog) {
+      await opts.onOrchestratorLog(
+        `issue=${issue.id} attempt=${action.attempt} off-branch-fast-forward ` +
+          `from=${fastForwarded.fromSha} to=${fastForwarded.toSha}`,
+      );
+    }
+  }
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(
       `issue=${issue.id} attempt=${action.attempt} implementer ` +
@@ -1281,7 +1323,13 @@ export async function runImplementer(
         ` maxGapMs=${run.maxGapMs}`,
     );
   }
-  return { kind: "implementer-result", signal, dirtyPaths, offBranch };
+  return {
+    kind: "implementer-result",
+    signal,
+    dirtyPaths,
+    offBranch,
+    fastForwarded,
+  };
 }
 
 export async function runSandboxAndPublish(

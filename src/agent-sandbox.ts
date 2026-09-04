@@ -2497,15 +2497,11 @@ export const createSandbox = async (
     //
     // With HEAD on the branch — every ordinary iteration — the two are the same
     // commit and this is a no-op. They diverge only when HEAD has wandered off
-    // (#27), and there the HEAD-based read is actively wrong: the correction
-    // sandbar prompts for is `git branch -f <branch> HEAD && git checkout
-    // <branch>`, which moves the branch forward to the detached sha WITHOUT
-    // creating a commit. Anchor the range at HEAD and `rev-list <detached>..
-    // <branch>` is empty, so an agent that rescues its work exactly as
-    // instructed is told it "made no commits this run" and has to burn another
-    // attempt — the very message #27's check exists to stop sending. Anchored at
-    // the branch, the rescued commits are counted, which is what every consumer
-    // of this list already assumes it is looking at.
+    // (#27), and there the branch ref remains the authoritative left edge: HEAD
+    // may name unrelated history while the agent reconciles its work onto the
+    // issue branch during the invocation. The host-side ancestor repair added
+    // by #127 necessarily happens after this invocation returns; git-ops
+    // recovers that newly reachable range alongside the ref move.
     //
     // ensureIssueBranch created this ref. Its absence is infrastructure failure,
     // never permission to change the commit range's meaning (#83).
