@@ -127,6 +127,10 @@ export type ResolveMode =
       readonly failedChecks: string;
     };
 
+// A codex merger's structured quota rollout dies with its --rm container
+// (#109); until that route gets persistent scratch storage, it halts with the
+// vendor message through this existing failure path.
+//
 // How one resolve-provider `podman run` invocation ended. `timeout` is
 // sandbar's own SIGTERM at RESOLVE_AGENT_TIMEOUT_MS and nothing else; `signal` is anything
 // else that killed the process (an OOM kill, an operator's Ctrl-C reaching the

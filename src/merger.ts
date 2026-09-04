@@ -304,6 +304,7 @@ import {
 } from "./agent-providers.js";
 import {
   createAgentSpeechAccumulator,
+  AgentQuotaError,
   type AgentProvider,
 } from "./agent-sandbox.js";
 import { classifyAgentRunEnd } from "./agent-run-end.js";
@@ -2264,6 +2265,11 @@ export function captureAgentRun(
   });
 }
 
+// Codex merger quota remains the deliberate #109 gap: its `--rm` container
+// uses HOME=/tmp, so the rollout disappears before it can be read. Its vendor
+// message therefore follows the existing halt path. Claude quota state is on
+// stdout and is retained by the shared accumulator.
+//
 // Interpret a completed capture through the SAME provider object that built
 // its command. Raw streams stay on the returned run for #67's attempt log;
 // only this parsed speech register is eligible to carry a resolve promise.
@@ -2291,7 +2297,15 @@ export function parseCapturedAgentRun(
     spawnError: run.end === "spawn-error" ? run.detail : undefined,
     parseError,
     silentRunRecovery: "infra",
+    rateLimit: speech.rateLimit,
   });
+  if (classification.verdict === "quota") {
+    if (!classification.rateLimit) throw new Error("quota classification missing measurement");
+    throw new AgentQuotaError(
+      agent.name === "codex" ? "codex" : "claude",
+      classification.rateLimit,
+    );
+  }
   return {
     ...run,
     // Both supported providers emit structured transport here. Resolve

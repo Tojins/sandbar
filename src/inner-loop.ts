@@ -52,7 +52,8 @@ import {
   buildAgentProvider,
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
-import { agentPartialOutput, agentPartialUsage, podman } from "./agent-sandbox.js";
+import { AgentQuotaError, agentPartialOutput, agentPartialUsage, podman } from "./agent-sandbox.js";
+import type { RateLimitMeasurement } from "./agent-run-end.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 import { formatUsageFields, sumAgentUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
@@ -264,7 +265,33 @@ export type Terminal =
       readonly type: "HARD-ERROR";
       readonly reason: string;
       readonly commits: readonly { sha: string }[];
+    }
+  | {
+      readonly type: "QUOTA";
+      readonly provider: AgentProviderName;
+      readonly window: string;
+      readonly resetsAt?: number;
     };
+
+export type RunQuotaState = {
+  get(provider: AgentProviderName): RateLimitMeasurement | undefined;
+  close(provider: AgentProviderName, measurement: RateLimitMeasurement): void;
+};
+
+const assertProviderOpen = (
+  quotaState: RunQuotaState | undefined,
+  provider: AgentProviderName,
+): void => {
+  const closed = quotaState?.get(provider);
+  if (closed) throw new AgentQuotaError(provider, closed);
+};
+
+export const formatRateLimitFields = (
+  measurement: RateLimitMeasurement | undefined,
+): string => measurement === undefined ? "" :
+  ` quotaStatus=${measurement.status} quotaWindow=${measurement.window}` +
+  (measurement.utilization === undefined ? "" : ` quotaUtilization=${measurement.utilization}`) +
+  (measurement.resetsAt === undefined ? "" : ` quotaResetsAt=${measurement.resetsAt}`);
 
 export type InnerLoopConfig = {
   // Every directory this loop touches, as one object (#38). The issue branch it
@@ -325,6 +352,7 @@ export type InnerLoopOptions = {
   readonly sandboxLogBaseDir?: string;
   readonly attemptLogger?: AttemptLogger;
   readonly onOrchestratorLog?: (line: string) => Promise<void> | void;
+  readonly quotaState?: RunQuotaState;
 };
 
 type SandboxCycleOutcome = {
@@ -389,6 +417,13 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
         type: "HARD-ERROR",
         reason: verdict.reason,
         commits: accumulatedCommits,
+      };
+    case "QUOTA":
+      return {
+        type: "QUOTA",
+        provider: verdict.provider,
+        window: verdict.window,
+        ...(verdict.resetsAt === undefined ? {} : { resetsAt: verdict.resetsAt }),
       };
   }
 }
@@ -682,6 +717,20 @@ async function runSandboxCycle(
 
     return { verdict: action.verdict, accumulatedCommits: accumulated };
   } catch (err) {
+    if (err instanceof AgentQuotaError) {
+      opts.quotaState?.close(err.provider, err.measurement);
+      return {
+        verdict: {
+          type: "QUOTA",
+          provider: err.provider,
+          window: err.measurement.window,
+          ...(err.measurement.resetsAt === undefined
+            ? {}
+            : { resetsAt: err.measurement.resetsAt }),
+        },
+        accumulatedCommits: accumulated,
+      };
+    }
     // HARD-ERROR is for INFRA failures — podman, setup, a container that would
     // not come up — which the outer layer retries with a fresh sandbox. A
     // SandbarError is sandbar's own bug (`gate-stack.ts` raises them for an
@@ -821,14 +870,28 @@ async function runImplementer(
   // agent leg, which is what every #77 idea trading implementer minutes for
   // reviewer rounds is spending (#82).
   const implementerTimer = startTimer();
+  assertProviderOpen(opts.quotaState, config.implementerAgent);
   const runAgent = (options: Parameters<Sandbox["run"]>[0]) =>
     runSandboxAndPublish(sandbox, options, issue.id);
-  const run = await runAgent({
-    name: `implementer-${issue.id}-attempt-${action.attempt}`,
-    agent: buildAgentProvider(config.implementerAgent, config.implementerModelId),
-    prompt,
-    completionSignal: PROMISE_COMPLETION_SIGNALS,
-  });
+  let run: Awaited<ReturnType<typeof runAgent>>;
+  try {
+    run = await runAgent({
+      name: `implementer-${issue.id}-attempt-${action.attempt}`,
+      agent: buildAgentProvider(config.implementerAgent, config.implementerModelId),
+      prompt,
+      completionSignal: PROMISE_COMPLETION_SIGNALS,
+    });
+  } catch (err) {
+    if (err instanceof AgentQuotaError && opts.onOrchestratorLog) {
+      await opts.onOrchestratorLog(
+        `issue=${issue.id} attempt=${action.attempt} implementer ` +
+          `provider=${config.implementerAgent} model=${config.implementerModelId} ` +
+          `${durationField(implementerTimer())}` +
+          formatRateLimitFields(err.measurement),
+      );
+    }
+    throw err;
+  }
   if (opts.attemptLogger) {
     await opts.attemptLogger.writeAttempt(issue.id, action.attempt, run.stdout);
   }
@@ -923,6 +986,7 @@ async function runImplementer(
         `provider=${config.implementerAgent} model=${config.implementerModelId} ` +
         `${durationField(implementerMs)}` +
         formatUsageFields(attemptUsage, attemptToolCalls) +
+        formatRateLimitFields(run.rateLimit) +
         // Absent when parsed speech carried none of the three promise tokens —
         // for example, an idle kill or a plain process exit. Omitted rather
         // than zeroed (#82).
@@ -1110,6 +1174,7 @@ async function runReviewer(
           maxGapMs: number | undefined,
           usage: AgentUsage | undefined,
           toolCalls: number | undefined,
+          rateLimit: RateLimitMeasurement | undefined,
         ): Promise<void> => {
           if (!opts.onOrchestratorLog) return;
           await opts.onOrchestratorLog(
@@ -1118,10 +1183,12 @@ async function runReviewer(
               `provider=${agent} model=${modelId} ` +
               `${durationField(passTimer())}` +
               formatUsageFields(usage, toolCalls) +
+              formatRateLimitFields(rateLimit) +
               (maxGapMs === undefined ? "" : ` maxGapMs=${maxGapMs}`),
           );
         };
         try {
+          assertProviderOpen(opts.quotaState, agent);
           const reviewerRun = await sandbox.run({
             name:
               `reviewer-${issue.id}-round-${action.reviewRound}-${pass}` +
@@ -1138,6 +1205,7 @@ async function runReviewer(
             reviewerRun.maxGapMs,
             reviewerRun.usage,
             reviewerRun.toolCalls,
+            reviewerRun.rateLimit,
           );
           const event = await detectWrite(beforeInvocation, reviewerRun.stdout);
           return event === null
@@ -1148,7 +1216,13 @@ async function runReviewer(
           // minutes and died is the expensive case, and one that fell over in a
           // second is a different fault entirely.
           const partial = agentPartialUsage(err);
-          await logPass(undefined, partial.usage, partial.toolCalls);
+          await logPass(
+            undefined,
+            partial.usage,
+            partial.toolCalls,
+            err instanceof AgentQuotaError ? err.measurement : undefined,
+          );
+          if (err instanceof AgentQuotaError) throw err;
           const transcript = agentPartialOutput(err);
           const event = await detectWrite(beforeInvocation, transcript);
           if (event !== null) return { kind: "aborted", event, transcript };

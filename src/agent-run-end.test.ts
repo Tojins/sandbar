@@ -81,6 +81,18 @@ describe("classifyAgentRunEnd (#114)", () => {
     });
   });
 
+  it("classifies only a failed invocation with a rejected measurement as quota", () => {
+    const rateLimit = { status: "rejected" as const, window: "five_hour", resetsAt: 42 };
+    expect(classifyAgentRunEnd({
+      end: "exit", exitCode: 1, spoken: "", failure: "limit", rateLimit,
+      silentRunRecovery: "retryable",
+    })).toMatchObject({ cause: "quota", verdict: "quota", rateLimit });
+    expect(classifyAgentRunEnd({
+      end: "exit", exitCode: 0, spoken: "answer", rateLimit,
+      silentRunRecovery: "retryable",
+    }).verdict).toBe("answer");
+  });
+
   it("uses the provider, stderr, speech, stdout-tail detail ladder", () => {
     const base = { end: "exit" as const, exitCode: 1, silentRunRecovery: "infra" as const };
     expect(classifyAgentRunEnd({

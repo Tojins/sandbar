@@ -492,6 +492,13 @@ export type FinalizeInput =
       readonly issue: IssueRef;
       readonly hasCommits: boolean;
     }
+  | {
+      readonly kind: "quota";
+      readonly issue: IssueRef;
+      readonly provider: "claude" | "codex";
+      readonly window: string;
+      readonly resetsAt?: number;
+    }
   // Silent-noop under the retry cap: discard the branch + worktree so the
   // next cycle's implementer starts fresh against current source. The issue
   // stays `ready-for-agent` and the planner re-picks it.
@@ -877,6 +884,22 @@ export async function finalizeOne(
         [labels.agentStuck],
       );
       requireFlip(r, n);
+      return { kind: "pushed" };
+    }
+    case "quota": {
+      const n = issueNumberOf(input.issue);
+      await adapter.reclaimIssueClone(input.issue.branch);
+      await adapter.pushBranch(input.issue.branch);
+      const reset = input.resetsAt === undefined
+        ? "an unknown time"
+        : new Date(input.resetsAt * 1000).toISOString();
+      await adapter.postComment(
+        n,
+        `**Sandbar:** The \`${input.provider}\` subscription quota window ` +
+          `\`${input.window}\` closed; it resets at ${reset}. The branch ` +
+          `\`${input.issue.branch}\` was pushed. This issue remains ` +
+          `\`ready-for-agent\` for the next run.`,
+      );
       return { kind: "pushed" };
     }
     case "review-budget-exhausted": {

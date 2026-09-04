@@ -15,7 +15,7 @@
 // `config.env` VALUE — so the seam absorbs a file-shaped credential without
 // sandbar learning a path or mounting anything (`CODEX_AUTH_SEED`).
 //
-// A provider's parser answers in five registers and the difference between
+// A provider's parser answers in six registers and the difference between
 // them is load-bearing: `text`/`result` is the agent's SPEECH and is the only
 // thing a run returns, `failure` is the provider naming a TERMINAL fault of its
 // own, and everything else — including a recoverable one it merely reports — is
@@ -24,8 +24,9 @@
 // uses for the fatal case) will hand a naive parser a `failure` for a
 // reconnect, and `invokeAgent` rejects on a failure, so a blip would arrive at
 // a human as NEEDS-HUMAN. The fourth and fifth, `usage` and the additive tool
-// count, are measurements only: neither is speech or failure and neither can
-// trip completion (#85). See `ParsedStreamEvent` and `parseCodexJsonLine`.
+// count, and rate-limit state are measurements only: none is speech or failure
+// and none can trip completion (#85, #109). See `ParsedStreamEvent` and
+// `parseCodexJsonLine`.
 //
 // Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
@@ -93,6 +94,7 @@ import { startGapTimer, startTimer } from "./timing.js";
 import { normalizeClaudeResult, normalizeCodexUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
 import { classifyAgentRunEnd } from "./agent-run-end.js";
+import type { RateLimitMeasurement } from "./agent-run-end.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -149,6 +151,7 @@ export type ParsedStreamEvent =
   | { type: "session_id"; sessionId: string }
   | { type: "usage"; usage: AgentUsage }
   | { type: "tool_calls"; count: number }
+  | { type: "rate_limit"; measurement: RateLimitMeasurement }
   // The provider naming a TERMINAL fault of its own (#72) — its turn ended
   // without reaching an answer. Never folded into the run's output (it is not
   // the agent's speech, and #41 turns on that distinction) and never emitted
@@ -183,6 +186,7 @@ export type AgentSpeechAccumulator = {
   readonly failure: string | undefined;
   readonly usage: AgentUsage | undefined;
   readonly toolCalls: number;
+  readonly rateLimit: RateLimitMeasurement | undefined;
 };
 
 export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
@@ -191,6 +195,7 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
   let failure: string | undefined;
   let usage: AgentUsage | undefined;
   let toolCalls = 0;
+  let rateLimit: RateLimitMeasurement | undefined;
   return {
     ingest(events) {
       for (const event of events) {
@@ -201,6 +206,7 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
         } else if (event.type === "failure") failure = event.message;
         else if (event.type === "usage") usage = event.usage;
         else if (event.type === "tool_calls") toolCalls += event.count;
+        else if (event.type === "rate_limit") rateLimit = event.measurement;
       }
     },
     get accumulated() {
@@ -217,6 +223,9 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
     },
     get toolCalls() {
       return toolCalls;
+    },
+    get rateLimit() {
+      return rateLimit;
     },
   };
 }
@@ -350,6 +359,7 @@ export type SandboxRunResult = {
   readonly maxGapMs: number;
   readonly usage?: AgentUsage;
   readonly toolCalls: number;
+  readonly rateLimit?: RateLimitMeasurement;
 };
 
 export interface Sandbox {
@@ -433,6 +443,18 @@ export type PrepareWorktreeOptions = {
 // ---------------------------------------------------------------------------
 
 export class AgentError extends Error {}
+export class AgentQuotaError extends Error {
+  readonly provider: "claude" | "codex";
+  readonly measurement: RateLimitMeasurement;
+  constructor(
+    provider: "claude" | "codex",
+    measurement: RateLimitMeasurement,
+  ) {
+    super(`quota closed: ${measurement.window}`);
+    this.provider = provider;
+    this.measurement = measurement;
+  }
+}
 
 export class AgentIdleTimeoutError extends Error {
   readonly timeoutMs: number;
@@ -569,6 +591,27 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
   if (parsed === undefined) return [];
   // JSON.parse yields `any`; the upstream parser is intentionally untyped.
   const obj = parsed as any;
+  if (obj.type === "rate_limit_event") {
+    const info = obj.rate_limit_info;
+    if (
+      info !== null && typeof info === "object" &&
+      ["allowed", "allowed_warning", "rejected"].includes(info.status) &&
+      typeof info.rateLimitType === "string"
+    ) {
+      const window = info.unifiedWindows?.[info.rateLimitType];
+      return [{
+        type: "rate_limit",
+        measurement: {
+          status: info.status,
+          window: info.rateLimitType,
+          ...(typeof window?.utilization === "number" ? { utilization: window.utilization } : {}),
+          ...(typeof info.resetsAt === "number" ? { resetsAt: info.resetsAt } :
+            typeof window?.resetsAt === "number" ? { resetsAt: window.resetsAt } : {}),
+        },
+      }];
+    }
+    return [];
+  }
   if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
     const events: ParsedStreamEvent[] = [];
     const texts: string[] = [];
@@ -691,17 +734,10 @@ export const claudeCode = (
 // — and, since no CLI documents its exit codes as a contract, the guard for a
 // turn that fails under an exit-0 process: infra, not an answer.
 //
-// A SPENT SUBSCRIPTION arrives here too, and it is worth knowing which shape it
-// takes (#73). When the plan's 5-hour or weekly cap is reached, `codex exec`
-// ends the turn — a `turn.failed` like any other, so the cap's own words become
-// the `AgentError` and the HARD-ERROR reason, verbatim, and reach a human on
-// stdout as `<issue>: HARD-ERROR (…)` per retry. Nothing here classifies it:
-// sandbar has no rate-limit vocabulary and inventing one would mean matching
-// another vendor's prose. What the run does with it is #67's rule unchanged —
-// two fresh sandboxes, then NEEDS-HUMAN — which for an exhausted pool is a
-// whole cycle of bringups that could not have worked. Naming the shape is the
-// pre-work for ever treating it differently; parking issues nothing is wrong
-// with is the cost until then.
+// A spent subscription is identified structurally (#109), never from this
+// prose: after the invocation the still-live sandbox reads Codex's rollout and
+// feeds its last token_count rate_limits object into the sixth register. A
+// reached window plus this failed turn becomes QUOTA and buys no retry.
 //
 // The turn's give-up cause, never empty: the string becomes the whole of an
 // `AgentError` message and so the NEEDS-HUMAN trace a person reads, and "the
@@ -783,6 +819,45 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
     return count;
   }
   return [];
+};
+
+// Codex deliberately omits quota state from exec JSONL. Its session rollout is
+// the structural side channel: read the last token_count after each invocation
+// and reduce it into the same register Claude fills from stdout (#109).
+export const parseCodexRolloutLine = (line: string): ParsedStreamEvent[] => {
+  const parsed = parseTransportJson(line);
+  if (parsed === undefined) return [];
+  const obj = parsed as any;
+  const payload = obj.type === "event_msg" ? obj.payload : obj;
+  if (payload?.type !== "token_count") return [];
+  const limits = payload.rate_limits ?? payload.info?.rate_limits;
+  if (limits === null || typeof limits !== "object") return [];
+  const reached = limits.rate_limit_reached_type;
+  const candidates = [limits.primary, limits.secondary].filter(
+    (v): v is Record<string, unknown> => v !== null && typeof v === "object",
+  );
+  const selected = candidates.find((v) =>
+    reached != null && (v.limit_name === reached || v.rate_limit_type === reached),
+  ) ?? candidates[0];
+  if (selected === undefined) return [];
+  const window = typeof reached === "string"
+    ? reached
+    : typeof selected.rate_limit_type === "string"
+      ? selected.rate_limit_type
+      : typeof selected.window_minutes === "number"
+        ? `${selected.window_minutes}_minute`
+        : "unknown";
+  return [{
+    type: "rate_limit",
+    measurement: {
+      status: reached == null ? "allowed" : "rejected",
+      window,
+      ...(typeof selected.used_percent === "number"
+        ? { utilization: selected.used_percent / 100 }
+        : {}),
+      ...(typeof selected.resets_at === "number" ? { resetsAt: selected.resets_at } : {}),
+    },
+  }];
 };
 
 // The ChatGPT-subscription credential, materialised in-container (#73).
@@ -1863,6 +1938,7 @@ const invokeAgent = (
   maxGapMs: number;
   usage?: AgentUsage;
   toolCalls: number;
+  rateLimit?: RateLimitMeasurement;
 }> =>
   new Promise((resolveRun, rejectRun) => {
     const speech = createAgentSpeechAccumulator();
@@ -1888,6 +1964,7 @@ const invokeAgent = (
       maxGapMs: number;
       usage?: AgentUsage;
       toolCalls: number;
+      rateLimit?: RateLimitMeasurement;
     }): void => {
       if (settled) return;
       settled = true;
@@ -1988,7 +2065,21 @@ const invokeAgent = (
           resetTimer();
         },
       })
-      .then((execResult) => {
+      .then(async (execResult) => {
+        if (agent.name === "codex") {
+          // The rollout is inside this still-live sandbox. Missing files or
+          // malformed lines deliberately yield no measurement and preserve the
+          // invocation's old classification (#109).
+          const rollout = await handle.exec(
+            "d=${CODEX_HOME:-$HOME/.codex}/sessions; " +
+              "f=$(find \"$d\" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort | tail -n 1); " +
+              "test -n \"$f\" && tail -n 200 \"$f\" || true",
+            { cwd: sandboxRepoDir },
+          );
+          for (const line of rollout.stdout.split("\n")) {
+            speech.ingest(parseCodexRolloutLine(line));
+          }
+        }
         // The persistent sandbox can cheaply re-ask in the same provider
         // session, so a silent successful exit is retryable here (#114).
         const classification = classifyAgentRunEnd({
@@ -1999,7 +2090,15 @@ const invokeAgent = (
           stderr: execResult.stderr,
           stdout: execResult.stdout,
           silentRunRecovery: "retryable",
+          rateLimit: speech.rateLimit,
         });
+        if (classification.verdict === "quota" && classification.rateLimit) {
+          settleReject(new AgentQuotaError(
+            agent.name === "codex" ? "codex" : "claude",
+            classification.rateLimit,
+          ));
+          return;
+        }
         if (execResult.exitCode !== 0 || classification.verdict === "infra") {
           // Four-tier detail: the reported failure → stderr → parsed speech →
           // last 20 stdout lines. The reported failure leads because it is the
@@ -2023,6 +2122,7 @@ const invokeAgent = (
           maxGapMs: gaps.finish(),
           ...(signalMs === undefined ? {} : { signalMs }),
           ...(speech.usage === undefined ? {} : { usage: speech.usage }),
+          ...(speech.rateLimit === undefined ? {} : { rateLimit: speech.rateLimit }),
           toolCalls: speech.toolCalls,
         });
       })
@@ -2257,7 +2357,7 @@ export const createSandbox = async (
       await execGit(["rev-parse", "--verify", `refs/heads/${branch}`], worktreePath)
     ).trim();
 
-    const { result, signalMs, maxGapMs, usage, toolCalls } = await invokeAgent(
+    const { result, signalMs, maxGapMs, usage, toolCalls, rateLimit } = await invokeAgent(
       providerHandle,
       sandboxRepoDir,
       prompt,
@@ -2290,6 +2390,7 @@ export const createSandbox = async (
       maxGapMs,
       ...(signalMs === undefined ? {} : { signalMs }),
       ...(usage === undefined ? {} : { usage }),
+      ...(rateLimit === undefined ? {} : { rateLimit }),
       toolCalls,
     };
   };

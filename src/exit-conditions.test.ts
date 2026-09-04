@@ -17,6 +17,7 @@ import {
   iterationCeilingExit,
   newRunState,
   planEmptyExit,
+  quotaExit,
   planFingerprint,
   relaunchExit,
   remainingBudget,
@@ -313,6 +314,12 @@ describe("terminal exit lines", () => {
       exit: planEmptyExit(),
       exitCode: EXIT_CODE_SUCCESS,
       reasonMatches: /no unblocked issues/,
+    },
+    {
+      tag: "quota",
+      exit: quotaExit({ provider: "claude", window: "five_hour", resetsAt: 1_788_422_400 }),
+      exitCode: 4,
+      reasonMatches: /claude five_hour quota window closed/,
     },
     {
       tag: "relaunch",

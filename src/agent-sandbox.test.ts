@@ -43,6 +43,7 @@ import {
   defaultImageName,
   killOnAbort,
   parseCodexJsonLine,
+  parseCodexRolloutLine,
   parseStreamJsonLine,
   prepareWorktree,
   reclaimIssueClone,
@@ -289,6 +290,31 @@ describe("parseStreamJsonLine", () => {
 
   it("returns [] for an unknown top-level type", () => {
     expect(parseStreamJsonLine(JSON.stringify({ type: "future_event" }))).toEqual([]);
+  });
+});
+
+describe("rate-limit measurements (#109)", () => {
+  it("reads Claude's rejected event without turning it into speech", () => {
+    expect(parseStreamJsonLine(JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "rejected", rateLimitType: "five_hour", resetsAt: 123,
+        unifiedWindows: { five_hour: { utilization: 1, resetsAt: 123 } },
+      },
+    }))).toEqual([{ type: "rate_limit", measurement: {
+      status: "rejected", window: "five_hour", utilization: 1, resetsAt: 123,
+    } }]);
+  });
+
+  it("reads Codex's last token-count quota shape", () => {
+    expect(parseCodexRolloutLine(JSON.stringify({
+      type: "event_msg", payload: { type: "token_count", rate_limits: {
+        rate_limit_reached_type: "seven_day",
+        primary: { rate_limit_type: "seven_day", used_percent: 100, resets_at: 456 },
+      } },
+    }))).toEqual([{ type: "rate_limit", measurement: {
+      status: "rejected", window: "seven_day", utilization: 1, resetsAt: 456,
+    } }]);
   });
 });
 

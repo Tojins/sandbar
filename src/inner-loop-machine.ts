@@ -165,7 +165,13 @@ export type Verdict =
       readonly latestReviewerProse: string;
       readonly cause?: "reviewer-wrote";
     }
-  | { readonly type: "HARD-ERROR"; readonly reason: string };
+  | { readonly type: "HARD-ERROR"; readonly reason: string }
+  | {
+      readonly type: "QUOTA";
+      readonly provider: "claude" | "codex";
+      readonly window: string;
+      readonly resetsAt?: number;
+    };
 
 export type LoopAction =
   | {

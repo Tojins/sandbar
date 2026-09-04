@@ -98,8 +98,8 @@ an exit condition fires.
    of those approvals inside the same round. `src/reviewer-run.ts` owns the
    order, the aggregation and what a failed reviewer invocation means (#41).
    Terminals: `DONE | NEEDS-INFO |
-   NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | HARD-ERROR`
-   (infra-only).
+   NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | QUOTA |
+   HARD-ERROR` (infra-only).
 
 3. **Merge** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
    + `src/forge-verify.ts` + `src/chunk-land.ts`) — procedural, in a dedicated
@@ -132,12 +132,13 @@ an exit condition fires.
 
 ### Exit conditions (`src/exit-conditions.ts`)
 
-First of: **plan-empty** (exit 0) · **relaunch** (#65, exit 75 after any cycle
+First of: **plan-empty** (exit 0) · **quota** (#109, exit 4; outranks relaunch) ·
+**relaunch** (#65, exit 75 after any cycle
 that landed merges, when `config.relaunchAfterLanding`) · **stuck-same-plan**
 (exit 2) · **stuck-zero-dones** (exit 2) · **budget** (`maxTotalIssues`,
 default 50, exit 3) · **halted** (exit 1) · **iteration-ceiling**.
 
-All seven are one type, `TerminalExit`, and the run ends with exactly one
+All eight are one type, `TerminalExit`, and the run ends with exactly one
 `Exit (<tag>): <reason>` on stdout whichever fired (#70) — `formatExitLine` is
 the only spelling of it, `EXIT_TAGS` is exhaustive over the union, and a table
 test asserts every tag has a line. `applyCycle` owns only the four that judge a

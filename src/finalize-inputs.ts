@@ -115,6 +115,15 @@ export function terminalFinalizeInputs(
           hasCommits: t.commits.length > 0,
         });
         break;
+      case "QUOTA":
+        inputs.push({
+          kind: "quota",
+          issue: o.issue,
+          provider: t.provider,
+          window: t.window,
+          ...(t.resetsAt === undefined ? {} : { resetsAt: t.resetsAt }),
+        });
+        break;
       default: {
         const unhandled: never = t;
         throw new Error(

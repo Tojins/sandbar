@@ -124,6 +124,8 @@
 import { realpathSync } from "node:fs";
 
 import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
+import { AgentQuotaError } from "./agent-sandbox.js";
+import type { RateLimitMeasurement } from "./agent-run-end.js";
 import {
   type SweepResult,
   cleanupOrphanContainers,
@@ -164,6 +166,7 @@ import {
   iterationCeilingExit,
   newRunState,
   planEmptyExit,
+  quotaExit,
   planFingerprint,
   remainingBudget,
 } from "./exit-conditions.js";
@@ -771,6 +774,16 @@ export async function run(
     maxTotalIssues: config.maxTotalIssues,
     relaunchAfterLanding: config.relaunchAfterLanding,
   });
+  const closedProviders = new Map<"claude" | "codex", RateLimitMeasurement>();
+  const quotaState = {
+    get: (provider: "claude" | "codex") => closedProviders.get(provider),
+    close: (
+      provider: "claude" | "codex",
+      measurement: RateLimitMeasurement,
+    ) => {
+      closedProviders.set(provider, measurement);
+    },
+  };
   // The one stop this run ends on (#70). Every break out of the loop below
   // assigns it what `announceExit` has already emitted, and the process exit
   // code comes off it at the bottom of the function — so "did this stop
@@ -1199,6 +1212,7 @@ export async function run(
               sandboxLogBaseDir: cycleLogger.cycleDir,
               attemptLogger: cycleLogger,
               onOrchestratorLog: (line) => runLogger.appendOrchestrator(line),
+              quotaState,
             });
             await runLogger.appendOrchestrator(
               `terminal #${issue.id} ${terminal.type} ${durationField(issueTimer())}`,
@@ -1285,6 +1299,7 @@ export async function run(
       // MergerError.partial). Finalised even though the run is stopping.
       let haltPartial: MergerSummary | undefined;
       let halt = false;
+      let mergerQuota: AgentQuotaError | null = null;
       // Why the run is stopping, in the short names the run log already uses.
       // Declared up here rather than beside the reports that fill it because
       // the merge phase's own halt is one of them, and the `Exit (halted): …`
@@ -1447,6 +1462,10 @@ export async function run(
           );
         } catch (err) {
           if (err instanceof MergerError) {
+            if (err.cause instanceof AgentQuotaError) {
+              mergerQuota = err.cause;
+              quotaState.close(err.cause.provider, err.cause.measurement);
+            }
             // A MergerError built by the merger's `asHalt` wraps an underlying
             // error as `cause`. When that was an unexpected bug rather than an
             // operator-actionable SandbarError, its stack is the only thing
@@ -1684,7 +1703,24 @@ export async function run(
         // the point: `run-end (halted)` is uniform with every other terminal,
         // and the causes it used to carry are on the `exit:` line above it and
         // in the report that produced each of them.
-        terminalExit = await announceExit(haltedExit(haltReasons));
+        terminalExit = await announceExit(
+          mergerQuota
+            ? quotaExit({
+                provider: mergerQuota.provider,
+                window: mergerQuota.measurement.window,
+                ...(mergerQuota.measurement.resetsAt === undefined
+                  ? {}
+                  : { resetsAt: mergerQuota.measurement.resetsAt }),
+              })
+            : haltedExit(haltReasons),
+        );
+        break;
+      }
+
+      const quotaTerminal = outcomes.find((o) => o.terminal.type === "QUOTA")
+        ?.terminal;
+      if (quotaTerminal?.type === "QUOTA") {
+        terminalExit = await announceExit(quotaExit(quotaTerminal));
         break;
       }
 
