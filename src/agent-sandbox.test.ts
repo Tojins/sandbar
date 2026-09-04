@@ -336,6 +336,30 @@ describe("rate-limit measurements (#109)", () => {
     } }]);
   });
 
+  it("reads Codex per-turn depth from rollout usage, not cumulative exec usage", () => {
+    expect(parseCodexRolloutLine(JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: { last_token_usage: {
+          input_tokens: 130_000,
+          cached_input_tokens: 120_000,
+          cache_write_input_tokens: 4_000,
+        } },
+      },
+    }))).toEqual([{ type: "context_depth", tokens: 134_000 }]);
+  });
+
+  it("keeps malformed or unavailable Codex rollout depth absent", () => {
+    expect(parseCodexRolloutLine(JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: { last_token_usage: { input_tokens: "130000" } },
+      },
+    }))).toEqual([]);
+  });
+
   it("takes a reached secondary window's evidence, never primary's", () => {
     expect(parseCodexRolloutLine(JSON.stringify({
       type: "event_msg", payload: { type: "token_count", rate_limits: {
@@ -452,7 +476,7 @@ describe("parseCodexJsonLine", () => {
         outputTokens: 100,
         reasoningTokens: 60,
       },
-    }, { type: "context_depth", tokens: 2025 }]);
+    }]);
   });
 
   it("normalizes a resumed Codex turn as its own near-total cache-hit ledger", () => {
@@ -471,7 +495,7 @@ describe("parseCodexJsonLine", () => {
       cacheWriteInputTokens: 0,
       outputTokens: 5,
       reasoningTokens: 0,
-    } }, { type: "context_depth", tokens: 15345 }]);
+    } }]);
   });
 
   it("drops a turn.completed event whose usage has no numeric fields", () => {
@@ -498,7 +522,7 @@ describe("parseCodexJsonLine", () => {
       inputTokens: 12,
     });
     expect(speech.toolCalls).toBe(0);
-    expect(speech.peakContext).toBe(12);
+    expect(speech.peakContext).toBeUndefined();
   });
 
   it("replaces repeated usage measurements instead of summing them", () => {

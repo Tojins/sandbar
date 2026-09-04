@@ -765,8 +765,10 @@ export const claudeCode = (
 //
 // A spent subscription is identified structurally (#109), never from this
 // prose: after the invocation the still-live sandbox reads Codex's rollout and
-// feeds its last token_count rate_limits object into the sixth register. A
-// reached window plus this failed turn becomes QUOTA and buys no retry.
+// feeds token_count rate_limits into the sixth register. The same records'
+// per-request last_token_usage feeds context depth into the seventh (#124),
+// never the cumulative turn.completed ledger. A reached window plus this
+// failed turn becomes QUOTA and buys no retry.
 //
 // The turn's give-up cause, never empty: the string becomes the whole of an
 // `AgentError` message and so the NEEDS-HUMAN trace a person reads, and "the
@@ -813,11 +815,7 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
   // it cannot end a run (#85).
   if (obj.type === "turn.completed") {
     const usage = normalizeCodexUsage(obj.usage);
-    const depth = normalizeCodexContextDepth(obj.usage);
-    return [
-      ...(usage === undefined ? [] : [{ type: "usage" as const, usage }]),
-      ...(depth === undefined ? [] : [{ type: "context_depth" as const, tokens: depth }]),
-    ];
+    return usage === undefined ? [] : [{ type: "usage", usage }];
   }
   // Items are reported started → updated → completed; only the completed form
   // is read, so a command's `aggregated_output` and an agent message's text
@@ -854,17 +852,21 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
   return [];
 };
 
-// Codex deliberately omits quota state from exec JSONL. Its session rollout is
-// the structural side channel: read the last token_count after each invocation
-// and reduce it into the same register Claude fills from stdout (#109).
+// Codex deliberately omits quota state and per-turn usage from exec JSONL. Its
+// session rollout is the structural side channel: reduce each token_count's
+// rate limits and last_token_usage into their separate measurement registers
+// after the invocation (#109, #124).
 export const parseCodexRolloutLine = (line: string): ParsedStreamEvent[] => {
   const parsed = parseTransportJson(line);
   if (parsed === undefined) return [];
   const obj = parsed as any;
   const payload = obj.type === "event_msg" ? obj.payload : obj;
   if (payload?.type !== "token_count") return [];
+  const events: ParsedStreamEvent[] = [];
+  const depth = normalizeCodexContextDepth(payload.info?.last_token_usage);
+  if (depth !== undefined) events.push({ type: "context_depth", tokens: depth });
   const limits = payload.rate_limits ?? payload.info?.rate_limits;
-  if (limits === null || typeof limits !== "object") return [];
+  if (limits === null || typeof limits !== "object") return events;
   const reached = limits.rate_limit_reached_type;
   const candidates = [limits.primary, limits.secondary].filter(
     (v): v is Record<string, unknown> => v !== null && typeof v === "object",
@@ -885,7 +887,7 @@ export const parseCodexRolloutLine = (line: string): ParsedStreamEvent[] => {
         );
   const fallback = reached == null ? candidates[0] : undefined;
   const windowDetails = selected ?? fallback;
-  if (windowDetails === undefined && typeof reached !== "string") return [];
+  if (windowDetails === undefined && typeof reached !== "string") return events;
   const window = typeof reached === "string"
     ? reached
     : typeof windowDetails?.rate_limit_type === "string"
@@ -893,7 +895,7 @@ export const parseCodexRolloutLine = (line: string): ParsedStreamEvent[] => {
       : typeof windowDetails?.window_minutes === "number"
         ? `${windowDetails.window_minutes}_minute`
         : "unknown";
-  return [{
+  events.push({
     type: "rate_limit",
     measurement: {
       status: reached == null ? "allowed" : "rejected",
@@ -905,7 +907,8 @@ export const parseCodexRolloutLine = (line: string): ParsedStreamEvent[] => {
         ? { resetsAt: windowDetails.resets_at }
         : {}),
     },
-  }];
+  });
+  return events;
 };
 
 // The ChatGPT-subscription credential, materialised in-container (#73).

@@ -10,9 +10,10 @@
 // session can report millions of cached tokens without ever holding that many
 // tokens at once. Depth comes from each turn's own usage event and occupies a
 // separate parser register: retain only the maximum of fresh + cache-read +
-// cache-write for Claude, or input_tokens + cache-write for Codex because its
-// input already includes cached tokens. It is evidence only, never a bound or
-// completion signal, and malformed/unavailable measurements stay absent.
+// cache-write from Claude assistant events, or input_tokens + cache-write from
+// Codex rollout last_token_usage records because Codex input already includes
+// cached tokens. It is evidence only, never a bound or completion signal, and
+// malformed/unavailable measurements stay absent.
 
 export type AgentUsage = {
   readonly inputTokens?: number;
