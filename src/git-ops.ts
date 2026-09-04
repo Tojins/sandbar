@@ -549,11 +549,10 @@ export class IssueBranchDivergedError extends Error {
 //     — an origin chunk branch whose root issue is now closed — lives in the
 //     namespace preflight fetches, not in anything this function is handed, so
 //     closing it means threading that namespace into the planner rather than
-//     tightening a comparison here. Documented for the host instead, where the
-//     lane is chosen (`config.ts`, `defaultLane`, and the README's lane
-//     blockquote): don't close one member of a chunk with issues still queued
-//     behind it. The guard below covers the members BEHIND the new root, which
-//     is the case that has a fact to check.
+//     tightening a comparison here. Documented for the host instead beside
+//     `defaultLane` in `sandbar.config.example.mjs`: don't close one member of
+//     a chunk with issues still queued behind it. The guard below covers the
+//     members BEHIND the new root, which is the case that has a fact to check.
 //   - A chunk the cache can name no branch for, and this issue is NOT its root
 //     → `ChunkBaseMissingError`. The ordinary argument says this cannot happen:
 //     a non-root member plans only once a blocker of its own carries
