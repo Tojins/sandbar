@@ -118,7 +118,13 @@ export default {
   // forge CI verdict must also pass before the source branch moves.
   // mergeMode: { kind: "direct" },
 
-  // `auto` lets the gate decide. `review` lands work on draft chunk pull
-  // requests for a human to inspect; review-gating follows dependency chains.
+  // `auto` lets the gate decide. `review` lands connected review-gated issues
+  // on a draft chunk pull request. An issue's `auto-land` label overrides the
+  // default, unless review-gating reaches it through `## Blocked by`; inherited
+  // review-gating wins. Land a chunk by adding the non-configurable `land`
+  // label to its draft PR; that label must already exist because sandbar never
+  // creates it. A landed chunk member stays open until then: while the chunk is
+  // live, do not close a member or retitle its root, because those issues
+  // determine the chunk's membership and derived branch name.
   // defaultLane: "auto",
 };
