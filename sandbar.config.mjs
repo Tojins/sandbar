@@ -85,17 +85,16 @@ export default {
   // floor below which it must not — but raise it in the same commit as anything
   // this file starts asking a newer sandbar for.
   //
-  // It is 0.24.6, the first TAGGED release that augments the resolved sandbox
-  // image with the routed agent CLIs (#75) — and this file started asking for
-  // that the moment the Containerfile stopped baking a CLI of its own: under a
-  // non-augmenting driver the image this config names would put an agent in a
-  // sandbox with NO CLI at all, a 127 on every attempt rather than a refusal.
-  // (#75 landed a few versions earlier in the same pass, but an untagged
-  // version is not installable, so a lower floor would buy nothing.) The
-  // previous floor, 0.23.0, was the codex routing below (#72) and its
-  // subscription credential (#73); 0.24.6 subsumes it. It moves when this file
-  // starts asking a newer sandbar for something, not when the pin does.
-  requiresSandbar: "0.28.1",
+  // It is 0.32.5, the first TAGGED release that reads the `*Effort` fields
+  // below (#130). A driver older than that would spread them through unread
+  // (#66) and run every codex role at the server's per-model default, `low` —
+  // the exact silent failure the floor exists to refuse. Earlier floors, each
+  // subsumed by the next: 0.23.0 for the codex routing and its subscription
+  // credential (#72, #73), 0.24.6 for the augmented sandbox image (#75, under
+  // which the image this config names has no CLI of its own), 0.28.1 for the
+  // two-pass reviewer's per-pass fields (#121). It moves when this file starts
+  // asking a newer sandbar for something, not when the pin does.
+  requiresSandbar: "0.32.5",
 
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
@@ -333,16 +332,26 @@ export default {
   // can quietly lose while still producing confident prose. Reverting is a
   // two-line edit to this file and needs no landing.
   //
-  // This pairing is what `requiresSandbar` above had to rise for: these two
-  // fields are meaningless to a driver older than #121, which would spread
-  // them through and ignore them (#66). The pin below therefore had to move
-  // FIRST — it names v0.28.1, the release that carries #121.
+  // The MERGER runs codex too (#130), on the same knobs it has had since #74.
+  // It sat on the claude/opus defaults until then on the reviewer's argument —
+  // conflict resolution is judgement — but the resolve loop is a short
+  // bounded chain on a prompt that carries the whole state, and it spends on
+  // the Claude subscription window that is this host's binding constraint,
+  // so it goes where the implementer went.
   //
-  // The merger has the same independent
-  // provider/model knobs since #74 and stays on its claude/opus defaults for
-  // the reviewer's reason — conflict resolution is judgement — not for
-  // compatibility; the codex merger route is driver-supported but unexercised
-  // by this self-host configuration.
+  // Every codex role names its EFFORT (#130). Left unset, codex runs at the
+  // per-model default the server ships — `low` for gpt-5.6-sol — because the
+  // sandbox reads no host config.toml (only the credential is seeded, #73),
+  // so the `high` this host's interactive codex sessions run at never reached
+  // a run. The field is the explicit spelling; the level a call ran at is on
+  // its `orchestrator.log` line as `effort=`. The correctness pass stays on
+  // claude's default, which is already `high`.
+  //
+  // These fields are what `requiresSandbar` above had to rise for: they are
+  // meaningless to a driver older than #130, which would spread them through
+  // and ignore them (#66). The pin below therefore had to move FIRST — it
+  // names v0.32.5, the release that carries #130 — as it did for #121's
+  // per-pass reviewer fields before it.
   //
   // Nothing here takes effect through the pin. This file comes from the
   // checkout, not from `.sandbar/driver/`, so an edit applies on the next run
@@ -352,6 +361,11 @@ export default {
   implementerModelId: "gpt-5.6-sol",
   reviewerQualityAgent: "codex",
   reviewerQualityModelId: "gpt-5.6-sol",
+  mergerAgent: "codex",
+  mergerModelId: "gpt-5.6-sol",
+  implementerEffort: "high",
+  reviewerQualityEffort: "high",
+  mergerEffort: "high",
 
   // Exit 75 after any cycle that lands merges, so `scripts/sandbar-launch.mjs`
   // re-reads the pin and relaunches (#65). Explicit rather than detected — see
