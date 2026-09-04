@@ -72,6 +72,21 @@
 //                               Unit-tested with hand-built fixtures.
 //   - gatherState() / runPreflight() — I/O wrappers that shell out to git/gh.
 //
+// All five outbound calls sit behind one credential-free reachability gate
+// (#118): DNS lookup plus a TCP connection to port 443 for the gh host and the
+// origin host (deduplicated). An unreachable host is retried six times, ten
+// seconds apart, and then refuses ALONE: no credential was asked about and no
+// branch classification ran, so neither may appear in the diagnosis. Once the
+// gate answers, the existing auth and tracker probes keep their boolean
+// contracts; an answer from a reachable forge is final and is never retried.
+// There remains a deliberate seconds-wide race if the network dies after the
+// gate. Closing that would require undocumented stderr classification in every
+// gh/git call, which this design specifically avoids.
+//
+// The two git fetches are answers too, not best-effort warmups. Their failures
+// join the ordinary invariant report by name and retain git's stderr (#81,
+// absorbed by #118); a wildcard refspec matching nothing still exits zero.
+//
 // HOST STATE is what this module is for, and `missingMountSources` (#51) is the
 // same class as the `missingImages` check beside it. Nothing used to verify
 // that a gate-stack container's `mounts[].hostPath` exists before the run: a
@@ -179,9 +194,13 @@
 // classifications either — see `classifySandbarBranches`.
 
 import { execFile, execFileSync } from "node:child_process";
+import { lookup } from "node:dns/promises";
 import { realpathSync } from "node:fs";
 import { rm, stat } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { performance } from "node:perf_hooks";
+import { setTimeout as wait } from "node:timers/promises";
 import { promisify } from "node:util";
 
 import {
@@ -220,6 +239,10 @@ import {
 } from "./repo-ref.js";
 
 const exec = promisify(execFile);
+
+const REACHABILITY_ATTEMPTS = 6;
+const REACHABILITY_RETRY_MS = 10_000;
+const REACHABILITY_CONNECT_TIMEOUT_MS = 5_000;
 
 export type PreflightConfig = {
   readonly layout: RepoLayout;
@@ -599,6 +622,25 @@ async function captureOk(
     return { ok: true, stdout };
   } catch {
     return { ok: false, stdout: "" };
+  }
+}
+
+function commandFailureDetail(err: unknown): string {
+  const stderr = (err as { stderr?: unknown } | null)?.stderr;
+  if (typeof stderr === "string" && stderr.trim() !== "") return stderr.trim();
+  return err instanceof Error ? err.message : String(err);
+}
+
+async function captureFailure(
+  cwd: string,
+  file: string,
+  args: readonly string[],
+): Promise<string | null> {
+  try {
+    await exec(file, [...args], { cwd });
+    return null;
+  } catch (err) {
+    return commandFailureDetail(err);
   }
 }
 
@@ -1085,6 +1127,91 @@ export class PreflightError extends Error {
   }
 }
 
+export type ForgeReachabilityAdapter = {
+  readonly lookup: (host: string) => Promise<void>;
+  readonly connect: (host: string, port: number) => Promise<void>;
+  readonly wait: (ms: number) => Promise<void>;
+  readonly now: () => number;
+};
+
+const forgeReachabilityAdapter: ForgeReachabilityAdapter = {
+  lookup: async (host) => {
+    await lookup(host);
+  },
+  connect: (host, port) =>
+    new Promise<void>((resolve, reject) => {
+      const socket = createConnection({ host, port });
+      let settled = false;
+      const finish = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        socket.destroy();
+        if (err) reject(err);
+        else resolve();
+      };
+      socket.setTimeout(REACHABILITY_CONNECT_TIMEOUT_MS, () =>
+        finish(new Error("connection timed out")),
+      );
+      socket.once("connect", () => finish());
+      socket.once("error", finish);
+    }),
+  wait: async (ms) => {
+    await wait(ms);
+  },
+  now: () => performance.now(),
+};
+
+type ForgeReachability =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly attempts: number;
+      readonly elapsedMs: number;
+      readonly failures: readonly string[];
+    };
+
+// A single credential-free gate for the host condition all five outbound
+// preflight calls share (#118). DNS and TCP are separate so a live resolver
+// with no route out does not let the credential checks manufacture an auth
+// verdict. Only this unanswered state retries; every later forge answer is
+// final on its first attempt.
+export async function checkForgeReachability(
+  hosts: readonly string[],
+  adapter: ForgeReachabilityAdapter = forgeReachabilityAdapter,
+): Promise<ForgeReachability> {
+  const uniqueHosts = [...new Set(hosts.map((h) => h.toLowerCase()))];
+  const started = adapter.now();
+  let failures: readonly string[] = [];
+  for (let attempt = 1; attempt <= REACHABILITY_ATTEMPTS; attempt += 1) {
+    const results = await Promise.all(
+      uniqueHosts.map(async (host): Promise<string | null> => {
+        try {
+          await adapter.lookup(host);
+          await adapter.connect(host, 443);
+          return null;
+        } catch (err) {
+          return `${host}: ${commandFailureDetail(err)}`;
+        }
+      }),
+    );
+    failures = results.filter((result): result is string => result !== null);
+    if (failures.length === 0) return { ok: true };
+    console.warn(
+      `Forge reachability attempt ${attempt}/${REACHABILITY_ATTEMPTS} failed: ` +
+        failures.join("; "),
+    );
+    if (attempt < REACHABILITY_ATTEMPTS) {
+      await adapter.wait(REACHABILITY_RETRY_MS);
+    }
+  }
+  return {
+    ok: false,
+    attempts: REACHABILITY_ATTEMPTS,
+    elapsedMs: Math.max(0, adapter.now() - started),
+    failures,
+  };
+}
+
 // Run `syncIssueBranchWithOrigin` over the branches preflight keeps (#112).
 // `lines` is what runPreflight prints — one per branch that moved, was
 // dropped, was kept ahead, or whose origin could not be asked; `refusals` are
@@ -1119,17 +1246,45 @@ export async function syncKeptIssueBranches(
   return { lines, refusals, abandoned };
 }
 
-export async function runPreflight(cfg: PreflightConfig): Promise<void> {
+export async function runPreflight(
+  cfg: PreflightConfig,
+  reachabilityAdapter: ForgeReachabilityAdapter = forgeReachabilityAdapter,
+): Promise<void> {
+  const originUrl = await readOriginUrl(cfg.layout.repoDir);
+  const originHost =
+    originUrl === null ? null : parseRepoFromRemoteUrl(originUrl)?.host ?? null;
+  const ghHost =
+    (process.env["GH_HOST"] ?? "").trim().toLowerCase() || "github.com";
+  const reachability = await checkForgeReachability(
+    originHost === null ? [ghHost] : [ghHost, originHost],
+    reachabilityAdapter,
+  );
+  if (!reachability.ok) {
+    const seconds = (reachability.elapsedMs / 1_000).toFixed(1);
+    throw new PreflightError([
+      `Could not reach the forge after ${reachability.attempts} attempts over ` +
+        `${seconds}s (${reachability.failures.join("; ")}). No credential was ` +
+        "judged and no branch was classified. Check DNS and network access, " +
+        "then retry.",
+    ]);
+  }
+
+  const fetchFailures: string[] = [];
   // Fetch before the cleanup pass so that merged-on-origin branches can be
   // reaped even when the cache has not seen origin recently. Into the CACHE:
   // sandbar never fetches into the operator's checkout, so a run can neither
   // move their refs nor be blamed for doing so.
-  await runOk(cfg.layout.repoDir, "git", [
+  const sourceFetchFailure = await captureFailure(cfg.layout.repoDir, "git", [
     "fetch",
     "origin",
     cfg.sourceBranch,
     "--quiet",
   ]);
+  if (sourceFetchFailure !== null) {
+    fetchFailures.push(
+      `Fetching origin/${cfg.sourceBranch} failed: ${sourceFetchFailure}`,
+    );
+  }
   // And origin's chunk branches (#60), which answer a different question: a
   // chunk branch lives on origin and is only cached here, so it is what says
   // whether a leftover member's issue branch is a duplicate of published work
@@ -1137,7 +1292,7 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   // chunk fetches nothing and succeeds; `--prune` scoped to those same
   // destinations, so a chunk branch deleted on origin stops answering for one
   // here rather than lingering as a cached yes.
-  await runOk(cfg.layout.repoDir, "git", [
+  const chunkFetchFailure = await captureFailure(cfg.layout.repoDir, "git", [
     "fetch",
     "origin",
     "--prune",
@@ -1145,6 +1300,11 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
     ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
     "--quiet",
   ]);
+  if (chunkFetchFailure !== null) {
+    fetchFailures.push(
+      `Fetching origin's sandbar chunk and member refs failed: ${chunkFetchFailure}`,
+    );
+  }
 
   // One query, two readers (#60): the delete pass uses it to decide which
   // leftover branches are duplicates of published work, and `gatherState` uses
@@ -1231,6 +1391,7 @@ export async function runPreflight(cfg: PreflightConfig): Promise<void> {
   const results = checkInvariants(state);
   const failures = [
     ...results.flatMap((r) => (r.ok ? [] : [r.message])),
+    ...fetchFailures,
     ...synced.refusals,
   ];
   if (failures.length > 0) throw new PreflightError(failures);
