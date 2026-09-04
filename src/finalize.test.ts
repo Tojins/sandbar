@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import type { IssueCloneReclaim } from "./agent-sandbox.js";
+
 import { NEEDS_REVIEW_LABEL } from "./chunks.js";
 import { DEFAULT_LABELS, type LabelConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
@@ -36,7 +38,7 @@ type Calls = {
   pushes: string[];
   deletes: string[];
   forceDeletes: string[];
-  worktreeRemoves: string[];
+  reclaims: { branch: string; keep?: string }[];
   comments: { n: number; body: string }[];
   labelEdits: { n: number; remove: readonly string[]; add: readonly string[] }[];
   stateChecks: number[];
@@ -44,6 +46,8 @@ type Calls = {
 };
 
 type Script = {
+  pushError?: string;
+  postCommentError?: string;
   deleteOk?: boolean;
   deleteError?: string;
   forceDeleteOk?: boolean;
@@ -52,6 +56,7 @@ type Script = {
   labelEditError?: string;
   issueState?: "OPEN" | "CLOSED";
   containedInOrigin?: boolean;
+  reclaim?: IssueCloneReclaim;
 };
 
 function makeAdapter(
@@ -61,7 +66,7 @@ function makeAdapter(
     pushes: [],
     deletes: [],
     forceDeletes: [],
-    worktreeRemoves: [],
+    reclaims: [],
     comments: [],
     labelEdits: [],
     stateChecks: [],
@@ -70,6 +75,7 @@ function makeAdapter(
   const adapter: FinalizeAdapter = {
     async pushBranch(branch) {
       calls.pushes.push(branch);
+      if (script.pushError !== undefined) throw new SandbarError(script.pushError);
     },
     async deleteBranch(branch) {
       calls.deletes.push(branch);
@@ -88,8 +94,9 @@ function makeAdapter(
       }
       return { ok: true };
     },
-    async removeWorktreeFor(branch) {
-      calls.worktreeRemoves.push(branch);
+    async reclaimIssueClone(branch, keep) {
+      calls.reclaims.push(keep === undefined ? { branch } : { branch, keep });
+      return script.reclaim ?? { kind: "removed" };
     },
     async branchIsContainedInOrigin(branch) {
       calls.containmentChecks.push(branch);
@@ -99,6 +106,9 @@ function makeAdapter(
     },
     async postComment(n, body) {
       calls.comments.push({ n, body });
+      if (script.postCommentError !== undefined) {
+        throw new SandbarError(script.postCommentError);
+      }
     },
     async editLabels(n, remove, add) {
       calls.labelEdits.push({ n, remove, add });
@@ -248,7 +258,7 @@ describe("finalizeOne", () => {
     const action = await finalizeOne({ kind: "merged", issue: i }, adapter, LABELS);
 
     expect(action).toEqual({ kind: "deleted-local" });
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.deletes).toEqual([i.branch]);
     expect(calls.pushes).toEqual([]);
     expect(calls.comments).toEqual([]);
@@ -301,7 +311,7 @@ describe("finalizeOne", () => {
     );
 
     expect(action).toEqual({ kind: "deleted-local" });
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_REVIEW_LABEL] },
     ]);
@@ -379,7 +389,7 @@ describe("finalizeOne", () => {
     expect(action).toEqual({ kind: "pushed" });
     expect(calls.pushes).toEqual([i.branch]);
     expect(calls.deletes).toEqual([]);
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [], add: [AGENT_STUCK] },
@@ -398,7 +408,7 @@ describe("finalizeOne", () => {
     expect(action).toEqual({ kind: "pushed" });
     expect(calls.pushes).toEqual([i.branch]);
     expect(calls.deletes).toEqual([]);
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [], add: [AGENT_STUCK] },
@@ -419,7 +429,7 @@ describe("finalizeOne", () => {
     // the failing check runs.
     expect(calls.pushes).toEqual([i.branch]);
     expect(calls.deletes).toEqual([]);
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [], add: [AGENT_STUCK] },
@@ -450,7 +460,7 @@ describe("finalizeOne", () => {
 
     expect(action).toEqual({ kind: "pushed" });
     expect(calls.pushes).toEqual([i.branch]);
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.n).toBe(45);
     expect(calls.comments[0]!.body).toContain("Should X be Y?");
@@ -480,7 +490,7 @@ describe("finalizeOne", () => {
 
     expect(action).toEqual({ kind: "deleted-local" });
     expect(calls.pushes).toEqual([]);
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.deletes).toEqual([i.branch]);
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.n).toBe(45);
@@ -528,9 +538,9 @@ describe("finalizeOne", () => {
       LABELS,
     );
 
-    expect(action.kind).toBe("delete-failed");
-    if (action.kind === "delete-failed") {
-      expect(action.error).toContain("not on origin");
+    expect(action.kind).toBe("kept-branch");
+    if (action.kind === "kept-branch") {
+      expect(action.reason).toContain("not on origin");
     }
     expect(calls.forceDeletes).toEqual([]);
     // The handoff itself still completed — the human gets the comment and the
@@ -623,7 +633,7 @@ describe("finalizeOne", () => {
     expect(action).toEqual({ kind: "skipped-closed" });
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([]);
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
   });
 
   it("needs-human: removes worktree, pushes, comments with failure trace, swaps labels", async () => {
@@ -643,7 +653,7 @@ describe("finalizeOne", () => {
 
     expect(action).toEqual({ kind: "pushed" });
     expect(calls.pushes).toEqual([i.branch]);
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.body).toContain("AssertionError: red");
     expect(calls.comments[0]!.body).toContain("without a green gate");
@@ -812,8 +822,8 @@ describe("finalizeOne", () => {
     expect(action).toEqual({ kind: "pushed" });
     const body = calls.comments[0]!.body;
     expect(body).toContain(i.branch);
-    // The comment is the last place this sha survives: removeWorktreeFor takes
-    // the per-worktree HEAD reflog with it.
+    // The comment and the cache pin it names are the only places this sha
+    // survives: reclaiming the clone takes the per-worktree HEAD reflog with it.
     expect(body).toContain("deadbeef1234");
     expect(body).toContain("git branch <rescue-name> deadbeef1234");
     // Must NOT claim no gate ran / the branch never moved: on the path that
@@ -822,17 +832,24 @@ describe("finalizeOne", () => {
     expect(body).not.toContain("without a green gate");
     expect(body).not.toContain("No gate ran");
     expect(body).not.toContain("never moved");
+    expect(body).toContain("refs/sandbar/stranded/deadbeef1234");
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
   });
 
-  // #27. The exemption that lets an off-branch NEEDS-UI-PROTOTYPE through must
-  // not also lose the work: hasCommits is false (commits are counted on the
-  // branch), so this arm deletes the branch, and without the note the detached
-  // sha would appear in no comment, no log and no ref.
-  it("needs-ui-prototype: names the stranded sha even though it deletes the branch (#27)", async () => {
-    const { adapter, calls } = makeAdapter();
+  // #27, #98. Commits are counted on the issue branch, so an off-branch UI
+  // escalation has hasCommits=false. Its private clone remains the only store
+  // for the detached commit, and the cache branch is the sweep's liveness
+  // record for that clone; both must survive the handoff.
+  it("needs-ui-prototype: keeps the cache branch when the clone could not be reclaimed", async () => {
+    const { adapter, calls } = makeAdapter({
+      reclaim: {
+        kind: "preserved",
+        reason: "could not publish its git state into the cache: cannot lock ref",
+      },
+    });
     const i = issue(45);
     const action = await finalizeOne(
       {
@@ -851,12 +868,18 @@ describe("finalizeOne", () => {
       LABELS,
     );
 
-    expect(action).toEqual({ kind: "deleted-local" });
+    expect(action).toEqual({
+      kind: "kept-branch",
+      reason: expect.stringContaining("cannot lock ref"),
+    });
     expect(calls.pushes).toEqual([]);
+    expect(calls.deletes).toEqual([]);
+    expect(calls.forceDeletes).toEqual([]);
     const body = calls.comments[0]!.body;
     expect(body).toContain("a new settings screen");
     expect(body).toContain("abc9999");
     expect(body).toContain("git branch <rescue-name> abc9999");
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
   });
 
   it("needs-info: appends the stranded-commits note when the run went off-branch (#27)", async () => {
@@ -880,6 +903,7 @@ describe("finalizeOne", () => {
     const body = calls.comments[0]!.body;
     expect(body).toContain("which currency?");
     expect(body).toContain("abc9999");
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
   });
 
   it("says nothing about stranded work on an ordinary on-branch handoff", async () => {
@@ -941,7 +965,7 @@ describe("finalizeOne", () => {
 
     expect(action).toEqual({ kind: "pushed" });
     expect(calls.pushes).toEqual([i.branch]);
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.n).toBe(45);
     expect(calls.comments[0]!.body).toContain("too much indirection");
@@ -951,6 +975,96 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
+  });
+
+  it("reviewer-wrote: leaves the preserved clone in place and publishes the handoff", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "reviewer-wrote",
+        issue: i,
+        latestReviewerProse: "Reviewer changed git state. Branch tip before: a; after: b.",
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    expect(calls.pushes).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([
+      { branch: i.branch, keep: expect.stringContaining("human inspection") },
+    ]);
+    expect(calls.comments[0]!.body).toContain("preserved for human inspection");
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+    ]);
+  });
+
+  it("reviewer-wrote: parks and comments when a rewound branch cannot be pushed", async () => {
+    const { adapter, calls } = makeAdapter({ pushError: "non-fast-forward" });
+    const i = issue(45);
+
+    const action = await finalizeOne(
+      {
+        kind: "reviewer-wrote",
+        issue: i,
+        latestReviewerProse: "Reviewer rewound the branch.",
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "parked-local" });
+    expect(calls.reclaims).toEqual([
+      { branch: i.branch, keep: expect.stringContaining("human inspection") },
+    ]);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+    ]);
+    expect(calls.comments[0]!.body).toContain("non-fast-forward");
+    expect(calls.comments[0]!.body).toContain("authoritative state");
+  });
+
+  it("reviewer-wrote: does not park before the handoff comment succeeds", async () => {
+    const { adapter, calls } = makeAdapter({ postCommentError: "comment failed" });
+
+    await expect(
+      finalizeOne(
+        {
+          kind: "reviewer-wrote",
+          issue: issue(45),
+          latestReviewerProse: "Reviewer changed git state.",
+        },
+        adapter,
+        LABELS,
+      ),
+    ).rejects.toThrow("comment failed");
+
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.labelEdits).toEqual([]);
+  });
+
+  it("reviewer-wrote on a CLOSED issue skips tracker writes and preserves the clone", async () => {
+    const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "reviewer-wrote",
+        issue: i,
+        latestReviewerProse: "Reviewer deleted the issue ref.",
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "skipped-closed" });
+    expect(calls.reclaims).toEqual([
+      { branch: i.branch, keep: expect.stringContaining("human inspection") },
+    ]);
+    expect(calls.pushes).toEqual([]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.labelEdits).toEqual([]);
   });
 
   it("hard-error with commits: removes worktree, pushes only, no label flip, no comment", async () => {
@@ -965,7 +1079,7 @@ describe("finalizeOne", () => {
     expect(action).toEqual({ kind: "pushed" });
     expect(calls.pushes).toEqual([i.branch]);
     expect(calls.deletes).toEqual([]);
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([]);
   });
@@ -980,7 +1094,7 @@ describe("finalizeOne", () => {
     );
 
     expect(action).toEqual({ kind: "deleted-local" });
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.deletes).toEqual([i.branch]);
     expect(calls.pushes).toEqual([]);
     expect(calls.comments).toEqual([]);
@@ -993,12 +1107,63 @@ describe("finalizeOne", () => {
       deleteError: "ref locked",
     });
     const action = await finalizeOne(
-      { kind: "hard-error", issue: issue(45), hasCommits: false },
+      {
+        kind: "hard-error",
+        issue: issue(45),
+        hasCommits: false,
+      },
       adapter,
       LABELS,
     );
 
     expect(action.kind).toBe("delete-failed");
+  });
+
+  // #98: the clone is the only repository holding an attempt's commits until
+  // the publish into the cache succeeds. A reclaim that could not publish keeps
+  // the clone, and the arm must then keep the cache branch too — deleting it
+  // would hand the clone to the next stale-clone sweep.
+  it("hard-error without commits: keeps the cache branch when the clone could not be reclaimed", async () => {
+    const { adapter, calls } = makeAdapter({
+      reclaim: {
+        kind: "preserved",
+        reason: "could not publish its git state into the cache: cannot lock ref",
+      },
+    });
+    const i = issue(45);
+    const action = await finalizeOne(
+      { kind: "hard-error", issue: i, hasCommits: false },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({
+      kind: "kept-branch",
+      reason: expect.stringContaining("cannot lock ref"),
+    });
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
+    expect(calls.deletes).toEqual([]);
+    expect(calls.forceDeletes).toEqual([]);
+    expect(calls.pushes).toEqual([]);
+  });
+
+  it("hard-error with commits: still pushes when the clone was preserved, and says the clone may hold more", async () => {
+    const { adapter, calls } = makeAdapter({
+      reclaim: { kind: "preserved", reason: "the worktree has uncommitted changes" },
+    });
+    const i = issue(45);
+    const action = await finalizeOne(
+      { kind: "hard-error", issue: i, hasCommits: true },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({
+      kind: "kept-branch",
+      reason: expect.stringContaining("uncommitted changes"),
+    });
+    expect(calls.pushes).toEqual([i.branch]);
+    expect(calls.deletes).toEqual([]);
   });
 
   it("fresh-attempt: removes worktree + force-deletes branch (its tip has commits not on source), no push, no comment, no labels", async () => {
@@ -1014,7 +1179,7 @@ describe("finalizeOne", () => {
     );
 
     expect(action).toEqual({ kind: "deleted-local" });
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.deletes).toEqual([i.branch]);
     expect(calls.forceDeletes).toEqual([i.branch]);
     expect(calls.pushes).toEqual([]);
@@ -1044,7 +1209,7 @@ describe("finalizeOne", () => {
     );
 
     expect(action).toEqual({ kind: "deleted-local" });
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.pushes).toEqual([]);
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.body).toContain("2 times");
@@ -1201,7 +1366,7 @@ describe("finalizeOne", () => {
 
     expect(action).toEqual({ kind: "skipped-closed" });
     expect(calls.stateChecks).toEqual([45]);
-    expect(calls.worktreeRemoves).toEqual([i.branch]);
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([]);
     expect(calls.pushes).toEqual([]);
@@ -1239,7 +1404,11 @@ describe("finalizeAll", () => {
       { kind: "merged", issue: issue(10) },
       { kind: "needs-info", issue: issue(11), questions: "?" },
       { kind: "merge-gate-red", issue: issue(12) },
-      { kind: "hard-error", issue: issue(13), hasCommits: true },
+      {
+        kind: "hard-error",
+        issue: issue(13),
+        hasCommits: true,
+      },
     ];
 
     const results = await finalizeAll(inputs, adapter, LABELS);
@@ -1256,11 +1425,11 @@ describe("finalizeAll", () => {
       "sandbar/issue-13-t-13",
     ]);
     expect(calls.deletes).toEqual(["sandbar/issue-10-t-10"]);
-    expect(calls.worktreeRemoves).toEqual([
-      "sandbar/issue-10-t-10",
-      "sandbar/issue-11-t-11",
-      "sandbar/issue-12-t-12",
-      "sandbar/issue-13-t-13",
+    expect(calls.reclaims).toEqual([
+      { branch: "sandbar/issue-10-t-10" },
+      { branch: "sandbar/issue-11-t-11" },
+      { branch: "sandbar/issue-12-t-12" },
+      { branch: "sandbar/issue-13-t-13" },
     ]);
     expect(calls.labelEdits).toEqual([
       { n: 10, remove: [READY_FOR_AGENT], add: [] },
@@ -1276,7 +1445,7 @@ describe("finalizeAll", () => {
     expect(results).toEqual([]);
     expect(calls.pushes).toEqual([]);
     expect(calls.deletes).toEqual([]);
-    expect(calls.worktreeRemoves).toEqual([]);
+    expect(calls.reclaims).toEqual([]);
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([]);
   });

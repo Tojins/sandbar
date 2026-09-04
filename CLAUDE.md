@@ -160,7 +160,17 @@ and used to announce themselves in four different ways, the halt in none at all.
 - **Every shell-out names its repo; nothing inherits `process.cwd()` (#34),**
   and every `gh` call passes `--repo` (`src/repo-ref.ts`). Preflight verifies
   the configured tracker and the git remote agree on host and `owner/name`.
-- **Per-issue podman isolation inside a per-run scope (#28).** All resource
+- **Per-issue git and podman isolation (#98, #28).** Issue and merger trees are
+  hardlink clones of the host-only bare cache; no container mounts the cache,
+  and each sandbox can write only its own repository. Gate containers get an
+  empty tmpfs over `.git`, while reviewer writes are detected and parked for
+  human inspection. The corollary: an attempt's commits live in the clone until
+  a host-side fetch publishes them, so removing a clone is where work can be
+  destroyed — `reclaimIssueClone` (`src/agent-sandbox.ts`) is the ONE spelling
+  of that removal, for the sandbox's `close()` and finalize alike: publish the
+  branch and pin an off-branch HEAD in the cache first, delete only once the
+  cache holds both, otherwise keep the clone and say why. Nothing decides
+  preservation by terminal kind. All resource
   names carry `w`+8-hex of the *realpath'd* locked workdir; the orphan sweep
   only ever touches its own scope, and unattributable debris is reported, never
   removed. `src/containers.ts` and `src/naming.ts` headers. Image **tags** are
@@ -542,7 +552,7 @@ run it, and around again only on exit 75.
   judging both is this checkout's config either way.
 - **The suite must not depend on ambient git config** (the gate runner has no
   global identity) **nor on `process.cwd()` being a repository** (`/workspace/.git`
-  is a broken gitlink inside gate containers — name the directory in every git
+  is not a repository inside gate containers — name the directory in every git
   call a test makes).
 
 ## When making changes

@@ -2,9 +2,9 @@
 
 Review the implementation on branch `{{branch}}` against `{{baseRef}}` — the ref
 this branch was seeded from.
-(That is also the ref to use for any git command of your own: this worktree comes
-from a bare object cache that holds no local `{{sourceBranch}}`, so the bare name
-does not resolve.)
+(That is also the ref to use for any git command of your own: this issue clone
+copies only `origin/*` for the source repository, so the bare local name
+`{{sourceBranch}}` does not resolve.)
 
 Issue #{{issueId}}: {{issueTitle}}
 
@@ -34,8 +34,10 @@ unaddressed one blocks.
 A change requested in an earlier round may not be reversed without naming that
 round and explaining why its request was wrong.
 
-Your role is strictly advisory: you must not modify the branch, commit, push, or
-run gate commands. Read-only investigation only.
+Your role is strictly advisory: you must not modify the branch.
+Do not run any command that writes under `.git` (including commit, checkout,
+reset, branch, worktree, gc, or prune), do not modify files, push, or run gate
+commands. Read-only investigation only.
 
 If a dimension requests changes, put only its actionable findings under its
 exact heading: `### Correctness`, `### Tests`, `### Spec`, or `### Standards`.

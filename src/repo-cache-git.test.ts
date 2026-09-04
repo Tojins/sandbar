@@ -205,6 +205,42 @@ describe("ensureRepoCache (real git)", () => {
 });
 
 describe("ensureSourceWorktree (real git)", () => {
+  it("locks source so cache-wide prune cannot unregister a missing directory", async () => {
+    const { checkout } = await setup();
+    const layout = repoLayout(checkout, ".sandbar");
+    await ensureRepoCache(layout);
+    await ensureSourceWorktree(layout, "main");
+
+    const sourceEntry = (listing: string): string | undefined =>
+      listing
+        .split("\n\n")
+        .find((entry) => entry.startsWith(`worktree ${layout.sourceWorktree}\n`));
+    const before = sourceEntry(
+      (await git(layout.repoDir, "worktree", "list", "--porcelain")).stdout,
+    );
+    expect(before).toBeDefined();
+    expect(before).toMatch(/(?:^|\n)locked(?:\n|$)/);
+
+    await rm(layout.sourceWorktree, { recursive: true, force: true });
+    await git(layout.repoDir, "worktree", "prune");
+
+    const after = sourceEntry(
+      (await git(layout.repoDir, "worktree", "list", "--porcelain")).stdout,
+    );
+    expect(after).toBeDefined();
+    expect(after).toMatch(/(?:^|\n)locked(?:\n|$)/);
+
+    const recreated = await ensureSourceWorktree(layout, "main");
+    expect(recreated).toBe(layout.sourceWorktree);
+    expect((await git(recreated, "rev-parse", "HEAD")).stdout.trim()).toBe(
+      (await git(layout.repoDir, "rev-parse", "origin/main")).stdout.trim(),
+    );
+    const replacement = sourceEntry(
+      (await git(layout.repoDir, "worktree", "list", "--porcelain")).stdout,
+    );
+    expect(replacement).toMatch(/(?:^|\n)locked(?:\n|$)/);
+  });
+
   it("checks out origin/<sourceBranch>, detached", async () => {
     const { checkout } = await setup();
     const layout = repoLayout(checkout, ".sandbar");

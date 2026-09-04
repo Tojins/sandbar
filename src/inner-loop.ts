@@ -34,6 +34,11 @@
 // That history also switches the follow-up from its one whole-branch listing
 // to a review anchored at the newest earlier follow-up head; the round record
 // exposes that list/verify mode without storing another piece of state (#107).
+// Each implementer invocation publishes its private clone's issue ref to the
+// host cache on success (#98). After an invocation failure the same publish is
+// recovery-only: its failure is logged and may not replace the provider error.
+// Reviewer invocations instead snapshot the tip and status; any mutation parks
+// the issue and preserves the clone rather than running another reviewer.
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -63,10 +68,12 @@ import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
 import {
   type HeadMismatch,
   type IssueBranchBase,
+  branchTip,
   describeIssueBranchOriginSync,
   dirtyWorktreePaths,
   ensureIssueBranch,
   headMismatch,
+  symbolicHeadRef,
 } from "./git-ops.js";
 import {
   HARD_ERROR_MAX_RETRIES,
@@ -218,6 +225,7 @@ export type Terminal =
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
+      readonly cause?: "reviewer-wrote";
       readonly commits: readonly { sha: string }[];
     }
   | {
@@ -297,7 +305,9 @@ export async function runInnerLoop(
   for (;;) {
     const outcome = await runSandboxCycle(issue, opts);
     const decision = decideAfterTerminal(outcome.verdict, retriesUsed);
-    if (decision.kind === "surface") return toTerminal(outcome);
+    if (decision.kind === "surface") {
+      return toTerminal(outcome);
+    }
     retriesUsed = decision.nextRetriesUsed;
     const reason = outcome.verdict.type === "HARD-ERROR" ? outcome.verdict.reason : "";
     console.error(
@@ -335,6 +345,7 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
     case "NEEDS-HUMAN-REVIEW":
       return {
         type: "NEEDS-HUMAN-REVIEW",
+        ...(verdict.cause === undefined ? {} : { cause: verdict.cause }),
         latestReviewerProse: verdict.latestReviewerProse,
         commits: accumulatedCommits,
       };
@@ -359,6 +370,7 @@ async function runSandboxCycle(
   let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
   const priorReviewRounds: PriorReviewRound[] = [];
+  let preparedWorktreePath: string | null = null;
 
   // Everything from here to a standing sandbox + gate stack is SETUP (#82), and
   // until it was measured it was the largest block of a cycle with nothing
@@ -430,6 +442,7 @@ async function runSandboxCycle(
       hooks: opts.hooks,
       copyToWorktree: [...opts.copyToWorktree],
     });
+    preparedWorktreePath = worktreePath;
     worktreeMs = worktreeTimer();
 
     // The sandbox's siblings (#44). Everything about them is derived from the
@@ -546,6 +559,7 @@ async function runSandboxCycle(
         scope: config.scope,
         spec: config.gateStack,
         worktreePath,
+        hideWorktreeGit: true,
         // A thunk, not a value: the stack calls it before every gate run, and
         // the answer changes as the agent commits (#37). It hands back the
         // tags it runs, so the sandbox's entry is not resolved here (#46).
@@ -651,7 +665,11 @@ async function runSandboxCycle(
     }
     // Setup failure or any other unhandled exception inside the cycle.
     // Surface as HARD-ERROR so the outer loop can decide whether to retry
-    // with a fresh sandbox.
+    // with a fresh sandbox. Whatever the attempt left in the clone — commits
+    // the publish never reached, a HEAD off the branch — is not this
+    // terminal's to classify: `sandbox.close()` below reclaims the clone
+    // through `reclaimIssueClone`, which publishes before it deletes and keeps
+    // the clone when it cannot (#98).
     return {
       verdict: {
         type: "HARD-ERROR",
@@ -768,7 +786,9 @@ async function runImplementer(
   // agent leg, which is what every #77 idea trading implementer minutes for
   // reviewer rounds is spending (#82).
   const implementerTimer = startTimer();
-  const run = await sandbox.run({
+  const runAgent = (options: Parameters<Sandbox["run"]>[0]) =>
+    runSandboxAndPublish(sandbox, options, issue.id);
+  const run = await runAgent({
     name: `implementer-${issue.id}-attempt-${action.attempt}`,
     agent: buildAgentProvider(config.implementerAgent, config.implementerModelId),
     prompt,
@@ -811,7 +831,7 @@ async function runImplementer(
   // next attempt either, and swallowing it would hide the infra fault.
   if (signal.kind === "NO-SIGNAL" && signal.missingTag) {
     const nudgeTimer = startTimer();
-    const nudge = await sandbox.run({
+    const nudge = await runAgent({
       name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
       agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
         continueSession: true,
@@ -878,6 +898,38 @@ async function runImplementer(
   return { kind: "implementer-result", signal, dirtyPaths, offBranch };
 }
 
+export async function runSandboxAndPublish(
+  sandbox: Sandbox,
+  options: Parameters<Sandbox["run"]>[0],
+  issueId: string,
+): ReturnType<Sandbox["run"]> {
+  let result: Awaited<ReturnType<Sandbox["run"]>>;
+  try {
+    result = await sandbox.run(options);
+  } catch (agentError) {
+    // A failed invocation may still have committed. Try to publish it, but a
+    // second failure must not replace the agent/provider error that selects
+    // and explains the HARD-ERROR path (#41, #67, #98). The commits are not
+    // lost either way: close() retries the publish before it removes the
+    // clone, and keeps the clone if that fails too.
+    try {
+      await sandbox.syncBranchToCache();
+    } catch (publishError) {
+      console.error(
+        `Could not publish issue=${issueId} after implementer failure (continuing with original error):`,
+        publishError,
+      );
+    }
+    throw agentError;
+  }
+  // A publish that fails is infrastructure, not an answer: the merge phase
+  // reads the cache's copy of the branch, so continuing past it would gate and
+  // review one tree and merge another. HARD-ERROR retries in a fresh sandbox,
+  // whose reuse path publishes again from the clone reclaim kept.
+  await sandbox.syncBranchToCache();
+  return result;
+}
+
 async function runGate1(
   action: Extract<LoopAction, { kind: "run-gate-1" }>,
   ctx: ExecuteActionCtx,
@@ -905,6 +957,51 @@ async function runGate1(
   };
 }
 
+export type ReviewerSnapshot = {
+  readonly tip: string | null;
+  readonly dirtyPaths: readonly string[];
+  readonly headRef: string | null;
+};
+
+export function reviewerSnapshotChanged(
+  before: ReviewerSnapshot,
+  after: ReviewerSnapshot,
+): boolean {
+  return (
+    before.tip !== after.tip ||
+    JSON.stringify(before.dirtyPaths) !== JSON.stringify(after.dirtyPaths) ||
+    before.headRef !== after.headRef
+  );
+}
+
+export async function enforceReviewerSnapshot(
+  sandbox: Pick<Sandbox, "preserveWorktree" | "syncBranchToCache">,
+  before: ReviewerSnapshot,
+  after: ReviewerSnapshot,
+  transcript: string,
+): Promise<Extract<LoopEvent, { kind: "reviewer-wrote" }> | null> {
+  if (!reviewerSnapshotChanged(before, after)) return null;
+  sandbox.preserveWorktree("the reviewer changed the repository; kept for human inspection");
+  // Deleting the issue ref is itself a reviewer write. There is then no ref
+  // to publish, but the preserved clone still contains the evidence.
+  if (after.tip !== null) await sandbox.syncBranchToCache();
+  const renderedTranscript = transcript.trim() || "(reviewer emitted no output)";
+  return {
+    kind: "reviewer-wrote",
+    detail:
+      `Reviewer changed git state. Branch tip before: ${before.tip}; ` +
+      `after: ${after.tip}. HEAD before: ${before.headRef}; ` +
+      `after: ${after.headRef}. Status after:\n` +
+      (after.dirtyPaths.length > 0
+        ? after.dirtyPaths.join("\n")
+        : "(clean worktree)") +
+      `\n\nReviewer transcript:\n${renderedTranscript}`,
+  };
+}
+
+const passTranscript = (pass: ReviewerPass, transcript: string): string =>
+  `=== ${pass === "followup" ? "follow-up" : pass} pass ===\n${transcript}`;
+
 async function runReviewer(
   action: Extract<LoopAction, { kind: "run-reviewer" }>,
   ctx: ExecuteActionCtx,
@@ -916,6 +1013,21 @@ async function runReviewer(
       `cannot review issue #${issue.id} round ${action.reviewRound}: no accumulated HEAD`,
     );
   }
+  const snapshot = async (): Promise<ReviewerSnapshot> => {
+    const [tip, dirtyPaths, headRef] = await Promise.all([
+      branchTip(sandbox.worktreePath, issue.branch),
+      dirtyWorktreePaths(sandbox.worktreePath),
+      symbolicHeadRef(sandbox.worktreePath),
+    ]);
+    return { tip, dirtyPaths, headRef };
+  };
+  const detectWrite = async (
+    before: ReviewerSnapshot,
+    transcript: string,
+  ): Promise<Extract<LoopEvent, { kind: "reviewer-wrote" }> | null> => {
+    const after = await snapshot();
+    return enforceReviewerSnapshot(sandbox, before, after, transcript);
+  };
 
   const reviewerPromptInputs = {
     issue,
@@ -941,6 +1053,7 @@ async function runReviewer(
     modelId: string,
   ): Promise<ReviewerOutcome> => runReviewerInvocations(
     async (invocation) => {
+      const beforeInvocation = await snapshot();
       // The retry is a fresh agent run in the SAME sandbox. The sandbox is not
       // what failed — in the observed case the implementer was working in it
       // concurrently — and rebuilding it would restart the whole issue from
@@ -990,20 +1103,29 @@ async function runReviewer(
           reviewerRun.usage,
           reviewerRun.toolCalls,
         );
-        return { output: reviewerRun.stdout, error: null };
+        const event = await detectWrite(beforeInvocation, reviewerRun.stdout);
+        return event === null
+          ? { kind: "run", run: { output: reviewerRun.stdout, error: null } }
+          : { kind: "aborted", event, transcript: reviewerRun.stdout };
       } catch (err) {
         // A failed invocation is timed too: an invocation that burned the ten
         // minutes and died is the expensive case, and one that fell over in a
         // second is a different fault entirely.
         const partial = agentPartialUsage(err);
         await logPass(undefined, partial.usage, partial.toolCalls);
+        const transcript = agentPartialOutput(err);
+        const event = await detectWrite(beforeInvocation, transcript);
+        if (event !== null) return { kind: "aborted", event, transcript };
         // The bytes the agent had emitted before it failed ride out on the
         // error (#41, agent-sandbox F9). Without them a reviewer that emitted
         // a verdict and then died is indistinguishable from one that emitted
         // nothing, and only the second is a harness fault.
         return {
-          output: agentPartialOutput(err),
-          error: err instanceof Error ? err.message : String(err),
+          kind: "run",
+          run: {
+            output: transcript,
+            error: err instanceof Error ? err.message : String(err),
+          },
         };
       }
     },
@@ -1019,13 +1141,34 @@ async function runReviewer(
     },
   );
 
+  const preserveReviewerWrite = async (
+    aborted: Extract<ReviewerOutcome, { kind: "aborted" }>,
+    pass: ReviewerPass,
+    completedTranscripts: readonly string[],
+  ): Promise<Extract<LoopEvent, { kind: "reviewer-wrote" }>> => {
+    if (opts.attemptLogger) {
+      await opts.attemptLogger.writeAttemptReviewer(
+        issue.id,
+        action.attempt,
+        [
+          ...completedTranscripts,
+          passTranscript(pass, aborted.transcript),
+        ].join("\n\n"),
+      );
+    }
+    return aborted.event;
+  };
+
   const correctness = await runPass(
     "correctness",
     reviewerPrompts.correctness,
     config.reviewerModelId,
   );
+  if (correctness.kind === "aborted") {
+    return preserveReviewerWrite(correctness, "correctness", []);
+  }
 
-  const transcripts = [`=== correctness pass ===\n${correctness.transcript}`];
+  const transcripts = [passTranscript("correctness", correctness.transcript)];
   // Every invocation's output, not just the reviewing one: the observed failure
   // left a 73-byte log for a 15-minute run, and this file is the only offline
   // artefact of what the reviewer did or did not say.
@@ -1043,7 +1186,10 @@ async function runReviewer(
       reviewerPrompts.followup,
       config.reviewerFollowupModelId,
     );
-    transcripts.push(`=== follow-up pass ===\n${followup.transcript}`);
+    if (followup.kind === "aborted") {
+      return preserveReviewerWrite(followup, "followup", transcripts);
+    }
+    transcripts.push(passTranscript("followup", followup.transcript));
     if (followup.kind === "harness-failed") {
       failed = { pass: "followup", invocations: followup.invocations };
     }

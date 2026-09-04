@@ -11,7 +11,7 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { appendFile, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 
@@ -45,6 +45,7 @@ import {
   parseCodexJsonLine,
   parseStreamJsonLine,
   prepareWorktree,
+  reclaimIssueClone,
   registerShutdown,
   sandboxRemoveArgs,
   sandboxExecArgs,
@@ -1048,6 +1049,7 @@ describe("createSandbox integration (local provider)", () => {
       expect(run.commits).toHaveLength(1);
       expect(typeof run.maxGapMs).toBe("number");
       expect(run.commits[0]!.sha).toMatch(/^[0-9a-f]{40}$/);
+      await sandbox.syncBranchToCache();
       // The captured commit is the one the agent made on the branch.
       const log = await git(["log", "-1", "--format=%H", "sandbar/issue-1-demo"], dir);
       expect(log.stdout.trim()).toBe(run.commits[0]!.sha);
@@ -1078,6 +1080,166 @@ describe("createSandbox integration (local provider)", () => {
     } finally {
       await sandbox.close();
     }
+  });
+
+  it("preserves a clean clone when the caller requests an evidence handoff", async () => {
+    const branch = "sandbar/issue-98-reviewer-commit";
+    await git(["branch", branch], dir);
+    const sandbox = await createSandbox({
+      env: {},
+      branch,
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+    });
+    const path = sandbox.worktreePath;
+
+    sandbox.preserveWorktree("evidence handoff");
+    const closed = await sandbox.close();
+
+    expect(closed).toEqual({ preservedWorktreePath: path });
+    expect(existsSync(path)).toBe(true);
+    await rm(path, { recursive: true, force: true });
+  });
+
+  // #98: a clean off-branch clone is reclaimed, not preserved — its HEAD is
+  // pinned in the cache first, and the pin is what the handoff comment names.
+  it("reclaims a clean off-branch clone after pinning its HEAD in the cache", async () => {
+    const branch = "sandbar/issue-98-stranded-head";
+    await git(["branch", branch], dir);
+    const sandbox = await createSandbox({
+      env: {},
+      branch,
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+    });
+    const path = sandbox.worktreePath;
+    await git(["checkout", "--detach"], path);
+    await writeFile(join(path, "stranded.txt"), "off branch\n");
+    await git(["add", "stranded.txt"], path);
+    await git(["-c", "user.name=Test Host", "-c", "user.email=host@test.com", "commit", "-m", "stranded work"], path);
+    const stranded = (await git(["rev-parse", "HEAD"], path)).stdout.trim();
+    expect((await git(["rev-parse", branch], path)).stdout.trim()).not.toBe(stranded);
+
+    const closed = await sandbox.close();
+
+    expect(closed).toEqual({ preservedWorktreePath: undefined });
+    expect(existsSync(path)).toBe(false);
+    expect(
+      (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], dir)).stdout.trim(),
+    ).toBe(stranded);
+  });
+
+  // A crash between the attempt and close() leaves the clone unreclaimed. Reuse
+  // pins the off-branch HEAD the same way before restoring the issue branch,
+  // so the fresh attempt neither inherits the detached HEAD nor loses it.
+  it("reuse pins a crash leftover's off-branch HEAD in the cache and restores the issue branch", async () => {
+    const branch = "sandbar/issue-98-crash-leftover";
+    await git(["branch", branch], dir);
+    const layout = layoutFor(dir);
+    const path = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+    await git(["checkout", "--detach"], path);
+    await git(["-c", "user.name=Test Host", "-c", "user.email=host@test.com", "commit", "--allow-empty", "-m", "stranded work"], path);
+    const stranded = (await git(["rev-parse", "HEAD"], path)).stdout.trim();
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect((await git(["symbolic-ref", "HEAD"], path)).stdout.trim()).toBe(
+      `refs/heads/${branch}`,
+    );
+    expect(
+      (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], dir)).stdout.trim(),
+    ).toBe(stranded);
+    await rm(path, { recursive: true, force: true });
+  });
+
+  describe("reclaimIssueClone", () => {
+    it("publishes the branch into the cache before removing the clone", async () => {
+      const branch = "sandbar/issue-98-reclaim-publish";
+      await git(["branch", branch], dir);
+      const layout = layoutFor(dir);
+      const path = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+      await git(["-c", "user.name=Test Host", "-c", "user.email=host@test.com", "commit", "--allow-empty", "-m", "unpublished"], path);
+      const tip = (await git(["rev-parse", "HEAD"], path)).stdout.trim();
+
+      expect(await reclaimIssueClone(dir, path, branch)).toEqual({ kind: "removed" });
+
+      expect(existsSync(path)).toBe(false);
+      expect((await git(["rev-parse", branch], dir)).stdout.trim()).toBe(tip);
+    });
+
+    it("keeps a dirty clone, having published what was committed", async () => {
+      const branch = "sandbar/issue-98-reclaim-dirty";
+      await git(["branch", branch], dir);
+      const layout = layoutFor(dir);
+      const path = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+      await git(["-c", "user.name=Test Host", "-c", "user.email=host@test.com", "commit", "--allow-empty", "-m", "committed"], path);
+      const tip = (await git(["rev-parse", "HEAD"], path)).stdout.trim();
+      await writeFile(join(path, "scratch.txt"), "not committed\n");
+
+      const reclaim = await reclaimIssueClone(dir, path, branch);
+
+      expect(reclaim).toEqual({
+        kind: "preserved",
+        reason: expect.stringContaining("uncommitted changes"),
+      });
+      expect(existsSync(join(path, "scratch.txt"))).toBe(true);
+      expect((await git(["rev-parse", branch], dir)).stdout.trim()).toBe(tip);
+      await rm(path, { recursive: true, force: true });
+    });
+
+    // The case the rule exists for: the clone holds commits the cache does not,
+    // and the cache cannot be written. Deleting the clone would destroy them.
+    it("keeps the clone when the cache refuses the publish", async () => {
+      const branch = "sandbar/issue-98-reclaim-locked";
+      await git(["branch", branch], dir);
+      const seeded = (await git(["rev-parse", branch], dir)).stdout.trim();
+      const layout = layoutFor(dir);
+      const path = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+      await git(["-c", "user.name=Test Host", "-c", "user.email=host@test.com", "commit", "--allow-empty", "-m", "unpublished"], path);
+      const lock = join(dir, ".git", "refs", "heads", `${branch}.lock`);
+      await mkdir(dirname(lock), { recursive: true });
+      await writeFile(lock, "");
+      try {
+        const reclaim = await reclaimIssueClone(dir, path, branch);
+
+        expect(reclaim).toEqual({
+          kind: "preserved",
+          reason: expect.stringContaining("could not publish"),
+        });
+        expect(existsSync(path)).toBe(true);
+        expect((await git(["rev-parse", branch], dir)).stdout.trim()).toBe(seeded);
+      } finally {
+        await rm(lock, { force: true });
+        await rm(path, { recursive: true, force: true });
+      }
+    });
+
+    it("honours a caller's reason to keep a clone it would otherwise remove", async () => {
+      const branch = "sandbar/issue-98-reclaim-keep";
+      await git(["branch", branch], dir);
+      const layout = layoutFor(dir);
+      const path = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+      expect(await reclaimIssueClone(dir, path, branch, "kept for a human")).toEqual({
+        kind: "preserved",
+        reason: "kept for a human",
+      });
+      expect(existsSync(path)).toBe(true);
+      await rm(path, { recursive: true, force: true });
+    });
+
+    it("answers absent for a missing path and removes an unmarked directory", async () => {
+      const branch = "sandbar/issue-98-reclaim-debris";
+      const layout = layoutFor(dir);
+      const path = worktreePathFor(layout.worktreesDir, branch);
+
+      expect(await reclaimIssueClone(dir, path, branch)).toEqual({ kind: "absent" });
+
+      await mkdir(path, { recursive: true });
+      await writeFile(join(path, "leftover"), "garbage");
+      expect(await reclaimIssueClone(dir, path, branch)).toEqual({ kind: "removed" });
+      expect(existsSync(path)).toBe(false);
+    });
   });
 
   // #27 follow-up. The commit range is anchored at `refs/heads/<branch>`, not at
@@ -1125,6 +1287,7 @@ describe("createSandbox integration (local provider)", () => {
         completionSignal: [],
       });
       expect(rescued.commits).toHaveLength(1);
+      await sandbox.syncBranchToCache();
       const tip = await git(
         ["log", "-1", "--format=%H", "sandbar/issue-9-rescue"],
         dir,
@@ -1793,27 +1956,57 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it("reports a stale-worktree sweep failure and still prepares the issue worktree", async () => {
+  it("replaces an unmarked leftover at the issue's managed path", async () => {
     const branch = "sandbar/issue-83-stale-sweep";
     const layout = layoutFor(dir);
-    const reported = vi.spyOn(console, "error").mockImplementation(() => {});
+    await git(["branch", branch], dir);
+    await mkdir(layout.worktreesDir, { recursive: true });
+    const target = worktreePathFor(layout.worktreesDir, branch);
+    await mkdir(target, { recursive: true });
+    await writeFile(join(target, "stale"), "garbage");
+    const worktreePath = await prepareWorktree({
+      branch,
+      layout,
+      copyToWorktree: [],
+    });
+
+    expect(worktreePath).toBe(worktreePathFor(layout.worktreesDir, branch));
+    expect((await stat(worktreePath)).isDirectory()).toBe(true);
+    expect(existsSync(join(worktreePath, "stale"))).toBe(false);
+  });
+
+  it("preserves reserved source and merger directories during an issue sweep", async () => {
+    const branch = "sandbar/issue-83-reserved-sweep";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    await mkdir(layout.worktreesDir, { recursive: true });
+    await git(["worktree", "add", "--detach", layout.sourceWorktree, "HEAD"], dir);
+    await git(["worktree", "lock", layout.sourceWorktree], dir);
+    const merger = join(layout.worktreesDir, "merger");
+    await git(["clone", "--local", "--no-checkout", dir, merger], dir);
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect((await stat(layout.sourceWorktree)).isDirectory()).toBe(true);
+    expect((await stat(join(merger, ".git"))).isDirectory()).toBe(true);
+  });
+
+  it("reports a stale issue-clone sweep failure and still prepares", async () => {
+    const branch = "sandbar/issue-83-sweep-failure";
+    const layout = layoutFor(dir);
     await git(["branch", branch], dir);
     await mkdir(layout.worktreesDir, { recursive: true });
     const loopA = join(layout.worktreesDir, "loop-a");
     const loopB = join(layout.worktreesDir, "loop-b");
     await symlink("loop-b", loopA);
     await symlink("loop-a", loopB);
+    const reported = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      const worktreePath = await prepareWorktree({
-        branch,
-        layout,
-        copyToWorktree: [],
-      });
-
-      expect(worktreePath).toBe(worktreePathFor(layout.worktreesDir, branch));
-      expect((await stat(worktreePath)).isDirectory()).toBe(true);
+      await expect(
+        prepareWorktree({ branch, layout, copyToWorktree: [] }),
+      ).resolves.toContain("sandbar-issue-83-sweep-failure");
       expect(reported).toHaveBeenCalledWith(
-        "Stale-worktree sweep failed (continuing):",
+        "Stale issue-clone sweep failed (continuing):",
         expect.objectContaining({ code: "ELOOP" }),
       );
     } finally {
@@ -1855,7 +2048,200 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     }
   });
 
-  it("rejects reuse when fetching the issue branch fails unexpectedly", async () => {
+  it("checks out the cache seed when origin still carries an older issue branch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-explicit-seed-"));
+    const origin = join(root, "origin.git");
+    const checkout = join(root, "checkout");
+    try {
+      await git(["init", "--bare", origin], root);
+      await git(["clone", origin, checkout], root);
+      await git(["config", "user.name", "Test Host"], checkout);
+      await git(["config", "user.email", "host@test.com"], checkout);
+      await writeFile(join(checkout, "content.txt"), "old\n");
+      await git(["add", "."], checkout);
+      await git(["commit", "-m", "old source"], checkout);
+      await git(["push", "-u", "origin", "HEAD:main"], checkout);
+      const branch = "sandbar/issue-83-explicit-seed";
+      await git(["push", "origin", `HEAD:refs/heads/${branch}`], checkout);
+
+      await writeFile(join(checkout, "content.txt"), "new seed\n");
+      await git(["commit", "-am", "new source"], checkout);
+      await git(["branch", branch], checkout);
+      const seededTip = (await git(["rev-parse", branch], checkout)).stdout.trim();
+
+      const worktreePath = await prepareWorktree({
+        branch,
+        layout: layoutFor(checkout),
+        copyToWorktree: [],
+      });
+
+      expect((await git(["rev-parse", "HEAD"], worktreePath)).stdout.trim()).toBe(
+        seededTip,
+      );
+      expect(await readFile(join(worktreePath, "content.txt"), "utf8")).toBe(
+        "new seed\n",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("creates a clone when the cache HEAD names the issue branch", async () => {
+    const branch = "sandbar/issue-98-cache-head";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    await git(["symbolic-ref", "HEAD", `refs/heads/${branch}`], dir);
+    const cacheTip = (await git(["rev-parse", branch], dir)).stdout.trim();
+
+    const clone = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect((await git(["symbolic-ref", "HEAD"], clone)).stdout.trim()).toBe(
+      `refs/heads/${branch}`,
+    );
+    expect((await git(["rev-parse", branch], clone)).stdout.trim()).toBe(cacheTip);
+    expect(
+      (await git(["for-each-ref", "--format=%(refname)", "refs/sandbar/reseed"], clone))
+        .stdout,
+    ).toBe("");
+  });
+
+  it("replaces an unmarked clone left before its initial checkout completed", async () => {
+    const branch = "sandbar/issue-83-incomplete-checkout";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    const clone = worktreePathFor(layout.worktreesDir, branch);
+    await git(["clone", "--local", "--no-checkout", dir, clone], dir);
+    expect((await stat(join(clone, ".git"))).isDirectory()).toBe(true);
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect((await git(["symbolic-ref", "HEAD"], clone)).stdout.trim()).toBe(
+      `refs/heads/${branch}`,
+    );
+    expect(
+      (await git(["config", "--get", "sandbar.issueBranch"], clone)).stdout.trim(),
+    ).toBe(branch);
+  });
+
+  it("recovers reuse when the preserved clone lost its issue ref", async () => {
+    const branch = "sandbar/issue-98-missing-private-ref";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    const clone = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+    const cacheTip = (await git(["rev-parse", branch], dir)).stdout.trim();
+    await git(["checkout", "--detach"], clone);
+    await git(["branch", "-D", branch], clone);
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect((await git(["symbolic-ref", "HEAD"], clone)).stdout.trim()).toBe(
+      `refs/heads/${branch}`,
+    );
+    expect((await git(["rev-parse", branch], clone)).stdout.trim()).toBe(cacheTip);
+  });
+
+  it("recovers reuse when HEAD still names the deleted issue ref", async () => {
+    const branch = "sandbar/issue-98-unborn-private-ref";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    const clone = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+    const cacheTip = (await git(["rev-parse", branch], dir)).stdout.trim();
+    await git(["update-ref", "-d", `refs/heads/${branch}`], clone);
+    expect((await git(["symbolic-ref", "HEAD"], clone)).stdout.trim()).toBe(
+      `refs/heads/${branch}`,
+    );
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect((await git(["symbolic-ref", "HEAD"], clone)).stdout.trim()).toBe(
+      `refs/heads/${branch}`,
+    );
+    expect((await git(["rev-parse", branch], clone)).stdout.trim()).toBe(cacheTip);
+  });
+
+  it("sweeps an unmarked orphan outside the branch being prepared", async () => {
+    const branch = "sandbar/issue-83-general-sweep";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    const orphan = join(layout.worktreesDir, "abandoned-clone");
+    await mkdir(orphan, { recursive: true });
+    await writeFile(join(orphan, "leftover"), "garbage");
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect(existsSync(orphan)).toBe(false);
+  });
+
+  it("sweeps a marked clone after its cache branch was removed", async () => {
+    const branch = "sandbar/issue-83-marked-sweep";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    const orphan = join(layout.worktreesDir, "sandbar-issue-999-old-title");
+    await git(["clone", "--local", "--no-checkout", dir, orphan], dir);
+    await git(
+      ["config", "sandbar.issueBranch", "sandbar/issue-999-old-title"],
+      orphan,
+    );
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect(existsSync(orphan)).toBe(false);
+  });
+
+  it("prunes a legacy cache worktree registration after removing its directory", async () => {
+    const branch = "sandbar/issue-83-prune-migration";
+    const legacyBranch = "sandbar/issue-999-legacy-worktree";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    await git(["branch", legacyBranch], dir);
+    const legacyPath = worktreePathFor(layout.worktreesDir, legacyBranch);
+    await git(["worktree", "add", legacyPath, legacyBranch], dir);
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect(existsSync(legacyPath)).toBe(false);
+    expect((await git(["worktree", "list", "--porcelain"], dir)).stdout).not.toContain(
+      legacyPath,
+    );
+    await expect(git(["branch", "-D", legacyBranch], dir)).resolves.toBeDefined();
+  });
+
+  it("refreshes prompt base refs when reusing an issue clone", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-refresh-reuse-"));
+    const origin = join(root, "origin.git");
+    const checkout = join(root, "checkout");
+    try {
+      await git(["init", "--bare", origin], root);
+      await git(["clone", origin, checkout], root);
+      await git(["config", "user.name", "Test Host"], checkout);
+      await git(["config", "user.email", "host@test.com"], checkout);
+      await writeFile(join(checkout, "content.txt"), "first\n");
+      await git(["add", "."], checkout);
+      await git(["commit", "-m", "first"], checkout);
+      await git(["push", "-u", "origin", "HEAD:main"], checkout);
+      const branch = "sandbar/issue-83-refresh-reuse";
+      await git(["branch", branch], checkout);
+      const layout = layoutFor(checkout);
+      const clone = await prepareWorktree({ branch, layout, copyToWorktree: [] });
+      const oldBase = (await git(["rev-parse", "origin/main"], clone)).stdout.trim();
+
+      await writeFile(join(checkout, "content.txt"), "second\n");
+      await git(["commit", "-am", "second"], checkout);
+      await git(["push", "origin", "HEAD:main"], checkout);
+      const newBase = (await git(["rev-parse", "origin/main"], checkout)).stdout.trim();
+      expect(newBase).not.toBe(oldBase);
+
+      await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+      expect((await git(["rev-parse", "origin/main"], clone)).stdout.trim()).toBe(
+        newBase,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects reuse when the cache's refreshed forge origin cannot be fetched", async () => {
     const root = await mkdtemp(join(tmpdir(), "asb-fetch-failure-"));
     const origin = join(root, "origin.git");
     const checkout = join(root, "checkout");
@@ -2055,7 +2441,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     expect(closed).toBe(true);
     // Caller-owned, so it survives — the same rule the bringup case below pins.
     expect(existsSync(worktreePath)).toBe(true);
-    await git(["worktree", "remove", "--force", worktreePath], dir);
+    await rm(worktreePath, { recursive: true, force: true });
   });
 
   it("a container bringup failure leaves the caller-owned prepared worktree in place", async () => {
@@ -2087,7 +2473,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     // initMounts from it, and the caller (not createSandbox) owns it.
     expect(existsSync(worktreePath)).toBe(true);
 
-    await git(["worktree", "remove", "--force", worktreePath], dir);
+    await rm(worktreePath, { recursive: true, force: true });
   });
 
   it("rejects copyToWorktree alongside preparedWorktreePath instead of silently skipping it", async () => {
@@ -2108,7 +2494,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
         }),
       ).rejects.toThrow(/copyToWorktree is ignored/);
     } finally {
-      await git(["worktree", "remove", "--force", worktreePath], dir);
+      await rm(worktreePath, { recursive: true, force: true });
     }
   });
 
@@ -2139,7 +2525,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
 // one answer for a plain repo and for a bare cache, and BOTH are asserted
 // because a fix that only handles the new shape breaks every embedding host
 // that still hands sandbar an ordinary checkout.
-describe("git mounts follow --git-common-dir, bare or not (#38)", () => {
+describe("issue clone isolation (#98)", () => {
   const cleanups: string[] = [];
   afterAll(async () => {
     for (const d of cleanups) await rm(d, { recursive: true, force: true });
@@ -2160,7 +2546,7 @@ describe("git mounts follow --git-common-dir, bare or not (#38)", () => {
     return provider.capturedMounts ?? [];
   };
 
-  it("mounts the plain repo's .git directory", async () => {
+  it("does not mount a plain parent repository's git directory", async () => {
     const dir = await mkdtemp(join(tmpdir(), "asb-mounts-plain-"));
     cleanups.push(dir);
     await git(["init", "-b", "main"], dir);
@@ -2174,14 +2560,10 @@ describe("git mounts follow --git-common-dir, bare or not (#38)", () => {
     const mounts = await mountsFor(layoutFor(dir), "sandbar/issue-1-plain");
 
     const extra = mounts.filter((m) => m.sandboxPath !== SANDBOX_REPO_DIR);
-    expect(extra).toHaveLength(1);
-    expect(extra[0]!.hostPath).toBe(join(dir, ".git"));
-    // Identity: the gitlink inside the worktree names an absolute host path,
-    // so the mount has to appear at that same path inside the container.
-    expect(extra[0]!.sandboxPath).toBe(extra[0]!.hostPath);
+    expect(extra).toEqual([]);
   });
 
-  it("mounts the bare cache itself for a worktree of it", async () => {
+  it("does not mount the bare cache", async () => {
     const root = await mkdtemp(join(tmpdir(), "asb-mounts-bare-"));
     cleanups.push(root);
     const origin = join(root, "origin.git");
@@ -2205,11 +2587,7 @@ describe("git mounts follow --git-common-dir, bare or not (#38)", () => {
     const mounts = await mountsFor(layout, "sandbar/issue-1-bare");
 
     const extra = mounts.filter((m) => m.sandboxPath !== SANDBOX_REPO_DIR);
-    expect(extra).toHaveLength(1);
-    // The cache directory itself — there is no `.git` inside it, which is
-    // exactly what the structural discovery got wrong.
-    expect(extra[0]!.hostPath).toBe(layout.repoDir);
-    expect(extra[0]!.sandboxPath).toBe(layout.repoDir);
+    expect(extra).toEqual([]);
   });
 });
 

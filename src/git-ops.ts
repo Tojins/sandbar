@@ -803,7 +803,7 @@ async function headRef(worktreePath: string): Promise<string | null> {
 // payload — once the worktree is removed, the sha printed in the handoff comment
 // is the only remaining handle on the stranded commits, and degrading it to "an
 // unknown commit" would lose the work quietly rather than loudly.
-async function branchTip(
+export async function branchTip(
   worktreePath: string,
   branch: string,
 ): Promise<string | null> {
@@ -818,6 +818,26 @@ async function branchTip(
     // `git rev-parse --verify` uses 128 for an unresolved ref (unlike
     // `show-ref --verify`, which uses 1). That one named absence is data.
     if (isGitExit(err, 128)) return null;
+    throw err;
+  }
+}
+
+// The symbolic position of HEAD, including an unborn branch whose ref does not
+// yet exist. Unlike `headRef` above this deliberately uses symbolic-ref: the
+// reviewer mutation snapshot needs to distinguish a detached HEAD (null) from
+// HEAD still naming a branch after that branch ref was deleted (#98).
+export async function symbolicHeadRef(
+  worktreePath: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await exec(
+      "git",
+      ["symbolic-ref", "--quiet", "HEAD"],
+      { cwd: worktreePath },
+    );
+    return stdout.trim() || null;
+  } catch (err) {
+    if (isGitExit(err, 1)) return null;
     throw err;
   }
 }

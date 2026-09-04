@@ -286,6 +286,7 @@ describe("containerRunArgs", () => {
     containerName: "sandbar-42-app",
     attach: { kind: "pod", podName: "sandbar-pod-42" } as const,
     worktreePath: "/wt",
+    hideWorktreeGit: true,
   };
 
   it("joins the pod and names the container", () => {
@@ -389,7 +390,18 @@ describe("containerRunArgs", () => {
       container: container({ mountWorktree: "/app" }),
     });
     expect(args).toContain("/wt:/app:rw,z");
+    expect(args).toContain("/app/.git:rw,nosuid,nodev,noexec");
     expect(args[args.indexOf("-w") + 1]).toBe("/app");
+  });
+
+  it("does not mask a file-shaped gitlink", () => {
+    const args = containerRunArgs({
+      ...base,
+      hideWorktreeGit: false,
+      container: container({ mountWorktree: "/app" }),
+    });
+    expect(args).toContain("/wt:/app:rw,z");
+    expect(args).not.toContain("/app/.git:rw,nosuid,nodev,noexec");
   });
 
   it("omits the worktree mount when the container does not ask for one", () => {

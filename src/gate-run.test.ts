@@ -6,6 +6,10 @@
 // directions. Every case below is either "this must tear the stack down" or
 // "this must not", and each of the second kind is a warm database somebody
 // would otherwise lose to an unrelated edit.
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -14,10 +18,32 @@ import {
   type ResolvedGateStack,
   resolveGateStack,
 } from "./config.js";
-import { gateReuseToken, gateStackImagesOf } from "./gate-run.js";
+import {
+  gateReuseToken,
+  gateStackImagesOf,
+  shouldHideWorktreeGit,
+} from "./gate-run.js";
 
 const WT = "/wt";
 const V = "1.2.3";
+
+describe("shouldHideWorktreeGit", () => {
+  it("distinguishes a clone directory from a linked-worktree gitlink", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandbar-gate-git-shape-"));
+    try {
+      const clone = join(root, "clone");
+      const linked = join(root, "linked");
+      await mkdir(join(clone, ".git"), { recursive: true });
+      await mkdir(linked);
+      await writeFile(join(linked, ".git"), "gitdir: /repo/.git/worktrees/linked\n");
+
+      expect(shouldHideWorktreeGit(clone)).toBe(true);
+      expect(shouldHideWorktreeGit(linked)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 const stack = (over: Partial<GateStackConfig> = {}): ResolvedGateStack =>
   resolveGateStack({

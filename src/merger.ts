@@ -319,9 +319,9 @@ import {
 } from "./forge-verify.js";
 import { type GateResult, formatGateFields } from "./gate.js";
 import { fetchIssueText } from "./issue-anchor.js";
-import { gitMountsForWorktree } from "./merger-worktree.js";
 import {
   memberBranchName,
+  issueNumberFromBranch,
   type RunScope,
   scopedResourcePrefix,
 } from "./naming.js";
@@ -2091,6 +2091,8 @@ async function closeMergedIssues(
 
 export type RealAdapterDeps = {
   readonly cwd: string;
+  // Host-only cache used solely as the source for issue refs (#98).
+  readonly cacheDir: string;
   // The run's podman namespace (#28), for the one container this module starts
   // — the resolve agent's. It was ANONYMOUS until #67, which meant a container
   // that died at startup could not even be named in the failure it caused; and
@@ -2487,6 +2489,20 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     // difference. See `chunk-land.ts`.
     ...chunkForgeWrites({ repo: deps.repo, gitCwd: cwd, errPrefix: "merger" }),
     async mergeNoFf(unit) {
+      // Fetch failures are infrastructure failures, not merge conflicts. Keep
+      // this outside the merge-only catch so the caller's halt path preserves
+      // that distinction (#67, #98).
+      if (issueNumberFromBranch(unit.branch) !== null) {
+        await exec(
+          "git",
+          [
+            "fetch",
+            deps.cacheDir,
+            `+refs/heads/${unit.branch}:refs/heads/${unit.branch}`,
+          ],
+          { cwd },
+        );
+      }
       try {
         await exec(
           "git",
@@ -2512,9 +2528,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // image, augmented with this run's routed providers (#75).
       // Bind-mounts the merger worktree at /workspace so
       // the agent's edits and commits are live on host. `cwd` is a git worktree
-      // (detached at origin/<sourceBranch>), so its `.git` is a gitlink file
-      // pointing at the parent repo's common git dir — that dir is identity-
-      // mounted too so in-container git can follow the link.
+      // (detached at origin/<sourceBranch>) with a real `.git` directory, all
+      // covered by the workspace mount; the host cache is never mounted.
       //
       // Captures stdout for the promise-token parser AND stderr, the exit
       // status, the duration and the container's name (#67). Before, stderr was
@@ -2527,7 +2542,6 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // two cycles resolving the same issue from colliding on the name; the
       // attempt number is in it so the name is greppable against the log line.
       const container = `${scopedResourcePrefix(deps.scope)}resolve-${attempt}-${randomUUID()}`;
-      const extraMounts = await gitMountsForWorktree(cwd);
       const command = agentProvider.buildPrintCommand({
         prompt,
         dangerouslySkipPermissions: true,
@@ -2535,7 +2549,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       const args = buildResolveRunArgv({
         container,
         cwd,
-        extraMounts,
+        extraMounts: [],
         image: deps.sandboxImage,
         command: command.command,
         credentials: resolveAgentCredentials(deps.mergerAgent, deps.env),
@@ -2550,11 +2564,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     },
     async isMergeInProgress() {
       // NOT `<cwd>/.git/MERGE_HEAD`. Since #10 the merger always runs in a
-      // LINKED WORKTREE, whose `.git` is a gitlink file, not a directory — the
-      // merge state lives at `.git/worktrees/<name>/MERGE_HEAD` in the parent
-      // repo. Testing the naive path returns false unconditionally in
-      // production, which silently disabled the resolve loop's "still
-      // conflicted, here is the digest" re-prompt. `--git-path` resolves it
+      // repository. `--git-path` remains the canonical way to resolve it
       // correctly in a worktree and in a plain checkout alike.
       try {
         const { stdout } = await exec(

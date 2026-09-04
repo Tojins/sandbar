@@ -82,6 +82,13 @@ import { sandbarVersion } from "./version.js";
 // is the same reason #47 declined to tokenise the id.
 export const GATE_STACK_ID = "gate";
 
+export function shouldHideWorktreeGit(worktreePath: string): boolean {
+  return (
+    statSync(resolve(worktreePath, ".git"), { throwIfNoEntry: false })?.isDirectory() ===
+    true
+  );
+}
+
 // Exit codes. 0/1 are the shape every test runner and CI system already reads;
 // 2 is the one that must not be confused with either, because "the stack could
 // not be brought up" is not a verdict about the code and treating it as a red
@@ -558,6 +565,7 @@ async function gate(
     scope,
     spec: config.gateStack,
     worktreePath,
+    hideWorktreeGit: shouldHideWorktreeGit(worktreePath),
     images: (only) => branchImages.resolve(worktreePath, only),
     reuseToken: gateReuseToken(
       config.gateStack,

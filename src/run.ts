@@ -806,16 +806,28 @@ export async function run(
     console.log(`\nFinalise (${label}): ${finalizeResults.length} issue(s).`);
     for (const r of finalizeResults) {
       const issue = r.input.issue;
-      const tag =
-        r.action.kind === "deleted-local"
-          ? "deleted local branch"
-          : r.action.kind === "delete-failed"
-            ? `delete failed (${r.action.error})`
-            : r.action.kind === "pushed"
-              ? "pushed branch"
-              : r.action.kind === "skipped-closed"
-                ? "skipped (issue already closed)"
-                : "no action";
+      const tag = (() => {
+        switch (r.action.kind) {
+          case "deleted-local":
+            return "deleted local branch";
+          case "delete-failed":
+            return `delete failed (${r.action.error})`;
+          case "pushed":
+            return "pushed branch";
+          case "parked-local":
+            return "parked; branch preserved locally";
+          case "kept-branch":
+            return r.action.reason;
+          case "skipped-closed":
+            return "skipped (issue already closed)";
+          case "noop":
+            return "no action";
+          default: {
+            const exhaustive: never = r.action;
+            return exhaustive;
+          }
+        }
+      })();
       console.log(`  #${issueNumberOf(issue)} ${r.input.kind} → ${tag}`);
       await runLogger.appendOrchestrator(
         `finalise #${issueNumberOf(issue)} ${r.input.kind} → ${tag}`,
@@ -1305,6 +1317,7 @@ export async function run(
             scope,
             spec: config.gateStack,
             worktreePath: mergerWorktree.path,
+            hideWorktreeGit: true,
             // gate-2 needs this as much as gate-1 does (#37): the merge result
             // is a tree neither branch had, and two branches that each touched
             // the lockfile compose into a third lockfile. Resolved per gate
@@ -1314,6 +1327,7 @@ export async function run(
           const stackForGate2 = mergerStack;
           const adapter = realAdapter({
             cwd: mergerWorktree.path,
+            cacheDir: layout.repoDir,
             scope,
             repo,
             sourceBranch: config.sourceBranch,

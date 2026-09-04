@@ -99,8 +99,8 @@
 //     wrong BEFORE the run starts, which is the one an operator can act on
 //     from the message.
 // The agent sandbox needs no equivalent, and that is settled rather than open:
-// its mounts are entirely sandbar-derived (the worktree plus whatever
-// `resolveGitMounts` answers) and `config.ts` exposes no mount surface for it,
+// its mounts are entirely sandbar-derived (the self-contained issue clone)
+// and `config.ts` exposes no mount surface for it,
 // so `gateStack.containers[].mounts[]` is the whole class of consumer-supplied
 // host paths and this check is complete at that scope.
 //
@@ -180,7 +180,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 
@@ -1058,15 +1058,14 @@ export async function deleteMergedSandbarBranches(
     if (!landedInChunk && !(await isBranchMerged(repoDir, branch, cfg.sourceBranch))) {
       continue;
     }
-    // A leftover worktree (from a crash or a non-merged terminal whose
-    // finalize ran before the corresponding fix landed) holds the branch and
-    // makes `git branch -D` fail. Remove it best-effort first.
-    await runOk(repoDir, "git", [
-      "worktree",
-      "remove",
-      "--force",
-      worktreePathFor(cfg.layout.worktreesDir, branch),
-    ]);
+    // Issue repositories are standalone clone directories (#98), not cache
+    // worktree registrations. Clear a crash leftover before deleting its ref.
+    await rm(worktreePathFor(cfg.layout.worktreesDir, branch), {
+      recursive: true,
+      force: true,
+    });
+    // A pre-#98 linked worktree may still be registered after its directory is
+    // gone, and that stale registration blocks branch deletion until pruned.
     await runOk(repoDir, "git", ["worktree", "prune"]);
     // Use -D rather than -d: when the branch is merged only into
     // origin/sourceBranch (not local), git's safety check refuses -d even

@@ -339,6 +339,10 @@ export type StackOptions = {
   // The worktree the gate is a verdict about. Must exist, with its files, before
   // this call — bind-mount sources are read at container start.
   readonly worktreePath: string;
+  // Hide a self-contained clone's object store from gate containers. False
+  // for a standalone gate over a linked worktree, whose `.git` is a file and
+  // therefore cannot be a tmpfs mountpoint (#98).
+  readonly hideWorktreeGit: boolean;
   // Which image each container should actually run, for THIS worktree as it is
   // right now (#37). Called at the top of every gate run, never cached: an
   // image that bakes a lockfile is a function of the branch, and the branch
@@ -657,6 +661,7 @@ export function containerRunArgs(opts: {
   readonly attach: ContainerAttachment;
   readonly container: ResolvedStackContainer;
   readonly worktreePath: string;
+  readonly hideWorktreeGit: boolean;
 }): string[] {
   const { container: c } = opts;
   const args = [
@@ -682,6 +687,11 @@ export function containerRunArgs(opts: {
   ];
   if (c.mountWorktree !== null) {
     args.push("-v", `${opts.worktreePath}:${c.mountWorktree}:rw,z`);
+    // A gate consumes files, never repository state (#98). Hide the clone's
+    // real object store just as the former gitlink was unusable in-container.
+    if (opts.hideWorktreeGit === true) {
+      args.push("--tmpfs", `${c.mountWorktree}/.git:rw,nosuid,nodev,noexec`);
+    }
     args.push("-w", c.mountWorktree);
   }
   if (c.hold) {
@@ -1035,6 +1045,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       attach,
       label: GATE_LABEL,
       worktreePath: opts.worktreePath,
+      hideWorktreeGit: opts.hideWorktreeGit,
       nameOf,
     });
     // Past this statement nothing THIS CALL created is half-built, which is the
@@ -1096,6 +1107,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
           issueContainers,
           attach,
           worktreePath: opts.worktreePath,
+          hideWorktreeGit: opts.hideWorktreeGit,
           nameOf,
           images: imageResolver
             ? () => imageResolver(imagesThisStackRuns)
@@ -1285,6 +1297,7 @@ export type BringUpCtx = {
   // pod where nothing is wrong.
   readonly label: string;
   readonly worktreePath: string;
+  readonly hideWorktreeGit: boolean;
   // Passed as a closure rather than rebuilt from (scope, stackId) here: the
   // name is the stack's identity, and one place composes it.
   readonly nameOf: (c: ResolvedStackContainer) => string;
@@ -1320,6 +1333,7 @@ export async function bringUpContainers(
         attach: ctx.attach,
         container: c,
         worktreePath: ctx.worktreePath,
+        hideWorktreeGit: ctx.hideWorktreeGit,
       }),
       CONTROL_TIMEOUT_MS,
     );
@@ -1812,6 +1826,7 @@ type RunGateCtx = {
   readonly issueContainers: readonly ResolvedStackContainer[];
   readonly attach: ContainerAttachment;
   readonly worktreePath: string;
+  readonly hideWorktreeGit: boolean;
   readonly nameOf: (c: ResolvedStackContainer) => string;
   readonly images: () => Promise<ImageMap>;
   // Mutable, owned by `startStack`: what the issue containers are running now.
@@ -1980,6 +1995,7 @@ async function assertIssueContainerHealthy(
       attach: ctx.attach,
       label: GATE_LABEL,
       worktreePath: ctx.worktreePath,
+      hideWorktreeGit: ctx.hideWorktreeGit,
       nameOf: ctx.nameOf,
     });
   } catch (err) {
@@ -2150,6 +2166,7 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
         attach: ctx.attach,
         label: GATE_LABEL,
         worktreePath: ctx.worktreePath,
+        hideWorktreeGit: ctx.hideWorktreeGit,
         nameOf: ctx.nameOf,
       });
     } catch (err) {
@@ -2206,6 +2223,7 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
       attach: ctx.attach,
       label: GATE_LABEL,
       worktreePath: ctx.worktreePath,
+      hideWorktreeGit: ctx.hideWorktreeGit,
       nameOf: ctx.nameOf,
     });
     steps.push({ name: "containers:attempt", ok: true, durationMs: tAttempt() });
@@ -2410,6 +2428,7 @@ async function reapKilledStep(
       attach: ctx.attach,
       label: GATE_LABEL,
       worktreePath: ctx.worktreePath,
+      hideWorktreeGit: ctx.hideWorktreeGit,
       nameOf: ctx.nameOf,
     });
   } catch (err) {

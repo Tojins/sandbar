@@ -39,7 +39,9 @@
 // walks UP and hands the operator's own repo to the destructive operations —
 // the bare-cache safety argument inverted. Probes NAME their target:
 // `--git-dir=<path>` for the cache, `--git-common-dir` compared against it
-// for a worktree.
+// for a worktree. The persistent source worktree is locked: issue-clone
+// cleanup and a human may run cache-wide `worktree prune`, and the lock keeps
+// a temporarily unreachable build context registered until it can be reset.
 
 import { execFile } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
@@ -56,8 +58,14 @@ const exec = promisify(execFile);
 export const CACHE_DIR_NAME = "repo.git";
 
 // The persistent worktree the base images are built from. A NAME, not a
-// branch: it is detached at origin/<sourceBranch> and reset there every run.
+// branch: it is detached at origin/<sourceBranch>, locked against cache-wide
+// pruning, and reset there every run.
 export const SOURCE_WORKTREE_NAME = "source";
+export const MERGER_WORKTREE_NAME = "merger";
+export const RESERVED_WORKTREE_NAMES: ReadonlySet<string> = new Set([
+  SOURCE_WORKTREE_NAME,
+  MERGER_WORKTREE_NAME,
+]);
 
 // Every path sandbar owns, derived from the two knobs a consumer sets.
 //
@@ -410,7 +418,10 @@ export async function ensureSourceWorktree(
     // has no registration for, and `worktree add` refuses a non-empty one. It
     // is inside the disposable state directory and, by the probe above, holds
     // no repository of its own.
-    await gitOk(repoDir, ["worktree", "remove", "--force", sourceWorktree]);
+    // A locked registration requires two --force flags. The path may be gone
+    // while its locked registration remains; replacement is safe because this
+    // managed path is reserved exclusively for the source build context.
+    await gitOk(repoDir, ["worktree", "remove", "--force", "--force", sourceWorktree]);
     await gitOk(repoDir, ["worktree", "prune"]);
     await rm(sourceWorktree, { recursive: true, force: true });
     try {
@@ -421,6 +432,9 @@ export async function ensureSourceWorktree(
         sourceWorktree,
         target,
       ]);
+      // Protect the persistent build context from pruneStaleIssueClones's
+      // cache-wide prune and from an equivalent command run by hand.
+      await git(repoDir, ["worktree", "lock", sourceWorktree]);
     } catch (err) {
       throw new SandbarError(
         `Failed to create the source worktree at ${sourceWorktree} ` +
@@ -432,6 +446,9 @@ export async function ensureSourceWorktree(
   }
 
   try {
+    // Idempotent and best-effort on reuse: an already-locked worktree makes
+    // `git worktree lock` fail, but the invariant is already satisfied.
+    await gitOk(repoDir, ["worktree", "lock", sourceWorktree]);
     await git(sourceWorktree, ["reset", "--hard", "-q", target]);
     await git(sourceWorktree, ["clean", "-ffdx", "-q"]);
   } catch (err) {

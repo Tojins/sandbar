@@ -128,14 +128,85 @@ describe("realAdapter.isMergeInProgress (real linked worktree)", () => {
   });
 });
 
+describe("realAdapter.mergeNoFf issue-ref import (#98)", () => {
+  let root: string;
+  let cache: string;
+  let merger: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-merge-import-"));
+    cache = join(root, "repo.git");
+    merger = join(root, "merger");
+    const seed = join(root, "seed");
+    await exec("git", ["init", "--bare", "-b", "main", cache], {
+      env: GIT_ENV,
+    });
+    await exec("git", ["init", "-b", "main", seed], { env: GIT_ENV });
+    await commit(seed, "base.txt", "base\n");
+    await git(seed, "push", cache, "main");
+    await exec("git", ["clone", "--local", cache, merger], { env: GIT_ENV });
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("rejects a missing cache ref instead of reporting a merge conflict", async () => {
+    const adapter = realAdapter({
+      cwd: merger,
+      cacheDir: cache,
+      sourceBranch: "main",
+      botName: "bot",
+      botEmail: "bot@e",
+      coauthorTrailer: "",
+    } as unknown as Parameters<typeof realAdapter>[0]);
+    const before = await git(merger, "rev-parse", "HEAD");
+
+    await expect(
+      adapter.mergeNoFf({
+        id: "98",
+        title: "missing cache ref",
+        branch: "sandbar/issue-98-missing",
+      }),
+    ).rejects.toThrow();
+
+    expect(await git(merger, "rev-parse", "HEAD")).toBe(before);
+    expect(await adapter.isMergeInProgress()).toBe(false);
+  });
+
+  it("imports an issue ref that exists only in the cache and merges its local name", async () => {
+    const branch = "sandbar/issue-98-imported";
+    await git(merger, "checkout", "-b", branch);
+    await commit(merger, "issue.txt", "isolated work\n");
+    const issueTip = await git(merger, "rev-parse", "HEAD");
+    await git(merger, "push", cache, `HEAD:refs/heads/${branch}`);
+    await git(merger, "checkout", "main");
+    await git(merger, "branch", "-D", branch);
+
+    const adapter = realAdapter({
+      cwd: merger,
+      cacheDir: cache,
+      sourceBranch: "main",
+      botName: "bot",
+      botEmail: "bot@e",
+      coauthorTrailer: "",
+    } as unknown as Parameters<typeof realAdapter>[0]);
+
+    await adapter.mergeNoFf({ id: "98", title: "import", branch });
+
+    expect(await git(merger, "rev-parse", branch)).toBe(issueTip);
+    expect(await git(merger, "show", "HEAD:issue.txt")).toBe("isolated work");
+  });
+});
+
 // #60 — the three git primitives the chunk landing rests on, against real
 // repositories in the shape production uses: a BARE object cache with
-// `+refs/heads/*:refs/remotes/origin/*` configured, a detached linked worktree
-// hanging off it, and a bare origin. Every claim in the adapter's comments is a
-// claim about git's behaviour in exactly that shape, and none of it is visible
-// in a plain clone: a chunk branch is fetched into a repo with no working tree,
-// and pushed from a HEAD that is on no branch.
-describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
+// `+refs/heads/*:refs/remotes/origin/*` configured, a detached standalone clone
+// of it, and a bare origin. Every claim in the adapter's comments is a
+// claim about git's behaviour in exactly that shape: remote refs live in the
+// merger clone, independently of the cache, and pushes start from a detached
+// HEAD.
+describe("realAdapter chunk primitives (real bare cache + standalone clone)", () => {
   let root: string;
   let origin: string;
   let seed: string;
@@ -160,7 +231,10 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     });
     await git(cache, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*");
     await git(cache, "fetch", "origin", "--prune", "--quiet");
-    await git(cache, "worktree", "add", "--detach", wt, "origin/main");
+    await exec("git", ["clone", "--local", "--no-checkout", cache, wt], { env: GIT_ENV });
+    await git(wt, "fetch", cache, "+refs/remotes/origin/*:refs/remotes/origin/*");
+    await git(wt, "remote", "set-url", "origin", origin);
+    await git(wt, "checkout", "--detach", "origin/main");
   });
 
   afterEach(async () => {
@@ -170,6 +244,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
   const adapter = () =>
     realAdapter({
       cwd: wt,
+      cacheDir: cache,
       sourceBranch: "main",
       botName: "bot",
       botEmail: "bot@e",
@@ -204,7 +279,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
       ref: "refs/remotes/origin/sandbar/chunk-1-c",
     });
     expect(
-      await git(cache, "rev-parse", "--verify", "refs/remotes/origin/sandbar/chunk-1-c"),
+      await git(wt, "rev-parse", "--verify", "refs/remotes/origin/sandbar/chunk-1-c"),
     ).toBeTruthy();
   });
 
@@ -214,7 +289,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     // is gone" is a tracker write and a false claim on somebody's pull
     // request.
     await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
-    await git(cache, "remote", "set-url", "origin", join(root, "gone.git"));
+    await git(wt, "remote", "set-url", "origin", join(root, "gone.git"));
 
     const found = await adapter().fetchChunkRef("sandbar/chunk-1-c");
 
@@ -225,22 +300,22 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
   it("still bases an unreachable origin on the source branch, which is safe to be wrong about", async () => {
     // `chunkBase` keeps the collapse the landing refuses: its wrongness is
     // caught by a rejected push, never by a tracker write.
-    await git(cache, "remote", "set-url", "origin", join(root, "gone.git"));
+    await git(wt, "remote", "set-url", "origin", join(root, "gone.git"));
 
     expect(await adapter().chunkBase("sandbar/chunk-1-c")).toBe("origin/main");
   });
 
-  it("bases on origin's chunk branch when it exists, fetching it into the bare cache", async () => {
+  it("bases on origin's chunk branch when it exists, fetching it into the merger clone", async () => {
     await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
 
     const base = await adapter().chunkBase("sandbar/chunk-1-c");
 
     expect(base).toBe("refs/remotes/origin/sandbar/chunk-1-c");
     // The point of the explicit refspec: the remote-tracking ref really is in
-    // the cache afterwards, so `checkoutDetached(base)` has something to
+    // the merger clone afterwards, so `checkoutDetached(base)` has something to
     // resolve. A fetch that only wrote FETCH_HEAD would pass the line above
     // and fail here.
-    expect(await git(cache, "rev-parse", "--verify", base)).toBeTruthy();
+    expect(await git(wt, "rev-parse", "--verify", base)).toBeTruthy();
   });
 
   it("atomically pushes the chunk and member issue branch", async () => {
@@ -287,7 +362,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
   it("refuses to publish a member source not contained by the chunk", async () => {
     await commit(seed, "member-source.txt", "member source\n");
     await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/issue-5-member");
-    await git(cache, "fetch", "origin", "--quiet");
+    await git(wt, "fetch", "origin", "--quiet");
 
     const result = await adapter().pushChunkBranch("sandbar/chunk-5-c", [{
       source: "origin/sandbar/issue-5-member",
@@ -405,7 +480,7 @@ describe("realAdapter chunk primitives (real bare cache + worktree)", () => {
     await a.checkoutDetached(base);
 
     expect(await git(wt, "rev-parse", "HEAD")).toBe(
-      await git(cache, "rev-parse", base),
+      await git(wt, "rev-parse", base),
     );
     await expect(git(wt, "symbolic-ref", "HEAD")).rejects.toThrow();
   });

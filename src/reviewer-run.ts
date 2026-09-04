@@ -11,6 +11,8 @@
 //     fault.
 // "Nothing" is retried once before it is believed (flake vs fault; the retry
 // costs no budget), and the transcript of every invocation is kept whole.
+// Repository mutation aborts the invocation loop as a typed value, so no
+// second reviewer runs against state the first reviewer altered (#98).
 //
 // A review ROUND first applies that policy to correctness. A correctness
 // rejection finishes the round immediately; an approval asks the runner for a
@@ -31,9 +33,10 @@ export const REVIEWER_MAX_INVOCATIONS = 2;
 // bounded; the transcript keeps everything.
 export const REVIEWER_DETAIL_TAIL_CHARS = 2000;
 
-// One invocation's raw result. Never a rejection: the caller adapts its
-// sandbox's throw into this shape, which is what keeps the classification below
-// pure and table-testable without an error-shaped fixture.
+// One invocation's raw review result. Ordinary sandbox failures are adapted
+// into this shape, which keeps classification pure and table-testable without
+// an error-shaped fixture. A detected reviewer write is the sole rejection: it
+// is repository mutation, not a review outcome, and must bypass the retry.
 export type ReviewerRun = {
   // Everything the agent emitted — its stdout when the run completed, its
   // partial output when it failed (`agentPartialOutput`).
@@ -41,6 +44,14 @@ export type ReviewerRun = {
   // The harness error's message, or null when the run completed.
   readonly error: string | null;
 };
+
+export type ReviewerInvocation =
+  | { readonly kind: "run"; readonly run: ReviewerRun }
+  | {
+      readonly kind: "aborted";
+      readonly event: Extract<LoopEvent, { kind: "reviewer-wrote" }>;
+      readonly transcript: string;
+    };
 
 export type ReviewerOutcome =
   | {
@@ -58,7 +69,13 @@ export type ReviewerOutcome =
       readonly detail: string;
       readonly transcript: string;
       readonly invocations: number;
-    };
+    }
+  | Extract<ReviewerInvocation, { readonly kind: "aborted" }>;
+
+export type CompletedReviewerOutcome = Exclude<
+  ReviewerOutcome,
+  { readonly kind: "aborted" }
+>;
 
 export type ReviewerPass = "correctness" | "followup";
 
@@ -83,14 +100,14 @@ export function continueReviewerSession(pass: ReviewerPass, invocation: number):
   return pass === "followup" && invocation === 1;
 }
 
-export function decideReviewRound(correctness: ReviewerOutcome): ReviewRoundDecision;
+export function decideReviewRound(correctness: CompletedReviewerOutcome): ReviewRoundDecision;
 export function decideReviewRound(
-  correctness: ReviewerOutcome,
-  followup: ReviewerOutcome,
+  correctness: CompletedReviewerOutcome,
+  followup: CompletedReviewerOutcome,
 ): FinishedReviewRoundDecision;
 export function decideReviewRound(
-  correctness: ReviewerOutcome,
-  followup?: ReviewerOutcome,
+  correctness: CompletedReviewerOutcome,
+  followup?: CompletedReviewerOutcome,
 ): ReviewRoundDecision {
   if (correctness.kind === "harness-failed") {
     return {
@@ -177,10 +194,12 @@ export type ReviewerRunOptions = {
 };
 
 // Invoke the reviewer until one invocation yields a verdict, or the invocation
-// budget runs out. `invoke` is given the 1-based invocation number and must not
-// reject — see ReviewerRun.
+// budget runs out. `invoke` is given the 1-based invocation number. It returns
+// a `ReviewerInvocation`: `run` for completed and ordinary failed invocations,
+// `aborted` for a detected reviewer write. A normal run is classified here; an
+// aborted value returns immediately and deliberately bypasses the retry loop.
 export async function runReviewerInvocations(
-  invoke: (invocation: number) => Promise<ReviewerRun>,
+  invoke: (invocation: number) => Promise<ReviewerInvocation>,
   opts: ReviewerRunOptions = {},
 ): Promise<ReviewerOutcome> {
   const max = opts.maxInvocations ?? REVIEWER_MAX_INVOCATIONS;
@@ -188,7 +207,9 @@ export async function runReviewerInvocations(
   const details: string[] = [];
 
   for (let n = 1; n <= max; n++) {
-    const run = await invoke(n);
+    const invocation = await invoke(n);
+    if (invocation.kind === "aborted") return invocation;
+    const { run } = invocation;
     transcript.push(transcriptEntry(n, run));
     const verdict = parseVerdict(run.output);
     if (verdict !== null) {

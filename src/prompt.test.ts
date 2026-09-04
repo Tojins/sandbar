@@ -227,7 +227,7 @@ describe("renderReviewerSlot", () => {
       diff: "diff",
     });
     expect(slot).toMatch(/strictly advisory/i);
-    expect(slot).toMatch(/must not modify the branch/i);
+    expect(slot).toMatch(/do not run any command that writes under/i);
   });
 
   it("documents the verdict-token contract with both options", () => {

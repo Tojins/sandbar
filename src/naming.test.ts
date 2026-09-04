@@ -28,12 +28,14 @@ import {
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
   ORIGIN_MEMBER_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
+  STRANDED_HEAD_REFGLOB,
   branchNameFromOriginRef,
   chunkBranchName,
   issueBranchName,
   issueNumberFromBranch,
   kebabSlug,
   rootIssueFromChunkBranch,
+  strandedHeadRef,
 } from "./naming.js";
 
 describe("naming transition contract", () => {
@@ -211,6 +213,14 @@ describe("branch names (#58)", () => {
     for (const glob of SANDBAR_BRANCH_REFGLOBS) {
       expect(glob.startsWith("refs/heads/")).toBe(true);
     }
+  });
+
+  it("keeps stranded HEAD ref naming and enumeration aligned", () => {
+    expect(STRANDED_HEAD_REFGLOB).toBe("refs/sandbar/stranded/*");
+    expect(strandedHeadRef("deadbeef")).toBe("refs/sandbar/stranded/deadbeef");
+    expect(
+      strandedHeadRef("deadbeef").startsWith(STRANDED_HEAD_REFGLOB.slice(0, -1)),
+    ).toBe(true);
   });
 
   it("globs match what the builders produce", () => {
