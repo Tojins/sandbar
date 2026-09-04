@@ -7,6 +7,7 @@ describe("parseVerdict", () => {
     const r = parseVerdict("looks good.\n<verdict>APPROVED</verdict>");
     expect(r.verdict).toBe("APPROVED");
     expect(r.prose).toBe("looks good.\n<verdict>APPROVED</verdict>");
+    expect(r.specGap).toBeNull();
   });
 
   it("returns CHANGES-REQUESTED when the token is present", () => {
@@ -112,6 +113,27 @@ describe("parseVerdict", () => {
       parseVerdict("<verdict>APPROVED</verdict>\nthe `</verdict>` closer ends it")
         ?.verdict,
     ).toBe("APPROVED");
+  });
+});
+
+describe("spec-gap block", () => {
+  it.each([
+    ["quoted opener", "the `<spec-gap>` tag is optional", null],
+    ["unclosed opener", "<spec-gap>question? answer", null],
+    ["empty block", "<spec-gap>  \n </spec-gap>", ""],
+  ])("treats a %s according to the tempered block contract", (_name, block, expected) => {
+    expect(
+      parseVerdict(`${block}\n<verdict>APPROVED</verdict>`)?.specGap,
+    ).toBe(expected);
+  });
+
+  it("uses the last well-formed block", () => {
+    const parsed = parseVerdict(
+      "<spec-gap>first decision</spec-gap>\n" +
+        "<spec-gap>second decision</spec-gap>\n" +
+        "<verdict>CHANGES-REQUESTED</verdict>",
+    );
+    expect(parsed?.specGap).toBe("second decision");
   });
 });
 

@@ -39,6 +39,13 @@
 // additionally emit `### Correctness` — #19's escalation permission for a
 // defect it happens to notice — so the headings are not a partition and nothing
 // downstream parses them.
+//
+// The correctness pass may also declare one `<spec-gap>` block (#108).
+// `parseVerdict` keeps it on the parsed correctness verdict; composition does
+// not place it on the state-machine event because it is evidence, not a
+// decision input. The I/O runner reads it directly from the completed
+// correctness outcome and accumulates it beside prior-round history. A block
+// emitted by quality is therefore structurally ignored.
 
 import type { ReviewerResult } from "./inner-loop-machine.js";
 import { type ParsedVerdict, parseVerdict } from "./verdict-parser.js";

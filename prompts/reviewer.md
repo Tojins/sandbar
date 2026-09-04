@@ -44,12 +44,26 @@ If a dimension requests changes, put only its actionable findings under its
 exact heading: `### Correctness` or `### Spec`. Omit the heading of a dimension
 that passes.
 
+When, and only when, a fundamental implementation error was caused by a question
+the issue and project conventions do not answer, declare the missing decision in
+one optional free-text block:
+
+`<spec-gap>the unanswered question, followed by the answer this review applied</spec-gap>`
+
+This is rare: issue vagueness alone is not a gap, nor is a finding whose answer
+the issue or conventions already determine. The answer is yours to decide; the
+block records that decision and never asks a human to make it. Prior review
+rounds and the issue's comments contain earlier records. Do not repeat one that
+has already been recorded. Emit at most one block, immediately before the
+verdict token; when several missing decisions caused the same fundamental error,
+record them together in that block.
+
 ## Verdict
 
-Your output is only the blocking findings under their exact headings, followed by
-the verdict token. Do not include a summary, what you checked, non-blocking
-observations, or a restatement of the change. When approving, emit the verdict
-token alone.
+Your output is only the blocking findings under their exact headings, an optional
+spec-gap block, and the verdict token. Do not include a summary, what you checked, non-blocking
+observations, or a restatement of the change.
+When approving, emit the verdict token alone on its line, after any spec-gap block.
 
 End your review with a single verdict token on its own:
 

@@ -35,6 +35,9 @@
 // Successful review rounds accumulate here beside the commits they judged and
 // are handed to both cold reviewer prompts on later rounds (#88). Harness
 // failures add no entry, and a fresh HARD-ERROR cycle resets the history.
+// An optional `<spec-gap>` declared by the correctness pass is accumulated
+// beside that history but around the state machine, preserved across fresh
+// cycles, and carried on every terminal for finalise to record (#108).
 // That history also switches the quality pass from its one whole-branch listing
 // to a review anchored at the newest earlier quality head; the round record
 // exposes that list/verify mode without storing another piece of state (#107).
@@ -251,12 +254,17 @@ export type IssueRef = {
 };
 
 export type Terminal =
-  | { readonly type: "DONE"; readonly commits: readonly { sha: string }[] }
+  | {
+      readonly type: "DONE";
+      readonly commits: readonly { sha: string }[];
+      readonly specGaps: readonly SpecGap[];
+    }
   | {
       readonly type: "NEEDS-INFO";
       readonly questions: string;
       // #27 — where the agent's commits went, when it asked from off the branch.
       readonly strandedHead: HeadMismatch | null;
+      readonly specGaps: readonly SpecGap[];
     }
   | {
       // #21. `commits` is normally empty (the assessment happens before any
@@ -269,6 +277,7 @@ export type Terminal =
       // counted on the branch, so an off-branch escalation reports none and
       // finalize would delete the branch and post nothing about the work.
       readonly strandedHead: HeadMismatch | null;
+      readonly specGaps: readonly SpecGap[];
     }
   | {
       readonly type: "NEEDS-HUMAN";
@@ -282,24 +291,33 @@ export type Terminal =
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
       readonly strandedHead: HeadMismatch | null;
+      readonly specGaps: readonly SpecGap[];
     }
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
       readonly cause?: "reviewer-wrote";
       readonly commits: readonly { sha: string }[];
+      readonly specGaps: readonly SpecGap[];
     }
   | {
       readonly type: "HARD-ERROR";
       readonly reason: string;
       readonly commits: readonly { sha: string }[];
+      readonly specGaps: readonly SpecGap[];
     }
   | {
       readonly type: "QUOTA";
       readonly provider: AgentProviderName;
       readonly window: string;
       readonly resetsAt?: number;
+      readonly specGaps: readonly SpecGap[];
     };
+
+export type SpecGap = {
+  readonly round: number;
+  readonly text: string;
+};
 
 export type RunQuotaState = {
   get(provider: AgentProviderName): RateLimitMeasurement | undefined;
@@ -412,6 +430,7 @@ export type InnerLoopOptions = {
 type SandboxCycleOutcome = {
   readonly verdict: Verdict;
   readonly accumulatedCommits: readonly { sha: string }[];
+  readonly specGaps: readonly SpecGap[];
 };
 
 export async function runInnerLoop(
@@ -423,11 +442,13 @@ export async function runInnerLoop(
   ) => Promise<SandboxCycleOutcome> = runSandboxCycle,
 ): Promise<Terminal> {
   let retriesUsed = 0;
+  const specGaps: SpecGap[] = [];
   for (;;) {
     const outcome = await runCycle(issue, opts);
+    specGaps.push(...outcome.specGaps);
     const decision = decideAfterTerminal(outcome.verdict, retriesUsed);
     if (decision.kind === "surface") {
-      return toTerminal(outcome);
+      return toTerminal({ ...outcome, specGaps });
     }
     retriesUsed = decision.nextRetriesUsed;
     const reason = outcome.verdict.type === "HARD-ERROR" ? outcome.verdict.reason : "";
@@ -440,15 +461,16 @@ export async function runInnerLoop(
 }
 
 function toTerminal(outcome: SandboxCycleOutcome): Terminal {
-  const { verdict, accumulatedCommits } = outcome;
+  const { verdict, accumulatedCommits, specGaps } = outcome;
   switch (verdict.type) {
     case "DONE":
-      return { type: "DONE", commits: accumulatedCommits };
+      return { type: "DONE", commits: accumulatedCommits, specGaps };
     case "NEEDS-INFO":
       return {
         type: "NEEDS-INFO",
         questions: verdict.questions,
         strandedHead: verdict.strandedHead,
+        specGaps,
       };
     case "NEEDS-UI-PROTOTYPE":
       return {
@@ -456,6 +478,7 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
         uiImpact: verdict.uiImpact,
         commits: accumulatedCommits,
         strandedHead: verdict.strandedHead,
+        specGaps,
       };
     case "NEEDS-HUMAN":
       return {
@@ -464,6 +487,7 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
         failureTrace: verdict.failureTrace,
         latestReviewerProse: verdict.latestReviewerProse,
         strandedHead: verdict.strandedHead,
+        specGaps,
       };
     case "NEEDS-HUMAN-REVIEW":
       return {
@@ -471,12 +495,14 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
         ...(verdict.cause === undefined ? {} : { cause: verdict.cause }),
         latestReviewerProse: verdict.latestReviewerProse,
         commits: accumulatedCommits,
+        specGaps,
       };
     case "HARD-ERROR":
       return {
         type: "HARD-ERROR",
         reason: verdict.reason,
         commits: accumulatedCommits,
+        specGaps,
       };
     case "QUOTA":
       return {
@@ -484,6 +510,7 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
         provider: verdict.provider,
         window: verdict.window,
         ...(verdict.resetsAt === undefined ? {} : { resetsAt: verdict.resetsAt }),
+        specGaps,
       };
   }
 }
@@ -500,6 +527,7 @@ async function runSandboxCycle(
   let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
   const priorReviewRounds: PriorReviewRound[] = [];
+  const specGaps: SpecGap[] = [];
   let preparedWorktreePath: string | null = null;
 
   // Everything from here to a standing sandbox + gate stack is SETUP (#82), and
@@ -768,6 +796,7 @@ async function runSandboxCycle(
         worktreePath,
         accumulated,
         priorReviewRounds,
+        specGaps,
         sandboxStatuses,
       });
       const r = step(state, event);
@@ -775,13 +804,14 @@ async function runSandboxCycle(
       action = r.action;
     }
 
-    return { verdict: action.verdict, accumulatedCommits: accumulated };
+    return { verdict: action.verdict, accumulatedCommits: accumulated, specGaps };
   } catch (err) {
     if (err instanceof AgentQuotaError) {
       opts.quotaState?.close(err.provider, err.measurement);
       return {
         verdict: quotaVerdict(err),
         accumulatedCommits: accumulated,
+        specGaps,
       };
     }
     // HARD-ERROR is for INFRA failures — podman, setup, a container that would
@@ -813,6 +843,7 @@ async function runSandboxCycle(
         reason: err instanceof Error ? err.message : String(err),
       },
       accumulatedCommits: accumulated,
+      specGaps,
     };
   } finally {
     // Stack first: its containers bind-mount the worktree read-write, and
@@ -873,8 +904,12 @@ type ExecuteActionCtx = {
   readonly worktreePath: string;
   readonly accumulated: { sha: string }[];
   // Successful review rounds in this sandbox cycle (#88), beside the commits
-  // whose heads they judged. A fresh HARD-ERROR cycle recreates both arrays.
+  // whose heads they judged. Declared spec gaps (#108) travel beside that
+  // history without entering LoopState; runInnerLoop preserves them across a
+  // fresh HARD-ERROR cycle so every terminal can hand the run's evidence to
+  // finalize.
   readonly priorReviewRounds: PriorReviewRound[];
+  readonly specGaps: SpecGap[];
   // What came up beside the agent, for the implementer's prompt slot (#44 D8).
   // Empty when the consumer declares no `inSandbox` container.
   readonly sandboxStatuses: readonly SandboxContainerStatus[];
@@ -916,6 +951,9 @@ export async function runGateAndReviewer(
   const reviewer = reviewerResult.value;
   if (gate.ok && reviewer.historyEntry !== null) {
     ctx.priorReviewRounds.push(reviewer.historyEntry);
+    if (typeof reviewer.specGap === "string") {
+      ctx.specGaps.push({ round: action.reviewRound, text: reviewer.specGap });
+    }
   }
   if (
     !gate.ok &&
@@ -1211,6 +1249,7 @@ async function runReviewer(
 ): Promise<{
   readonly event: ReviewerResult;
   readonly historyEntry: PriorReviewRound | null;
+  readonly specGap: string | null;
 }> {
   const { issue, sandbox, opts, config } = ctx;
   const head = ctx.accumulated.at(-1)?.sha;
@@ -1385,6 +1424,7 @@ async function runReviewer(
     return {
       event: await preserveReviewerWrite(quality, "quality", []),
       historyEntry: null,
+      specGap: null,
     };
   }
 
@@ -1413,6 +1453,7 @@ async function runReviewer(
           transcripts,
         ),
         historyEntry: null,
+        specGap: null,
       };
     }
     correctness = correctnessOutcome;
@@ -1453,5 +1494,10 @@ async function runReviewer(
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(line);
   }
-  return { event: decision.event, historyEntry };
+  return {
+    event: decision.event,
+    historyEntry,
+    specGap:
+      correctness?.kind === "reviewed" ? correctness.verdict.specGap : null,
+  };
 }

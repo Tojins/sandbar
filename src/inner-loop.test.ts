@@ -151,12 +151,14 @@ describe("runGateAndReviewer (#123)", () => {
       prose: "lgtm",
     },
     historyEntry,
+    specGap: null,
   };
   const context = (lines: string[] = []) =>
     ({
       issue: { id: "123" },
       opts: { onOrchestratorLog: (line: string) => lines.push(line) },
       priorReviewRounds: [],
+      specGaps: [],
     }) as unknown as Parameters<typeof runGateAndReviewer>[1];
 
   it("starts both jobs immediately, awaits both, and records green-gate history", async () => {
@@ -191,6 +193,36 @@ describe("runGateAndReviewer (#123)", () => {
       reviewer: approved.event,
     });
     expect(ctx.priorReviewRounds).toEqual([historyEntry]);
+    expect(ctx.specGaps).toEqual([]);
+  });
+
+  it("accumulates a correctness gap only when the concurrent gate is green", async () => {
+    const ctx = context();
+    const reviewer = {
+      ...approved,
+      specGap: "Which clock applies? Use the request clock.",
+    };
+    await runGateAndReviewer(action, ctx, {
+      gate: vi.fn(async () => ({ ok: true, failureTrace: "" })),
+      reviewer: vi.fn(async () => reviewer),
+    });
+    expect(ctx.specGaps).toEqual([
+      { round: 1, text: "Which clock applies? Use the request clock." },
+    ]);
+    await runGateAndReviewer({ ...action, reviewRound: 2 }, ctx, {
+      gate: vi.fn(async () => ({ ok: true, failureTrace: "" })),
+      reviewer: vi.fn(async () => approved),
+    });
+    expect(ctx.specGaps).toEqual([
+      { round: 1, text: "Which clock applies? Use the request clock." },
+    ]);
+
+    const redCtx = context();
+    await runGateAndReviewer(action, redCtx, {
+      gate: vi.fn(async () => ({ ok: false, failureTrace: "red" })),
+      reviewer: vi.fn(async () => reviewer),
+    });
+    expect(redCtx.specGaps).toEqual([]);
   });
 
   it("awaits a reviewer beside a red gate, discards its history, and logs the discard", async () => {
@@ -244,14 +276,17 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
       {
         verdict: { type: "HARD-ERROR" as const, reason: "bringup failed\nstack" },
         accumulatedCommits: [],
+        specGaps: [],
       },
       {
         verdict: { type: "HARD-ERROR" as const, reason: "socket refused" },
         accumulatedCommits: [],
+        specGaps: [],
       },
       {
         verdict: { type: "DONE" as const, commits: [] },
         accumulatedCommits: [],
+        specGaps: [],
       },
     ];
     const runCycle = vi.fn(async () => outcomes.shift()!);
@@ -267,7 +302,7 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
           } as unknown as Parameters<typeof runInnerLoop>[1],
           runCycle,
         ),
-      ).resolves.toEqual({ type: "DONE", commits: [] });
+      ).resolves.toEqual({ type: "DONE", commits: [], specGaps: [] });
       expect(orchestratorLines).toEqual([
         "  115: HARD-ERROR (bringup failed) — retry 1/2 with a fresh sandbox.",
         "  115: HARD-ERROR (socket refused) — retry 2/2 with a fresh sandbox.",
@@ -285,6 +320,7 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
         reason: "bringup failed\nfull stack",
       },
       accumulatedCommits: [],
+      specGaps: [],
     }));
 
     await expect(
@@ -297,6 +333,7 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
       type: "HARD-ERROR",
       reason: "bringup failed\nfull stack",
       commits: [],
+      specGaps: [],
     });
     expect(runCycle).toHaveBeenCalledTimes(3);
   });

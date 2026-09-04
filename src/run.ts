@@ -1552,6 +1552,7 @@ export async function run(
         const { inputs, bumpedSilentNoop } = mergeFinalizeInputs(
           mergerOutcome,
           runState.silentNoopAttemptsByIssue,
+          outcomes,
         );
         for (const [issueId, attempts] of bumpedSilentNoop) {
           runState.silentNoopAttemptsByIssue.set(issueId, attempts);
