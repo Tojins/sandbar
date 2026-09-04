@@ -1,9 +1,11 @@
 // Cleanup registry + signal traps.
 //
 // Cleanup actions are executed once, in LIFO order, on SIGINT / SIGTERM /
-// uncaughtException / unhandledRejection. Each action is awaited and its
-// failures are logged but never block the next action — partial cleanup is
-// always better than none.
+// uncaughtException / unhandledRejection. This registry is the explicit #35
+// exception to the ordinary catch rule: each independent action failure is
+// reported with its cause and the drain continues, because partial cleanup is
+// always better than none and there is no original failure for this loop to
+// rethrow.
 //
 // That holds only while this handler OWNS THE EXIT (#35): `runCleanup()` is
 // async, and a `process.exit` from any later signal listener kills the
@@ -98,7 +100,7 @@ export async function runCleanup(): Promise<void> {
     try {
       await action();
     } catch (err) {
-      console.error("Cleanup action failed:", err);
+      console.error("Cleanup action failed", { cause: err });
     }
   }
 }

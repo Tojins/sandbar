@@ -117,7 +117,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import type { ResolvedMergeMode } from "./config.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, isExitCode } from "./errors.js";
 import {
   type PullRequestRef,
   ensurePullRequest as ensureForgePullRequest,
@@ -1401,7 +1401,11 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
         // Leave nothing half-merged behind: the caller parks the cycle and the
         // worktree is reset to the cycle base, but an in-progress merge would
         // make that reset ambiguous.
-        await exec("git", ["merge", "--abort"], { cwd }).catch(() => undefined);
+        try {
+          await exec("git", ["merge", "--abort"], { cwd });
+        } catch (abortErr) {
+          console.error("Failed to abort integration merge", { cause: abortErr });
+        }
         return { ok: false, reason: pushErrorReason(err) };
       }
     },
@@ -1430,8 +1434,9 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
           ["pr", "close", String(number), "--repo", repoFlag, "--comment", comment],
           { cwd },
         );
-      } catch {
-        /* best-effort: an already-merged or already-closed PR is fine */
+      } catch (err) {
+        if (!isExitCode(err, 1)) throw err;
+        // GitHub reports an already-merged or already-closed PR with exit 1.
       }
     },
   };

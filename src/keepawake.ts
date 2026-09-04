@@ -53,6 +53,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { isErrno } from "./errors.js";
 
 // The line the script prints once, after the API call has succeeded. Read as a
 // substring of accumulated stdout rather than as an exact line: powershell may
@@ -150,7 +151,8 @@ function detailOf(text: string): string {
 function defaultIsWsl2(): boolean {
   try {
     return /microsoft/i.test(readFileSync("/proc/version", "utf8"));
-  } catch {
+  } catch (err) {
+    if (!isErrno(err, "ENOENT")) throw err;
     return false;
   }
 }
@@ -271,8 +273,11 @@ export function startKeepawake(io: WakeLockIo = {}): WakeLock {
         // no cleanup, and a SIGKILL.
         c.stdin?.end();
         c.kill("SIGTERM");
-      } catch {
-        // A child that has already gone is the outcome this asks for.
+      } catch (err) {
+        // A child that has already gone is the outcome this asks for, and
+        // ESRCH is the OS stating exactly that. Anything else is a fault in
+        // this teardown and propagates (#99).
+        if (!isErrno(err, "ESRCH")) throw err;
       }
       // Only what was taken can be released. A `released` line after a refusal
       // would read as a lock that had been held, which is the ambiguity this

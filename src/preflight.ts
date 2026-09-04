@@ -83,6 +83,14 @@
 // gate. Closing that would require undocumented stderr classification in every
 // gh/git call, which this design specifically avoids.
 //
+// The `gh` prerequisites — on PATH, authenticated — are probed exactly ONCE
+// per run, by `runPreflight`, and handed to `gatherState` as a required
+// argument (#99). Both are already invariants with tailored refusals of their
+// own, so asking a second time inside `gatherState` would buy nothing and
+// would let one run observe two prerequisite states. What a failing tracker
+// query means is a separate question the two-state `IssueNumberLookup` below
+// answers: not an empty issue set, but an unjudged one.
+//
 // The two git fetches are answers too, not best-effort warmups. Their failures
 // join the ordinary invariant report by name and retain git's stderr (#81,
 // absorbed by #118); a wildcard refspec matching nothing still exits zero.
@@ -210,6 +218,7 @@ import {
 } from "./agent-providers.js";
 import type { ResolvedStackContainer } from "./config.js";
 import type { EnvReader } from "./env.js";
+import { hasExitCode, isErrno, isExitStatus } from "./errors.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
@@ -577,11 +586,12 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
   return out;
 }
 
-function which(cmd: string): boolean {
+export function which(cmd: string): boolean {
   try {
     execFileSync("which", [cmd], { stdio: "ignore" });
     return true;
-  } catch {
+  } catch (err) {
+    if (!isExitStatus(err, 1)) throw err;
     return false;
   }
 }
@@ -607,7 +617,8 @@ async function runOk(
   try {
     await exec(file, [...args], { cwd });
     return true;
-  } catch {
+  } catch (err) {
+    if (!hasExitCode(err)) throw err;
     return false;
   }
 }
@@ -620,7 +631,8 @@ async function captureOk(
   try {
     const { stdout } = await exec(file, [...args], { cwd });
     return { ok: true, stdout };
-  } catch {
+  } catch (err) {
+    if (!hasExitCode(err)) throw err;
     return { ok: false, stdout: "" };
   }
 }
@@ -644,8 +656,22 @@ async function captureFailure(
   }
 }
 
+// Whether `gh` is on PATH and authenticated — the two prerequisites every
+// tracker-backed lookup in this module assumes, and the two whose own tailored
+// refusals explain a tracker that cannot answer. `runPreflight` establishes
+// them once, ahead of the tracker, and hands them down (#99).
+export type TrackerPrerequisites = {
+  readonly hasGh: boolean;
+  readonly ghAuthOk: boolean;
+};
+
 export async function gatherState(
   cfg: PreflightConfig,
+  // Required, not probed here with a fallback: a second `which`/`auth status`
+  // would be the double-ask the comment above `runPreflight`'s chunk-member
+  // query forbids, and would let one preflight run observe two prerequisite
+  // states.
+  trackerPrerequisites: TrackerPrerequisites,
   // Git-derived chunk members (#93). Optional so a caller that has the set already
   // — `runPreflight`, which needs the same set for the delete pass — pays for
   // the query once instead of twice; omitted, it is fetched here.
@@ -654,7 +680,7 @@ export async function gatherState(
   const repoDir = cfg.layout.repoDir;
   const env = cfg.env;
   const hasGit = which("git");
-  const hasGh = which("gh");
+  const { hasGh, ghAuthOk } = trackerPrerequisites;
   const hasContainerRuntime = which(RUNTIME);
 
   const missingImages: string[] = [];
@@ -668,7 +694,6 @@ export async function gatherState(
 
   const missingMountSources = await findMissingMountSources(cfg.mountSources);
 
-  const ghAuthOk = hasGh ? await runOk(repoDir, "gh", ["auth", "status"]) : false;
   const sandboxGhTokenOk = hasGh
     ? await checkSandboxGhToken(repoDir, env)
     : false;
@@ -848,12 +873,8 @@ async function fetchOpenIssueNumbers(
 async function fetchChunkMemberIssueNumbers(
   repoDir: string,
 ): Promise<ReadonlySet<number>> {
-  try {
-    const members = await readChunkMembers(repoDir);
-    return new Set([...members.values()].flatMap((ns) => [...ns]));
-  } catch {
-    return new Set();
-  }
+  const members = await readChunkMembers(repoDir);
+  return new Set([...members.values()].flatMap((ns) => [...ns]));
 }
 
 async function checkSandboxGhToken(
@@ -868,7 +889,8 @@ async function checkSandboxGhToken(
       env: { ...process.env, GH_TOKEN: token, GH_HOST: "github.com" },
     });
     return true;
-  } catch {
+  } catch (err) {
+    if (!hasExitCode(err)) throw err;
     return false;
   }
 }
@@ -1313,6 +1335,14 @@ export async function runPreflight(
   const chunkMemberIssues = await fetchChunkMemberIssueNumbers(
     cfg.layout.repoDir,
   );
+  // The `gh` prerequisites, probed exactly once and handed to `gatherState`,
+  // so one preflight run observes one prerequisite state and the tracker is
+  // never asked ahead of the checks whose tailored failures explain why it
+  // cannot answer.
+  const hasGh = which("gh");
+  const ghAuthOk = hasGh
+    ? await runOk(cfg.layout.repoDir, "gh", ["auth", "status"])
+    : false;
 
   const deleted = await deleteMergedSandbarBranches({
     layout: cfg.layout,
@@ -1322,7 +1352,7 @@ export async function runPreflight(
   if (deleted.length > 0) {
     console.log(`Cleaned up merged issue branches: ${deleted.join(", ")}`);
   }
-  const state = await gatherState(cfg, chunkMemberIssues);
+  const state = await gatherState(cfg, { hasGh, ghAuthOk }, chunkMemberIssues);
   // The branches this run keeps are brought level with origin's copy first
   // (#112), so the two announcements below describe the tips the run will
   // actually resume from, and a diverged one is refused alongside the
@@ -1549,7 +1579,8 @@ export function staleConfigWarning(s: ConfigStaleness): string | null {
 function realpathOr(path: string): string {
   try {
     return realpathSync(path);
-  } catch {
+  } catch (err) {
+    if (!isErrno(err, "ENOENT")) throw err;
     return path;
   }
 }

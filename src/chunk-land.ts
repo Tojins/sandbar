@@ -169,12 +169,11 @@
 // is why there is no retry loop here — the retry is the next cycle, which is a
 // better one than three `gh` attempts a second apart.
 //
-// Every failure is collected as RESIDUE rather than thrown. The source branch
-// has already moved by the time any of this runs; a throw here would abandon
-// the members after the failing one and report a landing that did not finish
-// as a landing that did not happen. Residue is not one kind of thing, though,
-// and a caller must not report it as one — `chunkResidue` at the bottom of
-// this file is the split and owns that argument.
+// Forge-write failures are collected as RESIDUE rather than thrown. A failure
+// from the separate durable-log callback propagates: continuing would hide the
+// later writes from the run record. Residue is not one kind of thing, though,
+// and a caller must not report it as one — `chunkResidue` at the bottom of this
+// file is the split and owns that argument.
 //
 // ---------------------------------------------------------------------------
 // One implementation of the wrap-up's writes, for both callers
@@ -606,9 +605,9 @@ export type ChunkWrapupAdapter = {
  * The one implementation of those writes — see the header for why there is
  * exactly one, and why `gitCwd` is its only parameter.
  *
- * Every method throws on failure rather than swallowing. That is not in tension
- * with `wrapUpLandedChunk` never throwing: the wrap-up is what catches these
- * and turns them into residue, and it can only do that if they are raised.
+ * Every method throws on failure rather than swallowing. The wrap-up catches
+ * these forge-write failures and turns them into residue; failures from its
+ * separate durable-log callback propagate.
  */
 export function chunkForgeWrites(deps: {
   readonly repo: RepoRef;
@@ -737,9 +736,9 @@ const detail = (err: unknown): string =>
 /**
  * Close the chunk out: members, labels, pull request, branch.
  *
- * Never throws. The source branch has already moved by the time this runs, so
- * every failure is residue the caller reports; see the header for the order and
- * for why the branch delete is conditional on the closes having worked.
+ * Forge-write failures become residue the caller reports; a failed durable-log
+ * callback propagates. See the header for the order and for why the branch
+ * delete is conditional on the closes having worked.
  */
 export async function wrapUpLandedChunk(
   target: ChunkLandTarget,
@@ -750,18 +749,9 @@ export async function wrapUpLandedChunk(
     readonly log?: (line: string) => void | Promise<void>;
   },
 ): Promise<ChunkWrapupResult> {
-  // Swallowed, unlike everything else here. The caller in the merge phase logs
-  // through a sink that THROWS once the source branch has moved (`merger.ts`
-  // deliberately stops wrapping errors past that point), and a run log that
-  // could not be written is not worth abandoning a member's close for — which
-  // is exactly what an escaping throw would do, silently, halfway through.
-  const log = async (line: string): Promise<void> => {
-    try {
-      await opts.log?.(line);
-    } catch {
-      /* the wrap-up's result is the record that matters */
-    }
-  };
+  // A failed durable log write propagates; continuing would hide subsequent
+  // forge writes from the run record (#99).
+  const log = async (line: string): Promise<void> => opts.log?.(line);
   const residue: string[] = [];
   const closed: number[] = [];
 
@@ -850,13 +840,17 @@ export async function wrapUpLandedChunk(
         `the pull request #${target.pullRequest} for ${target.branch} kept its \`${LAND_LABEL}\` label: ${detail(err)}`,
       );
     }
+    let pullRequestClosed = false;
     try {
       await adapter.closePullRequest(target.pullRequest);
-      await log(`chunk ${target.branch}: closed PR #${target.pullRequest}`);
+      pullRequestClosed = true;
     } catch (err) {
       residue.push(
         `the pull request #${target.pullRequest} for ${target.branch} could not be closed: ${detail(err)}`,
       );
+    }
+    if (pullRequestClosed) {
+      await log(`chunk ${target.branch}: closed PR #${target.pullRequest}`);
     }
   }
 
@@ -876,12 +870,12 @@ export async function wrapUpLandedChunk(
         target.members.map((member) => member.number),
       );
       branchDeleted = true;
-      await log(`chunk ${target.branch}: deleted on origin`);
     } catch (err) {
       residue.push(
         `the chunk branch ${target.branch} is landed but could not be deleted on origin: ${detail(err)}`,
       );
     }
+    if (branchDeleted) await log(`chunk ${target.branch}: deleted on origin`);
   } else {
     residue.push(
       `${target.branch} is kept on origin so the next run retries the ${

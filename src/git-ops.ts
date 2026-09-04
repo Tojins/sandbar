@@ -28,13 +28,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { type ChunkTarget } from "./chunks.js";
+import { hasExitCode, isExitCode } from "./errors.js";
 import { issueNumberFromBranch } from "./naming.js";
 
 const exec = promisify(execFile);
-
-const isGitExit = (err: unknown, code: number): boolean =>
-  typeof err === "object" && err !== null &&
-  (err as { code?: number }).code === code;
 
 // ---------------------------------------------------------------------------
 // Where an issue branch comes from (#61)
@@ -151,14 +148,15 @@ export async function fetchOriginChunkBranch(
       { cwd },
     );
     return remoteRef;
-  } catch {
+  } catch (err) {
+    if (!hasExitCode(err)) throw err;
     // Fall through: what the cache already holds outranks what the fetch said.
   }
   try {
     await exec("git", ["show-ref", "--verify", "--quiet", remoteRef], { cwd });
     return remoteRef;
   } catch (err) {
-    if (isGitExit(err, 1)) return null;
+    if (isExitCode(err, 1)) return null;
     throw err;
   }
 }
@@ -258,7 +256,7 @@ const revParseOrNull = async (cwd: string, ref: string): Promise<string | null> 
   try {
     return await revParse(cwd, ref);
   } catch (err) {
-    if (isGitExit(err, 1)) return null;
+    if (isExitCode(err, 1)) return null;
     throw err;
   }
 };
@@ -278,7 +276,7 @@ const isAncestor = async (
     await exec("git", ["merge-base", "--is-ancestor", ancestor, descendant], { cwd });
     return true;
   } catch (err) {
-    if (isGitExit(err, 1)) return false;
+    if (isExitCode(err, 1)) return false;
     throw err;
   }
 };
@@ -305,7 +303,7 @@ const fetchOriginIssueBranch = async (
       () => null,
       (err: unknown) => err,
     );
-    if (probe !== null && isGitExit(probe, 2)) {
+    if (probe !== null && isExitCode(probe, 2)) {
       await exec("git", ["update-ref", "-d", remoteRef], { cwd: repoDir });
       return { kind: "absent", previous };
     }
@@ -594,7 +592,7 @@ export async function ensureIssueBranch(
       { cwd: repoDir },
     );
   } catch (err) {
-    if (!isGitExit(err, 1)) throw err;
+    if (!isExitCode(err, 1)) throw err;
     exists = false;
   }
   // --no-track: don't write upstream config (a) we never `git pull` these
@@ -817,7 +815,7 @@ export async function branchTip(
   } catch (err) {
     // `git rev-parse --verify` uses 128 for an unresolved ref (unlike
     // `show-ref --verify`, which uses 1). That one named absence is data.
-    if (isGitExit(err, 128)) return null;
+    if (isExitCode(err, 128)) return null;
     throw err;
   }
 }
@@ -837,7 +835,7 @@ export async function symbolicHeadRef(
     );
     return stdout.trim() || null;
   } catch (err) {
-    if (isGitExit(err, 1)) return null;
+    if (isExitCode(err, 1)) return null;
     throw err;
   }
 }

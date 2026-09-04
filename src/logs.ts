@@ -172,14 +172,10 @@ export async function startRunLogger(
       return c;
     },
     async finalize(reason) {
-      try {
-        await appendFile(
-          orchestratorPath,
-          `[${new Date().toISOString()}] run-end (${reason})\n`,
-        );
-      } catch {
-        /* best-effort: cleanup must not throw */
-      }
+      await appendFile(
+        orchestratorPath,
+        `[${new Date().toISOString()}] run-end (${reason})\n`,
+      );
     },
   };
   return logger;

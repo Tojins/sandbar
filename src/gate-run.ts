@@ -59,7 +59,7 @@ import {
   removeBranchImages,
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
-import { SandbarError, faultDetail } from "./errors.js";
+import { SandbarError, faultDetail, isExitCode } from "./errors.js";
 import { formatGateSteps, summarizeGateFailure } from "./gate.js";
 import { durationField } from "./timing.js";
 import {
@@ -96,6 +96,19 @@ export function shouldHideWorktreeGit(worktreePath: string): boolean {
 export const GATE_EXIT_GREEN = 0;
 export const GATE_EXIT_RED = 1;
 export const GATE_EXIT_NO_VERDICT = 2;
+
+// `sandbar gate` also accepts an ordinary directory. Git names that condition
+// with status exit 128; every other failure leaves the tree state unknown.
+export async function gateDirtyWorktreePaths(
+  worktreePath: string,
+): Promise<readonly string[]> {
+  try {
+    return await dirtyWorktreePaths(worktreePath);
+  } catch (err) {
+    if (!isExitCode(err, 128)) throw err;
+    return [];
+  }
+}
 
 // How much of a red gate's captured step output is recapped after the run.
 // Everything was already streamed, so this is a scrollback aid, not the
@@ -531,17 +544,11 @@ async function gate(
 
   // Reported, not refused (see `StackOptions.allowDirtyWorktree`).
   //
-  // Tolerant of ANY failure to read, not only of a tree that is not a git
-  // worktree — which is the commonest one and the reason the read is optional
-  // at all, but not the only way `git status` declines to answer: no `git` on
-  // the PATH, an unreadable index, a repository whose gitlink points nowhere.
-  // The catch is deliberately as wide as that list rather than narrowed to
-  // match the sentence above, because what it costs is one informational line
-  // and what a narrowed one costs is the opposite trade: matching on git's
-  // prose, and a fault exit for a tree the gate could have run against
-  // perfectly well.
-  const dirty = await dirtyWorktreePaths(worktreePath).catch(() => null);
-  if (dirty !== null && dirty.length > 0) {
+  // A non-repository has no Git working-tree state to report; this command is
+  // also deliberately usable against an ordinary directory. Other status
+  // failures propagate because they do not establish that named condition.
+  const dirty = await gateDirtyWorktreePaths(worktreePath);
+  if (dirty.length > 0) {
     out(
       `Gating the WORKING TREE at ${worktreePath}, which has ` +
         `${dirty.length} uncommitted change(s). Inside a run the gate refuses ` +

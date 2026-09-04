@@ -49,7 +49,7 @@ import { mkdir, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { SandbarError } from "./errors.js";
+import { SandbarError, isErrno, isExitCode } from "./errors.js";
 
 const exec = promisify(execFile);
 
@@ -126,7 +126,8 @@ async function gitOk(cwd: string, args: readonly string[]): Promise<boolean> {
   try {
     await git(cwd, args);
     return true;
-  } catch {
+  } catch (err) {
+    if (!isExitCode(err, 1) && !isExitCode(err, 128)) throw err;
     return false;
   }
 }
@@ -139,7 +140,8 @@ function samePath(a: string, b: string): boolean {
   if (resolve(a) === resolve(b)) return true;
   try {
     return realpathSync(a) === realpathSync(b);
-  } catch {
+  } catch (err) {
+    if (!isErrno(err, "ENOENT")) throw err;
     return false;
   }
 }
@@ -187,7 +189,8 @@ async function isPreparedCache(repoDir: string): Promise<boolean> {
       { cwd: repoDir, maxBuffer: 1024 * 1024 },
     );
     return marked.stdout.trim() === "1";
-  } catch {
+  } catch (err) {
+    if (!isExitCode(err, 1) && !isExitCode(err, 128)) throw err;
     return false;
   }
 }
@@ -207,7 +210,8 @@ async function isWorktreeOfCache(
     const common = stdout.trim();
     // Relative, and relative to the worktree — `git rev-parse` says so.
     return common !== "" && samePath(resolve(dir, common), repoDir);
-  } catch {
+  } catch (err) {
+    if (!isExitCode(err, 1) && !isExitCode(err, 128)) throw err;
     return false;
   }
 }

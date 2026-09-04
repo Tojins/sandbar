@@ -88,6 +88,7 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { onCleanup } from "./cleanup.js";
 import { resolveSandboxEnv } from "./env.js";
+import { isErrno } from "./errors.js";
 import { RESOURCE_PREFIX, strandedHeadRef } from "./naming.js";
 import { RESERVED_WORKTREE_NAMES, type RepoLayout } from "./repo-cache.js";
 import { startGapTimer, startTimer } from "./timing.js";
@@ -1270,7 +1271,7 @@ const issueCloneMarker = async (path: string): Promise<string> => {
   try {
     if (!(await stat(join(path, ".git"))).isDirectory()) return "";
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "";
+    if (isErrno(err, "ENOENT")) return "";
     throw err;
   }
   return gitConfigOrEmpty(
@@ -1473,7 +1474,7 @@ const pruneStaleIssueClones = async (
   try {
     entries = await readdir(worktreesDir);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (!isErrno(err, "ENOENT")) throw err;
   }
   for (const entry of entries) {
     if (RESERVED_WORKTREE_NAMES.has(entry)) continue;
@@ -1482,7 +1483,7 @@ const pruneStaleIssueClones = async (
     try {
       isDirectory = (await stat(path)).isDirectory();
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      if (!isErrno(err, "ENOENT")) throw err;
     }
     if (!isDirectory) continue;
     const branch = await issueCloneMarker(path);

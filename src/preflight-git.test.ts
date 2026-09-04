@@ -10,7 +10,15 @@
 // did or did not move.
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -22,9 +30,11 @@ import {
   type DeclaredMount,
   deleteMergedSandbarBranches,
   gatherState,
+  PreflightError,
   readConfigStaleness,
   runPreflight,
   syncKeptIssueBranches,
+  which,
 } from "./preflight.js";
 import { type RepoLayout, ensureRepoCache, repoLayout } from "./repo-cache.js";
 
@@ -69,13 +79,24 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     target = await seedRepo("sandbar-target-");
     process.chdir(launchedFrom);
 
-    // A `gh` that fails instantly, so `gatherState` exercises its real code
-    // path (hasGh true, every gh call failing) without a network round-trip.
-    // The gh-dependent fields are not what this file asserts; the git-derived
-    // ones are, and they must not be hostage to whether the machine running
-    // the suite is logged in.
+    // A `gh` whose host auth and listing reads answer the factual state these
+    // git-focused tests need. Operational listing failures propagate since
+    // #99, so the fixture must not use one as shorthand for an empty tracker.
     shimBin = await mkdtemp(join(tmpdir(), "sandbar-shim-"));
-    await writeFile(join(shimBin, "gh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await writeFile(
+      join(shimBin, "gh"),
+      [
+        "#!/bin/sh",
+        'if [ "$1 $2" = "auth status" ]; then exit 0; fi',
+        'if [ "$1 $2" = "issue list" ]; then printf "[]"; exit 0; fi',
+        'if [ "$1 $2" = "api graphql" ]; then',
+        '  printf \'{"data":{"repository":{"i7":{"state":"CLOSED","labels":{"nodes":[]}}}}}\'',
+        "  exit 0",
+        "fi",
+        "exit 1",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
     originalPath = process.env["PATH"];
     process.env["PATH"] = `${shimBin}:${originalPath ?? ""}`;
   });
@@ -105,11 +126,14 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     sourceBranch: "main",
     pulledImages: [] as readonly string[],
     mountSources: [] as readonly DeclaredMount[],
+    configPath: null,
     // The default routing (#72): claude for both roles, and claude for the
     // merger, so the set the credential check walks is the one every
     // pre-#72 config produces.
     agentProviders: ["claude"] as readonly AgentProviderName[],
   });
+  // What `runPreflight` hands `gatherState` once its own `gh` checks pass.
+  const GH_READY = { hasGh: true, ghAuthOk: true } as const;
 
   // Replaces the failing `gh` the suite installs. `writeFile`'s `mode` applies
   // only when it CREATES the file and `beforeEach` has already made this one,
@@ -418,6 +442,33 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
   // The other consequence in #34: a clean launch directory would let preflight
   // pass while the actual target repo carries unmerged issue branches.
   describe("gatherState", () => {
+    it("classifies a command that is not on PATH as absent", () => {
+      expect(which("sandbar-command-that-does-not-exist")).toBe(false);
+    });
+
+    it("reports failed gh auth before making tracker queries", async () => {
+      const authCalls = join(shimBin, "auth-calls");
+      await writeFile(
+        join(shimBin, "gh"),
+        [
+          "#!/bin/sh",
+          `if [ "$1 $2" = "auth status" ]; then echo x >> '${authCalls}'; exit 1; fi`,
+          'if [ "$1 $2" = "issue list" ]; then exit 73; fi',
+          "exit 1",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+
+      await expect(runPreflight(cfg(layoutAt(target)))).rejects.toSatisfy(
+        (err: unknown) =>
+          err instanceof PreflightError &&
+          err.failures.some((failure) => failure.includes("gh auth status")),
+      );
+      expect(
+        (await readFile(authCalls, "utf8")).trim().split("\n"),
+      ).toHaveLength(1);
+    });
+
     it("classifies the target's issue branches, not the launch directory's", async () => {
       await git(launchedFrom, "checkout", "-q", "-b", "sandbar/issue-9-launch");
       await git(launchedFrom, "commit", "-q", "--allow-empty", "-m", "work");
@@ -425,13 +476,9 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
-      // …and the shim's `gh` failed, so nothing JUDGED that branch: the state
-      // carries the distinction so `checkInvariants` can refuse without
-      // proposing `git branch -D` over a branch that may well be parked.
-      expect(state.issueStatesKnown).toBe(false);
     });
 
     // The other half of the same fact, through a `gh` that answers: both
@@ -453,7 +500,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.issueStatesKnown).toBe(true);
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
@@ -477,7 +524,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.issueStatesKnown).toBe(false);
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
@@ -494,7 +541,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.unmergedIssueBranches).toEqual([]);
       expect(state.discardedIssueBranches).toEqual([]);
@@ -536,7 +583,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       );
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.unmergedIssueBranches).toEqual([]);
       expect(state.discardedIssueBranches).toEqual([]);
@@ -563,7 +610,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         "https://github.com/acme/app.git",
       );
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.originUrl).toBe("https://github.com/acme/app-fork.git");
       expect(state.originRepo).toEqual({ owner: "acme", name: "app-fork" });
@@ -575,7 +622,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // fixture repo built with a self-remote is exactly that shape — so this is
     // also the default state of every other test in this file.
     it("reports a remote it cannot read as a repo without guessing", async () => {
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.originUrl).toBe(target);
       expect(state.originRepo).toBeNull();
@@ -595,7 +642,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         "git@gitserver.internal:/srv/git/app.git",
       );
 
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
 
       expect(state.originUrl).toBe("git@gitserver.internal:/srv/git/app.git");
       expect(state.originRepo).toBeNull();
@@ -603,14 +650,14 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("reads origin/<sourceBranch> from the named repo", async () => {
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
       expect(state.hasOriginBranch).toBe(true);
 
       // A repo with no `origin/main` at all — the invariant must be about the
       // repo it was pointed at, not about the one the process stands in.
       const bare = await mkdtemp(join(tmpdir(), "sandbar-empty-"));
       await git(bare, "init", "-q", "-b", "main");
-      const empty = await gatherState(cfg(layoutAt(bare, target)));
+      const empty = await gatherState(cfg(layoutAt(bare, target)), GH_READY);
       expect(empty.hasOriginBranch).toBe(false);
       await rm(bare, { recursive: true, force: true });
     });
@@ -629,7 +676,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
           { container: "gate", hostPath: present },
           { container: "gate", hostPath: absent },
         ],
-      });
+      }, GH_READY);
 
       expect(state.missingMountSources).toEqual([
         {
@@ -649,7 +696,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const state = await gatherState({
         ...cfg(layoutAt(target)),
         mountSources: [{ container: "db", hostPath: dangling }],
-      });
+      }, GH_READY);
 
       expect(state.missingMountSources).toEqual([
         {
@@ -661,7 +708,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("reports nothing when the stack declares no absolute sources", async () => {
-      const state = await gatherState(cfg(layoutAt(target)));
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
       expect(state.missingMountSources).toEqual([]);
     });
 
@@ -674,7 +721,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         const state = await gatherState({
           ...cfg(layoutAt(target)),
           env: makeEnvReader({ [key]: "v" }),
-        });
+        }, GH_READY);
         expect(state.uncredentialledProviders).toEqual([]);
       }
     });
@@ -684,7 +731,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         ...cfg(layoutAt(target)),
         agentProviders: ["claude", "codex"],
         env: makeEnvReader({ ANTHROPIC_API_KEY: "v" }),
-      });
+      }, GH_READY);
       expect(state.uncredentialledProviders).toEqual(["codex"]);
     });
 
@@ -701,14 +748,14 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         const missing = await gatherState({
           ...cfg(layoutAt(target)),
           env: makeEnvReader({ [KEY]: "" }),
-        });
+        }, GH_READY);
         expect(missing.uncredentialledProviders).toEqual(["claude"]);
 
         process.env[KEY] = "from-the-host";
         const inherited = await gatherState({
           ...cfg(layoutAt(target)),
           env: makeEnvReader({ [KEY]: "" }),
-        });
+        }, GH_READY);
         expect(inherited.uncredentialledProviders).toEqual([]);
       } finally {
         if (saved === undefined) delete process.env[KEY];
@@ -721,7 +768,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         ...cfg(layoutAt(target)),
         agentProviders: ["codex"],
         env: makeEnvReader({ OPENAI_API_KEY: "v" }),
-      });
+      }, GH_READY);
       expect(state.uncredentialledProviders).toEqual([]);
     });
   });

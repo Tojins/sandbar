@@ -92,6 +92,14 @@ describe.runIf(available)("ensureImages against real podman", () => {
     ).stdout.trim();
 
   it.concurrent(
+    "classifies an absent image as having no inputs label",
+    async ({ expect, task }) => {
+      expect(await readInputsLabel(testImageTag(`absent-${task.id}`))).toBeNull();
+    },
+    120_000,
+  );
+
+  it.concurrent(
     "builds a generated tar context and applies COPY --chmod",
     async ({ expect, task, onTestFinished }) => {
       const tag = testImageTag(`generated-${task.id}`);

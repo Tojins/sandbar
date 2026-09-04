@@ -58,12 +58,14 @@ export async function createMergerWorktree(opts: {
 
   // The removal itself, unlatched — this runs twice on the ordinary path, once
   // to clear a prior crashed run's leftover and once as the teardown.
+  // Since #98 the merger tree is a standalone clone with its own `.git`, so
+  // there is no worktree registration to unpick and the removal is the
+  // directory alone. `force` already makes an absent path the success it
+  // reads as, which leaves nothing this may legitimately absorb: a sweep that
+  // fails propagates (#99), and on the teardown path `runCleanup` reports it
+  // with its cause rather than losing it to a "best-effort" comment.
   const sweep = async (): Promise<void> => {
-    try {
-      await rm(path, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
+    await rm(path, { recursive: true, force: true });
   };
 
   let removed = false;

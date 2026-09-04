@@ -15,7 +15,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resolveGateStack } from "./config.js";
 import { ContainerBringupError } from "./gate-stack.js";
@@ -264,6 +264,33 @@ describe("startSandboxStack (#44 D3)", () => {
     // The log tail rides along, because that is the whole of what the agent
     // gets to act on.
     expect(stack.statuses[1]?.failure).toMatch(/PHP Fatal error/);
+  });
+
+  it("keeps the attempt failure degraded when its redundant log copy cannot be written", async () => {
+    const r = recorder((n) => (n === "app" ? bringupError(n) : null));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const stack = await startSandboxStack(
+        {
+          issueId: "44",
+          scope: SCOPE,
+          spec: twoLifecycles(),
+          worktreePath: "/wt",
+          anchorContainerName: ANCHOR,
+          logDir: join(logDir, "missing", "nested"),
+        },
+        r.deps,
+      );
+      expect(
+        stack.statuses.find((status) => status.name === "app")?.up,
+      ).toBe(false);
+      expect(error).toHaveBeenCalledWith(
+        "Failed to write sandbox sibling failure log",
+        { cause: expect.anything() },
+      );
+    } finally {
+      error.mockRestore();
+    }
   });
 
   // "Degraded" has to mean the OTHER siblings still came up, and

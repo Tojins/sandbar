@@ -19,10 +19,22 @@ import {
   resolveGateStack,
 } from "./config.js";
 import {
+  gateDirtyWorktreePaths,
   gateReuseToken,
   gateStackImagesOf,
   shouldHideWorktreeGit,
 } from "./gate-run.js";
+
+describe("standalone gate worktree classification (real git)", () => {
+  it("accepts an ordinary directory as having no Git changes to report", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbar-gate-plain-"));
+    try {
+      await expect(gateDirtyWorktreePaths(dir)).resolves.toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 const WT = "/wt";
 const V = "1.2.3";

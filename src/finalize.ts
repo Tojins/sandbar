@@ -76,7 +76,7 @@ import { type IssueCloneReclaim, reclaimIssueClone } from "./agent-sandbox.js";
 import { LAND_LABEL, NEEDS_REVIEW_LABEL } from "./chunks.js";
 import { strandedHeadRef } from "./naming.js";
 import type { LabelConfig } from "./config.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, isExitCode } from "./errors.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { IssueRef } from "./merger.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
@@ -537,7 +537,7 @@ export type FinalizeAdapter = {
   // origin/<sourceBranch> — i.e. deleting it destroys nothing. This is the
   // *verified* form of the certainty forceDeleteBranch requires; `-d` refusing
   // is NOT that certainty (it also refuses when the local source branch merely
-  // trails origin). Any error answers false: we never force-delete on a guess.
+  // trails origin). Git's exit 1 answers false; other failures propagate.
   branchIsContainedInOrigin(branch: string): Promise<boolean>;
   postComment(issueNum: number, body: string): Promise<void>;
   // Removes then adds, as SEPARATE `gh issue edit` calls (remove first). A
@@ -1104,9 +1104,8 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
     },
     async branchIsContainedInOrigin(branch) {
       // Exit 0 iff the branch tip is an ancestor of (or equal to) the origin
-      // tip — every commit on it is already published. Any failure, including
-      // a missing remote-tracking ref, answers false: the caller only ever
-      // force-deletes on a true, so guessing wrong must not destroy work.
+      // tip — every commit on it is already published. Exit 1 answers false;
+      // other failures propagate because they do not establish non-containment.
       try {
         await exec(
           "git",
@@ -1119,7 +1118,8 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
           { cwd },
         );
         return true;
-      } catch {
+      } catch (err) {
+        if (!isExitCode(err, 1)) throw err;
         return false;
       }
     },

@@ -3,10 +3,8 @@
 // Same reasoning as gh-argv.test.ts: this call posts a comment on a human's
 // issue, so "which repository" being wrong is a comment nobody reads, and a
 // fake satisfies the contract no matter what argv the real call builds. It is
-// also the one gh call in sandbar that is deliberately BEST-EFFORT, and a
-// swallow that swallowed too much (a thrown error taking the cycle down, or a
-// missing marker check spraying a comment per cycle onto a held issue) is
-// exactly what a fake would not show.
+// Operational failures propagate (#99), while the marker check still prevents
+// a comment per cycle from being sprayed onto a held issue.
 //
 // Driven through a `gh` shim on PATH that records its own argv and answers
 // `issue view --json comments` from an env var, so the "already told" branch is
@@ -163,18 +161,16 @@ describe("postLaneOverrideNotices", () => {
     expect((await commentCalls()).map((argv) => argv[2])).toEqual(["42", "43"]);
   });
 
-  it("does not throw when gh fails — the fact is still true next cycle", async () => {
+  it("propagates a gh failure", async () => {
     process.env["SANDBAR_TEST_GH_FAIL"] = "1";
 
-    const posted = await postLaneOverrideNotices(REPO, [
-      { issue: 42, gatedBy: 7 },
-    ]);
-
-    expect(posted).toEqual([]);
+    await expect(
+      postLaneOverrideNotices(REPO, [{ issue: 42, gatedBy: 7 }]),
+    ).rejects.toThrow();
   });
 
-  it("keeps going for the other issues when one fails", async () => {
-    // The shim fails only for #42: a per-issue catch, not a per-batch one.
+  it("stops before later issues when one fails", async () => {
+    // The shim fails only for #42; that operational failure ends the batch.
     await writeFile(
       join(shimBin, "gh"),
       [
@@ -190,11 +186,12 @@ describe("postLaneOverrideNotices", () => {
       { mode: 0o755 },
     );
 
-    const posted = await postLaneOverrideNotices(REPO, [
-      { issue: 42, gatedBy: 7 },
-      { issue: 43, gatedBy: 7 },
-    ]);
-
-    expect(posted).toEqual([43]);
+    await expect(
+      postLaneOverrideNotices(REPO, [
+        { issue: 42, gatedBy: 7 },
+        { issue: 43, gatedBy: 7 },
+      ]),
+    ).rejects.toThrow();
+    expect(await commentCalls()).toEqual([]);
   });
 });

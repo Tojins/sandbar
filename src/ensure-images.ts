@@ -92,7 +92,7 @@ import {
 } from "./agent-providers.js";
 import type { BuiltImage, ResolvedGateStack } from "./config.js";
 import type { RuntimeExec, SweepResult } from "./containers.js";
-import { SandbarError } from "./errors.js";
+import { SandbarError, isExitCode } from "./errors.js";
 import { IMAGE_INPUTS_LABEL, fingerprintImageInputs } from "./image-inputs.js";
 import {
   type RunScope,
@@ -212,28 +212,27 @@ async function imageExists(tag: string): Promise<boolean> {
       timeout: IMAGE_QUERY_TIMEOUT_MS,
     });
     return true;
-  } catch {
+  } catch (err) {
+    if (!isExitCode(err, 1)) throw err;
     return false;
   }
 }
 
-// The fingerprint an existing image was built from, or null when the image is
-// absent, carries no such label, or podman cannot be asked. Every one of those
-// means "cannot prove this image is current", and the caller rebuilds — the
-// only safe direction, since the alternative is gating against an image whose
-// provenance is unknown.
-export async function readInputsLabel(tag: string): Promise<string | null> {
-  let stdout: string;
-  try {
-    ({ stdout } = await exec(
-      RUNTIME,
-      ["image", "inspect", tag, "--format", "{{json .Labels}}"],
-      { timeout: IMAGE_QUERY_TIMEOUT_MS },
-    ));
-  } catch {
-    return null;
-  }
+// The fingerprint an existing image was built from, or null when it is absent
+// or carries no such label. `image exists` names absence; inspect failures do
+// not establish either condition and propagate (#99).
+async function readExistingInputsLabel(tag: string): Promise<string | null> {
+  const { stdout } = await exec(
+    RUNTIME,
+    ["image", "inspect", tag, "--format", "{{json .Labels}}"],
+    { timeout: IMAGE_QUERY_TIMEOUT_MS },
+  );
   return parseInputsLabel(stdout);
+}
+
+export async function readInputsLabel(tag: string): Promise<string | null> {
+  if (!(await imageExists(tag))) return null;
+  return readExistingInputsLabel(tag);
 }
 
 // Pure half of the above, so the shape podman actually prints is table-tested
@@ -245,7 +244,8 @@ export function parseInputsLabel(json: string): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     return null;
   }
   if (typeof parsed !== "object" || parsed === null) return null;
@@ -542,8 +542,9 @@ export async function ensureImages(
       }
       continue;
     }
-    const recorded = await readInputsLabel(image.tag);
-    if (!rebuildInPlace && (await imageExists(image.tag))) {
+    const exists = await imageExists(image.tag);
+    const recorded = exists ? await readExistingInputsLabel(image.tag) : null;
+    if (!rebuildInPlace && exists) {
       // The baseline is what the image on disk was built from, not what this
       // context hashes to — see above. A null recording leaves the entry out,
       // which drops the tag from `participating` in `createBranchImages`… and
@@ -1226,8 +1227,8 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
           // the first 8 hex of the fingerprint, so the name alone is a 32-bit
           // cache key, and a leftover tag from a crashed run in this scope is
           // accepted on it. Reading back the full fingerprint the build
-          // recorded costs the same one podman call and makes the check the
-          // same one the base path already makes — "unknown provenance means
+          // recorded costs an existence probe plus an inspect and makes the
+          // check the same one the base path already makes — "unknown provenance means
           // rebuild" is this module's own rule.
           if ((await inputsLabel(tag)) !== fingerprint) {
             log(

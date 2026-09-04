@@ -24,6 +24,10 @@ import {
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import lockfile from "proper-lockfile";
+import { isErrno } from "./errors.js";
+
+const staleLockRemovalRefused = (err: unknown): boolean =>
+  ["EACCES", "EPERM", "EROFS"].some((code) => isErrno(err, code));
 
 export type LockPaths = {
   readonly workDir: string;
@@ -60,7 +64,8 @@ async function maybeReleaseStaleLock(paths: LockPaths): Promise<void> {
   let oldPid: number;
   try {
     oldPid = Number.parseInt(readFileSync(paths.pidPath, "utf8").trim(), 10);
-  } catch {
+  } catch (err) {
+    if (!isErrno(err, "ENOENT")) throw err;
     return;
   }
   // Fail CLOSED on a sidecar we cannot read as a pid: a truncated or garbage
@@ -74,18 +79,16 @@ async function maybeReleaseStaleLock(paths: LockPaths): Promise<void> {
 
   try {
     rmSync(lockDirFor(paths.lockPath), { recursive: true, force: true });
-  } catch {
-    // Could not clear it — a permissions problem, or someone else got there
-    // first. Leave the sidecar ALONE: it is the only evidence the next launch
-    // has that the holder is dead, and deleting it here would demote the next
-    // attempt to proper-lockfile's 10s staleness for no reason. The acquire
-    // below will report the lock as held, which is the honest answer.
+  } catch (err) {
+    // These conditions do not let us prove the stale lock was removed. Leave
+    // its sidecar alone and let the atomic acquire below report it as held.
+    if (!staleLockRemovalRefused(err)) throw err;
     return;
   }
   try {
     unlinkSync(paths.pidPath);
-  } catch {
-    // already gone
+  } catch (err) {
+    if (!isErrno(err, "ENOENT")) throw err;
   }
 }
 
@@ -123,16 +126,26 @@ export async function acquireLock(paths: LockPaths): Promise<Release> {
   try {
     writeFileSync(paths.pidPath, String(process.pid));
   } catch (err) {
-    await release().catch(() => {});
+    try {
+      await release();
+    } catch (releaseErr) {
+      console.error("Failed to release lock after PID sidecar write failed", {
+        cause: releaseErr,
+      });
+    }
     throw err;
   }
 
   return async () => {
     try {
       unlinkSync(paths.pidPath);
-    } catch {
-      // ignore
+    } catch (err) {
+      if (!isErrno(err, "ENOENT")) throw err;
+    } finally {
+      // Removing the sidecar comes first so a successor cannot create its own
+      // and have this holder unlink it. Releasing the real lock is mandatory
+      // even when that sidecar cleanup fails.
+      await release();
     }
-    await release();
   };
 }

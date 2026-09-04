@@ -31,13 +31,15 @@
 //     proved it; `requires-sandbar.ts`'s header owns the argument.
 
 import { createRequire } from "node:module";
+import { isErrno } from "./errors.js";
 
 export function sandbarVersion(): string {
   try {
     const require = createRequire(import.meta.url);
     const pkg = require("../package.json") as { version?: string };
     return pkg.version ?? "unknown";
-  } catch {
+  } catch (err) {
+    if (!isErrno(err, "MODULE_NOT_FOUND")) throw err;
     return "unknown";
   }
 }

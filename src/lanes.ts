@@ -209,13 +209,8 @@ async function existingComments(
 // issues it actually commented on (i.e. the ones not already carrying the
 // marker), which is what the caller logs.
 //
-// Best-effort, and that is the one place this differs from finalize's handoff
-// comments, which fail the run loud (#8). Those carry the ONLY copy of
-// something — an agent's questions, a failure trace — so a dropped one strands
-// a human. This carries a fact that is still true next cycle, on an issue that
-// is being held rather than worked, and the marker check means a failed post is
-// simply retried on the next plan. Failing the whole run over it would stop
-// every other issue for an annotation that self-heals.
+// Read and write failures propagate. Treating either as "not yet posted" would
+// turn an unknown forge state into a retry and hide an operational fault (#99).
 export async function postLaneOverrideNotices(
   repo: RepoRef,
   overrides: readonly LaneOverride[],
@@ -223,34 +218,23 @@ export async function postLaneOverrideNotices(
 ): Promise<readonly number[]> {
   const posted: number[] = [];
   for (const override of overrides) {
-    try {
-      if (!needsLaneOverrideNotice(await existingComments(repo, override.issue))) {
-        continue;
-      }
-      await exec("gh", [
-        "issue",
-        "comment",
-        String(override.issue),
-        "--repo",
-        repoSlug(repo),
-        "--body",
-        LANE_OVERRIDE_COMMENT(override.gatedBy),
-      ]);
-      posted.push(override.issue);
-      await log(
-        `lane: #${override.issue} labelled ${AUTO_LAND_LABEL} but review-gated ` +
-          `via #${override.gatedBy} — inheritance wins; said so on the issue`,
-      );
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      console.warn(
-        `Could not post the lane-override notice on issue #${override.issue} ` +
-          `(retried next cycle): ${detail}`,
-      );
-      await log(
-        `lane: notice for #${override.issue} failed, will retry: ${detail}`,
-      );
+    if (!needsLaneOverrideNotice(await existingComments(repo, override.issue))) {
+      continue;
     }
+    await exec("gh", [
+      "issue",
+      "comment",
+      String(override.issue),
+      "--repo",
+      repoSlug(repo),
+      "--body",
+      LANE_OVERRIDE_COMMENT(override.gatedBy),
+    ]);
+    posted.push(override.issue);
+    await log(
+      `lane: #${override.issue} labelled ${AUTO_LAND_LABEL} but review-gated ` +
+        `via #${override.gatedBy} — inheritance wins; said so on the issue`,
+    );
   }
   return posted;
 }
