@@ -119,6 +119,17 @@ describe("fingerprintImageInputs", () => {
     );
   });
 
+  it("covers context only when it was explicitly declared", async () => {
+    const root = await tree({
+      Containerfile: "FROM x",
+      "package-lock.json": "{}",
+    });
+    expect(await fp(root, { ...IMAGE, context: "" })).not.toBe(await fp(root));
+    expect(await fp(root, { ...IMAGE, context: "" })).not.toBe(
+      await fp(root, { ...IMAGE, context: "docker" }),
+    );
+  });
+
   it("does not depend on the ORDER the inputs were declared in", async () => {
     const root = await tree({
       Containerfile: "FROM x",

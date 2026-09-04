@@ -134,6 +134,9 @@ export async function fingerprintImageInputs(
     );
   }
   await hashPath(hash, root, containerfile);
+  // Omission preserves pre-#111 fingerprints. An explicit context participates
+  // even when it normalises to the same effective default.
+  if (image.context !== undefined) record(hash, "context", "", image.context);
   if (image.target !== undefined) record(hash, "target", "", image.target);
 
   for (const [k, v] of Object.entries(image.buildArgs ?? {}).sort(([a], [b]) =>

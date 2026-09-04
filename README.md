@@ -659,6 +659,8 @@ images: [
   // A named stage makes the sandbox and gates address stages of one ordinary
   // multi-stage product Dockerfile. The target also participates in rebuildOn.
   { tag: "localhost/your-repo-dev:latest", containerfile: "Dockerfile", target: "dev" },
+  // Reuse a deployed Dockerfile whose COPY paths are rooted at the repository.
+  { tag: "localhost/your-repo-prod:latest", containerfile: "docker/Dockerfile", context: "." },
   // No build context at all — right for a Containerfile that only pulls from a
   // registry and installs packages; tarring the repo up for it is pure latency.
   { tag: "localhost/app-php:gate", containerfile: "gate/Containerfile.php", stdinContext: true },
@@ -689,20 +691,22 @@ Declare what the image is built from and sandbar owns the rest:
 
 ```ts
 images: [
-  { tag: "localhost/app-runner:gate", containerfile: "Containerfile.runner",
+  { tag: "localhost/app-runner:gate", containerfile: "docker/Dockerfile",
+    context: ".", target: "dev",
     rebuildOn: ["package-lock.json", "bower.json"] },
 ]
 ```
 
-Note the containerfile is at the repo root here, and that is not incidental:
-sandbar builds with the containerfile's **own directory** as the context, so a
-`rebuildOn` path outside it could never be `COPY`d and the image could not be a
-function of it. That config is rejected rather than accepted-and-ignored — it
-would rebuild on every change and produce a byte-identical image, which is the
-silent no-op this whole feature exists to remove.
+`context` is repo-relative and defaults to the containerfile's directory, so
+existing entries keep their exact build. Set it to `"."` (or `""`) for the
+common deployed layout above: sandbar runs the equivalent of
+`podman build -f docker/Dockerfile .`. A `rebuildOn` path outside the effective
+context is rejected because it could never be `COPY`d and would otherwise
+trigger builds that produce a byte-identical image.
 
 Sandbar hashes those paths — plus the Containerfile's own bytes and the entry's
-`buildArgs` and `target` — and uses the hash, not the tag, as the cache key:
+`buildArgs`, `target`, and explicitly declared `context` — and uses the hash,
+not the tag, as the cache key:
 
 - at startup the tag is rebuilt when the hash no longer matches your checkout,
   instead of being reused because the name exists (the hash is recorded as an
@@ -733,8 +737,9 @@ An image that will not build in time is the same: `images[].buildTimeoutMs`
 inputs are written by the implementer agent and the build runs inside a gate
 run while sandbar holds its single-instance lock.
 
-Rules: `rebuildOn` paths are repo-relative (no `..`, no leading `/`), they must
-sit inside the containerfile's own directory (the build context), they must
+Rules: `context` is repo-relative (no `..`, no leading `/`) and cannot be
+combined with `stdinContext`. `rebuildOn` paths are likewise repo-relative;
+they must sit inside the effective build context, they must
 exist in your checkout (a path that matches nothing makes the whole declaration
 inert, which is the failure above), it cannot be combined with `stdinContext`
 (that build has no context, so nothing in the repo can change it) or with an
@@ -742,6 +747,9 @@ absolute `containerfile` (the rebuild re-roots the build at the worktree), and
 the image must be one something actually runs — a `gateStack` container's, or
 `sandboxImage`. An entry sandbar builds and nothing ever runs is rejected: the
 declaration would be inert, which is this feature's own failure mode.
+Sandbar checks containment but does not interpret `.dockerignore` or
+`.containerignore`; make sure those files do not exclude a declared input the
+recipe needs.
 
 ### `rebuildOn` on `sandboxImage`
 

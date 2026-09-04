@@ -635,6 +635,15 @@ describe("buildArgv", () => {
     ]);
   });
 
+  it("builds a nested containerfile from an explicit repo-root context", () => {
+    expect(
+      buildArgv(
+        { tag: "t", containerfile: "docker/Dockerfile", context: "" },
+        { root: "/worktree" },
+      ),
+    ).toEqual(["build", "-t", "t", "-f", "/worktree/docker/Dockerfile", "/worktree"]);
+  });
+
   it("builds with NO context when stdinContext is set", () => {
     // `-` is the whole point: a Containerfile that only pulls from a registry
     // needs no context, and tarring the repo up for it is pure latency.
@@ -1516,7 +1525,7 @@ describe("resolveImages: rebuildOn (#37)", () => {
     ).toThrow(/absolute/);
   });
 
-  it("refuses a path outside the containerfile's own directory — the build context", () => {
+  it("refuses a path outside the effective build context", () => {
     // `buildArgv` sets the context to `dirname(containerfile)`, so a path
     // outside it cannot be COPYd and the image cannot be a function of it.
     // Unchecked, that config passes everything else, changes its fingerprint on
@@ -1534,6 +1543,19 @@ describe("resolveImages: rebuildOn (#37)", () => {
         "sandbar:app",
       ),
     ).toThrow(/outside its build context/);
+    expect(() =>
+      resolveImages(
+        [
+          {
+            tag: "sandbar:app",
+            containerfile: "docker/Dockerfile",
+            context: ".",
+            rebuildOn: ["package-lock.json"],
+          },
+        ],
+        "sandbar:app",
+      ),
+    ).not.toThrow();
     // Inside it is fine, and so is a root containerfile with a nested input.
     expect(() =>
       resolveImages(
@@ -1571,6 +1593,17 @@ describe("resolveImages: rebuildOn (#37)", () => {
     );
     expect(() => img({ rebuildOn: ["a//b"] })).toThrow(
       /'\.', '\.\.' or empty segment/,
+    );
+  });
+
+  it("normalises and validates context independently of rebuildOn", () => {
+    expect(img({ context: "." })[0]?.context).toBe("");
+    expect(img({ context: "" })[0]?.context).toBe("");
+    expect(() => img({ context: "/tmp" })).toThrow(/absolute build context/);
+    expect(() => img({ context: "../tmp" })).toThrow(/build context/);
+    expect(() => img({ context: "a//b" })).toThrow(/build context/);
+    expect(() => img({ context: ".", stdinContext: true })).toThrow(
+      /both `context`/,
     );
   });
 });

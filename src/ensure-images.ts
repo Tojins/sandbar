@@ -3,9 +3,9 @@
 //
 // Builds are skipped when the tag already exists. We shell out to
 // `podman build` directly rather than via a sandbox-provider helper, to keep
-// the build context scoped (the upstream CLI set context = cwd for a custom
-// Dockerfile path, which would tar the whole repo). `stdinContext` builds with
-// NO context at all (`podman build -t <tag> - < file`).
+// the build context explicit. It defaults to the Containerfile's directory,
+// while a deploy recipe can name the repo root (or another repo-relative
+// directory). `stdinContext` builds with NO context at all.
 //
 // EVERY build entry point RECORDS what it did (#82). All three of them —
 // `ensureImages`, `createAgentImages` and `createBranchImages` — hand an
@@ -295,7 +295,11 @@ export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
     args.push("-");
   } else {
     const containerfile = containerfilePath(image, opts?.root ?? "");
-    args.push("-f", containerfile, dirname(containerfile));
+    const defaultContext = dirname(image.containerfile);
+    const context =
+      image.context ?? (defaultContext === "." ? "" : defaultContext);
+    const root = opts?.root ?? "";
+    args.push("-f", containerfile, root ? join(root, context) : context || ".");
   }
   return args;
 }
