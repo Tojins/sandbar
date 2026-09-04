@@ -25,8 +25,6 @@ import { MERGER_WORKTREE_NAME, type RepoLayout } from "./repo-cache.js";
 
 const exec = promisify(execFile);
 
-export { MERGER_WORKTREE_NAME } from "./repo-cache.js";
-
 // Where the merger worktree lives. Pure — beside the per-issue worktrees so the
 // existing prune/orphan-sweep reclaims it. Takes the worktrees directory since
 // #38: the repo is `<stateDir>/repo.git` and the worktrees sit beside it, so

@@ -195,8 +195,9 @@ export type ReviewerRunOptions = {
 
 // Invoke the reviewer until one invocation yields a verdict, or the invocation
 // budget runs out. `invoke` is given the 1-based invocation number. It returns
-// A normal run is classified here; an aborted value returns immediately and
-// deliberately bypasses the retry loop.
+// a `ReviewerInvocation`: `run` for completed and ordinary failed invocations,
+// `aborted` for a detected reviewer write. A normal run is classified here; an
+// aborted value returns immediately and deliberately bypasses the retry loop.
 export async function runReviewerInvocations(
   invoke: (invocation: number) => Promise<ReviewerInvocation>,
   opts: ReviewerRunOptions = {},
