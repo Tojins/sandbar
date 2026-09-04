@@ -10,7 +10,7 @@ describe("continuous-pool exits", () => {
   const table = [
     ["plan-empty", planEmptyExit(), EXIT_CODE_SUCCESS, /no unblocked issues/],
     ["quota", quotaExit({ provider: "claude", window: "five_hour", resetsAt: 42 }), EXIT_CODE_QUOTA, /1970-01-01T00:00:42/],
-    ["relaunch", relaunchExit(2), EXIT_CODE_RELAUNCH, /landed 2 merge/],
+    ["relaunch", relaunchExit(2), EXIT_CODE_RELAUNCH, /2 landing\(s\)/],
     ["stuck", stuckExit(6), EXIT_CODE_STUCK, /6 consecutive issue terminals/],
     ["budget", budgetExit(50, 50), EXIT_CODE_BUDGET, /issuesStarted=50/],
     ["halted", haltedExit(["merge", "tracker"]), EXIT_CODE_HALTED, /merge \+ tracker/],
@@ -32,6 +32,21 @@ describe("continuous-pool exits", () => {
     expect(quotaExit({ provider: "codex", window: "seven_day" }).reason)
       .toContain("unknown time");
     expect(haltedExit([]).reason).toContain("unspecified");
+  });
+
+  it("relaunch names what the next run re-resolves and claims nothing about the driver", () => {
+    const exit = relaunchExit(1);
+    expect(exit.reason).toContain("config file");
+    expect(exit.reason).toContain("launcher's to decide");
+    expect(exit.reason).not.toMatch(/driver is/);
+  });
+
+  it("EXIT_CODE_RELAUNCH collides with none of the codes that must break the launcher's loop", () => {
+    const loopBreakers = [
+      EXIT_CODE_SUCCESS, EXIT_CODE_HALTED, EXIT_CODE_STUCK, EXIT_CODE_BUDGET, EXIT_CODE_QUOTA,
+    ];
+    expect(loopBreakers).not.toContain(EXIT_CODE_RELAUNCH);
+    expect(new Set(loopBreakers).size).toBe(loopBreakers.length);
   });
 
   it("counts the start budget directly and clamps at zero", () => {

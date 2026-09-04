@@ -72,22 +72,33 @@ describe("scheduler decisions", () => {
     terminalBackstop: 6, quotaClosed: false, ...overrides,
   });
 
+  // Every row names the WHOLE action, reason included: the exit tags are the
+  // precedence the header states, and a row that only checked `kind` would
+  // pass with quota and stuck swapped.
   it.each([
-    [snapshot({ hasCompleted: true, active: 1, ongoing: 1 }), "recompute"],
-    [snapshot({ hasPendingTerminals: true, ongoing: 1 }), "land"],
-    [snapshot({ quotaClosed: true, hasPendingTerminals: true, ongoing: 1 }), "land"],
-    [snapshot({ quotaClosed: true, active: 1, ongoing: 1 }), "drain"],
-    [snapshot({ quotaClosed: true }), "exit"],
-    [snapshot({ landings: 1, hasCandidates: true }), "exit"],
-    [snapshot({ budgetRemaining: 0 }), "exit"],
-    [snapshot({ terminalsSinceLanding: 6 }), "exit"],
-    [snapshot({ terminalsSinceLanding: 6, active: 3, ongoing: 3, hasCandidates: true }), "drain"],
-    [snapshot({ terminalsSinceLanding: 6, ongoing: 1, hasPendingTerminals: true }), "land"],
-    [snapshot({ hasCandidates: true }), "admit"],
-    [snapshot({ hasRetries: true, budgetRemaining: 0, ongoing: 1 }), "admit"],
-    [snapshot({ active: 1, ongoing: 1, hasCapacity: false }), "wait"],
-    [snapshot(), "exit"],
-  ] as const)("maps a complete snapshot to %s", (state, kind) => {
-    expect(decideSchedulerAction(state).kind).toBe(kind);
+    ["recompute", snapshot({ hasCompleted: true, active: 1, ongoing: 1 }), { kind: "recompute" }],
+    ["land pending terminals", snapshot({ hasPendingTerminals: true, ongoing: 1 }), { kind: "land" }],
+    ["quota lands first", snapshot({ quotaClosed: true, hasPendingTerminals: true, ongoing: 1 }), { kind: "land" }],
+    ["quota drains", snapshot({ quotaClosed: true, active: 1, ongoing: 1 }), { kind: "drain" }],
+    ["quota exits", snapshot({ quotaClosed: true }), { kind: "exit", reason: "quota" }],
+    ["quota outranks stuck", snapshot({ quotaClosed: true, terminalsSinceLanding: 6 }), { kind: "exit", reason: "quota" }],
+    ["quota outranks relaunch", snapshot({ quotaClosed: true, landings: 1, hasCandidates: true }), { kind: "exit", reason: "quota" }],
+    ["stuck exits", snapshot({ terminalsSinceLanding: 6 }), { kind: "exit", reason: "stuck" }],
+    ["stuck outranks relaunch", snapshot({ terminalsSinceLanding: 6, landings: 1, hasCandidates: true }), { kind: "exit", reason: "stuck" }],
+    ["stuck drains on every observation, not at quiescence", snapshot({ terminalsSinceLanding: 6, active: 3, ongoing: 3, hasCandidates: true }), { kind: "drain" }],
+    ["stuck lands first", snapshot({ terminalsSinceLanding: 6, ongoing: 1, hasPendingTerminals: true }), { kind: "land" }],
+    ["relaunch at post-landing quiescence", snapshot({ landings: 1, hasCandidates: true }), { kind: "exit", reason: "relaunch" }],
+    ["relaunch for a land request alone", snapshot({ landings: 1, hasLandRequests: true }), { kind: "exit", reason: "relaunch" }],
+    ["relaunch outranks budget", snapshot({ landings: 1, hasCandidates: true, budgetRemaining: 0 }), { kind: "exit", reason: "relaunch" }],
+    ["no relaunch before a landing: a fresh process admits", snapshot({ hasCandidates: true }), { kind: "admit", next: "wait" }],
+    ["budget exits", snapshot({ budgetRemaining: 0 }), { kind: "exit", reason: "budget" }],
+    ["budget waits for a retry", snapshot({ hasRetries: true, budgetRemaining: 0, ongoing: 1 }), { kind: "admit", next: "wait" }],
+    ["refill before landing", snapshot({ hasPendingTerminals: true, hasCandidates: true, ongoing: 1 }), { kind: "admit", next: "land" }],
+    ["no capacity: wait", snapshot({ active: 1, ongoing: 1, hasCapacity: false }), { kind: "wait" }],
+    ["full pool with a land request waits", snapshot({ active: 1, ongoing: 1, hasCapacity: false, hasLandRequests: true }), { kind: "wait" }],
+    ["land request with nothing running lands", snapshot({ hasLandRequests: true }), { kind: "land" }],
+    ["plan-empty", snapshot(), { kind: "exit", reason: "plan-empty" }],
+  ] as const)("%s", (_name, state, action) => {
+    expect(decideSchedulerAction(state)).toEqual(action);
   });
 });

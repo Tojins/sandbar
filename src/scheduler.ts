@@ -1,8 +1,78 @@
-// Continuous issue-pool state machine (#87).
+// Continuous issue-pool state machine (#87): the one owner of admission,
+// active slots, completed and pending terminals, planner-visible ongoing
+// membership, silent-noop retries, once-per-run starts and the landing
+// counters. I/O stays in run.ts; each method here is one atomic transition and
+// `decideSchedulerAction` is the whole control decision over a snapshot of it.
 //
-// Sole owner of admission, active promises, completed terminals waiting for a
-// recompute, planner-visible ongoing membership, retries, and once-per-run
-// starts. I/O stays in run.ts; each method is one atomic transition.
+// TWO UNITS, AND THEY ARE NOT THE SAME.
+//
+//   - ONGOING (planner-visible): from admission until the issue lands or parks.
+//     A DONE issue awaiting its landing is ongoing. The planner excludes every
+//     ongoing issue from every recompute, so nothing is re-picked while sandbar
+//     still has business with it, and no label is touched while it is ongoing.
+//   - SLOT (execution): held only while the inner loop runs. A DONE issue
+//     releases its slot the moment `runInnerLoop` returns and waits for its
+//     landing without occupying one. Concurrency is `width` slots.
+//
+// Everything below turns on keeping those two apart. `#ongoing` is the first,
+// `#active` the second; `#started` is broader than both and never shrinks —
+// AN ISSUE STARTS ONCE PER RUN, no exceptions, which is the first of the four
+// loop countermeasures the issue rebuilt in place of the cycle-scoped wedge
+// detectors (an identical-plan fingerprint needs a second cycle to compare
+// against, and there are no cycles). The one thing that looks like a second
+// start, a silent-noop re-admission via `retry`, is handled INSIDE the ongoing
+// unit: the issue never left `#ongoing`, `admit` serves it ahead of every
+// candidate, and it costs no start.
+//
+// THE DECISION, IN PRECEDENCE ORDER — each line is a rule, and the reason it
+// sits where it does:
+//
+//   1. recompute — a completion arrived while the plan was being built, so the
+//      snapshot describes a pool that no longer exists. Cheapest to rebuild.
+//   2. quota    — a provider closed for the run (#109). No new starts, ever;
+//      pending terminals land first, because committed-but-unlanded work is
+//      the expensive thing in this system; running work drains to its
+//      terminal (under a two-vendor config an issue routed to the other
+//      provider may genuinely finish); then exit 4. Outranks the backstop and
+//      the relaunch because a relaunch would only rediscover the closed window.
+//   3. stuck    — `terminalBackstop` consecutive terminals with no landing.
+//      Same shape as quota: land what is pending, drain what is active, exit
+//      2. Evaluated on EVERY observation, not at quiescence — a deep queue
+//      refills every freed slot and is never quiescent until the candidates
+//      run out, which is the one case the backstop exists for.
+//   4. relaunch — quiescent, at least one landing in this process, and work
+//      remains. Before `admit`, or the pool starts the issue and the moment is
+//      gone. The "landing in this process" clause is what stops a launch-time
+//      spin: a fresh process with a full plan and nothing running is the start
+//      of a run, not a relaunch point.
+//   5. budget   — quiescent with no starts left and nothing to retry. After
+//      relaunch, because budgets are per process and reset across relaunches
+//      by design (exit-conditions.ts's header owns the argument).
+//   6. admit    — a free slot and something to put in it: a retry first, then
+//      a candidate while starts remain. Refill BEFORE landing, so a slot does
+//      not idle through gate-2; `next` says which of `land`/`wait` follows.
+//   7. land     — terminals are pending, or a human's `land` request is the
+//      only work and nothing is running to grow the chunk under it.
+//   8. wait     — slots are busy and nothing else applies: block for the next
+//      freed slot.
+//   9. plan-empty — nothing active, nothing ongoing, nothing to admit, nothing
+//      to land.
+//
+// WHAT `recordLandingOutcome` COUNTS. `landed` is landings in the sense
+// exit-conditions.ts's header defines — source-branch merges, chunks landed on
+// the source branch, AND DONE branches landed on their chunk branch. The
+// backstop and the relaunch both read it, and both would be wrong on a
+// review-lane host otherwise: there, work leaves the pool only onto chunk
+// branches, and a counter that ignored those would exit stuck after six
+// successful landings. Whether the source branch moved — the image-rebuild
+// question — is a different fact and run.ts keeps it separately.
+//
+// `waitForFreedSlot` settles through one extra microtask on purpose: the
+// `.then` that pushes into `#completed` runs after the raced promise resolves,
+// and reading `#completed` on the same tick would miss the event that woke
+// us. The settled events move to `#pendingTerminals` here and nowhere else, so
+// "in `#active`", "completed but unobserved" and "observed, awaiting a landing"
+// are three disjoint places and an issue is in at most one of them.
 
 export type SettledIssue<T, R> =
   | { readonly status: "fulfilled"; readonly issue: T; readonly value: R }

@@ -171,7 +171,7 @@ import {
   remainingBudget,
   stuckExit,
 } from "./exit-conditions.js";
-import { createRunQuotaState } from "./inner-loop.js";
+import { type RunQuotaState, createRunQuotaState } from "./inner-loop.js";
 import {
   type FinalizeInput,
   type FinalizeResult,
@@ -340,18 +340,41 @@ export async function verifyFinalizedTrackerState(
   }
 }
 
+// The quota exit for a provider the run's shared state closed, when no QUOTA
+// terminal and no merger quota built one. That happens when the issue that
+// closed the provider never returned a terminal at all — its inner loop
+// rejected after the close — so the scheduler is right that the run must
+// stop, and the measurement the state recorded is the only description left.
+export function closedProviderExit(
+  config: Parameters<typeof requiredAgentProviders>[0],
+  quotaState: RunQuotaState,
+): TerminalExit | null {
+  for (const provider of requiredAgentProviders(config)) {
+    const closed = quotaState.get(provider);
+    if (!closed) continue;
+    return quotaExit({
+      provider,
+      window: closed.window,
+      ...(closed.resetsAt === undefined ? {} : { resetsAt: closed.resetsAt }),
+    });
+  }
+  return null;
+}
+
 function schedulerExit(
   reason: SchedulerExit,
   pool: ContinuousPool<PlannedIssue, Terminal>,
   runState: ReturnType<typeof newRunState>,
-  pendingQuota: TerminalExit | null,
+  quota: TerminalExit | null,
 ): TerminalExit {
   switch (reason) {
     case "plan-empty": return planEmptyExit();
     case "relaunch": return relaunchExit(pool.landings);
     case "quota": {
-      if (!pendingQuota) throw new Error("scheduler selected quota without a quota exit");
-      return pendingQuota;
+      // `quotaClosed` is derived from the same two sources the caller resolves
+      // `quota` from, so a miss here is a bug in that derivation, not a state.
+      if (!quota) throw new Error("scheduler selected quota without a quota exit");
+      return quota;
     }
     case "budget": return budgetExit(runState.issuesAttempted, runState.maxTotalIssues);
     case "stuck": return stuckExit(pool.terminalsSinceLanding);
@@ -1267,7 +1290,12 @@ export async function run(
       });
       if (schedulerAction.kind === "exit") {
         terminalExit = await announceExit(
-          schedulerExit(schedulerAction.reason, pool, runState, quotaPending),
+          schedulerExit(
+            schedulerAction.reason,
+            pool,
+            runState,
+            quotaPending ?? closedProviderExit(config, quotaState),
+          ),
         );
         break;
       }
@@ -1359,12 +1387,12 @@ export async function run(
       // committed on a branch. The invariant is that every outcome is in the
       // log, not that it is there if the whole cohort survives.
       //
-      // The catch RETHROWS: the cohort still settles as a rejection and the
-      // reporting loop below is unchanged. And stdout does NOT move — a
-      // terminal reader wants one ordered block after the cohort settles, not
-      // three interleaved lines arriving over an hour. That is the two-stream
-      // split (#70) doing the job it exists for, which is why "just move the
-      // console.log too" is the wrong fix.
+      // The catch RETHROWS: the pool still observes a rejection and
+      // `finalizeSettled` reports it with its landing batch. And stdout does
+      // NOT move — a terminal reader wants one ordered block per landing
+      // batch, not three interleaved lines arriving over an hour. That is the
+      // two-stream split (#70) doing the job it exists for, which is why "just
+      // move the console.log too" is the wrong fix.
       const phase2Timer = startTimer();
       for (const issue of executionIssues) {
         const issueLogger = await runLogger.issue(issue.id);
@@ -1422,6 +1450,18 @@ export async function run(
       );
       const landingLogger = runLogger.landing(++landingNumber);
 
+      // The batch's terminals are finalised BEFORE the landing is attempted
+      // (#30). These are the issues the merger will never see — NEEDS-INFO
+      // questions, NEEDS-HUMAN handoffs, reviewer prose, branch pushes — and
+      // running them after it meant any non-MergerError throw from the
+      // landing (a ContainerBringupError from the merger stack is the live
+      // example) escaped to the top-level handler before a single one was
+      // written, so an issue kept `ready-for-agent` and burned another full
+      // attempt budget next run. The mirror-image risk is strictly smaller: a
+      // required side-effect failing here stops the run before the landing,
+      // and a DONE branch that misses its landing keeps its commits and its
+      // label, so preflight classifies it `resumable` (#13). The prose an
+      // agent produced once and nobody stored has no such fallback.
       const outcomes = await finalizeSettled(settled);
 
       const completedIssues = outcomes
@@ -1435,33 +1475,6 @@ export async function run(
         console.log(`  #${issue.id}: ${issue.title}`);
       }
 
-      // ---------------------------------------------------------------------
-      // Phase 4a: Finalise the agent terminals — BEFORE the merge (#30)
-      //
-      // Nothing here depends on the merge having happened: these are the
-      // issues the merger will never see. Running them after it meant any
-      // throw the merge phase produced that was not a MergerError — since #24,
-      // a ContainerBringupError from the merger stack is the live example —
-      // escaped to the top-level handler and exited before a single one was
-      // written. The cost was the whole cycle's Phase-2 output for a failure
-      // that happened after all of it: NEEDS-INFO questions never posted,
-      // NEEDS-HUMAN traces never posted and never parked (so the issue kept
-      // `ready-for-agent` and burned another full attempt budget next run),
-      // reviewer prose never posted, branches never pushed.
-      //
-      // The mirror-image risk is real but strictly smaller: a required
-      // side-effect failing here now stops the cycle before the merge, and a
-      // DONE branch that misses its merge is not merely re-planned — it keeps
-      // its commits and its `ready-for-agent` label, so preflight classifies it
-      // `resumable` (#13) and the next run continues from where it got to.
-      // That resume is not automatic if this pass parked anything first: an
-      // `agent-stuck` issue is an open issue no longer queued, so its leftover
-      // local branch is preflight-`unmerged` and refuses the next run until the
-      // operator clears it. That is the steady state EVERY successful parking
-      // cycle already produces, and the branch is on origin by then, so it
-      // costs a `git branch -D` — not the commits. The prose an agent produced
-      // once and nobody stored has no such fallback.
-      // ---------------------------------------------------------------------
       // ---------------------------------------------------------------------
       // Phase 3: Merge (procedural, in an isolated worktree off origin)
       // ---------------------------------------------------------------------
@@ -1689,7 +1702,24 @@ export async function run(
           if (mergerWorktree) await mergerWorktree.remove();
         }
         if (unexpectedLandingFailure) {
-          await drainAfterLandingHalt();
+          // Cleanup-shaped, so it follows the cleanup rule: the drain reports
+          // its own failure beside the original and the ORIGINAL is what
+          // escapes. A drain that threw in place of the landing failure would
+          // hand the internal-failure banner the wrong fault — a finalize
+          // hiccup on a sibling instead of the landing that actually broke —
+          // and the log would name a cause the operator cannot act on.
+          try {
+            await drainAfterLandingHalt();
+          } catch (drainErr) {
+            const detail = faultDetail(drainErr);
+            console.error(
+              "Draining in-flight work after the landing failure also failed:\n" + detail,
+            );
+            await runLogger.appendOrchestrator(
+              "drain after landing failure also failed: " + detail,
+            );
+            throw unexpectedLandingFailure.error;
+          }
           throw unexpectedLandingFailure.error;
         }
       }
@@ -1892,12 +1922,22 @@ export async function run(
         terminals: outcomes.map((outcome) => outcome.terminal),
         otherwise: () => null,
       });
-      const landedNow = mergerSummary && mergerSummary.pushed
+      // Two counts, because they answer two questions. `sourceLandings` is
+      // "did origin/<sourceBranch> move" — the image-rebuild question, since an
+      // image that bakes dependencies is a function of that branch (#37).
+      // `landedNow` is "did work leave the pool as durable progress", which is
+      // what the backstop and the relaunch ask, and a DONE branch landed on
+      // its chunk branch (#60) is a yes: on a review-lane host that is the
+      // ONLY way work ever leaves, so a backstop counting source merges alone
+      // would exit stuck after six landed issues. Chunk landings are pushed
+      // as they happen, independently of `pushed`, which is the source push.
+      const sourceLandings = mergerSummary && mergerSummary.pushed
         ? mergerSummary.merged.length + mergerSummary.mergedChunks.length
         : 0;
+      const landedNow = sourceLandings + (mergerSummary?.chunkLanded.length ?? 0);
       pool.recordLandingOutcome(settled.length, landedNow);
       nextPlanTrigger = landedNow > 0 ? "landing-finished" : "terminal-finalized";
-      if (landedNow > 0) {
+      if (sourceLandings > 0) {
         sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
         baseFingerprints = await ensureImages(config.images, sourceWorktree, {
           onImage: recordImage,

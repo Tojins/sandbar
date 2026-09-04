@@ -432,4 +432,91 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.merger.mock.calls.flatMap((call) => call[0]).map((item) => item.id).sort())
       .toEqual(["1", "2"]);
   });
+  it("counts a chunk-branch landing as a landing, so a review-lane host never trips the backstop", async () => {
+    const issues = Array.from({ length: 8 }, (_, index) => issue(String(index + 1)));
+    seams.plan.mockImplementation(async (_repo, options: { excluded?: Set<number> }) =>
+      resolution(issues.filter((candidate) => !options.excluded?.has(Number(candidate.id)))));
+    seams.innerLoop.mockImplementation(async (candidate: ReturnType<typeof issue>) =>
+      ({ type: "DONE", commits: [{ sha: candidate.id }] }));
+    // Every DONE lands on its chunk branch; nothing ever reaches the source
+    // branch, which is the whole of a review-lane host's steady state.
+    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) => ({
+      ...summary([]),
+      chunkLanded: batch.map((member) => ({ issue: member, chunkBranch: "sandbar/chunk-1-x" })),
+    }));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 3 })).resolves.toBeUndefined();
+    expect(exit).not.toHaveBeenCalled();
+    expect(seams.innerLoop).toHaveBeenCalledTimes(8);
+    expect(seams.logLines.some((line) => line.startsWith("exit: stuck"))).toBe(false);
+    expect(seams.logLines.some((line) => line.startsWith("exit: plan-empty"))).toBe(true);
+    // A chunk landing does not move the source branch, so images are built
+    // once, at startup, and never rebuilt.
+    expect(ensureImages).toHaveBeenCalledTimes(1);
+  });
+
+  it("exits quota from the shared provider state when the closing issue returned no terminal", async () => {
+    seams.plan.mockResolvedValue(resolution([issue("1")]));
+    seams.innerLoop.mockImplementation(async (
+      _candidate: ReturnType<typeof issue>,
+      options: { quotaState: { close(provider: "claude", measurement: object): void } },
+    ) => {
+      options.quotaState.close("claude", {
+        status: "rejected", window: "seven_day", resetsAt: 84,
+      });
+      throw new Error("sandbox died after the provider closed");
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:4");
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(seams.innerLoop).toHaveBeenCalledOnce();
+    expect(seams.logLines).toContain(
+      "exit: quota — claude seven_day quota window closed; resets at 1970-01-01T00:01:24.000Z",
+    );
+    expect(seams.logLines.some((line) => line.startsWith("HALTED"))).toBe(false);
+  });
+
+  it("reports a failing drain beside the landing failure and still halts on the original", async () => {
+    const first = issue("1");
+    const sibling = issue("2");
+    const slow = deferred<{
+      type: "NEEDS-INFO"; questions: string; strandedHead: null;
+    }>();
+    seams.plan.mockResolvedValue(resolution([first, sibling]));
+    seams.innerLoop.mockImplementation((candidate: ReturnType<typeof issue>) =>
+      candidate.id === "1"
+        ? Promise.resolve({ type: "DONE", commits: [{ sha: "1" }] })
+        : slow.promise);
+    seams.merger.mockImplementation(async () => {
+      slow.resolve({ type: "NEEDS-INFO", questions: "answer", strandedHead: null });
+      throw new Error("landing failed");
+    });
+    seams.finalize.mockImplementation(async (inputs: { kind: string }[]) => {
+      if (inputs.some((input) => input.kind === "needs-info")) {
+        throw new Error("finalize failed");
+      }
+      return [];
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 2 })).rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
+    const drainLine = seams.logLines.find((line) =>
+      line.startsWith("drain after landing failure also failed:"));
+    expect(drainLine).toContain("finalize failed");
+    expect(seams.logLines.some((line) =>
+      line.startsWith("HALTED — internal failure: Error: landing failed")
+    )).toBe(true);
+    expect(seams.logLines.some((line) =>
+      line.startsWith("HALTED — internal failure: Error: finalize failed")
+    )).toBe(false);
+  });
 });

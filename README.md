@@ -479,7 +479,16 @@ queue reaches it, and capacity that used to idle becomes work.
 
 After a landing leaves the run quiescent, a non-empty recompute exits 75 before
 starting another issue. Images are refreshed in-process; the relaunch lets the
-launcher re-import configuration without interrupting any work.
+launcher re-import configuration without interrupting any work. A landing is a
+merge onto the source branch or onto a chunk branch (review lane), so a host
+whose work only ever waits on chunk pull requests relaunches and counts
+progress the same way.
+
+Six consecutive issue terminals with no landing between them exit 2 (`stuck`):
+admissions stop at once, running issues drain to their terminals and are
+finalised, and the run stops. This is the bound for a red source branch or a
+misconfigured gate stack, where every issue would otherwise burn its whole
+attempt budget before parking.
 
 Exit 75 (`EXIT_CODE_RELAUNCH`, exported from the package root) is unconditional:
 it no longer depends on a config field. A launcher that wants sandbar to finish

@@ -145,7 +145,13 @@ quota stops new admissions and drains running and landing work before exit 4.
 `maxTotalIssues` counts admissions. Relaunch (75) is evaluated at quiescence,
 before admitting newly-unblocked work, and requires a landing in this process.
 After six consecutive terminals with no landing, admissions stop immediately;
-already-running issues drain and are finalised before the run exits stuck.
+already-running issues drain and are finalised before the run exits stuck. A
+LANDING, for both of those, is any of a source-branch merge, a chunk landed on
+the source branch, or a DONE branch landed on its chunk branch — the last one
+because on a review-lane host it is the only way work ever leaves the pool;
+only the first two move the source branch and trigger the in-process image
+rebuild. `src/exit-conditions.ts`'s header owns the precedence and
+`src/scheduler.ts`'s the decision that applies it.
 
 All seven are one type, `TerminalExit`, and the run ends with exactly one
 `Exit (<tag>): <reason>` on stdout whichever fired (#70) — `formatExitLine` is
