@@ -157,6 +157,7 @@ import { durationField, startTimer } from "./timing.js";
 import { SandbarError, faultDetail } from "./errors.js";
 import {
   type TerminalExit,
+  MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING,
   budgetExit,
   formatExitLine,
   haltedExit,
@@ -166,6 +167,7 @@ import {
   quotaExit,
   relaunchExit,
   remainingBudget,
+  stuckExit,
 } from "./exit-conditions.js";
 import { createRunQuotaState } from "./inner-loop.js";
 import {
@@ -926,6 +928,7 @@ export async function run(
   const startedThisRun = new Set<number>();
   let landingsThisRun = 0;
   let quotaPending: TerminalExit | null = null;
+  let terminalsSinceLanding = 0;
   const retryQueue: PlannedIssue[] = [];
 
   // -------------------------------------------------------------------------
@@ -1826,6 +1829,9 @@ export async function run(
         ? mergerSummary.merged.length + mergerSummary.mergedChunks.length
         : 0;
       landingsThisRun += landedNow;
+      terminalsSinceLanding = landedNow > 0
+        ? 0
+        : terminalsSinceLanding + settled.length;
       if (selectedExit?.tag === "quota") quotaPending = selectedExit;
       const cycleExit = selectedExit?.tag === "quota" && active.size > 0
         ? null
@@ -1840,6 +1846,13 @@ export async function run(
 
       if (quotaPending && active.size === 0) {
         terminalExit = await announceExit(quotaPending);
+        break;
+      }
+      if (
+        terminalsSinceLanding >= MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING &&
+        active.size === 0
+      ) {
+        terminalExit = await announceExit(stuckExit(terminalsSinceLanding));
         break;
       }
     }
