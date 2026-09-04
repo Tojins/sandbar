@@ -8,15 +8,15 @@
 //                              `chunks.ts` could give no chunk) and saying on
 //                              the issue where an `auto-land` label lost to
 //                              inherited gating. A changes-requested review on
-//                              a chunk's pull request is filed as a follow-up
-//                              issue in that chunk first (#63), and the
+//                              a chunk's pull request is routed to its landed
+//                              member(s) and re-queues them (#95), and the
 //                              RECONCILER (#64) finishes off any chunk branch
 //                              already contained in origin/<sourceBranch> —
 //                              hand-merged, or landed by a run that died
 //                              before it could close the members. The plan is
-//                              rebuilt after either, so a follow-up filed now
-//                              is queued now and a member closed now stops
-//                              blocking its dependents.
+//                              rebuilt after either, so a member re-queued now
+//                              is carried into this cycle and one closed now
+//                              stops blocking its dependents.
 //   Phase 2 (Inner-loop ralph): Each issue runs in its own sandbox up to
 //                              config.maxImplAttempts times; on gate-1 green
 //                              the (strictly-advisory) reviewer runs in the
@@ -131,7 +131,7 @@ import {
 } from "./containers.js";
 import { installCleanupTraps, onCleanup, runCleanup } from "./cleanup.js";
 import {
-  fileChunkReviewFollowUps,
+  routeChunkReviewFollowUps,
   realAdapter as realChunkFollowUpAdapter,
 } from "./chunk-follow-up.js";
 import {
@@ -843,9 +843,10 @@ export async function run(
   const mergedThisRun = new Set<number>();
 
   // One adapter for the whole run, like `repo` itself: the chunk-review scan
-  // (#63) reads and writes the same repository every cycle.
+  // (#95) reads and writes the same repository every cycle.
   const followUpAdapter = realChunkFollowUpAdapter({
     repo,
+    repoDir: layout.repoDir,
     sourceBranch: config.sourceBranch,
   });
 
@@ -931,19 +932,16 @@ export async function run(
         await runLogger.appendOrchestrator(line);
       }
 
-      // The chunk-review scan (#63). Every chunk with work on origin is asked
+      // The chunk-review scan (#95). Every chunk with work on origin is asked
       // whether a human has requested changes on its pull request, and each
-      // review that has not already been converted becomes an issue in that
-      // chunk. Inert on the default lane and until a chunk's first landing:
+      // review that has not already been handled is routed to and re-queues
+      // the landed member(s) it concerns. Inert until a chunk's first landing:
       // `landedChunks` is empty, and the scan makes no call at all.
       //
-      // RE-PLANNED when it files anything, because the follow-up is blocked
-      // only by members already on the chunk branch — it is eligible in this
-      // very cycle, and a cycle that filed the issue and then found the plan
-      // empty would exit with a review nobody had answered. The created issues
-      // are handed back in rather than re-listed: `gh issue list` is the
-      // lagging search backend, and nothing in the queue is younger than these.
-      const followUps = await fileChunkReviewFollowUps({
+      // RE-PLANNED when it re-queues anything. The existing issues are handed
+      // back rather than re-listed: `gh issue list` is the lagging search
+      // backend, so it may not reflect the label flip in this cycle.
+      const followUps = await routeChunkReviewFollowUps({
         chunks: resolution.landedChunks,
         adapter: followUpAdapter,
         log: (line) => runLogger.appendOrchestrator(line),
@@ -951,9 +949,8 @@ export async function run(
       if (followUps.length > 0) {
         const filed = followUps.map((f) => `#${f.number}`).join(", ");
         console.log(
-          `Filed ${followUps.length} chunk review follow-up issue(s): ${filed} ` +
-            "— a human requested changes on a chunk's pull request, and each " +
-            "review is now an issue in that chunk.",
+          `Re-queued ${followUps.length} chunk member(s): ${filed} — a human ` +
+            "requested changes on the chunk's pull request.",
         );
         resolution = await buildPlan(repo, {
           ...planOptions,

@@ -1,136 +1,32 @@
-// A changes-requested review on a chunk PR becomes a follow-up chunk issue
-// (#63, and §4 of the design in #54).
+// A changes-requested review on a chunk PR routes back to the landed member it
+// concerns (#95, replacing #63's follow-up-issue design; rationale in #92).
+// Sandbar comments on that existing issue and adds `ready-for-agent`; #94's
+// ordinary rework path resumes it from the chunk tip and lands it back on the
+// same branch. No new tracker surface is created.
 //
-// A chunk's review surface is its draft pull request (#62), and a human who
-// reviews it has exactly one interface: that page. They request changes there,
-// on the threads the diff gave them, and nothing else is asked of them — no
-// label to apply, no issue to write, no branch to name. Everything after that
-// is sandbar's bookkeeping, and this module is it: each changes-requested
-// review becomes ONE issue, blocked by the chunk's tips, which therefore joins
-// the chunk by the derivation rule (#58) and is worked like any other member
-// (#61) — its branch cut from the chunk tip, its commits landing back on the
-// same branch, under the same pull request the review was written on.
+// Routing is deterministic. A thread path is compared with the files each
+// member's merge brought onto the chunk branch; one unique owner wins.
+// Otherwise the lowest-numbered `LandedChunk.tip` wins. A mis-route costs only
+// whose history records the feedback: `implementer-chunk-base.md` licenses
+// cross-member rework, so every member can make the right fix. That is why
+// phase 1 needs neither a model call nor line-level blame.
 //
-// The rejected alternative is recorded in #54 and worth restating, because it
-// is the obvious one: an agent that reads the PR comments and pushes fixes
-// straight onto the chunk branch. That produces commits no issue tracks, work
-// no plan authorised and no budget counted, and — the part that actually bites
-// — nothing a human can point at when the fix is wrong. An issue is the handle
-// on a unit of agent work everywhere else in sandbar; review feedback is not
-// special enough to be the one exception.
+// Granularity is one comment per (member, review). A review is one human act
+// whose threads argue together. Threads routed to one member stay together;
+// a review spanning members produces one comment on each containing only that
+// member's threads. A body-only review goes to the fallback tip.
 //
-// ---------------------------------------------------------------------------
-// Idempotence, which is the whole difficulty
-// ---------------------------------------------------------------------------
+// Idempotence remains the PR ledger from #63, keyed by the review node id. The
+// PR node is strongly consistent, unlike label-scoped issue search, and the
+// label flip cannot be the record: after rework lands the label disappears and
+// the review would look unhandled again. Member comments and label flips happen
+// before the ledger; any failure is loud, so sandbar may repeat a completed
+// prefix but never records feedback it did not queue. Threads remain open for
+// their human reviewer to resolve.
 //
-// One review must yield one issue: across cycles, across runs, across further
-// comments on the same threads, and across a review whose threads a human
-// never resolves. Nothing about the tracker state answers that on its own —
-// GitHub does not mark a review "handled", the threads stay unresolved until a
-// human says otherwise (sandbar deliberately never resolves one; see below),
-// and the review is still `CHANGES_REQUESTED` for as long as the PR is open.
-// So a scan that asked only "is there a changes-requested review?" would file
-// the same issue every cycle, forever.
-//
-// The record is a LEDGER COMMENT on the pull request, one per converted
-// review, carrying an HTML-comment marker with the review's node id:
-//
-//     <!-- sandbar:chunk-follow-up review=<review node id> -->
-//
-// Three properties make that the right place for it. It is on the PR, so the
-// one query that reads the reviews reads the ledger with them — no second
-// listing, and no second thing to keep in step. It is read through GraphQL on
-// the pull request node, which is strongly consistent, unlike the search
-// backend `fetchCandidates` lists through: a follow-up filed sixty seconds ago
-// is visible, which is exactly when the question is asked. And it does not
-// depend on the follow-up ISSUE's state — an issue parked with `needs-info`,
-// or closed by a human who disagreed with it, has left every label-scoped
-// listing sandbar makes, and a ledger keyed on those would re-file it the next
-// cycle, which is precisely when a human is least interested in a duplicate.
-//
-// The issue's BODY carries the same marker (#63 asks for a bot-stamped body,
-// and it is what tells a human reading the issue where it came from), but the
-// body is provenance and not the index: no strongly-consistent query is keyed
-// on issue bodies, so an index made of them could only be a search.
-//
-// THE ORDER OF THE TWO WRITES is where this can still go wrong, and it is
-// written down rather than tuned away. The issue is created first and the
-// ledger comment posted second, because the comment names the issue. If the
-// comment fails, an issue exists that the ledger does not know about, and the
-// next cycle would file a second one — so that failure is LOUD (`SandbarError`,
-// the run stops) and its message says which issue exists and what to do about
-// it. The other order would trade a duplicate for a silent drop: a ledger entry
-// with no issue behind it is a review nothing will ever answer, and nothing
-// would ever say so.
-//
-// A CREATE that fails is the same shape one step earlier, and its message says
-// so rather than promising more than it knows. A rejected create wrote nothing
-// and the next cycle re-files it; a create whose issue was made and whose
-// RESPONSE was lost (a timeout, a reset connection) is indistinguishable from
-// here, and leaves exactly the unledgered issue the paragraph above is about.
-// So both readings are in the text, with the manual fix attached to the second.
-//
-// WHAT IS NOT DONE, deliberately: sandbar does not resolve the review threads.
-// A thread is resolved when the human who opened it is satisfied, and a bot
-// that resolves threads on its own behalf is a bot that closes the loop it was
-// supposed to hand back. The ledger is what stops the re-file; resolution stays
-// the reviewer's.
-//
-// ---------------------------------------------------------------------------
-// What becomes an issue, and what does not
-// ---------------------------------------------------------------------------
-//
-// The unit is a REVIEW — one submitted `CHANGES_REQUESTED` review — not a
-// thread and not a comment. That is what a human did in one act, and it is the
-// granularity their "please change these five things" was written at; five
-// issues for five threads would scatter one review's argument across five
-// branches that then land in some order nobody chose.
-//
-// A review is skipped when it is already in the ledger, and when it has nothing
-// left to ask for: no unresolved thread of its own and an empty body. The
-// second clause is what makes a human resolving every thread before sandbar
-// next runs mean what they meant by it. A DISMISSED review is not
-// `CHANGES_REQUESTED` any more, so it never reaches here at all — dismissal is
-// the reviewer's own "never mind", and GitHub already records it.
-//
-// A thread counts for a review if ANY of its comments belongs to that review,
-// not just the one that opened it: a reviewer whose second pass replies inside
-// a thread they opened last week is asking for something now, and keying on the
-// opening comment would file an issue that quotes the review body and none of
-// the substance. The cost is that a thread can be quoted by two follow-ups, one
-// per review that spoke in it, which is the honest reading of what happened.
-//
-// ---------------------------------------------------------------------------
-// The `## Blocked by` section, which is what makes any of it work
-// ---------------------------------------------------------------------------
-//
-// The follow-up declares the chunk's TIPS (`LandedChunk.tips`). That single
-// section does four things, and every one of them is load-bearing:
-//
-//   * it puts the issue in the chunk — `chunks.ts` derives a chunk as the
-//     connected component of review-gated issues, so an edge to a member IS
-//     the membership;
-//   * it review-GATES the issue, by #57's downward inheritance, so no host
-//     default and no missing label can let review feedback auto-land;
-//   * it holds the issue until the work it comments on is really on origin —
-//     the tips have durable member refs contained by the chunk branch, the clause
-//     the planner already has (#59); and
-//   * it puts the issue BEHIND everything on the branch, so the branch it is
-//     seeded from (the chunk tip, #61) contains the code the review is about.
-//
-// It is written FIRST in the body, above the quoted review, and that ordering
-// is a correctness requirement rather than a style: `parseBlockedBy` matches
-// the first `## Blocked by` in the body and reads every `#N` up to the next
-// heading, and the text being quoted is a human's — it may contain anything,
-// including a `## Blocked by` heading of its own. Quoted lines are blockquoted,
-// which already stops them terminating a section early; putting sandbar's own
-// section first is what stops one of them starting one.
-//
-// PURE where it can be. The decisions (which reviews are pending, what the
-// issue says, what the ledger says) are functions over a snapshot of the pull
-// request, and the `gh` calls live behind an adapter at the bottom — one read,
-// two writes, all three named in `chunk-follow-up-gh.test.ts` by their argv,
-// because argv is what a fake adapter cannot see.
+// Pure functions own review selection, routing and prose. Git derives the
+// changed paths from each member's merge commit; `gh` reads the review and
+// performs the tracker writes behind the adapter below.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -138,6 +34,7 @@ import { promisify } from "node:util";
 import type { ChunkMember, LandedChunk } from "./chunks.js";
 import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX, READY_FOR_AGENT_LABEL } from "./finalize.js";
+import { memberBranchName } from "./naming.js";
 import type { IssueSummary } from "./plan-resolver.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
@@ -147,8 +44,10 @@ const exec = promisify(execFile);
 // threads of fifty comments each, plus a hundred issue-comment bodies and fifty
 // review bodies, all of them human prose. Node's default ceiling is 1 MB, and
 // an overflow here does not degrade: it REJECTS the call, which `reviewState`
-// turns into a `SandbarError` that stops the run. Same ceiling `forge-pr` and
-// `forge-verify` give their own gh reads.
+// turns into a `SandbarError` that stops the run. Member-path discovery uses
+// the same explicit ceiling: its history read scales with the host repository's
+// first-parent merges, and a member's changed-path list scales with its tree.
+// Same ceiling `forge-pr` and `forge-verify` give their own reads.
 const MAX_BUFFER = 50 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -203,7 +102,7 @@ export type ChunkPullRequestState = {
 export const followUpMarker = (reviewId: string): string =>
   `<!-- sandbar:chunk-follow-up review=${reviewId} -->`;
 
-// Every review id the pull request's comments claim has been converted.
+// Every review id the pull request's comments claim has been handled.
 // Matching on the marker rather than the prose means the ledger comment can be
 // reworded without re-filing every follow-up in every open chunk.
 export function convertedReviewIds(
@@ -222,7 +121,7 @@ export function convertedReviewIds(
 }
 
 // ---------------------------------------------------------------------------
-// Which reviews are still owed an issue
+// Which reviews are still owed rework
 // ---------------------------------------------------------------------------
 
 export type PendingFollowUp = {
@@ -256,60 +155,77 @@ export function pendingFollowUps(
   return pending;
 }
 
-// ---------------------------------------------------------------------------
-// What the issue says
-// ---------------------------------------------------------------------------
+export type RoutedFollowUp = {
+  readonly member: ChunkMember;
+  readonly threads: readonly ReviewThread[];
+};
 
-export function followUpIssueTitle(
-  root: number,
-  review: ChangesRequestedReview,
-): string {
-  return review.author.length > 0
-    ? `Chunk #${root}: address ${review.author}'s review feedback`
-    : `Chunk #${root}: address review feedback`;
+/** Route by unique path ownership, falling back to the lowest-numbered tip. */
+export function routeFollowUp(
+  chunk: LandedChunk,
+  pending: PendingFollowUp,
+  pathsByMember: ReadonlyMap<number, ReadonlySet<string>>,
+): readonly RoutedFollowUp[] {
+  const fallback = [...chunk.tips].sort((a, b) => a.number - b.number)[0];
+  if (!fallback) {
+    throw new SandbarError(
+      `Chunk ${chunk.branch} has no tip to route review feedback to`,
+    );
+  }
+  const grouped = new Map<number, ReviewThread[]>();
+  const memberByNumber = new Map(
+    chunk.members.map((m) => [m.number, m] as const),
+  );
+  for (const thread of pending.threads) {
+    const owners = chunk.members.filter((m) =>
+      pathsByMember.get(m.number)?.has(thread.path),
+    );
+    const owner = owners.length === 1 ? owners[0] : fallback;
+    if (!owner) continue;
+    const threads = grouped.get(owner.number) ?? [];
+    threads.push(thread);
+    grouped.set(owner.number, threads);
+  }
+  // A body-only review still needs one actionable handle.
+  if (pending.threads.length === 0) grouped.set(fallback.number, []);
+  return [...grouped.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([number, threads]) => ({
+      member: memberByNumber.get(number) ?? fallback,
+      threads,
+    }));
 }
 
 // A human's words, rendered so they cannot be mistaken for sandbar's markup.
-// Every line is blockquoted — which is also what keeps a heading inside them
-// from ending the `## Blocked by` section above, since that section ends only
-// at a `##` immediately after a newline.
+// Every line is blockquoted so the review remains visually distinct from the
+// routing instructions around it.
 const quote = (text: string): readonly string[] =>
   text.replace(/\r\n/g, "\n").split("\n").map((line) => `> ${line}`);
 
 const threadHeading = (thread: ReviewThread): string =>
   thread.path.length > 0 ? `### \`${thread.path}\`` : "### Pull request thread";
 
-export function followUpIssueBody(args: {
+export function memberReviewComment(args: {
   readonly root: number;
   readonly branch: string;
   readonly prNumber: number;
   readonly review: ChangesRequestedReview;
   readonly threads: readonly ReviewThread[];
-  // The chunk's tips — what this issue is blocked by. Non-empty; an empty
-  // section would make the issue the root of a chunk of its own (`chunks.ts`,
-  // `landedChunksOf`).
-  readonly tips: readonly ChunkMember[];
 }): string {
   const who = args.review.author.length > 0 ? args.review.author : "A reviewer";
   const lines: string[] = [
     `${BOT_COMMENT_PREFIX} ${who} requested changes on the draft pull request ` +
-      `for chunk #${args.root} (#${args.prNumber}), and this issue is that ` +
-      `review. It belongs to the chunk: its branch is cut from the tip of ` +
-      `\`${args.branch}\`, and its commits land back there, under the same ` +
-      `pull request the review was written on.`,
+      `for chunk #${args.root} (#${args.prNumber}). This feedback was routed ` +
+      `here for rework; the issue will resume from \`${args.branch}\` and land ` +
+      `back on that chunk.`,
     "",
     "Do what the review asks for. Sandbar does not resolve review threads — " +
       "the reviewer resolves them when they are satisfied, and nothing here " +
       "depends on their doing so.",
     "",
-    // FIRST, above the quoted review, and see the header for why that is a
-    // correctness requirement. Bare `#N` per entry: `parseBlockedBy` reads
-    // every `#N` in the section, so a title alongside one would be a second
-    // chance to name a number nobody meant.
-    "## Blocked by",
+    `Review: ${args.review.url}`,
   ];
-  for (const tip of args.tips) lines.push(`- #${tip.number}`);
-  lines.push("", "## The review", "", `${args.review.url}`);
+  lines.push("", "## The review");
   if (args.review.body.trim().length > 0) {
     lines.push("", ...quote(args.review.body));
   }
@@ -328,45 +244,21 @@ export function followUpIssueBody(args: {
         "the whole of it.",
     );
   }
-  lines.push("", followUpMarker(args.review.id));
   return lines.join("\n");
-}
-
-export type FollowUpIssueContent = {
-  readonly title: string;
-  readonly body: string;
-};
-
-export function followUpIssueContent(args: {
-  readonly chunk: LandedChunk;
-  readonly prNumber: number;
-  readonly pending: PendingFollowUp;
-}): FollowUpIssueContent {
-  return {
-    title: followUpIssueTitle(args.chunk.root, args.pending.review),
-    body: followUpIssueBody({
-      root: args.chunk.root,
-      branch: args.chunk.branch,
-      prNumber: args.prNumber,
-      review: args.pending.review,
-      threads: args.pending.threads,
-      tips: args.chunk.tips,
-    }),
-  };
 }
 
 // The ledger entry, and the reviewer's receipt: it is on the page they are
 // looking at, so the answer to "where did my review go?" is one line under it.
 export function ledgerComment(args: {
   readonly review: ChangesRequestedReview;
-  readonly issueNumber: number;
+  readonly issueNumbers: readonly number[];
   readonly branch: string;
 }): string {
+  const issues = args.issueNumbers.map((n) => `#${n}`).join(" and ");
   return (
-    `${BOT_COMMENT_PREFIX} filed #${args.issueNumber} for the changes ` +
-    `requested in [this review](${args.review.url}). It joins this chunk, is ` +
-    `worked like every other member, and lands on \`${args.branch}\` — this ` +
-    `pull request will show the commits.\n\n` +
+    `${BOT_COMMENT_PREFIX} commented on ${issues} for the changes requested ` +
+    `in [this review](${args.review.url}) and re-queued them. Their rework ` +
+    `lands on \`${args.branch}\`, so this pull request will show the commits.\n\n` +
     `The threads stay open: sandbar does not resolve them, so resolving one ` +
     `is still how you say you are satisfied.\n\n` +
     `${followUpMarker(args.review.id)}`
@@ -383,8 +275,10 @@ export type ChunkFollowUpAdapter = {
   // PR call failed (the merger halts on that, but the branch is durable and a
   // later cycle retries it).
   reviewState(chunkBranch: string): Promise<ChunkPullRequestState | null>;
-  // Returns the new issue's number.
-  createIssue(content: FollowUpIssueContent): Promise<number>;
+  memberPaths(
+    chunk: LandedChunk,
+  ): Promise<ReadonlyMap<number, ReadonlySet<string>>>;
+  requeueMember(issueNumber: number, comment: string): Promise<IssueSummary>;
   postLedgerComment(prNumber: number, body: string): Promise<void>;
 };
 
@@ -402,16 +296,13 @@ export type ChunkFollowUpAdapter = {
 //
 //   * `comments(last:100)` is the ledger read, and it is the one cap with a
 //     real failure mode. Ledger entries are appended, so the newest comments
-//     are where a just-converted review is recorded; reading the oldest
-//     hundred of a busy pull request would stop seeing them at all and re-file
-//     every review every cycle, forever, one issue and one comment at a time
-//     with nothing reporting it. Read from the new end, a comment falling out
-//     of the window costs at most ONE duplicate and then settles, because the
-//     ledger entry that duplicate writes is by construction the newest comment
-//     on the page.
+//     are where a just-handled review is recorded; reading the oldest hundred
+//     of a busy pull request would re-queue and comment on old reviews every
+//     cycle. Read from the new end, a comment falling out of the window costs
+//     at most one repeated routing before the new ledger entry settles it.
 //   * `reviews(...,last:50)` is the newest fifty changes-requested reviews. A
-//     review old enough to fall out of that was converted long ago; a review
-//     too NEW to be seen would never be filed at all, which is a silent drop
+//     review old enough to fall out of that was handled long ago; a review too
+//     NEW to be seen would never be routed at all, which is a silent drop
 //     rather than a truncation.
 //   * `reviewThreads(last:100)` is the newest hundred threads, which is where
 //     a review submitted minutes ago put its own. Losing the oldest costs a
@@ -476,7 +367,7 @@ function parseReviewState(stdout: string): ChunkPullRequestState | null {
         body: str(r["body"]),
       }))
       // A review with no node id cannot be ledgered, and an unledgerable
-      // review would be re-filed every cycle. Unreachable from GitHub; dropped
+      // review would be re-queued every cycle. Unreachable from GitHub; dropped
       // rather than trusted.
       .filter((r) => r.id.length > 0),
     threads: nodesOf(pr["reviewThreads"]).map((t) => ({
@@ -494,6 +385,7 @@ function parseReviewState(stdout: string): ChunkPullRequestState | null {
 
 export function realAdapter(args: {
   readonly repo: RepoRef;
+  readonly repoDir: string;
   // The base every chunk PR is opened against — `config.sourceBranch`. Part of
   // the lookup rather than decoration: `ensurePullRequest` finds the PR it
   // re-titles by the head-to-base PAIR, so a scan asking by head alone could
@@ -529,35 +421,81 @@ export function realAdapter(args: {
       );
       return parseReviewState(stdout);
     },
-    async createIssue(content) {
-      const { stdout } = await exec("gh", [
-        "issue",
-        "create",
-        "--repo",
-        slug,
-        "--title",
-        content.title,
-        "--body",
-        content.body,
-        // The queue label, so the issue is a candidate on the very next plan.
-        // Its LANE needs no label: `## Blocked by` names a review-gated member,
-        // and gating is inherited downward (#57).
-        "--label",
-        READY_FOR_AGENT_LABEL,
-      ]);
-      const url = stdout.trim().split("\n").pop() ?? "";
-      const m = url.match(/\/issues\/(\d+)/);
-      const number = m && m[1] ? Number(m[1]) : 0;
-      if (number === 0) {
+    async memberPaths(chunk) {
+      const chunkRef = `refs/remotes/origin/${chunk.branch}`;
+      const memberRefs = chunk.members.map(
+        (member) => `refs/remotes/origin/${memberBranchName(member.number)}`,
+      );
+      const [{ stdout: mergesOut }, { stdout: memberShasOut }] =
+        await Promise.all([
+          exec(
+            "git",
+            ["rev-list", "--parents", "--first-parent", "--merges", chunkRef],
+            { cwd: args.repoDir, maxBuffer: MAX_BUFFER },
+          ),
+          exec("git", ["rev-parse", ...memberRefs], { cwd: args.repoDir }),
+        ]);
+      const mergeByMemberSha = new Map<string, [string, string]>();
+      for (const line of mergesOut.trim().split("\n").filter(Boolean)) {
+        const [merge, firstParent, ...otherParents] = line.trim().split(/\s+/);
+        if (!merge || !firstParent) continue;
+        for (const parent of otherParents) {
+          if (!mergeByMemberSha.has(parent)) {
+            mergeByMemberSha.set(parent, [firstParent, merge]);
+          }
+        }
+      }
+      const memberShas = memberShasOut.trim().split("\n");
+      if (memberShas.length !== chunk.members.length) {
         throw new SandbarError(
-          `Filed a chunk review follow-up issue but could not read its number ` +
-            `out of gh's output (${JSON.stringify(url)}). The issue exists; ` +
-            `nothing recorded it, so the next cycle would file a second one. ` +
-            `Find it on the tracker and either close it or add the marker ` +
-            `comment to the chunk's pull request by hand.`,
+          `Resolved ${memberShas.length} member refs for ${chunk.members.length} ` +
+            `members on ${chunk.branch}`,
         );
       }
-      return number;
+      const entries = await Promise.all(
+        chunk.members.map(async (member, index) => {
+          const merge = mergeByMemberSha.get(memberShas[index] ?? "");
+          if (!merge) {
+            throw new SandbarError(
+              `Could not find member #${member.number}'s merge on ${chunk.branch}`,
+            );
+          }
+          const { stdout } = await exec(
+            "git",
+            ["diff", "--name-only", merge[0], merge[1]],
+            { cwd: args.repoDir, maxBuffer: MAX_BUFFER },
+          );
+          const paths = new Set(
+            stdout.split("\n").map((path) => path.trim()).filter(Boolean),
+          );
+          return [member.number, paths] as const;
+        }),
+      );
+      return new Map(entries);
+    },
+    async requeueMember(issueNumber, comment) {
+      await exec("gh", [
+        "issue", "comment", String(issueNumber), "--repo", slug,
+        "--body", comment,
+      ]);
+      await exec("gh", [
+        "issue", "edit", String(issueNumber), "--repo", slug,
+        "--add-label", READY_FOR_AGENT_LABEL,
+      ]);
+      const { stdout } = await exec("gh", [
+        "issue", "view", String(issueNumber), "--repo", slug,
+        "--json", "number,title,body,labels",
+      ]);
+      const raw = JSON.parse(stdout) as {
+        number: number; title: string; body: string;
+        labels: readonly { name: string }[];
+      };
+      return {
+        number: raw.number,
+        title: raw.title,
+        body: raw.body,
+        labels: raw.labels.map((l) => l.name),
+      };
     },
     async postLedgerComment(prNumber, body) {
       await exec("gh", [
@@ -578,10 +516,9 @@ export function realAdapter(args: {
 // ---------------------------------------------------------------------------
 
 /**
- * File one issue per unconverted changes-requested review on every chunk that
- * has work on origin (#63).
+ * Route every unconverted changes-requested review to existing chunk members.
  *
- * Returns the issues it created, in the shape the planner lists candidates in,
+ * Returns the issues it re-queued, in the shape the planner lists candidates in,
  * so the caller can re-plan WITH them (`buildPlan`'s `extraCandidates`) instead
  * of waiting for the search index — see this module's header, and the
  * plan-resolver's.
@@ -589,18 +526,17 @@ export function realAdapter(args: {
  * LOUD on failure, like every other tracker write that carries the only copy of
  * something (#8). A read that fails leaves sandbar unable to say whether a
  * review is waiting, while the merge phase would go on adding members to the
- * branch it is waiting on; a create that fails leaves a review unanswered for
- * the same reason; and a ledger comment that fails leaves an issue nothing
- * knows about, which is the one failure that COMPOUNDS — every later cycle
- * files another. None of the three is worth carrying on past.
+ * branch it is waiting on; a member write that fails leaves feedback
+ * unanswered; and a ledger failure makes the next cycle repeat the routing.
+ * None is worth carrying on past.
  */
-export async function fileChunkReviewFollowUps(args: {
+export async function routeChunkReviewFollowUps(args: {
   readonly chunks: readonly LandedChunk[];
   readonly adapter: ChunkFollowUpAdapter;
   readonly log?: (line: string) => void | Promise<void>;
 }): Promise<readonly IssueSummary[]> {
   const log = args.log ?? (() => {});
-  const created: IssueSummary[] = [];
+  const requeued = new Map<number, IssueSummary>();
   for (const chunk of args.chunks) {
     let state: ChunkPullRequestState | null;
     try {
@@ -615,27 +551,41 @@ export async function fileChunkReviewFollowUps(args: {
       );
     }
     if (!state) continue;
+    let pathsByMember: ReadonlyMap<number, ReadonlySet<string>> | undefined;
     for (const pending of pendingFollowUps(state)) {
-      const content = followUpIssueContent({
-        chunk,
-        prNumber: state.number,
-        pending,
-      });
-      let issueNumber: number;
       try {
-        issueNumber = await args.adapter.createIssue(content);
+        pathsByMember ??= await args.adapter.memberPaths(chunk);
+      } catch (err) {
+        throw new SandbarError(
+          `Could not read the member merges on chunk ${chunk.branch}, so ` +
+            `sandbar cannot route review ${pending.review.url}: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      }
+      const routed = routeFollowUp(chunk, pending, pathsByMember);
+      const issueNumbers: number[] = [];
+      try {
+        for (const route of routed) {
+          const candidate = await args.adapter.requeueMember(
+            route.member.number,
+            memberReviewComment({
+              root: chunk.root,
+              branch: chunk.branch,
+              prNumber: state.number,
+              review: pending.review,
+              threads: route.threads,
+            }),
+          );
+          issueNumbers.push(route.member.number);
+          requeued.set(candidate.number, candidate);
+        }
       } catch (err) {
         if (err instanceof SandbarError) throw err;
         throw new SandbarError(
-          `Could not file the follow-up issue for the review requesting ` +
-            `changes on chunk ${chunk.branch} (${pending.review.url}, on ` +
-            `${state.url}). ` +
-            `The issue was most likely not created, in which case the next ` +
-            `cycle files it and there is nothing to do. If it WAS created and ` +
-            `only the response was lost, it is unledgered, so the next cycle ` +
-            `files a second one — check the tracker, and either close the ` +
-            `duplicate or record it by hand with a comment containing ` +
-            `${followUpMarker(pending.review.id)}: ` +
+          `Could not re-queue all members for the review requesting changes ` +
+            `on chunk ${chunk.branch} (${pending.review.url}, on ${state.url}). ` +
+            `The review is not ledgered, so the next cycle retries it: ` +
             `${err instanceof Error ? err.message : String(err)}`,
           { cause: err },
         );
@@ -645,33 +595,28 @@ export async function fileChunkReviewFollowUps(args: {
           state.number,
           ledgerComment({
             review: pending.review,
-            issueNumber,
+            issueNumbers,
             branch: chunk.branch,
           }),
         );
       } catch (err) {
         throw new SandbarError(
-          `Filed #${issueNumber} for the review requesting changes on chunk ` +
-            `${chunk.branch} (${pending.review.url}), but could not record it ` +
+          `Re-queued ${issueNumbers.map((n) => `#${n}`).join(", ")} for the ` +
+            `review requesting changes on chunk ${chunk.branch} ` +
+            `(${pending.review.url}), but could not record it ` +
             `on pull request #${state.number}. That comment is what stops the ` +
-            `next cycle filing the same issue again, so post it by hand — the ` +
+            `next cycle routing the same review again, so post it by hand — the ` +
             `body needs to contain ${followUpMarker(pending.review.id)} — or ` +
-            `close #${issueNumber} and let sandbar re-file it: ` +
+            `let sandbar retry it: ` +
             `${err instanceof Error ? err.message : String(err)}`,
           { cause: err },
         );
       }
-      created.push({
-        number: issueNumber,
-        title: content.title,
-        body: content.body,
-        labels: [READY_FOR_AGENT_LABEL],
-      });
       await log(
-        `chunk ${chunk.branch}: filed #${issueNumber} for a changes-requested ` +
+        `chunk ${chunk.branch}: re-queued ${issueNumbers.map((n) => `#${n}`).join(", ")} for a changes-requested ` +
           `review on PR #${state.number} (${pending.review.url})`,
       );
     }
   }
-  return created;
+  return [...requeued.values()];
 }
