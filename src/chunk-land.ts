@@ -74,6 +74,10 @@
 //                     take their recovery point with it. So `land` STAYS, the
 //                     PR says what arrived, and the cycle that adds nothing
 //                     new lands the chunk as reviewed.
+//                     The same bucket covers #94 rework: a member carrying an
+//                     authoritative `ready-for-agent` is still in flight, so
+//                     landing waits, keeps `land`, and names that member on
+//                     the PR rather than closing it with feedback unbuilt.
 //
 // ---------------------------------------------------------------------------
 // Reconciliation — the same wrap-up, without the merge
@@ -241,6 +245,7 @@ export type ChunkLandTarget = {
   // landing may not close them in any other order, and why it stops at the
   // first failure.
   readonly closeOrder: readonly ChunkMember[];
+  readonly rework: readonly ChunkMember[];
   // The pull request carrying the chunk. 0 when there is none to act on —
   // a reconciled chunk whose PR a human already closed.
   readonly pullRequest: number;
@@ -295,6 +300,7 @@ function targetFor(
     title: chunk?.title ?? pr?.title ?? "",
     members: chunk?.members ?? [],
     closeOrder: chunk?.closeOrder ?? [],
+    rework: chunk?.rework ?? [],
     pullRequest: pr?.number ?? 0,
   };
 }
@@ -548,10 +554,10 @@ export const CHUNK_LAND_DEFERRED_PR_COMMENT = (args: {
   readonly landedNow: readonly ChunkMember[];
 }): string =>
   `${BOT_COMMENT_PREFIX} this chunk is labelled \`${LAND_LABEL}\`, and it was NOT ` +
-  `landed this cycle: sandbar had just put more of it on \`${args.chunkBranch}\` — ` +
+  `landed this cycle: these members are still in flight or had just arrived on \`${args.chunkBranch}\` — ` +
   args.landedNow.map((m) => `#${m.number} — ${m.title}`).join(", ") +
   `.\n\nMerging now would move commits onto \`${args.sourceBranch}\` that this pull ` +
-  `request did not carry when you labelled it, which is the one thing the review ` +
+  `request may not yet carry as reviewed, which is the one thing the review ` +
   `lane exists to prevent. Nothing was merged and the \`${LAND_LABEL}\` label is ` +
   `untouched: the description above now lists the new work, and the next cycle ` +
   `that adds nothing further lands the chunk. Take the label off if you would ` +

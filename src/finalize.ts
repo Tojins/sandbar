@@ -406,7 +406,8 @@ export const CHUNK_LANDED_COMMENT_TEMPLATE = (chunkBranch: string): string =>
   `chunk lands, which a human ` +
   `triggers by putting \`${LAND_LABEL}\` on the chunk's pull request — ` +
   `sandbar then merges \`${chunkBranch}\` into the source branch and closes every ` +
-  `issue on it. The local issue branch was deleted — \`${chunkBranch}\` carries ` +
+  `issue on it. Re-apply \`ready-for-agent\` to ask sandbar to build a change ` +
+  `before the chunk lands. The local issue branch was deleted — \`${chunkBranch}\` carries ` +
   `its commits.`;
 
 export type FinalizeInput =

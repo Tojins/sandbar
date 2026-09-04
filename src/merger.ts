@@ -1715,6 +1715,10 @@ export async function runMergerWithAdapter(
         sourceBranch: chunkLanding.sourceBranch,
       };
       try {
+        if (request.rework.length > 0) {
+          await deferChunk(request, request.rework, pending.sourceBranch);
+          continue;
+        }
         // Grew under the request, in this very cycle (#61's layer landing, one
         // phase up). The plan read this chunk's members BEFORE phase 2, so the
         // wrap-up would close what was on the branch then and delete the branch

@@ -72,6 +72,12 @@
 // from the lane graph) and auto-land unreviewed chunk code onto the source
 // branch, which is the back door `lanes.ts` exists to shut. They are listed
 // back in and dropped from the plan when ANY fetched chunk branch names them.
+// The deliberate inverse is #94: re-applying `ready-for-agent` asks for rework
+// and overrides that de-queue. Only the authoritative GraphQL facts may make
+// that exception; the search listing can retain the label briefly after a
+// landing and would otherwise re-plan the same member forever. Membership is
+// still broad and fail-safe, while the re-planned issue keeps its exact derived
+// chunk target so its new work cannot escape onto the source branch.
 // That de-queue reading is deliberately broader than blocker satisfaction:
 // title drift or re-rooting must not make durable work eligible to implement
 // again, while only membership on the exact derived branch can prove a
@@ -188,11 +194,13 @@ const DEFAULT_K = 3;
 
 export type IssueState = "OPEN" | "CLOSED";
 
-// What the authoritative (GraphQL) batch knows about one issue. An issue absent
+// What the authoritative (GraphQL) batch knows about one issue. Labels are here
+// because #94's rework override must never read the lagging search result. An issue absent
 // from the batch has no facts at all, and every read below treats that miss the
 // safe way round.
 export type IssueFacts = {
   readonly state: IssueState;
+  readonly labels: readonly string[];
 };
 
 export type IssueSummary = {
@@ -365,11 +373,15 @@ export function resolvePlan(
     // as OPEN so a single state-fetch miss never silently drops a ready issue.
     if (excluded.has(c.number)) return false;
     if (issueFacts.get(c.number)?.state === "CLOSED") return false;
-    // Already developed and already landed on its chunk's branch (#59). It is
+    // Already developed and already landed on its chunk's branch (#59), unless
+    // the authoritative facts say a human explicitly re-queued it (#94). It is
     // here only to hold its place in the two graphs above, and it is dropped
     // before the review-lane hold below so it is never reported as "held": it
     // is not waiting for anything this cycle can give it.
-    if (publishedChunkMembers.has(c.number)) return false;
+    if (
+      publishedChunkMembers.has(c.number) &&
+      !issueFacts.get(c.number)?.labels.includes(READY_LABEL)
+    ) return false;
     if (c.labels.includes(WAITING_LABEL)) return false;
     const blockers = blockedBy.get(c.number) ?? [];
     if (!blockers.every((n) => blockerSatisfied(n, c.number))) return false;
@@ -417,6 +429,9 @@ export function resolvePlan(
       chunks,
       chunkIssues,
       new Set(candidates.map((c) => c.number).filter(isOnDerivedChunk)),
+      new Set(candidates.map((c) => c.number).filter((n) =>
+        issueFacts.get(n)?.labels.includes(READY_LABEL),
+      )),
     ),
     chunkNameDrifts: [...chunkMembers.keys()].flatMap((existing) => {
       const root = rootIssueFromChunkBranch(existing);
@@ -584,13 +599,14 @@ export async function fetchIssueStates(
   const records = await ghIssueBatch(
     numbers,
     repo,
-    "state",
+    "state labels(first: 100) { nodes { name } }",
   );
   for (const n of numbers) {
     const v = records[`i${n}`];
     if (!v) continue;
     result.set(n, {
       state: v.state === "CLOSED" ? "CLOSED" : "OPEN",
+      labels: (v.labels?.nodes ?? []).flatMap((l) => l?.name ? [l.name] : []),
     });
   }
   return result;

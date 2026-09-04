@@ -94,6 +94,7 @@ describe("selectLandRequests (#64)", () => {
           { number: 43, title: "beta" },
           { number: 42, title: "alpha" },
         ],
+        rework: [],
         pullRequest: 9,
       },
     ]);
@@ -110,6 +111,7 @@ describe("selectLandRequests (#64)", () => {
       title: "Sandbar chunk #42: alpha",
       members: [],
       closeOrder: [],
+      rework: [],
       pullRequest: 9,
     });
   });
@@ -153,6 +155,7 @@ describe("selectReconciliations (#64)", () => {
         title: "alpha",
         members: [{ number: 42, title: "alpha" }],
         closeOrder: [{ number: 42, title: "alpha" }],
+        rework: [],
         pullRequest: 9,
       },
     ]);

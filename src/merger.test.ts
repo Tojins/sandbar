@@ -2245,6 +2245,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     closeOrder: [...members]
       .reverse()
       .map((n) => ({ number: n, title: `t-${n}` })),
+    rework: [],
     pullRequest: 500 + root,
   });
 
@@ -2303,6 +2304,24 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     // The chunk landing itself is untouched: #43 is on the branch and owed its
     // `needs-review` display label.
     expect(summary.chunkLanded.map((c) => c.issue.id)).toEqual(["43"]);
+  });
+
+  it("defers landing while a member is queued for rework", async () => {
+    const { adapter, calls } = makeAdapter({ chunkRefs: originHas(42) });
+    const target = {
+      ...request(42),
+      rework: [{ number: 42, title: "t-42" }],
+    };
+    const summary = await runMergerWithAdapter(
+      [], adapter, undefined, undefined, landing(target),
+    );
+
+    expect(calls.merges).toEqual([]);
+    expect(summary.deferredChunks).toEqual([
+      { target, landedNow: [{ number: 42, title: "t-42" }] },
+    ]);
+    expect(calls.prLabelRemovals).toEqual([]);
+    expect(calls.prComments[0]?.body).toContain("#42 — t-42");
   });
 
   it("lands a chunk whose branch this cycle did not touch, beside one it did", async () => {

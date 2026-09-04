@@ -247,6 +247,7 @@ describe("comment templates", () => {
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("sandbar/chunk-42-alpha");
     expect(body).toContain("contained by the chunk branch");
+    expect(body).toContain("Re-apply `ready-for-agent`");
     expect(body).not.toMatch(/#\d/);
   });
 });

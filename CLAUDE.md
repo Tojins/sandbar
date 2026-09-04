@@ -238,7 +238,11 @@ and used to announce themselves in four different ways, the halt in none at all.
   closes (#64) and whose tips a follow-up is blocked by (#63) — never the whole
   component, since a member that has never been worked has no commits
   anywhere. De-queueing alone is broader and fail-safe: a member ref contained
-  by any fetched chunk branch is never reimplemented after title drift or re-rooting.
+  by any fetched chunk branch is never reimplemented after title drift or re-rooting,
+  unless the authoritative issue batch says a human re-applied
+  `ready-for-agent` to request rework (#94). That member is planned back onto
+  the same chunk, and an outstanding `land` request is deferred until the
+  rework leaves the queue.
   It also carries the ORDER those closes must go in, for the reason
   the `land` bullet below states.
 - **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,

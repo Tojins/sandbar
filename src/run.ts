@@ -1550,17 +1550,17 @@ export async function run(
             `chunk parked: ${c.target.branch} not landed (${c.reason})`,
           );
         }
-        // Deferred, not parked (#61 + #64): the chunk grew this cycle, so the
-        // label is still on and the next cycle lands it. Printed from here for
+        // Deferred, not parked (#61 + #64 + #94): member work arrived this
+        // cycle or remains queued for rework, so the label stays on. Printed from here for
         // the same reason — the pull request has been commented on already.
         for (const c of mergerOutcome.deferredChunks) {
           console.log(
-            `  ⏸ ${c.target.branch} not landed — it grew this cycle ` +
+            `  ⏸ ${c.target.branch} not landed — member work is in flight ` +
               `(${c.landedNow.map((m) => `#${m.number}`).join(", ")}); ` +
               `\`${LAND_LABEL}\` kept for the next one`,
           );
           await runLogger.appendOrchestrator(
-            `chunk deferred: ${c.target.branch} grew this cycle ` +
+            `chunk deferred: ${c.target.branch} has member work in flight ` +
               `(${c.landedNow.map((m) => `#${m.number}`).join(", ")}); ` +
               `\`${LAND_LABEL}\` kept`,
           );
