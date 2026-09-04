@@ -54,6 +54,8 @@ type Script = {
   forceDeleteError?: string;
   labelEditOk?: boolean;
   labelEditError?: string;
+  addLabelEditOk?: boolean;
+  addLabelEditError?: string;
   issueState?: "OPEN" | "CLOSED";
   containedInOrigin?: boolean;
   reclaim?: IssueCloneReclaim;
@@ -112,6 +114,12 @@ function makeAdapter(
     },
     async editLabels(n, remove, add) {
       calls.labelEdits.push({ n, remove, add });
+      if (add.length > 0 && script.addLabelEditOk === false) {
+        return {
+          ok: false,
+          error: script.addLabelEditError ?? "'needs-review' not found",
+        };
+      }
       if (script.labelEditOk === false) {
         return { ok: false, error: script.labelEditError ?? "'agent-stuck' not found" };
       }
@@ -314,7 +322,8 @@ describe("finalizeOne", () => {
     expect(action).toEqual({ kind: "deleted-local" });
     expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_REVIEW_LABEL] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [] },
+      { n: 45, remove: [], add: [NEEDS_REVIEW_LABEL] },
     ]);
     expect(calls.deletes).toEqual([i.branch]);
     // The branch is on origin under the chunk's name, so it is never pushed
@@ -358,6 +367,23 @@ describe("finalizeOne", () => {
     expect(calls.comments).toEqual([]);
   });
 
+  it("chunk-landed with a missing display label still comments and cleans up", async () => {
+    const { adapter, calls } = makeAdapter({ addLabelEditOk: false });
+    const i = issue(45);
+
+    await expect(finalizeOne(
+      { kind: "chunk-landed", issue: i, chunkBranch: "sandbar/chunk-45-x" },
+      adapter,
+      LABELS,
+    )).resolves.toEqual({ kind: "deleted-local" });
+    expect(calls.comments[0]?.body).toContain("sandbar/chunk-45-x");
+    expect(calls.deletes).toEqual([i.branch]);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [] },
+      { n: 45, remove: [], add: [NEEDS_REVIEW_LABEL] },
+    ]);
+  });
+
   it("chunk-landed on an issue a human closed mid-run: still records and cleans up", async () => {
     // Not a handoff, so not guarded on issue state (#16): the comment is a
     // statement of fact that stays true, containment already records the
@@ -371,7 +397,7 @@ describe("finalizeOne", () => {
 
     expect(action).toEqual({ kind: "deleted-local" });
     expect(calls.stateChecks).toEqual([]);
-    expect(calls.labelEdits).toHaveLength(1);
+    expect(calls.labelEdits).toHaveLength(2);
   });
 
   it("merge-conflict: removes worktree, pushes branch + adds ready-for-human (merger already commented + dropped ready-for-agent)", async () => {

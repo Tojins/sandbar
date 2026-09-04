@@ -52,11 +52,11 @@
 // silent-noop-exhausted, needs-human, review-budget-exhausted) parks the issue
 // under the single `agentStuck` label; the *reason* lives in the bot comment.
 //
-// `chunk-landed` (#60) applies the display-only `needs-review` label. Membership
-// and de-queueing come from issue-ref containment by the chunk branch (#93), so a missing
-// or hand-removed label costs only the human cue and never blocks landing. The
-// issue comment is still required: it names the review branch even when that
-// optional display-label edit fails.
+// `chunk-landed` (#60) must remove `ready-for-agent`: on a published member that
+// label now requests rework (#94). It also applies the display-only
+// `needs-review` label, whose failure still costs only the human cue and never
+// blocks landing. The issue comment remains required: it names the review
+// branch even when that optional display-label edit fails.
 //
 // Required side-effects fail loud, they don't swallow (#8). The original bug was
 // `editLabels` catching a "label doesn't exist" error, logging it, and returning
@@ -701,19 +701,23 @@ export async function finalizeOne(
       // deliberately requests another implementation pass (#94).
       const n = issueNumberOf(input.issue);
       await adapter.reclaimIssueClone(input.issue.branch);
-      const flip = await adapter.editLabels(
+      const dequeue = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
-        [NEEDS_REVIEW_LABEL],
+        [],
       );
-      if (!flip.ok) {
+      if (!dequeue.ok) {
         throw new SandbarError(
-          `Could not move chunk member #${n} into review: updating labels failed ` +
-            `(${flip.error ?? "unknown error"}). The issue may still be in the ` +
+          `Could not move chunk member #${n} into review: removing ` +
+            `\`${READY_FOR_AGENT_LABEL}\` failed ` +
+            `(${dequeue.error ?? "unknown error"}). The issue may still be in the ` +
             `agent queue, so its local branch was kept; fix the label configuration ` +
             `or forge failure, then re-run.`,
         );
       }
+      // Display only: the durable comment below still points the human to the
+      // review branch when a host has not created `needs-review`.
+      await adapter.editLabels(n, [], [NEEDS_REVIEW_LABEL]);
       await adapter.postComment(
         n,
         CHUNK_LANDED_COMMENT_TEMPLATE(input.chunkBranch),
