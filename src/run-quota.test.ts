@@ -4,6 +4,7 @@ const seams = vi.hoisted(() => ({
   innerLoop: vi.fn(),
   merger: vi.fn(),
   plan: vi.fn(),
+  finalize: vi.fn(async () => []),
   logLines: [] as string[],
 }));
 
@@ -83,7 +84,7 @@ vi.mock("./inner-loop.js", async (importOriginal) => ({
 }));
 vi.mock("./finalize.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./finalize.js")>(),
-  realAdapter: vi.fn(() => ({})), finalizeAll: vi.fn(async () => []),
+  realAdapter: vi.fn(() => ({})), finalizeAll: seams.finalize,
 }));
 vi.mock("./merger-worktree.js", () => ({
   createMergerWorktree: vi.fn(async () => ({ path: "/tmp/merger", remove: vi.fn() })),
@@ -137,6 +138,7 @@ describe("run quota orchestration (#109)", () => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
     seams.innerLoop.mockReset(); seams.merger.mockReset(); seams.plan.mockReset();
+    seams.finalize.mockReset(); seams.finalize.mockResolvedValue([]);
     seams.logLines.length = 0;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -302,6 +304,15 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.innerLoop).toHaveBeenCalledTimes(2);
     expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["87", "87"]);
     expect(seams.merger).toHaveBeenCalledTimes(2);
+    const freshAttemptCall = seams.finalize.mock.calls.findIndex(
+      ([inputs]) => inputs.some((input: { kind: string }) => input.kind === "fresh-attempt"),
+    );
+    expect(freshAttemptCall).toBeGreaterThanOrEqual(0);
+    expect(seams.finalize.mock.calls[freshAttemptCall]?.[0]).toEqual([
+      { kind: "fresh-attempt", issue: target, specGaps: [] },
+    ]);
+    expect(seams.finalize.mock.invocationCallOrder[freshAttemptCall])
+      .toBeLessThan(seams.innerLoop.mock.invocationCallOrder[1]!);
   });
 
   it("drains and lands in-flight work before exiting the start budget", async () => {

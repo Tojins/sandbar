@@ -1,7 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { Terminal } from "./inner-loop.js";
-import { formatTerminalLine, verifyFinalizedTrackerState } from "./run.js";
+import {
+  formatTerminalLine,
+  maxRecomputesFor,
+  verifyFinalizedTrackerState,
+} from "./run.js";
+
+describe("maxRecomputesFor (#87)", () => {
+  it("keeps a minimum for small budgets and scales for every allowed silent-noop retry", () => {
+    expect(maxRecomputesFor(1)).toBe(100);
+    expect(maxRecomputesFor(50)).toBe(610);
+    expect(maxRecomputesFor(51)).toBe(622);
+  });
+});
 
 describe("formatTerminalLine (#115)", () => {
   const terminals: readonly [string, Terminal][] = [

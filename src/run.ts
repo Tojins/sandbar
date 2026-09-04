@@ -245,6 +245,13 @@ import {
 // cannot become the default-budget terminator.
 const MIN_MAX_RECOMPUTES = 100;
 
+export function maxRecomputesFor(maxTotalIssues: number): number {
+  return Math.max(
+    MIN_MAX_RECOMPUTES,
+    maxTotalIssues * (SILENT_NOOP_RETRY_LIMIT + 1) * 4 + 10,
+  );
+}
+
 // The merge phase's stack id. Distinct from every issue id (which are numeric),
 // so its pod, network and containers can never collide with an issue's.
 const MERGER_STACK_ID = "merger";
@@ -972,10 +979,7 @@ export async function run(
   let quotaPending: TerminalExit | null = null;
   let nextPlanTrigger: Parameters<typeof runLogger.writePlan>[0] = "launch";
   let landingNumber = 0;
-  const maxRecomputes = Math.max(
-    MIN_MAX_RECOMPUTES,
-    config.maxTotalIssues * (SILENT_NOOP_RETRY_LIMIT + 1) * 4 + 10,
-  );
+  const maxRecomputes = maxRecomputesFor(config.maxTotalIssues);
 
   // -------------------------------------------------------------------------
   // Main loop
