@@ -25,7 +25,7 @@ const baseInputs = {
   // is every auto-lane issue and every chunk ROOT. `chunkBranch: null` is what
   // makes the chunk-base slots render to nothing.
   base: sourceBranchBase("main"),
-  codingStandardsPath: "docs/CODING_STANDARDS.md",
+  reviewerQualityPromptExtension: { path: "docs/CODING_STANDARDS.md" },
   claudeMdPath: "CLAUDE.md",
   priorRounds: [],
 } as const;
@@ -116,17 +116,18 @@ describe("renderAttemptSlot — commit-on-the-issue-branch rule (#27)", () => {
 });
 
 describe("renderAttemptSlot — implementer standards and pre-promise review (#78)", () => {
-  const renderImplementer = (codingStandardsPath?: string) =>
+  const renderImplementer = (promptExtension?: { readonly path: string } | { readonly text: string }) =>
     renderAttemptSlot({
       ...implementerInputs,
       contextMdPath: "AGENTS.md",
-      ...(codingStandardsPath ? { codingStandardsPath } : {}),
+      ...(promptExtension ? { promptExtension } : {}),
     });
 
   it("carries the reviewer's built-in standards verbatim and host extension", () => {
-    const implementer = renderImplementer("docs/CODING_STANDARDS.md");
+    const implementer = renderImplementer({ path: "docs/CODING_STANDARDS.md" });
     const reviewer = renderReviewerQualitySlot({
       ...baseInputs,
+      promptExtension: baseInputs.reviewerQualityPromptExtension,
       contextMdPath: "AGENTS.md",
       commits: "a1 first",
       diff: "diff",
@@ -145,7 +146,7 @@ describe("renderAttemptSlot — implementer standards and pre-promise review (#7
     expect(implementer).toContain("@CLAUDE.md (and @AGENTS.md if it exists)");
     expect(implementer).toContain("git diff origin/main...HEAD");
     expect(implementer).toContain("git log origin/main..HEAD");
-    expect(implementer).toContain("module headers, architecture documents, and READMEs");
+    expect(implementer).not.toContain("module headers, architecture documents, and READMEs");
     expect(implementer).toMatch(/version\s+bumps and changelog entries/);
     expect(implementer).toContain("list its stated requirements");
   });
@@ -153,8 +154,13 @@ describe("renderAttemptSlot — implementer standards and pre-promise review (#7
   it("keeps built-in standards without an optional host extension", () => {
     const slot = renderImplementer();
     expect(slot).toContain("## Coding standards");
-    expect(slot).not.toContain("### Project standards");
+    expect(slot).not.toContain("### Project prompt extension");
     expect(slot).not.toContain("CODING_STANDARDS.md");
+  });
+
+  it("inlines a text extension verbatim", () => {
+    expect(renderImplementer({ text: "host-specific instruction" }))
+      .toContain("### Project prompt extension\n\nhost-specific instruction");
   });
 
   it("does not bake this host's ritual wording into the shipped prompt", () => {
@@ -178,6 +184,15 @@ describe("renderAttemptSlot — implementer standards and pre-promise review (#7
 });
 
 describe("renderReviewerSlot", () => {
+  it("carries only the correctness reviewer's extension", () => {
+    const slot = renderReviewerSlot({
+      ...baseInputs,
+      promptExtension: { text: "correctness-only instruction" },
+      commits: "a1 first",
+      diff: "diff",
+    });
+    expect(slot).toContain("correctness-only instruction");
+  });
   // Correctness AND spec, and nothing the quality pass owns (#121): an unmet
   // requirement is the one finding that can invalidate a whole branch, and it
   // is not range-limited, so it belongs in the pass that decides the issue.
@@ -329,6 +344,7 @@ describe("renderReviewerQualitySlot", () => {
   const renderQuality = () =>
     renderReviewerQualitySlot({
       ...baseInputs,
+      promptExtension: baseInputs.reviewerQualityPromptExtension,
       contextMdPath: "CONTEXT.md",
       commits: "a1 first",
       diff: "diff --git a/x b/x\n+hi",
@@ -467,7 +483,10 @@ describe("renderReviewerQualitySlot", () => {
   });
 
   it("keeps built-in standards when no project standards file is provided", () => {
-    const { codingStandardsPath: _omit, ...noStandards } = baseInputs;
+    const {
+      reviewerQualityPromptExtension: _omitInput,
+      ...noStandards
+    } = baseInputs;
     const slot = renderReviewerQualitySlot({
       ...noStandards,
       commits: "a1 first",

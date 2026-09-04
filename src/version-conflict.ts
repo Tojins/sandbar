@@ -54,9 +54,8 @@
 // stating, and neither side's own value satisfies it.
 //
 // Pure: the merger's adapter reads the files, writes them back and stages
-// them. `merger.ts` owns the log line, and `prompts/resolve-conflict.md` states
-// the same `max + 1` rule for the agent, which still sees this conflict
-// whenever a file here declines.
+// them. `merger.ts` owns the log line; a host that needs the same rule for a
+// declined file supplies it through its merger prompt extension.
 
 // Repo-relative paths this module will consider, and the JSON paths inside each
 // that a conflict may legitimately be confined to.

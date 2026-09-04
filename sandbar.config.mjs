@@ -109,6 +109,12 @@ export default {
   // nothing it was not already spending.
   contextMdPath: "AGENTS.md",
 
+  promptExtensions: {
+    merger: {
+      text: "When a merge conflicts on `version`, the merged value is one patch bump above the higher of the two sides — never either side's own — and `package-lock.json` carries the same value.",
+    },
+  },
+
   sandboxHooks: {
     host: {
       // `node_modules` is installed on the HOST, into the gated worktree, and

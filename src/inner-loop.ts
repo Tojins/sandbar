@@ -29,9 +29,9 @@
 // What a FAILED reviewer run means is reviewer-run.ts's policy (#41); this
 // file only adapts `sandbox.run`'s throw into the shape that policy
 // classifies, which is why the try/catch below returns a value instead of
-// substituting prose. The implementer prompt also receives the configured
-// coding-standards path here; prompt.ts probes it in the issue worktree so a
-// branch can introduce the standards it is expected to follow (#78).
+// substituting prose. Each role also receives only its configured prompt
+// extension; prompt.ts probes path extensions in the issue worktree so a
+// branch can introduce the instructions it is expected to follow (#78, #91).
 // Successful review rounds accumulate here beside the commits they judged and
 // are handed to both cold reviewer prompts on later rounds (#88). Harness
 // failures add no entry, and a fresh HARD-ERROR cycle resets the history.
@@ -67,7 +67,7 @@ import { formatUsageFields, maxContextDepth, sumAgentUsage } from "./agent-usage
 import type { AgentUsage } from "./agent-usage.js";
 
 import type { ChunkTarget } from "./chunks.js";
-import type { ResolvedGateStack } from "./config.js";
+import type { PromptExtensions, ResolvedGateStack } from "./config.js";
 import {
   type AgentImages,
   resolveSandboxImage,
@@ -405,7 +405,7 @@ export type InnerLoopConfig = {
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
-  readonly codingStandardsPath?: string;
+  readonly promptExtensions?: PromptExtensions;
 };
 
 export type InnerLoopOptions = {
@@ -980,7 +980,7 @@ export async function runImplementer(
       worktreePath: sandbox.worktreePath,
       lastFailureTrace: action.failureTrace,
       base: ctx.base,
-      codingStandardsPath: config.codingStandardsPath,
+      promptExtension: config.promptExtensions?.implementer,
       ...(action.extraReprompt !== null ? { extraReprompt: action.extraReprompt } : {}),
       ...(action.latestReviewerProse !== null
         ? { latestReviewerProse: action.latestReviewerProse }
@@ -1281,7 +1281,8 @@ async function runReviewer(
     worktreePath: sandbox.worktreePath,
     sourceBranch: config.sourceBranch,
     base: ctx.base,
-    codingStandardsPath: config.codingStandardsPath,
+    reviewerPromptExtension: config.promptExtensions?.reviewer,
+    reviewerQualityPromptExtension: config.promptExtensions?.reviewerQuality,
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
     priorRounds: ctx.priorReviewRounds,

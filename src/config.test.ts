@@ -150,8 +150,25 @@ describe("resolveConfig", () => {
     // this — and this repo — is routed exactly as it was before lanes existed.
     expect(r.defaultLane).toBe(DEFAULT_LANE);
     expect(r.defaultLane).toBe("auto");
-    // No conventional value → stays undefined.
-    expect(r.codingStandardsPath).toBeUndefined();
+    expect(r.promptExtensions).toEqual({});
+  });
+
+  it("refuses the removed codingStandardsPath by name", () => {
+    expect(() => resolveConfig({ ...minimal, codingStandardsPath: "STANDARDS.md" } as RunConfig))
+      .toThrow(/config\.codingStandardsPath.*config\.promptExtensions/);
+  });
+
+  it("accepts the explicit prompt-extension union and refuses loose shapes", () => {
+    expect(resolveConfig({
+      ...minimal,
+      promptExtensions: { implementer: { path: "RULES.md" }, merger: { text: "merge rule" } },
+    }).promptExtensions).toEqual({
+      implementer: { path: "RULES.md" }, merger: { text: "merge rule" },
+    });
+    expect(() => resolveConfig({
+      ...minimal,
+      promptExtensions: { merger: { text: "x", path: "RULES.md" } },
+    } as RunConfig)).toThrow(/exactly \{ text: string \} or \{ path: string \}/);
   });
 
   it("defaults the two per-issue budgets to the same number (#71)", () => {

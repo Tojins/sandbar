@@ -53,6 +53,50 @@ export type LabelConfig = {
   readonly agentStuck: string;
 };
 
+export type PromptRole =
+  | "implementer"
+  | "reviewer"
+  | "reviewerQuality"
+  | "merger";
+export type PromptExtension =
+  | { readonly text: string }
+  | { readonly path: string };
+export type PromptExtensions = Partial<
+  Readonly<Record<PromptRole, PromptExtension>>
+>;
+
+const PROMPT_ROLES: readonly PromptRole[] = [
+  "implementer",
+  "reviewer",
+  "reviewerQuality",
+  "merger",
+];
+
+export function resolvePromptExtensions(
+  configured: PromptExtensions | undefined,
+): PromptExtensions {
+  if (configured === undefined) return {};
+  if (typeof configured !== "object" || configured === null || Array.isArray(configured)) {
+    throw new SandbarError("config.promptExtensions must be an object keyed by agent role.");
+  }
+  for (const [role, value] of Object.entries(configured)) {
+    if (!PROMPT_ROLES.includes(role as PromptRole)) {
+      throw new SandbarError(
+        `config.promptExtensions has unknown role ${JSON.stringify(role)}; expected ${PROMPT_ROLES.join(", ")}.`,
+      );
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new SandbarError(`config.promptExtensions.${role} must be { text } or { path }.`);
+    }
+    const fields = Object.keys(value);
+    const kind = fields.length === 1 ? fields[0] : undefined;
+    if ((kind !== "text" && kind !== "path") || typeof (value as Record<string, unknown>)[kind] !== "string") {
+      throw new SandbarError(`config.promptExtensions.${role} must be exactly { text: string } or { path: string }.`);
+    }
+  }
+  return configured;
+}
+
 export const DEFAULT_LABELS: LabelConfig = {
   needsInfo: "needs-info",
   agentStuck: "agent-stuck",
@@ -552,10 +596,10 @@ export type RunConfig = {
   readonly contextMdPath?: string;
   readonly adrDir?: string;
 
-  // When set, the file *extends* sandbar's built-in coding standards
-  // (prompts/coding-standards.md) with project-specific rules. No default:
-  // hosts are not required to supply one, and there's no conventional path.
-  readonly codingStandardsPath?: string;
+  // Optional additions to each role's shipped prompt (#91). `{ text }` is
+  // inlined verbatim; `{ path }` becomes an @ref only when that path exists in
+  // the worktree the role will inspect. No role has a default extension.
+  readonly promptExtensions?: PromptExtensions;
 
   // The credentials, as a VALUE rather than a path (#38). Sandbar names no
   // file: where a host keeps its secrets is a property of that host's
@@ -728,9 +772,8 @@ export type RunConfig = {
   readonly defaultLane?: Lane;
 };
 
-// After resolution every defaultable field is concrete. TWO stay optional, for
-// different reasons: `codingStandardsPath` is genuinely absent on most hosts
-// and has nothing to default to, while `requiresSandbar` is a gate on
+// After resolution every defaultable field is concrete. `requiresSandbar` is a
+// gate on
 // `resolveConfig` itself (#66), spent by the time there is a resolved config —
 // and inventing a value for it here would make "this host declared a floor"
 // indistinguishable from "this host did not". The other three
@@ -741,7 +784,6 @@ export type RunConfig = {
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
-    | "codingStandardsPath"
     | "labels"
     | "gateStack"
     | "mergeMode"
@@ -749,7 +791,6 @@ export type ResolvedConfig = Required<
   >
 > & {
   readonly requiresSandbar?: string;
-  readonly codingStandardsPath?: string;
   readonly labels: LabelConfig;
   readonly gateStack: ResolvedGateStack;
   readonly mergeMode: ResolvedMergeMode;
@@ -1705,6 +1746,11 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   // so a parameter would widen a production signature to buy a test seam the
   // decision already has.
   checkRequiresSandbar(config.requiresSandbar, sandbarVersion());
+  if ("codingStandardsPath" in config) {
+    throw new SandbarError(
+      "config.codingStandardsPath was removed; use config.promptExtensions with per-role { path } entries instead.",
+    );
+  }
   checkRenamedReviewerField(config);
   // Trimmed HERE, not just where it is compared. `resolveMergeMode` tests
   // `integrationBranch === sourceBranch.trim()`, so trimming only in the guard
@@ -1802,6 +1848,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     claudeMdPath: config.claudeMdPath ?? DEFAULT_CLAUDE_MD_PATH,
     contextMdPath: config.contextMdPath ?? DEFAULT_CONTEXT_MD_PATH,
     adrDir: config.adrDir ?? DEFAULT_ADR_DIR,
+    promptExtensions: resolvePromptExtensions(config.promptExtensions),
     // No resolution to do since #38: this is the record itself, not a path
     // that had to be rooted somewhere (`resolve(cwd, …)`, #34). The empty
     // default is a real configuration — a host that supplies every credential
