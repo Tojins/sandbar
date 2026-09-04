@@ -158,17 +158,28 @@ describe("resolveConfig", () => {
       .toThrow(/config\.codingStandardsPath.*config\.promptExtensions/);
   });
 
-  it("accepts the explicit prompt-extension union and refuses loose shapes", () => {
+  it("accepts the explicit prompt-extension union", () => {
     expect(resolveConfig({
       ...minimal,
       promptExtensions: { implementer: { path: "RULES.md" }, merger: { text: "merge rule" } },
     }).promptExtensions).toEqual({
       implementer: { path: "RULES.md" }, merger: { text: "merge rule" },
     });
-    expect(() => resolveConfig({
-      ...minimal,
-      promptExtensions: { merger: { text: "x", path: "RULES.md" } },
-    } as RunConfig)).toThrow(/exactly \{ text: string \} or \{ path: string \}/);
+  });
+
+  it.each([
+    ["a non-object collection", "merger", /must be an object keyed by agent role/],
+    ["an array collection", [], /must be an object keyed by agent role/],
+    ["an unknown role", { operator: { text: "x" } }, /unknown role "operator"/],
+    ["a non-object role value", { merger: "x" }, /merger must be \{ text \} or \{ path \}/],
+    ["an array role value", { merger: [] }, /merger must be \{ text \} or \{ path \}/],
+    ["both union fields", { merger: { text: "x", path: "RULES.md" } }, /exactly \{ text: string \} or \{ path: string \}/],
+    ["an extra field", { merger: { text: "x", extra: true } }, /exactly \{ text: string \} or \{ path: string \}/],
+    ["a non-string text", { merger: { text: 1 } }, /exactly \{ text: string \} or \{ path: string \}/],
+    ["a non-string path", { merger: { path: false } }, /exactly \{ text: string \} or \{ path: string \}/],
+  ])("refuses %s in promptExtensions", (_label, promptExtensions, message) => {
+    expect(() => resolveConfig({ ...minimal, promptExtensions } as RunConfig))
+      .toThrow(message);
   });
 
   it("defaults the two per-issue budgets to the same number (#71)", () => {

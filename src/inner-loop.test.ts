@@ -23,6 +23,7 @@ import {
   priorReviewRound,
   reviewRoundLine,
   reviewerPassRouting,
+  reviewerPromptExtensions,
   reviewerSnapshotChanged,
   runGateAndReviewer,
   runImplementer,
@@ -53,6 +54,7 @@ describe("silent implementer attempt policy (#116)", () => {
   const runPath = (
     first: ReturnType<typeof sandboxResult>,
     nudge: ReturnType<typeof sandboxResult>,
+    promptExtensions?: Parameters<typeof runImplementer>[1]["config"]["promptExtensions"],
   ) => {
     const writes: string[] = [];
     const lines: string[] = [];
@@ -74,6 +76,7 @@ describe("silent implementer attempt policy (#116)", () => {
         implementerAgent: "codex",
         implementerModelId: "model",
         maxImplAttempts: 8,
+        promptExtensions,
       },
       anchorOpts: {},
       base: { ref: "origin/main" },
@@ -130,6 +133,42 @@ describe("silent implementer attempt policy (#116)", () => {
     });
     expect(writes).toEqual(["", `\n${spoken}`]);
     expect(lines.at(-1)).toContain("commits=0");
+  });
+
+  it("hands only the implementer extension to the implementer prompt", async () => {
+    innerLoopMocks.buildPrompt.mockClear();
+    const implementer = { text: "implementer only" } as const;
+    const { pending } = runPath(
+      sandboxResult("done", false),
+      sandboxResult("unused", false),
+      {
+        implementer,
+        reviewer: { text: "correctness only" },
+        reviewerQuality: { text: "quality only" },
+        merger: { text: "merger only" },
+      },
+    );
+    await pending;
+    expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ promptExtension: implementer }),
+      expect.anything(),
+    );
+  });
+});
+
+describe("role prompt-extension wiring (#91)", () => {
+  it("maps the two reviewer roles independently", () => {
+    const reviewer = { text: "correctness only" } as const;
+    const reviewerQuality = { text: "quality only" } as const;
+    expect(reviewerPromptExtensions({
+      implementer: { text: "implementer only" },
+      reviewer,
+      reviewerQuality,
+      merger: { text: "merger only" },
+    })).toEqual({
+      reviewerPromptExtension: reviewer,
+      reviewerQualityPromptExtension: reviewerQuality,
+    });
   });
 });
 

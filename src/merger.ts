@@ -281,7 +281,7 @@ import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -2494,6 +2494,9 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     }
   };
   return {
+    worktreeFileExists(path) {
+      return existsSync(resolve(cwd, path));
+    },
     // The six writes a chunk wrap-up makes, from the one place they are
     // spelled (#64) — `closeIssue` and `removeLabel` among them, which the auto
     // lane has used since long before chunks existed and which are the same two

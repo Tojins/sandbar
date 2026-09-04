@@ -234,6 +234,9 @@ export type ResolveAttemptSummary = {
 };
 
 export type ResolveAdapter = {
+  // Probe against the live worktree at prompt-build time: a branch being
+  // merged may have introduced or amended a configured path extension.
+  worktreeFileExists(path: string): boolean;
   // `attempt` is passed so the invocation can be NAMED after it — the
   // container name is the handle on a failure that produced nothing else, and
   // an anonymous one leaves an operator grepping `podman events` by timestamp.
@@ -381,9 +384,15 @@ export async function runResolveLoop(
   }
 
   for (let attempt = 1; attempt <= RESOLVE_MAX_ATTEMPTS; attempt++) {
+    const promptExtension =
+      deps.promptExtension && "path" in deps.promptExtension
+        ? adapter.worktreeFileExists(deps.promptExtension.path)
+          ? deps.promptExtension
+          : undefined
+        : deps.promptExtension;
     const prompt = buildResolvePromptBody({
       projectAnchor: deps.projectAnchor,
-      promptExtension: deps.promptExtension,
+      promptExtension,
       // Passed through undefined and defaulted once, in the builder: two
       // `?? SOURCE_TARGET_PHRASE` on one value is two places to change it.
       target: deps.target,

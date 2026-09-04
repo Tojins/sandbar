@@ -226,7 +226,7 @@ import {
   PreflightError,
   runPreflight,
 } from "./preflight.js";
-import { buildProjectAnchor, resolvePromptExtension } from "./prompt.js";
+import { buildProjectAnchor } from "./prompt.js";
 import {
   ensureRepoCache,
   ensureSourceWorktree,
@@ -1435,10 +1435,7 @@ export async function run(
             {
               cycleIssues: issues,
               projectAnchor,
-              promptExtension: resolvePromptExtension(
-                mergerWorktree.path,
-                config.promptExtensions.merger,
-              ),
+              promptExtension: config.promptExtensions.merger,
               // #67: every resolve attempt's stdout and stderr, beside the
               // gate artefact it was prompted from. The writer answers with
               // the path, which is what the abandon comment points at.

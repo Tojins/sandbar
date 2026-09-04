@@ -126,6 +126,7 @@ function makeAdapter(script: Script): { adapter: ResolveAdapter; calls: Calls } 
   let merging = script.initiallyConflicted;
 
   const adapter: ResolveAdapter = {
+    worktreeFileExists: () => false,
     async runResolveAgent(prompt: string): Promise<AgentResult> {
       // The `attempt` arg is ignored here; the tests that care about it assert
       // on the record the sink receives.

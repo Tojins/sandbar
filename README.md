@@ -267,7 +267,7 @@ sits in).
 | `mergeMode` | `{ kind: "direct" }` — see below |
 | `relaunchAfterLanding` | `false` — see below |
 | `defaultLane` | `"auto"` — see below |
-| `codingStandardsPath` | *(unset)* — no conventional path; see below |
+| `promptExtensions` | `{}` — optional per-role `{ text }` or `{ path }` additions; see below |
 
 Each review round runs a **quality** pass first, on `reviewerQualityAgent` /
 `reviewerQualityModelId`: test quality and coverage, plus the coding standards.
@@ -302,13 +302,15 @@ mirror path, say — is reported as a warning rather than refused, since guessin
 at it would reject working setups. The paths above are not all interpreted in the same
 place, so:
 
-- `claudeMdPath`, `contextMdPath`, `adrDir` and `codingStandardsPath` stay
+- `claudeMdPath`, `contextMdPath`, `adrDir` and `{ path }` prompt extensions stay
   relative in the prompt, because the agent resolves them from the repo root
   inside its own sandbox — i.e. against the **issue worktree**. Sandbar's
   host-side "does this file exist" check is rooted at that same worktree, so a
-  doc the branch itself adds is referenced from the attempt that adds it, and
-  both the implementer and reviewer of a commit that introduces a
-  `CODING_STANDARDS.md` are pointed at it.
+  file the branch itself adds is referenced from the attempt that adds it.
+  `promptExtensions` has independent `implementer`, `reviewer`,
+  `reviewerQuality`, and `merger` entries; `{ text }` is inlined verbatim while
+  `{ path }` is emitted as an `@ref` only when it exists in that role's
+  worktree.
 - `copyToWorktree` entries resolve against `cwd`, your own checkout, because
   the cache is bare and has nothing to copy. That is the feature's intent
   (host-only files that are not in git), but it does make issue-worktree
@@ -987,7 +989,7 @@ rather than spending the rest of its budget on it.
 
 The host project also supplies on disk:
 - A `Containerfile` for the sandbox image (or whatever `images` names)
-- Optionally, a `CODING_STANDARDS.md` (`codingStandardsPath`) — the implementer and reviewer share built-in default coding standards (`prompts/coding-standards.md`); this file *extends* them and is not required
+- Optionally, files named by `{ path }` entries in `promptExtensions`; implementer and reviewer roles still receive the built-in coding standards in `prompts/coding-standards.md`
 - `GH_TOKEN` and a credential for every routed agent provider, reachable through `config.env` — as literal values, as keys declared empty so they inherit from the launching environment, or read from a file of your choosing with `readEnvFile`
 
 `verified` mode additionally uses the host's own `gh` auth (not the container's

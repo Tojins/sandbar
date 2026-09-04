@@ -487,7 +487,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     orchestratorNote: section(orchestratorNote),
     escalation: section(escalation),
     codingStandards: CODING_STANDARDS,
-    projectStandards: projectStandardsSlot(inputs.promptExtension),
+    projectStandards: promptExtensionSlot(inputs.promptExtension),
     conventionsRef: conventionsRef(inputs.claudeMdPath, inputs.contextMdPath),
     baseRef: base.ref,
   });
@@ -707,7 +707,7 @@ function renderReviewerTemplate(
     // every round it runs (#107, #121).
     ...(template === REVIEWER_QUALITY_TPL ? renderQualitySlots(inputs) : {}),
     codingStandards: CODING_STANDARDS,
-    projectStandards: projectStandardsSlot(promptExtension),
+    projectStandards: promptExtensionSlot(promptExtension),
     conventionsRef: conventionsRef(claudeMdPath, contextMdPath),
   });
   return template === REVIEWER_TPL
@@ -761,5 +761,3 @@ export function promptExtensionSlot(extension?: PromptExtension): string {
       : "",
   );
 }
-
-const projectStandardsSlot = promptExtensionSlot;

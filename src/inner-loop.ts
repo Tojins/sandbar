@@ -125,6 +125,7 @@ import { durationField, startTimer } from "./timing.js";
 import {
   type ProjectAnchorOptions,
   type PriorReviewRound,
+  type ReviewerPromptInputs,
   buildPrompt,
   buildReviewerPrompts,
   qualityReviewContext,
@@ -407,6 +408,15 @@ export type InnerLoopConfig = {
   readonly adrDir?: string;
   readonly promptExtensions?: PromptExtensions;
 };
+
+export function reviewerPromptExtensions(
+  extensions?: PromptExtensions,
+): Pick<ReviewerPromptInputs, "reviewerPromptExtension" | "reviewerQualityPromptExtension"> {
+  return {
+    reviewerPromptExtension: extensions?.reviewer,
+    reviewerQualityPromptExtension: extensions?.reviewerQuality,
+  };
+}
 
 export type InnerLoopOptions = {
   readonly config: InnerLoopConfig;
@@ -1281,8 +1291,7 @@ async function runReviewer(
     worktreePath: sandbox.worktreePath,
     sourceBranch: config.sourceBranch,
     base: ctx.base,
-    reviewerPromptExtension: config.promptExtensions?.reviewer,
-    reviewerQualityPromptExtension: config.promptExtensions?.reviewerQuality,
+    ...reviewerPromptExtensions(config.promptExtensions),
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
     priorRounds: ctx.priorReviewRounds,

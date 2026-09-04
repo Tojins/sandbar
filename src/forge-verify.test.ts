@@ -607,6 +607,7 @@ function makeVerify(script: VerifyScript): {
   };
 
   const resolve: ResolveAdapter = {
+    worktreeFileExists: () => false,
     async runResolveAgent(prompt) {
       calls.agentPrompts.push(prompt);
       // A resolve attempt means the current round's verdict is spent; the next
@@ -732,6 +733,18 @@ describe("runVerifiedLanding", () => {
     // Cross-branch context: both cycle issues reach the agent.
     expect(calls.agentPrompts[0]).toContain("body of #7");
     expect(calls.agentPrompts[0]).toContain("body of #9");
+  });
+
+  it("hands the merger extension through the verified-landing resolve path", async () => {
+    const failing = run({ name: "browser", conclusion: "failure" });
+    const { calls } = await land(
+      {
+        checks: [{ kind: "red", failed: [failing] }, { kind: "green", names: [] }],
+        heads: ["sha-A", "sha-B", "sha-B"],
+      },
+      { promptExtension: { text: "verified merger only" } },
+    );
+    expect(calls.agentPrompts[0]).toContain("verified merger only");
   });
 
   // #67 — the capture key is a function of the ROUND. Each round runs a fresh
