@@ -881,15 +881,6 @@ async function runGate1(
   };
 }
 
-class ReviewerWriteDetected extends Error {
-  constructor(
-    readonly event: Extract<LoopEvent, { kind: "reviewer-wrote" }>,
-    readonly transcript: string,
-  ) {
-    super(event.detail);
-  }
-}
-
 export type ReviewerSnapshot = {
   readonly tip: string | null;
   readonly dirtyPaths: readonly string[];
@@ -912,28 +903,28 @@ export async function enforceReviewerSnapshot(
   before: ReviewerSnapshot,
   after: ReviewerSnapshot,
   transcript: string,
-): Promise<void> {
-  if (!reviewerSnapshotChanged(before, after)) return;
+): Promise<Extract<LoopEvent, { kind: "reviewer-wrote" }> | null> {
+  if (!reviewerSnapshotChanged(before, after)) return null;
   sandbox.preserveWorktree("the reviewer changed the repository; kept for human inspection");
   // Deleting the issue ref is itself a reviewer write. There is then no ref
   // to publish, but the preserved clone still contains the evidence.
   if (after.tip !== null) await sandbox.syncBranchToCache();
   const renderedTranscript = transcript.trim() || "(reviewer emitted no output)";
-  throw new ReviewerWriteDetected(
-    {
-      kind: "reviewer-wrote",
-      detail:
-        `Reviewer changed git state. Branch tip before: ${before.tip}; ` +
-        `after: ${after.tip}. HEAD before: ${before.headRef}; ` +
-        `after: ${after.headRef}. Status after:\n` +
-        (after.dirtyPaths.length > 0
-          ? after.dirtyPaths.join("\n")
-          : "(clean worktree)") +
-        `\n\nReviewer transcript:\n${renderedTranscript}`,
-    },
-    transcript,
-  );
+  return {
+    kind: "reviewer-wrote",
+    detail:
+      `Reviewer changed git state. Branch tip before: ${before.tip}; ` +
+      `after: ${after.tip}. HEAD before: ${before.headRef}; ` +
+      `after: ${after.headRef}. Status after:\n` +
+      (after.dirtyPaths.length > 0
+        ? after.dirtyPaths.join("\n")
+        : "(clean worktree)") +
+      `\n\nReviewer transcript:\n${renderedTranscript}`,
+  };
 }
+
+const passTranscript = (pass: ReviewerPass, transcript: string): string =>
+  `=== ${pass === "followup" ? "follow-up" : pass} pass ===\n${transcript}`;
 
 async function runReviewer(
   action: Extract<LoopAction, { kind: "run-reviewer" }>,
@@ -951,9 +942,9 @@ async function runReviewer(
   const detectWrite = async (
     before: ReviewerSnapshot,
     transcript: string,
-  ): Promise<void> => {
+  ): Promise<Extract<LoopEvent, { kind: "reviewer-wrote" }> | null> => {
     const after = await snapshot();
-    await enforceReviewerSnapshot(sandbox, before, after, transcript);
+    return enforceReviewerSnapshot(sandbox, before, after, transcript);
   };
 
   const reviewerPromptInputs = {
@@ -1028,23 +1019,29 @@ async function runReviewer(
           reviewerRun.usage,
           reviewerRun.toolCalls,
         );
-        await detectWrite(beforeInvocation, reviewerRun.stdout);
-        return { output: reviewerRun.stdout, error: null };
+        const event = await detectWrite(beforeInvocation, reviewerRun.stdout);
+        return event === null
+          ? { kind: "run", run: { output: reviewerRun.stdout, error: null } }
+          : { kind: "aborted", event, transcript: reviewerRun.stdout };
       } catch (err) {
-        if (err instanceof ReviewerWriteDetected) throw err;
         // A failed invocation is timed too: an invocation that burned the ten
         // minutes and died is the expensive case, and one that fell over in a
         // second is a different fault entirely.
         const partial = agentPartialUsage(err);
         await logPass(undefined, partial.usage, partial.toolCalls);
-        await detectWrite(beforeInvocation, agentPartialOutput(err));
+        const transcript = agentPartialOutput(err);
+        const event = await detectWrite(beforeInvocation, transcript);
+        if (event !== null) return { kind: "aborted", event, transcript };
         // The bytes the agent had emitted before it failed ride out on the
         // error (#41, agent-sandbox F9). Without them a reviewer that emitted
         // a verdict and then died is indistinguishable from one that emitted
         // nothing, and only the second is a harness fault.
         return {
-          output: agentPartialOutput(err),
-          error: err instanceof Error ? err.message : String(err),
+          kind: "run",
+          run: {
+            output: transcript,
+            error: err instanceof Error ? err.message : String(err),
+          },
         };
       }
     },
@@ -1061,9 +1058,9 @@ async function runReviewer(
   );
 
   const preserveReviewerWrite = async (
-    err: ReviewerWriteDetected,
+    aborted: Extract<ReviewerOutcome, { kind: "aborted" }>,
     pass: ReviewerPass,
-    completedTranscripts: readonly string[] = [],
+    completedTranscripts: readonly string[],
   ): Promise<Extract<LoopEvent, { kind: "reviewer-wrote" }>> => {
     if (opts.attemptLogger) {
       await opts.attemptLogger.writeAttemptReviewer(
@@ -1071,28 +1068,23 @@ async function runReviewer(
         action.attempt,
         [
           ...completedTranscripts,
-          `=== ${pass} pass ===\n${err.transcript}`,
+          passTranscript(pass, aborted.transcript),
         ].join("\n\n"),
       );
     }
-    return err.event;
+    return aborted.event;
   };
 
-  let correctness: ReviewerOutcome;
-  try {
-    correctness = await runPass(
-      "correctness",
-      reviewerPrompts.correctness,
-      config.reviewerModelId,
-    );
-  } catch (err) {
-    if (err instanceof ReviewerWriteDetected) {
-      return preserveReviewerWrite(err, "correctness");
-    }
-    throw err;
+  const correctness = await runPass(
+    "correctness",
+    reviewerPrompts.correctness,
+    config.reviewerModelId,
+  );
+  if (correctness.kind === "aborted") {
+    return preserveReviewerWrite(correctness, "correctness", []);
   }
 
-  const transcripts = [`=== correctness pass ===\n${correctness.transcript}`];
+  const transcripts = [passTranscript("correctness", correctness.transcript)];
   // Every invocation's output, not just the reviewing one: the observed failure
   // left a 73-byte log for a 15-minute run, and this file is the only offline
   // artefact of what the reviewer did or did not say.
@@ -1104,20 +1096,15 @@ async function runReviewer(
       : null;
 
   if (afterCorrectness.kind === "run-followup") {
-    let followup: ReviewerOutcome;
-    try {
-      followup = await runPass(
-        "followup",
-        reviewerPrompts.followup,
-        config.reviewerFollowupModelId,
-      );
-    } catch (err) {
-      if (err instanceof ReviewerWriteDetected) {
-        return preserveReviewerWrite(err, "followup", transcripts);
-      }
-      throw err;
+    const followup = await runPass(
+      "followup",
+      reviewerPrompts.followup,
+      config.reviewerFollowupModelId,
+    );
+    if (followup.kind === "aborted") {
+      return preserveReviewerWrite(followup, "followup", transcripts);
     }
-    transcripts.push(`=== follow-up pass ===\n${followup.transcript}`);
+    transcripts.push(passTranscript("followup", followup.transcript));
     if (followup.kind === "harness-failed") {
       failed = { pass: "followup", invocations: followup.invocations };
     }

@@ -229,6 +229,16 @@ describe("ensureSourceWorktree (real git)", () => {
     );
     expect(after).toBeDefined();
     expect(after).toMatch(/(?:^|\n)locked(?:\n|$)/);
+
+    const recreated = await ensureSourceWorktree(layout, "main");
+    expect(recreated).toBe(layout.sourceWorktree);
+    expect((await git(recreated, "rev-parse", "HEAD")).stdout.trim()).toBe(
+      (await git(layout.repoDir, "rev-parse", "origin/main")).stdout.trim(),
+    );
+    const replacement = sourceEntry(
+      (await git(layout.repoDir, "worktree", "list", "--porcelain")).stdout,
+    );
+    expect(replacement).toMatch(/(?:^|\n)locked(?:\n|$)/);
   });
 
   it("checks out origin/<sourceBranch>, detached", async () => {

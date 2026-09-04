@@ -1408,7 +1408,6 @@ describe("finalizeAll", () => {
         kind: "hard-error",
         issue: issue(13),
         hasCommits: true,
-        strandedHead: null,
       },
     ];
 

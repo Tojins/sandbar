@@ -11,9 +11,8 @@
 //     fault.
 // "Nothing" is retried once before it is believed (flake vs fault; the retry
 // costs no budget), and the transcript of every invocation is kept whole.
-// Repository mutation is outside that result model: the I/O caller may reject
-// with its reviewer-write signal, which must escape immediately so no second
-// reviewer runs against state the first reviewer altered (#98).
+// Repository mutation aborts the invocation loop as a typed value, so no
+// second reviewer runs against state the first reviewer altered (#98).
 //
 // A review ROUND first applies that policy to correctness. A correctness
 // rejection finishes the round immediately; an approval asks the runner for a
@@ -46,6 +45,14 @@ export type ReviewerRun = {
   readonly error: string | null;
 };
 
+export type ReviewerInvocation =
+  | { readonly kind: "run"; readonly run: ReviewerRun }
+  | {
+      readonly kind: "aborted";
+      readonly event: Extract<LoopEvent, { kind: "reviewer-wrote" }>;
+      readonly transcript: string;
+    };
+
 export type ReviewerOutcome =
   | {
       readonly kind: "reviewed";
@@ -62,7 +69,13 @@ export type ReviewerOutcome =
       readonly detail: string;
       readonly transcript: string;
       readonly invocations: number;
-    };
+    }
+  | Extract<ReviewerInvocation, { readonly kind: "aborted" }>;
+
+export type CompletedReviewerOutcome = Exclude<
+  ReviewerOutcome,
+  { readonly kind: "aborted" }
+>;
 
 export type ReviewerPass = "correctness" | "followup";
 
@@ -87,14 +100,14 @@ export function continueReviewerSession(pass: ReviewerPass, invocation: number):
   return pass === "followup" && invocation === 1;
 }
 
-export function decideReviewRound(correctness: ReviewerOutcome): ReviewRoundDecision;
+export function decideReviewRound(correctness: CompletedReviewerOutcome): ReviewRoundDecision;
 export function decideReviewRound(
-  correctness: ReviewerOutcome,
-  followup: ReviewerOutcome,
+  correctness: CompletedReviewerOutcome,
+  followup: CompletedReviewerOutcome,
 ): FinishedReviewRoundDecision;
 export function decideReviewRound(
-  correctness: ReviewerOutcome,
-  followup?: ReviewerOutcome,
+  correctness: CompletedReviewerOutcome,
+  followup?: CompletedReviewerOutcome,
 ): ReviewRoundDecision {
   if (correctness.kind === "harness-failed") {
     return {
@@ -182,10 +195,10 @@ export type ReviewerRunOptions = {
 
 // Invoke the reviewer until one invocation yields a verdict, or the invocation
 // budget runs out. `invoke` is given the 1-based invocation number. It returns
-// ReviewerRun for completed and ordinary failed invocations, but may reject to
-// report a reviewer write; that rejection deliberately bypasses this retry loop.
+// A normal run is classified here; an aborted value returns immediately and
+// deliberately bypasses the retry loop.
 export async function runReviewerInvocations(
-  invoke: (invocation: number) => Promise<ReviewerRun>,
+  invoke: (invocation: number) => Promise<ReviewerInvocation>,
   opts: ReviewerRunOptions = {},
 ): Promise<ReviewerOutcome> {
   const max = opts.maxInvocations ?? REVIEWER_MAX_INVOCATIONS;
@@ -193,7 +206,9 @@ export async function runReviewerInvocations(
   const details: string[] = [];
 
   for (let n = 1; n <= max; n++) {
-    const run = await invoke(n);
+    const invocation = await invoke(n);
+    if (invocation.kind === "aborted") return invocation;
+    const { run } = invocation;
     transcript.push(transcriptEntry(n, run));
     const verdict = parseVerdict(run.output);
     if (verdict !== null) {

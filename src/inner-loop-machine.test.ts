@@ -834,6 +834,13 @@ describe("inner-loop-machine — phase invariants", () => {
     );
   });
 
+  it("reviewer-wrote before reviewer phase throws", () => {
+    const state = initialState(defaultOpts);
+    expect(() =>
+      step(state, { kind: "reviewer-wrote", detail: "changed HEAD" }),
+    ).toThrow(/reviewer-wrote.*expected needs-reviewer/);
+  });
+
   it("implementer-result during gate-1 phase throws", () => {
     let state = initialState(defaultOpts);
     state = step(state, impl(complete)).state;

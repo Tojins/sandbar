@@ -74,6 +74,7 @@ import { promisify } from "node:util";
 
 import { type IssueCloneReclaim, reclaimIssueClone } from "./agent-sandbox.js";
 import { LAND_LABEL, NEEDS_REVIEW_LABEL } from "./chunks.js";
+import { strandedHeadRef } from "./naming.js";
 import type { LabelConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
 import type { HeadMismatch } from "./git-ops.js";
@@ -247,7 +248,7 @@ export const STRANDED_COMMITS_NOTE = (m: StrandedHead): string =>
     ? `\n\n---\n\n**Work was left off \`${m.branch}\`.** This run committed on a ` +
       `detached HEAD at \`${m.headSha}\`, so none of it is on the branch and ` +
       `nothing above includes it. Sandbar pinned that commit in the host-side ` +
-      `cache as \`refs/sandbar/stranded/${m.headSha}\` before reclaiming the ` +
+      `cache as \`${strandedHeadRef(m.headSha)}\` before reclaiming the ` +
       `issue clone (the clone is kept instead if that pin failed). Recover it ` +
       `with \`git branch <rescue-name> ${m.headSha}\`, then fold ` +
       `it into \`${m.branch}\` with \`cherry-pick\`/\`merge\` — not ` +
@@ -255,7 +256,7 @@ export const STRANDED_COMMITS_NOTE = (m: StrandedHead): string =>
     : `\n\n---\n\n**Work was left off \`${m.branch}\`.** This run committed on ` +
       `\`${m.headRef}\` (at \`${m.headSha}\`) instead, so none of it is on the ` +
       `branch and nothing above includes it. Sandbar pinned that commit in the ` +
-      `host-side cache as \`refs/sandbar/stranded/${m.headSha}\` before ` +
+      `host-side cache as \`${strandedHeadRef(m.headSha)}\` before ` +
       `reclaiming the issue clone (the clone is kept instead if that pin ` +
       `failed). Fold it into \`${m.branch}\` with \`cherry-pick\`/\`merge\`.`;
 

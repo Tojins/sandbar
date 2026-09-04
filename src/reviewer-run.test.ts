@@ -112,7 +112,7 @@ function drive(script: readonly ReviewerRun[]) {
       asked.push(n);
       const run = script[n - 1];
       if (run === undefined) throw new Error(`invoked ${n} times; script has ${script.length}`);
-      return run;
+      return { kind: "run", run };
     },
     { onRetry: (invocation, detail) => void retries.push({ invocation, detail }) },
   ).then((outcome) => ({ outcome, asked, retries }));
@@ -260,12 +260,28 @@ describe("runReviewerInvocations", () => {
     const single = await runReviewerInvocations(
       async () => {
         calls++;
-        return idleRun;
+        return { kind: "run", run: idleRun };
       },
       { maxInvocations: 1 },
     );
     expect(calls).toBe(1);
     expect(single.invocations).toBe(1);
     expect(single.kind).toBe("harness-failed");
+  });
+
+  it("returns an aborted reviewer write without retrying", async () => {
+    const event = { kind: "reviewer-wrote", detail: "changed HEAD" } as const;
+    const asked: number[] = [];
+    const outcome = await runReviewerInvocations(async (n) => {
+      asked.push(n);
+      return { kind: "aborted", event, transcript: "partial output" };
+    });
+
+    expect(outcome).toEqual({
+      kind: "aborted",
+      event,
+      transcript: "partial output",
+    });
+    expect(asked).toEqual([1]);
   });
 });

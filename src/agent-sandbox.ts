@@ -84,9 +84,8 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { onCleanup } from "./cleanup.js";
 import { resolveSandboxEnv } from "./env.js";
-import { MERGER_WORKTREE_NAME } from "./merger-worktree.js";
-import { RESOURCE_PREFIX } from "./naming.js";
-import { SOURCE_WORKTREE_NAME, type RepoLayout } from "./repo-cache.js";
+import { RESOURCE_PREFIX, strandedHeadRef } from "./naming.js";
+import { RESERVED_WORKTREE_NAMES, type RepoLayout } from "./repo-cache.js";
 import { startGapTimer, startTimer } from "./timing.js";
 import { normalizeClaudeResult, normalizeCodexUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
@@ -352,7 +351,6 @@ export interface Sandbox {
 
 export type CreateSandboxOptions = {
   branch: string;
-  baseBranch?: string;
   sandbox: SandboxProvider;
   // Every path this module needs, as one object (#38). `repoDir` is the bare
   // cache every git call runs in; `worktreesDir` is where the managed worktree
@@ -403,7 +401,6 @@ export type CreateSandboxOptions = {
 
 export type PrepareWorktreeOptions = {
   branch: string;
-  baseBranch?: string;
   layout: RepoLayout;
   copyToWorktree?: string[];
   // Only host.onWorktreeReady runs here; sandbox-side hooks need the
@@ -1091,7 +1088,7 @@ const pinStrandedHead = async (
   const head = await headCommit(worktreePath);
   if (head === null) return null;
   await execGit(
-    ["fetch", worktreePath, `+HEAD:refs/sandbar/stranded/${head}`],
+    ["fetch", worktreePath, `+HEAD:${strandedHeadRef(head)}`],
     repoDir,
   );
   return head;
@@ -1290,7 +1287,6 @@ const worktreeCreate = (
   repoDir: string,
   branch: string,
   worktreesDir: string,
-  baseBranch?: string,
 ): Promise<{ path: string; branch: string }> =>
   withTimeout(
     (async () => {
@@ -1334,12 +1330,7 @@ const worktreeCreate = (
       // still present on the forge. Import the seed ensureIssueBranch authored
       // as a LOCAL ref before checkout, so DWIM can never select the old copy.
       await importIssueBranchFromCache(repoDir, worktreePath, branch);
-      try {
-        await execGit(["checkout", branch], worktreePath);
-      } catch (e) {
-        if (!(e instanceof WorktreeError) || !e.message.includes("did not match")) throw e;
-        await execGit(["checkout", "-b", branch, baseBranch ?? "HEAD"], worktreePath);
-      }
+      await execGit(["checkout", branch], worktreePath);
       // The marker is the clone's eligibility token for reuse. Install it only
       // after checkout has produced a complete workspace; a timeout or failed
       // checkout then leaves unmarked debris that the next attempt replaces.
@@ -1369,7 +1360,7 @@ const pruneStaleIssueClones = async (
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
   for (const entry of entries) {
-    if (entry === SOURCE_WORKTREE_NAME || entry === MERGER_WORKTREE_NAME) continue;
+    if (RESERVED_WORKTREE_NAMES.has(entry)) continue;
     const path = join(worktreesDir, entry);
     let isDirectory = false;
     try {
@@ -2071,7 +2062,6 @@ export const prepareWorktree = async (
       repoDir,
       options.branch,
       worktreesDir,
-      options.baseBranch,
     );
   });
 
@@ -2114,7 +2104,6 @@ export const createSandbox = async (
     options.preparedWorktreePath ??
     (await prepareWorktree({
       branch,
-      baseBranch: options.baseBranch,
       layout: options.layout,
       copyToWorktree: options.copyToWorktree,
       hooks: options.hooks,

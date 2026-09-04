@@ -268,6 +268,12 @@ export const SANDBAR_BRANCH_REFGLOBS: readonly string[] =
     LOCAL_BRANCH_INFIXES.map((infix) => `refs/heads/${prefix}${infix}*`),
   );
 
+export const STRANDED_HEAD_REFGLOB = "refs/sandbar/stranded/*";
+
+export function strandedHeadRef(sha: string): string {
+  return `refs/sandbar/stranded/${sha}`;
+}
+
 // The same chunk-branch namespace, on the REMOTE side (#60). A chunk branch
 // lives on origin — it is the review artifact and the recovery point, and
 // nothing in the state directory is authoritative — so the refs that answer

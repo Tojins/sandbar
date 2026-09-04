@@ -34,14 +34,16 @@ describe("reviewer write detection", () => {
       syncBranchToCache: vi.fn(),
     };
 
-    await expect(
-      enforceReviewerSnapshot(
-        sandbox,
-        snapshot(),
-        snapshot({ tip: null }),
-        "partial reviewer output",
-      ),
-    ).rejects.toThrow("Reviewer changed git state");
+    const event = await enforceReviewerSnapshot(
+      sandbox,
+      snapshot(),
+      snapshot({ tip: null }),
+      "partial reviewer output",
+    );
+    expect(event).toEqual(expect.objectContaining({
+      kind: "reviewer-wrote",
+      detail: expect.stringContaining("Reviewer changed git state"),
+    }));
     expect(sandbox.preserveWorktree).toHaveBeenCalledWith(
       expect.stringContaining("human inspection"),
     );

@@ -61,6 +61,11 @@ export const CACHE_DIR_NAME = "repo.git";
 // branch: it is detached at origin/<sourceBranch>, locked against cache-wide
 // pruning, and reset there every run.
 export const SOURCE_WORKTREE_NAME = "source";
+export const MERGER_WORKTREE_NAME = "merger";
+export const RESERVED_WORKTREE_NAMES: ReadonlySet<string> = new Set([
+  SOURCE_WORKTREE_NAME,
+  MERGER_WORKTREE_NAME,
+]);
 
 // Every path sandbar owns, derived from the two knobs a consumer sets.
 //
@@ -413,9 +418,9 @@ export async function ensureSourceWorktree(
     // has no registration for, and `worktree add` refuses a non-empty one. It
     // is inside the disposable state directory and, by the probe above, holds
     // no repository of its own.
-    // A locked registration requires two --force flags. That lock is normally
-    // what protects source from cache-wide prune; here replacement is safe
-    // because the structural probe above proved this path is not that worktree.
+    // A locked registration requires two --force flags. The path may be gone
+    // while its locked registration remains; replacement is safe because this
+    // managed path is reserved exclusively for the source build context.
     await gitOk(repoDir, ["worktree", "remove", "--force", "--force", sourceWorktree]);
     await gitOk(repoDir, ["worktree", "prune"]);
     await rm(sourceWorktree, { recursive: true, force: true });

@@ -21,11 +21,11 @@ import { promisify } from "node:util";
 
 import { registerDisposable } from "./cleanup.js";
 import { SandbarError } from "./errors.js";
-import type { RepoLayout } from "./repo-cache.js";
+import { MERGER_WORKTREE_NAME, type RepoLayout } from "./repo-cache.js";
 
 const exec = promisify(execFile);
 
-export const MERGER_WORKTREE_NAME = "merger";
+export { MERGER_WORKTREE_NAME } from "./repo-cache.js";
 
 // Where the merger worktree lives. Pure — beside the per-issue worktrees so the
 // existing prune/orphan-sweep reclaims it. Takes the worktrees directory since

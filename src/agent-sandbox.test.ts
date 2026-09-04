@@ -9,7 +9,7 @@
 // and the two-phase completion timer (F5).
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { appendFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -1949,6 +1949,47 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     expect(worktreePath).toBe(worktreePathFor(layout.worktreesDir, branch));
     expect((await stat(worktreePath)).isDirectory()).toBe(true);
     expect(existsSync(join(worktreePath, "stale"))).toBe(false);
+  });
+
+  it("preserves reserved source and merger directories during an issue sweep", async () => {
+    const branch = "sandbar/issue-83-reserved-sweep";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    await mkdir(layout.worktreesDir, { recursive: true });
+    await git(["worktree", "add", "--detach", layout.sourceWorktree, "HEAD"], dir);
+    await git(["worktree", "lock", layout.sourceWorktree], dir);
+    const merger = join(layout.worktreesDir, "merger");
+    await git(["clone", "--local", "--no-checkout", dir, merger], dir);
+
+    await prepareWorktree({ branch, layout, copyToWorktree: [] });
+
+    expect((await stat(layout.sourceWorktree)).isDirectory()).toBe(true);
+    expect((await stat(join(merger, ".git"))).isDirectory()).toBe(true);
+  });
+
+  it("reports a stale issue-clone sweep failure and still prepares", async () => {
+    const branch = "sandbar/issue-83-sweep-failure";
+    const layout = layoutFor(dir);
+    await git(["branch", branch], dir);
+    await mkdir(layout.worktreesDir, { recursive: true });
+    const loopA = join(layout.worktreesDir, "loop-a");
+    const loopB = join(layout.worktreesDir, "loop-b");
+    await symlink("loop-b", loopA);
+    await symlink("loop-a", loopB);
+    const reported = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        prepareWorktree({ branch, layout, copyToWorktree: [] }),
+      ).resolves.toContain("sandbar-issue-83-sweep-failure");
+      expect(reported).toHaveBeenCalledWith(
+        "Stale issue-clone sweep failed (continuing):",
+        expect.objectContaining({ code: "ELOOP" }),
+      );
+    } finally {
+      reported.mockRestore();
+      await rm(loopA, { force: true });
+      await rm(loopB, { force: true });
+    }
   });
 
   it("reuses a clean worktree when its local issue branch is absent from origin", async () => {
