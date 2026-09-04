@@ -1533,6 +1533,7 @@ describe("createSandbox integration (local provider)", () => {
       const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
       expect(run.stdout).toBe("");
       expect(run.commits).toEqual([]);
+      expect(run.silent).toBe(true);
     } finally {
       await sandbox.close();
     }
@@ -1568,6 +1569,7 @@ describe("createSandbox integration (local provider)", () => {
       };
       const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
       expect(run.stdout).toBe("");
+      expect(run.silent).toBe(true);
       expect(run.stdout).not.toContain("command_execution");
     } finally {
       await sandbox.close();

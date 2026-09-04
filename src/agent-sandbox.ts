@@ -343,6 +343,10 @@ export type RunOptions = {
 export type SandboxRunResult = {
   readonly stdout: string;
   readonly commits: { sha: string }[];
+  // Derived by the shared end classifier, which remains the only definition
+  // of a silent provider run (#114). Callers may apply policy after commit
+  // collection without re-reading provider output (#116).
+  readonly silent: boolean;
   // Milliseconds from the start of `run()` to the instant the completion signal
   // was first seen in the agent's accumulated speech (#82). ABSENT when it was
   // never seen — the run ended by exec exit or by the idle kill instead — which
@@ -486,7 +490,7 @@ const AGENT_PARTIAL_USAGE = new WeakMap<object, {
   rateLimit?: RateLimitMeasurement;
 }>();
 
-const withPartialOutput = (
+export const withPartialOutput = (
   err: unknown,
   partial: string,
   usage: AgentUsage | undefined,
@@ -1956,6 +1960,7 @@ const invokeAgent = (
   elapsed: () => number,
 ): Promise<{
   result: string;
+  silent: boolean;
   signalMs?: number;
   maxGapMs: number;
   usage?: AgentUsage;
@@ -1982,6 +1987,7 @@ const invokeAgent = (
     };
     const settleResolve = (val: {
       result: string;
+      silent: boolean;
       signalMs?: number;
       maxGapMs: number;
       usage?: AgentUsage;
@@ -2162,6 +2168,7 @@ const invokeAgent = (
         }
         settleResolve({
           result: speech.spoken,
+          silent: classification.cause === "silent",
           maxGapMs: gaps.finish(),
           ...(signalMs === undefined ? {} : { signalMs }),
           ...(speech.usage === undefined ? {} : { usage: speech.usage }),
@@ -2343,6 +2350,7 @@ export const createSandbox = async (
   ): Promise<{
     result: string;
     commits: { sha: string }[];
+    silent: boolean;
     signalMs?: number;
     maxGapMs: number;
     usage?: AgentUsage;
@@ -2401,7 +2409,7 @@ export const createSandbox = async (
       await execGit(["rev-parse", "--verify", `refs/heads/${branch}`], worktreePath)
     ).trim();
 
-    const { result, signalMs, maxGapMs, usage, toolCalls, rateLimit } = await invokeAgent(
+    const { result, signalMs, maxGapMs, usage, toolCalls, rateLimit, silent } = await invokeAgent(
       providerHandle,
       sandboxRepoDir,
       prompt,
@@ -2431,6 +2439,7 @@ export const createSandbox = async (
     return {
       result,
       commits,
+      silent,
       maxGapMs,
       ...(signalMs === undefined ? {} : { signalMs }),
       ...(usage === undefined ? {} : { usage }),
@@ -2461,6 +2470,7 @@ export const createSandbox = async (
       return {
         stdout: iter.result,
         commits: iter.commits,
+        silent: iter.silent,
         maxGapMs: iter.maxGapMs,
         ...(iter.signalMs === undefined ? {} : { signalMs: iter.signalMs }),
         ...(iter.usage === undefined ? {} : { usage: iter.usage }),

@@ -208,6 +208,19 @@ export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
   `<details><summary>Last failure trace</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
+export const NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE = (
+  branch: string,
+  failureTrace: string,
+  stuckLabel: string,
+  readyLabel: string,
+): string =>
+  `${BOT_COMMENT_PREFIX} exhausted the attempt budget because the implementer ` +
+  `never emitted a \`<promise>\` token, so no gate ran. Inspect the attempt ` +
+  `transcripts, fix the provider or push a fix on \`${branch}\`, then drop ` +
+  `\`${stuckLabel}\` and re-apply \`${readyLabel}\` when ready.\n\n` +
+  `<details><summary>Attempt summary</summary>\n\n` +
+  `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
+
 // The worktree could not be brought to a committed state, so no gate ever ran
 // (#24 D1). Distinct from NEEDS_HUMAN_COMMENT_TEMPLATE, which says "exhausted
 // the attempt budget without a green gate" — true-ish but it sends the reader
@@ -470,6 +483,7 @@ export type FinalizeInput =
       readonly issue: IssueRef;
       readonly cause:
         | "gate-red"
+        | "no-signal-exhausted"
         | "reviewer-blocked"
         | "uncommittable-worktree"
         | "off-branch-head"
@@ -883,6 +897,13 @@ export async function finalizeOne(
             );
           case "gate-red":
             return NEEDS_HUMAN_COMMENT_TEMPLATE(
+              input.issue.branch,
+              input.failureTrace,
+              labels.agentStuck,
+              READY_FOR_AGENT_LABEL,
+            );
+          case "no-signal-exhausted":
+            return NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE(
               input.issue.branch,
               input.failureTrace,
               labels.agentStuck,

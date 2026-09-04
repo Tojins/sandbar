@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Sandbox } from "./agent-sandbox.js";
 import {
+  combinePromiseNudge,
   enforceReviewerSnapshot,
   priorReviewRound,
   reviewRoundLine,
@@ -10,6 +11,7 @@ import {
   runGateAndReviewer,
   runInnerLoop,
   runSandboxAndPublish,
+  silentAttemptIsInfra,
   type ReviewerSnapshot,
 } from "./inner-loop.js";
 import { qualityReviewContext } from "./prompt.js";
@@ -22,6 +24,34 @@ const deferred = <T,>() => {
   });
   return { promise, resolve };
 };
+
+describe("silent implementer attempt policy (#116)", () => {
+  const result = (silent: boolean, commits: string[] = []) => ({
+    silent,
+    commits: commits.map((sha) => ({ sha })),
+  });
+
+  it("classes two silent zero-commit runs as infrastructure", () => {
+    expect(silentAttemptIsInfra(result(true), result(true))).toBe(true);
+  });
+
+  it("keeps a silent attempt with commit evidence on the ordinary path", () => {
+    expect(silentAttemptIsInfra(result(true, ["abc"]), result(true))).toBe(false);
+  });
+
+  it("keeps a blip that speaks on the nudge on the ordinary path", () => {
+    expect(silentAttemptIsInfra(result(true), result(false))).toBe(false);
+  });
+
+  it("uses the same combined text for parsing and the transcript, and sums commits", () => {
+    expect(
+      combinePromiseNudge(
+        { stdout: "first", commits: [{ sha: "a" }] },
+        { stdout: "second", commits: [{ sha: "b" }, { sha: "c" }] },
+      ),
+    ).toEqual({ stdout: "first\nsecond", commitCount: 3 });
+  });
+});
 
 describe("runGateAndReviewer (#123)", () => {
   const action = {

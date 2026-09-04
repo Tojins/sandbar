@@ -734,6 +734,26 @@ describe("finalizeOne", () => {
     ]);
   });
 
+  it("needs-human no-signal exhaustion points at transcripts and says no gate ran", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    await finalizeOne(
+      {
+        kind: "needs-human",
+        issue: i,
+        cause: "no-signal-exhausted",
+        failureTrace: "The implementer emitted no <promise> token across 8 attempts.",
+        latestReviewerProse: null,
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(calls.comments[0]!.body).toContain("no gate ran");
+    expect(calls.comments[0]!.body).toContain("attempt transcripts");
+    expect(calls.comments[0]!.body).not.toContain("Last failure trace");
+  });
+
   it("needs-human reviewer-blocked: comments with the reviewer prose and names the green gate, not 'no green gate' (#17)", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);

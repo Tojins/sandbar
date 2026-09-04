@@ -54,9 +54,6 @@ import type { ParseSignal } from "./promise-parser.js";
 
 export const HARD_ERROR_MAX_RETRIES = 2;
 
-export const NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE =
-  "Attempt budget exhausted with no green gate.";
-
 export const NEEDS_HUMAN_REVIEW_BUDGET_EXHAUSTED_MESSAGE =
   "Review-round budget exhausted without an APPROVED verdict.";
 
@@ -124,8 +121,11 @@ export type Verdict =
   | {
       // Impl-attempt budget exhausted. `cause` names the real blocker so the
       // human-handoff message is accurate (#17):
-      //   gate-red — ran out of attempts with the last gate failing, or never
-      //     reaching a green gate; `failureTrace` carries the gate trace.
+      //   gate-red — ran out of attempts with the last gate failing;
+      //     `failureTrace` carries the gate trace.
+      //   no-signal-exhausted — the implementer never emitted a promise token
+      //     across the attempt budget; no gate ran and the transcripts are the
+      //     evidence a human needs.
       //   reviewer-blocked — ran out of attempts while the gate was GREEN and
       //     the reviewer's last verdict was CHANGES-REQUESTED;
       //     `latestReviewerProse` carries that report (so the human is pointed
@@ -150,6 +150,7 @@ export type Verdict =
       readonly type: "NEEDS-HUMAN";
       readonly cause:
         | "gate-red"
+        | "no-signal-exhausted"
         | "reviewer-blocked"
         | "uncommittable-worktree"
         | "off-branch-head"
@@ -555,9 +556,8 @@ function onImplementerResult(
       },
     };
   }
-  // NO-SIGNAL — either re-prompt for next attempt or exhaust the budget. The
-  // implementer didn't reach a green gate this attempt, so exhaustion here is
-  // the gate-red flavour.
+  // NO-SIGNAL — either re-prompt for next attempt or exhaust the budget. No
+  // gate ran on this route, so it has its own honest terminal cause (#116).
   return advanceAttempt(
     state,
     {
@@ -565,7 +565,14 @@ function onImplementerResult(
       extraReprompt: signal.reprompt ?? null,
       latestReviewerProse: state.latestReviewerProse,
     },
-    gateRedExhaustion(state),
+    {
+      type: "NEEDS-HUMAN",
+      cause: "no-signal-exhausted",
+      failureTrace:
+        `The implementer emitted no <promise> token across ${state.maxAttempts} attempts.`,
+      latestReviewerProse: null,
+      strandedHead: null,
+    },
   );
 }
 
@@ -680,13 +687,13 @@ function onReviewerHarnessFailed(state: LoopState, detail: string): StepResult {
   );
 }
 
-// The gate-red flavour of impl-budget exhaustion: surface the last recorded
-// gate trace, or the sentinel when no gate ever ran (NO-SIGNAL only).
+// Gate-red is only reachable after a real gate execution, so its trace is
+// always present. NO-SIGNAL exhaustion has a distinct cause above (#116).
 function gateRedExhaustion(state: LoopState): Verdict {
   return {
     type: "NEEDS-HUMAN",
     cause: "gate-red",
-    failureTrace: state.lastFailureTrace || NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE,
+    failureTrace: state.lastFailureTrace,
     latestReviewerProse: null,
     strandedHead: null,
   };

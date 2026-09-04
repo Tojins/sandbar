@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   HARD_ERROR_MAX_RETRIES,
-  NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE,
   type LoopAction,
   type LoopEvent,
   type LoopState,
@@ -646,21 +645,21 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
     });
   });
 
-  it("repeated NO-SIGNAL over maxAttempts → NEEDS-HUMAN with sentinel (no trace recorded)", () => {
+  it("repeated NO-SIGNAL exhausts with its own honest cause", () => {
     const { verdict } = drive({ maxAttempts: 2, maxReviewRounds: 3 }, [
       impl(noSignal()),
       impl(noSignal()),
     ]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN",
-      cause: "gate-red",
-      failureTrace: NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE,
+      cause: "no-signal-exhausted",
+      failureTrace: "The implementer emitted no <promise> token across 2 attempts.",
       latestReviewerProse: null,
       strandedHead: null,
     });
   });
 
-  it("NO-SIGNAL after a recorded gate-1 trace surfaces that trace, not the sentinel", () => {
+  it("NO-SIGNAL exhaustion does not misreport an older gate trace", () => {
     const { verdict } = drive({ maxAttempts: 3, maxReviewRounds: 3 }, [
       impl(complete),
       judged(gate1Red("recorded trace"), approved("discarded")),
@@ -669,8 +668,8 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
     ]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN",
-      cause: "gate-red",
-      failureTrace: "recorded trace",
+      cause: "no-signal-exhausted",
+      failureTrace: "The implementer emitted no <promise> token across 3 attempts.",
       latestReviewerProse: null,
       strandedHead: null,
     });
@@ -1091,7 +1090,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     ]);
     if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
     expect(verdict.cause).toBe("off-branch-head");
-    expect(verdict.failureTrace).not.toContain(NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE);
+    expect(verdict.failureTrace).toContain("HEAD");
   });
 
   it("is checked BEFORE the dirty tree — the branch is the deeper problem", () => {
