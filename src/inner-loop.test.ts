@@ -394,6 +394,29 @@ describe("silent implementer attempt policy (#116)", () => {
     expect(lines.at(-1)).toContain("commits=1");
   });
 
+  it("reparses a nudge-only COMPLETE after the repair supplies commit evidence", async () => {
+    const mismatch: HeadMismatch = {
+      branch: "sandbar/issue-116-silent",
+      headRef: null,
+      headSha: "head123",
+      branchSha: "base456",
+      branchIsAncestor: true,
+    };
+    const { pending, sandbox } = runPath(
+      sandboxResult("", true),
+      sandboxResult("<promise>COMPLETE</promise>", false),
+      undefined,
+      mismatch,
+    );
+
+    await expect(pending).resolves.toMatchObject({
+      kind: "implementer-result",
+      signal: { kind: "COMPLETE" },
+      fastForwarded: { fromSha: "base456", toSha: "head123" },
+    });
+    expect(sandbox.run).toHaveBeenCalledTimes(2);
+  });
+
   it("leaves a non-ancestor mismatch for the state machine", async () => {
     const mismatch: HeadMismatch = {
       branch: "sandbar/issue-116-silent",

@@ -1130,34 +1130,83 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     expect(text).not.toContain("If `sandbar/issue-1-x` is an ancestor");
   });
 
-  it("carries a free fast-forward note through review when there is a next attempt", () => {
-    const repaired = {
-      fromSha: "base0",
-      toSha: "head1",
-    } as const;
-    const gated = step(
+  const repaired = { fromSha: "base0", toSha: "head1" } as const;
+  const gatedAfterRepair = () =>
+    step(
       initialState(defaultOpts),
       impl(complete, [], null, repaired),
     );
-    expect(gated.action.kind).toBe("run-gate-and-reviewer");
-    expect(gated.state.lastOffBranch).toBe(false);
 
-    const reviewed = step(
-      gated.state,
-      judged(gate1Ok, changes("adjust this")),
-    );
-    if (reviewed.action.kind !== "run-implementer") {
-      throw new Error("expected next implementer");
-    }
-    expect(reviewed.action.extraReprompt).toContain(
-      "moved `sandbar/issue-1-x` from base0",
-    );
-    expect(reviewed.action.extraReprompt).toContain("HEAD at head1");
-    expect(reviewed.state.lastOffBranch).toBe(false);
-  });
+  it.each([
+    {
+      route: "dirty tree",
+      next: () =>
+        step(
+          initialState(defaultOpts),
+          impl(complete, ["?? pending.ts"], null, repaired),
+        ),
+      routeContext: "?? pending.ts",
+    },
+    {
+      route: "NO-SIGNAL",
+      next: () =>
+        step(
+          initialState(defaultOpts),
+          impl(noSignal("Emit a valid promise token."), [], null, repaired),
+        ),
+      routeContext: "Emit a valid promise token.",
+    },
+    {
+      route: "gate red",
+      next: () => {
+        const gated = gatedAfterRepair();
+        return step(
+          gated.state,
+          judged(gate1Red("gate exploded"), approved("discarded")),
+        );
+      },
+      routeContext: "gate exploded",
+    },
+    {
+      route: "reviewer rejection",
+      next: () => {
+        const gated = gatedAfterRepair();
+        return step(
+          gated.state,
+          judged(gate1Ok, changes("adjust this")),
+        );
+      },
+      routeContext: "adjust this",
+    },
+    {
+      route: "reviewer harness failure",
+      next: () => {
+        const gated = gatedAfterRepair();
+        return step(gated.state, judged(gate1Ok, harnessFailed()));
+      },
+      routeContext: "reviewer could not be run",
+    },
+  ])(
+    "carries the free repair note and $route context into the next attempt",
+    ({ next, routeContext }) => {
+      const result = next();
+      if (result.action.kind !== "run-implementer") {
+        throw new Error("expected next implementer");
+      }
+      expect(result.action.extraReprompt).toContain(
+        "moved `sandbar/issue-1-x` from base0",
+      );
+      expect(result.action.extraReprompt).toContain("HEAD at head1");
+      expect([
+        result.action.extraReprompt,
+        result.action.failureTrace,
+        result.action.latestReviewerProse,
+      ].join("\n")).toContain(routeContext);
+      expect(result.state.lastOffBranch).toBe(false);
+    },
+  );
 
   it("does not spend the off-branch correction when a repair precedes another route", () => {
-    const repaired = { fromSha: "base0", toSha: "head1" } as const;
     let state = step(
       initialState(defaultOpts),
       impl(noSignal(), [], null, repaired),

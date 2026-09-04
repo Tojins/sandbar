@@ -253,6 +253,26 @@ describe("headMismatch (#27)", () => {
     expect(m?.branchIsAncestor).toBe(false);
   });
 
+  it("propagates a merge-base failure other than not-an-ancestor", async () => {
+    await inWt("checkout", "-q", "--detach");
+    const blob = (await inWt("rev-parse", "HEAD:app.ts")).stdout.trim();
+    // Keep the ref resolvable so headRef, HEAD and branchTip all succeed, but
+    // make it name something merge-base cannot treat as a commit. This reaches
+    // the ancestry probe itself and makes git return an infrastructure error,
+    // not exit 1's ordinary "not an ancestor" answer.
+    const commonDir = (
+      await inWt("rev-parse", "--path-format=absolute", "--git-common-dir")
+    ).stdout.trim();
+    await writeFile(
+      join(commonDir, "refs/heads/sandbar/issue-1-x"),
+      `${blob}\n`,
+    );
+
+    await expect(
+      headMismatch(wt, "sandbar/issue-1-x"),
+    ).rejects.toThrow();
+  });
+
   it("reports a missing branch ref rather than throwing", async () => {
     // Not reachable through the inner loop (ensureIssueBranch runs first), but
     // the message must degrade to something readable rather than a stack trace.
@@ -308,6 +328,65 @@ describe("headMismatch (#27)", () => {
       }
     },
   );
+
+  it("returns a multi-commit repair range oldest-first with HEAD last", async () => {
+    await inWt("checkout", "-q", "-b", "agent-work");
+    await writeFile(join(wt, "first.ts"), "export const first = 1;\n");
+    await inWt("add", "-A");
+    await inWt("commit", "-qm", "first agent commit");
+    const first = (await inWt("rev-parse", "HEAD")).stdout.trim();
+    await writeFile(join(wt, "second.ts"), "export const second = 2;\n");
+    await inWt("add", "-A");
+    await inWt("commit", "-qm", "second agent commit");
+    const second = (await inWt("rev-parse", "HEAD")).stdout.trim();
+    const mismatch = await headMismatch(wt, "sandbar/issue-1-x");
+    if (mismatch === null) throw new Error("expected mismatch");
+
+    const repaired = await fastForwardOffBranchHead(wt, mismatch);
+
+    expect(repaired.commits).toEqual([{ sha: first }, { sha: second }]);
+    expect(repaired.commits.at(-1)?.sha).toBe(mismatch.headSha);
+  });
+
+  it("refuses an unproved repair without changing HEAD, refs, index, or worktree", async () => {
+    await writeFile(join(wt, "branch.ts"), "export const branch = true;\n");
+    await inWt("add", "-A");
+    await inWt("commit", "-qm", "branch work");
+    await inWt("checkout", "-q", "--detach", "HEAD^");
+    await writeFile(join(wt, "pending.ts"), "staged\n");
+    await inWt("add", "pending.ts");
+    await writeFile(join(wt, "pending.ts"), "staged and unstaged\n");
+    const mismatch = await headMismatch(wt, "sandbar/issue-1-x");
+    if (mismatch === null) throw new Error("expected mismatch");
+    expect(mismatch.branchSha).not.toBeNull();
+    expect(mismatch.branchIsAncestor).toBe(false);
+    const before = {
+      head: (await inWt("rev-parse", "HEAD")).stdout,
+      branch: (
+        await inWt("rev-parse", "refs/heads/sandbar/issue-1-x")
+      ).stdout,
+      index: (await inWt("diff", "--cached", "--binary")).stdout,
+      worktree: (await inWt("diff", "--binary")).stdout,
+      status: (await inWt("status", "--porcelain=v1")).stdout,
+    };
+
+    await expect(fastForwardOffBranchHead(wt, mismatch)).rejects.toThrow(
+      "refusing to fast-forward",
+    );
+
+    expect(await symbolicHeadRef(wt)).toBeNull();
+    expect((await inWt("rev-parse", "HEAD")).stdout).toBe(before.head);
+    expect(
+      (await inWt("rev-parse", "refs/heads/sandbar/issue-1-x")).stdout,
+    ).toBe(before.branch);
+    expect((await inWt("diff", "--cached", "--binary")).stdout).toBe(
+      before.index,
+    );
+    expect((await inWt("diff", "--binary")).stdout).toBe(before.worktree);
+    expect((await inWt("status", "--porcelain=v1")).stdout).toBe(
+      before.status,
+    );
+  });
 
   // Regression: the first cut used `git symbolic-ref -q HEAD` and read "exit 1
   // with empty stderr" as "detached". `-q` suppresses only git's OWN message —
