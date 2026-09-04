@@ -57,10 +57,18 @@ describe("continuous pool", () => {
     const pool = new ContinuousPool<Issue, string>(1, (i) => i.id);
     pool.recordLandingOutcome(2, 0);
     pool.recordLandingOutcome(3, 0);
-    expect(pool.terminalsSinceLanding).toBe(5);
+    expect(pool.noProgressSinceLanding).toBe(5);
     pool.recordLandingOutcome(1, 2);
-    expect(pool.terminalsSinceLanding).toBe(0);
+    expect(pool.noProgressSinceLanding).toBe(0);
     expect(pool.landings).toBe(2);
+  });
+
+  it("bounds a human-requested landing pass that makes no progress", () => {
+    const pool = new ContinuousPool<Issue, string>(1, (i) => i.id);
+    pool.recordLandingOutcome(0, 0, true);
+    expect(pool.noProgressSinceLanding).toBe(1);
+    pool.recordLandingOutcome(0, 1, true);
+    expect(pool.noProgressSinceLanding).toBe(0);
   });
 });
 
@@ -68,8 +76,8 @@ describe("scheduler decisions", () => {
   const snapshot = (overrides: Partial<SchedulerSnapshot> = {}): SchedulerSnapshot => ({
     active: 0, ongoing: 0, hasCompleted: false, hasPendingTerminals: false,
     hasCandidates: false, hasRetries: false, hasLandRequests: false, hasCapacity: true,
-    budgetRemaining: 10, landings: 0, terminalsSinceLanding: 0,
-    terminalBackstop: 6, quotaClosed: false, ...overrides,
+    budgetRemaining: 10, landings: 0, noProgressSinceLanding: 0,
+    noProgressBackstop: 6, quotaClosed: false, ...overrides,
   });
 
   // Every row names the WHOLE action, reason included: the exit tags are the
@@ -81,12 +89,12 @@ describe("scheduler decisions", () => {
     ["quota lands first", snapshot({ quotaClosed: true, hasPendingTerminals: true, ongoing: 1 }), { kind: "land" }],
     ["quota drains", snapshot({ quotaClosed: true, active: 1, ongoing: 1 }), { kind: "drain" }],
     ["quota exits", snapshot({ quotaClosed: true }), { kind: "exit", reason: "quota" }],
-    ["quota outranks stuck", snapshot({ quotaClosed: true, terminalsSinceLanding: 6 }), { kind: "exit", reason: "quota" }],
+    ["quota outranks stuck", snapshot({ quotaClosed: true, noProgressSinceLanding: 6 }), { kind: "exit", reason: "quota" }],
     ["quota outranks relaunch", snapshot({ quotaClosed: true, landings: 1, hasCandidates: true }), { kind: "exit", reason: "quota" }],
-    ["stuck exits", snapshot({ terminalsSinceLanding: 6 }), { kind: "exit", reason: "stuck" }],
-    ["stuck outranks relaunch", snapshot({ terminalsSinceLanding: 6, landings: 1, hasCandidates: true }), { kind: "exit", reason: "stuck" }],
-    ["stuck drains on every observation, not at quiescence", snapshot({ terminalsSinceLanding: 6, active: 3, ongoing: 3, hasCandidates: true }), { kind: "drain" }],
-    ["stuck lands first", snapshot({ terminalsSinceLanding: 6, ongoing: 1, hasPendingTerminals: true }), { kind: "land" }],
+    ["stuck exits", snapshot({ noProgressSinceLanding: 6 }), { kind: "exit", reason: "stuck" }],
+    ["stuck outranks relaunch", snapshot({ noProgressSinceLanding: 6, landings: 1, hasCandidates: true }), { kind: "exit", reason: "stuck" }],
+    ["stuck drains on every observation, not at quiescence", snapshot({ noProgressSinceLanding: 6, active: 3, ongoing: 3, hasCandidates: true }), { kind: "drain" }],
+    ["stuck lands first", snapshot({ noProgressSinceLanding: 6, ongoing: 1, hasPendingTerminals: true }), { kind: "land" }],
     ["relaunch at post-landing quiescence", snapshot({ landings: 1, hasCandidates: true }), { kind: "exit", reason: "relaunch" }],
     ["relaunch for a land request alone", snapshot({ landings: 1, hasLandRequests: true }), { kind: "exit", reason: "relaunch" }],
     ["relaunch outranks budget", snapshot({ landings: 1, hasCandidates: true, budgetRemaining: 0 }), { kind: "exit", reason: "relaunch" }],

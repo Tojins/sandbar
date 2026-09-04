@@ -144,7 +144,8 @@ The pool exits plan-empty only when no issue, landing, or plan remains. Provider
 quota stops new admissions and drains running and landing work before exit 4.
 `maxTotalIssues` counts admissions. Relaunch (75) is evaluated at quiescence,
 before admitting newly-unblocked work, and requires a landing in this process.
-After six consecutive terminals with no landing, admissions stop immediately;
+After six consecutive no-progress observations — issue terminals or a
+human-requested landing pass that only defers unchanged requests — admissions stop immediately;
 already-running issues drain and are finalised before the run exits stuck. A
 LANDING, for both of those, is any of a source-branch merge, a chunk landed on
 the source branch, or a DONE branch landed on its chunk branch — the last one

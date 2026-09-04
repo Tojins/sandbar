@@ -11,7 +11,7 @@ describe("continuous-pool exits", () => {
     ["plan-empty", planEmptyExit(), EXIT_CODE_SUCCESS, /no unblocked issues/],
     ["quota", quotaExit({ provider: "claude", window: "five_hour", resetsAt: 42 }), EXIT_CODE_QUOTA, /1970-01-01T00:00:42/],
     ["relaunch", relaunchExit(2), EXIT_CODE_RELAUNCH, /2 landing\(s\)/],
-    ["stuck", stuckExit(6), EXIT_CODE_STUCK, /6 consecutive issue terminals/],
+    ["stuck", stuckExit(6), EXIT_CODE_STUCK, /6 consecutive terminal or requested-landing passes/],
     ["budget", budgetExit(50, 50), EXIT_CODE_BUDGET, /issuesStarted=50/],
     ["halted", haltedExit(["merge", "tracker"]), EXIT_CODE_HALTED, /merge \+ tracker/],
     ["iteration-ceiling", iterationCeilingExit(100), EXIT_CODE_SUCCESS, /100 recomputes/],

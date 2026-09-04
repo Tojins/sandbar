@@ -35,7 +35,7 @@
 //      terminal (under a two-vendor config an issue routed to the other
 //      provider may genuinely finish); then exit 4. Outranks the backstop and
 //      the relaunch because a relaunch would only rediscover the closed window.
-//   3. stuck    — `terminalBackstop` consecutive terminals with no landing.
+//   3. stuck    — `noProgressBackstop` consecutive no-progress observations.
 //      Same shape as quota: land what is pending, drain what is active, exit
 //      2. Evaluated on EVERY observation, not at quiescence — a deep queue
 //      refills every freed slot and is never quiescent until the candidates
@@ -65,7 +65,11 @@
 // review-lane host otherwise: there, work leaves the pool only onto chunk
 // branches, and a counter that ignored those would exit stuck after six
 // successful landings. Whether the source branch moved — the image-rebuild
-// question — is a different fact and run.ts keeps it separately.
+// question — is a different fact and run.ts keeps it separately. A landing
+// pass requested by a human that consumes no terminal and lands nothing also
+// advances the no-progress backstop by one. Its unchanged deferral would
+// otherwise select `land` forever without producing an issue terminal for the
+// terminal-based backstop to count.
 //
 // `waitForFreedSlot` settles through one extra microtask on purpose: the
 // `.then` that pushes into `#completed` runs after the raced promise resolves,
@@ -100,8 +104,8 @@ export type SchedulerSnapshot = {
   readonly hasCapacity: boolean;
   readonly budgetRemaining: number;
   readonly landings: number;
-  readonly terminalsSinceLanding: number;
-  readonly terminalBackstop: number;
+  readonly noProgressSinceLanding: number;
+  readonly noProgressBackstop: number;
   readonly quotaClosed: boolean;
 };
 
@@ -121,7 +125,7 @@ export function decideSchedulerAction(state: SchedulerSnapshot): SchedulerAction
   if (state.quotaClosed) {
     return state.active > 0 ? { kind: "drain" } : { kind: "exit", reason: "quota" };
   }
-  if (state.terminalsSinceLanding >= state.terminalBackstop) {
+  if (state.noProgressSinceLanding >= state.noProgressBackstop) {
     if (state.hasPendingTerminals) return { kind: "land" };
     return state.active > 0 ? { kind: "drain" } : { kind: "exit", reason: "stuck" };
   }
@@ -153,7 +157,7 @@ export class ContinuousPool<T, R> {
   readonly #started = new Set<string>();
   readonly #retries: T[] = [];
   #landings = 0;
-  #terminalsSinceLanding = 0;
+  #noProgressSinceLanding = 0;
 
   constructor(readonly width: number, readonly idOf: (issue: T) => string) {
     if (!Number.isInteger(width) || width < 1) {
@@ -168,7 +172,7 @@ export class ContinuousPool<T, R> {
   get hasRetries(): boolean { return this.#retries.length > 0; }
   get isQuiescent(): boolean { return this.#active.size === 0 && this.#ongoing.size === 0; }
   get landings(): number { return this.#landings; }
-  get terminalsSinceLanding(): number { return this.#terminalsSinceLanding; }
+  get noProgressSinceLanding(): number { return this.#noProgressSinceLanding; }
   ongoingIssues(): readonly T[] { return [...this.#ongoing.values()]; }
   startedIds(): ReadonlySet<string> { return new Set(this.#started); }
   hasUnstarted(candidates: readonly T[]): boolean {
@@ -229,10 +233,14 @@ export class ContinuousPool<T, R> {
     if (!this.#retries.some((queued) => this.idOf(queued) === id)) this.#retries.push(issue);
   }
 
-  recordLandingOutcome(terminals: number, landed: number): void {
+  recordLandingOutcome(
+    terminals: number,
+    landed: number,
+    noProgressLanding = false,
+  ): void {
     this.#landings += landed;
-    this.#terminalsSinceLanding = landed > 0
+    this.#noProgressSinceLanding = landed > 0
       ? 0
-      : this.#terminalsSinceLanding + terminals;
+      : this.#noProgressSinceLanding + terminals + (noProgressLanding ? 1 : 0);
   }
 }

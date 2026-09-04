@@ -484,8 +484,10 @@ merge onto the source branch or onto a chunk branch (review lane), so a host
 whose work only ever waits on chunk pull requests relaunches and counts
 progress the same way.
 
-Six consecutive issue terminals with no landing between them exit 2 (`stuck`):
-admissions stop at once, running issues drain to their terminals and are
+Six consecutive no-progress observations with no landing between them exit 2
+(`stuck`). An issue terminal and a requested landing pass that only defers
+unchanged requests each count as one observation. Admissions stop at once,
+running issues drain to their terminals and are
 finalised, and the run stops. This is the bound for a red source branch or a
 misconfigured gate stack, where every issue would otherwise burn its whole
 attempt budget before parking.

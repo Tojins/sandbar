@@ -158,7 +158,7 @@ import { durationField, startTimer } from "./timing.js";
 import { SandbarError, faultDetail } from "./errors.js";
 import {
   type TerminalExit,
-  MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING,
+  MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
   SILENT_NOOP_RETRY_LIMIT,
   budgetExit,
   formatExitLine,
@@ -377,7 +377,7 @@ function schedulerExit(
       return quota;
     }
     case "budget": return budgetExit(runState.issuesAttempted, runState.maxTotalIssues);
-    case "stuck": return stuckExit(pool.terminalsSinceLanding);
+    case "stuck": return stuckExit(pool.noProgressSinceLanding);
   }
 }
 
@@ -1302,6 +1302,15 @@ export async function run(
       const quotaClosed = quotaPending !== null || requiredAgentProviders(config).some(
         (provider) => quotaState.get(provider) !== undefined,
       );
+      // The plan record is the resolver's answer, not the narrower admission
+      // this observation may make. Active slots, budget and scheduler state
+      // can all reduce admission without changing what the planner resolved.
+      await runLogger.writePlan(planTrigger, resolution.plan);
+      await runLogger.appendOrchestrator(
+        `plan: ${resolution.plan.length} unblocked issue(s) — ${resolution.plan
+          .map((issue) => `#${issue.id}`)
+          .join(", ") || "none"}`,
+      );
       const schedulerAction = decideSchedulerAction({
         active: pool.activeCount,
         ongoing: pool.ongoingCount,
@@ -1313,8 +1322,8 @@ export async function run(
         hasCapacity: pool.activeCount < config.maxParallelIssues,
         budgetRemaining: budget,
         landings: pool.landings,
-        terminalsSinceLanding: pool.terminalsSinceLanding,
-        terminalBackstop: MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING,
+        noProgressSinceLanding: pool.noProgressSinceLanding,
+        noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
         quotaClosed,
       });
       if (schedulerAction.kind === "exit") {
@@ -1335,9 +1344,8 @@ export async function run(
       const executionIssues = [...admission.issues];
       const issues = executionIssues;
       runState.issuesAttempted += admission.newStarts;
-      await runLogger.writePlan(planTrigger, issues);
       await runLogger.appendOrchestrator(
-        `plan: ${issues.length} unblocked issue(s) — ${issues.map((i) => `#${i.id}`).join(", ") || "none"}`,
+        `admit: ${issues.length} issue(s) — ${issues.map((i) => `#${i.id}`).join(", ") || "none"}`,
       );
 
       // Both of these run BEFORE the plan-empty exit below (#57): a queue whose
@@ -1975,8 +1983,14 @@ export async function run(
         ? mergerSummary.merged.length + mergerSummary.mergedChunks.length
         : 0;
       const landedNow = sourceLandings + (mergerSummary?.chunkLanded.length ?? 0);
-      pool.recordLandingOutcome(settled.length, landedNow);
-      nextPlanTrigger = landedNow > 0 ? "landing-finished" : "terminal-finalized";
+      pool.recordLandingOutcome(
+        settled.length,
+        landedNow,
+        settled.length === 0 && landRequests.length > 0,
+      );
+      nextPlanTrigger = landRequests.length > 0 || landedNow > 0
+        ? "landing-finished"
+        : "terminal-finalized";
       if (sourceLandings > 0) {
         sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
         baseFingerprints = await ensureImages(config.images, sourceWorktree, {

@@ -8,6 +8,7 @@ const seams = vi.hoisted(() => ({
   issueLabels: vi.fn(async () => [] as string[]),
   mergerStackStop: vi.fn(async () => undefined),
   mergerWorktreeRemove: vi.fn(async () => undefined),
+  writePlan: vi.fn(async () => undefined),
   logLines: [] as string[],
 }));
 
@@ -31,7 +32,7 @@ vi.mock("./logs.js", () => ({
     runDir: "/tmp/run-quota-test",
     appendOrchestrator: vi.fn(async (line: string) => { seams.logLines.push(line); }),
     finalize: vi.fn(),
-    writePlan: vi.fn(),
+    writePlan: seams.writePlan,
     issue: vi.fn(async (id: string) => ({
       dir: `/tmp/run-quota-test/issue-${id}`,
       writeAttempt: vi.fn(), writeAttemptReviewer: vi.fn(),
@@ -149,6 +150,7 @@ describe("run quota orchestration (#109)", () => {
     seams.mergerStackStop.mockReset(); seams.mergerStackStop.mockResolvedValue(undefined);
     seams.mergerWorktreeRemove.mockReset();
     seams.mergerWorktreeRemove.mockResolvedValue(undefined);
+    seams.writePlan.mockReset(); seams.writePlan.mockResolvedValue(undefined);
     seams.logLines.length = 0;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -266,7 +268,7 @@ describe("run quota orchestration (#109)", () => {
   });
 
   it("refills a freed slot before landing while a sibling remains active", async () => {
-    const issues = [issue("1"), issue("2"), issue("3")];
+    const issues = [issue("1"), issue("2"), issue("3"), issue("4"), issue("5")];
     const slow = deferred<{ type: "DONE"; commits: { sha: string }[] }>();
     seams.plan.mockImplementation(async (_repo, options: { excluded?: Set<number> }) =>
       resolution(issues.filter((candidate) => !options.excluded?.has(Number(candidate.id)))));
@@ -294,6 +296,16 @@ describe("run quota orchestration (#109)", () => {
       .toEqual(["2"]);
     expect(seams.merger.mock.calls[1]?.[0].map((candidate: ReturnType<typeof issue>) => candidate.id))
       .toEqual(["1", "3"]);
+    // The second recompute resolved every unstarted candidate even though only
+    // one slot was free. plans.jsonl records that resolver answer, not the
+    // narrower admission of #3.
+    expect(seams.writePlan.mock.calls[1]?.[1].map(
+      (candidate: ReturnType<typeof issue>) => candidate.id,
+    )).toEqual(["3", "4", "5"]);
+    expect(seams.logLines).toContain(
+      "plan: 3 unblocked issue(s) — #3, #4, #5",
+    );
+    expect(seams.logLines).toContain("admit: 1 issue(s) — #3");
   });
 
   it("continues after a rejected member and admits its successor", async () => {

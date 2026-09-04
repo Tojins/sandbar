@@ -10,8 +10,10 @@
 //                           recompute is non-empty (exit 75, #65). That instant
 //                           is the old cycle boundary: the last landing closed
 //                           a blocker and unblocked its successors.
-//   (d) stuck             — MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING issue
-//                           terminals in a row with no landing between them
+//   (d) stuck             — MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING
+//                           no-progress observations in a row: issue terminals
+//                           or human-requested landing passes that defer every
+//                           request and consume no terminal
 //                           (exit 2). The broken-world backstop: a red source
 //                           branch or a misconfigured gate stack parks every
 //                           issue after an hour of paid tokens, and without
@@ -75,7 +77,7 @@ export const SILENT_NOOP_RETRY_LIMIT = 2;
 // enough that one bad issue, or one flaky landing, cannot trip it, and small
 // enough that a red source branch is caught after two rounds of parks rather
 // than fifty.
-export const MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING = 6;
+export const MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING = 6;
 
 export const EXIT_CODE_SUCCESS = 0;
 // The code every stop that is not a normal terminal already exited with — a
@@ -204,7 +206,7 @@ export function budgetExit(started: number, maximum: number): TerminalExit {
 export function stuckExit(terminals: number): TerminalExit {
   return {
     tag: "stuck",
-    reason: `${terminals} consecutive issue terminals with zero landings`,
+    reason: `${terminals} consecutive terminal or requested-landing passes with zero landings`,
     exitCode: EXIT_CODE_STUCK,
   };
 }
