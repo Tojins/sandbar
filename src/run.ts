@@ -1065,14 +1065,18 @@ export async function run(
       if (result?.status === "rejected") cleanupFailures.push(result.reason);
     }
     if (cleanupFailures.length === 0) return;
-    if (landingFailure === null) throw cleanupFailures[0];
-    for (const cleanupErr of cleanupFailures) {
+    const primaryFailure = landingFailure ?? cleanupFailures[0];
+    const secondaryFailures = landingFailure === null
+      ? cleanupFailures.slice(1)
+      : cleanupFailures;
+    for (const cleanupErr of secondaryFailures) {
       const detail = faultDetail(cleanupErr);
       console.error("Landing resource cleanup also failed:\n" + detail);
       await runLogger.appendOrchestrator(
         "landing resource cleanup also failed: " + detail,
       );
     }
+    if (landingFailure === null) throw primaryFailure;
   };
 
   // -------------------------------------------------------------------------

@@ -559,4 +559,32 @@ describe("run quota orchestration (#109)", () => {
       )).toBe(false);
     },
   );
+
+  it("reports later teardown failures after a successful landing and halts on the first", async () => {
+    seams.plan.mockResolvedValue(resolution([issue("1")]));
+    seams.innerLoop.mockResolvedValue({
+      type: "DONE", commits: [{ sha: "1" }],
+    });
+    seams.merger.mockResolvedValue(summary([issue("1")]));
+    seams.mergerStackStop.mockRejectedValue(new Error("stack teardown failed"));
+    seams.mergerWorktreeRemove.mockRejectedValue(new Error("worktree teardown failed"));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(seams.mergerStackStop).toHaveBeenCalledOnce();
+    expect(seams.mergerWorktreeRemove).toHaveBeenCalledOnce();
+    expect(seams.logLines.some((line) =>
+      line.includes("landing resource cleanup also failed") &&
+      line.includes("worktree teardown failed")
+    )).toBe(true);
+    expect(seams.logLines.some((line) =>
+      line.startsWith("HALTED — internal failure: Error: stack teardown failed")
+    )).toBe(true);
+    expect(seams.logLines.some((line) =>
+      line.startsWith("HALTED — internal failure: Error: worktree teardown failed")
+    )).toBe(false);
+  });
 });
