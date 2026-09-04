@@ -865,38 +865,46 @@ async function executeAction(
   switch (action.kind) {
     case "run-implementer":
       return runImplementer(action, ctx);
-    case "run-gate-and-reviewer": {
-      // Turn rejection into data so Promise.all waits for both concurrent jobs
-      // before cycle teardown can remove resources one of them is still using.
-      const settled = <T>(work: Promise<T>) => work.then(
-        (value) => ({ ok: true as const, value }),
-        (reason: unknown) => ({ ok: false as const, reason }),
-      );
-      const [gateResult, reviewerResult] = await Promise.all([
-        settled(runGate1(action, ctx)),
-        settled(runReviewer(action, ctx)),
-      ]);
-      if (!gateResult.ok) throw gateResult.reason;
-      if (!reviewerResult.ok) throw reviewerResult.reason;
-      const gate = gateResult.value;
-      const reviewer = reviewerResult.value;
-      if (gate.ok && reviewer.historyEntry !== null) {
-        ctx.priorReviewRounds.push(reviewer.historyEntry);
-      }
-      if (
-        !gate.ok &&
-        reviewer.event.kind !== "reviewer-wrote" &&
-        ctx.opts.onOrchestratorLog
-      ) {
-        await ctx.opts.onOrchestratorLog(
-          `issue=${ctx.issue.id} attempt=${action.attempt} gate-1 red — discarded concurrent reviewer result`,
-        );
-      }
-      return { kind: "gate-and-reviewer-result", gate, reviewer: reviewer.event };
-    }
+    case "run-gate-and-reviewer":
+      return runGateAndReviewer(action, ctx);
     case "terminate":
       throw new Error("executeAction called with terminate; runner should exit instead");
   }
+}
+
+type GateAndReviewerJobs = {
+  readonly gate: typeof runGate1;
+  readonly reviewer: typeof runReviewer;
+};
+
+export async function runGateAndReviewer(
+  action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
+  ctx: ExecuteActionCtx,
+  jobs: GateAndReviewerJobs = { gate: runGate1, reviewer: runReviewer },
+): Promise<Extract<LoopEvent, { kind: "gate-and-reviewer-result" }>> {
+  // Wait for both jobs before cycle teardown can remove resources either one
+  // is still using. If both reject, the gate remains the first surfaced error.
+  const [gateResult, reviewerResult] = await Promise.allSettled([
+    jobs.gate(action, ctx),
+    jobs.reviewer(action, ctx),
+  ]);
+  if (gateResult.status === "rejected") throw gateResult.reason;
+  if (reviewerResult.status === "rejected") throw reviewerResult.reason;
+  const gate = gateResult.value;
+  const reviewer = reviewerResult.value;
+  if (gate.ok && reviewer.historyEntry !== null) {
+    ctx.priorReviewRounds.push(reviewer.historyEntry);
+  }
+  if (
+    !gate.ok &&
+    reviewer.event.kind !== "reviewer-wrote" &&
+    ctx.opts.onOrchestratorLog
+  ) {
+    await ctx.opts.onOrchestratorLog(
+      `issue=${ctx.issue.id} attempt=${action.attempt} gate-1 red — discarded concurrent reviewer result`,
+    );
+  }
+  return { kind: "gate-and-reviewer-result", gate, reviewer: reviewer.event };
 }
 
 async function runImplementer(

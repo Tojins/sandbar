@@ -7,12 +7,109 @@ import {
   reviewRoundLine,
   reviewerPassRouting,
   reviewerSnapshotChanged,
+  runGateAndReviewer,
   runInnerLoop,
   runSandboxAndPublish,
   type ReviewerSnapshot,
 } from "./inner-loop.js";
 import { qualityReviewContext } from "./prompt.js";
 import type { ReviewerOutcome } from "./reviewer-run.js";
+
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+};
+
+describe("runGateAndReviewer (#123)", () => {
+  const action = {
+    kind: "run-gate-and-reviewer" as const,
+    attempt: 2,
+    reviewRound: 1,
+  };
+  const historyEntry = {
+    round: 1,
+    head: "abc1234",
+    quality: { verdict: "APPROVED" as const, prose: "lgtm" },
+  };
+  const approved = {
+    event: {
+      kind: "reviewer-result" as const,
+      verdict: "APPROVED" as const,
+      prose: "lgtm",
+    },
+    historyEntry,
+  };
+  const context = (lines: string[] = []) =>
+    ({
+      issue: { id: "123" },
+      opts: { onOrchestratorLog: (line: string) => lines.push(line) },
+      priorReviewRounds: [],
+    }) as unknown as Parameters<typeof runGateAndReviewer>[1];
+
+  it("starts both jobs immediately, awaits both, and records green-gate history", async () => {
+    const gate = deferred<{ readonly ok: boolean; readonly failureTrace: string }>();
+    const reviewer = deferred<typeof approved>();
+    const started: string[] = [];
+    const ctx = context();
+    const result = runGateAndReviewer(action, ctx, {
+      gate: vi.fn(() => {
+        started.push("gate");
+        return gate.promise;
+      }),
+      reviewer: vi.fn(() => {
+        started.push("reviewer");
+        return reviewer.promise;
+      }),
+    });
+
+    expect(started).toEqual(["gate", "reviewer"]);
+    gate.resolve({ ok: true, failureTrace: "" });
+    let finished = false;
+    void result.then(() => {
+      finished = true;
+    });
+    await Promise.resolve();
+    expect(finished).toBe(false);
+    reviewer.resolve(approved);
+
+    await expect(result).resolves.toEqual({
+      kind: "gate-and-reviewer-result",
+      gate: { ok: true, failureTrace: "" },
+      reviewer: approved.event,
+    });
+    expect(ctx.priorReviewRounds).toEqual([historyEntry]);
+  });
+
+  it("awaits a reviewer beside a red gate, discards its history, and logs the discard", async () => {
+    const reviewer = deferred<typeof approved>();
+    const lines: string[] = [];
+    const ctx = context(lines);
+    const result = runGateAndReviewer(action, ctx, {
+      gate: vi.fn(async () => ({ ok: false, failureTrace: "tests failed" })),
+      reviewer: vi.fn(() => reviewer.promise),
+    });
+    let finished = false;
+    void result.then(() => {
+      finished = true;
+    });
+    await Promise.resolve();
+    expect(finished).toBe(false);
+    reviewer.resolve(approved);
+
+    await expect(result).resolves.toEqual({
+      kind: "gate-and-reviewer-result",
+      gate: { ok: false, failureTrace: "tests failed" },
+      reviewer: approved.event,
+    });
+    expect(ctx.priorReviewRounds).toEqual([]);
+    expect(lines).toEqual([
+      "issue=123 attempt=2 gate-1 red — discarded concurrent reviewer result",
+    ]);
+  });
+});
 
 const reviewed = (
   verdict: "APPROVED" | "CHANGES-REQUESTED",
