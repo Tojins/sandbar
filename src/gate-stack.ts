@@ -1429,12 +1429,16 @@ async function waitForReady(
   await pollUntilReady(containerName, c, c.readiness, label, clock);
 }
 
-async function pollUntilReady(
+// Exported with the same probe seam as `pollUntilHealthy`: a real podman cannot
+// deterministically demonstrate a clock step between the loop bound and the
+// per-probe budget, while that ordering is the deadline's contract.
+export async function pollUntilReady(
   containerName: string,
   c: ResolvedStackContainer,
   readiness: NonNullable<ResolvedStackContainer["readiness"]>,
   label: string,
   clock: Clock = monotonicClock,
+  podman: PodmanProbe = boundedPodman,
 ): Promise<void> {
   const deadline = clock() + c.readinessTimeoutMs;
   let lastErr = "";
@@ -1453,7 +1457,11 @@ async function pollUntilReady(
     // This is the ONLY bound on a probe. Podman's `--health-timeout` is not
     // passed and would not help if it were: it lets the probe run to
     // completion and then labels the result as having exceeded the bound.
-    const probe = await probeOnce(containerName, remainingMs(deadline, clock));
+    const probe = await probeOnce(
+      containerName,
+      remainingMs(deadline, clock),
+      podman,
+    );
     if (probe.status === "healthy") return;
     // `unhealthy` and `error` are the same thing HERE and are deliberately not
     // separated: nothing has yet been known to work, so a probe that failed and
@@ -1468,19 +1476,19 @@ async function pollUntilReady(
     // container whose entrypoint dies at startup is an EXPECTED failure. Report
     // it immediately with its log instead of polling a corpse for the full
     // timeout and then reporting a misleading "did not become ready".
-    await throwIfDead(containerName, c, label);
+    await throwIfDead(containerName, c, label, DIED_DURING_STARTUP, podman);
     await sleep(READY_POLL_INTERVAL_MS);
   }
   // Read once, here, rather than on every failed poll: this sees the most
   // recent probes podman still holds, and a per-poll read would be a podman
   // call every 500ms for text nobody looks at until now.
-  const entries = await readHealthLog(containerName);
+  const entries = await readHealthLog(containerName, podman);
   throw new ContainerBringupError(
     containerName,
     `${label}: container '${c.name}' (${c.image}) did not become ready ` +
       `within ${c.readinessTimeoutMs}ms (${describeReadiness(readiness)}; ` +
       `last probe: ${lastProbeText(entries, lastErr, lastTimedOut)})`,
-    await logTail(containerName),
+    await logTail(containerName, CONTAINER_LOG_TAIL, podman),
     // Sliced here rather than trusted to be short: podman keeps five by
     // default, but `--health-max-log-count` and containers.conf can raise it,
     // and the heading is a claim about what follows.
@@ -1794,12 +1802,13 @@ async function throwIfDead(
 async function logTail(
   containerName: string,
   lines = CONTAINER_LOG_TAIL,
+  podman: PodmanProbe = boundedPodman,
 ): Promise<string> {
   // MAX_BUFFER, not node's 1MB default: `--tail 40` bounds the LINE count, not
   // the byte count, and 40 lines of a JSON dump or a minified bundle overflows
   // it — losing the one diagnostic D9 exists to provide, precisely when the log
   // is biggest.
-  const r = await boundedPodman(
+  const r = await podman(
     ["logs", "--tail", String(lines), containerName],
     LOG_READ_TIMEOUT_MS,
   );
@@ -1821,7 +1830,7 @@ async function logTail(
   // case. (`throwIfDead` and `assertIssueContainersAlive` do not reach this:
   // they already know the state and pass GONE_LOG_NOTE without reading.)
   if (!boundedOk(r)) {
-    return (await containerGone(containerName, boundedPodman))
+    return (await containerGone(containerName, podman))
       ? GONE_LOG_NOTE
       : "(logs unavailable)";
   }
