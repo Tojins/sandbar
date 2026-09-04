@@ -54,7 +54,7 @@ describe("startRunLogger", () => {
     expect(lines[2]).toMatch(/cycle 1 started$/);
   });
 
-  it("cycle().writePlan writes verbatim JSON to cycle-<n>/plan.json", async () => {
+  it("cycle().writePlan appends a triggered record to plans.jsonl", async () => {
     const base = await makeBase();
     const logger = await startRunLogger({ baseDir: base });
     const plan = [
@@ -63,9 +63,9 @@ describe("startRunLogger", () => {
     ];
     await logger.cycle(1).writePlan(plan);
 
-    const path = join(logger.runDir, "cycle-1", "plan.json");
+    const path = join(logger.runDir, "plans.jsonl");
     const body = await readFile(path, "utf8");
-    expect(JSON.parse(body)).toEqual(plan);
+    expect(JSON.parse(body)).toEqual({ trigger: "launch", plan });
     expect(body).toContain("\n");
   });
 
@@ -77,7 +77,7 @@ describe("startRunLogger", () => {
     await c.appendMerger("gate green: 42");
 
     const body = await readFile(
-      join(logger.runDir, "cycle-2", "merger.log"),
+      join(logger.runDir, "landing-2", "merger.log"),
       "utf8",
     );
     const lines = body.trim().split("\n");
@@ -93,7 +93,7 @@ describe("startRunLogger", () => {
     await c.writeAttempt("47", 2, "implementer stdout");
     await c.writeAttemptReviewer("47", 2, "reviewer stdout");
 
-    const dir = join(logger.runDir, "cycle-3", "issue-47");
+    const dir = join(logger.runDir, "issue-47");
     const entries = (await readdir(dir)).sort();
     expect(entries).toEqual(["attempt-2-reviewer.log", "attempt-2.log"]);
     expect(await readFile(join(dir, "attempt-2.log"), "utf8")).toBe(
@@ -125,7 +125,7 @@ describe("startRunLogger", () => {
     });
 
     expect(path).toBe(
-      join(logger.runDir, "cycle-1", "resolve-64-attempt-2.log"),
+      join(logger.runDir, "landing-1", "resolve-64-attempt-2.log"),
     );
     const body = await readFile(path, "utf8");
     expect(body).toContain("agent said this");

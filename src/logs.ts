@@ -3,12 +3,9 @@
 // At run start, makes `<baseDir>/run-<UTC-ISO>/` and exposes:
 //
 //   appendOrchestrator(line)              → run-<UTC>/orchestrator.log
-//   cycle(n).writePlan(plan)              → run-<UTC>/cycle-<n>/plan.json
-//   cycle(n).appendMerger(line)           → run-<UTC>/cycle-<n>/merger.log
-//   cycle(n).writeMergerGate(id, gate)    → run-<UTC>/cycle-<n>/merger-gate-<id>.{out,err,meta.json,containers.log}
-//   cycle(n).writeResolveAttempt(k, rec)  → run-<UTC>/cycle-<n>/resolve-<k>-attempt-<m>.log
-//   cycle(n).writeAttempt(id, m, content) → run-<UTC>/cycle-<n>/issue-<id>/attempt-<m>.log
-//   cycle(n).writeAttemptReviewer(...)    → run-<UTC>/cycle-<n>/issue-<id>/attempt-<m>-reviewer.log
+//   plans.jsonl                           → one trigger + plan per recompute
+//   issue-<id>/                           → all attempts for one issue
+//   landing-<n>/                          → one serialized landing's artefacts
 //
 // Append-style writers are unbuffered (Node uses O_APPEND), so SIGINT/SIGTERM
 // and uncaught exceptions don't lose lines that already returned. finalize()
@@ -113,6 +110,7 @@ export type MergerGateRecord = {
 
 export type CycleLogger = AttemptLogger & {
   readonly cycleDir: string;
+  issueDir(issueId: string): Promise<string>;
   writePlan(plan: unknown): Promise<void>;
   appendMerger(line: string): Promise<void>;
   writeMergerGate(issueId: string, gate: MergerGateRecord): Promise<void>;
@@ -188,18 +186,21 @@ export async function startRunLogger(
 }
 
 function makeCycleLogger(runDir: string, n: number): CycleLogger {
-  const cycleDir = join(runDir, `cycle-${n}`);
+  // Compatibility name at the call boundary; the filesystem unit is now a
+  // landing, while issue transcripts live directly under the run.
+  const cycleDir = runDir;
+  const landingDir = join(runDir, `landing-${n}`);
   let cycleDirReady: Promise<void> | null = null;
   const ensureCycleDir = (): Promise<void> => {
     if (!cycleDirReady) {
-      cycleDirReady = mkdir(cycleDir, { recursive: true }).then(() => undefined);
+      cycleDirReady = mkdir(landingDir, { recursive: true }).then(() => undefined);
     }
     return cycleDirReady;
   };
   const issueDirsReady = new Map<string, Promise<void>>();
   const ensureIssueDir = async (issueId: string): Promise<string> => {
     await ensureCycleDir();
-    const dir = join(cycleDir, `issue-${issueId}`);
+    const dir = join(runDir, `issue-${issueId}`);
     let p = issueDirsReady.get(issueId);
     if (!p) {
       p = mkdir(dir, { recursive: true }).then(() => undefined);
@@ -211,20 +212,23 @@ function makeCycleLogger(runDir: string, n: number): CycleLogger {
 
   return {
     cycleDir,
+    issueDir: ensureIssueDir,
     async writePlan(plan) {
-      await ensureCycleDir();
-      await writeFile(join(cycleDir, "plan.json"), JSON.stringify(plan, null, 2));
+      await appendFile(
+        join(runDir, "plans.jsonl"),
+        `${JSON.stringify({ trigger: n === 1 ? "launch" : "slot-freed", plan })}\n`,
+      );
     },
     async appendMerger(line) {
       await ensureCycleDir();
       await appendFile(
-        join(cycleDir, "merger.log"),
+        join(landingDir, "merger.log"),
         `[${new Date().toISOString()}] ${line}\n`,
       );
     },
     async writeMergerGate(issueId, gate) {
       await ensureCycleDir();
-      const base = join(cycleDir, `merger-gate-${issueId}`);
+      const base = join(landingDir, `merger-gate-${issueId}`);
       await writeFile(`${base}.out`, gate.stdout);
       await writeFile(`${base}.err`, gate.stderr);
       // Its own file, never appended to `.err`: `summarizeGateFailure`
@@ -245,7 +249,7 @@ function makeCycleLogger(runDir: string, n: number): CycleLogger {
     },
     async writeResolveAttempt(key, record) {
       await ensureCycleDir();
-      const path = join(cycleDir, `resolve-${key}-attempt-${record.attempt}.log`);
+      const path = join(landingDir, `resolve-${key}-attempt-${record.attempt}.log`);
       // A header before the streams, because the streams are what a container
       // that died at startup does NOT have: on the failure this file exists for,
       // everything below the header is empty and the header is the whole

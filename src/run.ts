@@ -844,6 +844,16 @@ export async function run(
       finalizeAdapter,
       config.labels,
     );
+    for (const input of inputs) {
+      const issueNum = issueNumberOf(input.issue);
+      const observed = await finalizeAdapter.issueLabels(issueNum);
+      if (observed.includes("ready-for-agent")) {
+        throw new SandbarError(
+          `Tracker read-back mismatch for issue #${issueNum}: sandbar wrote ` +
+            `not-ready but observed labels [${observed.join(", ")}].`,
+        );
+      }
+    }
     console.log(`\nFinalise (${label}): ${finalizeResults.length} issue(s).`);
     for (const r of finalizeResults) {
       const issue = r.input.issue;
@@ -1239,7 +1249,7 @@ export async function run(
               // transcripts (#44 D4), so the offline artefact of what the
               // agent's stack was doing sits next to the transcript of what the
               // agent did.
-              sandboxLogBaseDir: cycleLogger.cycleDir,
+              sandboxLogBaseDir: await cycleLogger.issueDir(issue.id),
               attemptLogger: cycleLogger,
               onOrchestratorLog: (line) => runLogger.appendOrchestrator(line),
               quotaState,

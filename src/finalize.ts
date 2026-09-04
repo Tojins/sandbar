@@ -584,6 +584,9 @@ export type FinalizeAdapter = {
   // closed issue (merged earlier this run, or human-closed mid-run) never gets
   // stamped with a handoff label + failure comment (#16).
   issueState(issueNum: number): Promise<"OPEN" | "CLOSED">;
+  // Read-back after finalization. A successful write is not accepted until the
+  // tracker reports the queue label absent (#87).
+  issueLabels(issueNum: number): Promise<readonly string[]>;
 };
 
 export type LabelEditResult = {
@@ -1258,6 +1261,22 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       } catch (err) {
         throw new SandbarError(
           `Failed to read state of issue #${issueNum} before finalising: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          { cause: err },
+        );
+      }
+    },
+    async issueLabels(issueNum) {
+      try {
+        const { stdout } = await exec("gh", [
+          "issue", "view", String(issueNum), "--repo", repoSlug(deps.repo),
+          "--json", "labels", "--jq", ".labels[].name",
+        ]);
+        return stdout.split("\n").map((label) => label.trim()).filter(Boolean);
+      } catch (err) {
+        throw new SandbarError(
+          `Failed to read labels of issue #${issueNum} after finalising: ${
             err instanceof Error ? err.message : String(err)
           }`,
           { cause: err },
