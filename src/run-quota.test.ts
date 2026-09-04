@@ -60,8 +60,9 @@ vi.mock("./ensure-images.js", async (importOriginal) => ({
 vi.mock("./plan-resolver.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./plan-resolver.js")>(), buildPlan: seams.plan,
 }));
-vi.mock("./chunk-follow-up.js", () => ({
-  realAdapter: vi.fn(() => ({})), fileChunkReviewFollowUps: vi.fn(async () => []),
+vi.mock("./chunk-follow-up.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./chunk-follow-up.js")>(),
+  realAdapter: vi.fn(() => ({})), routeChunkReviewFollowUps: vi.fn(async () => []),
 }));
 vi.mock("./chunk-reconcile.js", () => ({
   fetchLandRequestPullRequests: vi.fn(async () => []),
