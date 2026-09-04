@@ -4,9 +4,9 @@
 // lives here and is table-driven tested in inner-loop-machine.test.ts.
 //
 // Impl-attempt exhaustion carries a `cause` so the human-handoff names the
-// real blocker (#17): `gate-red` vs `reviewer-blocked`. Each advanceAttempt
-// caller supplies the exhaustion verdict because only it knows which case
-// it's in.
+// real blocker (#17): `gate-red`, `no-signal-exhausted`, or
+// `reviewer-blocked`. Each advanceAttempt caller supplies the exhaustion
+// verdict because only it knows which case it's in.
 //
 // The two budgets bind together, not independently (#71). `reviewRoundsUsed`
 // only ever advances in `onReviewerResult`, which advances `attempt` too, so
@@ -53,9 +53,6 @@ import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";
 
 export const HARD_ERROR_MAX_RETRIES = 2;
-
-export const NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE =
-  "Attempt budget exhausted with no green gate.";
 
 export const NEEDS_HUMAN_REVIEW_BUDGET_EXHAUSTED_MESSAGE =
   "Review-round budget exhausted without an APPROVED verdict.";
@@ -124,8 +121,11 @@ export type Verdict =
   | {
       // Impl-attempt budget exhausted. `cause` names the real blocker so the
       // human-handoff message is accurate (#17):
-      //   gate-red — ran out of attempts with the last gate failing, or never
-      //     reaching a green gate; `failureTrace` carries the gate trace.
+      //   gate-red — ran out of attempts with the last gate failing;
+      //     `failureTrace` carries the gate trace.
+      //   no-signal-exhausted — the last attempt did not produce an actionable
+      //     promise signal; `failureTrace` carries its parser correction and
+      //     any gate trace preserved from an earlier attempt.
       //   reviewer-blocked — ran out of attempts while the gate was GREEN and
       //     the reviewer's last verdict was CHANGES-REQUESTED;
       //     `latestReviewerProse` carries that report (so the human is pointed
@@ -150,6 +150,7 @@ export type Verdict =
       readonly type: "NEEDS-HUMAN";
       readonly cause:
         | "gate-red"
+        | "no-signal-exhausted"
         | "reviewer-blocked"
         | "uncommittable-worktree"
         | "off-branch-head"
@@ -555,17 +556,29 @@ function onImplementerResult(
       },
     };
   }
-  // NO-SIGNAL — either re-prompt for next attempt or exhaust the budget. The
-  // implementer didn't reach a green gate this attempt, so exhaustion here is
-  // the gate-red flavour.
+  // NO-SIGNAL — either re-prompt for next attempt or exhaust the budget. This
+  // route has its own cause because the deciding attempt did not run a gate,
+  // while its trace preserves any gate failure from an earlier attempt (#116).
+  const correction = signal.missingTag
+    ? "The final implementer attempt emitted no <promise> token."
+    : `The final implementer signal failed validation:\n${signal.reprompt}`;
+  const failureTrace = state.lastFailureTrace
+    ? `Last gate failure:\n${state.lastFailureTrace}\n\n${correction}`
+    : correction;
   return advanceAttempt(
     state,
     {
       failureTrace: state.lastFailureTrace,
-      extraReprompt: signal.reprompt ?? null,
+      extraReprompt: signal.reprompt,
       latestReviewerProse: state.latestReviewerProse,
     },
-    gateRedExhaustion(state),
+    {
+      type: "NEEDS-HUMAN",
+      cause: "no-signal-exhausted",
+      failureTrace,
+      latestReviewerProse: null,
+      strandedHead: null,
+    },
   );
 }
 
@@ -680,13 +693,13 @@ function onReviewerHarnessFailed(state: LoopState, detail: string): StepResult {
   );
 }
 
-// The gate-red flavour of impl-budget exhaustion: surface the last recorded
-// gate trace, or the sentinel when no gate ever ran (NO-SIGNAL only).
+// Gate-red is only reachable after a real gate execution, so its trace is
+// always present. NO-SIGNAL exhaustion has a distinct cause above (#116).
 function gateRedExhaustion(state: LoopState): Verdict {
   return {
     type: "NEEDS-HUMAN",
     cause: "gate-red",
-    failureTrace: state.lastFailureTrace || NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE,
+    failureTrace: state.lastFailureTrace,
     latestReviewerProse: null,
     strandedHead: null,
   };

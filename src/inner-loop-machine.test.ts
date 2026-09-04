@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   HARD_ERROR_MAX_RETRIES,
-  NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE,
   type LoopAction,
   type LoopEvent,
   type LoopState,
@@ -50,7 +49,8 @@ function drive(
 const complete: ParseSignal = { kind: "COMPLETE" };
 const noSignal = (reprompt?: string): ParseSignal => ({
   kind: "NO-SIGNAL",
-  ...(reprompt !== undefined ? { reprompt } : {}),
+  reprompt: reprompt ?? "Still working. Emit <promise>...",
+  missingTag: reprompt === undefined,
 });
 const needsInfo = (questions: string): ParseSignal => ({
   kind: "NEEDS-INFO",
@@ -615,7 +615,7 @@ describe("inner-loop-machine — NO-SIGNAL re-prompting", () => {
     expect(third.extraReprompt).toBeNull();
   });
 
-  it("NO-SIGNAL without reprompt still advances the attempt", () => {
+  it("carries the missing-tag correction into the next attempt", () => {
     const { actions } = drive(defaultOpts, [
       impl(noSignal()),
       impl(complete),
@@ -623,7 +623,7 @@ describe("inner-loop-machine — NO-SIGNAL re-prompting", () => {
     ]);
     const second = actions[1] as Extract<LoopAction, { kind: "run-implementer" }>;
     expect(second.attempt).toBe(2);
-    expect(second.extraReprompt).toBeNull();
+    expect(second.extraReprompt).toBe("Still working. Emit <promise>...");
   });
 });
 
@@ -646,21 +646,21 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
     });
   });
 
-  it("repeated NO-SIGNAL over maxAttempts → NEEDS-HUMAN with sentinel (no trace recorded)", () => {
+  it("repeated NO-SIGNAL exhausts with its own honest cause", () => {
     const { verdict } = drive({ maxAttempts: 2, maxReviewRounds: 3 }, [
       impl(noSignal()),
       impl(noSignal()),
     ]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN",
-      cause: "gate-red",
-      failureTrace: NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE,
+      cause: "no-signal-exhausted",
+      failureTrace: "The final implementer attempt emitted no <promise> token.",
       latestReviewerProse: null,
       strandedHead: null,
     });
   });
 
-  it("NO-SIGNAL after a recorded gate-1 trace surfaces that trace, not the sentinel", () => {
+  it("NO-SIGNAL exhaustion preserves an older gate trace", () => {
     const { verdict } = drive({ maxAttempts: 3, maxReviewRounds: 3 }, [
       impl(complete),
       judged(gate1Red("recorded trace"), approved("discarded")),
@@ -669,8 +669,25 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
     ]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN",
-      cause: "gate-red",
-      failureTrace: "recorded trace",
+      cause: "no-signal-exhausted",
+      failureTrace:
+        "Last gate failure:\nrecorded trace\n\n" +
+        "The final implementer attempt emitted no <promise> token.",
+      latestReviewerProse: null,
+      strandedHead: null,
+    });
+  });
+
+  it("NO-SIGNAL guard exhaustion carries the parser correction", () => {
+    const correction =
+      "You declared <promise>COMPLETE</promise> but made no commits this run.";
+    const { verdict } = drive({ maxAttempts: 1, maxReviewRounds: 3 }, [
+      impl(noSignal(correction)),
+    ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "no-signal-exhausted",
+      failureTrace: `The final implementer signal failed validation:\n${correction}`,
       latestReviewerProse: null,
       strandedHead: null,
     });
@@ -1035,7 +1052,11 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     // capture reads refs/heads/<branch>), which sends it to fix the wrong thing.
     const r = step(
       initialState(defaultOpts),
-      impl({ kind: "NO-SIGNAL", reprompt: "Still working." }, [], detached()),
+      impl(
+        { kind: "NO-SIGNAL", reprompt: "Still working.", missingTag: true },
+        [],
+        detached(),
+      ),
     );
     if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
     expect(r.action.extraReprompt).toContain("not on the issue branch");
@@ -1075,7 +1096,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     // the first of a new run, so it is re-prompted rather than terminated.
     let state = initialState({ maxAttempts: 8, maxReviewRounds: 3 });
     state = step(state, impl(complete, [], detached())).state;
-    state = step(state, impl({ kind: "NO-SIGNAL" })).state;
+    state = step(state, impl(noSignal())).state;
     const relapse = step(state, impl(complete, [], detached()));
     expect(relapse.action.kind).toBe("run-implementer");
     // And the one after THAT does terminate.
@@ -1091,7 +1112,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     ]);
     if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
     expect(verdict.cause).toBe("off-branch-head");
-    expect(verdict.failureTrace).not.toContain(NEEDS_HUMAN_BUDGET_EXHAUSTED_MESSAGE);
+    expect(verdict.failureTrace).toContain("HEAD");
   });
 
   it("is checked BEFORE the dirty tree — the branch is the deeper problem", () => {

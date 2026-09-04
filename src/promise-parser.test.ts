@@ -195,7 +195,7 @@ describe("parsePromise", () => {
   // with NO tag at all qualifies for the same-conversation follow-up. A tag
   // that failed its guard means the agent remembered the contract and got the
   // substance wrong — the guard's own re-prompt is the correction, so those
-  // must not carry the flag.
+  // carry `false` rather than licensing the nudge.
   describe("missingTag", () => {
     it("is set when no promise tag appears at all", () => {
       const r = parsePromise("finished everything, see the commits", withCommits);
@@ -203,16 +203,16 @@ describe("parsePromise", () => {
       if (r.kind === "NO-SIGNAL") expect(r.missingTag).toBe(true);
     });
 
-    it("is absent for a zero-commit COMPLETE", () => {
+    it("is false for a zero-commit COMPLETE", () => {
       const r = parsePromise("<promise>COMPLETE</promise>", noCommits);
       expect(r.kind).toBe("NO-SIGNAL");
-      if (r.kind === "NO-SIGNAL") expect(r.missingTag).toBeUndefined();
+      if (r.kind === "NO-SIGNAL") expect(r.missingTag).toBe(false);
     });
 
-    it("is absent for NEEDS-INFO without a questions block", () => {
+    it("is false for NEEDS-INFO without a questions block", () => {
       const r = parsePromise("<promise>NEEDS-INFO</promise>", withCommits);
       expect(r.kind).toBe("NO-SIGNAL");
-      if (r.kind === "NO-SIGNAL") expect(r.missingTag).toBeUndefined();
+      if (r.kind === "NO-SIGNAL") expect(r.missingTag).toBe(false);
     });
 
     it("a nudge reply concatenated after the original output parses last-wins", () => {

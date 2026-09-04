@@ -1,5 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 
+const innerLoopMocks = vi.hoisted(() => ({
+  buildPrompt: vi.fn(async () => "implementer prompt"),
+  dirtyWorktreePaths: vi.fn(async () => [] as string[]),
+  headMismatch: vi.fn(async () => null),
+}));
+
+vi.mock("./prompt.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./prompt.js")>()),
+  buildPrompt: innerLoopMocks.buildPrompt,
+}));
+
+vi.mock("./git-ops.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./git-ops.js")>()),
+  dirtyWorktreePaths: innerLoopMocks.dirtyWorktreePaths,
+  headMismatch: innerLoopMocks.headMismatch,
+}));
+
 import type { Sandbox } from "./agent-sandbox.js";
 import {
   enforceReviewerSnapshot,
@@ -8,6 +25,7 @@ import {
   reviewerPassRouting,
   reviewerSnapshotChanged,
   runGateAndReviewer,
+  runImplementer,
   runInnerLoop,
   runSandboxAndPublish,
   type ReviewerSnapshot,
@@ -22,6 +40,98 @@ const deferred = <T,>() => {
   });
   return { promise, resolve };
 };
+
+describe("silent implementer attempt policy (#116)", () => {
+  const sandboxResult = (stdout: string, silent: boolean, commits: string[] = []) => ({
+    stdout,
+    silent,
+    commits: commits.map((sha) => ({ sha })),
+    maxGapMs: 1,
+    toolCalls: 0,
+  });
+
+  const runPath = (
+    first: ReturnType<typeof sandboxResult>,
+    nudge: ReturnType<typeof sandboxResult>,
+  ) => {
+    const writes: string[] = [];
+    const lines: string[] = [];
+    const sandbox = {
+      worktreePath: "/unused",
+      run: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(nudge),
+      syncBranchToCache: vi.fn(),
+    } as unknown as Sandbox;
+    const ctx = {
+      issue: { id: "116", title: "silent", branch: "sandbar/issue-116-silent" },
+      sandbox,
+      opts: {
+        attemptLogger: {
+          writeAttempt: vi.fn(async (_id, _attempt, text) => writes.push(text)),
+        },
+        onOrchestratorLog: (line: string) => lines.push(line),
+      },
+      config: {
+        implementerAgent: "codex",
+        implementerModelId: "model",
+        maxImplAttempts: 8,
+      },
+      anchorOpts: {},
+      base: { ref: "origin/main" },
+      gateStack: {},
+      worktreePath: "/unused",
+      accumulated: [],
+      priorReviewRounds: [],
+      sandboxStatuses: [],
+    } as unknown as Parameters<typeof runImplementer>[1];
+    const pending = runImplementer(
+      {
+        kind: "run-implementer",
+        attempt: 1,
+        failureTrace: null,
+        extraReprompt: null,
+        latestReviewerProse: null,
+      },
+      ctx,
+    );
+    return { pending, sandbox, writes, lines };
+  };
+
+  it("rejects the implementer path after two silent zero-commit runs", async () => {
+    const { pending, sandbox } = runPath(
+      sandboxResult("", true),
+      sandboxResult("", true),
+    );
+
+    await expect(pending).rejects.toThrow("no speech or commits");
+    expect(sandbox.run).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps silent runs with commit evidence and logs the combined attempt", async () => {
+    const { pending, writes, lines } = runPath(
+      sandboxResult("", true, ["a"]),
+      sandboxResult("", true, ["b"]),
+    );
+
+    await expect(pending).resolves.toMatchObject({ kind: "implementer-result" });
+    expect(writes).toEqual(["", "\n"]);
+    expect(lines.at(-1)).toContain("commits=2");
+  });
+
+  it("keeps a blip that speaks on the nudge and records exactly what was parsed", async () => {
+    const spoken = "<promise>NEEDS-INFO</promise>\n<questions>Which API?</questions>";
+    const { pending, writes, lines } = runPath(
+      sandboxResult("", true),
+      sandboxResult(spoken, false),
+    );
+
+    await expect(pending).resolves.toMatchObject({
+      kind: "implementer-result",
+      signal: { kind: "NEEDS-INFO" },
+    });
+    expect(writes).toEqual(["", `\n${spoken}`]);
+    expect(lines.at(-1)).toContain("commits=0");
+  });
+});
 
 describe("runGateAndReviewer (#123)", () => {
   const action = {

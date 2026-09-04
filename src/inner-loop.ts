@@ -57,7 +57,7 @@ import {
   buildAgentProvider,
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
-import { AgentQuotaError, agentPartialOutput, agentPartialUsage, podman } from "./agent-sandbox.js";
+import { AgentError, AgentQuotaError, agentPartialOutput, agentPartialUsage, podman, withPartialOutput } from "./agent-sandbox.js";
 import { formatRateLimitFields, type RateLimitMeasurement } from "./agent-run-end.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 import { formatUsageFields, sumAgentUsage } from "./agent-usage.js";
@@ -128,6 +128,27 @@ import {
 } from "./prompt.js";
 
 export const FAILURE_TAIL_LINES = 200;
+
+function requireImplementerAttemptEvidence(
+  run: Pick<agentSandbox.SandboxRunResult, "silent" | "commits">,
+  nudge: Pick<agentSandbox.SandboxRunResult, "silent" | "commits">,
+): void {
+  if (run.silent && nudge.silent && run.commits.length + nudge.commits.length === 0) {
+    throw new AgentError(
+      "Implementer produced no speech or commits across the initial run and promise nudge.",
+    );
+  }
+}
+
+function combinePromiseNudge(
+  run: Pick<agentSandbox.SandboxRunResult, "stdout" | "commits">,
+  nudge: Pick<agentSandbox.SandboxRunResult, "stdout" | "commits">,
+): { readonly stdout: string; readonly commitCount: number } {
+  return {
+    stdout: `${run.stdout}\n${nudge.stdout}`,
+    commitCount: run.commits.length + nudge.commits.length,
+  };
+}
 
 // The runner-owned projection from pass outcomes to prompt history (#88).
 // A harness failure produced no review, so the whole round contributes no
@@ -253,6 +274,7 @@ export type Terminal =
       readonly type: "NEEDS-HUMAN";
       readonly cause:
         | "gate-red"
+        | "no-signal-exhausted"
         | "reviewer-blocked"
         | "uncommittable-worktree"
         | "off-branch-head"
@@ -907,7 +929,7 @@ export async function runGateAndReviewer(
   return { kind: "gate-and-reviewer-result", gate, reviewer: reviewer.event };
 }
 
-async function runImplementer(
+export async function runImplementer(
   action: Extract<LoopAction, { kind: "run-implementer" }>,
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
@@ -965,6 +987,7 @@ async function runImplementer(
   });
   let attemptUsage = run.usage;
   let attemptToolCalls = run.toolCalls;
+  let attemptCommits = run.commits.length;
 
   // The promise nudge: output with NO tag at all gets one same-conversation
   // follow-up before it is allowed to cost an attempt. The observed failure is
@@ -1004,15 +1027,16 @@ async function runImplementer(
     accumulated.push(...nudge.commits);
     attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
     attemptToolCalls += nudge.toolCalls;
-    const combined = `${run.stdout}\n${nudge.stdout}`;
-    signal = parsePromise(combined, {
+    const combined = combinePromiseNudge(run, nudge);
+    attemptCommits = combined.commitCount;
+    signal = parsePromise(combined.stdout, {
       commitsAccumulated: accumulated.length,
     });
     if (opts.attemptLogger) {
       await opts.attemptLogger.writeAttempt(
         issue.id,
         action.attempt,
-        `${run.stdout}\n\n--- promise nudge ---\n\n${nudge.stdout}`,
+        combined.stdout,
       );
     }
     if (opts.onOrchestratorLog) {
@@ -1020,6 +1044,21 @@ async function runImplementer(
         `issue=${issue.id} attempt=${action.attempt} promise-nudge signal=${signal.kind} ` +
           `${durationField(nudgeTimer())}` +
           ` maxGapMs=${nudge.maxGapMs}`,
+      );
+    }
+    // The nudge was the same-session re-ask. If both calls were silent and
+    // this attempt committed nothing, there is no evidence that the provider
+    // ran successfully. Commits are independent evidence and deliberately keep
+    // Codex's tool-call-only turn on the ordinary NO-SIGNAL path (#116).
+    try {
+      requireImplementerAttemptEvidence(run, nudge);
+    } catch (err) {
+      throw withPartialOutput(
+        err,
+        combined.stdout,
+        attemptUsage,
+        attemptToolCalls,
+        nudge.rateLimit ?? run.rateLimit,
       );
     }
   }
@@ -1045,7 +1084,7 @@ async function runImplementer(
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(
       `issue=${issue.id} attempt=${action.attempt} implementer ` +
-        `signal=${signal.kind} commits=${run.commits.length} ` +
+        `signal=${signal.kind} commits=${attemptCommits} ` +
         `provider=${config.implementerAgent} model=${config.implementerModelId} ` +
         `${durationField(implementerMs)}` +
         formatUsageFields(attemptUsage, attemptToolCalls) +
