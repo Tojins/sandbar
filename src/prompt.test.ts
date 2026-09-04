@@ -191,7 +191,10 @@ describe("renderReviewerSlot", () => {
       commits: "a1 first",
       diff: "diff",
     });
-    expect(slot).toContain("correctness-only instruction");
+    expect(slot).toContain(
+      "### Project prompt extension\n\ncorrectness-only instruction\n\n## Review process",
+    );
+    expect(slot.match(/correctness-only instruction/g)).toHaveLength(1);
   });
   // Correctness AND spec, and nothing the quality pass owns (#121): an unmet
   // requirement is the one finding that can invalidate a whole branch, and it

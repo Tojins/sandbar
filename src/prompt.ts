@@ -690,7 +690,7 @@ function renderReviewerTemplate(
         rounds: inputs.priorRounds.map(renderPriorReviewRound).join("\n\n"),
       });
 
-  const rendered = render(template, {
+  return render(template, {
     branch: issue.branch,
     baseRef: base.ref,
     sourceBranch,
@@ -710,9 +710,6 @@ function renderReviewerTemplate(
     projectStandards: promptExtensionSlot(promptExtension),
     conventionsRef: conventionsRef(claudeMdPath, contextMdPath),
   });
-  return template === REVIEWER_TPL
-    ? `${rendered}${promptExtensionSlot(promptExtension)}`
-    : rendered;
 }
 
 function reviewFindings(pass: ParsedVerdict): string {
