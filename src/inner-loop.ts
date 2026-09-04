@@ -58,6 +58,7 @@ import { join } from "node:path";
 import {
   type AgentProviderName,
   buildAgentProvider,
+  effortField,
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
 import { AgentError, AgentQuotaError, agentPartialOutput, agentPartialUsage, podman, withPartialOutput } from "./agent-sandbox.js";
@@ -189,17 +190,34 @@ export function priorReviewRound(
 export function reviewerPassRouting(
   config: Pick<
     InnerLoopConfig,
-    "reviewerAgent" | "reviewerModelId" | "reviewerQualityAgent" | "reviewerQualityModelId"
+    | "reviewerAgent"
+    | "reviewerModelId"
+    | "reviewerEffort"
+    | "reviewerQualityAgent"
+    | "reviewerQualityModelId"
+    | "reviewerQualityEffort"
   >,
 ): Readonly<
-  Record<ReviewerPass, { readonly agent: AgentProviderName; readonly modelId: string }>
+  Record<
+    ReviewerPass,
+    {
+      readonly agent: AgentProviderName;
+      readonly modelId: string;
+      readonly effort: string | undefined;
+    }
+  >
 > {
   return {
     quality: {
       agent: config.reviewerQualityAgent,
       modelId: config.reviewerQualityModelId,
+      effort: config.reviewerQualityEffort,
     },
-    correctness: { agent: config.reviewerAgent, modelId: config.reviewerModelId },
+    correctness: {
+      agent: config.reviewerAgent,
+      modelId: config.reviewerModelId,
+      effort: config.reviewerEffort,
+    },
   };
 }
 
@@ -394,6 +412,12 @@ export type InnerLoopConfig = {
   // The quality pass's CLI (#121). Resolution defaults it to `reviewerAgent`,
   // so this is a distinct provider only where the host asked for one.
   readonly reviewerQualityAgent: AgentProviderName;
+  // Reasoning effort per call (#130), the third per-call knob beside the model
+  // id and the CLI. Absent is a value — the CLI's default — and stays absent
+  // on the log line.
+  readonly implementerEffort?: string | undefined;
+  readonly reviewerEffort?: string | undefined;
+  readonly reviewerQualityEffort?: string | undefined;
   readonly maxImplAttempts: number;
   readonly maxReviewRounds: number;
   readonly sandboxImage: string;
@@ -1000,7 +1024,9 @@ export async function runImplementer(
   try {
     run = await runWithQuotaState(opts.quotaState, config.implementerAgent, () => runAgent({
       name: `implementer-${issue.id}-attempt-${action.attempt}`,
-      agent: buildAgentProvider(config.implementerAgent, config.implementerModelId),
+      agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
+        effort: config.implementerEffort,
+      }),
       prompt,
       completionSignal: PROMISE_COMPLETION_SIGNALS,
     }));
@@ -1008,7 +1034,8 @@ export async function runImplementer(
     if (err instanceof AgentQuotaError && opts.onOrchestratorLog) {
       await opts.onOrchestratorLog(
         `issue=${issue.id} attempt=${action.attempt} implementer ` +
-          `provider=${config.implementerAgent} model=${config.implementerModelId} ` +
+          `provider=${config.implementerAgent} model=${config.implementerModelId}` +
+          `${effortField(config.implementerEffort)} ` +
           `${durationField(implementerTimer())}` +
           formatRateLimitFields(err.measurement),
       );
@@ -1058,6 +1085,7 @@ export async function runImplementer(
       name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
       agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
         continueSession: true,
+        effort: config.implementerEffort,
       }),
       prompt: PROMISE_NUDGE_TPL,
       // Any of the three tags ends the wait, not just COMPLETE.
@@ -1126,7 +1154,8 @@ export async function runImplementer(
     await opts.onOrchestratorLog(
       `issue=${issue.id} attempt=${action.attempt} implementer ` +
         `signal=${signal.kind} commits=${attemptCommits} ` +
-        `provider=${config.implementerAgent} model=${config.implementerModelId} ` +
+        `provider=${config.implementerAgent} model=${config.implementerModelId}` +
+        `${effortField(config.implementerEffort)} ` +
         `${durationField(implementerMs)}` +
         formatUsageFields(attemptUsage, attemptToolCalls, attemptPeakContext) +
         formatRateLimitFields(run.rateLimit) +
@@ -1298,7 +1327,7 @@ export async function runReviewer(
   // parallel: three arguments in the same order at two call sites is how a
   // pass ends up reviewed by the other one's prompt.
   const runPass = async (pass: ReviewerPass): Promise<ReviewerOutcome> => {
-    const { agent, modelId } = routing[pass];
+    const { agent, modelId, effort } = routing[pass];
     const prompt = reviewerPrompts[pass];
     return runReviewerInvocations(
       async (invocation) => {
@@ -1328,7 +1357,7 @@ export async function runReviewer(
           await opts.onOrchestratorLog(
             `issue=${issue.id} attempt=${action.attempt} reviewer ` +
               `round=${action.reviewRound} pass=${pass} invocation=${invocation} ` +
-              `provider=${agent} model=${modelId} ` +
+              `provider=${agent} model=${modelId}${effortField(effort)} ` +
               `${durationField(passTimer())}` +
               formatUsageFields(usage, toolCalls, peakContext) +
               formatRateLimitFields(rateLimit) +
@@ -1342,7 +1371,7 @@ export async function runReviewer(
               (invocation > 1 ? `-invocation-${invocation}` : ""),
             // Cold, always (#121): neither pass resumes the other's session, so
             // each is self-sufficient and the two may run on different vendors.
-            agent: buildAgentProvider(agent, modelId),
+            agent: buildAgentProvider(agent, modelId, { effort }),
             prompt,
             // A reviewer owns no completion signal. Process exit is the honest
             // end of its single artefact; inherited role contracts are banned.

@@ -4,7 +4,13 @@
 //
 // The config splits the MODEL per call (`implementerModelId`, correctness
 // `reviewerModelId`, `reviewerQualityModelId`, and `mergerModelId`); this is
-// the vendor knob beside it. The two reviewer calls used to share one provider
+// the vendor knob beside it, and `*Effort` (#130) is the third per-call knob:
+// the reasoning effort, passed through `buildAgentProvider` for the provider
+// to spell in its own argv. It exists because the sandbox reads no host
+// config — codex's effort otherwise comes from the server's per-model default,
+// `low` for gpt-5.6-sol — and it is a per-call string rather than a driver
+// default so that what a run ran at is in the config and on the log line,
+// never in a dotfile no log records. The two reviewer calls used to share one provider
 // because a resumed session cannot cross vendor CLIs; #121 deleted the resume,
 // so `reviewerQualityAgent` is a fourth routing knob — defaulting to
 // `reviewerAgent`, so a config that says nothing still has one reviewer vendor.
@@ -420,7 +426,19 @@ export type BuildAgentProviderOptions = {
   // one — `claude --continue`, `codex exec resume --last`. Sound only inside an
   // agent sandbox; see the option's own note on each provider.
   readonly continueSession?: boolean;
+  // Reasoning effort for this call (#130), spelled by the provider — `claude
+  // --effort`, `codex -c model_reasoning_effort=` — and omitted when unset so
+  // the CLI's own default applies. Not validated here: the level set is
+  // vendor- and model-dependent, and the CLI refuses a wrong one loudly.
+  readonly effort?: string | undefined;
 };
+
+// The `effort=<level>` field an invocation's log line carries beside `model=`
+// (#130). Absent stays absent (#82's rule): a line without it ran at the CLI's
+// default, and a stats reader must not be handed a placeholder to average.
+export function effortField(effort: string | undefined): string {
+  return effort === undefined ? "" : ` effort=${effort}`;
+}
 
 // The role's CLI and the role's model, together. Every provider takes the model
 // id it is given: the id fields keep their existing meaning and are simply
@@ -432,10 +450,11 @@ export function buildAgentProvider(
   options: BuildAgentProviderOptions = {},
 ): AgentProvider {
   const continueSession = options.continueSession === true;
+  const effort = options.effort;
   switch (name) {
     case "claude":
-      return claudeCode(modelId, { continueSession });
+      return claudeCode(modelId, { continueSession, effort });
     case "codex":
-      return codex(modelId, { continueSession });
+      return codex(modelId, { continueSession, effort });
   }
 }

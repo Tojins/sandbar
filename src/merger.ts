@@ -2127,6 +2127,9 @@ export type RealAdapterDeps = {
   // credential routing cannot disagree with the command being invoked.
   readonly mergerAgent: AgentProviderName;
   readonly mergerModelId: string;
+  // Reasoning effort for the resolve invocation (#130); absent is the CLI's
+  // default.
+  readonly mergerEffort?: string | undefined;
   // The image the resolve agent runs in — augmented with exactly the providers
   // routed by this run, unlike any gate-stack image (#24 D7, #75).
   readonly sandboxImage: string;
@@ -2390,7 +2393,9 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   const cwd = deps.cwd;
   // No resume semantics: every resolve attempt is a fresh container whose
   // prompt carries the complete state.
-  const agentProvider = buildAgentProvider(deps.mergerAgent, deps.mergerModelId);
+  const agentProvider = buildAgentProvider(deps.mergerAgent, deps.mergerModelId, {
+    effort: deps.mergerEffort,
+  });
   // The merger worktree is always detached, so every push it makes is HEAD to a
   // named ref on origin, and every one of them classifies its failure the same
   // way. ONE copy of that classification (#60): the race regex is the whole

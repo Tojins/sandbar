@@ -710,6 +710,29 @@ describe("codex command line", () => {
     expect(cmd.command).not.toContain("--dangerously-bypass-approvals-and-sandbox");
   });
 
+  // The effort is codex's global `-c key=value` override (#130): the CLI
+  // reads `model_reasoning_effort` from config.toml and sandbar seeds no
+  // config file, so this is the only per-invocation spelling. Escaped as ONE
+  // word so the shell hands codex `key=value` intact, and placed ahead of
+  // `--model` so the argv still ends on the model the resume test pins.
+  it("renders effort as a -c model_reasoning_effort override; absent by default", () => {
+    const cmd = codex("gpt-5.6-sol", { effort: "high" }).buildPrintCommand({
+      prompt: "p",
+      dangerouslySkipPermissions: true,
+    }).command;
+    expect(cmd).toBe(
+      `${CODEX_AUTH_SEED} codex exec --json --dangerously-bypass-approvals-and-sandbox ` +
+        "-c 'model_reasoning_effort=high' --model 'gpt-5.6-sol'",
+    );
+    expect(
+      codex("m", { effort: "x'y" }).buildPrintCommand({ prompt: "p" }).command,
+    ).toContain("-c 'model_reasoning_effort=x'\\''y'");
+    for (const opts of [undefined, { effort: undefined }, { continueSession: true }]) {
+      expect(codex("m", opts).buildPrintCommand({ prompt: "p" }).command).not.toContain(
+        "model_reasoning_effort",
+      );
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -859,6 +882,23 @@ describe("claudeCode", () => {
     expect(claudeCode("m").buildPrintCommand({ prompt: "p" }).command).not.toContain(
       "--continue",
     );
+  });
+
+  // `--effort <level>` (#130), verbatim and only when asked for: absent must
+  // leave the CLI on its own default rather than pin one here.
+  it("renders effort as --effort; absent by default", () => {
+    const cmd = claudeCode("opus", { effort: "max" }).buildPrintCommand({
+      prompt: "p",
+      dangerouslySkipPermissions: true,
+    }).command;
+    expect(cmd).toBe(
+      "claude --print --verbose --dangerously-skip-permissions --output-format stream-json --model 'opus' --effort max -p -",
+    );
+    for (const opts of [undefined, { effort: undefined }, { continueSession: true }]) {
+      expect(claudeCode("m", opts).buildPrintCommand({ prompt: "p" }).command).not.toContain(
+        "--effort",
+      );
+    }
   });
 });
 

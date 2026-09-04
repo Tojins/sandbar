@@ -12,6 +12,7 @@ import {
   assertRoleModelIdNamed,
   billingPrecedenceWarnings,
   buildAgentProvider,
+  effortField,
   parseAgentProviderName,
   requiredAgentProviders,
 } from "./agent-providers.js";
@@ -342,6 +343,33 @@ describe("buildAgentProvider", () => {
     ).toContain("resume --last");
   });
 
+  // The third per-call knob (#130): one option, each provider's own spelling.
+  it("routes effort to each provider's own flag", () => {
+    expect(
+      buildAgentProvider("claude", "opus", { effort: "high" }).buildPrintCommand({
+        prompt: "p",
+      }).command,
+    ).toContain("--effort high");
+    expect(
+      buildAgentProvider("codex", "gpt-5.6-sol", { effort: "high" }).buildPrintCommand({
+        prompt: "p",
+      }).command,
+    ).toContain("-c 'model_reasoning_effort=high'");
+  });
+
+  // Unset is the CLI's own default, not a default of sandbar's: a config that
+  // says nothing must produce the argv it produced before the knob existed.
+  it("emits no effort flag when effort is omitted or undefined", () => {
+    for (const name of AGENT_PROVIDER_NAMES) {
+      for (const options of [{}, { effort: undefined }]) {
+        const cmd = buildAgentProvider(name, "m", options).buildPrintCommand({
+          prompt: "p",
+        }).command;
+        expect(cmd).not.toContain("effort");
+      }
+    }
+  });
+
   // Omitted must mean a fresh conversation, not an implicitly resumed one:
   // the nudge is the only caller that wants resume, and every attempt after
   // the first would otherwise inherit the previous attempt's context.
@@ -362,5 +390,13 @@ describe("buildAgentProvider", () => {
           .stdin,
       ).toBe("the prompt");
     }
+  });
+});
+
+describe("effortField (#130)", () => {
+  it("renders the log field only when an effort was set", () => {
+    expect(effortField("high")).toBe(" effort=high");
+    // Absent stays absent (#82): no placeholder a stats reader would average.
+    expect(effortField(undefined)).toBe("");
   });
 });

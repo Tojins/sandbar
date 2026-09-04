@@ -318,6 +318,46 @@ describe("resolveConfig", () => {
     expect(r.reviewerAgent).toBe("claude");
   });
 
+  // The third per-call knob (#130). Passed through per role and otherwise
+  // ABSENT — not defaulted, not normalised — because unset means "the CLI's
+  // own default", and a driver default here would be the dotfile-shaped
+  // invisible setting the field exists to replace.
+  it("passes each role's reasoning effort through, and leaves unset ones absent (#130)", () => {
+    const r = resolveConfig({
+      ...minimal,
+      implementerEffort: "high",
+      reviewerQualityEffort: "high",
+      mergerEffort: "xhigh",
+    });
+    expect(r.implementerEffort).toBe("high");
+    expect(r.reviewerQualityEffort).toBe("high");
+    expect(r.mergerEffort).toBe("xhigh");
+    expect(r.reviewerEffort).toBeUndefined();
+    const none = resolveConfig(minimal);
+    expect(none.implementerEffort).toBeUndefined();
+    expect(none.reviewerEffort).toBeUndefined();
+    expect(none.reviewerQualityEffort).toBeUndefined();
+    expect(none.mergerEffort).toBeUndefined();
+  });
+
+  // Shape only: the level set is the CLI's to refuse. An empty string would
+  // render as `--effort ` and a number as a flag the CLI never sees the type
+  // of, so both are refused ahead of the lock, naming the field.
+  it("refuses an empty or non-string reasoning effort (#130)", () => {
+    expect(() => resolveConfig({ ...minimal, implementerEffort: "" })).toThrow(
+      /config\.implementerEffort/,
+    );
+    expect(() =>
+      resolveConfig({ ...minimal, reviewerEffort: 3 as never }),
+    ).toThrow(/config\.reviewerEffort/);
+    expect(() =>
+      resolveConfig({ ...minimal, reviewerQualityEffort: null as never }),
+    ).toThrow(/config\.reviewerQualityEffort/);
+    expect(() => resolveConfig({ ...minimal, mergerEffort: "" })).toThrow(
+      /config\.mergerEffort/,
+    );
+  });
+
   // The config is a PROGRAM (#66): the value can be computed, and a field
   // written for a newer sandbar is otherwise spread through unread. `opencode`
   // is the specific name worth pinning — #72 records it as the next provider,

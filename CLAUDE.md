@@ -343,7 +343,12 @@ and used to announce themselves in four different ways, the halt in none at all.
   every provider takes whatever id its role's field holds — which is why a role
   routed off claude must NAME its model (`assertRoleModelIdNamed`), the default
   being a claude alias and a half-moved config otherwise asking codex for
-  "opus" on every attempt. `AgentProvider`
+  "opus" on every attempt. A third per-call knob, `*Effort` (#130), is the
+  reasoning effort, a plain string each provider spells in its own argv
+  (`--effort`, `-c model_reasoning_effort=`) and the log line carries as
+  `effort=`; unset emits no flag and stays absent, because the sandbox reads no
+  host `config.toml` and a driver default would be the same invisible setting
+  in a different place. `AgentProvider`
   (`src/agent-sandbox.ts`) was already the whole seam — argv plus a line parser,
   with the explicitly named completion watch, the idle timeout and commit collection reading
   parsed events and git — so `codex` is a second implementation of it and

@@ -504,9 +504,24 @@ describe("reviewerPassRouting (#121)", () => {
 
   it("puts each pass on its own CLI and model", () => {
     expect(reviewerPassRouting(config)).toEqual({
-      quality: { agent: "codex", modelId: "gpt-5.6-sol" },
-      correctness: { agent: "claude", modelId: "opus" },
+      quality: { agent: "codex", modelId: "gpt-5.6-sol", effort: undefined },
+      correctness: { agent: "claude", modelId: "opus", effort: undefined },
     });
+  });
+
+  // The effort rides the same table (#130), so it cannot be handed to the
+  // other pass any more than the model can — and unset stays undefined rather
+  // than inheriting the sibling's or a default.
+  it("puts each pass's effort beside its own model, absent when unset", () => {
+    expect(
+      reviewerPassRouting({ ...config, reviewerQualityEffort: "high" }),
+    ).toEqual({
+      quality: { agent: "codex", modelId: "gpt-5.6-sol", effort: "high" },
+      correctness: { agent: "claude", modelId: "opus", effort: undefined },
+    });
+    expect(
+      reviewerPassRouting({ ...config, reviewerEffort: "max" }).correctness.effort,
+    ).toBe("max");
   });
 
   // The default routing, where resolution has already copied `reviewerAgent`

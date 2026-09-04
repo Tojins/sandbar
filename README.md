@@ -253,6 +253,10 @@ sits in).
 | `reviewerAgent` | `claude` |
 | `reviewerQualityAgent` | the value of `reviewerAgent` |
 | `mergerAgent` | `claude` |
+| `implementerEffort` | *(unset)* — the CLI's own default; see below |
+| `reviewerEffort` | *(unset)* |
+| `reviewerQualityEffort` | *(unset)* |
+| `mergerEffort` | *(unset)* |
 | `coauthorTrailer` | `Co-authored-by: <botName> <<botEmail>>` |
 | `claudeMdPath` | `CLAUDE.md` |
 | `contextMdPath` | `CONTEXT.md` (referenced only if the file exists) |
@@ -284,6 +288,19 @@ is the supported way to move most reviewer rounds onto a second account's quota
 while the deciding verdict stays where it was. Each pass's model id is checked
 against **its own** provider: a pass routed away from `claude` must set its own
 id explicitly, since the default is a claude alias.
+
+Each call also has a reasoning-effort knob beside its model id and CLI:
+`implementerEffort`, `reviewerEffort`, `reviewerQualityEffort`, `mergerEffort`.
+The value is a plain string the provider spells for its own CLI — `claude
+--effort <level>`, `codex -c model_reasoning_effort=<level>` — and sandbar does
+not check it against a level table, since the set is vendor- and
+model-dependent and the CLI refuses a wrong one on the first invocation. Unset
+means no flag at all, so the CLI's default applies: for codex that is the
+per-model default the server ships (`low` for `gpt-5.6-sol` at the time of
+writing), for claude `high`. The sandbox reads no host `config.toml`, so a
+codex effort set on the operator's machine does not reach it; this field is
+the way to set one, and the level a call ran at appears as `effort=` on its
+line in `orchestrator.log`.
 
 `reviewerFollowupModelId` was the pre-0.28 name of `reviewerQualityModelId`, and
 that pass was the second one rather than the first. A config still carrying the

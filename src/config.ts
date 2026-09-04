@@ -584,6 +584,22 @@ export type RunConfig = {
   readonly reviewerQualityAgent?: AgentProviderName;
   readonly mergerAgent?: AgentProviderName;
 
+  // Reasoning effort per call, beside the model id and the CLI (#130). A plain
+  // string the provider spells for its own CLI — `claude --effort <level>`,
+  // `codex -c model_reasoning_effort=<level>` — and never checked against a
+  // level table here: the set is vendor- and model-dependent (`xhigh` on some
+  // codex models, `ultra` on one), and a wrong value is refused by the CLI on
+  // the first invocation, loudly. UNSET MEANS ABSENT: no flag is emitted and
+  // the CLI's own default applies — for codex the per-model default the
+  // server ships (`low` for gpt-5.6-sol when this was written), for claude
+  // `high`. There is no driver default, so a config that says nothing sees no
+  // change, and the level a run used is on its log line (`effort=`) or
+  // provably nowhere.
+  readonly implementerEffort?: string;
+  readonly reviewerEffort?: string;
+  readonly reviewerQualityEffort?: string;
+  readonly mergerEffort?: string;
+
   // Trailer appended to merge commits. Default: a `Co-authored-by:` line built
   // from botName/botEmail.
   readonly coauthorTrailer?: string;
@@ -788,9 +804,20 @@ export type ResolvedConfig = Required<
     | "gateStack"
     | "mergeMode"
     | "requiresSandbar"
+    | "implementerEffort"
+    | "reviewerEffort"
+    | "reviewerQualityEffort"
+    | "mergerEffort"
   >
 > & {
   readonly requiresSandbar?: string;
+  // Optional after resolution too: absent is a value here (the CLI's own
+  // default), and #82's rule is that an absent measurement never becomes a
+  // placeholder.
+  readonly implementerEffort?: string;
+  readonly reviewerEffort?: string;
+  readonly reviewerQualityEffort?: string;
+  readonly mergerEffort?: string;
   readonly labels: LabelConfig;
   readonly gateStack: ResolvedGateStack;
   readonly mergeMode: ResolvedMergeMode;
@@ -1825,6 +1852,22 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     modelField: "reviewerQualityModelId",
   });
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
+  // Shape only (#130): a non-empty string or absent. The level itself is the
+  // CLI's to refuse — see the field's note.
+  for (const field of [
+    "implementerEffort",
+    "reviewerEffort",
+    "reviewerQualityEffort",
+    "mergerEffort",
+  ] as const) {
+    const value = config[field];
+    if (value !== undefined && (typeof value !== "string" || value.length === 0)) {
+      throw new SandbarError(
+        `config.${field} must be a non-empty string naming a reasoning effort level, ` +
+          `or be left unset for the CLI's default; got ${JSON.stringify(value)}.`,
+      );
+    }
+  }
   return {
     ...config,
     ghOwner,

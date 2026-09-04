@@ -249,7 +249,11 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
 }
 
 export type ClaudeCodeOptions = {
-  effort?: "low" | "medium" | "high" | "max";
+  // `--effort <level>`, verbatim (#130). A string rather than a union because
+  // the level set moves with the CLI (2.1.x added `xhigh`) and a wrong one is
+  // refused by claude on the first invocation, which is loud enough. Absent
+  // means no flag and the CLI's own default.
+  effort?: string | undefined;
   env?: Record<string, string>;
   // `--continue`: resume the most recent conversation for the sandbox cwd
   // instead of starting a fresh one. Sound inside an agent sandbox precisely
@@ -964,6 +968,14 @@ export const CODEX_AUTH_SEED = [
 
 export type CodexOptions = {
   env?: Record<string, string>;
+  // `-c model_reasoning_effort=<level>` (#130) — codex's global config
+  // override, which is the only per-invocation spelling it has: the CLI reads
+  // effort from `config.toml`, and sandbar seeds no config file into the
+  // sandbox (only the credential, #73), so with this absent codex falls back
+  // to the per-model default the server ships in its models cache. The level
+  // set is model-dependent (`ultra` exists on gpt-5.6-sol alone), so it is a
+  // string the CLI validates, not a union.
+  effort?: string | undefined;
   // `codex exec resume --last` — the `--continue` analogue, sound for exactly
   // the reason ClaudeCodeOptions.continueSession gives: the container's $HOME
   // (and so `$CODEX_HOME`) persists for the life of the issue and only
@@ -984,6 +996,9 @@ export const codex = (model: string, options?: CodexOptions): AgentProvider => (
       ? " --dangerously-bypass-approvals-and-sandbox"
       : "";
     const resume = options?.continueSession ? " resume --last" : "";
+    const effortFlag = options?.effort
+      ? ` -c ${shellEscape(`model_reasoning_effort=${options.effort}`)}`
+      : "";
     // NO positional argument, and that is the difference between the two
     // subcommands rather than a style choice. `codex exec [PROMPT]` documents
     // `-` as "read stdin", but `codex exec resume [SESSION_ID] [PROMPT]` binds
@@ -1000,7 +1015,7 @@ export const codex = (model: string, options?: CodexOptions): AgentProvider => (
     // could answer more accurately. With the key undeclared the guard is one
     // `test` that falls through to the same `codex exec` as before.
     return {
-      command: `${CODEX_AUTH_SEED} codex exec${resume} --json${bypass} --model ${shellEscape(model)}`,
+      command: `${CODEX_AUTH_SEED} codex exec${resume} --json${bypass}${effortFlag} --model ${shellEscape(model)}`,
       stdin: prompt,
     };
   },
