@@ -839,6 +839,18 @@ describe("resolvePlan git membership safety (#93)", () => {
       issueFacts: facts({ 47: { state: "CLOSED", labels: ["ready-for-agent"] } }),
       excluded: new Set<number>(),
     },
+    {
+      name: "waiting",
+      candidate: issue(47, "", { title: "Root", labels: ["waiting"] }),
+      issueFacts: facts({ 47: { labels: ["ready-for-agent"] } }),
+      excluded: new Set<number>(),
+    },
+    {
+      name: "blocked",
+      candidate: issue(47, "## Blocked by\n- #99\n", { title: "Root" }),
+      issueFacts: facts({ 47: { labels: ["ready-for-agent"] } }),
+      excluded: new Set<number>(),
+    },
   ])("does not defer landing for a $name member the planner will not work", ({
     candidate,
     issueFacts,

@@ -371,12 +371,14 @@ export function resolvePlan(
   };
 
   const heldForReview: number[] = [];
-  const eligible = candidates.filter((c) => {
+  const eligibleApartFromSchedulerExclusion = (
+    c: IssueSummary,
+    recordReviewHold: boolean,
+  ): boolean => {
     // Drop issues this run already merged, and issues the live tracker now
     // reports CLOSED — both guard against the stale-listing re-pick described in
     // the module header (#16). Unknown state (absent from the map) is treated
     // as OPEN so a single state-fetch miss never silently drops a ready issue.
-    if (excluded.has(c.number)) return false;
     const authoritative = issueFacts.get(c.number);
     if (authoritative?.state === "CLOSED") return false;
     // When the batch knows this issue it owns both directions of queue
@@ -422,25 +424,27 @@ export function resolvePlan(
     // branch — the one outcome the lane exists to prevent. Asking the same
     // question the answer is built from costs nothing and cannot drift.
     if (lanes.get(c.number)?.lane === "review" && chunkTargetOf(c.number) === null) {
-      heldForReview.push(c.number);
+      if (recordReviewHold) heldForReview.push(c.number);
       return false;
     }
     return true;
-  });
+  };
+  const eligible = candidates.filter((c) =>
+    !excluded.has(c.number) && eligibleApartFromSchedulerExclusion(c, true)
+  );
   const sorted = [...eligible].sort((a, b) => a.number - b.number);
-  // Human-requested rework is tracker state, not scheduler eligibility. In
-  // particular, a continuous-pool run excludes every issue it already started
-  // from admission, but a human may re-apply `ready-for-agent` after that
-  // issue landed on its chunk. Preserve that authoritative signal so a `land`
-  // request cannot close the chunk over requested work (#87, #94).
+  // Human-requested rework follows the planner's eligibility rules except for
+  // scheduler exclusion. An ongoing issue is excluded from re-admission but
+  // must still defer its chunk's landing; a CLOSED, waiting or blocked member
+  // cannot be worked and therefore must not hold the request open forever.
   const trackerReadyNumbers = new Set(
     candidates
-      .map((c) => c.number)
-      .filter((n) => {
-        const authoritative = issueFacts.get(n);
-        return authoritative?.state !== "CLOSED" &&
+      .filter((c) => {
+        const authoritative = issueFacts.get(c.number);
+        return eligibleApartFromSchedulerExclusion(c, false) &&
           authoritative?.labels.includes(READY_LABEL);
-      }),
+      })
+      .map((c) => c.number),
   );
   const plan = sorted.slice(0, k).map((c) => ({
     id: String(c.number),
