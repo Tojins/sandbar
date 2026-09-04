@@ -952,7 +952,7 @@ export async function runGateAndReviewer(
   if (gate.ok && reviewer.historyEntry !== null) {
     ctx.priorReviewRounds.push(reviewer.historyEntry);
   }
-  if (typeof reviewer.specGap === "string") {
+  if (reviewer.specGap) {
     ctx.specGaps.push({ round: action.reviewRound, text: reviewer.specGap });
   }
   if (

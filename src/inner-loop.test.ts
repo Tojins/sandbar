@@ -227,6 +227,15 @@ describe("runGateAndReviewer (#123)", () => {
     ]);
   });
 
+  it("does not accumulate an empty correctness gap", async () => {
+    const ctx = context();
+    await runGateAndReviewer(action, ctx, {
+      gate: vi.fn(async () => ({ ok: true, failureTrace: "" })),
+      reviewer: vi.fn(async () => ({ ...approved, specGap: "" })),
+    });
+    expect(ctx.specGaps).toEqual([]);
+  });
+
   it("awaits a reviewer beside a red gate, discards its history, and logs the discard", async () => {
     const reviewer = deferred<typeof approved>();
     const lines: string[] = [];

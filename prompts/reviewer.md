@@ -46,9 +46,8 @@ that passes.
 
 When, and only when, a fundamental implementation error was caused by a question
 the issue and project conventions do not answer, declare the missing decision in
-one optional free-text block:
-
-`<spec-gap>the unanswered question, followed by the answer this review applied</spec-gap>`
+one optional free-text `<spec-gap>` block containing the unanswered question,
+followed by the answer this review applied.
 
 This is rare: issue vagueness alone is not a gap, nor is a finding whose answer
 the issue or conventions already determine. The answer is yours to decide; the
