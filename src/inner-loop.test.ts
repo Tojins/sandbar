@@ -369,7 +369,7 @@ describe("silent implementer attempt policy (#116)", () => {
       branchSha: "base456",
       branchIsAncestor: true,
     };
-    const { pending, lines } = runPath(
+    const { pending, sandbox, lines } = runPath(
       // Off-branch commits are absent from the sandbox's issue-ref capture.
       // The repair range is what makes this COMPLETE valid without a retry.
       sandboxResult("<promise>COMPLETE</promise>", false),
@@ -388,10 +388,44 @@ describe("silent implementer attempt policy (#116)", () => {
       "/unused",
       mismatch,
     );
+    expect(sandbox.syncBranchToCache).toHaveBeenCalledTimes(2);
+    expect(innerLoopMocks.fastForwardOffBranchHead.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(sandbox.syncBranchToCache).mock.invocationCallOrder[1]!,
+    );
     expect(lines).toContain(
       "issue=116 attempt=1 off-branch-fast-forward from=base456 to=head123",
     );
     expect(lines.at(-1)).toContain("commits=1");
+  });
+
+  it("fails the attempt when publishing the repaired tip fails", async () => {
+    const mismatch: HeadMismatch = {
+      branch: "sandbar/issue-116-silent",
+      headRef: null,
+      headSha: "head123",
+      branchSha: "base456",
+      branchIsAncestor: true,
+    };
+    const { pending, sandbox, lines } = runPath(
+      sandboxResult("<promise>COMPLETE</promise>", false),
+      sandboxResult("unused", false),
+      undefined,
+      mismatch,
+    );
+    const publishError = new Error("cache unavailable");
+    vi.mocked(sandbox.syncBranchToCache)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(publishError);
+
+    await expect(pending).rejects.toBe(publishError);
+    expect(innerLoopMocks.fastForwardOffBranchHead).toHaveBeenCalledWith(
+      "/unused",
+      mismatch,
+    );
+    expect(sandbox.syncBranchToCache).toHaveBeenCalledTimes(2);
+    expect(lines).not.toContain(
+      "issue=116 attempt=1 off-branch-fast-forward from=base456 to=head123",
+    );
   });
 
   it("reparses a nudge-only COMPLETE after the repair supplies commit evidence", async () => {

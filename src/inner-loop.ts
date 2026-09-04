@@ -33,10 +33,11 @@
 // The other deliberate runner-side exception is #127's off-branch repair.
 // `headMismatch` has already made the mechanical ancestry decision; when the
 // issue branch is an ancestor of HEAD, runImplementer advances the ref and
-// reattaches HEAD before it builds the event. The state machine receives the
-// repaired state plus note metadata, while unsafe mismatches still take its
-// existing correction route. This is the same class of glue-owned Git write as
-// the successful implementer publish below, not a branching policy decision.
+// reattaches HEAD, then must publish that new tip to the cache before it builds
+// the event. The state machine receives the repaired state plus note metadata,
+// while unsafe mismatches still take its existing correction route. This is the
+// same class of glue-owned Git write as the successful implementer publish
+// below, not a branching policy decision.
 //
 // What a FAILED reviewer run means is reviewer-run.ts's policy (#41); this
 // file only adapts `sandbox.run`'s throw into the shape that policy
@@ -1284,6 +1285,11 @@ export async function runImplementer(
   >["fastForwarded"] = null;
   if (mismatch?.branchIsAncestor) {
     const repair = await fastForwardOffBranchHead(ctx.worktreePath, mismatch);
+    // The agent run published before this host-side ref move. Publish the
+    // repaired tip now as a required part of the repair: gate/reviewer inspect
+    // this clone, while the merger reads the cache, so proceeding after a
+    // failed sync could approve one tree and land another (#98/#127).
+    await sandbox.syncBranchToCache();
     fastForwarded = { fromSha: repair.fromSha, toSha: repair.toSha };
     accumulated.push(...repair.commits);
     attemptCommits += repair.commits.length;
