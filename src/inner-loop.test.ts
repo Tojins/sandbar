@@ -269,7 +269,7 @@ describe("silent implementer attempt policy (#116)", () => {
       config: {
         implementerAgent: "codex",
         implementerModelId: "model",
-        maxImplAttempts: 8,
+        maxQualityRounds: 4,
         promptExtensions,
       },
       anchorOpts: {},
@@ -774,7 +774,7 @@ describe("reviewRoundLine (#88, #121)", () => {
         "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
         "pass=quality harness-failed invocations=2 " +
         "quality=HARNESS-FAILED correctness=SKIPPED mode=list durationMs=123 " +
-        "(round not consumed)",
+        "(budgets not consumed)",
     },
     {
       name: "harness-failed round",
@@ -786,7 +786,7 @@ describe("reviewRoundLine (#88, #121)", () => {
         "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
         "pass=correctness harness-failed invocations=2 " +
         "quality=APPROVED correctness=HARNESS-FAILED mode=verify durationMs=123 " +
-        "(round not consumed)",
+        "(budgets not consumed)",
     },
   ])("formats a $name with its reviewed HEAD", ({ failed, quality, correctness, qualityMode, expected }) => {
     expect(

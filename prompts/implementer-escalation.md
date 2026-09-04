@@ -1,6 +1,6 @@
 ## Escalation
 
-This is attempt {{attempt}}/{{maxAttempts}}. If you cannot make further
+This is attempt {{attempt}}. If you cannot make further
 progress:
 
 - Emit `<promise>NEEDS-INFO</promise>` with a `<questions>` block listing the

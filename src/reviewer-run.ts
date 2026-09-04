@@ -17,8 +17,9 @@
 // A review ROUND first applies that policy to QUALITY — tests and standards.
 // A quality rejection finishes the round immediately; an approval asks the
 // runner for CORRECTNESS, and the second outcome completes the AND. This
-// module returns the one event the state machine understands, keeping pass
-// policy out of the I/O runner.
+// module returns the one event the state machine understands, including which
+// pass rejected so the machine can charge that pass's budget (#129), while
+// keeping pass order and aggregation out of the I/O runner.
 //
 // Quality protects the EXPENSIVE correctness pass (#121). Gate-1 runs beside
 // the review round (#123), whose result is discarded if the gate is red. #19
@@ -135,7 +136,11 @@ export function decideReviewRound(
   if (quality.kind === "harness-failed") {
     return {
       kind: "finished",
-      event: { kind: "reviewer-harness-failed", detail: `quality: ${quality.detail}` },
+      event: {
+        kind: "reviewer-harness-failed",
+        pass: "quality",
+        detail: `quality: ${quality.detail}`,
+      },
       quality: "HARNESS-FAILED",
       correctness: "SKIPPED",
     };
@@ -147,6 +152,7 @@ export function decideReviewRound(
       event: {
         kind: "reviewer-result",
         verdict: "CHANGES-REQUESTED",
+        rejectingPass: "quality",
         prose: qualityVerdict.prose,
       },
       quality: "CHANGES-REQUESTED",
@@ -157,19 +163,32 @@ export function decideReviewRound(
   if (correctness.kind === "harness-failed") {
     return {
       kind: "finished",
-      event: { kind: "reviewer-harness-failed", detail: `correctness: ${correctness.detail}` },
+      event: {
+        kind: "reviewer-harness-failed",
+        pass: "correctness",
+        detail: `correctness: ${correctness.detail}`,
+      },
       quality: "APPROVED",
       correctness: "HARNESS-FAILED",
     };
   }
   const correctnessVerdict = correctness.verdict;
+  const event: Extract<ReviewerResult, { kind: "reviewer-result" }> =
+    correctnessVerdict.verdict === "CHANGES-REQUESTED"
+      ? {
+          kind: "reviewer-result",
+          verdict: "CHANGES-REQUESTED",
+          rejectingPass: "correctness",
+          prose: correctnessVerdict.prose,
+        }
+      : {
+          kind: "reviewer-result",
+          verdict: "APPROVED",
+          prose: correctnessVerdict.prose,
+        };
   return {
     kind: "finished",
-    event: {
-      kind: "reviewer-result",
-      verdict: correctnessVerdict.verdict,
-      prose: correctnessVerdict.prose,
-    },
+    event,
     quality: "APPROVED",
     correctness: correctnessVerdict.verdict,
   };

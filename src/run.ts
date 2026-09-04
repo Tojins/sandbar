@@ -17,25 +17,16 @@
 //                              rebuilt after either, so a member re-queued now
 //                              is carried into this recompute and one closed now
 //                              stops blocking its dependents.
-//   Execution pool:           Each issue runs in its own sandbox up to
-//                              config.maxImplAttempts times; on gate-1 green
-//                              the (strictly-advisory) reviewer runs in the
-//                              same sandbox and consumes one of
-//                              config.maxReviewRounds. APPROVED → DONE;
+//   Execution pool:           Each issue runs in its own sandbox under two
+//                              independent consecutive-failure budgets (#129).
+//                              maxQualityRounds covers quality rejection, red
+//                              gates and pre-gate re-prompts, and resets when
+//                              quality approves. maxReviewRounds covers only
+//                              correctness rejection. APPROVED → DONE;
 //                              CHANGES-REQUESTED loops back to a new impl
-//                              attempt carrying the reviewer's prose. The two
-//                              budgets are not independent (#71): a round is
-//                              only ever spent alongside an attempt, so the
-//                              budget an issue gets is at most
-//                              min(maxImplAttempts, maxReviewRounds), and it is
-//                              exactly that on the green-gate loop where every
-//                              attempt ends in a verdict. An attempt that ends
-//                              without one — a red gate, a re-prompt, or a
-//                              reviewer harness failure (#41) — spends no
-//                              round. The defaults are equal, 8 and 8, so both
-//                              exhaust on the same attempt and the issue parks
-//                              as NEEDS-HUMAN-REVIEW — the terminal that hands
-//                              the human the latest review.
+//                              attempt carrying the rejecting pass's prose.
+//                              Reviewer harness failure spends neither budget
+//                              and keeps its two-consecutive stop rule (#41).
 //   Serialized landing:       Procedural merger lands queued DONE branches into
 //                              the source branch and pushes once — directly,
 //                              or (config.mergeMode = verified, #22) only after
@@ -55,7 +46,7 @@
 //                              finalises the agent terminals BEFORE the merge
 //                              (they don't depend on it, and a merge phase that
 //                              throws something other than MergerError must not
-//                              discard a full attempt budget's worth of
+//                              discard a full inner loop's worth of
 //                              questions, traces and reviewer prose), 4b
 //                              finalises the merger's own outcomes after.
 //
@@ -991,7 +982,7 @@ export async function run(
     uiCheckEffort: config.uiCheckEffort,
     reviewerEffort: config.reviewerEffort,
     reviewerQualityEffort: config.reviewerQualityEffort,
-    maxImplAttempts: config.maxImplAttempts,
+    maxQualityRounds: config.maxQualityRounds,
     maxReviewRounds: config.maxReviewRounds,
     sandboxImage: config.sandboxImage,
     agentImages,
@@ -1500,8 +1491,9 @@ export async function run(
       // running them after it meant any non-MergerError throw from the
       // landing (a ContainerBringupError from the merger stack is the live
       // example) escaped to the top-level handler before a single one was
-      // written, so an issue kept `ready-for-agent` and burned another full
-      // attempt budget next run. The mirror-image risk is strictly smaller: a
+      // written, so an issue kept `ready-for-agent` and burned through its
+      // inner-loop budgets again next run. The mirror-image risk is strictly
+      // smaller: a
       // required side-effect failing here stops the run before the landing,
       // and a DONE branch that misses its landing keeps its commits and its
       // label, so preflight classifies it `resumable` (#13). The prose an

@@ -103,11 +103,11 @@ export default {
   // that key from the process environment; undeclared host variables stay out.
   // env: {},
 
-  // A review round consumes an implementation attempt, so reviewed work gets
-  // at most min(maxImplAttempts, maxReviewRounds). Equal defaults let both
-  // budgets exhaust together; red gates consume attempts but not rounds.
-  // maxImplAttempts: 8,
-  // maxReviewRounds: 8,
+  // Independent consecutive-failure budgets. Quality counts rejections, red
+  // gates, NO-SIGNAL, dirty trees and off-branch HEADs, then resets when the
+  // quality pass approves. Review counts correctness rejections only.
+  // maxQualityRounds: 4,
+  // maxReviewRounds: 4,
   // Stop admitting new issues after this many have started in one process.
   // maxTotalIssues: 50,
   // DONE work releases one of these concurrent inner-loop slots immediately.

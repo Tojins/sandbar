@@ -81,32 +81,31 @@ without consuming one of `maxParallelIssues` slots.
    stack. After setup, a default-on cold UI classifier runs once against the
    issue anchor before attempt 1 (#126); hosts with no UI disable it with
    `uiPrototypeCheck: false`. A missing prototype terminates immediately, while
-   CLEAR enters the ralph-style loop of up to `maxImplAttempts` (default 8) in the
-   **same** sandbox so commits accumulate on the issue branch. All transitions
+   CLEAR enters the ralph-style loop in the **same** sandbox so commits
+   accumulate on the issue branch. All transitions
    live in the pure state machine; `inner-loop.ts` is I/O glue. The classifier
-   spends neither an attempt nor a review round and is rerun after a fresh
-   HARD-ERROR cycle. Two budgets,
-   impl attempts and `maxReviewRounds` (default 8, equal to `maxImplAttempts`),
-   and they are NOT independent (#71): a round is never spent without an
-   attempt, so the budget is at most the min of the two — exactly that on the
-   green-gate loop where every attempt ends in a verdict, and more attempts
-   than rounds wherever one ends without one (a red gate, a re-prompt, a
-   reviewer harness failure). Equal is what makes both
-   exhaust on the same attempt and park the issue with the terminal carrying
-   the latest review; `DEFAULT_MAX_REVIEW_ROUNDS`'s comment in `src/config.ts`
-   owns the number and the two dogfooding exhaustions behind it (#8, #66). The
-   UI classifier and reviewer are strictly advisory and read-only; each
+   spends neither inner-loop budget and is rerun after a fresh
+   HARD-ERROR cycle. Two independent consecutive-failure budgets bound the
+   loop (#129): `maxQualityRounds` (default 4) counts quality rejection, red
+   gates and pre-gate re-prompts, then resets on quality approval;
+   `maxReviewRounds` (default 4) counts correctness rejections only. Reviewer
+   harness failures spend neither and retain #41's two-consecutive stop rule.
+   There is no total implementer-attempt ceiling. `src/config.ts` owns both
+   defaults. The UI classifier and reviewer are strictly advisory and
+   read-only; each
    invocation snapshots branch tip, status and HEAD, and any mutation parks the
    issue with the managed clone preserved. After a clean, on-branch
    COMPLETE, gate-1 and the reviewer run concurrently against the same commit
    (#123). A reviewer write always parks; otherwise a red gate discards the
-   review result without spending a round or updating reviewer prose, while any
-   declared specification gap remains run evidence (#108). One review round
+   review result, spends one quality failure, and does not update reviewer
+   prose, while any declared specification gap remains run evidence (#108).
+   One review round
    is up to two sequential COLD calls (#19, #121): tests/standards first on
    `reviewerQualityAgent`/`reviewerQualityModelId`, then — only after its
    approval — correctness/spec on `reviewerAgent`/`reviewerModelId`; the state
-   machine receives their single aggregate result and spends one round. The
-   quality pass protects the EXPENSIVE correctness pass and the deciding verdict
+   machine receives their single aggregate result, including which pass
+   rejected, and spends only that pass's count. The quality pass protects the
+   EXPENSIVE correctness pass and the deciding verdict
    stays on the strongest model: measured, correctness approved 11 of 11 judged rounds after
    #107 for two thirds of the reviewer minutes, and the second pass discarded 7
    of those approvals inside the same round. `src/reviewer-run.ts` owns the

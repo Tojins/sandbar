@@ -8,7 +8,7 @@
 //     merge phase. A merge phase that dies (podman failing to bring up the
 //     merger stack is the live example) then costs only the merge, instead of
 //     discarding NEEDS-INFO questions, NEEDS-HUMAN traces and reviewer prose
-//     that a full attempt budget already paid for.
+//     that the inner loop already paid for.
 //   - mergeFinalizeInputs — one input per merged/skipped issue. Only exists
 //     once the merger has produced a summary, so it runs after.
 //
@@ -103,15 +103,22 @@ export function terminalFinalizeInputs(
           cause: t.cause,
           failureTrace: t.failureTrace,
           latestReviewerProse: t.latestReviewerProse,
+          qualityBudgetExhausted: t.qualityBudgetExhausted,
           strandedHead: t.strandedHead,
           specGaps: t.specGaps,
         });
         break;
       case "NEEDS-HUMAN-REVIEW":
-        if (t.cause === undefined) {
+        if (
+          t.cause === "quality-budget-exhausted" ||
+          t.cause === "correctness-budget-exhausted"
+        ) {
           inputs.push({
             kind: "review-budget-exhausted",
             issue: o.issue,
+            budget:
+              t.cause === "quality-budget-exhausted" ? "quality" : "correctness",
+            roundsUsed: t.roundsUsed,
             latestReviewerProse: t.latestReviewerProse,
             specGaps: t.specGaps,
           });

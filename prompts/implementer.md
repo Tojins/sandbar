@@ -1,4 +1,4 @@
-# Attempt {{attempt}} of {{maxAttempts}}
+# Attempt {{attempt}}
 
 Fix issue #{{issueId}}: {{issueTitle}}
 Branch: {{branch}}

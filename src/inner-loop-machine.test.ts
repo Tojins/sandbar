@@ -16,7 +16,7 @@ import {
   step,
 } from "./inner-loop-machine.js";
 import {
-  DEFAULT_MAX_IMPL_ATTEMPTS,
+  DEFAULT_MAX_QUALITY_ROUNDS,
   DEFAULT_MAX_REVIEW_ROUNDS,
 } from "./config.js";
 import type { HeadMismatch } from "./git-ops.js";
@@ -27,7 +27,7 @@ import type { ParseSignal } from "./promise-parser.js";
 // verdict and the full action trace so each case can assert both.
 function drive(
   opts: {
-    maxAttempts: number;
+    maxQualityRounds: number;
     maxReviewRounds: number;
     uiPrototypeCheck: boolean;
   },
@@ -78,11 +78,22 @@ const approved = (prose: string = "lgtm"): ReviewerResult => ({
 const changes = (prose: string): ReviewerResult => ({
   kind: "reviewer-result",
   verdict: "CHANGES-REQUESTED",
+  rejectingPass: "correctness",
+  prose,
+});
+const qualityChanges = (prose: string): ReviewerResult => ({
+  kind: "reviewer-result",
+  verdict: "CHANGES-REQUESTED",
+  rejectingPass: "quality",
   prose,
 });
 // The reviewer was invoked its full budget and reviewed nothing (#41).
-const harnessFailed = (detail = "invocation 1/2: …"): ReviewerResult => ({
+const harnessFailed = (
+  detail = "invocation 1/2: …",
+  pass: "quality" | "correctness" = "quality",
+): ReviewerResult => ({
   kind: "reviewer-harness-failed",
+  pass,
   detail,
 });
 const judged = (gate: Gate1Result, reviewer: ReviewerResult): LoopEvent => ({
@@ -116,7 +127,7 @@ const detached = (
 });
 
 const defaultOpts = {
-  maxAttempts: 8,
+  maxQualityRounds: 4,
   maxReviewRounds: 3,
   uiPrototypeCheck: false,
 } as const;
@@ -137,7 +148,8 @@ describe("inner-loop-machine — one pre-attempt UI check (#126)", () => {
     state = result.state;
     expect(result.action).toMatchObject({ kind: "run-implementer", attempt: 1 });
     expect(state.attempt).toBe(1);
-    expect(state.reviewRoundsUsed).toBe(0);
+    expect(state.qualityFailures).toBe(0);
+    expect(state.correctnessFailures).toBe(0);
   });
 
   it("terminates before attempt 1 when a prototype is needed", () => {
@@ -155,7 +167,8 @@ describe("inner-loop-machine — one pre-attempt UI check (#126)", () => {
       },
     });
     expect(result.state.attempt).toBe(1);
-    expect(result.state.reviewRoundsUsed).toBe(0);
+    expect(result.state.qualityFailures).toBe(0);
+    expect(result.state.correctnessFailures).toBe(0);
   });
 
   it("starts directly with the implementer when disabled", () => {
@@ -241,7 +254,7 @@ describe("inner-loop-machine — happy paths", () => {
   // failing gate rather than the missing prototype.
   it("escalating on the LAST attempt terminates NEEDS-UI-PROTOTYPE, not budget-exhausted NEEDS-HUMAN", () => {
     const { verdict } = drive(
-      { maxAttempts: 2, maxReviewRounds: 3 },
+      { maxQualityRounds: 2, maxReviewRounds: 3 },
       [
         impl(complete),
         judged(gate1Red("trace A"), approved("discarded")),
@@ -311,7 +324,7 @@ describe("inner-loop-machine — gate-1 red re-prompts", () => {
       judged(gate1Ok, approved()),
     ]);
     expect(asImpl(actions[4]!).latestReviewerProse).toBe("earlier gated review");
-    expect(asReviewer(actions[5]!).reviewRound).toBe(2);
+    expect(asReviewer(actions[5]!).reviewRound).toBe(3);
   });
 });
 
@@ -342,7 +355,7 @@ describe("inner-loop-machine — reviewer CHANGES-REQUESTED loop", () => {
     expect(verdict).toEqual({ type: "DONE" });
   });
 
-  it("reviewer round counter increments per reviewer pass, not per impl attempt", () => {
+  it("reviewer round records retain the attempt number when intervening work is unreviewed", () => {
     const { actions } = drive(defaultOpts, [
       impl(complete),
       judged(gate1Ok, changes("round 1 notes")),
@@ -366,8 +379,8 @@ describe("inner-loop-machine — reviewer CHANGES-REQUESTED loop", () => {
       { kind: "run-gate-and-reviewer" }
     >;
     expect(firstReviewer.reviewRound).toBe(1);
-    expect(secondReviewer.reviewRound).toBe(2);
-    expect(thirdReviewer.reviewRound).toBe(3);
+    expect(secondReviewer.reviewRound).toBe(3);
+    expect(thirdReviewer.reviewRound).toBe(4);
   });
 
   it("reviewer prose persists across an intervening gate-1 red", () => {
@@ -429,15 +442,13 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
       latestReviewerProse: "changed HEAD",
     });
   });
-  it("spends NO review round: the next reviewer pass is still round 1", () => {
-    const { actions } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, harnessFailed()),
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-    expect(asReviewer(actions[1]!).reviewRound).toBe(1);
-    expect(asReviewer(actions[3]!).reviewRound).toBe(1);
+  it("spends neither failure budget", () => {
+    let state = initialState(defaultOpts);
+    state = step(state, impl(complete)).state;
+    const result = step(state, judged(gate1Ok, harnessFailed()));
+    expect(result.state.qualityFailures).toBe(0);
+    expect(result.state.correctnessFailures).toBe(0);
+    expect(result.action).toMatchObject({ kind: "run-implementer", attempt: 2 });
   });
 
   it("cannot exhaust the review budget — a maxReviewRounds of 1 survives it", () => {
@@ -446,7 +457,7 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
     // NEEDS-HUMAN-REVIEW quoting its own error message as the reviewer's
     // report. The real CHANGES-REQUESTED that follows is what spends the round.
     const { verdict } = drive(
-      { maxAttempts: 8, maxReviewRounds: 1 },
+      { maxQualityRounds: 8, maxReviewRounds: 1 },
       [
         impl(complete),
         judged(gate1Ok, harnessFailed()),
@@ -456,6 +467,8 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
     );
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN-REVIEW",
+      cause: "correctness-budget-exhausted",
+      roundsUsed: 1,
       latestReviewerProse: "a real report",
     });
   });
@@ -527,6 +540,7 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
       cause: "reviewer-harness-failed",
       failureTrace: "second",
       latestReviewerProse: null,
+      qualityBudgetExhausted: null,
       strandedHead: null,
     });
   });
@@ -562,38 +576,21 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
     expect(asImpl(actions[6]!).attempt).toBe(4);
   });
 
-  it("on the LAST impl attempt it exhausts as reviewer-harness-failed, not reviewer-blocked", () => {
-    const { verdict } = drive({ ...defaultOpts, maxAttempts: 1 }, [
-      impl(complete),
-      judged(gate1Ok, harnessFailed("nothing came back, twice")),
-    ]);
-    // #17's rule, one terminal along: reviewer-blocked would tell the human to
-    // go and resolve a CHANGES-REQUESTED that nobody wrote.
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "reviewer-harness-failed",
-      failureTrace: "nothing came back, twice",
-      latestReviewerProse: null,
-      strandedHead: null,
-    });
-  });
-
-  it("exhausting on a harness failure keeps an earlier round's prose for the handoff", () => {
-    const { verdict } = drive({
-      ...defaultOpts,
-      maxAttempts: 2,
-      maxReviewRounds: 5,
-    }, [
+  it("a second harness failure keeps an earlier round's prose for the handoff", () => {
+    const { verdict } = drive(defaultOpts, [
       impl(complete),
       judged(gate1Ok, changes("round 1 prose")),
       impl(complete),
-      judged(gate1Ok, harnessFailed("nothing came back")),
+      judged(gate1Ok, harnessFailed("first")),
+      impl(complete),
+      judged(gate1Ok, harnessFailed("second")),
     ]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN",
       cause: "reviewer-harness-failed",
-      failureTrace: "nothing came back",
+      failureTrace: "second",
       latestReviewerProse: "round 1 prose",
+      qualityBudgetExhausted: null,
       strandedHead: null,
     });
   });
@@ -611,24 +608,22 @@ describe("inner-loop-machine — review-round budget exhaustion", () => {
     ]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN-REVIEW",
+      cause: "correctness-budget-exhausted",
+      roundsUsed: 3,
       latestReviewerProse: "r3",
     });
   });
 
-  it("at the defaults a green-gate loop reaches round 8 before parking (#71)", () => {
-    // #66 was parked on round six of a five-round budget with a five-line
-    // header edit left to make: five attempts, gate-1 green on every one, five
-    // distinct findings, each fixed. The defaults are now equal — every round
-    // below the last dispatches another attempt, and the round the constants
-    // name is reached rather than being one past the budget.
+  it("at the defaults reaches four correctness rejections before parking", () => {
     const script: LoopEvent[] = [];
     for (let round = 1; round <= DEFAULT_MAX_REVIEW_ROUNDS; round++) {
       script.push(impl(complete), judged(gate1Ok, changes(`r${round}`)));
     }
     const { actions, verdict } = drive(
       {
-        maxAttempts: DEFAULT_MAX_IMPL_ATTEMPTS,
+        maxQualityRounds: DEFAULT_MAX_QUALITY_ROUNDS,
         maxReviewRounds: DEFAULT_MAX_REVIEW_ROUNDS,
+        uiPrototypeCheck: false,
       },
       script,
     );
@@ -638,11 +633,10 @@ describe("inner-loop-machine — review-round budget exhaustion", () => {
     expect(rounds).toEqual(
       Array.from({ length: DEFAULT_MAX_REVIEW_ROUNDS }, (_, i) => i + 1),
     );
-    // Both budgets exhaust on the same attempt because they are equal, and
-    // onReviewerResult tests the review budget first — so the human is handed
-    // the terminal that carries the latest review, not reviewer-blocked.
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN-REVIEW",
+      cause: "correctness-budget-exhausted",
+      roundsUsed: DEFAULT_MAX_REVIEW_ROUNDS,
       latestReviewerProse: `r${DEFAULT_MAX_REVIEW_ROUNDS}`,
     });
   });
@@ -654,7 +648,24 @@ describe("inner-loop-machine — review-round budget exhaustion", () => {
     ]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN-REVIEW",
+      cause: "correctness-budget-exhausted",
+      roundsUsed: 1,
       latestReviewerProse: "only round",
+    });
+  });
+
+  it("quality rejections exhaust only the quality budget", () => {
+    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
+      impl(complete),
+      judged(gate1Ok, qualityChanges("q1")),
+      impl(complete),
+      judged(gate1Ok, qualityChanges("q2")),
+    ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN-REVIEW",
+      cause: "quality-budget-exhausted",
+      roundsUsed: 2,
+      latestReviewerProse: "q2",
     });
   });
 });
@@ -696,9 +707,9 @@ describe("inner-loop-machine — NO-SIGNAL re-prompting", () => {
   });
 });
 
-describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
-  it("repeated gate-1 red over maxAttempts → NEEDS-HUMAN with last trace", () => {
-    const { verdict } = drive({ ...defaultOpts, maxAttempts: 3 }, [
+describe("inner-loop-machine — quality budget exhaustion", () => {
+  it("repeated gate-1 red exhausts quality with the last trace", () => {
+    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 3 }, [
       impl(complete),
       judged(gate1Red("trace 1"), approved("discarded")),
       impl(complete),
@@ -711,12 +722,13 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
       cause: "gate-red",
       failureTrace: "trace 3",
       latestReviewerProse: null,
+      qualityBudgetExhausted: 3,
       strandedHead: null,
     });
   });
 
   it("repeated NO-SIGNAL exhausts with its own honest cause", () => {
-    const { verdict } = drive({ ...defaultOpts, maxAttempts: 2 }, [
+    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
       impl(noSignal()),
       impl(noSignal()),
     ]);
@@ -725,12 +737,13 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
       cause: "no-signal-exhausted",
       failureTrace: "The final implementer attempt emitted no <promise> token.",
       latestReviewerProse: null,
+      qualityBudgetExhausted: 2,
       strandedHead: null,
     });
   });
 
   it("NO-SIGNAL exhaustion preserves an older gate trace", () => {
-    const { verdict } = drive({ ...defaultOpts, maxAttempts: 3 }, [
+    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 3 }, [
       impl(complete),
       judged(gate1Red("recorded trace"), approved("discarded")),
       impl(noSignal()),
@@ -743,6 +756,7 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
         "Last gate failure:\nrecorded trace\n\n" +
         "The final implementer attempt emitted no <promise> token.",
       latestReviewerProse: null,
+      qualityBudgetExhausted: 3,
       strandedHead: null,
     });
   });
@@ -750,7 +764,7 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
   it("NO-SIGNAL guard exhaustion carries the parser correction", () => {
     const correction =
       "You declared <promise>COMPLETE</promise> but made no commits this run.";
-    const { verdict } = drive({ ...defaultOpts, maxAttempts: 1 }, [
+    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 1 }, [
       impl(noSignal(correction)),
     ]);
     expect(verdict).toEqual({
@@ -758,12 +772,13 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
       cause: "no-signal-exhausted",
       failureTrace: `The final implementer signal failed validation:\n${correction}`,
       latestReviewerProse: null,
+      qualityBudgetExhausted: 1,
       strandedHead: null,
     });
   });
 
-  it("maxAttempts=1 with one gate-1 red still surfaces NEEDS-HUMAN", () => {
-    const { verdict } = drive({ ...defaultOpts, maxAttempts: 1 }, [
+  it("maxQualityRounds=1 with one gate-1 red surfaces NEEDS-HUMAN", () => {
+    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 1 }, [
       impl(complete),
       judged(gate1Red("trace"), approved("discarded")),
     ]);
@@ -772,57 +787,51 @@ describe("inner-loop-machine — impl-attempt budget exhaustion", () => {
       cause: "gate-red",
       failureTrace: "trace",
       latestReviewerProse: null,
+      qualityBudgetExhausted: 1,
       strandedHead: null,
     });
   });
 });
 
 describe("inner-loop-machine — interleaved budgets", () => {
-  it("CHANGES-REQUESTED can exhaust impl budget if it advances past the cap", () => {
-    // maxAttempts=2: attempt 1 COMPLETE+green+CHANGES-REQUESTED advances to
-    // attempt 2; attempt 2 gate-1 red has nowhere to go → NEEDS-HUMAN.
-    const { verdict } = drive({ ...defaultOpts, maxAttempts: 2 }, [
+  it("a correctness rejection resets the consecutive quality count", () => {
+    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
       impl(complete),
-      judged(gate1Ok, changes("r1")),
+      judged(gate1Red("quality failure 1"), approved("discarded")),
       impl(complete),
-      judged(gate1Red("trace"), approved("discarded")),
+      judged(gate1Ok, changes("correctness 1")),
+      impl(complete),
+      judged(gate1Red("quality failure after reset"), approved("discarded")),
+      impl(complete),
+      judged(gate1Ok, approved()),
     ]);
+    expect(verdict).toEqual({ type: "DONE" });
+  });
+
+  it("quality rejections do not spend the correctness budget", () => {
+    const { verdict } = drive(
+      { maxQualityRounds: 3, maxReviewRounds: 2, uiPrototypeCheck: false },
+      [
+        impl(complete),
+        judged(gate1Ok, changes("correctness 1")),
+        impl(complete),
+        judged(gate1Ok, qualityChanges("quality 1")),
+        impl(complete),
+        judged(gate1Ok, qualityChanges("quality 2")),
+        impl(complete),
+        judged(gate1Ok, changes("correctness 2")),
+      ],
+    );
     expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "gate-red",
-      failureTrace: "trace",
-      latestReviewerProse: null,
-      strandedHead: null,
+      type: "NEEDS-HUMAN-REVIEW",
+      cause: "correctness-budget-exhausted",
+      roundsUsed: 2,
+      latestReviewerProse: "correctness 2",
     });
   });
 
-  it("impl budget exhausted with a GREEN gate + CHANGES-REQUESTED → reviewer-blocked, not 'no green gate' (#17)", () => {
-    // The offergeist#404 shape: every attempt's gate is green, the reviewer
-    // keeps requesting changes, and the IMPL-attempt budget (not the
-    // review-round budget) runs out first. The terminal must name the reviewer
-    // as the blocker and carry its latest prose — never claim "no green gate".
-    const { verdict } = drive({ ...defaultOpts, maxAttempts: 2 }, [
-      impl(complete),
-      judged(gate1Ok, changes("r1")),
-      impl(complete),
-      judged(gate1Ok, changes("r2")),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "reviewer-blocked",
-      failureTrace: "",
-      latestReviewerProse: "r2",
-      strandedHead: null,
-    });
-  });
-
-  it("the ROUNDS bind first when they are the smaller budget (#71)", () => {
-    // The mirror of the case above, and the min(maxImplAttempts,
-    // maxReviewRounds) claim from the review-rounds side: maxAttempts=4 but
-    // maxReviewRounds=3, every gate green, so the 4th attempt is never
-    // dispatched — one attempt of the configured budget is unreachable. This
-    // is the shape #71 removed from the defaults by making them equal.
-    const { actions, verdict } = drive({ ...defaultOpts, maxAttempts: 4 }, [
+  it("correctness rejections do not spend the quality budget", () => {
+    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 1 }, [
       impl(complete),
       judged(gate1Ok, changes("r1")),
       impl(complete),
@@ -830,41 +839,26 @@ describe("inner-loop-machine — interleaved budgets", () => {
       impl(complete),
       judged(gate1Ok, changes("r3")),
     ]);
-    const attempts = actions
-      .filter((a) => a.kind === "run-implementer")
-      .map((a) => asImpl(a).attempt);
-    expect(attempts).toEqual([1, 2, 3]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN-REVIEW",
+      cause: "correctness-budget-exhausted",
+      roundsUsed: 3,
       latestReviewerProse: "r3",
     });
   });
 
-  it("a GREEN gate can spend an attempt and no round (#41) — min() is a ceiling", () => {
-    // The header's claim that the two counters come apart behind a green gate,
-    // not only on a red one: maxAttempts=3, maxReviewRounds=3, and a reviewer
-    // harness failure on attempt 2 spends the attempt without a round. The
-    // attempt budget runs out having spent only two rounds, so the issue is
-    // NOT parked on the review budget.
-    const { actions, verdict } = drive({ ...defaultOpts, maxAttempts: 3 }, [
-      impl(complete),
-      judged(gate1Ok, changes("r1")),
-      impl(complete),
-      judged(gate1Ok, harnessFailed()),
-      impl(complete),
-      judged(gate1Ok, changes("r2")),
-    ]);
-    const rounds = actions
-      .filter((a) => a.kind === "run-gate-and-reviewer")
-      .map((a) => asReviewer(a).reviewRound);
-    expect(rounds).toEqual([1, 2, 2]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "reviewer-blocked",
-      failureTrace: "",
-      latestReviewerProse: "r2",
-      strandedHead: null,
-    });
+  it("a correctness harness failure resets quality after its approval", () => {
+    let state = initialState({ ...defaultOpts, maxQualityRounds: 2 });
+    state = step(state, impl(complete)).state;
+    state = step(state, judged(gate1Red("red"), approved("discarded"))).state;
+    expect(state.qualityFailures).toBe(1);
+    state = step(state, impl(complete)).state;
+    const failed = step(
+      state,
+      judged(gate1Ok, harnessFailed("correctness failed", "correctness")),
+    );
+    expect(failed.state.qualityFailures).toBe(0);
+    expect(failed.state.correctnessFailures).toBe(0);
   });
 });
 
@@ -890,10 +884,10 @@ describe("inner-loop-machine — phase invariants", () => {
     );
   });
 
-  it("initialState rejects non-positive maxAttempts", () => {
-    expect(() => initialState({ ...defaultOpts, maxAttempts: 0 })).toThrow();
-    expect(() => initialState({ ...defaultOpts, maxAttempts: -1 })).toThrow();
-    expect(() => initialState({ ...defaultOpts, maxAttempts: 1.5 })).toThrow();
+  it("initialState rejects non-positive maxQualityRounds", () => {
+    expect(() => initialState({ ...defaultOpts, maxQualityRounds: 0 })).toThrow();
+    expect(() => initialState({ ...defaultOpts, maxQualityRounds: -1 })).toThrow();
+    expect(() => initialState({ ...defaultOpts, maxQualityRounds: 1.5 })).toThrow();
   });
 
   it("initialState rejects non-positive maxReviewRounds", () => {
@@ -914,9 +908,15 @@ describe("decideAfterTerminal", () => {
         cause: "gate-red",
         failureTrace: "trace",
         latestReviewerProse: null,
-      strandedHead: null,
+        qualityBudgetExhausted: 4,
+        strandedHead: null,
       },
-      { type: "NEEDS-HUMAN-REVIEW", latestReviewerProse: "prose" },
+      {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "correctness-budget-exhausted",
+        roundsUsed: 4,
+        latestReviewerProse: "prose",
+      },
       { type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42 },
     ];
     for (const v of verdicts) {
@@ -1003,7 +1003,7 @@ describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () =>
   it("spends an attempt, and exhausting the budget on dirt is NEEDS-HUMAN", () => {
     // Each attempt leaves a DIFFERENT dirty set, so the agent is visibly still
     // working and the loop lets it run to the end of the budget.
-    const { actions, verdict } = drive({ ...defaultOpts, maxAttempts: 2 }, [
+    const { actions, verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
       impl(complete, ["?? a.ts"]),
       impl(complete, ["?? b.ts"]),
     ]);
@@ -1176,7 +1176,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
   it("exhausting the budget off-branch is off-branch-head, not gate-red", () => {
     // No gate ever ran, so the generic "budget exhausted with no green gate"
     // would describe a failure that did not happen.
-    const { verdict } = drive({ ...defaultOpts, maxAttempts: 1 }, [
+    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 1 }, [
       impl(complete, [], detached()),
     ]);
     if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
@@ -1242,7 +1242,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
   });
 
   it("leaves strandedHead null on the other NEEDS-HUMAN causes", () => {
-    const { verdict } = drive({ ...defaultOpts, maxAttempts: 1 }, [
+    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 1 }, [
       impl(complete),
       judged(gate1Red("boom"), approved("discarded")),
     ]);

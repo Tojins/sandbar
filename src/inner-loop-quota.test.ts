@@ -111,7 +111,7 @@ const config = (
   uiCheckAgent,
   reviewerAgent: "claude",
   reviewerQualityAgent: "claude",
-  maxImplAttempts: 1,
+  maxQualityRounds: 1,
   maxReviewRounds: 1,
   sandboxImage: "image",
   agentImages: {

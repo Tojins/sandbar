@@ -38,6 +38,7 @@ describe("formatTerminalLine (#115)", () => {
         cause: "gate-red",
         failureTrace: "trace",
         latestReviewerProse: null,
+        qualityBudgetExhausted: 4,
         strandedHead: null,
       },
     ],
@@ -45,6 +46,8 @@ describe("formatTerminalLine (#115)", () => {
       "NEEDS-HUMAN-REVIEW",
       {
         type: "NEEDS-HUMAN-REVIEW",
+        cause: "correctness-budget-exhausted",
+        roundsUsed: 4,
         latestReviewerProse: "review",
         commits: [],
       },

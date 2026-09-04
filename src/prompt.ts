@@ -168,7 +168,6 @@ export type ProjectAnchorOptions = {
 export type PromptInputs = {
   readonly issue: { readonly id: string; readonly title: string; readonly branch: string };
   readonly attempt: number;
-  readonly maxAttempts: number;
   readonly worktreePath: string;
   readonly lastFailureTrace: string;
   // What the branch was seeded from and what every range below is measured
@@ -443,7 +442,6 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
   const {
     issue,
     attempt,
-    maxAttempts,
     base,
     lastFailureTrace,
     extraReprompt,
@@ -483,13 +481,11 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     attempt >= ESCALATION_ATTEMPT
       ? render(IMPLEMENTER_ESCALATION_TPL, {
           attempt: String(attempt),
-          maxAttempts: String(maxAttempts),
         })
       : "";
 
   return render(IMPLEMENTER_TPL, {
     attempt: String(attempt),
-    maxAttempts: String(maxAttempts),
     issueId: issue.id,
     issueTitle: issue.title,
     branch: issue.branch,

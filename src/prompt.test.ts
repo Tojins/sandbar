@@ -33,7 +33,6 @@ const baseInputs = {
 const implementerInputs = {
   issue: baseInputs.issue,
   attempt: 1,
-  maxAttempts: 8,
   worktreePath: "/tmp/wt",
   lastFailureTrace: "",
   base: sourceBranchBase("main"),

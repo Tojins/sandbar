@@ -43,7 +43,11 @@ describe("sequential review round policy (#19, #121)", () => {
       correctness: undefined,
       expected: {
         kind: "finished",
-        event: { kind: "reviewer-harness-failed", detail: "quality: idle" },
+        event: {
+          kind: "reviewer-harness-failed",
+          pass: "quality",
+          detail: "quality: idle",
+        },
         quality: "HARNESS-FAILED",
         correctness: "SKIPPED",
       },
@@ -57,6 +61,7 @@ describe("sequential review round policy (#19, #121)", () => {
         event: {
           kind: "reviewer-result",
           verdict: "CHANGES-REQUESTED",
+          rejectingPass: "quality",
           // Verbatim: the quality prompt names its own dimension headings, so
           // nothing here may label prose that already carries `### Tests`.
           prose: "### Tests\n\nno coverage\n<verdict>CHANGES-REQUESTED</verdict>",
@@ -77,7 +82,11 @@ describe("sequential review round policy (#19, #121)", () => {
       correctness: failed("crashed"),
       expected: {
         kind: "finished",
-        event: { kind: "reviewer-harness-failed", detail: "correctness: crashed" },
+        event: {
+          kind: "reviewer-harness-failed",
+          pass: "correctness",
+          detail: "correctness: crashed",
+        },
         quality: "APPROVED",
         correctness: "HARNESS-FAILED",
       },
@@ -91,6 +100,7 @@ describe("sequential review round policy (#19, #121)", () => {
         event: {
           kind: "reviewer-result",
           verdict: "CHANGES-REQUESTED",
+          rejectingPass: "correctness",
           prose:
             "### Spec\n\nrequirement 2 is unmet\n<verdict>CHANGES-REQUESTED</verdict>",
         },

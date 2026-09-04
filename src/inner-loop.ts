@@ -16,8 +16,8 @@
 // consumer's `onSandboxReady` hook runs.
 //
 // The UI-prototype decision (#126) is its own first action when enabled. It is
-// a cold agent call in the existing issue sandbox and spends neither an
-// implementation attempt nor a review round. A fresh HARD-ERROR cycle rebuilds
+// a cold agent call in the existing issue sandbox and spends neither failure
+// budget. A fresh HARD-ERROR cycle rebuilds
 // the state and therefore asks again. Two deliberate exceptions to "all
 // branching lives in the SM" stay within one action each. The promise nudge
 // in runImplementer gives an implementer
@@ -26,9 +26,10 @@
 // — the SM never sees the nudge, only the re-parsed result. The full argument
 // is at the call site. A review round is likewise a QUALITY pass followed, only
 // when approved, by the correctness pass on its own separately configured
-// provider and model (#121); the SM receives one aggregate reviewer result and
-// spends one round. Both passes are cold — nothing resumes anything — which is
-// what lets them run on different vendors.
+// provider and model (#121); the SM receives one aggregate reviewer result,
+// including the rejecting pass, and charges only that pass (#129). Both passes
+// are cold — nothing resumes anything — which is what lets them run on
+// different vendors.
 //
 // What a FAILED reviewer run means is reviewer-run.ts's policy (#41); this
 // file only adapts `sandbox.run`'s throw into the shape that policy
@@ -254,7 +255,7 @@ export function reviewRoundLine(args: {
     `quality=${args.quality} correctness=${args.correctness}` +
     ` mode=${args.qualityMode} ` +
     args.durationField +
-    (args.failed ? " (round not consumed)" : "")
+    (args.failed ? " (budgets not consumed)" : "")
   );
 }
 
@@ -308,19 +309,29 @@ export type Terminal =
       readonly cause:
         | "gate-red"
         | "no-signal-exhausted"
-        | "reviewer-blocked"
         | "uncommittable-worktree"
         | "off-branch-head"
         | "reviewer-harness-failed";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
+      readonly qualityBudgetExhausted: number | null;
       readonly strandedHead: HeadMismatch | null;
       readonly specGaps: readonly SpecGap[];
     }
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
-      readonly cause?: "reviewer-wrote" | "ui-checker-wrote";
+      readonly cause:
+        | "quality-budget-exhausted"
+        | "correctness-budget-exhausted";
+      readonly roundsUsed: number;
+      readonly commits: readonly { sha: string }[];
+      readonly specGaps: readonly SpecGap[];
+    }
+  | {
+      readonly type: "NEEDS-HUMAN-REVIEW";
+      readonly latestReviewerProse: string;
+      readonly cause: "reviewer-wrote" | "ui-checker-wrote";
       readonly commits: readonly { sha: string }[];
       readonly specGaps: readonly SpecGap[];
     }
@@ -430,7 +441,7 @@ export type InnerLoopConfig = {
   readonly reviewerQualityEffort?: string | undefined;
   readonly uiCheckEffort?: string | undefined;
   readonly uiPrototypeCheck: boolean;
-  readonly maxImplAttempts: number;
+  readonly maxQualityRounds: number;
   readonly maxReviewRounds: number;
   readonly sandboxImage: string;
   readonly agentImages: AgentImages;
@@ -522,17 +533,27 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
         cause: verdict.cause,
         failureTrace: verdict.failureTrace,
         latestReviewerProse: verdict.latestReviewerProse,
+        qualityBudgetExhausted: verdict.qualityBudgetExhausted,
         strandedHead: verdict.strandedHead,
         specGaps,
       };
     case "NEEDS-HUMAN-REVIEW":
-      return {
-        type: "NEEDS-HUMAN-REVIEW",
-        ...(verdict.cause === undefined ? {} : { cause: verdict.cause }),
-        latestReviewerProse: verdict.latestReviewerProse,
-        commits: accumulatedCommits,
-        specGaps,
-      };
+      return "roundsUsed" in verdict
+        ? {
+            type: "NEEDS-HUMAN-REVIEW",
+            cause: verdict.cause,
+            roundsUsed: verdict.roundsUsed,
+            latestReviewerProse: verdict.latestReviewerProse,
+            commits: accumulatedCommits,
+            specGaps,
+          }
+        : {
+            type: "NEEDS-HUMAN-REVIEW",
+            cause: verdict.cause,
+            latestReviewerProse: verdict.latestReviewerProse,
+            commits: accumulatedCommits,
+            specGaps,
+          };
     case "HARD-ERROR":
       return {
         type: "HARD-ERROR",
@@ -815,7 +836,7 @@ async function runSandboxCycle(
     };
 
     let state: LoopState = initialState({
-      maxAttempts: config.maxImplAttempts,
+      maxQualityRounds: config.maxQualityRounds,
       maxReviewRounds: config.maxReviewRounds,
       uiPrototypeCheck: config.uiPrototypeCheck,
     });
@@ -1115,7 +1136,6 @@ export async function runImplementer(
     {
       issue,
       attempt: action.attempt,
-      maxAttempts: config.maxImplAttempts,
       worktreePath: sandbox.worktreePath,
       lastFailureTrace: action.failureTrace,
       base: ctx.base,

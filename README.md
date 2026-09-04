@@ -267,6 +267,18 @@ unchanged requested-landing deferrals without a landing. It bounds persistent
 failures such as a red source branch or misconfigured gate stack instead of
 letting them consume the whole issue budget.
 
+### The two inner-loop budgets
+
+`maxQualityRounds` (default 4) bounds consecutive attempts that do not end in
+a quality approval: quality `CHANGES-REQUESTED`, a red gate, NO-SIGNAL, a dirty
+tree, or HEAD off the issue branch. A quality approval resets that count.
+
+`maxReviewRounds` (default 4) separately bounds correctness rejections. A
+quality rejection never spends it. Reviewer harness failures spend neither
+budget and retain their dedicated two-consecutive-failures stop rule. There is
+no total implementer-attempt ceiling: each attempt is charged only to the pass
+or pre-review condition that rejected it.
+
 ### `images` — what sandbar builds
 
 By default sandbar builds one image: `sandboxImage`, from `./Containerfile`.
@@ -324,7 +336,7 @@ branch**. The tag alone cannot express that: it exists, so it is reused, and an
 issue branch that changes the lockfile gets gated against dependencies built
 from the source branch. Both directions are silent false verdicts — a branch
 that *adds* a dependency reds with a module-not-found nobody can reproduce (and
-can burn its whole attempt budget onto `agent-stuck` for it), and a branch that
+can burn its whole quality budget onto `agent-stuck` for it), and a branch that
 *removes* one greens against a dependency it deleted.
 
 Declare what the image is built from and sandbar owns the rest:

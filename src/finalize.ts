@@ -203,7 +203,8 @@ export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} exhausted the attempt budget without a green gate. ` +
+  `${BOT_COMMENT_PREFIX} exhausted the consecutive quality-failure budget ` +
+  `without a green gate. ` +
   `Investigate the trace below and push a fix on \`${branch}\`, then drop ` +
   `\`${stuckLabel}\` and re-apply \`${readyLabel}\` when ready.\n\n` +
   `<details><summary>Last failure trace</summary>\n\n` +
@@ -215,7 +216,8 @@ export const NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE = (
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} exhausted the attempt budget because the implementer ` +
+  `${BOT_COMMENT_PREFIX} exhausted the consecutive quality-failure budget ` +
+  `because the implementer ` +
   `did not produce an actionable completion signal on the final attempt. ` +
   `Inspect the attempt transcripts and summary below, fix the provider or push ` +
   `a fix on \`${branch}\`, then drop ` +
@@ -225,22 +227,22 @@ export const NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE = (
 
 // The worktree could not be brought to a committed state, so no gate ever ran
 // (#24 D1). Distinct from NEEDS_HUMAN_COMMENT_TEMPLATE, which says "exhausted
-// the attempt budget without a green gate" — true-ish but it sends the reader
-// looking for a failing test, and this terminal usually fires after two
-// attempts rather than the full budget. What the human needs is the path list
-// and the knowledge that the cause is almost never the branch's code.
+// the quality budget without a green gate" — true-ish but it sends the reader
+// looking for a failing test. It may fire early when two attempts leave the
+// same dirty set, or when the quality budget expires across changing sets.
+// What the human needs is the path list and the knowledge that the cause is
+// almost never the branch's code.
 export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
   branch: string,
   failureTrace: string,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} stopped: the worktree for \`${branch}\` kept the same uncommitted ` +
-  `changes across attempts, so no gate could run — a gate verdict is about a ` +
-  `commit, and there was never one to judge. The implementer was asked to ` +
-  `commit and came back with an identical dirty set, which usually means the ` +
-  `files are not its to remove: a gate step writing outside a gitignored ` +
-  `path, or a container writing into the tree as another uid. Fix that (or ` +
+  `${BOT_COMMENT_PREFIX} stopped: the worktree for \`${branch}\` could not be ` +
+  `brought to a committed state across attempts, so no gate could run — a gate ` +
+  `verdict is about a commit, and there was never one to judge. The last dirty ` +
+  `set is below. It may be a gate step writing outside a gitignored path or a ` +
+  `container writing into the tree as another uid. Fix that (or ` +
   `commit/ignore the paths below), then drop \`${stuckLabel}\` and re-apply ` +
   `\`${readyLabel}\`.\n\n` +
   `<details><summary>Uncommitted paths</summary>\n\n` +
@@ -276,7 +278,7 @@ export const STRANDED_COMMITS_NOTE = (m: StrandedHead): string =>
       `failed). Fold it into \`${m.branch}\` with \`cherry-pick\`/\`merge\`.`;
 
 // The implementer committed off the issue branch and stayed off it after being
-// told (#27). Neither the gate-red nor the reviewer-blocked comment applies —
+// told (#27). Neither the gate-red nor a review-budget comment applies —
 // and neither would mention the fact that matters, which is that work exists and
 // is not where anyone will look for it.
 //
@@ -300,9 +302,9 @@ export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} stopped: the implementer committed somewhere other ` +
-  `than \`${branch}\` — a detached HEAD, or a branch of its own — and was still ` +
-  `off the branch on the following attempt, after being told exactly how to get ` +
-  `back. Whatever had already landed on \`${branch}\` is untouched and correct; ` +
+  `than \`${branch}\` — a detached HEAD, or a branch of its own — and its last ` +
+  `attempt was still off the branch. Whatever had already landed on ` +
+  `\`${branch}\` is untouched and correct; ` +
   `what the off-branch attempts wrote is not part of it, and no gate verdict on ` +
   `this issue covers that work.\n\n` +
   `Fold the stranded commits in (see below), then drop \`${stuckLabel}\` and ` +
@@ -310,26 +312,9 @@ export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
   `<details><summary>What the implementer was told</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
-// Impl-attempt budget exhausted while the gate was GREEN and the reviewer was
-// the blocker (#17). Distinct from NEEDS_HUMAN_COMMENT_TEMPLATE (which claims
-// "without a green gate") and from REVIEW_BUDGET_EXHAUSTED (a different budget):
-// here the *attempt* budget ran out, not the reviewer-round budget.
-export const NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE = (
-  branch: string,
-  latestReviewerProse: string,
-  stuckLabel: string,
-  readyLabel: string,
-): string =>
-  `${BOT_COMMENT_PREFIX} exhausted the attempt budget with a green gate — the ` +
-  `build and tests pass; the code reviewer's \`CHANGES-REQUESTED\` is the blocker, ` +
-  `not a failing gate. The latest reviewer pass below is what the human needs to ` +
-  `resolve. Push a fix on \`${branch}\` (or rewrite the standards if the reviewer ` +
-  `was wrong), then drop \`${stuckLabel}\` and re-apply \`${readyLabel}\` when ` +
-  `ready.\n\n---\n\n${latestReviewerProse}`;
-
-// Impl-attempt budget exhausted (or a second consecutive incident) with a GREEN
+// A second consecutive incident with a GREEN
 // gate and NO review at all (#41). Every other template here would misdescribe
-// it, and the one it is closest to — reviewer-blocked — would misdescribe it in
+// it, and the review-budget comment would misdescribe it in
 // the most expensive direction: it opens by asserting the reviewer's
 // `CHANGES-REQUESTED` is the blocker and then renders the harness's error text
 // under a "latest reviewer pass" heading, sending the author to resolve a
@@ -385,15 +370,21 @@ export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
 
 export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
   branch: string,
+  budget: "quality" | "correctness",
+  roundsUsed: number,
   latestReviewerProse: string,
   stuckLabel: string,
   readyLabel: string,
-): string =>
-  `${BOT_COMMENT_PREFIX} exhausted the reviewer-round budget without an ` +
-  `\`APPROVED\` verdict. The latest reviewer pass below is the standards-violation ` +
+): string => {
+  const field = budget === "quality" ? "maxQualityRounds" : "maxReviewRounds";
+  return `${BOT_COMMENT_PREFIX} exhausted the \`${field}\` ${budget} budget after ` +
+  `${roundsUsed} consecutive ${budget} failure${roundsUsed === 1 ? "" : "s"} ` +
+  `without that pass reaching an \`APPROVED\` verdict. The latest ${budget} ` +
+  `pass below is the ` +
   `report the human needs to resolve. Push a fix on \`${branch}\` (or rewrite ` +
   `the standards if the reviewer was wrong), then drop \`${stuckLabel}\` and ` +
   `re-apply \`${readyLabel}\` when ready.\n\n---\n\n${latestReviewerProse}`;
+};
 
 export const SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE = (attempts: number): string =>
   `${BOT_COMMENT_PREFIX} hit the silent-merge-abort failure mode ${attempts} time${attempts === 1 ? "" : "s"} ` +
@@ -468,10 +459,9 @@ type FinalizeKindInput =
       readonly strandedHead: StrandedHead | null;
     }
   | {
-      // Impl-attempt budget exhausted, or a blocker the agent cannot clear.
+      // Quality-budget exhaustion, or a blocker the agent cannot clear.
       // `cause` selects the comment so the human is pointed at the real blocker
-      // (#17): gate-red surfaces the failure trace; reviewer-blocked surfaces
-      // the reviewer's CHANGES-REQUESTED prose; uncommittable-worktree surfaces
+      // (#17): gate-red surfaces the failure trace; uncommittable-worktree surfaces
       // the paths that stayed dirty across attempts (no gate ever ran, so a
       // gate-red comment would describe a failure that did not happen);
       // off-branch-head surfaces where HEAD went (#27) — likewise no gate ran,
@@ -486,17 +476,19 @@ type FinalizeKindInput =
       readonly cause:
         | "gate-red"
         | "no-signal-exhausted"
-        | "reviewer-blocked"
         | "uncommittable-worktree"
         | "off-branch-head"
         | "reviewer-harness-failed";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
+      readonly qualityBudgetExhausted: number | null;
       readonly strandedHead: StrandedHead | null;
     }
   | {
       readonly kind: "review-budget-exhausted";
       readonly issue: IssueRef;
+      readonly budget: "quality" | "correctness";
+      readonly roundsUsed: number;
       readonly latestReviewerProse: string;
     }
   | {
@@ -887,8 +879,7 @@ export async function finalizeOne(
       const n = issueNumberOf(input.issue);
       await adapter.reclaimIssueClone(input.issue.branch);
       await adapter.pushBranch(input.issue.branch);
-      // #17: name the real blocker. reviewer-blocked → surface the reviewer's
-      // CHANGES-REQUESTED prose; uncommittable-worktree → the dirty paths, and
+      // #17: name the real blocker. uncommittable-worktree → the dirty paths, and
       // say that no gate ran; off-branch-head → where HEAD went and how to
       // rescue the commits (#27); gate-red → the gate failure trace.
       // A switch rather than the ternary chain this used to be: one arm per
@@ -905,13 +896,6 @@ export async function finalizeOne(
               // dropping it would lose the only review this branch ever got,
               // exactly as the reader is told to review it themselves.
               input.latestReviewerProse,
-              labels.agentStuck,
-              READY_FOR_AGENT_LABEL,
-            );
-          case "reviewer-blocked":
-            return NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE(
-              input.issue.branch,
-              input.latestReviewerProse ?? "",
               labels.agentStuck,
               READY_FOR_AGENT_LABEL,
             );
@@ -948,7 +932,14 @@ export async function finalizeOne(
             );
         }
       })();
-      await adapter.postComment(n, body);
+      await adapter.postComment(
+        n,
+        body +
+          (input.qualityBudgetExhausted === null
+            ? ""
+            : `\n\nThe \`maxQualityRounds\` budget ran out at ` +
+              `${input.qualityBudgetExhausted} consecutive quality failures.`),
+      );
       const r = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
@@ -981,6 +972,8 @@ export async function finalizeOne(
         n,
         REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(
           input.issue.branch,
+          input.budget,
+          input.roundsUsed,
           input.latestReviewerProse,
           labels.agentStuck,
           READY_FOR_AGENT_LABEL,

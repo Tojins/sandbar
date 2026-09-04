@@ -46,12 +46,15 @@ describe("terminalFinalizeInputs", () => {
           cause: "gate-red",
           failureTrace: "boom",
           latestReviewerProse: null,
+          qualityBudgetExhausted: 4,
         },
       },
       {
         issue: issue("4"),
         terminal: {
           type: "NEEDS-HUMAN-REVIEW",
+          cause: "correctness-budget-exhausted",
+          roundsUsed: 4,
           latestReviewerProse: "nope",
           commits: [],
         },
@@ -98,6 +101,7 @@ describe("terminalFinalizeInputs", () => {
           cause: "uncommittable-worktree",
           failureTrace: "src/a.ts",
           latestReviewerProse: "prose",
+          qualityBudgetExhausted: null,
         },
       },
     ]);
@@ -107,6 +111,7 @@ describe("terminalFinalizeInputs", () => {
       cause: "uncommittable-worktree",
       failureTrace: "src/a.ts",
       latestReviewerProse: "prose",
+      qualityBudgetExhausted: null,
     });
   });
 

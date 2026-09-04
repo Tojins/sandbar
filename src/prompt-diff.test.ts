@@ -110,7 +110,6 @@ const anchorOpts = (sourceBranch = "main") => ({
 const implementerInputs = (base = sourceBranchBase("main")) => ({
   issue: ISSUE,
   attempt: 2,
-  maxAttempts: 8,
   worktreePath: worktree,
   lastFailureTrace: "",
   base,

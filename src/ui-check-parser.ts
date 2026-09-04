@@ -1,6 +1,6 @@
 // UI-check token parser (#126).
 //
-// This role makes one decision before the implementation-attempt budget begins:
+// This role makes one decision before either inner-loop budget begins:
 // either the issue is clear to implement, or it implies non-trivial visible UI
 // for which no readable prototype exists. Its token is deliberately distinct
 // from the implementer's promise — the checker cannot complete work and must
