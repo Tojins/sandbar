@@ -4,13 +4,20 @@
 // `## Blocked by` section that /to-issues writes into every ready-for-agent
 // issue and batch-checking the referenced issues' state.
 //
-// `fetchCandidates` lists via the `gh` search backend, which lags label/close
+// The listing endpoint `fetchCandidates` uses lags label/close
 // writes by seconds. So an issue merged+closed (and de-queued) in a PRIOR
 // iteration of the same run can still surface as a candidate here. To stop the
 // planner re-picking it (#16) resolvePlan also drops (a) anything the caller
 // passes in `excluded` — the issues this run already merged — and (b) anything
 // whose authoritative state (fetched per-candidate alongside blocker states via
-// strongly-consistent GraphQL) reads CLOSED.
+// strongly-consistent GraphQL) reads CLOSED. Candidate labels have two distinct
+// consistency rules (#94, #96): `in-chunk` membership and `waiting` are
+// fail-safe unions, so either the listing or the authoritative batch keeps an
+// issue out. `ready-for-agent` is authoritative-only whenever the batch knows
+// the issue: absence de-queues it, presence is the explicit chunk-rework
+// override, and the lagging listing decides neither direction. On a batch miss
+// the listing remains the answer, so one failed lookup cannot silently drop
+// ready work.
 //
 // All ranking logic lives in pure functions (parseBlockedBy, resolvePlan) so it
 // can be table-driven tested. The I/O wrappers (fetchCandidates,
@@ -195,7 +202,7 @@ const DEFAULT_K = 3;
 export type IssueState = "OPEN" | "CLOSED";
 
 // What the authoritative (GraphQL) batch knows about one issue. Labels are here
-// because #94's rework override must never read the lagging search result. An issue absent
+// because #94's rework override must never read the lagging listing. An issue absent
 // from the batch has no facts at all, and every read below treats that miss the
 // safe way round.
 export type IssueFacts = {
@@ -316,7 +323,7 @@ export function resolvePlan(
   // change made today's derivation name a different branch. Every placement
   // and safety decision stays strict: a blocker is satisfied, a PR names a
   // member, and a landing closes it only when the EXACT derived branch names
-  // it. Membership never consults labels, and git has no search-index lag.
+  // it. Membership never consults labels, and git has no listing lag.
   const publishedChunkMembers = new Set(
     [...chunkMembers.values()].flatMap((members) => [...members]),
   );
@@ -368,11 +375,18 @@ export function resolvePlan(
   const heldForReview: number[] = [];
   const eligible = candidates.filter((c) => {
     // Drop issues this run already merged, and issues the live tracker now
-    // reports CLOSED — both guard against the stale-search re-pick described in
+    // reports CLOSED — both guard against the stale-listing re-pick described in
     // the module header (#16). Unknown state (absent from the map) is treated
     // as OPEN so a single state-fetch miss never silently drops a ready issue.
     if (excluded.has(c.number)) return false;
-    if (issueFacts.get(c.number)?.state === "CLOSED") return false;
+    const authoritative = issueFacts.get(c.number);
+    if (authoritative?.state === "CLOSED") return false;
+    // When the batch knows this issue it owns both directions of queue
+    // membership (#96): absence means a stale listing row for an issue that is
+    // no longer ready, while presence is #94's explicit rework override. A
+    // fetch miss keeps the listing's reading. `waiting` differs: either source
+    // is enough to hold work, so its union is strictly fail-safe.
+    if (authoritative && !authoritative.labels.includes(READY_LABEL)) return false;
     // Already developed and already landed on its chunk's branch (#59), unless
     // the authoritative facts say a human explicitly re-queued it (#94). It is
     // here only to hold its place in the two graphs above, and it is dropped
@@ -380,9 +394,12 @@ export function resolvePlan(
     // is not waiting for anything this cycle can give it.
     if (
       publishedChunkMembers.has(c.number) &&
-      !issueFacts.get(c.number)?.labels.includes(READY_LABEL)
+      !authoritative?.labels.includes(READY_LABEL)
     ) return false;
-    if (c.labels.includes(WAITING_LABEL)) return false;
+    if (
+      c.labels.includes(WAITING_LABEL) ||
+      authoritative?.labels.includes(WAITING_LABEL)
+    ) return false;
     const blockers = blockedBy.get(c.number) ?? [];
     if (!blockers.every((n) => blockerSatisfied(n, c.number))) return false;
     // LAST, so `heldForReview` counts only issues that would otherwise have
@@ -590,8 +607,8 @@ async function ghIssueBatch(
 
 // Authoritative facts for a set of issue numbers, via a single GraphQL batch.
 // Used for both blockers (the dependency gate) and the candidates themselves
-// (the stale-search CLOSED guard, #16). GraphQL node lookups are strongly
-// consistent, unlike the search backend `fetchCandidates` lists through.
+// (the stale-listing CLOSED guard, #16). GraphQL node lookups are strongly
+// consistent, unlike the listing endpoint `fetchCandidates` uses.
 export async function fetchIssueStates(
   numbers: readonly number[],
   repo: RepoRef,
@@ -624,12 +641,12 @@ export type BuildPlanOptions = {
   readonly excluded?: ReadonlySet<number>;
   readonly k?: number;
   readonly defaultLane?: Lane;
-  // Issues to add to the listing, whatever the tracker's search index says
+  // Issues to add to the listing, whatever its lagging index says
   // (#63). Exactly one caller: the chunk-review scan files a follow-up issue
   // and then re-plans so it is queued from that cycle rather than the next run
   // — and a
   // just-created issue is the one candidate the `gh` listing is guaranteed to
-  // be wrong about, because that listing is the lagging search backend and
+  // be wrong about, because that listing endpoint lags and
   // nothing else in the plan is newer than seconds old.
   //
   // Safe because it is additive and authoritative in the same breath: the
@@ -659,7 +676,7 @@ export async function buildPlan(
   ];
   // The queue plus issues found by fetched branch containment (#93), in one graph
   // because lane inheritance and chunk derivation need both sets. Deduped by
-  // number with the queue entry winning if the search index still returns a
+  // number with the queue entry winning if the listing still returns a
   // member whose `ready-for-agent` removal has not become visible yet.
   const listed = [
     ...(await fetchCandidates(repo)),
@@ -672,7 +689,8 @@ export async function buildPlan(
   }
   const candidates = [...byNumber.values()];
   // One GraphQL batch covers both the authoritative facts of every candidate
-  // (the #16 stale-search CLOSED guard) and of every blocker they reference.
+  // (the #16 stale-listing CLOSED guard and #96 queue-label guard) and of every
+  // blocker they reference.
   const wanted = new Set<number>();
   for (const c of candidates) {
     wanted.add(c.number);

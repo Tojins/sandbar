@@ -140,6 +140,33 @@ describe("resolvePlan", () => {
     expect(plan).toEqual([]);
   });
 
+  it("drops a listed candidate when authoritative facts say it is no longer ready", () => {
+    const plan = planOf(
+      [issue(10, "", { labels: ["ready-for-agent"] })],
+      facts({ 10: { labels: [] } }),
+    );
+
+    expect(plan).toEqual([]);
+  });
+
+  it("keeps the listed ready reading when the authoritative batch misses it", () => {
+    const plan = planOf(
+      [issue(10, "", { labels: ["ready-for-agent"] })],
+      new Map(),
+    );
+
+    expect(plan.map((p) => p.id)).toEqual(["10"]);
+  });
+
+  it("unions authoritative `waiting` with the listing", () => {
+    const plan = planOf(
+      [issue(10, "", { labels: ["ready-for-agent"] })],
+      facts({ 10: { labels: ["ready-for-agent", "waiting"] } }),
+    );
+
+    expect(plan).toEqual([]);
+  });
+
   it("treats unknown blocker numbers as open (safe default)", () => {
     const plan = planOf(
       [issue(10, "## Blocked by\n- #999\n")],
@@ -194,14 +221,17 @@ describe("resolvePlan", () => {
     expect(plan.map((p) => p.id)).toEqual(["11"]);
   });
 
-  it("drops a candidate the live tracker reports CLOSED — stale search re-pick (#16)", () => {
-    // The candidate surfaced from `gh issue list` (lagging search index) but its
+  it("drops a candidate the live tracker reports CLOSED — stale listing re-pick (#16)", () => {
+    // The candidate surfaced from a lagging `gh issue list` result but its
     // authoritative state is CLOSED: it was merged+closed earlier this run.
     // The guard fails safe in the other direction: a state-fetch MISS keeps the
     // candidate (treated as open) — exercised by every empty-facts test above.
     const plan = planOf(
       [issue(10, ""), issue(11, "")],
-      states({ 10: "CLOSED", 11: "OPEN" }),
+      facts({
+        10: { state: "CLOSED" },
+        11: { labels: ["ready-for-agent"] },
+      }),
     );
     expect(plan.map((p) => p.id)).toEqual(["11"]);
   });
@@ -340,7 +370,7 @@ describe("resolvePlan lanes (#57)", () => {
   });
 
   it("gates a descendant through a blocker THIS cycle would not pick", () => {
-    // #12 is CLOSED, so the #16 stale-search guard drops it from the plan —
+    // #12 is CLOSED, so the #16 stale-listing guard drops it from the plan —
     // but it is still a candidate, so its lane is known and it gates #13. Drop
     // non-planned issues from the lane graph and #13 reads as auto here.
     const r = resolvePlan(
@@ -357,7 +387,7 @@ describe("resolvePlan lanes (#57)", () => {
     // #13 plans, and the CHUNK it carries is the proof the gating landed: an
     // auto-lane issue is in no chunk at all, so a `chunk` here can only have
     // come from #12 staying in the graph. (The chunk is rooted at a closed
-    // issue only because a CLOSED candidate is a stale-search artefact by
+    // issue only because a CLOSED candidate is a stale-listing artefact by
     // construction — #16 — and it clears as soon as the index catches up.)
     expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
       ["13", { root: 12, branch: "sandbar/chunk-12-issue-12", landed: [] }],
@@ -373,7 +403,7 @@ describe("resolvePlan lanes (#57)", () => {
         issue(12, ""),
         issue(13, "## Blocked by\n- #12\n", { labels: ["auto-land"] }),
       ],
-      states({ 12: "OPEN" }),
+      facts({ 12: { labels: ["ready-for-agent"] } }),
       new Set(),
       3,
       "review",
@@ -497,7 +527,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     // a satisfied #11 would be planned beside it, as the case above shows.
     const r = resolvePlan(
       [issue(10, ""), issue(11, "## Blocked by\n- #10\n")],
-      facts({ 10: {} }),
+      facts({ 10: { labels: ["ready-for-agent"] } }),
       new Set(),
       3,
       "review",
@@ -575,7 +605,11 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
         issue(11, "## Blocked by\n- #10\n"),
         issue(12, "## Blocked by\n- #11\n"),
       ],
-      facts({ 10: {}, 11: {}, 12: {} }),
+      facts({
+        10: {},
+        11: { labels: ["ready-for-agent"] },
+        12: { labels: ["ready-for-agent"] },
+      }),
       new Set(),
       3,
       "review",
@@ -628,7 +662,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
   it("does not let a display label de-queue an auto-lane candidate", () => {
     const r = resolvePlan(
       [issue(10, "", { labels: ["needs-review"] }), issue(11, "")],
-      facts({ 10: {} }),
+      facts({ 10: { labels: ["ready-for-agent"] } }),
       new Set(),
       3,
       "auto",
@@ -826,7 +860,8 @@ describe("resolvePlan git membership safety (#93)", () => {
   it("ignores needs-review when git does not name the member", () => {
     const candidate = issue(47, "", { labels: ["ready-for-agent", "needs-review"] });
     const result = resolvePlan(
-      [candidate], facts({ 47: {} }), new Set(), 3, "review", new Map(),
+      [candidate], facts({ 47: { labels: ["ready-for-agent"] } }),
+      new Set(), 3, "review", new Map(),
     );
     expect(result.plan.map((p) => p.id)).toEqual(["47"]);
   });

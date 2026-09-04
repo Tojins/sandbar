@@ -835,8 +835,8 @@ export async function run(
     }
   };
 
-  // Issue numbers merged+closed earlier in THIS run. The `gh` search backend
-  // the planner lists through lags label/close writes, so without this an issue
+  // Issue numbers merged+closed earlier in THIS run. The listing endpoint the
+  // planner uses lags label/close writes, so without this an issue
   // merged in a prior iteration can resurface as a candidate, get re-planned,
   // and get stamped agent-stuck on a closed-COMPLETED issue (#16). Fed to
   // buildPlan as a hard exclusion alongside its live-state CLOSED check.
@@ -941,8 +941,8 @@ export async function run(
       // only by members already on the chunk branch — it is eligible in this
       // very cycle, and a cycle that filed the issue and then found the plan
       // empty would exit with a review nobody had answered. The created issues
-      // are handed back in rather than re-listed: `gh issue list` is the
-      // lagging search backend, and nothing in the queue is younger than these.
+      // are handed back in rather than re-listed: `gh issue list` lags, and
+      // nothing in the queue is younger than these.
       const followUps = await fileChunkReviewFollowUps({
         chunks: resolution.landedChunks,
         adapter: followUpAdapter,
@@ -976,8 +976,8 @@ export async function run(
       // `success` right below. Without the re-plan a chunk somebody merged by
       // hand would reconcile, unblock three issues, and stop the run anyway.
       // The re-plan reads the same authoritative GraphQL batch, which is
-      // strongly consistent about the closes just made even while the search
-      // index that lists candidates lags.
+      // strongly consistent about the closes just made even while the candidate
+      // listing lags.
       const reconciliation = await reconcileLandedChunks({
         repoDir: layout.repoDir,
         repo,
@@ -992,12 +992,12 @@ export async function run(
               `closed ${r.closed.length} issue(s)${r.branchDeleted ? ", branch deleted" : ", branch kept"}`,
           );
         }
-        // Same exclusion the merger's own closes get (#16): the `gh` search
-        // backend the planner lists through lags a close by seconds, so an
+        // Same exclusion the merger's own closes get (#16): the listing
+        // endpoint the planner uses lags a close by seconds, so an
         // issue closed one line ago can still come back as a candidate.
         for (const n of reconciliation.closedIssues) mergedThisRun.add(n);
         // Carrying `followUps` again: one filed a block above is younger than
-        // anything the search backend can see, so a re-plan without it would
+        // anything the listing can see, so a re-plan without it would
         // drop the issue this cycle just created. `planOptions.excluded` is
         // `mergedThisRun` itself, so the numbers just added are already in it.
         resolution = await buildPlan(repo, {
@@ -1520,7 +1520,7 @@ export async function run(
         // A chunk landing on the SOURCE branch (#64) is a different matter: its
         // members really were closed and their work really is on the source
         // branch, so they belong here for exactly the reason `merged` does —
-        // the search backend the planner lists through lags a close by seconds,
+        // the listing endpoint the planner uses lags a close by seconds,
         // and a re-picked closed issue is #16 verbatim. `mergedChunks` is empty
         // on the halt path by construction, since the wrap-up only ever runs
         // after the source branch has moved.

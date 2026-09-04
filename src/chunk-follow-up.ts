@@ -40,8 +40,8 @@
 // Three properties make that the right place for it. It is on the PR, so the
 // one query that reads the reviews reads the ledger with them — no second
 // listing, and no second thing to keep in step. It is read through GraphQL on
-// the pull request node, which is strongly consistent, unlike the search
-// backend `fetchCandidates` lists through: a follow-up filed sixty seconds ago
+// the pull request node, which is strongly consistent, unlike the listing
+// endpoint `fetchCandidates` uses: a follow-up filed sixty seconds ago
 // is visible, which is exactly when the question is asked. And it does not
 // depend on the follow-up ISSUE's state — an issue parked with `needs-info`,
 // or closed by a human who disagreed with it, has left every label-scoped
@@ -583,7 +583,7 @@ export function realAdapter(args: {
  *
  * Returns the issues it created, in the shape the planner lists candidates in,
  * so the caller can re-plan WITH them (`buildPlan`'s `extraCandidates`) instead
- * of waiting for the search index — see this module's header, and the
+ * of waiting for the listing — see this module's header, and the
  * plan-resolver's.
  *
  * LOUD on failure, like every other tracker write that carries the only copy of
