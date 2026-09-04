@@ -23,8 +23,7 @@ simplification — prefer deleting a branch, helper, or layer over polishing it.
 5. **Loose contracts.** `any`, unjustified optional fields, invariants left
    implicit. Types and boundaries should state what is true. A `catch` may do
    exactly one of two things: **classify** — map one named, expected condition
-   to a value, checked explicitly (exit 1 from `show-ref --verify` is
-   "absent"; exit 128 propagates) — or **clean up** — on a failure path, report
+   to a value, checked explicitly — or **clean up** — on a failure path, report
    the secondary failure to the log with its cause, then rethrow the original
    error. Everything else propagates. Blanket defaults, log-and-continue, and
    empty catches are banned.
@@ -39,15 +38,3 @@ simplification — prefer deleting a branch, helper, or layer over polishing it.
 
 The standards — not your preferences — decide what ships. If you cannot name a
 concrete violation, APPROVE.
-
-### Soft signal
-
-A file past ~1000 lines or a function that no longer fits on a screen is a
-smell worth flagging for decomposition, weighed against the change's scope —
-not an automatic block.
-
-### Tone
-
-Be direct and specific. Every blocking point names the location, the rule it
-violates, and the concrete change that clears it. No vague disapproval, no
-padding.
