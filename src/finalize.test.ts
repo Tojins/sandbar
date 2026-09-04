@@ -54,6 +54,8 @@ type Script = {
   forceDeleteError?: string;
   labelEditOk?: boolean;
   labelEditError?: string;
+  addLabelEditOk?: boolean;
+  addLabelEditError?: string;
   issueState?: "OPEN" | "CLOSED";
   containedInOrigin?: boolean;
   reclaim?: IssueCloneReclaim;
@@ -112,6 +114,12 @@ function makeAdapter(
     },
     async editLabels(n, remove, add) {
       calls.labelEdits.push({ n, remove, add });
+      if (add.length > 0 && script.addLabelEditOk === false) {
+        return {
+          ok: false,
+          error: script.addLabelEditError ?? "'needs-review' not found",
+        };
+      }
       if (script.labelEditOk === false) {
         return { ok: false, error: script.labelEditError ?? "'agent-stuck' not found" };
       }
@@ -247,6 +255,7 @@ describe("comment templates", () => {
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("sandbar/chunk-42-alpha");
     expect(body).toContain("contained by the chunk branch");
+    expect(body).toContain("Re-apply `ready-for-agent`");
     expect(body).not.toMatch(/#\d/);
   });
 });
@@ -313,7 +322,8 @@ describe("finalizeOne", () => {
     expect(action).toEqual({ kind: "deleted-local" });
     expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_REVIEW_LABEL] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [] },
+      { n: 45, remove: [], add: [NEEDS_REVIEW_LABEL] },
     ]);
     expect(calls.deletes).toEqual([i.branch]);
     // The branch is on origin under the chunk's name, so it is never pushed
@@ -341,7 +351,7 @@ describe("finalizeOne", () => {
     expect(calls.forceDeletes).toEqual(["sandbar/issue-45-t-45"]);
   });
 
-  it("chunk-landed with a failing display-label flip still deletes the branch", async () => {
+  it("chunk-landed with a failing queue-label flip halts before comment and deletion", async () => {
     const { adapter, calls } = makeAdapter({
       labelEditOk: false,
       labelEditError: "label not found",
@@ -352,13 +362,26 @@ describe("finalizeOne", () => {
         adapter,
         LABELS,
       ),
-    ).resolves.toEqual({ kind: "deleted-local" });
-    expect(calls.deletes).toEqual(["sandbar/issue-45-t-45"]);
-    // The label is optional, but the comment remains the issue's durable route
-    // to the branch a human must review.
-    expect(calls.comments).toHaveLength(1);
-    expect(calls.comments[0]!.body).toContain("sandbar/chunk-45-x");
-    expect(calls.comments[0]!.body).not.toContain(NEEDS_REVIEW_LABEL);
+    ).rejects.toThrow(/Could not move chunk member #45 into review/);
+    expect(calls.deletes).toEqual([]);
+    expect(calls.comments).toEqual([]);
+  });
+
+  it("chunk-landed with a missing display label still comments and cleans up", async () => {
+    const { adapter, calls } = makeAdapter({ addLabelEditOk: false });
+    const i = issue(45);
+
+    await expect(finalizeOne(
+      { kind: "chunk-landed", issue: i, chunkBranch: "sandbar/chunk-45-x" },
+      adapter,
+      LABELS,
+    )).resolves.toEqual({ kind: "deleted-local" });
+    expect(calls.comments[0]?.body).toContain("sandbar/chunk-45-x");
+    expect(calls.deletes).toEqual([i.branch]);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [] },
+      { n: 45, remove: [], add: [NEEDS_REVIEW_LABEL] },
+    ]);
   });
 
   it("chunk-landed on an issue a human closed mid-run: still records and cleans up", async () => {
@@ -374,7 +397,7 @@ describe("finalizeOne", () => {
 
     expect(action).toEqual({ kind: "deleted-local" });
     expect(calls.stateChecks).toEqual([]);
-    expect(calls.labelEdits).toHaveLength(1);
+    expect(calls.labelEdits).toHaveLength(2);
   });
 
   it("merge-conflict: removes worktree, pushes branch + adds ready-for-human (merger already commented + dropped ready-for-agent)", async () => {

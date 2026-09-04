@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { selectLandRequests } from "./chunk-land.js";
 import {
   buildPlan,
   fetchCandidates,
@@ -206,7 +207,7 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
   });
 });
 
-describe("buildPlan loads git-derived members into the candidate graph (#93)", () => {
+describe("buildPlan loads git-derived members into the candidate graph (#93, #94)", () => {
   let shimBin: string;
   let repoDir: string;
   let originalPath: string | undefined;
@@ -227,9 +228,20 @@ describe("buildPlan loads git-derived members into the candidate graph (#93)", (
     execFileSync("git", ["update-ref", "refs/remotes/origin/main", "HEAD~1"], { cwd: repoDir });
     await writeFile(join(shimBin, "gh"), [
       "#!/bin/sh",
-      'case "$1 $2" in',
-      '  "issue list") printf "[]" ;;',
-      '  "api graphql") printf \'{"data":{"repository":{"i60":{"number":60,"title":"Root","body":"","state":"CLOSED","labels":{"nodes":[]}}}}}\' ;;',
+      'if [ "$1 $2" = "issue list" ]; then printf "[]"; exit 0; fi',
+      'query=""',
+      "while [ $# -gt 0 ]; do",
+      '  case "$1" in',
+      '    -f) case "$2" in query=*) query=${2#query=} ;; esac; shift 2 ;;',
+      "    *) shift ;;",
+      "  esac",
+      "done",
+      'case "$query" in',
+      '  *"number title body labels(first: 100)"*)',
+      '    printf \'{"data":{"repository":{"i60":{"number":60,"title":"Root","body":"","state":"OPEN","labels":{"nodes":[]}}}}}\' ;;',
+      '  *"state labels(first: 100)"*)',
+      '    printf \'{"data":{"repository":{"i60":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]}}}}}\' ;;',
+      "  *) exit 64 ;;",
       "esac",
     ].join("\n") + "\n", { mode: 0o755 });
     originalPath = process.env["PATH"];
@@ -243,10 +255,16 @@ describe("buildPlan loads git-derived members into the candidate graph (#93)", (
     await rm(repoDir, { recursive: true, force: true });
   });
 
-  it("reports a member found only through origin chunk history", async () => {
+  it("requeues a git-derived member from authoritative labels onto its chunk", async () => {
     const result = await buildPlan(CONFIGURED, { repoDir, defaultLane: "review" });
-    expect(result.plan).toEqual([]);
+    expect(result.plan.map((p) => p.id)).toEqual(["60"]);
+    expect(result.plan[0]?.chunk).not.toBeNull();
     expect(result.landedChunks[0]?.members).toEqual([{ number: 60, title: "Root" }]);
     expect(result.landedChunks[0]?.branch).toBe("sandbar/chunk-60-root");
+    const [landing] = selectLandRequests(
+      [{ number: 7, headRefName: "sandbar/chunk-60-root", title: "Root" }],
+      result.landedChunks,
+    );
+    expect(landing?.rework).toEqual([{ number: 60, title: "Root" }]);
   });
 });

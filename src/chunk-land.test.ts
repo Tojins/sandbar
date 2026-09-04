@@ -94,6 +94,7 @@ describe("selectLandRequests (#64)", () => {
           { number: 43, title: "beta" },
           { number: 42, title: "alpha" },
         ],
+        rework: [],
         pullRequest: 9,
       },
     ]);
@@ -110,6 +111,7 @@ describe("selectLandRequests (#64)", () => {
       title: "Sandbar chunk #42: alpha",
       members: [],
       closeOrder: [],
+      rework: [],
       pullRequest: 9,
     });
   });
@@ -153,6 +155,7 @@ describe("selectReconciliations (#64)", () => {
         title: "alpha",
         members: [{ number: 42, title: "alpha" }],
         closeOrder: [{ number: 42, title: "alpha" }],
+        rework: [],
         pullRequest: 9,
       },
     ]);
@@ -500,11 +503,26 @@ describe("the prose (#64)", () => {
     const body = CHUNK_LAND_DEFERRED_PR_COMMENT({
       chunkBranch: "sandbar/chunk-42-alpha",
       sourceBranch: "main",
+      reason: "arrived",
       landedNow: [{ number: 43, title: "beta" }],
     });
     expect(body).toContain("#43 — beta");
     expect(body).toContain(`\`${LAND_LABEL}\` label is untouched`);
     expect(body).not.toMatch(/has been removed/);
+  });
+
+  it("says queued rework must leave the agent queue before landing resumes", () => {
+    const body = CHUNK_LAND_DEFERRED_PR_COMMENT({
+      chunkBranch: "sandbar/chunk-42-alpha",
+      sourceBranch: "main",
+      reason: "rework",
+      landedNow: [{ number: 42, title: "alpha" }],
+    });
+    expect(body).toContain("#42 — alpha");
+    expect(body).toContain("queued for rework");
+    expect(body).toContain("leave the `ready-for-agent` queue");
+    expect(body).not.toContain("description above now lists");
+    expect(body).not.toContain("next cycle");
   });
 
   it("says the land label was removed when the merge was abandoned", () => {

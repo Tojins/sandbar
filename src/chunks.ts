@@ -270,6 +270,8 @@ export type LandedChunk = {
   // chunk of its own on a branch origin has never had, while the branch it
   // really is on matches nothing and is deleted out from under it.
   readonly closeOrder: readonly ChunkMember[];
+  // Members explicitly put back in the authoritative agent queue for rework.
+  readonly rework: readonly ChunkMember[];
   // The landed members that no OTHER landed member is blocked by — the tips of
   // what the branch carries, ascending. Non-empty, and a subset of `members`:
   // it is what a NEW member of the chunk declares under `## Blocked by`
@@ -458,6 +460,7 @@ export function landedChunksOf(
   chunks: readonly Chunk[],
   issues: readonly ChunkIssue[],
   landed: ReadonlySet<number>,
+  rework: ReadonlySet<number> = new Set(),
 ): readonly LandedChunk[] {
   const byNumber = new Map(issues.map((i) => [i.number, i] as const));
   const asMember = (n: number): ChunkMember => ({
@@ -491,6 +494,7 @@ export function landedChunksOf(
       title: byNumber.get(chunk.root)?.title ?? "",
       members: members.map(asMember),
       closeOrder: closeOrderOf(members, blockersOf).map(asMember),
+      rework: members.filter((m) => rework.has(m)).map(asMember),
       tips: (tips.length > 0 ? tips : members).map(asMember),
     });
   }

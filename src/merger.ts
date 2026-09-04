@@ -1663,6 +1663,7 @@ export async function runMergerWithAdapter(
     request: ChunkLandTarget,
     landedNow: readonly ChunkMember[],
     sourceBranch: string,
+    reason: "arrived" | "rework",
   ): Promise<void> => {
     if (request.pullRequest > 0) {
       await adapter.commentOnPullRequest(
@@ -1671,12 +1672,14 @@ export async function runMergerWithAdapter(
           chunkBranch: request.branch,
           sourceBranch,
           landedNow,
+          reason,
         }),
       );
     }
     deferredChunks.push({ target: request, landedNow });
     await emit(
-      `chunk ${request.branch}: not landed (grew this cycle: ` +
+      `chunk ${request.branch}: not landed (` +
+        (reason === "rework" ? "queued for rework: " : "grew this cycle: ") +
         `${landedNow.map((m) => `#${m.number}`).join(", ")}); \`${LAND_LABEL}\` kept`,
     );
   };
@@ -1715,6 +1718,10 @@ export async function runMergerWithAdapter(
         sourceBranch: chunkLanding.sourceBranch,
       };
       try {
+        if (request.rework.length > 0) {
+          await deferChunk(request, request.rework, pending.sourceBranch, "rework");
+          continue;
+        }
         // Grew under the request, in this very cycle (#61's layer landing, one
         // phase up). The plan read this chunk's members BEFORE phase 2, so the
         // wrap-up would close what was on the branch then and delete the branch
@@ -1723,7 +1730,7 @@ export async function runMergerWithAdapter(
         // Nothing is merged and the label is left alone.
         const landedNow = grewThisCycle.get(request.branch);
         if (landedNow) {
-          await deferChunk(request, landedNow, pending.sourceBranch);
+          await deferChunk(request, landedNow, pending.sourceBranch, "arrived");
           continue;
         }
         const found = await adapter.fetchChunkRef(request.branch);

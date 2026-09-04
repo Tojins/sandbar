@@ -349,6 +349,7 @@ describe("landedChunksOf (#63, #64)", () => {
           { number: 43, title: "Second" },
           { number: 42, title: "First" },
         ],
+        rework: [],
         tips: [{ number: 43, title: "Second" }],
       },
     ]);
