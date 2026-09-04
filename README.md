@@ -351,7 +351,7 @@ hand. Set `maxReviewRounds` **above** `maxImplAttempts` and you get
 `NEEDS-HUMAN` (`reviewer-blocked`) instead, with the review no longer the
 headline.
 
-Both budgets are per-issue and per **sandbox cycle**, not per run: a HARD-ERROR
+Both budgets are per issue's **inner loop**, not per run: a HARD-ERROR
 (an infrastructure failure, never a verdict about the code) retries the issue in
 a fresh sandbox up to two further times, and each retry starts both counters at
 zero. One issue in one run can therefore cost up to three full budgets. Neither
@@ -380,19 +380,19 @@ mergeMode: {
 }
 ```
 
-Per cycle, once the local merges + gate are green, sandbar force-pushes the
+Per landing, once the local merges + gate are green, sandbar force-pushes the
 merge result to `integrationBranch`, polls that sha's check runs, and only a
 green verdict earns the fast-forward onto `sourceBranch`. A red forge goes to
 the resolve loop with the failing jobs' logs; checks that never conclude park
-the cycle. Sandbar never lands on an unknown verdict — including a check that
+the landing batch. Sandbar never lands on an unknown verdict — including a check that
 nobody named and that hasn't finished yet, which holds the verdict up exactly
-like a required one. Cost is one CI run per cycle when it passes first time and
+like a required one. Cost is one CI run per landing when it passes first time and
 at most three otherwise (a re-merge after `sourceBranch` moves spends a round
 too, with no agent involved) — not one per implementer attempt.
 
 **`requiredChecks` is mandatory.** Name the check runs (as the forge reports
 them) that must exist *and* pass. It is the floor, not a filter: a check you
-did not name still sinks the cycle if it fails. Without it, sandbar cannot tell
+did not name still sinks the landing if it fails. Without it, sandbar cannot tell
 a check that hasn't started from one that will never run — which is exactly the
 mis-triggered-workflow case verified mode exists to catch — so resolving the
 config fails rather than quietly weakening to "nothing was failing when I
@@ -400,7 +400,7 @@ looked".
 
 Some failures are deliberately **fatal** rather than parked, because they are
 properties of the repo rather than of the code under test, and would otherwise
-recur every cycle while converting the backlog into `agent-stuck`:
+recur across issue terminals while converting the backlog into `agent-stuck`:
 
 - the forge reporting no checks at all for the pushed sha (widen
   `noChecksGraceMs` if your forge is merely slow to create runs);
@@ -415,14 +415,14 @@ recur every cycle while converting the backlog into `agent-stuck`:
 - an unreachable or unreadable forge across several consecutive polls.
 
 All of them halt the run loudly, after finalising the tracker state already
-applied in that cycle. If `sourceBranch` genuinely moves during the CI wait, the
+applied in that landing. If `sourceBranch` genuinely moves during the CI wait, the
 new tip is merged in and the result is re-verified — a green verdict is never
 carried over to a result the forge has not seen.
 
 `integrationBranch` must start with `sandbar/`. It is a scratch ref, force-pushed
 on every verification round, so it has to live in a namespace sandbar owns —
 pointing it at a branch anyone else uses would destroy that branch on the first
-cycle. Sandbar never deletes it; it simply gets overwritten each cycle. The other
+landing. Sandbar never deletes it; it simply gets overwritten each verification round. The other
 values are validated at startup too: every `*Ms` knob must be positive and
 finite, `pollIntervalMs` may not exceed `checkTimeoutMs`, and `noChecksGraceMs`
 must be less than it (otherwise the timeout always fires first and the no-checks
@@ -522,20 +522,18 @@ dependency; relabelling the issue alone will not do it.
 > branch until they land it. A landed member keeps its issue open; a dedicated
 > `sandbar/member-<n>` ref is pushed atomically with the chunk branch, and containment by
 > `origin/sandbar/chunk-*` is what takes it out of the queue and
-> unblocks whatever was queued behind it, so a chunk grows one *layer* per
-> cycle and the members worked in any one cycle are always siblings. Sandbar
+> unblocks whatever was queued behind it, so a chunk can keep growing as pool
+> slots free and later recomputes admit more members. Sandbar
 > adds `needs-review` only as a display cue for humans.
 >
 > **You land a chunk by putting the `land` label on its pull request.** The next
 > run merges the chunk branch into your source branch — in the same pass, under
-> the same gate and the same forge verification as that cycle's ordinary work —
+> the same gate and the same forge verification as the queued DONE work —
 > pushes it, closes every issue whose commits are on the branch, drops their
 > `needs-review` labels, closes the pull request and deletes the branch. Approving
 > is deliberately *not* the trigger, so approve-now-land-later works: nothing
-> moves until the label is on. If that cycle has just landed another member on
-> the branch, the landing waits for the next one — what reaches your source
-> branch is what the pull request carried when you labelled it, and sandbar says
-> so on the PR.
+> moves until the label is on. Landing is deferred while any ongoing issue
+> targets that chunk; the request stays queued until those issues land or park.
 >
 > If you mark the PR ready and merge it by hand instead, sandbar recovers — a
 > later run finds the branch already contained in your source branch and does
@@ -551,7 +549,7 @@ dependency; relabelling the issue alone will not do it.
 >
 > **Requesting changes on that pull request is how you send work back.** Review
 > it the way you review anything — threads on the diff, a review body, submit as
-> *Request changes* — and at the top of its next cycle sandbar files one issue
+> *Request changes* — and at the next full recompute sandbar files one issue
 > per changes-requested review: `ready-for-agent`, blocked by the chunk's tip
 > members, bodied with your unresolved threads. It joins the chunk by the same
 > derivation as everything else, so it is worked from the chunk's tip and its
@@ -565,7 +563,7 @@ dependency; relabelling the issue alone will not do it.
 > nothing sandbar does depends on your having done it. And it files **one issue
 > per review**, recorded by a comment on the pull request naming the issue and
 > the review it came from; that comment is the whole of the bookkeeping, so
-> don't delete it (a review whose comment is gone is filed again next cycle).
+> don't delete it (a review whose comment is gone is filed again at a later recompute).
 > A review you dismiss is never filed at all, and a review whose threads you
 > resolve before sandbar next runs is dropped if it had no body of its own.
 >
@@ -581,7 +579,7 @@ dependency; relabelling the issue alone will not do it.
 > chunk — its blockers straddle two different chunks, it sits downstream of an
 > issue in that state, or it is inside a `## Blocked by` cycle. There is nothing
 > for it to land on, so it stays in the queue, `ready-for-agent` intact, and is
-> reported as held at the top of each cycle.
+> reported as held at each recompute.
 
 ### `images` — what sandbar builds
 
@@ -734,7 +732,7 @@ Two things differ from the gate's version:
   is where verdicts come from;
 - a build that fails leaves the sandbox on the **declared** tag, with a line on
   the console and in the run log, rather than refusing to start. The sandbox is
-  where the fix gets written and the branch outlives the cycle, so a throw would
+  where the fix gets written and the branch outlives the attempt, so a throw would
   wedge the issue instead of failing it — every later sandbox for that branch,
   including the ones meant to repair it, would fail before the agent's first
   turn. The agent then works a commit behind its own branch, and can install
@@ -915,7 +913,7 @@ port is which in your own anchor docs, beside the credentials.
   decidable emptiness `servesWorktree` is checked for. `sleep infinity` plus
   nothing exec'd after it would advertise a service that does not exist.
 - **Cost.** At the default plan size, three issues run at once, so N `inSandbox`
-  containers means 3N extra containers per cycle. That is the price of the
+  containers means 3N extra containers per concurrently active issue. That is the price of the
   isolation.
 
 Note the sandbox siblings share the issue worktree with the gate and keep

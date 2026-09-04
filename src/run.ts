@@ -276,10 +276,9 @@ export type RunOptions = {
   readonly configPath?: string;
 };
 
-// The completed-cycle precedence table in one testable place (#109). The
-// fallback is lazy because applyCycle mutates run accounting; quota must not
-// spend that accounting merely to prove it outranks relaunch.
-export function selectCompletedCycleExit(args: {
+// Terminal precedence in one testable place (#109). The fallback is lazy so a
+// quota result cannot be displaced by a lower-priority run-state exit.
+export function selectTerminalExit(args: {
   readonly mergerQuota: AgentQuotaError | null;
   readonly haltReasons: readonly string[];
   readonly terminals: readonly Terminal[];
@@ -974,9 +973,8 @@ export async function run(
 
       const budget = remainingBudget(runState);
       if (budget === 0 && pool.isQuiescent) {
-        // The same `budgetExit` applyCycle returns, rather than the second
-        // hand-written copy of its reason this used to print in different
-        // words at the top of a cycle (#70).
+        // The same constructor used after landing, so the two budget checks
+        // cannot drift in their operator-facing reason (#70).
         terminalExit = await announceExit(
           budgetExit(runState.issuesAttempted, runState.maxTotalIssues),
         );
@@ -1829,7 +1827,7 @@ export async function run(
 
       if (haltReasons.length > 0) halt = true;
 
-      const selectedExit = selectCompletedCycleExit({
+      const selectedExit = selectTerminalExit({
         mergerQuota,
         haltReasons: halt ? haltReasons : [],
         terminals: outcomes.map((outcome) => outcome.terminal),
@@ -1865,8 +1863,7 @@ export async function run(
         : selectedExit;
       if (cycleExit) {
         // announceExit owns both stdout and the run record. Quota is selected
-        // before the lazy applyCycle fallback, so landed work cannot turn it
-        // into relaunch and cannot spend another cycle's accounting.
+        // before the lazy fallback, so landed work cannot displace it.
         terminalExit = await announceExit(cycleExit);
         break;
       }

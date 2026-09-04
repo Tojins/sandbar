@@ -284,7 +284,7 @@ from that state and provider or landing outcomes.
   or change the derived branch name; dependents-first still leaves the safest
   retry set if refs are repaired or changed by hand. The chunk branch
   is deleted only once every close worked — a kept branch is what makes
-  `src/chunk-reconcile.ts` retry the remainder next cycle, and therefore what
+  `src/chunk-reconcile.ts` retry the remainder at the next recompute, and therefore what
   `run.ts` halts on (`chunkResidue` splits a wrap-up's leftovers on exactly
   that question, `unnamed` included; only the merge-phase report halts, since
   the reconciler IS the retry). The reconciler is also the answer to a
@@ -488,7 +488,7 @@ from that state and provider or landing outcomes.
   log paths. `src/resolve-loop.ts`'s header owns the argument.
 - **The version collision is settled before the agent is asked (#68).** Every
   commit here moves `version` in `package.json` and its two mirrors in
-  `package-lock.json` (AGENTS.md), so two branches landing in one cycle conflict
+  `package-lock.json` (AGENTS.md), so two branches in one landing batch conflict
   there BY CONSTRUCTION. `resolveVersionCollision` in `src/merger.ts` resolves
   it mechanically ahead of `runResolveLoop`, at `max(ours, theirs)` bumped once
   — a value neither side carries — and commits the merge itself when nothing
