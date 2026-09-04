@@ -129,11 +129,15 @@ import {
 
 export const FAILURE_TAIL_LINES = 200;
 
-export function silentAttemptIsInfra(
+export function requireImplementerAttemptEvidence(
   run: Pick<agentSandbox.SandboxRunResult, "silent" | "commits">,
   nudge: Pick<agentSandbox.SandboxRunResult, "silent" | "commits">,
-): boolean {
-  return run.silent && nudge.silent && run.commits.length + nudge.commits.length === 0;
+): void {
+  if (run.silent && nudge.silent && run.commits.length + nudge.commits.length === 0) {
+    throw new AgentError(
+      "Implementer produced no speech or commits across the initial run and promise nudge.",
+    );
+  }
 }
 
 export function combinePromiseNudge(
@@ -1046,11 +1050,11 @@ async function runImplementer(
     // this attempt committed nothing, there is no evidence that the provider
     // ran successfully. Commits are independent evidence and deliberately keep
     // Codex's tool-call-only turn on the ordinary NO-SIGNAL path (#116).
-    if (silentAttemptIsInfra(run, nudge)) {
+    try {
+      requireImplementerAttemptEvidence(run, nudge);
+    } catch (err) {
       throw withPartialOutput(
-        new AgentError(
-          "Implementer produced no speech or commits across the initial run and promise nudge.",
-        ),
+        err,
         combined.stdout,
         attemptUsage,
         attemptToolCalls,

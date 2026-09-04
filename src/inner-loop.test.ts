@@ -11,7 +11,7 @@ import {
   runGateAndReviewer,
   runInnerLoop,
   runSandboxAndPublish,
-  silentAttemptIsInfra,
+  requireImplementerAttemptEvidence,
   type ReviewerSnapshot,
 } from "./inner-loop.js";
 import { qualityReviewContext } from "./prompt.js";
@@ -32,15 +32,19 @@ describe("silent implementer attempt policy (#116)", () => {
   });
 
   it("classes two silent zero-commit runs as infrastructure", () => {
-    expect(silentAttemptIsInfra(result(true), result(true))).toBe(true);
+    expect(() => requireImplementerAttemptEvidence(result(true), result(true))).toThrow(
+      "no speech or commits",
+    );
   });
 
   it("keeps a silent attempt with commit evidence on the ordinary path", () => {
-    expect(silentAttemptIsInfra(result(true, ["abc"]), result(true))).toBe(false);
+    expect(() =>
+      requireImplementerAttemptEvidence(result(true, ["abc"]), result(true)),
+    ).not.toThrow();
   });
 
   it("keeps a blip that speaks on the nudge on the ordinary path", () => {
-    expect(silentAttemptIsInfra(result(true), result(false))).toBe(false);
+    expect(() => requireImplementerAttemptEvidence(result(true), result(false))).not.toThrow();
   });
 
   it("uses the same combined text for parsing and the transcript, and sums commits", () => {
