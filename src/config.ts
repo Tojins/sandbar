@@ -1827,6 +1827,13 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     "uiCheckAgent",
     config.uiCheckAgent ?? implementerAgent,
   );
+  // A model id follows the implementer only while the provider does too. Once
+  // the UI checker is routed elsewhere, its model must be named independently:
+  // an implementer model says nothing about another vendor's id space (#126).
+  const inheritedUiCheckModelId =
+    config.uiCheckAgent === undefined || uiCheckAgent === implementerAgent
+      ? config.implementerModelId
+      : undefined;
   const reviewerAgent = parseAgentProviderName("reviewerAgent", config.reviewerAgent);
   // Defaulted to the correctness pass's CLI rather than to "claude": one
   // reviewer vendor stays one field, and #121's split is opt-in (#72's
@@ -1841,7 +1848,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     assertRoleModelIdNamed(
       "uiCheck",
       uiCheckAgent,
-      config.uiCheckModelId ?? config.implementerModelId,
+      config.uiCheckModelId ?? inheritedUiCheckModelId,
       {
         agentField:
           config.uiCheckAgent === undefined ? "implementerAgent" : "uiCheckAgent",
@@ -1896,7 +1903,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     uiPrototypeCheck,
     uiCheckModelId:
       config.uiCheckModelId ??
-      config.implementerModelId ??
+      inheritedUiCheckModelId ??
       DEFAULT_IMPLEMENTER_MODEL_ID,
     reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
     reviewerQualityModelId:

@@ -323,10 +323,43 @@ describe("resolveConfig", () => {
     expect(() =>
       resolveConfig({
         ...minimal,
+        implementerModelId: "opus",
+        uiCheckAgent: "codex",
+      }),
+    ).toThrow(/config\.uiCheckAgent is "codex"[\s\S]*config\.uiCheckModelId/);
+    const backToClaude = resolveConfig({
+      ...minimal,
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+      uiCheckAgent: "claude",
+    });
+    expect(backToClaude.uiCheckModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
+    expect(() =>
+      resolveConfig({
+        ...minimal,
         uiPrototypeCheck: false,
         uiCheckAgent: "codex",
       }),
     ).not.toThrow();
+  });
+
+  it("inherits the implementer model only for a UI check on the same provider (#126)", () => {
+    const sameProvider = resolveConfig({
+      ...minimal,
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+      uiCheckAgent: "codex",
+    });
+    expect(sameProvider.uiCheckModelId).toBe("gpt-5.6-sol");
+
+    const splitProvider = resolveConfig({
+      ...minimal,
+      uiPrototypeCheck: false,
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+      uiCheckAgent: "claude",
+    });
+    expect(splitProvider.uiCheckModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
   });
 
   // #72 — the vendor knob beside the tiering one. Defaulting both to "claude"
