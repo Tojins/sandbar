@@ -28,6 +28,7 @@ export class ContinuousPool<T, R> {
 
   get activeCount(): number { return this.#active.size; }
   get ongoingCount(): number { return this.#ongoing.size; }
+  get hasCompleted(): boolean { return this.#completed.length > 0; }
   get hasPendingTerminals(): boolean { return this.#pendingTerminals.length > 0; }
   get isQuiescent(): boolean { return this.#active.size === 0 && this.#ongoing.size === 0; }
   get landings(): number { return this.#landings; }

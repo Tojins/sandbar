@@ -39,6 +39,7 @@ describe("continuous pool", () => {
     jobs[0]!.resolve("ten"); jobs[1]!.resolve("two");
     await Promise.resolve(); await Promise.resolve();
     await pool.waitForFreedSlot();
+    expect(pool.hasCompleted).toBe(false);
     expect(pool.admit([issue("8")], 10).issues.map((i) => i.id)).toEqual(["8"]);
     expect(pool.takeLandingBatch().map((event) => event.issue.id)).toEqual(["2", "10"]);
   });

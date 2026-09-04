@@ -1323,7 +1323,7 @@ export async function run(
       // only for the next freed slot; siblings remain live and the next full
       // plan is built immediately around them.
       let settled: ExecutionEvent[];
-      if (pool.hasPendingTerminals) {
+      if (pool.hasPendingTerminals && !pool.hasCompleted) {
         // The preceding slot-free event deliberately yielded back to the top
         // of the loop. Its full recompute and admissions have now happened, so
         // landing can run while the replenished pool keeps executing.
