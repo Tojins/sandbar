@@ -644,6 +644,22 @@ describe("buildArgv", () => {
     ).toEqual(["build", "-t", "t", "-f", "/worktree/docker/Dockerfile", "/worktree"]);
   });
 
+  it("preserves an absolute containerfile's default context", () => {
+    expect(
+      buildArgv(
+        { tag: "t", containerfile: "/etc/deploy/Containerfile" },
+        { root: "/worktree" },
+      ),
+    ).toEqual([
+      "build",
+      "-t",
+      "t",
+      "-f",
+      "/etc/deploy/Containerfile",
+      "/etc/deploy",
+    ]);
+  });
+
   it("builds with NO context when stdinContext is set", () => {
     // `-` is the whole point: a Containerfile that only pulls from a registry
     // needs no context, and tarring the repo up for it is pure latency.

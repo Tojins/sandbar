@@ -301,7 +301,8 @@ export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
     const containerfile = containerfilePath(image, opts?.root ?? "");
     const context = effectiveImageBuildContext(image);
     const root = opts?.root ?? "";
-    args.push("-f", containerfile, root ? join(root, context) : context || ".");
+    const contextPath = isAbsolute(context) || !root ? context || "." : join(root, context);
+    args.push("-f", containerfile, contextPath);
   }
   return args;
 }
