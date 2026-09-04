@@ -245,6 +245,28 @@ copyable config with every optional `RunConfig` field commented out at its
 default. Copy it beside your `package.json`, fill in the required placeholders,
 then uncomment only the settings this repository needs to change.
 
+### Continuous pool and launcher
+
+Sandbar keeps up to `maxParallelIssues` issue sandboxes in flight and replans
+whenever a slot becomes free. If a landing leaves the process quiescent but the
+new plan has more work, sandbar exits 75 (`EXIT_CODE_RELAUNCH`, exported from
+the package root) so the launcher can re-import the config before continuing.
+A launcher that drains the queue must loop **only** on 75 and propagate every
+other exit code:
+
+```sh
+while :; do
+  npx sandbar
+  code=$?
+  [ "$code" -eq 75 ] || exit "$code"
+done
+```
+
+Exit 2 (`stuck`) stops the series after six consecutive issue terminals or
+unchanged requested-landing deferrals without a landing. It bounds persistent
+failures such as a red source branch or misconfigured gate stack instead of
+letting them consume the whole issue budget.
+
 ### `images` — what sandbar builds
 
 By default sandbar builds one image: `sandboxImage`, from `./Containerfile`.
