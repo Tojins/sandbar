@@ -1975,6 +1975,7 @@ const sandboxGitSetup = async (
 // ---------------------------------------------------------------------------
 
 type CodexRolloutCursor =
+  | { readonly kind: "unknown" }
   | { readonly kind: "empty" }
   | { readonly kind: "existing"; readonly path: string; readonly bytes: number };
 
@@ -1983,7 +1984,7 @@ const shellLiteral = (value: string): string => `'${value.replaceAll("'", `'\\''
 const captureCodexRolloutCursor = async (
   handle: SandboxHandle,
   sandboxRepoDir: string,
-): Promise<CodexRolloutCursor | undefined> => {
+): Promise<CodexRolloutCursor> => {
   const result = await withTimeout(
       handle.exec(
         "d=${CODEX_HOME:-$HOME/.codex}/sessions; " +
@@ -1997,17 +1998,18 @@ const captureCodexRolloutCursor = async (
       ),
     ).then(
       (probe) => probe,
-      // Depth and rate-limit state are optional reports; a failed cursor read
-      // disables the post-run probe because it cannot delimit this invocation.
+      // A failed cursor read cannot delimit depth to this invocation. Keep the
+      // post-run probe alive for rate limits, whose verdict never required
+      // invocation scoping (#109, #124).
       () => undefined,
     );
-  if (result === undefined) return undefined;
+  if (result === undefined) return { kind: "unknown" };
   const [path, rawBytes] = result.stdout.split("\n");
   if (!path) return { kind: "empty" };
   const bytes = Number(rawBytes?.trim());
   return Number.isSafeInteger(bytes) && bytes >= 0
     ? { kind: "existing", path, bytes }
-    : undefined;
+    : { kind: "unknown" };
 };
 
 const invokeAgent = async (
@@ -2034,7 +2036,7 @@ const invokeAgent = async (
   // earlier invocation's larger depth or stale rate-limit evidence (#124).
   const rolloutCursor = agent.name === "codex"
     ? await captureCodexRolloutCursor(handle, sandboxRepoDir)
-    : undefined;
+    : { kind: "unknown" } as const;
 
   return new Promise((resolveRun, rejectRun) => {
     const speech = createAgentSpeechAccumulator();
@@ -2173,13 +2175,13 @@ const invokeAgent = async (
         // The agent process has ended. Its idle/grace clock must not govern the
         // optional post-run evidence read below (#109).
         clearTimer();
-        if (agent.name === "codex" && rolloutCursor !== undefined) {
+        if (agent.name === "codex") {
           // The rollout is inside this still-live sandbox. Missing files or
-          // malformed lines or an exec-level probe failure deliberately yield
-          // no measurement and preserve the invocation's old classification
-          // (#109). This register is evidence only and cannot trip completion.
+          // malformed lines or a post-run exec failure preserve the invocation's
+          // old classification. An unknown cursor omits depth while retaining
+          // rate-limit evidence (#109, #124).
           try {
-            const readNewRecords = rolloutCursor.kind === "empty"
+            const readNewRecords = rolloutCursor.kind === "empty" || rolloutCursor.kind === "unknown"
               ? "test -n \"$f\" && tail -n 200 \"$f\" || true"
               : `if test \"$f\" = ${shellLiteral(rolloutCursor.path)}; then ` +
                 `tail -c +${rolloutCursor.bytes + 1} \"$f\" | tail -n 200; ` +
@@ -2197,7 +2199,10 @@ const invokeAgent = async (
               ),
             );
             for (const line of rollout.stdout.split("\n")) {
-              speech.ingest(parseCodexRolloutLine(line));
+              const events = parseCodexRolloutLine(line);
+              speech.ingest(rolloutCursor.kind === "unknown"
+                ? events.filter((event) => event.type !== "context_depth")
+                : events);
             }
           } catch {
             // The agent result remains authoritative when its optional side

@@ -979,7 +979,7 @@ describe("registerShutdown", () => {
 // for, and "the run rejected" is true whether or not it did.
 function makeLocalProvider(
   live: Set<ChildProcess> = new Set(),
-  rolloutProbe: "run" | "reject" | "hang" = "run",
+  rolloutProbe: "run" | "reject" | "reject-first" | "hang" = "run",
 ): SandboxProvider & {
   capturedEnv?: Record<string, string>;
   capturedMounts?: readonly Mount[];
@@ -993,6 +993,7 @@ function makeLocalProvider(
     env: {},
     sandboxHomedir: "/home/agent",
     create: async (opts: ProviderCreateOptions) => {
+      let rolloutProbeCalls = 0;
       provider.capturedEnv = opts.env;
       provider.capturedMounts = opts.mounts;
       // sandboxRepoDir resolves to this handle.worktreePath; point it at the
@@ -1007,7 +1008,9 @@ function makeLocalProvider(
         exec: (command, execOpts) =>
           new Promise((resolveExec, rejectExec) => {
             if (command.includes("/sessions;")) {
-              if (rolloutProbe === "reject") {
+              rolloutProbeCalls += 1;
+              if (rolloutProbe === "reject" ||
+                  (rolloutProbe === "reject-first" && rolloutProbeCalls === 1)) {
                 rejectExec(new Error("probe exec failed"));
                 return;
               }
@@ -1334,7 +1337,7 @@ describe("createSandbox integration (local provider)", () => {
     } finally {
       await sandbox.close();
     }
-  }, 15_000);
+  }, 25_000);
 
   it.each(["missing", "malformed"] as const)(
     "preserves Codex's existing failure classification when its rollout is %s",
@@ -1402,6 +1405,48 @@ describe("createSandbox integration (local provider)", () => {
         provider: "codex",
         measurement: { status: "rejected", window: "seven_day", resetsAt: 789 },
       });
+    } finally {
+      await sandbox.close();
+      if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = oldCodexHome;
+    }
+  });
+
+  it("keeps quota classification when the pre-invocation cursor probe fails", async () => {
+    const branch = "sandbar/issue-124-codex-cursor-failure";
+    await git(["branch", branch], dir);
+    const codexHome = await mkdtemp(join(tmpdir(), "asb-codex-home-"));
+    cleanups.push(codexHome);
+    const oldCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    const rollout = join(codexHome, "sessions", "2026", "09", "04", "rollout-test.jsonl");
+    await mkdir(dirname(rollout), { recursive: true });
+    const rejectedLine = JSON.stringify({
+      type: "event_msg", payload: {
+        type: "token_count",
+        info: { last_token_usage: { input_tokens: 91_000 } },
+        rate_limits: {
+          rate_limit_reached_type: "seven_day",
+          primary: { rate_limit_type: "seven_day", used_percent: 100 },
+        },
+      },
+    });
+    await writeFile(rollout, "old invocation\n");
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(new Set(), "reject-first"), layout: layoutFor(dir),
+    });
+    try {
+      const err = await sandbox.run({
+        agent: scriptedCodexAgent(
+          `printf '%s\\n' '${rejectedLine}' >> '${rollout}'; exit 1`,
+        ),
+        prompt: "go", completionSignal: [],
+      }).then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(AgentQuotaError);
+      expect(err).toMatchObject({
+        measurement: { status: "rejected", window: "seven_day" },
+      });
+      expect(agentPartialUsage(err).peakContext).toBeUndefined();
     } finally {
       await sandbox.close();
       if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
