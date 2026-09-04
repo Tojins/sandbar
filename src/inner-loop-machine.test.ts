@@ -890,7 +890,7 @@ describe("inner-loop-machine — interleaved budgets", () => {
     });
   });
 
-  it("a correctness harness failure resets quality after its approval", () => {
+  it("a correctness harness failure preserves the quality streak", () => {
     let state = initialState({ ...defaultOpts, maxQualityRounds: 2 });
     state = step(state, impl(complete)).state;
     state = step(state, judged(gate1Red("red"), approved("discarded"))).state;
@@ -900,8 +900,34 @@ describe("inner-loop-machine — interleaved budgets", () => {
       state,
       judged(gate1Ok, harnessFailed("correctness failed", "correctness")),
     );
-    expect(failed.state.qualityFailures).toBe(0);
+    expect(failed.state.qualityFailures).toBe(1);
     expect(failed.state.correctnessFailures).toBe(0);
+  });
+
+  it("alternating correctness harness and quality failures still exhausts quality", () => {
+    const script: LoopEvent[] = [];
+    for (let failure = 1; failure <= DEFAULT_MAX_QUALITY_ROUNDS; failure++) {
+      script.push(
+        impl(complete),
+        judged(
+          gate1Ok,
+          harnessFailed("correctness unavailable", "correctness"),
+        ),
+        impl(complete),
+        judged(gate1Ok, qualityChanges(`quality failure ${failure}`)),
+      );
+    }
+
+    const { actions, verdict } = drive(defaultOpts, script);
+    expect(
+      actions.filter((action) => action.kind === "run-implementer"),
+    ).toHaveLength(DEFAULT_MAX_QUALITY_ROUNDS * 2);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN-REVIEW",
+      cause: "quality-budget-exhausted",
+      roundsUsed: DEFAULT_MAX_QUALITY_ROUNDS,
+      latestReviewerProse: `quality failure ${DEFAULT_MAX_QUALITY_ROUNDS}`,
+    });
   });
 });
 

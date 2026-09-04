@@ -8,14 +8,17 @@
 // failure is any attempt that does not end in quality APPROVED: a quality
 // rejection, red gate (whose concurrent review is discarded), NO-SIGNAL,
 // dirty tree, or off-branch HEAD. `qualityFailures` is consecutive and resets
-// to zero when quality approves. `correctnessFailures` counts correctness
-// rejections only; quality failures neither spend nor reset it. There is no
-// implementer-attempt budget: `attempt` is a sequence number, not a ceiling.
+// to zero when quality approval leads to a completed reviewer verdict.
+// `correctnessFailures` counts correctness rejections only; quality failures
+// neither spend nor reset it. There is no implementer-attempt budget: `attempt`
+// is a sequence number, not a ceiling.
 //
 // Reviewer harness failure keeps #41's separate rule: it charges neither
-// budget, and a second consecutive failure terminates. A correctness-harness
-// failure follows a quality approval, so it resets the quality streak; a
-// quality-harness failure leaves the prior streak untouched.
+// budget, leaves both failure counters untouched, and a second consecutive
+// failure terminates. In particular, a correctness-harness failure does not
+// reset the quality streak: the aggregate attempt ended in harness failure,
+// not an approval, and resetting it permits alternating failures to run
+// forever now that there is no implementer-attempt ceiling.
 //
 // A COMPLETE claim is routed on THREE inputs, not one: the promise token, a
 // clean worktree (#24 D1), and HEAD still being the issue branch (#27). The
@@ -659,7 +662,7 @@ function onGateAndReviewerResult(
   }
   return reviewer.kind === "reviewer-result"
     ? onReviewerResult(state, reviewer)
-    : onReviewerHarnessFailed(state, reviewer.pass, reviewer.detail);
+    : onReviewerHarnessFailed(state, reviewer.detail);
 }
 
 function onReviewerResult(
@@ -724,11 +727,8 @@ function onReviewerResult(
 // invocation retries twice.
 function onReviewerHarnessFailed(
   state: LoopState,
-  pass: "quality" | "correctness",
   detail: string,
 ): StepResult {
-  const unchargedState =
-    pass === "correctness" ? { ...state, qualityFailures: 0 } : state;
   const exhausted: Verdict = {
     type: "NEEDS-HUMAN",
     cause: "reviewer-harness-failed",
@@ -739,12 +739,12 @@ function onReviewerHarnessFailed(
     qualityBudgetExhausted: null,
     strandedHead: null,
   };
-  if (state.lastReviewerHarnessFailed) return terminate(unchargedState, exhausted);
+  if (state.lastReviewerHarnessFailed) return terminate(state, exhausted);
   return advanceAttempt(
     // Gate-1 was green this attempt, so there is no gate trace to carry: an
     // older red would be re-shown to the implementer as if it were this
     // attempt's, the same way onReviewerResult clears it.
-    { ...unchargedState, lastFailureTrace: "" },
+    { ...state, lastFailureTrace: "" },
     {
       failureTrace: "",
       extraReprompt: reviewerHarnessFailedReprompt(),

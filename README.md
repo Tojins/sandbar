@@ -271,13 +271,15 @@ letting them consume the whole issue budget.
 
 `maxQualityRounds` (default 4) bounds consecutive attempts that do not end in
 a quality approval: quality `CHANGES-REQUESTED`, a red gate, NO-SIGNAL, a dirty
-tree, or HEAD off the issue branch. A quality approval resets that count.
+tree, or HEAD off the issue branch. A completed reviewer verdict following a
+quality approval resets that count.
 
 `maxReviewRounds` (default 4) separately bounds correctness rejections. A
 quality rejection never spends it. Reviewer harness failures spend neither
-budget and retain their dedicated two-consecutive-failures stop rule. There is
-no total implementer-attempt ceiling: each attempt is charged only to the pass
-or pre-review condition that rejected it.
+budget, leave both streaks unchanged, and retain their dedicated
+two-consecutive-failures stop rule. There is no total implementer-attempt
+ceiling: each attempt is charged only to the pass or pre-review condition that
+rejected it.
 
 ### `images` — what sandbar builds
 

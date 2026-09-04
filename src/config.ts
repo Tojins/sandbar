@@ -641,9 +641,10 @@ export type RunConfig = {
 
   // Independent consecutive-failure budgets (#129). `maxQualityRounds` counts
   // attempts that do not end in quality APPROVED: a quality rejection, red
-  // gate, NO-SIGNAL, dirty tree, or off-branch HEAD. It resets on quality
-  // approval. `maxReviewRounds` counts correctness rejections only. Reviewer
-  // harness failures spend neither; their existing two-consecutive rule (#41)
+  // gate, NO-SIGNAL, dirty tree, or off-branch HEAD. It resets when quality
+  // approval leads to a completed reviewer verdict. `maxReviewRounds` counts
+  // correctness rejections only. Reviewer harness failures spend neither and
+  // leave both counters unchanged; their existing two-consecutive rule (#41)
   // remains the bound. There is deliberately no total attempt ceiling.
   readonly maxQualityRounds?: number;
   readonly maxReviewRounds?: number;
@@ -808,8 +809,8 @@ export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
 export const DEFAULT_ADR_DIR = "docs/adr";
 // Four consecutive non-approving quality attempts are enough to establish a
 // circling cheap gate while still tolerating transient gate and standards
-// churn. Quality approval resets the count, so these do not consume the
-// correctness budget they protect (#129).
+// churn. Quality approval followed by a completed reviewer verdict resets the
+// count, so these do not consume the correctness budget they protect (#129).
 export const DEFAULT_MAX_QUALITY_ROUNDS = 4;
 // Four correctness rejections. #8 converged on its fourth correctness look
 // after three distinct real findings; a default of three would have parked it

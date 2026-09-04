@@ -20,13 +20,15 @@
 //   Execution pool:           Each issue runs in its own sandbox under two
 //                              independent consecutive-failure budgets (#129).
 //                              maxQualityRounds covers quality rejection, red
-//                              gates and pre-gate re-prompts, and resets when
-//                              quality approves. maxReviewRounds covers only
-//                              correctness rejection. APPROVED → DONE;
+//                              gates and pre-gate re-prompts, and resets when a
+//                              quality approval reaches a completed verdict.
+//                              maxReviewRounds covers only correctness
+//                              rejection. APPROVED → DONE;
 //                              CHANGES-REQUESTED loops back to a new impl
 //                              attempt carrying the rejecting pass's prose.
-//                              Reviewer harness failure spends neither budget
-//                              and keeps its two-consecutive stop rule (#41).
+//                              Reviewer harness failure spends neither budget,
+//                              leaves both counters unchanged, and keeps its
+//                              two-consecutive stop rule (#41).
 //   Serialized landing:       Procedural merger lands queued DONE branches into
 //                              the source branch and pushes once — directly,
 //                              or (config.mergeMode = verified, #22) only after

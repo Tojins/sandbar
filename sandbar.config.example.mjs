@@ -104,8 +104,9 @@ export default {
   // env: {},
 
   // Independent consecutive-failure budgets. Quality counts rejections, red
-  // gates, NO-SIGNAL, dirty trees and off-branch HEADs, then resets when the
-  // quality pass approves. Review counts correctness rejections only.
+  // gates, NO-SIGNAL, dirty trees and off-branch HEADs, then resets when a
+  // quality approval leads to a completed review verdict. Harness failures
+  // leave both counters unchanged. Review counts correctness rejections only.
   // maxQualityRounds: 4,
   // maxReviewRounds: 4,
   // Stop admitting new issues after this many have started in one process.

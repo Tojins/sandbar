@@ -87,11 +87,13 @@ without consuming one of `maxParallelIssues` slots.
    spends neither inner-loop budget and is rerun after a fresh
    HARD-ERROR cycle. Two independent consecutive-failure budgets bound the
    loop (#129): `maxQualityRounds` (default 4) counts quality rejection, red
-   gates and pre-gate re-prompts, then resets on quality approval;
+   gates and pre-gate re-prompts, then resets when quality approval leads to a
+   completed reviewer verdict;
    `maxReviewRounds` (default 4) counts correctness rejections only. Reviewer
-   harness failures spend neither and retain #41's two-consecutive stop rule.
-   There is no total implementer-attempt ceiling. `src/config.ts` owns both
-   defaults. The UI classifier and reviewer are strictly advisory and
+   harness failures spend neither, leave both streaks unchanged, and retain
+   #41's two-consecutive stop rule. There is no total implementer-attempt
+   ceiling. `src/config.ts` owns both defaults. The UI classifier and reviewer
+   are strictly advisory and
    read-only; each
    invocation snapshots branch tip, status and HEAD, and any mutation parks the
    issue with the managed clone preserved. After a clean, on-branch
