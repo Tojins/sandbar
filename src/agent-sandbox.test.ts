@@ -1200,20 +1200,58 @@ describe("createSandbox integration (local provider)", () => {
       } },
     });
     expect(parseCodexRolloutLine(rolloutLine)).toHaveLength(1);
-    await writeFile(rollout, rolloutLine + "\n");
+    await writeFile(rollout, "old invocation\n");
     const sandbox = await createSandbox({
       env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
     });
     try {
       const run = await sandbox.run({
-        agent: scriptedCodexAgent(`printf '%s\\n' '${JSON.stringify({
-          type: "item.completed", item: { type: "agent_message", text: "done" },
-        })}'`),
+        agent: scriptedCodexAgent(
+          `printf '%s\\n' '${rolloutLine}' >> '${rollout}' && ` +
+          `printf '%s\\n' '${JSON.stringify({
+            type: "item.completed", item: { type: "agent_message", text: "done" },
+          })}'`,
+        ),
         prompt: "go", completionSignal: [],
       });
       expect(run.rateLimit).toEqual({
         status: "allowed", window: "seven_day", utilization: 0.25, resetsAt: 456,
       });
+    } finally {
+      await sandbox.close();
+      if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = oldCodexHome;
+    }
+  });
+
+  it("does not reuse an earlier resumed-session context depth", async () => {
+    const branch = "sandbar/issue-124-codex-resumed-depth";
+    await git(["branch", branch], dir);
+    const codexHome = await mkdtemp(join(tmpdir(), "asb-codex-home-"));
+    cleanups.push(codexHome);
+    const oldCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    const rollout = join(codexHome, "sessions", "2026", "09", "04", "rollout-test.jsonl");
+    await mkdir(dirname(rollout), { recursive: true });
+    const tokenCount = (inputTokens: number): string => JSON.stringify({
+      type: "event_msg",
+      payload: { type: "token_count", info: { last_token_usage: { input_tokens: inputTokens } } },
+    });
+    await writeFile(rollout, tokenCount(180_000) + "\n");
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
+    });
+    try {
+      const run = await sandbox.run({
+        agent: scriptedCodexAgent(
+          `printf '%s\\n' '${tokenCount(42_000)}' >> '${rollout}' && ` +
+          `printf '%s\\n' '${JSON.stringify({
+            type: "item.completed", item: { type: "agent_message", text: "done" },
+          })}'`,
+        ),
+        prompt: "go", completionSignal: [],
+      });
+      expect(run.peakContext).toBe(42_000);
     } finally {
       await sandbox.close();
       if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -1308,18 +1346,22 @@ describe("createSandbox integration (local provider)", () => {
     process.env.CODEX_HOME = codexHome;
     const rollout = join(codexHome, "sessions", "2026", "09", "04", "rollout-test.jsonl");
     await mkdir(dirname(rollout), { recursive: true });
-    await writeFile(rollout, JSON.stringify({
+    const rejectedLine = JSON.stringify({
       type: "event_msg", payload: { type: "token_count", rate_limits: {
         rate_limit_reached_type: "seven_day",
         primary: { rate_limit_type: "seven_day", used_percent: 100, resets_at: 789 },
       } },
-    }) + "\n");
+    });
+    await writeFile(rollout, "old invocation\n");
     const sandbox = await createSandbox({
       env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
     });
     try {
       const err = await sandbox.run({
-        agent: scriptedCodexAgent("exit 1"), prompt: "go", completionSignal: [],
+        agent: scriptedCodexAgent(
+          `printf '%s\\n' '${rejectedLine}' >> '${rollout}'; exit 1`,
+        ),
+        prompt: "go", completionSignal: [],
       }).then(() => null, (e: unknown) => e);
       expect(err).toBeInstanceOf(AgentQuotaError);
       expect(err).toMatchObject({

@@ -764,11 +764,12 @@ export const claudeCode = (
 // turn that fails under an exit-0 process: infra, not an answer.
 //
 // A spent subscription is identified structurally (#109), never from this
-// prose: after the invocation the still-live sandbox reads Codex's rollout and
-// feeds token_count rate_limits into the sixth register. The same records'
-// per-request last_token_usage feeds context depth into the seventh (#124),
-// never the cumulative turn.completed ledger. A reached window plus this
-// failed turn becomes QUOTA and buys no retry.
+// prose: the still-live sandbox snapshots the rollout byte boundary before the
+// invocation, then reads only newly appended token_count records afterwards.
+// Their rate_limits feed the sixth register; their per-request last_token_usage
+// feeds context depth into the seventh (#124), never the cumulative
+// turn.completed ledger or a previous invocation's larger turn. A reached
+// window plus this failed turn becomes QUOTA and buys no retry.
 //
 // The turn's give-up cause, never empty: the string becomes the whole of an
 // `AgentError` message and so the NEEDS-HUMAN trace a person reads, and "the
@@ -1973,7 +1974,43 @@ const sandboxGitSetup = async (
 // Agent run loop — two-phase timeout (F5), error tiering (gotcha B)
 // ---------------------------------------------------------------------------
 
-const invokeAgent = (
+type CodexRolloutCursor =
+  | { readonly kind: "empty" }
+  | { readonly kind: "existing"; readonly path: string; readonly bytes: number };
+
+const shellLiteral = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
+
+const captureCodexRolloutCursor = async (
+  handle: SandboxHandle,
+  sandboxRepoDir: string,
+): Promise<CodexRolloutCursor | undefined> => {
+  const result = await withTimeout(
+      handle.exec(
+        "d=${CODEX_HOME:-$HOME/.codex}/sessions; " +
+          "f=$(find \"$d\" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort | tail -n 1); " +
+          "test -n \"$f\" && printf '%s\\n' \"$f\" && wc -c < \"$f\" || true",
+        { cwd: sandboxRepoDir },
+      ),
+      CODEX_ROLLOUT_PROBE_TIMEOUT_MS,
+      () => new Error(
+        `Codex rollout cursor probe timed out after ${CODEX_ROLLOUT_PROBE_TIMEOUT_MS}ms`,
+      ),
+    ).then(
+      (probe) => probe,
+      // Depth and rate-limit state are optional reports; a failed cursor read
+      // disables the post-run probe because it cannot delimit this invocation.
+      () => undefined,
+    );
+  if (result === undefined) return undefined;
+  const [path, rawBytes] = result.stdout.split("\n");
+  if (!path) return { kind: "empty" };
+  const bytes = Number(rawBytes?.trim());
+  return Number.isSafeInteger(bytes) && bytes >= 0
+    ? { kind: "existing", path, bytes }
+    : undefined;
+};
+
+const invokeAgent = async (
   handle: SandboxHandle,
   sandboxRepoDir: string,
   prompt: string | undefined,
@@ -1991,8 +2028,15 @@ const invokeAgent = (
   toolCalls: number;
   peakContext?: number;
   rateLimit?: RateLimitMeasurement;
-}> =>
-  new Promise((resolveRun, rejectRun) => {
+}> => {
+  // A resumed Codex session appends to an existing rollout. Snapshot its byte
+  // boundary before starting the process so this invocation cannot inherit an
+  // earlier invocation's larger depth or stale rate-limit evidence (#124).
+  const rolloutCursor = agent.name === "codex"
+    ? await captureCodexRolloutCursor(handle, sandboxRepoDir)
+    : undefined;
+
+  return new Promise((resolveRun, rejectRun) => {
     const speech = createAgentSpeechAccumulator();
     let matchedSignal: string | undefined;
     let signalMs: number | undefined;
@@ -2129,17 +2173,22 @@ const invokeAgent = (
         // The agent process has ended. Its idle/grace clock must not govern the
         // optional post-run evidence read below (#109).
         clearTimer();
-        if (agent.name === "codex") {
+        if (agent.name === "codex" && rolloutCursor !== undefined) {
           // The rollout is inside this still-live sandbox. Missing files or
           // malformed lines or an exec-level probe failure deliberately yield
           // no measurement and preserve the invocation's old classification
           // (#109). This register is evidence only and cannot trip completion.
           try {
+            const readNewRecords = rolloutCursor.kind === "empty"
+              ? "test -n \"$f\" && tail -n 200 \"$f\" || true"
+              : `if test \"$f\" = ${shellLiteral(rolloutCursor.path)}; then ` +
+                `tail -c +${rolloutCursor.bytes + 1} \"$f\" | tail -n 200; ` +
+                "else test -n \"$f\" && tail -n 200 \"$f\" || true; fi";
             const rollout = await withTimeout(
               handle.exec(
                 "d=${CODEX_HOME:-$HOME/.codex}/sessions; " +
                   "f=$(find \"$d\" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort | tail -n 1); " +
-                  "test -n \"$f\" && tail -n 200 \"$f\" || true",
+                  readNewRecords,
                 { cwd: sandboxRepoDir },
               ),
               CODEX_ROLLOUT_PROBE_TIMEOUT_MS,
@@ -2204,6 +2253,7 @@ const invokeAgent = (
       })
       .catch((err) => settleReject(err));
   });
+};
 
 // ---------------------------------------------------------------------------
 // prepareWorktree / createSandbox — orchestration, lifecycle, commit capture
