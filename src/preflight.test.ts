@@ -67,6 +67,42 @@ describe("forge reachability gate (#118)", () => {
     expect(warning).toHaveBeenCalledTimes(6);
     warning.mockRestore();
   });
+
+  it("retries when DNS answers but port 443 remains unreachable", async () => {
+    let now = 0;
+    let lookups = 0;
+    let connections = 0;
+    const waits: number[] = [];
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await checkForgeReachability(["github.com"], {
+      lookup: async () => {
+        lookups += 1;
+      },
+      connect: async (host, port) => {
+        expect([host, port]).toEqual(["github.com", 443]);
+        connections += 1;
+        throw new Error("connect ENETUNREACH");
+      },
+      wait: async (ms) => {
+        waits.push(ms);
+        now += ms;
+      },
+      now: () => now,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      attempts: 6,
+      elapsedMs: 50_000,
+      failures: ["github.com: connect ENETUNREACH"],
+    });
+    expect(lookups).toBe(6);
+    expect(connections).toBe(6);
+    expect(waits).toEqual([10_000, 10_000, 10_000, 10_000, 10_000]);
+    expect(warning).toHaveBeenCalledTimes(6);
+    warning.mockRestore();
+  });
 });
 
 const cleanState: RepoState = {
