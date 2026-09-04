@@ -1,6 +1,6 @@
 // Pure inner-loop state machine — no I/O. The runner calls step(state, event)
 // and executes the returned action; `terminate` ends the loop. Every decision
-// (promise routing, gate-red re-prompt, reviewer routing, budget exhaustion)
+// (promise routing, concurrent gate/reviewer routing, budget exhaustion)
 // lives here and is table-driven tested in inner-loop-machine.test.ts.
 //
 // Impl-attempt exhaustion carries a `cause` so the human-handoff names the
@@ -33,8 +33,9 @@
 // hand-to-human terminals NEEDS-INFO and NEEDS-UI-PROTOTYPE (#21, stops
 // before the gate) are exempt — they land nothing by construction.
 //
-// Reviewer is strictly advisory: it never commits and the SM never asks the
-// runner to revert anything.
+// Gate-1 and the reviewer run concurrently against the same immutable commit
+// (#123). Reviewer writes always park; a red gate otherwise discards the review
+// completely; only a green gate lets it spend a round or update reviewer prose.
 //
 // A reviewer that produced NO review is not a verdict (#41); that judgment is
 // reviewer-run.ts's. `reviewer-harness-failed` consumes no review round,
@@ -61,8 +62,7 @@ export const NEEDS_HUMAN_REVIEW_BUDGET_EXHAUSTED_MESSAGE =
 
 export type LoopPhase =
   | "needs-implementer"
-  | "needs-gate-1"
-  | "needs-reviewer"
+  | "needs-gate-and-reviewer"
   | "terminated";
 
 export type LoopState = {
@@ -181,9 +181,8 @@ export type LoopAction =
       readonly extraReprompt: string | null;
       readonly latestReviewerProse: string | null;
     }
-  | { readonly kind: "run-gate-1"; readonly attempt: number }
   | {
-      readonly kind: "run-reviewer";
+      readonly kind: "run-gate-and-reviewer";
       readonly attempt: number;
       readonly reviewRound: number;
     }
@@ -203,10 +202,16 @@ export type LoopEvent =
       readonly offBranch: HeadMismatch | null;
     }
   | {
-      readonly kind: "gate-1-result";
-      readonly ok: boolean;
-      readonly failureTrace: string;
-    }
+      readonly kind: "gate-and-reviewer-result";
+      readonly gate: Gate1Result;
+      readonly reviewer: ReviewerResult;
+    };
+
+export type Gate1Result = {
+  readonly ok: boolean;
+  readonly failureTrace: string;
+};
+export type ReviewerResult =
   | {
       readonly kind: "reviewer-result";
       readonly verdict: "APPROVED" | "CHANGES-REQUESTED";
@@ -287,44 +292,13 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
         event.offBranch,
       );
 
-    case "gate-1-result":
-      if (state.phase !== "needs-gate-1") {
+    case "gate-and-reviewer-result":
+      if (state.phase !== "needs-gate-and-reviewer") {
         throw new Error(
-          `gate-1-result event in phase ${state.phase}; expected needs-gate-1`,
+          `gate-and-reviewer-result event in phase ${state.phase}; expected needs-gate-and-reviewer`,
         );
       }
-      return onGate1Result(state, event.ok, event.failureTrace);
-
-    case "reviewer-result":
-      if (state.phase !== "needs-reviewer") {
-        throw new Error(
-          `reviewer-result event in phase ${state.phase}; expected needs-reviewer`,
-        );
-      }
-      return onReviewerResult(state, event.verdict, event.prose);
-
-    case "reviewer-harness-failed":
-      if (state.phase !== "needs-reviewer") {
-        throw new Error(
-          `reviewer-harness-failed event in phase ${state.phase}; expected needs-reviewer`,
-        );
-      }
-      return onReviewerHarnessFailed(state, event.detail);
-    case "reviewer-wrote":
-      if (state.phase !== "needs-reviewer") {
-        throw new Error(`reviewer-wrote event in phase ${state.phase}; expected needs-reviewer`);
-      }
-      return {
-        state: { ...state, phase: "terminated" },
-        action: {
-          kind: "terminate",
-          verdict: {
-            type: "NEEDS-HUMAN-REVIEW",
-            cause: "reviewer-wrote",
-            latestReviewerProse: event.detail,
-          },
-        },
-      };
+      return onGateAndReviewerResult(state, event.gate, event.reviewer);
   }
 }
 
@@ -569,12 +543,16 @@ function onImplementerResult(
     return {
       state: {
         ...state,
-        phase: "needs-gate-1",
+        phase: "needs-gate-and-reviewer",
         extraReprompt: null,
         lastDirtyPaths: null,
         lastOffBranch: false,
       },
-      action: { kind: "run-gate-1", attempt: state.attempt },
+      action: {
+        kind: "run-gate-and-reviewer",
+        attempt: state.attempt,
+        reviewRound: state.reviewRoundsUsed + 1,
+      },
     };
   }
   // NO-SIGNAL — either re-prompt for next attempt or exhaust the budget. The
@@ -591,31 +569,39 @@ function onImplementerResult(
   );
 }
 
-function onGate1Result(
+function onGateAndReviewerResult(
   state: LoopState,
-  ok: boolean,
-  failureTrace: string,
+  gate: Gate1Result,
+  reviewer: ReviewerResult,
 ): StepResult {
-  if (ok) {
+  if (reviewer.kind === "reviewer-wrote") {
     return {
-      state: { ...state, phase: "needs-reviewer" },
+      state: { ...state, phase: "terminated" },
       action: {
-        kind: "run-reviewer",
-        attempt: state.attempt,
-        reviewRound: state.reviewRoundsUsed + 1,
+        kind: "terminate",
+        verdict: {
+          type: "NEEDS-HUMAN-REVIEW",
+          cause: "reviewer-wrote",
+          latestReviewerProse: reviewer.detail,
+        },
       },
     };
   }
-  const advanced = { ...state, lastFailureTrace: failureTrace };
-  return advanceAttempt(
-    advanced,
-    {
-      failureTrace,
-      extraReprompt: null,
-      latestReviewerProse: state.latestReviewerProse,
-    },
-    gateRedExhaustion(advanced),
-  );
+  if (!gate.ok) {
+    const advanced = { ...state, lastFailureTrace: gate.failureTrace };
+    return advanceAttempt(
+      advanced,
+      {
+        failureTrace: gate.failureTrace,
+        extraReprompt: null,
+        latestReviewerProse: state.latestReviewerProse,
+      },
+      gateRedExhaustion(advanced),
+    );
+  }
+  return reviewer.kind === "reviewer-result"
+    ? onReviewerResult(state, reviewer.verdict, reviewer.prose)
+    : onReviewerHarnessFailed(state, reviewer.detail);
 }
 
 function onReviewerResult(

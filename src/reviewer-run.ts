@@ -20,7 +20,9 @@
 // module returns the one event the state machine understands, keeping pass
 // policy out of the I/O runner.
 //
-// The gate protects the EXPENSIVE pass (#121). #19 ran correctness first so a
+// Quality protects the EXPENSIVE correctness pass (#121). Gate-1 runs beside
+// the review round (#123), whose result is discarded if the gate is red. #19
+// ran correctness first so a
 // correctness rejection would skip the checklist's cost; measured, correctness
 // approved 11 of 11 judged rounds after #107 while costing two thirds of all
 // reviewer minutes, and 7 of those approvals were discarded by the second pass
@@ -38,7 +40,7 @@
 // defect it happens to notice — so the headings are not a partition and nothing
 // downstream parses them.
 
-import type { LoopEvent } from "./inner-loop-machine.js";
+import type { ReviewerResult } from "./inner-loop-machine.js";
 import { type ParsedVerdict, parseVerdict } from "./verdict-parser.js";
 
 // One retry. A second flake in a row is not a flake, and each invocation can
@@ -66,7 +68,7 @@ export type ReviewerInvocation =
   | { readonly kind: "run"; readonly run: ReviewerRun }
   | {
       readonly kind: "aborted";
-      readonly event: Extract<LoopEvent, { kind: "reviewer-wrote" }>;
+      readonly event: Extract<ReviewerResult, { kind: "reviewer-wrote" }>;
       readonly transcript: string;
     };
 
@@ -102,7 +104,7 @@ export type ReviewRoundDecision =
   | {
       readonly kind: "finished";
       readonly event: Extract<
-        LoopEvent,
+        ReviewerResult,
         { kind: "reviewer-result" | "reviewer-harness-failed" }
       >;
       readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED";

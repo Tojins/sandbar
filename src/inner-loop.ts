@@ -41,8 +41,11 @@
 // Each implementer invocation publishes its private clone's issue ref to the
 // host cache on success (#98). After an invocation failure the same publish is
 // recovery-only: its failure is logged and may not replace the provider error.
-// Reviewer invocations instead snapshot the tip and status; any mutation parks
-// the issue and preserves the clone rather than running another reviewer.
+// Gate-1 and the reviewer are dispatched together after COMPLETE (#123). The
+// machine discards a review under a red gate except for reviewer mutation,
+// which still parks. Reviewer history is recorded only after a green gate.
+// Reviewer invocations snapshot the tip and status; any mutation parks the
+// issue and preserves the clone rather than running another reviewer.
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -85,6 +88,7 @@ import {
   type LoopAction,
   type LoopEvent,
   type LoopState,
+  type ReviewerResult,
   type Verdict,
   decideAfterTerminal,
   initialAction,
@@ -861,13 +865,46 @@ async function executeAction(
   switch (action.kind) {
     case "run-implementer":
       return runImplementer(action, ctx);
-    case "run-gate-1":
-      return runGate1(action, ctx);
-    case "run-reviewer":
-      return runReviewer(action, ctx);
+    case "run-gate-and-reviewer":
+      return runGateAndReviewer(action, ctx);
     case "terminate":
       throw new Error("executeAction called with terminate; runner should exit instead");
   }
+}
+
+type GateAndReviewerJobs = {
+  readonly gate: typeof runGate1;
+  readonly reviewer: typeof runReviewer;
+};
+
+export async function runGateAndReviewer(
+  action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
+  ctx: ExecuteActionCtx,
+  jobs: GateAndReviewerJobs = { gate: runGate1, reviewer: runReviewer },
+): Promise<Extract<LoopEvent, { kind: "gate-and-reviewer-result" }>> {
+  // Wait for both jobs before cycle teardown can remove resources either one
+  // is still using. If both reject, the gate remains the first surfaced error.
+  const [gateResult, reviewerResult] = await Promise.allSettled([
+    jobs.gate(action, ctx),
+    jobs.reviewer(action, ctx),
+  ]);
+  if (gateResult.status === "rejected") throw gateResult.reason;
+  if (reviewerResult.status === "rejected") throw reviewerResult.reason;
+  const gate = gateResult.value;
+  const reviewer = reviewerResult.value;
+  if (gate.ok && reviewer.historyEntry !== null) {
+    ctx.priorReviewRounds.push(reviewer.historyEntry);
+  }
+  if (
+    !gate.ok &&
+    reviewer.event.kind !== "reviewer-wrote" &&
+    ctx.opts.onOrchestratorLog
+  ) {
+    await ctx.opts.onOrchestratorLog(
+      `issue=${ctx.issue.id} attempt=${action.attempt} gate-1 red — discarded concurrent reviewer result`,
+    );
+  }
+  return { kind: "gate-and-reviewer-result", gate, reviewer: reviewer.event };
 }
 
 async function runImplementer(
@@ -1056,9 +1093,9 @@ export async function runSandboxAndPublish(
 }
 
 async function runGate1(
-  action: Extract<LoopAction, { kind: "run-gate-1" }>,
+  action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
   ctx: ExecuteActionCtx,
-): Promise<LoopEvent> {
+): Promise<{ readonly ok: boolean; readonly failureTrace: string }> {
   const { issue, opts, gateStack } = ctx;
   const gate1 = await gateStack.runGate();
   if (opts.onOrchestratorLog) {
@@ -1070,7 +1107,6 @@ async function runGate1(
     );
   }
   return {
-    kind: "gate-1-result",
     ok: gate1.ok,
     // Summarize the STEP output, then append the container logs — never the
     // other way round. The cascade collapse looks for many lines sharing one
@@ -1104,7 +1140,7 @@ export async function enforceReviewerSnapshot(
   before: ReviewerSnapshot,
   after: ReviewerSnapshot,
   transcript: string,
-): Promise<Extract<LoopEvent, { kind: "reviewer-wrote" }> | null> {
+): Promise<Extract<ReviewerResult, { kind: "reviewer-wrote" }> | null> {
   if (!reviewerSnapshotChanged(before, after)) return null;
   sandbox.preserveWorktree("the reviewer changed the repository; kept for human inspection");
   // Deleting the issue ref is itself a reviewer write. There is then no ref
@@ -1128,9 +1164,12 @@ const passTranscript = (pass: ReviewerPass, transcript: string): string =>
   `=== ${pass} pass ===\n${transcript}`;
 
 async function runReviewer(
-  action: Extract<LoopAction, { kind: "run-reviewer" }>,
+  action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
   ctx: ExecuteActionCtx,
-): Promise<LoopEvent> {
+): Promise<{
+  readonly event: ReviewerResult;
+  readonly historyEntry: PriorReviewRound | null;
+}> {
   const { issue, sandbox, opts, config } = ctx;
   const head = ctx.accumulated.at(-1)?.sha;
   if (!head) {
@@ -1149,7 +1188,7 @@ async function runReviewer(
   const detectWrite = async (
     before: ReviewerSnapshot,
     transcript: string,
-  ): Promise<Extract<LoopEvent, { kind: "reviewer-wrote" }> | null> => {
+  ): Promise<Extract<ReviewerResult, { kind: "reviewer-wrote" }> | null> => {
     const after = await snapshot();
     return enforceReviewerSnapshot(sandbox, before, after, transcript);
   };
@@ -1282,7 +1321,7 @@ async function runReviewer(
     aborted: Extract<ReviewerOutcome, { kind: "aborted" }>,
     pass: ReviewerPass,
     completedTranscripts: readonly string[],
-  ): Promise<Extract<LoopEvent, { kind: "reviewer-wrote" }>> => {
+  ): Promise<Extract<ReviewerResult, { kind: "reviewer-wrote" }>> => {
     if (opts.attemptLogger) {
       await opts.attemptLogger.writeAttemptReviewer(
         issue.id,
@@ -1298,7 +1337,10 @@ async function runReviewer(
 
   const quality = await runPass("quality");
   if (quality.kind === "aborted") {
-    return preserveReviewerWrite(quality, "quality", []);
+    return {
+      event: await preserveReviewerWrite(quality, "quality", []),
+      historyEntry: null,
+    };
   }
 
   const transcripts = [passTranscript("quality", quality.transcript)];
@@ -1319,7 +1361,14 @@ async function runReviewer(
   if (afterQuality.kind === "run-correctness") {
     const correctnessOutcome = await runPass("correctness");
     if (correctnessOutcome.kind === "aborted") {
-      return preserveReviewerWrite(correctnessOutcome, "correctness", transcripts);
+      return {
+        event: await preserveReviewerWrite(
+          correctnessOutcome,
+          "correctness",
+          transcripts,
+        ),
+        historyEntry: null,
+      };
     }
     correctness = correctnessOutcome;
     transcripts.push(passTranscript("correctness", correctness.transcript));
@@ -1337,8 +1386,6 @@ async function runReviewer(
     quality,
     correctness,
   );
-  if (historyEntry) ctx.priorReviewRounds.push(historyEntry);
-
   if (opts.attemptLogger) {
     await opts.attemptLogger.writeAttemptReviewer(
       issue.id,
@@ -1361,5 +1408,5 @@ async function runReviewer(
   if (opts.onOrchestratorLog) {
     await opts.onOrchestratorLog(line);
   }
-  return decision.event;
+  return { event: decision.event, historyEntry };
 }

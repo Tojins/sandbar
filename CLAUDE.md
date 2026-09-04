@@ -87,13 +87,16 @@ an exit condition fires.
    exhaust on the same attempt and park the issue with the terminal carrying
    the latest review; `DEFAULT_MAX_REVIEW_ROUNDS`'s comment in `src/config.ts`
    owns the number and the two dogfooding exhaustions behind it (#8, #66). The
-   reviewer is strictly advisory and read-only. One review round is up to two
-   sequential COLD calls (#19, #121): tests/standards first on
+   reviewer is strictly advisory and read-only. After a clean, on-branch
+   COMPLETE, gate-1 and the reviewer run concurrently against the same commit
+   (#123). A reviewer write always parks; otherwise a red gate discards the
+   review without spending a round or updating reviewer prose. One review round
+   is up to two sequential COLD calls (#19, #121): tests/standards first on
    `reviewerQualityAgent`/`reviewerQualityModelId`, then — only after its
    approval — correctness/spec on `reviewerAgent`/`reviewerModelId`; the state
    machine receives their single aggregate result and spends one round. The
-   gate protects the EXPENSIVE pass and the deciding verdict stays on the
-   strongest model: measured, correctness approved 11 of 11 judged rounds after
+   quality pass protects the EXPENSIVE correctness pass and the deciding verdict
+   stays on the strongest model: measured, correctness approved 11 of 11 judged rounds after
    #107 for two thirds of the reviewer minutes, and the second pass discarded 7
    of those approvals inside the same round. `src/reviewer-run.ts` owns the
    order, the aggregation and what a failed reviewer invocation means (#41).
