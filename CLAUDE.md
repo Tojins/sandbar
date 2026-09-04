@@ -62,8 +62,8 @@ without consuming one of `maxParallelIssues` slots.
 
 1. **Plan** (`src/plan-resolver.ts` + `src/chunk-reconcile.ts`) — purely
    deterministic, no LLM: lists issues labelled `ready-for-agent`, parses
-   `## Blocked by` sections, selects the top-K unblocked issues (default 3) by
-   number. Each candidate also gets a **lane** (`src/lanes.ts`, #57) and, when
+   `## Blocked by` sections, selects up to `maxParallelIssues` unblocked issues
+   by number. Each candidate also gets a **lane** (`src/lanes.ts`, #57) and, when
    review-gated, a `chunk` target (#61) that tells phase 2 what to seed from
    and phase 3 where to land. Ahead of the plan proper two passes make the
    tracker agree with the forge and with git: the **chunk-review scan**
@@ -134,8 +134,9 @@ without consuming one of `maxParallelIssues` slots.
    `labels.needsInfo`/`labels.agentStuck`, plus `needs-review` for a
    chunk-landed member, are the only labels sandbar applies — `land` (#64) it only ever
    REMOVES, from a pull request a human labelled).
-   A terminal is finalised before its landing is attempted, and tracker labels
-   are read back before the issue ceases to be ongoing.
+   A terminal is finalised before its landing is attempted. Handoffs that decide
+   to remove `ready-for-agent` read that state back before the issue ceases to
+   be ongoing; quota and infrastructure terminals deliberately remain queued.
 
 ### Exit conditions (`src/exit-conditions.ts`)
 
@@ -143,6 +144,8 @@ The pool exits plan-empty only when no issue, landing, or plan remains. Provider
 quota stops new admissions and drains running and landing work before exit 4.
 `maxTotalIssues` counts admissions. Relaunch (75) is evaluated at quiescence,
 before admitting newly-unblocked work, and requires a landing in this process.
+After six consecutive terminals with no landing, admissions stop immediately;
+already-running issues drain and are finalised before the run exits stuck.
 
 All seven are one type, `TerminalExit`, and the run ends with exactly one
 `Exit (<tag>): <reason>` on stdout whichever fired (#70) — `formatExitLine` is
@@ -275,8 +278,9 @@ from that state and provider or landing outcomes.
   has no such branch" apart from "origin could not be asked" with an
   `ls-remote` probe. A request is DEFERRED while any ongoing issue targets that
   chunk: landing it could put commits a review never covered on the source
-  branch, so the label stays until the issue lands or parks. Members are closed
-  EXPLICITLY (a `Closes #N` trailer only
+  branch, so the label stays until the issue lands or parks. Tracker-visible
+  rework independently defers the same request until the member leaves
+  `ready-for-agent`. Members are closed EXPLICITLY (a `Closes #N` trailer only
   fires on GitHub's own merge of that PR, and sandbar composes the merge
   locally), in `LandedChunk.closeOrder` — dependents first, ROOT LAST — and the
   loop stops at the first failure. Git-derived members are fetched by number

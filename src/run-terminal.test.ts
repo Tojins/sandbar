@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Terminal } from "./inner-loop.js";
 import { formatTerminalLine, verifyFinalizedTrackerState } from "./run.js";
@@ -82,5 +82,30 @@ describe("tracker finalization read-back (#87)", () => {
       [result],
       async () => ["ready-for-agent", "needs-info"],
     )).rejects.toThrow(/Tracker read-back mismatch for issue #87.*not-ready.*ready-for-agent/);
+  });
+
+  it("does not read back finalizations that intentionally keep the issue ready", async () => {
+    const issueLabels = vi.fn(async () => ["ready-for-agent"]);
+    await verifyFinalizedTrackerState([
+      {
+        input: {
+          kind: "quota", issue: result.input.issue, provider: "codex",
+          window: "five_hour", specGaps: [],
+        },
+        action: { kind: "pushed" },
+      },
+      {
+        input: {
+          kind: "hard-error", issue: result.input.issue, hasCommits: false,
+          specGaps: [],
+        },
+        action: { kind: "deleted-local" },
+      },
+      {
+        input: result.input,
+        action: { kind: "skipped-closed" },
+      },
+    ], issueLabels);
+    expect(issueLabels).not.toHaveBeenCalled();
   });
 });

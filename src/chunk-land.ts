@@ -542,19 +542,23 @@ export const CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT = (args: {
   `The \`${LAND_LABEL}\` label has been removed. Nothing about the chunk changed — ` +
   `re-apply it once the composition has a reason to pass.`;
 
-// Ongoing work targets the chunk (#87). Nothing is merged and the label is
-// untouched; this comment explains why the human's request remains queued.
+// Ongoing work or tracker-visible rework targets the chunk (#87, #94). Nothing
+// is merged and the label is untouched; this explains why the request remains queued.
 export const CHUNK_LAND_DEFERRED_PR_COMMENT = (args: {
   readonly chunkBranch: string;
   readonly sourceBranch: string;
-  readonly reason: "ongoing";
+  readonly reason: "ongoing" | "rework";
   readonly landedNow: readonly ChunkMember[];
 }): string => {
   const members = args.landedNow
     .map((m) => `#${m.number} — ${m.title}`)
     .join(", ");
-  const cause = `these members still have ongoing sandbar work — ${members}`;
-  const resume = `Landing resumes after the named issues land or park.`;
+  const cause = args.reason === "rework"
+    ? `these members are queued for rework — ${members}`
+    : `these members still have ongoing sandbar work — ${members}`;
+  const resume = args.reason === "rework"
+    ? `Landing resumes after the named issues leave the \`ready-for-agent\` queue.`
+    : `Landing resumes after the named issues land or park.`;
   return `${BOT_COMMENT_PREFIX} this chunk is labelled \`${LAND_LABEL}\`, and it was NOT ` +
     `landed now: ${cause}.\n\nMerging now would move commits onto ` +
     `\`${args.sourceBranch}\` that this pull request may not yet carry as reviewed, ` +

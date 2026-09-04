@@ -1665,7 +1665,7 @@ export async function runMergerWithAdapter(
     request: ChunkLandTarget,
     landedNow: readonly ChunkMember[],
     sourceBranch: string,
-    reason: "ongoing",
+    reason: "ongoing" | "rework",
   ): Promise<void> => {
     if (request.pullRequest > 0) {
       await adapter.commentOnPullRequest(
@@ -1681,7 +1681,7 @@ export async function runMergerWithAdapter(
     deferredChunks.push({ target: request, landedNow });
     await emit(
       `chunk ${request.branch}: not landed (` +
-        "ongoing member work: " +
+        (reason === "rework" ? "queued for rework: " : "ongoing member work: ") +
         `${landedNow.map((m) => `#${m.number}`).join(", ")}); \`${LAND_LABEL}\` kept`,
     );
   };
@@ -1707,6 +1707,10 @@ export async function runMergerWithAdapter(
         sourceBranch: chunkLanding.sourceBranch,
       };
       try {
+        if (request.rework.length > 0) {
+          await deferChunk(request, request.rework, pending.sourceBranch, "rework");
+          continue;
+        }
         const targeting = cycle
           .filter((issue) => issue.chunk?.branch === request.branch)
           .map((issue) => ({ number: issueNumberOf(issue), title: issue.title }));

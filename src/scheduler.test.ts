@@ -81,6 +81,8 @@ describe("scheduler decisions", () => {
     [snapshot({ landings: 1, hasCandidates: true }), "exit"],
     [snapshot({ budgetRemaining: 0 }), "exit"],
     [snapshot({ terminalsSinceLanding: 6 }), "exit"],
+    [snapshot({ terminalsSinceLanding: 6, active: 3, ongoing: 3, hasCandidates: true }), "drain"],
+    [snapshot({ terminalsSinceLanding: 6, ongoing: 1, hasPendingTerminals: true }), "land"],
     [snapshot({ hasCandidates: true }), "admit"],
     [snapshot({ hasRetries: true, budgetRemaining: 0, ongoing: 1 }), "admit"],
     [snapshot({ active: 1, ongoing: 1, hasCapacity: false }), "wait"],

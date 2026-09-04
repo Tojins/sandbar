@@ -517,7 +517,7 @@ type FinalizeKindInput =
       readonly resetsAt?: number;
     }
   // Silent-noop under the retry cap: discard the branch + worktree so the
-  // next cycle's implementer starts fresh against current source. The issue
+  // next execution starts fresh against current source. The issue
   // stays `ready-for-agent` and the planner re-picks it.
   | { readonly kind: "fresh-attempt"; readonly issue: IssueRef }
   // Silent-noop retries exhausted: drop `ready-for-agent`, add the handoff
@@ -622,6 +622,13 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
   "reviewer-wrote",
   "silent-noop-exhausted",
 ]);
+
+// Only these successful finalizations decide to remove `ready-for-agent`.
+// Quota and infrastructure terminals deliberately leave the issue queued, and
+// a closed-issue handoff performs no tracker write at all (#16).
+export function finalizationIntendsNotReady(result: FinalizeResult): boolean {
+  return result.action.kind !== "skipped-closed" && HANDOFF_KINDS.has(result.input.kind);
+}
 
 // The one caller that keeps a clone the reclaim rule would remove — see the
 // module header.
@@ -1040,8 +1047,8 @@ export async function finalizeOne(
       // Same shape as `merged`: worktree first, then branch (with `-D`
       // fallback because the silent-noop branch has commits that aren't on
       // the source branch and `-d` would refuse). No push, no comment, no
-      // label flip — the issue stays `ready-for-agent` for the next cycle's
-      // planner.
+      // label flip — the issue stays `ready-for-agent` while its ongoing unit
+      // reacquires a pool slot.
       await adapter.reclaimIssueClone(input.issue.branch);
       return deleteBranchForcing(adapter, input.issue.branch);
     }

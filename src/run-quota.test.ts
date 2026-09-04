@@ -246,7 +246,7 @@ describe("run quota orchestration (#109)", () => {
   });
 
   it("exits stuck after the global terminal-without-landing backstop", async () => {
-    const issues = Array.from({ length: 6 }, (_, index) => issue(String(index + 1)));
+    const issues = Array.from({ length: 20 }, (_, index) => issue(String(index + 1)));
     seams.plan.mockImplementation(async (_repo, options: { excluded?: Set<number> }) =>
       resolution(issues.filter((candidate) => !options.excluded?.has(Number(candidate.id)))));
     seams.innerLoop.mockResolvedValue({
@@ -258,8 +258,28 @@ describe("run quota orchestration (#109)", () => {
 
     await expect(run({ ...config, maxParallelIssues: 3 })).rejects.toThrow("EXIT:2");
     expect(exit).toHaveBeenCalledWith(2);
-    expect(seams.innerLoop).toHaveBeenCalledTimes(6);
+    // Six terminals trip the backstop. At most the already-admitted sibling
+    // batch drains; the remaining eleven candidates never start.
+    expect(seams.innerLoop).toHaveBeenCalledTimes(9);
     expect(seams.merger).not.toHaveBeenCalled();
+  });
+
+  it("requests enough planner candidates to fill a wider configured pool", async () => {
+    const issues = Array.from({ length: 6 }, (_, index) => issue(String(index + 1)));
+    seams.plan.mockImplementation(async (_repo, options: { k?: number }) => {
+      expect(options.k).toBe(6);
+      return resolution(issues);
+    });
+    seams.innerLoop.mockResolvedValue({
+      type: "NEEDS-INFO", questions: "answer", strandedHead: null,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 6 })).rejects.toThrow("EXIT:2");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(seams.innerLoop).toHaveBeenCalledTimes(6);
   });
 
   it("reacquires a slot for silent-noop without spending another start", async () => {

@@ -51,11 +51,12 @@ export function decideSchedulerAction(state: SchedulerSnapshot): SchedulerAction
   if (state.quotaClosed) {
     return state.active > 0 ? { kind: "drain" } : { kind: "exit", reason: "quota" };
   }
+  if (state.terminalsSinceLanding >= state.terminalBackstop) {
+    if (state.hasPendingTerminals) return { kind: "land" };
+    return state.active > 0 ? { kind: "drain" } : { kind: "exit", reason: "stuck" };
+  }
   if (quiescent && state.landings > 0 && (state.hasCandidates || state.hasLandRequests)) {
     return { kind: "exit", reason: "relaunch" };
-  }
-  if (quiescent && state.terminalsSinceLanding >= state.terminalBackstop) {
-    return { kind: "exit", reason: "stuck" };
   }
   if (quiescent && state.budgetRemaining === 0 && !state.hasRetries) {
     return { kind: "exit", reason: "budget" };

@@ -533,7 +533,8 @@ dependency; relabelling the issue alone will not do it.
 > `needs-review` labels, closes the pull request and deletes the branch. Approving
 > is deliberately *not* the trigger, so approve-now-land-later works: nothing
 > moves until the label is on. Landing is deferred while any ongoing issue
-> targets that chunk; the request stays queued until those issues land or park.
+> targets that chunk, or while a member remains queued for requested rework;
+> the request stays queued until that work lands, parks, or leaves the queue.
 >
 > If you mark the PR ready and merge it by hand instead, sandbar recovers — a
 > later run finds the branch already contained in your source branch and does

@@ -116,7 +116,8 @@
 // Termination is governed by exit-conditions.ts. Plan-empty requires a
 // quiescent pool; maxTotalIssues counts admissions; quota drains work already
 // running; and relaunch is checked only at post-landing quiescence, before a
-// newly-unblocked issue starts. MAX_ITERATIONS remains a defensive ceiling.
+// newly-unblocked issue starts. A budget-derived recompute limit remains a
+// defensive ceiling.
 
 import { realpathSync } from "node:fs";
 
@@ -158,6 +159,7 @@ import { SandbarError, faultDetail } from "./errors.js";
 import {
   type TerminalExit,
   MAX_CONSECUTIVE_TERMINALS_WITHOUT_LANDING,
+  SILENT_NOOP_RETRY_LIMIT,
   budgetExit,
   formatExitLine,
   haltedExit,
@@ -173,6 +175,7 @@ import { createRunQuotaState } from "./inner-loop.js";
 import {
   type FinalizeInput,
   type FinalizeResult,
+  finalizationIntendsNotReady,
   finalizeAll,
   realAdapter as realFinalizeAdapter,
 } from "./finalize.js";
@@ -236,10 +239,11 @@ import {
   repoLayout,
 } from "./repo-cache.js";
 
-// Defensive ceiling on cycles. The real terminators are in exit-conditions.ts
-// (success / stuck / budget) — MAX_ITERATIONS just guarantees the loop is
-// bounded if those checks ever fail to fire.
-const MAX_ITERATIONS = 100;
+// Each start can produce several recomputes (slot release, finalization and a
+// landing), and silent-noop can execute the same ongoing issue three times.
+// Keep the defensive ceiling proportional to the configured run budget so it
+// cannot become the default-budget terminator.
+const MIN_MAX_RECOMPUTES = 100;
 
 // The merge phase's stack id. Distinct from every issue id (which are numeric),
 // so its pod, network and containers can never collide with an issue's.
@@ -317,6 +321,7 @@ export async function verifyFinalizedTrackerState(
   issueLabels: (issueNum: number) => Promise<readonly string[]>,
 ): Promise<void> {
   for (const result of results) {
+    if (!finalizationIntendsNotReady(result)) continue;
     const issueNum = issueNumberOf(result.input.issue);
     const observed = await issueLabels(issueNum);
     if (observed.includes("ready-for-agent")) {
@@ -967,13 +972,17 @@ export async function run(
   let quotaPending: TerminalExit | null = null;
   let nextPlanTrigger: Parameters<typeof runLogger.writePlan>[0] = "launch";
   let landingNumber = 0;
+  const maxRecomputes = Math.max(
+    MIN_MAX_RECOMPUTES,
+    config.maxTotalIssues * (SILENT_NOOP_RETRY_LIMIT + 1) * 4 + 10,
+  );
 
   // -------------------------------------------------------------------------
   // Main loop
   // -------------------------------------------------------------------------
 
   try {
-    for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
+    for (let iteration = 1; iteration <= maxRecomputes; iteration++) {
       // -----------------------------------------------------------------------
       // Between-cycle orphan sweep. Phase 2/3/4 already tear down their own
       // resources in finally blocks, and startStack registers its teardown
@@ -996,8 +1005,8 @@ export async function run(
 
       const budget = remainingBudget(runState);
 
-      console.log(`\n=== Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
-      await runLogger.appendOrchestrator(`cycle ${iteration} start`);
+      console.log(`\n=== Recompute ${iteration}/${maxRecomputes} ===\n`);
+      await runLogger.appendOrchestrator(`recompute ${iteration} start`);
       const planTrigger = nextPlanTrigger;
 
       const configWarning = staleConfigWarning(await readConfigStaleness({
@@ -1019,6 +1028,7 @@ export async function run(
           ...[...pool.startedIds()].map(Number),
         ]),
         defaultLane: config.defaultLane,
+        k: config.maxParallelIssues,
         repoDir: layout.repoDir,
       };
       let resolution = await buildPlan(repo, planOptions);
@@ -1662,11 +1672,6 @@ export async function run(
             .filter((input) => input.kind === "fresh-attempt")
             .map((input) => input.issue.id),
         );
-        for (const input of inputs) {
-          if (input.kind === "fresh-attempt") {
-            pool.retry(input.issue as PlannedIssue);
-          }
-        }
         // Merged-and-closed only. A chunk landing (#60) is deliberately NOT
         // added: `excluded` means "this run already merged it to the source
         // branch". Git membership de-queues a chunk member without tracker lag.
@@ -1707,7 +1712,7 @@ export async function run(
           );
         }
         // Deferred, not parked (#61 + #64 + #94): member work arrived this
-        // cycle or remains queued for rework, so the label stays on. Printed from here for
+        // remains ongoing or queued for rework, so the label stays on. Printed from here for
         // the same reason — the pull request has been commented on already.
         for (const c of mergerOutcome.deferredChunks) {
           console.log(
@@ -1721,10 +1726,12 @@ export async function run(
               `\`${LAND_LABEL}\` kept`,
           );
         }
-        await runFinalize(
-          "merge outcomes",
-          inputs.filter((input) => input.kind !== "fresh-attempt"),
-        );
+        await runFinalize("merge outcomes", inputs);
+        for (const input of inputs) {
+          if (input.kind === "fresh-attempt") {
+            pool.retry(input.issue as PlannedIssue);
+          }
+        }
         for (const issue of completedIssues) {
           if (!freshAttempts.has(issue.id)) pool.finish(issue);
         }
@@ -1897,12 +1904,12 @@ export async function run(
   // (#70) — plan-empty and halted included, which between them used to print a
   // success banner and nothing at all. The `??` is the DEFENSIVE CEILING and
   // nothing else: falling out of the loop without a `break` means
-  // MAX_ITERATIONS cycles and not one exit condition, which nothing has ever
+  // maxRecomputes observations and not one exit condition, which nothing has ever
   // reached. Its exit code is unchanged (success); what changed is that it used
   // to print "All done.", the one thing a run that ran out of iterations did
   // not do.
   const finalExit =
-    terminalExit ?? (await announceExit(iterationCeilingExit(MAX_ITERATIONS)));
+    terminalExit ?? (await announceExit(iterationCeilingExit(maxRecomputes)));
 
   await runCleanup();
   if (finalExit.exitCode !== 0) process.exit(finalExit.exitCode);

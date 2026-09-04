@@ -2309,10 +2309,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
   it("defers landing while an ongoing issue targets the chunk", async () => {
     const { adapter, calls } = makeAdapter({ chunkRefs: originHas(42) });
     const log: string[] = [];
-    const target = {
-      ...request(42),
-      rework: [{ number: 42, title: "t-42" }],
-    };
+    const target = request(42);
     const summary = await runMergerWithAdapter(
       [], adapter, (line) => log.push(line), undefined, {
         ...landing(target),
@@ -2332,6 +2329,29 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     expect(calls.prComments[0]?.body).not.toContain("description above now lists");
     expect(log).toContain(
       "chunk sandbar/chunk-42-c: not landed (ongoing member work: #42); `land` kept",
+    );
+  });
+
+  it("defers landing while a member remains queued for rework", async () => {
+    const { adapter, calls } = makeAdapter({ chunkRefs: originHas(42) });
+    const log: string[] = [];
+    const target = {
+      ...request(42),
+      rework: [{ number: 43, title: "requested changes" }],
+    };
+    const summary = await runMergerWithAdapter(
+      [], adapter, (line) => log.push(line), undefined, landing(target),
+    );
+
+    expect(calls.merges).toEqual([]);
+    expect(summary.deferredChunks).toEqual([
+      { target, landedNow: target.rework },
+    ]);
+    expect(calls.prLabelRemovals).toEqual([]);
+    expect(calls.prComments[0]?.body).toContain("queued for rework");
+    expect(calls.prComments[0]?.body).toContain("leave the `ready-for-agent` queue");
+    expect(log).toContain(
+      "chunk sandbar/chunk-42-c: not landed (queued for rework: #43); `land` kept",
     );
   });
 
