@@ -1471,6 +1471,7 @@ export async function run(
       let haltPartial: MergerSummary | undefined;
       let halt = false;
       let mergerQuota: AgentQuotaError | null = null;
+      let unexpectedLandingFailure: { readonly error: unknown } | null = null;
       // Why the run is stopping, in the short names the run log already uses.
       // Declared up here rather than beside the reports that fill it because
       // the merge phase's own halt is one of them, and the `Exit (halted): …`
@@ -1677,25 +1678,19 @@ export async function run(
               );
             }
           } else {
-            // Bring-up failures and unexpected landing faults have no partial
-            // merger state to reconcile, but they share the same lifecycle
-            // boundary: stop admissions, drain sibling inner loops, and then
-            // announce one halted exit instead of tearing live work down.
-            const trace = err instanceof Error
-              ? `\n${err.stack ?? err.message}`
-              : `\n${String(err)}`;
-            console.error(`Merger halted unexpectedly:${trace}`);
-            halt = true;
-            haltReasons.push("merger-halted");
-            cleanupReason = "merger-halted";
-            await runLogger.appendOrchestrator(
-              `merger halted unexpectedly:${trace}`,
-            );
+            // Unknown failures are not merger verdicts. Carry the original
+            // value across the resource cleanup below, drain sibling work,
+            // then let the outer internal-failure handler report it unchanged.
+            unexpectedLandingFailure = { error: err };
           }
         } finally {
           // Stack first: its containers bind-mount the worktree.
           if (mergerStack) await mergerStack.stop();
           if (mergerWorktree) await mergerWorktree.remove();
+        }
+        if (unexpectedLandingFailure) {
+          await drainAfterLandingHalt();
+          throw unexpectedLandingFailure.error;
         }
       }
 

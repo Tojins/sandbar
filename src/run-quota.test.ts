@@ -331,6 +331,11 @@ describe("run quota orchestration (#109)", () => {
       .toBe(true);
     expect(seams.logLines.findIndex((line) => line.startsWith("finalise #2 needs-info")))
       .toBeLessThan(seams.logLines.findIndex((line) => line.startsWith("exit: halted")));
+    expect(seams.logLines.some((line) =>
+      line.startsWith("HALTED — internal failure: Error: landing failed")
+    )).toBe(true);
+    expect(seams.logLines.some((line) => line.includes("merger halted unexpectedly")))
+      .toBe(false);
   });
 
   it("exits stuck after the global terminal-without-landing backstop", async () => {
