@@ -3,11 +3,11 @@
 // The agent signals state with a single `<promise>TOKEN</promise>` tag:
 // `COMPLETE`, `NEEDS-INFO` (paired with a `<questions>` block) or
 // `NEEDS-UI-PROTOTYPE` (#21, paired with a `<ui-impact>` block). Anything else
-// is a no-signal — the inner loop keeps going, optionally with a re-prompt
-// hint payload that the next attempt's prompt should include.
+// is a no-signal — the inner loop keeps going with a re-prompt hint payload
+// that the next attempt's prompt should include.
 //
-// `missingTag` marks the one NO-SIGNAL flavour where NO token was emitted at
-// all, as opposed to a token that failed its guard. The distinction is the
+// `missingTag` discriminates the NO-SIGNAL flavour where NO token was emitted
+// at all from a token that failed its guard. The distinction is the
 // inner loop's licence for the promise nudge: no token is overwhelmingly a
 // finished agent that forgot the contract, worth one cheap same-conversation
 // follow-up before it costs a full attempt; a failed guard means the agent got
@@ -32,11 +32,8 @@ export type ParseSignal =
   | { readonly kind: "COMPLETE" }
   | { readonly kind: "NEEDS-INFO"; readonly questions: string }
   | { readonly kind: "NEEDS-UI-PROTOTYPE"; readonly uiImpact: string }
-  | {
-      readonly kind: "NO-SIGNAL";
-      readonly reprompt?: string;
-      readonly missingTag?: true;
-    };
+  | { readonly kind: "NO-SIGNAL"; readonly reprompt: string; readonly missingTag: true }
+  | { readonly kind: "NO-SIGNAL"; readonly reprompt: string; readonly missingTag: false };
 
 export type ParseContext = {
   readonly commitsAccumulated: number;
@@ -107,7 +104,7 @@ export function parsePromise(
 
   if (token === PROMISE_TOKENS.COMPLETE) {
     if (ctx.commitsAccumulated === 0) {
-      return { kind: "NO-SIGNAL", reprompt: COMPLETE_NO_COMMITS };
+      return { kind: "NO-SIGNAL", reprompt: COMPLETE_NO_COMMITS, missingTag: false };
     }
     return { kind: "COMPLETE" };
   }
@@ -115,7 +112,7 @@ export function parsePromise(
   if (token === PROMISE_TOKENS.NEEDS_INFO) {
     const questions = lastBlock(stdout, "questions");
     if (!questions) {
-      return { kind: "NO-SIGNAL", reprompt: NEEDS_INFO_NO_QUESTIONS };
+      return { kind: "NO-SIGNAL", reprompt: NEEDS_INFO_NO_QUESTIONS, missingTag: false };
     }
     return { kind: "NEEDS-INFO", questions };
   }
@@ -123,7 +120,11 @@ export function parsePromise(
   if (token === PROMISE_TOKENS.NEEDS_UI_PROTOTYPE) {
     const uiImpact = lastBlock(stdout, "ui-impact");
     if (!uiImpact) {
-      return { kind: "NO-SIGNAL", reprompt: NEEDS_UI_PROTOTYPE_NO_IMPACT };
+      return {
+        kind: "NO-SIGNAL",
+        reprompt: NEEDS_UI_PROTOTYPE_NO_IMPACT,
+        missingTag: false,
+      };
     }
     return { kind: "NEEDS-UI-PROTOTYPE", uiImpact };
   }

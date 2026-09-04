@@ -569,7 +569,7 @@ function onImplementerResult(
     state,
     {
       failureTrace: state.lastFailureTrace,
-      extraReprompt: signal.reprompt ?? null,
+      extraReprompt: signal.reprompt,
       latestReviewerProse: state.latestReviewerProse,
     },
     {

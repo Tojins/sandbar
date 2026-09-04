@@ -49,7 +49,8 @@ function drive(
 const complete: ParseSignal = { kind: "COMPLETE" };
 const noSignal = (reprompt?: string): ParseSignal => ({
   kind: "NO-SIGNAL",
-  ...(reprompt !== undefined ? { reprompt } : { missingTag: true }),
+  reprompt: reprompt ?? "Still working. Emit <promise>...",
+  missingTag: reprompt === undefined,
 });
 const needsInfo = (questions: string): ParseSignal => ({
   kind: "NEEDS-INFO",
@@ -614,7 +615,7 @@ describe("inner-loop-machine — NO-SIGNAL re-prompting", () => {
     expect(third.extraReprompt).toBeNull();
   });
 
-  it("NO-SIGNAL without reprompt still advances the attempt", () => {
+  it("carries the missing-tag correction into the next attempt", () => {
     const { actions } = drive(defaultOpts, [
       impl(noSignal()),
       impl(complete),
@@ -622,7 +623,7 @@ describe("inner-loop-machine — NO-SIGNAL re-prompting", () => {
     ]);
     const second = actions[1] as Extract<LoopAction, { kind: "run-implementer" }>;
     expect(second.attempt).toBe(2);
-    expect(second.extraReprompt).toBeNull();
+    expect(second.extraReprompt).toBe("Still working. Emit <promise>...");
   });
 });
 
@@ -1051,7 +1052,11 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     // capture reads refs/heads/<branch>), which sends it to fix the wrong thing.
     const r = step(
       initialState(defaultOpts),
-      impl({ kind: "NO-SIGNAL", reprompt: "Still working." }, [], detached()),
+      impl(
+        { kind: "NO-SIGNAL", reprompt: "Still working.", missingTag: true },
+        [],
+        detached(),
+      ),
     );
     if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
     expect(r.action.extraReprompt).toContain("not on the issue branch");
@@ -1091,7 +1096,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     // the first of a new run, so it is re-prompted rather than terminated.
     let state = initialState({ maxAttempts: 8, maxReviewRounds: 3 });
     state = step(state, impl(complete, [], detached())).state;
-    state = step(state, impl({ kind: "NO-SIGNAL" })).state;
+    state = step(state, impl(noSignal())).state;
     const relapse = step(state, impl(complete, [], detached()));
     expect(relapse.action.kind).toBe("run-implementer");
     // And the one after THAT does terminate.
