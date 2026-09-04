@@ -5,6 +5,11 @@
 // anchor. The --json form is TTY-independent; rendering is a pure function
 // (`renderIssueText`) so the prompt shape is table-testable.
 //
+// Sandbar comments are attributed from BOT_COMMENT_PREFIX at position zero of
+// the trimmed body. They cannot be attributed from the author login: sandbar
+// posts through the same operator account the human uses. Quoted or inline
+// occurrences stay human-authored because they do not start the trimmed body.
+//
 // Fetch/parse failures THROW (SandbarError): a missing anchor must halt loudly
 // rather than degrade into a placeholder string the agent ignores.
 
@@ -12,6 +17,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { SandbarError } from "./errors.js";
+import { BOT_COMMENT_PREFIX } from "./finalize.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
 const exec = promisify(execFile);
@@ -42,9 +48,12 @@ export function renderIssueText(issueId: string, issue: IssueJson): string {
   if (comments.length > 0) {
     lines.push("", "## Comments");
     for (const c of comments) {
-      const author = c.author?.login ?? "(unknown)";
+      const body = (c.body ?? "").trim();
+      const author = body.startsWith(BOT_COMMENT_PREFIX)
+        ? "Sandbar (orchestrator, not a human)"
+        : (c.author?.login ?? "(unknown)");
       const when = c.createdAt ? ` — ${c.createdAt}` : "";
-      lines.push("", `### ${author}${when}`, "", (c.body ?? "").trim());
+      lines.push("", `### ${author}${when}`, "", body);
     }
   }
   return lines.join("\n");
