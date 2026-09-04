@@ -1078,6 +1078,7 @@ describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () =>
     ]);
     if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
     expect(verdict.cause).toBe("uncommittable-worktree");
+    expect(verdict.qualityBudgetExhausted).toBeNull();
   });
 
   it("annotates a repeated dirty-set stop that also exhausts quality", () => {
@@ -1211,6 +1212,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     expect(verdict.cause).toBe("off-branch-head");
     // The sha is the only handle on the stranded commits once the worktree goes.
     expect(verdict.failureTrace).toContain("dead2");
+    expect(verdict.qualityBudgetExhausted).toBeNull();
   });
 
   it("annotates a repeated off-branch stop that also exhausts quality", () => {

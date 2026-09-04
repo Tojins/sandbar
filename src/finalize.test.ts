@@ -1117,6 +1117,10 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("too much indirection");
     expect(calls.comments[0]!.body).toContain("maxReviewRounds");
     expect(calls.comments[0]!.body).toContain("4 consecutive correctness failures");
+    expect(calls.comments[0]!.body).toContain(
+      "governing issue or project instructions",
+    );
+    expect(calls.comments[0]!.body).not.toContain("rewrite the standards");
     // #70 — "Push a fix on this branch" is only actionable with a name on it.
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
