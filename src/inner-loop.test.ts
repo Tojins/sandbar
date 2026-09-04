@@ -213,6 +213,27 @@ describe("runUiCheck (#126)", () => {
     );
     expect(sandbox.syncBranchToCache).toHaveBeenCalledOnce();
   });
+
+  it("parks a failed invocation that changed the repository and keeps its partial transcript", async () => {
+    const { sandbox, ctx } = context([]);
+    innerLoopMocks.dirtyWorktreePaths
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(["M src/x.ts"]);
+    const err = withPartialOutput(
+      new Error("disconnected"),
+      "partial checker transcript",
+    );
+    vi.mocked(sandbox.run).mockReset().mockRejectedValueOnce(err);
+
+    await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).resolves.toMatchObject({
+      kind: "ui-checker-wrote",
+      detail: expect.stringContaining("partial checker transcript"),
+    });
+    expect(sandbox.preserveWorktree).toHaveBeenCalledWith(
+      expect.stringContaining("ui checker changed the repository"),
+    );
+    expect(sandbox.syncBranchToCache).toHaveBeenCalledOnce();
+  });
 });
 
 describe("silent implementer attempt policy (#116)", () => {
