@@ -165,7 +165,7 @@ export type Verdict =
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
-      readonly cause?: "reviewer-wrote";
+      readonly cause?: "reviewer-wrote" | "ui-checker-wrote";
     }
   | { readonly type: "HARD-ERROR"; readonly reason: string }
   | {
@@ -193,6 +193,7 @@ export type LoopAction =
 
 export type LoopEvent =
   | { readonly kind: "ui-check-result"; readonly result: UiCheckResult }
+  | { readonly kind: "ui-checker-wrote"; readonly detail: string }
   | {
       readonly kind: "implementer-result";
       readonly signal: ParseSignal;
@@ -239,7 +240,7 @@ export type StepResult = {
 export type InitialStateOptions = {
   readonly maxAttempts: number;
   readonly maxReviewRounds: number;
-  readonly uiPrototypeCheck?: boolean;
+  readonly uiPrototypeCheck: boolean;
 };
 
 export function initialState(opts: InitialStateOptions): LoopState {
@@ -285,6 +286,18 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
   }
 
   switch (event.kind) {
+    case "ui-checker-wrote":
+      if (state.phase !== "needs-ui-check") {
+        throw new Error(
+          `ui-checker-wrote event in phase ${state.phase}; expected needs-ui-check`,
+        );
+      }
+      return terminate(state, {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "ui-checker-wrote",
+        latestReviewerProse: event.detail,
+      });
+
     case "ui-check-result":
       if (state.phase !== "needs-ui-check") {
         throw new Error(

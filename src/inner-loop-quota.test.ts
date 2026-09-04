@@ -63,6 +63,7 @@ vi.mock("./agent-tools.js", async (importOriginal) => ({
 vi.mock("./prompt.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./prompt.js")>(),
   buildPrompt: vi.fn(async () => "implement"),
+  buildUiCheckPrompt: vi.fn(async () => "ui check"),
   buildReviewerPrompts: vi.fn(async () => ({
     quality: "quality review",
     correctness: "correctness review",
@@ -84,7 +85,11 @@ const issue = (id: string): PlannedIssue => ({
   chunk: null,
 });
 
-const config = (implementerAgent: "claude" | "codex"): InnerLoopConfig => ({
+const config = (
+  implementerAgent: "claude" | "codex",
+  uiPrototypeCheck = false,
+  uiCheckAgent: "claude" | "codex" = implementerAgent,
+): InnerLoopConfig => ({
   layout: {
     cwd: "/tmp",
     workDir: "/tmp/.sandbar",
@@ -98,12 +103,12 @@ const config = (implementerAgent: "claude" | "codex"): InnerLoopConfig => ({
   sourceBranch: "main",
   env: {},
   implementerModelId: "model",
-  uiPrototypeCheck: false,
+  uiPrototypeCheck,
   uiCheckModelId: "model",
   reviewerModelId: "model",
   reviewerQualityModelId: "model",
   implementerAgent,
-  uiCheckAgent: implementerAgent,
+  uiCheckAgent,
   reviewerAgent: "claude",
   reviewerQualityAgent: "claude",
   maxImplAttempts: 1,
@@ -167,6 +172,87 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     expect(lines.find((line) => line.includes(" implementer signal="))).toContain(
       "toolCalls=3 peakContext=41",
     );
+  });
+
+  it("runs the enabled UI check before attempt 1 and again after a fresh HARD-ERROR cycle", async () => {
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    seams.sandboxRun
+      .mockResolvedValueOnce({
+        stdout: "no token",
+        commits: [],
+        silent: false,
+        maxGapMs: 1,
+        toolCalls: 0,
+      })
+      .mockResolvedValueOnce({
+        stdout: "still no token",
+        commits: [],
+        silent: false,
+        maxGapMs: 1,
+        toolCalls: 0,
+      })
+      .mockResolvedValueOnce({
+        stdout: "<ui-check>CLEAR</ui-check>",
+        commits: [],
+        silent: false,
+        maxGapMs: 1,
+        toolCalls: 0,
+      })
+      .mockResolvedValueOnce({
+        stdout: "<promise>NEEDS-INFO</promise><questions>Which?</questions>",
+        headBefore: "base-sha",
+        headAfter: "base-sha",
+        signalMs: 1,
+        commits: [],
+        silent: false,
+        maxGapMs: 1,
+        toolCalls: 0,
+      });
+
+    try {
+      await expect(runInnerLoop(issue("126"), {
+        config: config("codex", true), hooks: {}, copyToWorktree: [],
+      })).resolves.toMatchObject({ type: "NEEDS-INFO" });
+    } finally {
+      stderr.mockRestore();
+    }
+
+    expect(seams.createSandbox).toHaveBeenCalledTimes(2);
+    expect(seams.sandboxRun.mock.calls.map(([options]) => options.name)).toEqual([
+      "ui-check-126",
+      "ui-check-126-reprompt",
+      "ui-check-126",
+      "implementer-126-attempt-1",
+    ]);
+  });
+
+  it("closes UI-check quota, surfaces QUOTA, and never invokes a closed provider", async () => {
+    const state = createRunQuotaState();
+    const measurement = {
+      status: "rejected" as const,
+      window: "five_hour",
+      resetsAt: 42,
+    };
+    seams.sandboxRun.mockRejectedValueOnce(
+      new AgentQuotaError("claude", measurement),
+    );
+
+    await expect(runInnerLoop(issue("127"), {
+      config: config("codex", true, "claude"), hooks: {}, copyToWorktree: [],
+      quotaState: state,
+    })).resolves.toEqual({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+      specGaps: [],
+    });
+    expect(seams.createSandbox).toHaveBeenCalledOnce();
+    expect(seams.sandboxRun).toHaveBeenCalledOnce();
+
+    await expect(runInnerLoop(issue("128"), {
+      config: config("codex", true, "claude"), hooks: {}, copyToWorktree: [],
+      quotaState: state,
+    })).resolves.toMatchObject({ type: "QUOTA", provider: "claude" });
+    expect(seams.createSandbox).toHaveBeenCalledTimes(2);
+    expect(seams.sandboxRun).toHaveBeenCalledOnce();
   });
 
   it("logs peak context for successful and failed reviewer invocations", async () => {

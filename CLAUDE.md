@@ -95,7 +95,9 @@ without consuming one of `maxParallelIssues` slots.
    exhaust on the same attempt and park the issue with the terminal carrying
    the latest review; `DEFAULT_MAX_REVIEW_ROUNDS`'s comment in `src/config.ts`
    owns the number and the two dogfooding exhaustions behind it (#8, #66). The
-   reviewer is strictly advisory and read-only. After a clean, on-branch
+   UI classifier and reviewer are strictly advisory and read-only; each
+   invocation snapshots branch tip, status and HEAD, and any mutation parks the
+   issue with the managed clone preserved. After a clean, on-branch
    COMPLETE, gate-1 and the reviewer run concurrently against the same commit
    (#123). A reviewer write always parks; otherwise a red gate discards the
    review result without spending a round or updating reviewer prose, while any
@@ -190,9 +192,9 @@ from that state and provider or landing outcomes.
 - **Per-issue git and podman isolation (#98, #28).** Issue and merger trees are
   hardlink clones of the host-only bare cache; no container mounts the cache,
   and each sandbox can write only its own repository. Gate containers get an
-  empty tmpfs over `.git`, while reviewer writes are detected and parked for
-  human inspection. The corollary: an attempt's commits live in the clone until
-  a host-side fetch publishes them, so removing a clone is where work can be
+  empty tmpfs over `.git`, while UI-check and reviewer writes are detected and
+  parked for human inspection. The corollary: an attempt's commits live in the
+  clone until a host-side fetch publishes them, so removing a clone is where work can be
   destroyed — `reclaimIssueClone` (`src/agent-sandbox.ts`) is the ONE spelling
   of that removal, for the sandbox's `close()` and finalize alike: publish the
   branch and pin an off-branch HEAD in the cache first, delete only once the

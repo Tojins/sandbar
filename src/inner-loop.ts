@@ -51,8 +51,8 @@
 // Gate-1 and the reviewer are dispatched together after COMPLETE (#123). The
 // machine discards a review under a red gate except for reviewer mutation,
 // which still parks. Reviewer history is recorded only after a green gate.
-// Reviewer invocations snapshot the tip and status; any mutation parks the
-// issue and preserves the clone rather than running another reviewer.
+// UI-check and reviewer invocations snapshot the tip and status; any mutation
+// parks the issue and preserves the clone rather than trusting that call.
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -320,7 +320,7 @@ export type Terminal =
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
-      readonly cause?: "reviewer-wrote";
+      readonly cause?: "reviewer-wrote" | "ui-checker-wrote";
       readonly commits: readonly { sha: string }[];
       readonly specGaps: readonly SpecGap[];
     }
@@ -971,19 +971,20 @@ async function executeAction(
 export async function runUiCheck(
   _action: Extract<LoopAction, { kind: "run-ui-check" }>,
   ctx: ExecuteActionCtx,
-): Promise<Extract<LoopEvent, { kind: "ui-check-result" }>> {
+): Promise<
+  Extract<LoopEvent, { kind: "ui-check-result" | "ui-checker-wrote" }>
+> {
   const { issue, sandbox, opts, config } = ctx;
   const basePrompt = await buildUiCheckPrompt(issue.id, config.repo);
   let prompt = basePrompt;
-  let combinedOutput = "";
-  let combinedUsage: AgentUsage | undefined;
-  let combinedToolCalls = 0;
-  let combinedPeakContext: number | undefined;
-  let latestRateLimit: RateLimitMeasurement | undefined;
 
   // One correction at most. Neither invocation owns a completion signal:
   // process exit is the honest end of this role's single classification.
   for (let invocation = 1; invocation <= 2; invocation += 1) {
+    const beforeInvocation = await snapshotReadOnlyAgent(
+      sandbox.worktreePath,
+      issue.branch,
+    );
     const timer = startTimer();
     const logInvocation = async (
       maxGapMs: number | undefined,
@@ -1033,14 +1034,25 @@ export async function runUiCheck(
         partial.rateLimit ??
           (err instanceof AgentQuotaError ? err.measurement : undefined),
       );
+      const wrote = await enforceReadOnlyAgentSnapshot(
+        sandbox,
+        beforeInvocation,
+        await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch),
+        "UI checker",
+        agentPartialOutput(err),
+      );
+      if (wrote !== null) return { kind: "ui-checker-wrote", detail: wrote };
       throw err;
     }
 
-    combinedOutput += `${combinedOutput ? "\n" : ""}${run.stdout}`;
-    combinedUsage = sumAgentUsage(combinedUsage, run.usage);
-    combinedToolCalls += run.toolCalls;
-    combinedPeakContext = maxContextDepth(combinedPeakContext, run.peakContext);
-    latestRateLimit = run.rateLimit ?? latestRateLimit;
+    const wrote = await enforceReadOnlyAgentSnapshot(
+      sandbox,
+      beforeInvocation,
+      await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch),
+      "UI checker",
+      run.stdout,
+    );
+    if (wrote !== null) return { kind: "ui-checker-wrote", detail: wrote };
     const result = parseUiCheck(run.stdout);
     if (result.kind !== "NO-SIGNAL") {
       return { kind: "ui-check-result", result };
@@ -1049,15 +1061,8 @@ export async function runUiCheck(
       prompt = `${basePrompt}\n\n---\n\n# Required correction\n\n${result.reprompt}`;
       continue;
     }
-    throw withPartialOutput(
-      new AgentError(
-        "UI checker produced no valid classification after its one re-prompt.",
-      ),
-      combinedOutput,
-      combinedUsage,
-      combinedToolCalls,
-      combinedPeakContext,
-      latestRateLimit,
+    throw new AgentError(
+      "UI checker produced no valid classification after its one re-prompt.",
     );
   }
   throw new Error("unreachable UI-check invocation count");
@@ -1337,15 +1342,27 @@ async function runGate1(
   };
 }
 
-export type ReviewerSnapshot = {
+export type ReadOnlyAgentSnapshot = {
   readonly tip: string | null;
   readonly dirtyPaths: readonly string[];
   readonly headRef: string | null;
 };
 
-export function reviewerSnapshotChanged(
-  before: ReviewerSnapshot,
-  after: ReviewerSnapshot,
+export async function snapshotReadOnlyAgent(
+  worktreePath: string,
+  branch: string,
+): Promise<ReadOnlyAgentSnapshot> {
+  const [tip, dirtyPaths, headRef] = await Promise.all([
+    branchTip(worktreePath, branch),
+    dirtyWorktreePaths(worktreePath),
+    symbolicHeadRef(worktreePath),
+  ]);
+  return { tip, dirtyPaths, headRef };
+}
+
+export function readOnlyAgentSnapshotChanged(
+  before: ReadOnlyAgentSnapshot,
+  after: ReadOnlyAgentSnapshot,
 ): boolean {
   return (
     before.tip !== after.tip ||
@@ -1354,28 +1371,50 @@ export function reviewerSnapshotChanged(
   );
 }
 
+export async function enforceReadOnlyAgentSnapshot(
+  sandbox: Pick<Sandbox, "preserveWorktree" | "syncBranchToCache">,
+  before: ReadOnlyAgentSnapshot,
+  after: ReadOnlyAgentSnapshot,
+  role: "Reviewer" | "UI checker",
+  transcript: string,
+): Promise<string | null> {
+  if (!readOnlyAgentSnapshotChanged(before, after)) return null;
+  sandbox.preserveWorktree(
+    `the ${role.toLowerCase()} changed the repository; kept for human inspection`,
+  );
+  // Deleting the issue ref is itself an agent write. There is then no ref to
+  // publish, but the preserved clone still contains the evidence.
+  if (after.tip !== null) await sandbox.syncBranchToCache();
+  const renderedTranscript =
+    transcript.trim() || `(${role.toLowerCase()} emitted no output)`;
+  return (
+    `${role} changed git state. Branch tip before: ${before.tip}; ` +
+    `after: ${after.tip}. HEAD before: ${before.headRef}; ` +
+    `after: ${after.headRef}. Status after:\n` +
+    (after.dirtyPaths.length > 0
+      ? after.dirtyPaths.join("\n")
+      : "(clean worktree)") +
+    `\n\n${role} transcript:\n${renderedTranscript}`
+  );
+}
+
 export async function enforceReviewerSnapshot(
   sandbox: Pick<Sandbox, "preserveWorktree" | "syncBranchToCache">,
-  before: ReviewerSnapshot,
-  after: ReviewerSnapshot,
+  before: ReadOnlyAgentSnapshot,
+  after: ReadOnlyAgentSnapshot,
   transcript: string,
 ): Promise<Extract<ReviewerResult, { kind: "reviewer-wrote" }> | null> {
-  if (!reviewerSnapshotChanged(before, after)) return null;
-  sandbox.preserveWorktree("the reviewer changed the repository; kept for human inspection");
-  // Deleting the issue ref is itself a reviewer write. There is then no ref
-  // to publish, but the preserved clone still contains the evidence.
-  if (after.tip !== null) await sandbox.syncBranchToCache();
-  const renderedTranscript = transcript.trim() || "(reviewer emitted no output)";
+  const detail = await enforceReadOnlyAgentSnapshot(
+    sandbox,
+    before,
+    after,
+    "Reviewer",
+    transcript,
+  );
+  if (detail === null) return null;
   return {
     kind: "reviewer-wrote",
-    detail:
-      `Reviewer changed git state. Branch tip before: ${before.tip}; ` +
-      `after: ${after.tip}. HEAD before: ${before.headRef}; ` +
-      `after: ${after.headRef}. Status after:\n` +
-      (after.dirtyPaths.length > 0
-        ? after.dirtyPaths.join("\n")
-        : "(clean worktree)") +
-      `\n\nReviewer transcript:\n${renderedTranscript}`,
+    detail,
   };
 }
 
@@ -1397,16 +1436,10 @@ export async function runReviewer(
       `cannot review issue #${issue.id} round ${action.reviewRound}: no accumulated HEAD`,
     );
   }
-  const snapshot = async (): Promise<ReviewerSnapshot> => {
-    const [tip, dirtyPaths, headRef] = await Promise.all([
-      branchTip(sandbox.worktreePath, issue.branch),
-      dirtyWorktreePaths(sandbox.worktreePath),
-      symbolicHeadRef(sandbox.worktreePath),
-    ]);
-    return { tip, dirtyPaths, headRef };
-  };
+  const snapshot = (): Promise<ReadOnlyAgentSnapshot> =>
+    snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
   const detectWrite = async (
-    before: ReviewerSnapshot,
+    before: ReadOnlyAgentSnapshot,
     transcript: string,
   ): Promise<Extract<ReviewerResult, { kind: "reviewer-wrote" }> | null> => {
     const after = await snapshot();
