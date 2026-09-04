@@ -24,7 +24,7 @@ export function makeEnvReader(env: Record<string, string>): EnvReader {
     // one direction that is silent and unrecoverable: preflight would find
     // `GH_TOKEN` in its own environment and pass, `resolveSandboxEnv` iterates
     // only declared keys and would export nothing, and every agent would run
-    // unauthenticated for its whole attempt budget — the exact failure the
+    // unauthenticated for its whole quality budget — the exact failure the
     // credential check exists to prevent, reached through the check. Which is
     // also why the reader is not merely `env[key] ?? process.env[key]`.
     if (!Object.prototype.hasOwnProperty.call(env, key)) return undefined;

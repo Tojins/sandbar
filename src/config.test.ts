@@ -13,7 +13,7 @@ import {
   DEFAULT_CLAUDE_MD_PATH,
   DEFAULT_CONTAINERFILE_PATH,
   DEFAULT_CONTEXT_MD_PATH,
-  DEFAULT_MAX_IMPL_ATTEMPTS,
+  DEFAULT_MAX_QUALITY_ROUNDS,
   DEFAULT_MAX_REVIEW_ROUNDS,
   DEFAULT_MAX_TOTAL_ISSUES,
   DEFAULT_IMPLEMENTER_MODEL_ID,
@@ -141,7 +141,7 @@ describe("resolveConfig", () => {
     // a host whose credentials all come from the process environment still has
     // to DECLARE the keys, because the fallback is per declared key.
     expect(r.env).toEqual({});
-    expect(r.maxImplAttempts).toBe(DEFAULT_MAX_IMPL_ATTEMPTS);
+    expect(r.maxQualityRounds).toBe(DEFAULT_MAX_QUALITY_ROUNDS);
     expect(r.maxReviewRounds).toBe(DEFAULT_MAX_REVIEW_ROUNDS);
     expect(r.maxTotalIssues).toBe(DEFAULT_MAX_TOTAL_ISSUES);
     expect(r.copyToWorktree).toEqual([]);
@@ -186,16 +186,32 @@ describe("resolveConfig", () => {
       .toThrow(message);
   });
 
-  it("defaults the two per-issue budgets to the same number (#71)", () => {
-    // Not decoration: on a green-gate branch every attempt ends in a reviewer
-    // run, so the effective budget is min(attempts, rounds). Equal is what
-    // keeps every attempt reachable AND parks an exhausted issue as
-    // NEEDS-HUMAN-REVIEW rather than reviewer-blocked. 8 is #71's number, from
-    // #66's five-round exhaustion on a converging branch.
-    expect(DEFAULT_MAX_REVIEW_ROUNDS).toBe(8);
-    expect(DEFAULT_MAX_REVIEW_ROUNDS).toBe(DEFAULT_MAX_IMPL_ATTEMPTS);
+  it("defaults the independent quality and correctness budgets to four (#129)", () => {
+    expect(DEFAULT_MAX_QUALITY_ROUNDS).toBe(4);
+    expect(DEFAULT_MAX_REVIEW_ROUNDS).toBe(4);
     const r = resolveConfig(minimal);
-    expect(r.maxReviewRounds).toBe(r.maxImplAttempts);
+    expect(r.maxQualityRounds).toBe(4);
+    expect(r.maxReviewRounds).toBe(4);
+  });
+
+  it.each([8, undefined])(
+    "refuses removed maxImplAttempts=%s and names both replacements",
+    (maxImplAttempts) => {
+      expect(() =>
+        resolveConfig({ ...minimal, maxImplAttempts } as RunConfig),
+      ).toThrow(/maxImplAttempts.*maxQualityRounds.*maxReviewRounds/s);
+    },
+  );
+
+  it.each([
+    ["maxQualityRounds", 0],
+    ["maxQualityRounds", 1.5],
+    ["maxReviewRounds", -1],
+    ["maxReviewRounds", Number.POSITIVE_INFINITY],
+  ] as const)("refuses invalid %s %s", (field, value) => {
+    expect(() => resolveConfig({ ...minimal, [field]: value })).toThrow(
+      new RegExp(`config\\.${field}.*positive integer`),
+    );
   });
 
   it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
@@ -257,12 +273,14 @@ describe("resolveConfig", () => {
       ...minimal,
       sourceBranch: "develop",
       implementerModelId: "claude-haiku-4-5-20251001",
+      maxQualityRounds: 3,
       maxReviewRounds: 2,
       coauthorTrailer: "Co-authored-by: Someone Else <x@y.z>",
       copyToWorktree: [".npmrc"],
     });
     expect(r.sourceBranch).toBe("develop");
     expect(r.implementerModelId).toBe("claude-haiku-4-5-20251001");
+    expect(r.maxQualityRounds).toBe(3);
     expect(r.maxReviewRounds).toBe(2);
     expect(r.coauthorTrailer).toBe("Co-authored-by: Someone Else <x@y.z>");
     expect(r.copyToWorktree).toEqual([".npmrc"]);

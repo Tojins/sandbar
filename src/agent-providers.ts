@@ -20,8 +20,8 @@
 // that provider is absent from `requiredAgentProviders` because no call uses it.
 // The pressure that wants the vendor
 // knob is the implementer's: a review round is one bounded sequential chain,
-// while an implementer attempt is a long multi-tool session, up to
-// `maxImplAttempts` of them per issue and several issues per cycle. Splitting
+// while an implementer attempt is a long multi-tool session, with several of
+// them per issue and several issues per cycle. Splitting
 // across VENDORS buys a second quota pool without weakening the verdict, which
 // is why the interesting configuration is a cheaper implementer under a
 // Claude/Opus reviewer rather than a cheaper MODEL everywhere — measured

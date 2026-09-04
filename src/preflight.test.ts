@@ -531,7 +531,7 @@ describe("checkInvariants", () => {
 // #51 — a gate-stack `mounts[].hostPath` that does not exist on the host fails
 // `podman run` at bringup, and a gate container is `attempt`-lifecycle, so #24
 // D5 charges that to the BRANCH: a gate red about a statfs source no agent can
-// see or fix, repeated until the attempt budget parks the issue as
+// see or fix, repeated until the quality budget parks the issue as
 // `agent-stuck` with an "environment" trace. Host state belongs in preflight,
 // beside `missingImages`, which is the identical class.
 describe("checkInvariants — gate-stack mount sources exist (#51)", () => {

@@ -33,13 +33,21 @@ const baseInputs = {
 const implementerInputs = {
   issue: baseInputs.issue,
   attempt: 1,
-  maxAttempts: 8,
   worktreePath: "/tmp/wt",
   lastFailureTrace: "",
   base: sourceBranchBase("main"),
   claudeMdPath: "CLAUDE.md",
   diff: "",
 } as const;
+
+describe("renderAttemptSlot — unbounded attempt sequence (#129)", () => {
+  it("renders the escalation threshold with its attempt number and no removed maximum", () => {
+    const slot = renderAttemptSlot({ ...implementerInputs, attempt: 6 });
+    expect(slot).toContain("# Attempt 6");
+    expect(slot).toContain("This is attempt 6.");
+    expect(slot).not.toMatch(/attempt 6 of \d+/i);
+  });
+});
 
 describe("UI-prototype prompt contracts (#126)", () => {
   const slot = renderAttemptSlot(implementerInputs);

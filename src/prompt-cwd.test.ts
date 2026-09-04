@@ -177,7 +177,6 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       {
         issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
         attempt: 1,
-        maxAttempts: 8,
         worktreePath: target,
         lastFailureTrace: "",
         base: sourceBranchBase("main"),
@@ -313,7 +312,6 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       {
         issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
         attempt: 1,
-        maxAttempts: 8,
         worktreePath: launchedFrom,
         lastFailureTrace: "",
         base: sourceBranchBase("main"),
@@ -339,7 +337,6 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       {
         issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
         attempt: 1,
-        maxAttempts: 8,
         worktreePath: launchedFrom,
         lastFailureTrace: "",
         base: sourceBranchBase("main"),

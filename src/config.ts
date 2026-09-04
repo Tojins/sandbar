@@ -22,10 +22,9 @@ export const DEFAULT_READINESS_TIMEOUT_MS = 60_000;
 // and finite". 15 minutes clears a full browser suite on a cold cache several
 // times over, so a default-bounded step that trips this has hung rather than
 // been slow — which matters, because a spurious timeout is a false red that
-// costs the issue one of its eight implementation attempts. It also keeps the
-// worst case legible: a gate run stops at the first red, so one hung step costs
-// one bound, and the whole attempt budget cannot burn more than a couple of
-// hours against a wedged suite.
+// costs the issue one quality failure. It also keeps the worst case legible: a
+// gate run stops at the first red, so one hung step costs one bound, and four
+// consecutive timeouts exhaust the default quality budget in an hour.
 export const DEFAULT_STEP_TIMEOUT_MS = 900_000;
 
 // The handoff labels sandbar APPLIES when it parks an issue for a human. These
@@ -640,19 +639,14 @@ export type RunConfig = {
   // leaks wholesale. Default: {}.
   readonly env?: Record<string, string>;
 
-  // Two budgets, but only the smaller one binds (#71): a review round is never
-  // spent without an implementer attempt, so the budget an issue gets is at
-  // most min(maxImplAttempts, maxReviewRounds) — and it is exactly that on the
-  // path that matters, a branch whose gate goes green and whose reviewer
-  // answers, where every attempt ends in a verdict and the two counters advance
-  // in lockstep. They come apart wherever an attempt ends WITHOUT a verdict,
-  // spending the attempt and no round: a red gate, a re-prompt (NO-SIGNAL, a
-  // dirty tree, HEAD off the branch), or a reviewer harness failure (#41), that
-  // last one behind a green gate. The defaults are equal — 8 and 8, for the
-  // reason DEFAULT_MAX_REVIEW_ROUNDS gives — so a host that lowers either one
-  // lowers the reviewed path's budget to it, and one that raises
-  // maxImplAttempts alone buys attempts only for the unreviewed routes above.
-  readonly maxImplAttempts?: number;
+  // Independent consecutive-failure budgets (#129). `maxQualityRounds` counts
+  // attempts that do not end in quality APPROVED: a quality rejection, red
+  // gate, NO-SIGNAL, dirty tree, or off-branch HEAD. It resets when quality
+  // approval leads to a completed reviewer verdict. `maxReviewRounds` counts
+  // correctness rejections only. Reviewer harness failures spend neither and
+  // leave both counters unchanged; their existing two-consecutive rule (#41)
+  // remains the bound. There is deliberately no total attempt ceiling.
+  readonly maxQualityRounds?: number;
   readonly maxReviewRounds?: number;
   readonly maxTotalIssues?: number;
 
@@ -813,33 +807,16 @@ export const DEFAULT_MERGER_MODEL_ID = "opus";
 export const DEFAULT_CLAUDE_MD_PATH = "CLAUDE.md";
 export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
 export const DEFAULT_ADR_DIR = "docs/adr";
-export const DEFAULT_MAX_IMPL_ATTEMPTS = 8;
-// 8, and equal to DEFAULT_MAX_IMPL_ATTEMPTS on purpose. Two dogfooding
-// exhaustions set this number, and both were issues that were CONVERGING:
-//   - 3 → 5 (#8): three rounds, three distinct real findings, each fixed; the
-//     4th round was APPROVED. 3 is marginal even for converging work.
-//   - 5 → 8 (#71, from run #66): five attempts, gate-1 green on every one,
-//     five rounds, five distinct and monotonically narrowing findings, each
-//     fixed and none re-raised. What parked the branch was a five-line header
-//     edit arriving on round six of a five-round budget.
-// The budget exists to bound a loop that is NOT converging — a reviewer and an
-// implementer that disagree permanently, or an implementer thrashing — and it
-// cannot tell that case from these two, because "the same finding again" is a
-// judgement about prose and nothing but the token contracts is allowed inside
-// the orchestrator's termination logic. So the only lever is the number, and
-// it was set below what this repo's reviewer costs to satisfy.
-// EQUAL to the attempt budget is the relation, not merely a bigger number. A
-// round is never spent without an attempt, so the budget an issue gets is at
-// most min(maxImplAttempts, maxReviewRounds), and it is exactly that on the
-// green-gate-and-answering-reviewer loop where every attempt ends in a verdict
-// — see RunConfig's doc for where the two come apart. Below it, rounds
-// bind first and part of the attempt budget is unreachable; above it, attempts
-// bind first and the issue parks as NEEDS-HUMAN/`reviewer-blocked`, without the
-// reviewer's prose as the headline of what the human is handed. Equal, both
-// exhaust on the same attempt and `onReviewerResult` checks the review budget
-// first, so the issue is parked with the terminal that carries the latest
-// review — the thing a human needs to finish the branch by hand.
-export const DEFAULT_MAX_REVIEW_ROUNDS = 8;
+// Four consecutive non-approving quality attempts are enough to establish a
+// circling cheap gate while still tolerating transient gate and standards
+// churn. Quality approval followed by a completed reviewer verdict resets the
+// count, so these do not consume the correctness budget they protect (#129).
+export const DEFAULT_MAX_QUALITY_ROUNDS = 4;
+// Four correctness rejections. #8 converged on its fourth correctness look
+// after three distinct real findings; a default of three would have parked it
+// one round before approval. This caps the deciding pass, not total loop cost:
+// each correctness rejection may be preceded by a fresh quality-failure streak.
+export const DEFAULT_MAX_REVIEW_ROUNDS = 4;
 export const DEFAULT_MAX_TOTAL_ISSUES = 50;
 export const DEFAULT_MAX_PARALLEL_ISSUES = 3;
 export const DEFAULT_INTEGRATION_BRANCH = "sandbar/integration";
@@ -1767,6 +1744,13 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       "config.codingStandardsPath was removed; use config.promptExtensions with per-role { path } entries instead.",
     );
   }
+  if ("maxImplAttempts" in config) {
+    throw new SandbarError(
+      "config.maxImplAttempts was removed (#129); use config.maxQualityRounds " +
+        "to bound consecutive quality failures and config.maxReviewRounds to " +
+        "bound correctness rejections.",
+    );
+  }
   checkRenamedReviewerField(config);
   // Trimmed HERE, not just where it is compared. `resolveMergeMode` tests
   // `integrationBranch === sourceBranch.trim()`, so trimming only in the guard
@@ -1927,8 +1911,14 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     // through the process environment still has to DECLARE the keys, because
     // the fallback is per declared key and never a wholesale leak.
     env: resolveEnv(config.env),
-    maxImplAttempts: config.maxImplAttempts ?? DEFAULT_MAX_IMPL_ATTEMPTS,
-    maxReviewRounds: config.maxReviewRounds ?? DEFAULT_MAX_REVIEW_ROUNDS,
+    maxQualityRounds: requirePositiveInteger(
+      "maxQualityRounds",
+      config.maxQualityRounds ?? DEFAULT_MAX_QUALITY_ROUNDS,
+    ),
+    maxReviewRounds: requirePositiveInteger(
+      "maxReviewRounds",
+      config.maxReviewRounds ?? DEFAULT_MAX_REVIEW_ROUNDS,
+    ),
     maxTotalIssues: config.maxTotalIssues ?? DEFAULT_MAX_TOTAL_ISSUES,
     maxParallelIssues: requirePositiveInteger(
       "maxParallelIssues",

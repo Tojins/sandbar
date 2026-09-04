@@ -760,6 +760,7 @@ describe("finalizeOne", () => {
         cause: "gate-red",
         failureTrace: "AssertionError: red",
         latestReviewerProse: null,
+        qualityBudgetExhausted: 4,
       },
       adapter,
       LABELS,
@@ -771,6 +772,8 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.body).toContain("AssertionError: red");
     expect(calls.comments[0]!.body).toContain("without a green gate");
+    expect(calls.comments[0]!.body).toContain("maxQualityRounds");
+    expect(calls.comments[0]!.body).toContain("4 consecutive quality failures");
     // #70 — "push a fix on this branch" used to never say which.
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
@@ -789,6 +792,7 @@ describe("finalizeOne", () => {
         cause: "no-signal-exhausted",
         failureTrace: "The final implementer signal failed validation: guard correction",
         latestReviewerProse: null,
+        qualityBudgetExhausted: 4,
       },
       adapter,
       LABELS,
@@ -802,15 +806,15 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).not.toContain("Last failure trace");
   });
 
-  it("needs-human reviewer-blocked: comments with the reviewer prose and names the green gate, not 'no green gate' (#17)", async () => {
+  it("quality review exhaustion names its budget, count, and latest prose", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
       {
-        kind: "needs-human",
+        kind: "review-budget-exhausted",
         issue: i,
-        cause: "reviewer-blocked",
-        failureTrace: "",
+        budget: "quality",
+        roundsUsed: 4,
         latestReviewerProse: "## Extract the duplicated lifecycle dispatch",
       },
       adapter,
@@ -822,11 +826,10 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     const body = calls.comments[0]!.body;
     expect(body).toContain("Extract the duplicated lifecycle dispatch");
-    expect(body).toContain("green gate");
-    expect(body).toContain("CHANGES-REQUESTED");
+    expect(body).toContain("maxQualityRounds");
+    expect(body).toContain("4 consecutive quality failures");
     expect(body).toContain(i.branch); // #70
-    // Must NOT misreport the gate as the blocker.
-    expect(body).not.toContain("without a green gate");
+    expect(body).not.toContain("standards-violation report");
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
@@ -844,6 +847,7 @@ describe("finalizeOne", () => {
           "invocation 1/2: the run failed and emitted no output at all: Agent idle for 600 seconds — no output received.",
         // No round ever produced a report, so the global claim is the true one.
         latestReviewerProse: null,
+        qualityBudgetExhausted: null,
       },
       adapter,
       LABELS,
@@ -860,7 +864,7 @@ describe("finalizeOne", () => {
     // #70 — and this one is telling the reader to review it themselves, so it
     // had better say what to check out.
     expect(body).toContain(i.branch);
-    // The claim the reviewer-blocked comment would have made, and it is false
+    // The claim a review-rejection comment would make, and it is false
     // here: that a standards complaint is what the human has to resolve.
     expect(body).not.toContain("the code reviewer's `CHANGES-REQUESTED` is the blocker");
     // Nor is it a gate failure — the gate is what went green.
@@ -888,6 +892,7 @@ describe("finalizeOne", () => {
         failureTrace:
           "invocation 1/2: the run failed and emitted no output at all: Agent idle for 600 seconds — no output received.",
         latestReviewerProse: earlier,
+        qualityBudgetExhausted: null,
       },
       adapter,
       LABELS,
@@ -920,6 +925,7 @@ describe("finalizeOne", () => {
         cause: "uncommittable-worktree",
         failureTrace: "?? node_modules/.cache/foo",
         latestReviewerProse: null,
+        qualityBudgetExhausted: null,
         strandedHead: null,
       },
       adapter,
@@ -945,6 +951,7 @@ describe("finalizeOne", () => {
         failureTrace:
           "You are not on the issue branch. HEAD is DETACHED at deadbeef1234,",
         latestReviewerProse: null,
+        qualityBudgetExhausted: null,
         strandedHead: {
           branch: `sandbar/issue-45-t-45`,
           headRef: null,
@@ -1098,6 +1105,8 @@ describe("finalizeOne", () => {
       {
         kind: "review-budget-exhausted",
         issue: i,
+        budget: "correctness",
+        roundsUsed: 4,
         latestReviewerProse: "## Bar violations\n- too much indirection",
       },
       adapter,
@@ -1110,6 +1119,12 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.n).toBe(45);
     expect(calls.comments[0]!.body).toContain("too much indirection");
+    expect(calls.comments[0]!.body).toContain("maxReviewRounds");
+    expect(calls.comments[0]!.body).toContain("4 consecutive correctness failures");
+    expect(calls.comments[0]!.body).toContain(
+      "governing issue or project instructions",
+    );
+    expect(calls.comments[0]!.body).not.toContain("rewrite the standards");
     // #70 — "Push a fix on this branch" is only actionable with a name on it.
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
@@ -1394,6 +1409,7 @@ describe("finalizeOne", () => {
           cause: "gate-red",
           failureTrace: "boom",
           latestReviewerProse: null,
+          qualityBudgetExhausted: 4,
         },
         adapter,
         LABELS,
@@ -1419,6 +1435,7 @@ describe("finalizeOne", () => {
           cause: "gate-red",
           failureTrace: "boom",
           latestReviewerProse: null,
+          qualityBudgetExhausted: 4,
         },
         adapter,
         LABELS,
@@ -1430,7 +1447,13 @@ describe("finalizeOne", () => {
     const { adapter } = makeAdapter({ labelEditOk: false });
     await expect(
       finalizeOne(
-        { kind: "review-budget-exhausted", issue: issue(45), latestReviewerProse: "violations" },
+        {
+          kind: "review-budget-exhausted",
+          issue: issue(45),
+          budget: "correctness",
+          roundsUsed: 4,
+          latestReviewerProse: "violations",
+        },
         adapter,
         LABELS,
       ),
@@ -1475,6 +1498,7 @@ describe("finalizeOne", () => {
           cause: "gate-red",
           failureTrace: "t",
           latestReviewerProse: null,
+          qualityBudgetExhausted: 4,
         },
         throwing,
         LABELS,
@@ -1495,6 +1519,7 @@ describe("finalizeOne", () => {
         cause: "gate-red",
         failureTrace: "boom",
         latestReviewerProse: null,
+        qualityBudgetExhausted: 4,
       },
       adapter,
       custom,
@@ -1520,6 +1545,7 @@ describe("finalizeOne", () => {
         cause: "gate-red",
         failureTrace: "boom",
         latestReviewerProse: null,
+        qualityBudgetExhausted: 4,
         specGaps: [{ round: 1, text: "must not be posted" }],
       },
       adapter,
