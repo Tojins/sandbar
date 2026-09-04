@@ -843,7 +843,7 @@ export async function run(
   const mergedThisRun = new Set<number>();
 
   // One adapter for the whole run, like `repo` itself: the chunk-review scan
-  // (#63) reads and writes the same repository every cycle.
+  // (#95) reads and writes the same repository every cycle.
   const followUpAdapter = realChunkFollowUpAdapter({
     repo,
     repoDir: layout.repoDir,

@@ -629,9 +629,9 @@ export type BuildPlanOptions = {
   // flip made seconds ago.
   //
   // Safe because it is additive and authoritative in the same breath: the
-  // caller has the issue's number from the create call, and the strongly
-  // consistent facts batch below covers it like any other candidate — so an
-  // issue closed or relabelled between the create and the plan is still
+  // caller has the member's summary from the post-label tracker read, and the
+  // strongly consistent facts batch below covers it like any other candidate — so an
+  // issue closed or relabelled between that read and the plan is still
   // filtered out on the usual grounds. Deduped against the listing by number,
   // the listing winning, so an index that HAS caught up decides.
   readonly extraCandidates?: readonly IssueSummary[];
