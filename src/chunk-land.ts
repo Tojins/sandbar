@@ -550,18 +550,26 @@ export const CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT = (args: {
 export const CHUNK_LAND_DEFERRED_PR_COMMENT = (args: {
   readonly chunkBranch: string;
   readonly sourceBranch: string;
-  // What this cycle put on the branch after the request was read.
+  readonly reason: "arrived" | "rework";
   readonly landedNow: readonly ChunkMember[];
-}): string =>
-  `${BOT_COMMENT_PREFIX} this chunk is labelled \`${LAND_LABEL}\`, and it was NOT ` +
-  `landed this cycle: these members are still in flight or had just arrived on \`${args.chunkBranch}\` — ` +
-  args.landedNow.map((m) => `#${m.number} — ${m.title}`).join(", ") +
-  `.\n\nMerging now would move commits onto \`${args.sourceBranch}\` that this pull ` +
-  `request may not yet carry as reviewed, which is the one thing the review ` +
-  `lane exists to prevent. Nothing was merged and the \`${LAND_LABEL}\` label is ` +
-  `untouched: the description above now lists the new work, and the next cycle ` +
-  `that adds nothing further lands the chunk. Take the label off if you would ` +
-  `rather look again first.`;
+}): string => {
+  const members = args.landedNow
+    .map((m) => `#${m.number} — ${m.title}`)
+    .join(", ");
+  const cause = args.reason === "rework"
+    ? `these members are queued for rework — ${members}`
+    : `these members had just arrived on \`${args.chunkBranch}\` — ${members}`;
+  const resume = args.reason === "rework"
+    ? `Landing resumes after the named issues leave the \`ready-for-agent\` queue.`
+    : `The description above now lists the new work; the next cycle that adds ` +
+      `nothing further lands the chunk.`;
+  return `${BOT_COMMENT_PREFIX} this chunk is labelled \`${LAND_LABEL}\`, and it was NOT ` +
+    `landed this cycle: ${cause}.\n\nMerging now would move commits onto ` +
+    `\`${args.sourceBranch}\` that this pull request may not yet carry as reviewed, ` +
+    `which is the one thing the review lane exists to prevent. Nothing was merged ` +
+    `and the \`${LAND_LABEL}\` label is untouched. ${resume} Take the label off if ` +
+    `you would rather look again first.`;
+};
 
 export const CHUNK_BRANCH_MISSING_PR_COMMENT = (args: {
   readonly chunkBranch: string;

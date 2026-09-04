@@ -2308,12 +2308,13 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
 
   it("defers landing while a member is queued for rework", async () => {
     const { adapter, calls } = makeAdapter({ chunkRefs: originHas(42) });
+    const log: string[] = [];
     const target = {
       ...request(42),
       rework: [{ number: 42, title: "t-42" }],
     };
     const summary = await runMergerWithAdapter(
-      [], adapter, undefined, undefined, landing(target),
+      [], adapter, (line) => log.push(line), undefined, landing(target),
     );
 
     expect(calls.merges).toEqual([]);
@@ -2322,6 +2323,11 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     ]);
     expect(calls.prLabelRemovals).toEqual([]);
     expect(calls.prComments[0]?.body).toContain("#42 — t-42");
+    expect(calls.prComments[0]?.body).toContain("leave the `ready-for-agent` queue");
+    expect(calls.prComments[0]?.body).not.toContain("description above now lists");
+    expect(log).toContain(
+      "chunk sandbar/chunk-42-c: not landed (queued for rework: #42); `land` kept",
+    );
   });
 
   it("lands a chunk whose branch this cycle did not touch, beside one it did", async () => {

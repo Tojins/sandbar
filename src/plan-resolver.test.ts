@@ -785,6 +785,44 @@ describe("resolvePlan git membership safety (#93)", () => {
     expect(result.plan[0]!.chunk).not.toBeNull();
   });
 
+  it.each([
+    {
+      name: "closed",
+      candidate: issue(47, "", { title: "Root" }),
+      issueFacts: facts({ 47: { state: "CLOSED", labels: ["ready-for-agent"] } }),
+      excluded: new Set<number>(),
+    },
+    {
+      name: "excluded",
+      candidate: issue(47, "", { title: "Root" }),
+      issueFacts: facts({ 47: { labels: ["ready-for-agent"] } }),
+      excluded: new Set([47]),
+    },
+    {
+      name: "waiting",
+      candidate: issue(47, "", { title: "Root", labels: ["waiting"] }),
+      issueFacts: facts({ 47: { labels: ["ready-for-agent"] } }),
+      excluded: new Set<number>(),
+    },
+    {
+      name: "blocked",
+      candidate: issue(47, "## Blocked by\n- #99\n", { title: "Root" }),
+      issueFacts: facts({ 47: { labels: ["ready-for-agent"] } }),
+      excluded: new Set<number>(),
+    },
+  ])("does not defer landing for a $name member the planner will not work", ({
+    candidate,
+    issueFacts,
+    excluded,
+  }) => {
+    const result = resolvePlan(
+      [candidate], issueFacts, excluded, 3, "review", membersOn(47, "Root", 47),
+    );
+
+    expect(result.plan).toEqual([]);
+    expect(result.landedChunks[0]?.rework).toEqual([]);
+  });
+
   it("ignores needs-review when git does not name the member", () => {
     const candidate = issue(47, "", { labels: ["ready-for-agent", "needs-review"] });
     const result = resolvePlan(

@@ -696,16 +696,24 @@ export async function finalizeOne(
       // branch and that branch is on origin, so the local issue branch is a
       // duplicate and `-D` is safe on the same structural certainty. What
       // differs is everything issue-facing: no close (the review has not
-      // happened), and the label edit is best-effort display. Git has already
-      // recorded membership, so failure here cannot cause duplicate work or
-      // prevent the branch and local issue branch lifecycle from completing.
+      // happened), and the label flip moves the issue out of the agent queue.
+      // It is required because `ready-for-agent` on a published member now
+      // deliberately requests another implementation pass (#94).
       const n = issueNumberOf(input.issue);
       await adapter.reclaimIssueClone(input.issue.branch);
-      await adapter.editLabels(
+      const flip = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
         [NEEDS_REVIEW_LABEL],
       );
+      if (!flip.ok) {
+        throw new SandbarError(
+          `Could not move chunk member #${n} into review: updating labels failed ` +
+            `(${flip.error ?? "unknown error"}). The issue may still be in the ` +
+            `agent queue, so its local branch was kept; fix the label configuration ` +
+            `or forge failure, then re-run.`,
+        );
+      }
       await adapter.postComment(
         n,
         CHUNK_LANDED_COMMENT_TEMPLATE(input.chunkBranch),

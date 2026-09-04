@@ -124,8 +124,8 @@ an exit condition fires.
 
 4. **Finalise** (`src/finalize.ts` + `src/finalize-inputs.ts`) — per-issue
    branch lifecycle, bot comments, label flips (`ready-for-agent` ↔
-   `labels.needsInfo`/`labels.agentStuck`, plus display-only `needs-review` for
-   a chunk-landed member, are the only labels sandbar applies — `land` (#64) it only ever
+   `labels.needsInfo`/`labels.agentStuck`, plus `needs-review` for a
+   chunk-landed member, are the only labels sandbar applies — `land` (#64) it only ever
    REMOVES, from a pull request a human labelled).
    Runs in **two passes straddling the merge** (#30): Phase-2 terminals are
    finalised before Phase 3 so a merge-phase throw cannot discard them.
@@ -267,7 +267,10 @@ and used to announce themselves in four different ways, the halt in none at all.
   `ls-remote` probe. A request for a chunk PHASE A JUST GREW is DEFERRED rather
   than honoured or parked (#61 plans a layer per cycle): landing it would put
   commits a review never covered on the source branch, so the label stays and
-  the next quiet cycle lands it. Members are closed EXPLICITLY (a `Closes #N` trailer only
+  the next quiet cycle lands it. A member queued for #94 rework defers the same
+  request until it leaves `ready-for-agent`; unlike new work that just arrived,
+  the deferral does not claim the PR description was updated or that one quiet
+  cycle clears it. Members are closed EXPLICITLY (a `Closes #N` trailer only
   fires on GitHub's own merge of that PR, and sandbar composes the merge
   locally), in `LandedChunk.closeOrder` — dependents first, ROOT LAST — and the
   loop stops at the first failure. Git-derived members are fetched by number

@@ -413,6 +413,7 @@ export function resolvePlan(
     return true;
   });
   const sorted = [...eligible].sort((a, b) => a.number - b.number);
+  const eligibleNumbers = new Set(eligible.map((c) => c.number));
   const plan = sorted.slice(0, k).map((c) => ({
     id: String(c.number),
     title: c.title,
@@ -430,6 +431,7 @@ export function resolvePlan(
       chunkIssues,
       new Set(candidates.map((c) => c.number).filter(isOnDerivedChunk)),
       new Set(candidates.map((c) => c.number).filter((n) =>
+        eligibleNumbers.has(n) &&
         issueFacts.get(n)?.labels.includes(READY_LABEL),
       )),
     ),

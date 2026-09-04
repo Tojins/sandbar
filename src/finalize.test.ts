@@ -342,7 +342,7 @@ describe("finalizeOne", () => {
     expect(calls.forceDeletes).toEqual(["sandbar/issue-45-t-45"]);
   });
 
-  it("chunk-landed with a failing display-label flip still deletes the branch", async () => {
+  it("chunk-landed with a failing queue-label flip halts before comment and deletion", async () => {
     const { adapter, calls } = makeAdapter({
       labelEditOk: false,
       labelEditError: "label not found",
@@ -353,13 +353,9 @@ describe("finalizeOne", () => {
         adapter,
         LABELS,
       ),
-    ).resolves.toEqual({ kind: "deleted-local" });
-    expect(calls.deletes).toEqual(["sandbar/issue-45-t-45"]);
-    // The label is optional, but the comment remains the issue's durable route
-    // to the branch a human must review.
-    expect(calls.comments).toHaveLength(1);
-    expect(calls.comments[0]!.body).toContain("sandbar/chunk-45-x");
-    expect(calls.comments[0]!.body).not.toContain(NEEDS_REVIEW_LABEL);
+    ).rejects.toThrow(/Could not move chunk member #45 into review/);
+    expect(calls.deletes).toEqual([]);
+    expect(calls.comments).toEqual([]);
   });
 
   it("chunk-landed on an issue a human closed mid-run: still records and cleans up", async () => {
