@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { PullRequestSummary } from "./chunk-land.js";
 
 const seams = vi.hoisted(() => ({
   innerLoop: vi.fn(),
@@ -9,6 +10,7 @@ const seams = vi.hoisted(() => ({
   mergerStackStop: vi.fn(async () => undefined),
   mergerWorktreeRemove: vi.fn(async () => undefined),
   writePlan: vi.fn(async () => undefined),
+  landRequestPullRequests: vi.fn(async () => [] as PullRequestSummary[]),
   logLines: [] as string[],
 }));
 
@@ -77,7 +79,7 @@ vi.mock("./chunk-follow-up.js", async (importOriginal) => ({
   realAdapter: vi.fn(() => ({})), routeChunkReviewFollowUps: vi.fn(async () => []),
 }));
 vi.mock("./chunk-reconcile.js", () => ({
-  fetchLandRequestPullRequests: vi.fn(async () => []),
+  fetchLandRequestPullRequests: seams.landRequestPullRequests,
   reconcileLandedChunks: vi.fn(async () => ({ reconciled: [], failures: [] })),
 }));
 vi.mock("./lanes.js", async (importOriginal) => ({
@@ -151,6 +153,8 @@ describe("run quota orchestration (#109)", () => {
     seams.mergerWorktreeRemove.mockReset();
     seams.mergerWorktreeRemove.mockResolvedValue(undefined);
     seams.writePlan.mockReset(); seams.writePlan.mockResolvedValue(undefined);
+    seams.landRequestPullRequests.mockReset();
+    seams.landRequestPullRequests.mockResolvedValue([]);
     seams.logLines.length = 0;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -475,6 +479,40 @@ describe("run quota orchestration (#109)", () => {
     // A chunk landing does not move the source branch, so images are built
     // once, at startup, and never rebuilt.
     expect(ensureImages).toHaveBeenCalledTimes(1);
+  });
+
+  it("exits stuck after six persistent deferred landing requests", async () => {
+    const target = {
+      root: 42,
+      branch: "sandbar/chunk-42-test",
+      title: "Chunk 42",
+      members: [{ number: 42, title: "Issue 42" }],
+      closeOrder: [{ number: 42, title: "Issue 42" }],
+      rework: [{ number: 42, title: "Issue 42" }],
+      pullRequest: 9,
+    };
+    seams.plan.mockResolvedValue({
+      ...resolution([]),
+      landedChunks: [target],
+    });
+    seams.landRequestPullRequests.mockResolvedValue([{
+      number: 9,
+      headRefName: target.branch,
+      title: target.title,
+    }]);
+    seams.merger.mockResolvedValue({
+      ...summary([]),
+      deferredChunks: [{ target, landedNow: target.rework }],
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:2");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(seams.merger).toHaveBeenCalledTimes(6);
+    expect(seams.innerLoop).not.toHaveBeenCalled();
+    expect(seams.logLines.some((line) => line.startsWith("exit: stuck"))).toBe(true);
   });
 
   it("exits quota from the shared provider state when the closing issue returned no terminal", async () => {
