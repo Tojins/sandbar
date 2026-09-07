@@ -525,36 +525,31 @@ export async function run(
   // its own for the whole series precisely because no per-run holder can span
   // an exit (#65).
   //
-  // `await statusWrites` is not decoration. `appendFile` needs a real event
-  // loop turn, and every non-zero exit — including 75, the relaunch this issue
-  // was written about — leaves the drain for `process.exit`, which grants none:
+  // Awaiting the submitted writes is not decoration. `appendFile` needs a real
+  // event-loop turn, and every non-zero exit — including 75, the relaunch this
+  // issue was written about — leaves the drain for `process.exit`, which grants none:
   // a fire-and-forget append of the `released` transition reached the record
-  // on the exit-0 path alone. The chain is awaited so the last thing the lock says is
-  // in the record it is claimed to be in.
-  let statusWrites: Promise<void> = Promise.resolve();
+  // on the exit-0 path alone. The submitted writes are awaited so the last
+  // thing the lock says is in the record it is claimed to be in.
+  const statusWrites: Promise<void>[] = [];
   onCleanup(async () => {
     wakeLock.stop();
-    await statusWrites;
+    await Promise.all(statusWrites);
   });
 
   // Whether the host can sleep under this run is an outcome. Wake-lock
   // transitions are bounded and belong in the event record, not stdout.
   //
-  // The appends are CHAINED rather than fired: two of them racing would
-  // interleave in an append-only file, and a bare `void` on a rejected write
-  // reaches `installCleanupTraps`'s `unhandledRejection` trap, which exits 1 —
-  // turning a failed log write into a relaunch that never happens.
-  wakeLock.onStatus((line) => {
-    const state = line.includes("released")
-      ? "released"
-      : line.includes("lost")
-        ? "lost"
-        : line.includes("refused")
-          ? "refused"
-          : "held";
-    statusWrites = statusWrites
-      .then(() => runRecord.emit({ kind: "wake-lock", state, detail: line }))
-      .then(() => undefined);
+  // EventRecord already serializes concurrent submissions. Keep each promise
+  // only so cleanup can await it, and attach its rejection handler immediately:
+  // a delayed handler would let Node's unhandledRejection trap stop a healthy
+  // run before cleanup. A failed observation is best-effort at this callback
+  // boundary; EventRecord's recovered latch lets the next status append.
+  wakeLock.onStatus((line, status) => {
+    statusWrites.push(
+      runRecord.emit({ kind: "wake-lock", state: status.kind, detail: line })
+        .then(() => undefined, () => undefined),
+    );
   });
 
   // The one site that emits an exit (#70/#132), shared by startup refusals and

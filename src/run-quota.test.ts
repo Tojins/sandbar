@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PullRequestSummary } from "./chunk-land.js";
+import type { WakeLockStatus } from "./keepawake.js";
 
 const seams = vi.hoisted(() => ({
   innerLoop: vi.fn(),
@@ -10,7 +11,12 @@ const seams = vi.hoisted(() => ({
   mergerStackStop: vi.fn(async () => undefined),
   mergerWorktreeRemove: vi.fn(async () => undefined),
   landRequestPullRequests: vi.fn(async () => [] as PullRequestSummary[]),
+  emit: vi.fn(),
   events: [] as Array<Record<string, unknown>>,
+  wakeStatusReports: [] as Array<{
+    line: string;
+    status: WakeLockStatus;
+  }>,
 }));
 
 vi.mock("./driver-identity.js", () => ({
@@ -23,7 +29,12 @@ vi.mock("./cleanup.js", () => ({
   runCleanup: vi.fn(async () => undefined),
 }));
 vi.mock("./keepawake.js", () => ({
-  startKeepawake: vi.fn(() => ({ stop: vi.fn(), onStatus: vi.fn() })),
+  startKeepawake: vi.fn(() => ({
+    stop: vi.fn(),
+    onStatus: vi.fn((sink: (line: string, status: WakeLockStatus) => void) => {
+      for (const report of seams.wakeStatusReports) sink(report.line, report.status);
+    }),
+  })),
 }));
 vi.mock("./lock.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./lock.js")>(),
@@ -34,10 +45,7 @@ vi.mock("./events.js", () => ({
   startEventRecord: vi.fn(async () => ({
     runDir: "/tmp/run-quota-test",
     finalize: vi.fn(),
-    emit: vi.fn(async (event: Record<string, unknown>) => {
-      seams.events.push(event);
-      return event;
-    }),
+    emit: seams.emit,
     issue: vi.fn(async (id: string) => ({
       dir: `/tmp/run-quota-test/issue-${id}`,
       writeAttempt: vi.fn(), writeAttemptReviewer: vi.fn(),
@@ -172,7 +180,13 @@ describe("run quota orchestration (#109)", () => {
     seams.mergerWorktreeRemove.mockResolvedValue(undefined);
     seams.landRequestPullRequests.mockReset();
     seams.landRequestPullRequests.mockResolvedValue([]);
+    seams.emit.mockReset();
+    seams.emit.mockImplementation(async (event: Record<string, unknown>) => {
+      seams.events.push(event);
+      return event;
+    });
     seams.events.length = 0;
+    seams.wakeStatusReports.length = 0;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -195,6 +209,48 @@ describe("run quota orchestration (#109)", () => {
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining("SANDBAR HALTED — internal failure"),
     );
+  });
+
+  it("records wake-lock state from the structured status, not its rendered prose", async () => {
+    seams.wakeStatusReports.push(
+      {
+        line: "wake-lock: NOT held — not WSL2",
+        status: { kind: "refused", reason: "not WSL2" },
+      },
+      {
+        line: "wake-lock: LOST — exit 1; giving up",
+        status: { kind: "lost", reason: "exit 1", retaking: false },
+      },
+    );
+    seams.plan.mockResolvedValue(resolution([]));
+
+    await expect(run(config)).resolves.toBeUndefined();
+    expect(eventsOf("wake-lock")).toEqual([
+      { kind: "wake-lock", state: "refused", detail: "wake-lock: NOT held — not WSL2" },
+      { kind: "wake-lock", state: "lost", detail: "wake-lock: LOST — exit 1; giving up" },
+    ]);
+  });
+
+  it("handles one failed wake-lock append immediately and submits the next status", async () => {
+    seams.wakeStatusReports.push(
+      { line: "wake-lock: held", status: { kind: "held" } },
+      { line: "wake-lock: released", status: { kind: "released" } },
+    );
+    let failed = false;
+    seams.emit.mockImplementation(async (event: Record<string, unknown>) => {
+      if (event.kind === "wake-lock" && !failed) {
+        failed = true;
+        throw new Error("event filesystem unavailable");
+      }
+      seams.events.push(event);
+      return event;
+    });
+    seams.plan.mockResolvedValue(resolution([]));
+
+    await expect(run(config)).resolves.toBeUndefined();
+    expect(eventsOf("wake-lock")).toEqual([
+      { kind: "wake-lock", state: "released", detail: "wake-lock: released" },
+    ]);
   });
 
   it("drives issue quota through run(), exits 4, and outranks landed-work relaunch", async () => {

@@ -114,7 +114,9 @@ export interface WakeLock {
   // complaint is that a wake lock used to fail by saying nothing, and a
   // subscribe-shaped call that silently unhooks the existing subscriber is
   // that failure with a new name.
-  onStatus(sink: (line: string) => void): void;
+  // The rendered line remains for terminal-oriented callers, while the
+  // structured status keeps event consumers from reverse-parsing that prose.
+  onStatus(sink: (line: string, status: WakeLockStatus) => void): void;
   // For tests and for `keepawake-hold.ts`, which has to keep a process alive
   // exactly as long as the lock is worth holding.
   readonly status: () => WakeLockStatus | null;
@@ -161,8 +163,8 @@ export function startKeepawake(io: WakeLockIo = {}): WakeLock {
   const spawnFn = io.spawn ?? spawn;
   const isWsl2 = io.isWsl2 ?? defaultIsWsl2;
 
-  const lines: string[] = [];
-  const sinks: Array<(line: string) => void> = [];
+  const reports: Array<{ readonly line: string; readonly status: WakeLockStatus }> = [];
+  const sinks: Array<(line: string, status: WakeLockStatus) => void> = [];
   let current: WakeLockStatus | null = null;
   let child: ChildProcess | null = null;
   let stopping = false;
@@ -171,8 +173,8 @@ export function startKeepawake(io: WakeLockIo = {}): WakeLock {
   const report = (status: WakeLockStatus): void => {
     current = status;
     const line = formatWakeLockStatus(status);
-    lines.push(line);
-    for (const sink of sinks) sink(line);
+    reports.push({ line, status });
+    for (const sink of sinks) sink(line, status);
   };
 
   const take = (): void => {
@@ -284,9 +286,9 @@ export function startKeepawake(io: WakeLockIo = {}): WakeLock {
       // module exists to remove.
       if (wasHeld) report({ kind: "released" });
     },
-    onStatus(next: (line: string) => void): void {
+    onStatus(next: (line: string, status: WakeLockStatus) => void): void {
       sinks.push(next);
-      for (const line of lines) next(line);
+      for (const report of reports) next(report.line, report.status);
     },
     status: () => current,
   };
