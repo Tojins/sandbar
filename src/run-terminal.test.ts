@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Terminal } from "./inner-loop.js";
 import {
-  formatTerminalLine,
   maxRecomputesFor,
+  terminalReason,
   verifyFinalizedTrackerState,
 } from "./run.js";
 
@@ -15,24 +15,23 @@ describe("maxRecomputesFor (#87)", () => {
   });
 });
 
-describe("formatTerminalLine (#115)", () => {
-  const terminals: readonly [string, Terminal][] = [
-    ["DONE", { type: "DONE", commits: [] }],
+describe("terminal event reasons (#132)", () => {
+  const terminals: readonly [Terminal, string | null][] = [
+    [{ type: "DONE", commits: [] }, null],
     [
-      "NEEDS-INFO",
       { type: "NEEDS-INFO", questions: "question", strandedHead: null },
+      "question",
     ],
     [
-      "NEEDS-UI-PROTOTYPE",
       {
         type: "NEEDS-UI-PROTOTYPE",
         uiImpact: "impact",
         commits: [],
         strandedHead: null,
       },
+      "impact",
     ],
     [
-      "NEEDS-HUMAN",
       {
         type: "NEEDS-HUMAN",
         cause: "gate-red",
@@ -41,9 +40,9 @@ describe("formatTerminalLine (#115)", () => {
         qualityBudgetExhausted: 4,
         strandedHead: null,
       },
+      "gate-red: trace",
     ],
     [
-      "NEEDS-HUMAN-REVIEW",
       {
         type: "NEEDS-HUMAN-REVIEW",
         cause: "correctness-budget-exhausted",
@@ -51,28 +50,14 @@ describe("formatTerminalLine (#115)", () => {
         latestReviewerProse: "review",
         commits: [],
       },
+      "correctness-budget-exhausted: review",
     ],
-    ["QUOTA", { type: "QUOTA", provider: "codex", window: "five_hour" }],
+    [{ type: "QUOTA", provider: "codex", window: "five_hour" }, "codex five_hour"],
+    [{ type: "HARD-ERROR", reason: "bringup failed\nstack", commits: [] }, "bringup failed\nstack"],
   ];
 
-  it.each(terminals)("leaves the %s terminal payload-free", (_name, terminal) => {
-    expect(formatTerminalLine("115", terminal, "durationMs=42")).toBe(
-      `terminal #115 ${terminal.type} durationMs=42`,
-    );
-  });
-
-  it.each([
-    ["single-line", "podman socket refused"],
-    ["multi-line", "bringup failed\nstack frame\nlast frame"],
-    ["empty", ""],
-  ])("appends the %s HARD-ERROR reason verbatim", (_name, reason) => {
-    expect(
-      formatTerminalLine(
-        "115",
-        { type: "HARD-ERROR", reason, commits: [] },
-        "durationMs=42",
-      ),
-    ).toBe(`terminal #115 HARD-ERROR durationMs=42: ${reason}`);
+  it.each(terminals)("keeps structured terminal detail", (terminal, reason) => {
+    expect(terminalReason(terminal)).toBe(reason);
   });
 });
 

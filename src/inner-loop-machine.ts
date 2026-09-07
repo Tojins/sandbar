@@ -193,6 +193,20 @@ export type LoopAction =
     }
   | { readonly kind: "terminate"; readonly verdict: Verdict };
 
+// The UI phase is derived from the machine's transition result, never guessed
+// by the I/O runner. Gate-1 and review are a set because they run concurrently
+// after COMPLETE (#123, #132).
+export function visiblePhases(
+  action: LoopAction,
+): readonly ("ui-check" | "implementer" | "gate-1" | "review")[] {
+  switch (action.kind) {
+    case "run-ui-check": return ["ui-check"];
+    case "run-implementer": return ["implementer"];
+    case "run-gate-and-reviewer": return ["gate-1", "review"];
+    case "terminate": return [];
+  }
+}
+
 export type LoopEvent =
   | { readonly kind: "ui-check-result"; readonly result: UiCheckResult }
   | { readonly kind: "ui-checker-wrote"; readonly detail: string }

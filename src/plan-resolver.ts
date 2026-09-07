@@ -126,11 +126,10 @@
 // planned in the same cycle does. So same-cycle members of one chunk are always
 // siblings, which is what the merge phase's per-chunk grouping relies on.
 //
-// `resolvePlan` returns a RESOLUTION rather than a bare plan: the issues it
-// held for review, and the `auto-land` labels inheritance overrode, are things
-// the run has to report — held work that vanished from the plan without a word
-// reads as an empty queue, and an overridden label read as honoured is a human
-// believing an issue auto-lands when it never will. Each planned issue also
+// `resolvePlan` returns a RESOLUTION rather than a bare plan: every ready issue
+// it did not admit carries the scheduler reason, and inherited `auto-land`
+// overrides remain explicit. Otherwise a full pool and an empty queue are
+// indistinguishable to the UI. Each planned issue also
 // carries its CHUNK (`PlannedIssue.chunk`), which is how the landing target
 // reaches phase 3: the derivation needs the whole candidate graph and the
 // merger sees only DONE branches, so deriving it there would answer a
@@ -189,8 +188,10 @@ import {
   issueBranchName,
   issueNumberFromMemberBranch,
   rootIssueFromChunkBranch,
+  issueNumberFromBranch,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
+import type { WaitingReason } from "./events.js";
 
 const exec = promisify(execFile);
 
@@ -229,15 +230,24 @@ export type PlannedIssue = {
 
 export type Plan = readonly PlannedIssue[];
 
+export type PlanCandidate = PlannedIssue & {
+  readonly ready: boolean;
+};
+
 export type PlanResolution = {
   readonly plan: Plan;
-  // Issues that cleared every other filter and were held out of the plan by
-  // the review lane's holding rule, in issue order. Empty for every host on
-  // the default lane. Since #61 these are exactly the review-gated issues
-  // `chunks.ts` could give no chunk at all — a two-chunk parent, something
-  // downstream of one, or a `## Blocked by` cycle. Chunk members, root or
-  // chained, all plan.
-  readonly heldForReview: readonly number[];
+  // The complete issue graph used for this resolution, including branch-held
+  // issues that are not currently ready. The event reducer joins this with
+  // cached refs to name parked work without another tracker query (#132).
+  readonly candidates: readonly PlanCandidate[];
+  // Every ready-for-agent issue not admitted by this recompute, with the
+  // scheduler fact that kept it out. This is state for the UI, not prose the
+  // caller reconstructs from a discarded slice (#132).
+  readonly waiting: readonly {
+    readonly issue: number;
+    readonly title: string;
+    readonly reason: WaitingReason;
+  }[];
   // `auto-land` labels that inherited review-gating anyway (#57). Reported for
   // every candidate, not just the eligible ones: the contradiction is a fact
   // about the issue's labels, and a human wants it while the chain is still
@@ -287,6 +297,7 @@ export function resolvePlan(
   k: number = DEFAULT_MAX_PARALLEL_ISSUES,
   defaultLane: Lane = DEFAULT_LANE,
   chunkMembers: ReadonlyMap<string, ReadonlySet<number>> = new Map(),
+  ongoing: ReadonlySet<number> = new Set(),
 ): PlanResolution {
   // Parsed once and shared with the lane graph: the `## Blocked by` section is
   // the dependency gate below AND the edge set gating inherits along, and two
@@ -370,10 +381,8 @@ export function resolvePlan(
     return theirs !== undefined && theirs === chunkOf.get(dependent);
   };
 
-  const heldForReview: number[] = [];
   const eligibleApartFromSchedulerExclusion = (
     c: IssueSummary,
-    recordReviewHold: boolean,
   ): boolean => {
     // Drop issues this run already merged, and issues the live tracker now
     // reports CLOSED — both guard against the stale-listing re-pick described in
@@ -402,9 +411,8 @@ export function resolvePlan(
     ) return false;
     const blockers = blockedBy.get(c.number) ?? [];
     if (!blockers.every((n) => blockerSatisfied(n, c.number))) return false;
-    // LAST, so `heldForReview` counts only issues that would otherwise have
-    // been ELIGIBLE — not necessarily planned, since the K slice below can
-    // still drop an eligible one. A review-gated issue that is also blocked,
+    // LAST, so the waiting resolution names "held" only for issues that would
+    // otherwise have been eligible. A review-gated issue that is also blocked,
     // closed or already merged is not being "held" by its lane; it was already
     // out on some other filter, and reporting it as held would make the
     // holding rule look like it costs more than it does.
@@ -424,13 +432,12 @@ export function resolvePlan(
     // branch — the one outcome the lane exists to prevent. Asking the same
     // question the answer is built from costs nothing and cannot drift.
     if (lanes.get(c.number)?.lane === "review" && chunkTargetOf(c.number) === null) {
-      if (recordReviewHold) heldForReview.push(c.number);
       return false;
     }
     return true;
   };
   const eligible = candidates.filter((c) =>
-    !excluded.has(c.number) && eligibleApartFromSchedulerExclusion(c, true)
+    !excluded.has(c.number) && eligibleApartFromSchedulerExclusion(c)
   );
   const sorted = [...eligible].sort((a, b) => a.number - b.number);
   // Human-requested rework follows the planner's eligibility rules except for
@@ -441,7 +448,7 @@ export function resolvePlan(
     candidates
       .filter((c) => {
         const authoritative = issueFacts.get(c.number);
-        return eligibleApartFromSchedulerExclusion(c, false) &&
+        return eligibleApartFromSchedulerExclusion(c) &&
           authoritative?.labels.includes(READY_LABEL);
       })
       .map((c) => c.number),
@@ -452,9 +459,70 @@ export function resolvePlan(
     branch: issueBranchName(c.number, c.title),
     chunk: chunkTargetOf(c.number),
   }));
+  const admitted = new Set(plan.map((issue) => Number(issue.id)));
+  const resolutionCandidates: PlanCandidate[] = candidates.map((c) => {
+    const authoritative = issueFacts.get(c.number);
+    return {
+      id: String(c.number),
+      title: c.title,
+      branch: issueBranchName(c.number, c.title),
+      chunk: chunkTargetOf(c.number),
+      ready: authoritative
+        ? authoritative.state !== "CLOSED" && authoritative.labels.includes(READY_LABEL)
+        : true,
+    };
+  });
+  const waiting: Array<{
+    readonly issue: number;
+    readonly title: string;
+    readonly reason: WaitingReason;
+  }> = [];
+  for (const c of candidates) {
+    const authoritative = issueFacts.get(c.number);
+    const ready = authoritative
+      ? authoritative.labels.includes(READY_LABEL)
+      : true;
+    if (!ready || authoritative?.state === "CLOSED" || admitted.has(c.number)) {
+      continue;
+    }
+    if (ongoing.has(c.number)) {
+      waiting.push({ issue: c.number, title: c.title, reason: { kind: "ongoing" } });
+      continue;
+    }
+    // An exclusion that is not ongoing is work this run already finished; it
+    // is omitted rather than mislabeled as waiting while the listing catches up.
+    if (excluded.has(c.number)) continue;
+    if (
+      c.labels.includes(WAITING_LABEL) ||
+      authoritative?.labels.includes(WAITING_LABEL) ||
+      (publishedChunkMembers.has(c.number) &&
+        !authoritative?.labels.includes(READY_LABEL))
+    ) continue;
+    const unsatisfied = (blockedBy.get(c.number) ?? []).filter(
+      (blocker) => !blockerSatisfied(blocker, c.number),
+    );
+    if (unsatisfied.length > 0) {
+      waiting.push({
+        issue: c.number,
+        title: c.title,
+        reason: { kind: "blocked", by: unsatisfied },
+      });
+      continue;
+    }
+    if (
+      lanes.get(c.number)?.lane === "review" &&
+      chunkTargetOf(c.number) === null
+    ) {
+      waiting.push({ issue: c.number, title: c.title, reason: { kind: "held" } });
+      continue;
+    }
+    waiting.push({ issue: c.number, title: c.title, reason: { kind: "no-slot" } });
+  }
+  waiting.sort((a, b) => a.issue - b.issue);
   return {
     plan,
-    heldForReview: heldForReview.sort((a, b) => a - b),
+    candidates: resolutionCandidates,
+    waiting,
     overrides: laneOverrides(lanes),
     // Strict to the derived branch: unlike de-queueing, neither review nor
     // closure may claim work that is durable somewhere else.
@@ -523,6 +591,28 @@ export async function fetchCandidates(
   repo: RepoRef,
 ): Promise<readonly IssueSummary[]> {
   return listOpenIssuesLabelled(repo, READY_LABEL);
+}
+
+// One local read for the recompute event (#132). Origin governs this bare
+// cache at preflight/admission; no network belongs in the observation path.
+export async function readIssueBranchRefs(repoDir: string): Promise<readonly {
+  readonly issue: number;
+  readonly branch: string;
+  readonly tip: string;
+}[]> {
+  const { stdout } = await exec("git", [
+    "for-each-ref",
+    "--format=%(refname:short) %(objectname)",
+    "refs/heads/sandbar/issue-*",
+  ], { cwd: repoDir });
+  return stdout.split("\n").flatMap((line) => {
+    const split = line.lastIndexOf(" ");
+    if (split < 1) return [];
+    const branch = line.slice(0, split);
+    const issue = issueNumberFromBranch(branch);
+    const tip = line.slice(split + 1);
+    return issue === null || tip === "" ? [] : [{ issue, branch, tip }];
+  });
 }
 
 /**
@@ -651,6 +741,7 @@ export async function fetchIssueStates(
 export type BuildPlanOptions = {
   readonly repoDir: string;
   readonly excluded?: ReadonlySet<number>;
+  readonly ongoing?: ReadonlySet<number>;
   readonly k?: number;
   readonly defaultLane?: Lane;
   // Issues to add to the listing, whatever its lagging index says (#63, #95,
@@ -714,5 +805,6 @@ export async function buildPlan(
     k,
     options.defaultLane ?? DEFAULT_LANE,
     chunkMembers,
+    options.ongoing ?? new Set(),
   );
 }

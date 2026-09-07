@@ -2464,8 +2464,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
         prepareWorktree({ branch, layout, copyToWorktree: [] }),
       ).resolves.toContain("sandbar-issue-83-sweep-failure");
       expect(reported).toHaveBeenCalledWith(
-        "Stale issue-clone sweep failed (continuing):",
-        expect.objectContaining({ code: "ELOOP" }),
+        expect.stringMatching(/^Stale issue-clone sweep failed \(continuing\): .*ELOOP/),
       );
     } finally {
       reported.mockRestore();

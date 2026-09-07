@@ -1,5 +1,10 @@
 // Pre-flight invariants for sandbar runs.
 //
+// After the run owns the lock, structured preflight outcomes and warnings are
+// emitted through `onEvent` into events.jsonl; this module writes no terminal
+// rendering or orchestration log. Throws remain refusals for run.ts to record
+// with their exit event.
+//
 // Runs UNDER the single-instance lock (#32), and must keep doing so. This
 // module is not read-only: it fetches, and `deleteMergedSandbarBranches` runs
 // `git branch -D` over every `sandbar/issue-*` branch it finds merged. It used
@@ -246,6 +251,7 @@ import {
   repoSlug,
   sameRepo,
 } from "./repo-ref.js";
+import type { EventInput } from "./events.js";
 
 const exec = promisify(execFile);
 
@@ -286,6 +292,7 @@ export type PreflightConfig = {
   // attempt dying in-container a cycle later. A disabled UI check contributes
   // no provider because it contributes no invocation.
   readonly agentProviders: readonly AgentProviderName[];
+  readonly onEvent?: (event: EventInput) => Promise<void> | void;
 };
 
 // A gate-stack mount source, carrying the container that declared it. A stack
@@ -1201,6 +1208,7 @@ type ForgeReachability =
 export async function checkForgeReachability(
   hosts: readonly string[],
   adapter: ForgeReachabilityAdapter = forgeReachabilityAdapter,
+  onAttempt?: (message: string) => Promise<void> | void,
 ): Promise<ForgeReachability> {
   const uniqueHosts = [...new Set(hosts.map((h) => h.toLowerCase()))];
   const started = adapter.now();
@@ -1219,7 +1227,7 @@ export async function checkForgeReachability(
     );
     failures = results.filter((result): result is string => result !== null);
     if (failures.length === 0) return { ok: true };
-    console.warn(
+    await onAttempt?.(
       `Forge reachability attempt ${attempt}/${REACHABILITY_ATTEMPTS} failed: ` +
         failures.join("; "),
     );
@@ -1281,6 +1289,7 @@ export async function runPreflight(
   const reachability = await checkForgeReachability(
     originHost === null ? [ghHost] : [ghHost, originHost],
     reachabilityAdapter,
+    (message) => cfg.onEvent?.({ kind: "complaint", severity: "warning", message }),
   );
   if (!reachability.ok) {
     const seconds = (reachability.elapsedMs / 1_000).toFixed(1);
@@ -1351,7 +1360,11 @@ export async function runPreflight(
     chunkMemberIssues,
   });
   if (deleted.length > 0) {
-    console.log(`Cleaned up merged issue branches: ${deleted.join(", ")}`);
+    await cfg.onEvent?.({
+      kind: "preflight",
+      action: "cleaned",
+      detail: `Cleaned up merged issue branches: ${deleted.join(", ")}`,
+    });
   }
   const state = await gatherState(cfg, { hasGh, ghAuthOk }, chunkMemberIssues);
   // The branches this run keeps are brought level with origin's copy first
@@ -1362,28 +1375,34 @@ export async function runPreflight(
     ...state.resumableIssueBranches,
     ...state.parkedIssueBranches,
   ]);
-  for (const line of synced.lines) console.log(line);
+  for (const line of synced.lines) {
+    await cfg.onEvent?.({ kind: "preflight", action: "synced", detail: line });
+  }
   const kept = (branches: readonly string[]) =>
     branches.filter((b) => !synced.abandoned.includes(b));
   const resumable = kept(state.resumableIssueBranches);
   const parked = kept(state.parkedIssueBranches);
   if (resumable.length > 0) {
-    console.log(
-      `Resuming ${resumable.length} stranded issue ` +
+    await cfg.onEvent?.({
+      kind: "preflight",
+      action: "resumed",
+      detail: `Resuming ${resumable.length} stranded issue ` +
         `branch(es) from an interrupted run: ` +
         `${resumable.join(", ")}. The planner will re-pick ` +
         "the matching open `ready-for-agent` issue(s) and the inner loop " +
         "continues from each branch's commits.",
-    );
+    });
   }
   if (parked.length > 0) {
-    console.log(
-      `Keeping ${parked.length} parked issue branch(es): ` +
+    await cfg.onEvent?.({
+      kind: "preflight",
+      action: "parked",
+      detail: `Keeping ${parked.length} parked issue branch(es): ` +
         `${parked.join(", ")}. Each maps to an open issue ` +
         "that is not `ready-for-agent`; re-applying the label resumes from " +
         "the branch's commits, brought level with origin's copy wherever " +
         "origin is ahead. Deleting the branch on origin is what abandons them.",
-    );
+    });
   }
   // The other half of the #34 agreement check, and it is emitted BEFORE the
   // throw on purpose: the run most likely to be failing preflight for other
@@ -1399,14 +1418,16 @@ export async function runPreflight(
   // than the silent split the check exists to catch. Saying so is the honest
   // remainder: the two halves may well disagree and sandbar cannot tell.
   if (state.originUrl !== null && state.originRepo === null) {
-    console.warn(
-      `WARNING: could not read an <owner>/<repo> out of this repository's ` +
+    await cfg.onEvent?.({
+      kind: "complaint",
+      severity: "warning",
+      message: `WARNING: could not read an <owner>/<repo> out of this repository's ` +
         `\`origin\` (${state.originUrl}), so it cannot be checked against the ` +
         `configured ${repoSlug(state.configuredRepo)}. Issues are read and ` +
         "written in the configured repo; branches and merges are pushed to " +
         "`origin`. If those are not the same repository, sandbar will close " +
         "issues for work that landed somewhere else.",
-    );
+    });
   }
 
   // Also before the throw, and for the same reason the line above it is (#73):
@@ -1416,7 +1437,7 @@ export async function runPreflight(
   // other reason. Soft, because both keys work: what it costs is a bill, and
   // sandbar cannot know which of the two the operator meant to spend.
   for (const warning of billingPrecedenceWarnings(cfg.agentProviders, cfg.env)) {
-    console.warn(warning);
+    await cfg.onEvent?.({ kind: "complaint", severity: "warning", message: warning });
   }
 
   const results = checkInvariants(state);
@@ -1440,12 +1461,14 @@ export async function runPreflight(
     cfg.sourceBranch,
   );
   if (ahead > 0) {
-    console.warn(
-      `WARNING: ${cfg.layout.hostCwd} has local ${cfg.sourceBranch} ${ahead} commit(s) ahead of origin/${cfg.sourceBranch}. ` +
+    await cfg.onEvent?.({
+      kind: "complaint",
+      severity: "warning",
+      message: `WARNING: ${cfg.layout.hostCwd} has local ${cfg.sourceBranch} ${ahead} commit(s) ahead of origin/${cfg.sourceBranch}. ` +
         "Per-issue worktrees seed from origin, so issues that depend on " +
         "unpushed work will fail or merge oddly. Push or rebase first if " +
         "those commits matter for the work sandbar is about to do.",
-    );
+    });
   }
 
   // The second, which is the same read run the other way (#66).
@@ -1456,7 +1479,9 @@ export async function runPreflight(
       configPath: cfg.configPath,
     }),
   );
-  if (staleConfig !== null) console.warn(staleConfig);
+  if (staleConfig !== null) {
+    await cfg.onEvent?.({ kind: "complaint", severity: "warning", message: staleConfig });
+  }
 }
 
 // What the checkout's copy of the config file is missing, against origin (#66).

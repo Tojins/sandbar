@@ -162,12 +162,11 @@ only the first two move the source branch and trigger the in-process image
 rebuild. `src/exit-conditions.ts`'s header owns the precedence and
 `src/scheduler.ts`'s the decision that applies it.
 
-All seven are one type, `TerminalExit`, and the run ends with exactly one
-`Exit (<tag>): <reason>` on stdout whichever fired (#70) — `formatExitLine` is
-the only spelling of it, `EXIT_TAGS` is exhaustive over the union, and a table
-test asserts every tag has a line. The pool owns run-wide starts, ongoing work,
-landings, and the terminal-without-landing backstop; `run.ts` selects one exit
-from that state and provider or landing outcomes.
+All seven are one type, `TerminalExit`, and the run writes exactly one `exit`
+event whichever fired (#70/#132). `EXIT_TAGS` is exhaustive over the union and
+a table test asserts every tag has a code and reason. The pool owns run-wide
+starts, ongoing work, landings, and the terminal-without-landing backstop;
+`run.ts` selects one exit from that state and provider or landing outcomes.
 
 ## Key invariants — where the details live
 
@@ -333,14 +332,11 @@ from that state and provider or landing outcomes.
   previous state), and it is released by EOF ON STDIN so it cannot outlive its
   owner — which is also what makes the `process.exit` paths that run no cleanup
   safe. Every held / refused / lost / released transition of the RUN's holder
-  is a line in `orchestrator.log` and on stdout; the SERIES holder predates
-  every log tree and reaches the terminal only. Before this the module logged
-  nothing at all and "was the lock held during run X?" was unanswerable. Two
-  ordering rules the module headers own the rest of: the release is registered
-  immediately after `runLogger.finalize` so #35's LIFO drain puts it after
-  every teardown and before `run-end`, and its log writes are AWAITED in that
-  cleanup action, because `process.exit` grants no event-loop turn and a
-  fire-and-forget `appendFile` reached the log on the exit-0 path alone.
+  is a `wake-lock` event; the SERIES holder predates a run record and reaches
+  the terminal only. The release is registered immediately after record
+  finalization so #35's LIFO drain puts it after every teardown and before
+  `run-end`, and its event writes are awaited because `process.exit` grants no
+  event-loop turn.
 - **Credentials are a value, not a path (#38).** `config.env` is an allowlist
   record (empty value ⇒ inherit from `process.env`); `readEnvFile` is the
   opt-in loader. `src/env.ts`. A credential whose vendor interface is a FILE is
@@ -366,10 +362,10 @@ from that state and provider or landing outcomes.
   being a claude alias and a half-moved config otherwise asking codex for
   "opus" on every attempt. A third per-call knob, `*Effort` (#130), is the
   reasoning effort, a plain string each provider spells in its own argv
-  (`--effort`, `-c model_reasoning_effort=`) and the log line carries as
-  `effort=`; unset emits no flag and stays absent, because the sandbox reads no
-  host `config.toml` and a driver default would be the same invisible setting
-  in a different place. `AgentProvider`
+  (`--effort`, `-c model_reasoning_effort=`) and the implementer/review-pass
+  event carries it as `effort`; unset emits no flag and stays absent, because
+  the sandbox reads no host `config.toml` and a driver default would be the
+  same invisible setting in a different place. `AgentProvider`
   (`src/agent-sandbox.ts`) was already the whole seam — argv plus a line parser,
   with the explicitly named completion watch, the idle timeout and commit collection reading
   parsed events and git — so `codex` is a second implementation of it and
@@ -445,23 +441,30 @@ from that state and provider or landing outcomes.
 - **Prompt prose lives in `prompts/*.md`**, loaded by `src/prompts.ts`; TS
   keeps only structure. Every git range a prompt renders anchors at the issue
   branch's SEED REF, never a bare branch name (#40, #61) — `src/prompt.ts`.
-- **Logs are append-only and unbuffered** (`src/logs.ts`), and **from the
-  moment sandbar holds the lock there is a record (#70)**. `startRunLogger`
-  runs immediately after `acquireLock` — not fifteen steps later, after
-  preflight and the image builds — so every startup refusal lands in
-  `run-<stamp>/orchestrator.log` instead of only on a terminal; `run.ts` names
-  the three exits deliberately left outside it — a refused config and a missing
-  `GH_TOKEN`, both decided before the lock is won, and losing the lock, whose
-  answer is the other run's log. The
-  invariant `logs.ts`'s header owns: every line reporting an OUTCOME or a
-  REFUSAL exists in the log, and the terminal may additionally render it. Two
-  streams, not one tee — the log keeps the per-attempt gate/reviewer trace
-  stdout must never carry, and stdout keeps titled renderings that would make
-  the log unreadable.
+- **One append-only event record is the run's source of truth (#70/#132).**
+  Immediately after `acquireLock`, `src/events.ts` creates
+  `run-<stamp>/events.jsonl`; every event has monotonic `seq`, wall-clock `ts`
+  and a typed `kind`, and `run-start` declares the schema version. Readers
+  reject unknown schemas; older log-only runs are intentionally unreadable.
+  Every outcome or refusal after the lock is an event. Refused config, missing
+  `GH_TOKEN`, and losing the lock remain stderr-only because no record can be
+  owned safely. Raw agent, reviewer, gate, merger, and resolve transcripts stay
+  as files through `src/logs.ts`; they are artefacts, not a second event stream.
+  `run()` hosts the file-fed UI and writes its URL—and nothing else—to stdout.
+  The internal-failure banner is the sole post-record stderr rendering.
+- **The UI is a projection, never scheduler state (#132).** `src/run-state.ts`
+  purely reduces events into the pool timeline, waiting and parked rows, recent
+  events, and finished issues across recent run directories. `src/ui-server.ts`
+  serves the shipped vanilla page and `/state.json`, rereading the record on
+  every request. A live run hosts it in-process; `sandbar ui` hosts the same
+  module for post-mortem browsing. The page polls every two seconds. A growing
+  file plus live matching `run.pid` means working; a dead/missing PID without
+  `run-end` means crashed. `uiPort` is per-workdir host configuration and a
+  bind collision refuses the run.
 - **Every outcome carries how long it took, and nothing decides on it (#82).**
   `src/timing.ts` is the one measurement — `startTimer` on a MONOTONIC clock,
-  injectable because several suites assert log lines by exact string, and
-  `durationMs=<int>` as its elapsed-time field spelling. `startGapTimer` records
+  injectable because suites assert event objects exactly, and `durationMs` as
+  its elapsed-time field spelling. `startGapTimer` records
   the largest leading, inter-line, or trailing stream silence as
   `maxGapMs=<int>`; a line-less run reports its whole duration. It is likewise
   evidence only, and absent stays absent rather than becoming zero. This closes
@@ -469,17 +472,17 @@ from that state and provider or landing outcomes.
   first attempt to assemble a timing table found: a cohort's terminals all
   carried the SETTLE instant in plan order (so "which issue held the cohort" and
   "how long did the others idle" were unanswerable, and an outcome reached
-  eight minutes earlier existed in the log only if every sibling survived — a
-  #70 hole, fixed by having the task that terminated write its own line and
+  eight minutes earlier existed in the record only if every sibling survived —
+  a #70 hole, fixed by having the task that terminated write its own event and
   rethrow), the largest block of a run had nothing inside it (6m41s from
   `plan:` to the first `gate-1` line), and an image rebuild — which changes what
   every container in the run executes — was announced to a terminal and nowhere
   else. `GateResult` carries `durationMs` plus a per-phase `steps` split filled
-  in `runStackGate`, the only place a step runs; `formatGateFields` is the one
-  rendering its four consumers share, and `sandbar gate` is the only one that
-  PRINTS it, because #45 suspends the log tree. All three image build entry
+  in `runStackGate`, the only place a step runs; run events retain that
+  structure, and `sandbar gate` is its only terminal renderer. All three image build entry
   points hand an `ImageBuildRecord` to an `onImage` seam kept separate from the
-  human `log` one — #82 adds nothing to stdout outside `sandbar gate`. Two
+  CLI progress seam; `run()` suppresses progress and captures build output so
+  stdout remains the UI URL. Two
   rules: a duration is a REPORT (no budget, no threshold, no adaptive bound —
   `step.timeoutMs` stays the one bound `gate-stack.ts` has), and an absent
   measurement is ABSENT, never `0`, because a stats reader averages a zero.
@@ -500,7 +503,7 @@ from that state and provider or landing outcomes.
   a report only, never a budget, threshold, adaptive bound or completion input,
   and an unavailable measurement is absent rather than zero.
   `timing.ts`, `agent-usage.ts`, `gate.ts`, `gate-stack.ts`,
-  `ensure-images.ts` and `logs.ts` headers own the rest — `agent-usage.ts`
+  `ensure-images.ts` and `events.ts` headers own the rest — `agent-usage.ts`
   specifically owns why the two providers' input conventions are opposite and
   are normalised to Claude's disjoint one.
 - **The resolve loop leaves a trace, and a container that never ran halts
@@ -530,9 +533,10 @@ from that state and provider or landing outcomes.
   a dependency's identically-shaped `"version"` line out of it. Anything else
   reaches the agent untouched; sandbar's merger-only prompt extension carries
   the same `max + 1` rule without shipping that convention to consumers.
-- **A run opens by naming what is driving it (#69).** One line on stdout and in
-  `orchestrator.log`: version, the tree `dist/` was built from, the config
-  file's path, and whether either tree is dirty. Two trees because there are
+- **A run opens by naming what is driving it (#69/#132).** The `run-start`
+  event carries the version, the tree `dist/` was built from, the config file's
+  path, workdir and whether either tree is dirty; the UI renders the identity.
+  Two trees because there are
   two, and since #66 they differ in kind: the driver is an installed release
   (gitignored, so it reports `unknown` and its VERSION is the identification),
   while the config is still the operator's working-tree file and is the one that

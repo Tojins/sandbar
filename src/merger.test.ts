@@ -424,7 +424,14 @@ describe("runMergerWithAdapter — clean-merge happy paths", () => {
       merges: ["ok"],
       gates: [{ ok: true }],
     });
-    const summary = await runMergerWithAdapter([issue(42)], adapter);
+    const outcomes: unknown[] = [];
+    const summary = await runMergerWithAdapter(
+      [issue(42)],
+      adapter,
+      undefined,
+      undefined,
+      { onOutcome: (outcome) => { outcomes.push(outcome); } },
+    );
 
     expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
     expect(summary.skipped).toEqual([]);
@@ -435,6 +442,7 @@ describe("runMergerWithAdapter — clean-merge happy paths", () => {
     expect(calls.closes).toEqual([
       { n: 42, comment: "Completed by Sandbar" },
     ]);
+    expect(outcomes).toEqual([{ kind: "merged", issue: issue(42) }]);
   });
 
   it("clean merge + npm install fails: resets to preMergeSha, comments install-failed, skips, no gate", async () => {

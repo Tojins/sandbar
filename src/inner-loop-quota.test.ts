@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { EventInput } from "./events.js";
 
 const seams = vi.hoisted(() => ({
   sandboxRun: vi.fn(),
@@ -141,7 +142,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
   });
 
   it("logs the larger peak context across an implementer and its promise nudge", async () => {
-    const lines: string[] = [];
+    const events: EventInput[] = [];
     seams.sandboxRun
       .mockResolvedValueOnce({
         stdout: "I need one detail.",
@@ -166,12 +167,12 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("124"), {
       config: config("claude"), hooks: {}, copyToWorktree: [],
-      onOrchestratorLog: (line) => lines.push(line),
+      onEvent: (event) => events.push(event),
     })).resolves.toMatchObject({ type: "NEEDS-INFO" });
 
-    expect(lines.find((line) => line.includes(" implementer signal="))).toContain(
-      "toolCalls=3 peakContext=41",
-    );
+    expect(events.find((event) => event.kind === "implementer")).toMatchObject({
+      kind: "implementer", usage: { toolCalls: 3, peakContext: 41 },
+    });
   });
 
   it("runs the enabled UI check before attempt 1 and again after a fresh HARD-ERROR cycle", async () => {
@@ -256,7 +257,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
   });
 
   it("logs peak context for successful and failed reviewer invocations", async () => {
-    const lines: string[] = [];
+    const events: EventInput[] = [];
     const reviewerFailure = new Error("reviewer disconnected");
     seams.partialUsage.set(reviewerFailure, {
       usage: { inputTokens: 7 }, toolCalls: 2, peakContext: 52,
@@ -290,18 +291,15 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("125"), {
       config: config("codex"), hooks: {}, copyToWorktree: [],
-      onOrchestratorLog: (line) => lines.push(line),
+      onEvent: (event) => events.push(event),
     })).resolves.toMatchObject({ type: "DONE" });
 
-    expect(lines.find((line) => line.includes("pass=quality invocation=1 "))).toContain(
-      "tokens=in:7 toolCalls=2 peakContext=52",
-    );
-    expect(lines.find((line) => line.includes("pass=quality invocation=2 "))).toContain(
-      "toolCalls=3 peakContext=61",
-    );
-    expect(lines.find((line) => line.includes("pass=correctness invocation=1 "))).toContain(
-      "toolCalls=4 peakContext=73",
-    );
+    const passes = events.filter((event) => event.kind === "review-pass");
+    expect(passes).toEqual([
+      expect.objectContaining({ pass: "quality", invocation: 1, usage: expect.objectContaining({ inputTokens: 7, toolCalls: 2, peakContext: 52 }) }),
+      expect.objectContaining({ pass: "quality", invocation: 2, usage: expect.objectContaining({ toolCalls: 3, peakContext: 61 }) }),
+      expect.objectContaining({ pass: "correctness", invocation: 1, usage: expect.objectContaining({ toolCalls: 4, peakContext: 73 }) }),
+    ]);
   });
 
   it("surfaces quota without a fresh-sandbox retry and closes only that provider", async () => {

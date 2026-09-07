@@ -41,6 +41,11 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   "merger.ts": 11,
   "preflight.ts": 5,
   "prompt.ts": 1,
-  "run.ts": 9,
+  // UI startup failure is classified as a recorded startup refusal (#132).
+  // The syntactic matcher counts this braced catch in two of its forms.
+  "run.ts": 11,
   "sandbox-stack.ts": 3,
+  // The HTTP request boundary maps record/reducer failures to a 500 response
+  // for the polling page (#132).
+  "ui-server.ts": 1,
 };

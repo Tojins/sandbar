@@ -12,13 +12,13 @@
 // `ImageBuildRecord` to an optional `onImage` seam: the tag, whether this call
 // built or reused, why, and how long deciding-plus-building took. Rebuilding a
 // declared image changes what every container in the run then executes, so it
-// is an outcome, and #70 says an outcome exists in the log rather than only on
-// a terminal. It used to be `console.log` alone, which is why a startup that
+// is an outcome, and #70 says an outcome exists in the event record. It used
+// to be `console.log` alone, which is why a startup that
 // took 34 s instead of 7.7 s had to be explained from git history.
 //
-// The seam is SEPARATE from the existing `log` one on purpose. `log` is the
-// human prose that goes to stdout; `onImage` is the structured record that goes
-// to `orchestrator.log`. #82 adds nothing to stdout outside `sandbar gate`.
+// The seam is separate from the optional CLI progress renderer. `run()`
+// suppresses progress and captures build output because its stdout is the UI
+// URL only; `sandbar gate` keeps the direct terminal rendering.
 //
 // Images that are a function of the BRANCH (#37): an entry declaring what it
 // is a function of (`rebuildOn`) gets a real cache key beyond the tag
@@ -463,10 +463,9 @@ export function formatImageRecord(r: ImageBuildRecord): string {
   );
 }
 
-// Where an `ImageBuildRecord` goes. Separate from the existing `log` seam,
-// which is the TERMINAL rendering ("Building x in podman..."): #82 adds nothing
-// to stdout outside `sandbar gate`, so the record is the log tree's and the
-// prose stays the terminal's. Two streams, one invariant (#70).
+// Where an `ImageBuildRecord` goes. Separate from CLI progress rendering so
+// the orchestrator can write events while `sandbar gate` can remain terminal
+// oriented.
 export type ImageRecorder = (r: ImageBuildRecord) => void | Promise<void>;
 
 export async function ensureImages(
@@ -475,9 +474,13 @@ export async function ensureImages(
   opts?: {
     readonly rebuildInPlace?: boolean;
     readonly onImage?: ImageRecorder;
+    readonly log?: (line: string) => void;
+    readonly captureBuild?: boolean;
   },
 ): Promise<ReadonlyMap<string, string>> {
   const rebuildInPlace = opts?.rebuildInPlace ?? true;
+  const log = opts?.log ?? ((line: string) => console.log(line));
+  const captureBuild = opts?.captureBuild ?? false;
   const baseFingerprints = new Map<string, string>();
   for (const image of images) {
     // Per tag, and started before the fingerprint: hashing the declared inputs
@@ -497,12 +500,12 @@ export async function ensureImages(
     });
     if (fingerprint === null) {
       if (!(await imageExists(image.tag))) {
-        console.log(
+        log(
           `Building ${image.tag} in ${RUNTIME} (one-time setup; cached afterwards)...`,
         );
         await buildImage(image, {
           root: contextRoot,
-          capture: false,
+          capture: captureBuild,
           timeoutMs: image.buildTimeoutMs,
         });
         await record(true, "absent");
@@ -529,7 +532,7 @@ export async function ensureImages(
       await record(false, "inputs-unchanged");
       continue;
     }
-    console.log(
+    log(
       recorded === null
         ? `Building ${image.tag} in ${RUNTIME} (declares rebuildOn; not present, or built before sandbar recorded its inputs)...`
         : `Rebuilding ${image.tag} in ${RUNTIME}: its declared inputs in ${contextRoot} changed since it was built...`,
@@ -537,7 +540,7 @@ export async function ensureImages(
     await buildImage(image, {
       root: contextRoot,
       fingerprint,
-      capture: false,
+      capture: captureBuild,
       timeoutMs: image.buildTimeoutMs,
     });
     await record(true, recorded === null ? "inputs-unrecorded" : "inputs-changed");

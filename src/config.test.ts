@@ -18,6 +18,7 @@ import {
   DEFAULT_MAX_TOTAL_ISSUES,
   DEFAULT_IMPLEMENTER_MODEL_ID,
   DEFAULT_UI_PROTOTYPE_CHECK,
+  DEFAULT_UI_PORT,
   DEFAULT_REVIEWER_MODEL_ID,
   DEFAULT_REVIEWER_QUALITY_MODEL_ID,
   DEFAULT_MERGER_MODEL_ID,
@@ -149,6 +150,7 @@ describe("resolveConfig", () => {
     // Off by default (#65): only a host whose launcher loops on
     // EXIT_CODE_RELAUNCH wants a landing cycle to end the process.
     expect(r.maxParallelIssues).toBe(3);
+    expect(r.uiPort).toBe(DEFAULT_UI_PORT);
     // The auto lane (#57): the pre-lane behaviour, so a host that never sets
     // this — and this repo — is routed exactly as it was before lanes existed.
     expect(r.defaultLane).toBe(DEFAULT_LANE);
@@ -200,6 +202,13 @@ describe("resolveConfig", () => {
       expect(() =>
         resolveConfig({ ...minimal, maxImplAttempts } as RunConfig),
       ).toThrow(/maxImplAttempts.*maxQualityRounds.*maxReviewRounds/s);
+    },
+  );
+
+  it.each([0, -1, 1.5, 65_536, Number.NaN])(
+    "refuses invalid uiPort %s",
+    (uiPort) => {
+      expect(() => resolveConfig({ ...minimal, uiPort })).toThrow(/config\.uiPort/);
     },
   );
 

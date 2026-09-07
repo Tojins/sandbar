@@ -9,9 +9,8 @@ const seams = vi.hoisted(() => ({
   issueLabels: vi.fn(async () => [] as string[]),
   mergerStackStop: vi.fn(async () => undefined),
   mergerWorktreeRemove: vi.fn(async () => undefined),
-  writePlan: vi.fn(async () => undefined),
   landRequestPullRequests: vi.fn(async () => [] as PullRequestSummary[]),
-  logLines: [] as string[],
+  events: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock("./driver-identity.js", () => ({
@@ -29,12 +28,14 @@ vi.mock("./lock.js", async (importOriginal) => ({
   lockPathsFor: vi.fn(() => ({ workDir: "/tmp", lockDir: "/tmp/lock", pidPath: "/tmp/pid" })),
   acquireLock: vi.fn(async () => vi.fn()),
 }));
-vi.mock("./logs.js", () => ({
-  startRunLogger: vi.fn(async () => ({
+vi.mock("./events.js", () => ({
+  startEventRecord: vi.fn(async () => ({
     runDir: "/tmp/run-quota-test",
-    appendOrchestrator: vi.fn(async (line: string) => { seams.logLines.push(line); }),
     finalize: vi.fn(),
-    writePlan: seams.writePlan,
+    emit: vi.fn(async (event: Record<string, unknown>) => {
+      seams.events.push(event);
+      return event;
+    }),
     issue: vi.fn(async (id: string) => ({
       dir: `/tmp/run-quota-test/issue-${id}`,
       writeAttempt: vi.fn(), writeAttemptReviewer: vi.fn(),
@@ -44,6 +45,9 @@ vi.mock("./logs.js", () => ({
       writeMergerGate: vi.fn(), writeResolveAttempt: vi.fn(),
     })),
   })),
+}));
+vi.mock("./ui-server.js", () => ({
+  startUiServer: vi.fn(async () => ({ url: "http://127.0.0.1:7331/", close: vi.fn() })),
 }));
 vi.mock("./repo-cache.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./repo-cache.js")>(),
@@ -73,6 +77,7 @@ vi.mock("./agent-tools.js", async (importOriginal) => ({
 }));
 vi.mock("./plan-resolver.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./plan-resolver.js")>(), buildPlan: seams.plan,
+  readIssueBranchRefs: vi.fn(async () => []),
 }));
 vi.mock("./chunk-follow-up.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./chunk-follow-up.js")>(),
@@ -136,7 +141,9 @@ const issue = (id: string) => ({
   id, title: `Issue ${id}`, branch: `sandbar/issue-${id}-test`, chunk: null,
 });
 const resolution = (plan: ReturnType<typeof issue>[]) => ({
-  plan, heldForReview: [], overrides: [], landedChunks: [], chunkNameDrifts: [],
+  plan,
+  candidates: plan.map((candidate) => ({ ...candidate, ready: true })),
+  waiting: [], overrides: [], landedChunks: [], chunkNameDrifts: [],
 });
 const summary = (merged: ReturnType<typeof issue>[], pushed = true) => ({
   merged, chunkLanded: [], skipped: [], pushed, unclosed: [], mergedChunks: [],
@@ -147,6 +154,7 @@ const deferred = <T>() => {
   const promise = new Promise<T>((yes) => { resolve = yes; });
   return { promise, resolve };
 };
+const eventsOf = (kind: string) => seams.events.filter((event) => event.kind === kind);
 
 describe("run quota orchestration (#109)", () => {
   beforeEach(() => {
@@ -158,10 +166,9 @@ describe("run quota orchestration (#109)", () => {
     seams.mergerStackStop.mockReset(); seams.mergerStackStop.mockResolvedValue(undefined);
     seams.mergerWorktreeRemove.mockReset();
     seams.mergerWorktreeRemove.mockResolvedValue(undefined);
-    seams.writePlan.mockReset(); seams.writePlan.mockResolvedValue(undefined);
     seams.landRequestPullRequests.mockReset();
     seams.landRequestPullRequests.mockResolvedValue([]);
-    seams.logLines.length = 0;
+    seams.events.length = 0;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -190,9 +197,11 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.merger.mock.calls[0]?.[4]).toEqual(expect.objectContaining({
       promptExtension: config.promptExtensions?.merger,
     }));
-    expect(seams.logLines).toContain(
-      "exit: quota — claude five_hour quota window closed; resets at 1970-01-01T00:00:42.000Z",
-    );
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
+      tag: "quota",
+      reason: "claude five_hour quota window closed; resets at 1970-01-01T00:00:42.000Z",
+      exitCode: 4,
+    }));
   });
 
   it("stops admissions as soon as the shared provider state closes", async () => {
@@ -239,9 +248,11 @@ describe("run quota orchestration (#109)", () => {
     }) as never);
 
     await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:1");
-    expect(seams.logLines).toContain("finalise #87 needs-info → pushed branch");
-    expect(seams.logLines.some((line) => line.includes("Tracker read-back mismatch")))
-      .toBe(true);
+    expect(eventsOf("finalise")).toContainEqual(expect.objectContaining({
+      issue: 87, finaliseKind: "needs-info", outcome: "pushed branch",
+    }));
+    expect(eventsOf("complaint").some((event) =>
+      String(event.message).includes("Tracker read-back mismatch"))).toBe(true);
   });
 
   it("relaunches only at post-landing quiescence before starting successors", async () => {
@@ -277,10 +288,45 @@ describe("run quota orchestration (#109)", () => {
 
     await expect(run(config)).rejects.toThrow("EXIT:4");
     expect(exit).toHaveBeenCalledWith(4);
-    expect(seams.logLines).toContain(
-      "exit: quota — codex seven_day quota window closed; resets at 1970-01-01T00:01:24.000Z",
-    );
-    expect(seams.logLines.some((line) => line.startsWith("exit: halted"))).toBe(false);
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
+      tag: "quota",
+      reason: "codex seven_day quota window closed; resets at 1970-01-01T00:01:24.000Z",
+    }));
+    expect(eventsOf("exit").some((event) => event.tag === "halted")).toBe(false);
+  });
+
+  it("records durable outcomes from a merger halt's partial summary", async () => {
+    const done = issue("1");
+    const partial = {
+      ...summary([]),
+      skipped: [{ issue: done, reason: "gate-2 stayed red" }],
+    };
+    seams.plan.mockResolvedValue(resolution([done]));
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "abc" }] });
+    seams.merger.mockImplementation(async (
+      _issues,
+      _adapter,
+      _log,
+      _gateLog,
+      options: { onOutcome?: (outcome: object) => Promise<void> },
+    ) => {
+      await options.onOutcome?.({
+        kind: "skipped",
+        issue: done,
+        reason: "gate-2 stayed red",
+      });
+      throw new MergerError("merge halted", partial);
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:1");
+    expect(eventsOf("landed")).toContainEqual(expect.objectContaining({
+      issue: 1,
+      outcome: "skipped",
+      reason: "gate-2 stayed red",
+    }));
   });
 
   it("refills a freed slot before landing while a sibling remains active", async () => {
@@ -312,16 +358,12 @@ describe("run quota orchestration (#109)", () => {
       .toEqual(["2"]);
     expect(seams.merger.mock.calls[1]?.[0].map((candidate: ReturnType<typeof issue>) => candidate.id))
       .toEqual(["1", "3"]);
-    // The second recompute resolved every unstarted candidate even though only
-    // one slot was free. plans.jsonl records that resolver answer, not the
-    // narrower admission of #3.
-    expect(seams.writePlan.mock.calls[1]?.[1].map(
-      (candidate: ReturnType<typeof issue>) => candidate.id,
-    )).toEqual(["3", "4", "5"]);
-    expect(seams.logLines).toContain(
-      "plan: 3 unblocked issue(s) — #3, #4, #5",
-    );
-    expect(seams.logLines).toContain("admit: 1 issue(s) — #3");
+    // One event carries both the full resolver answer and the narrower
+    // admission made with the single free slot.
+    const refill = eventsOf("recompute").find((event) => event.trigger === "slot-freed");
+    expect((refill?.candidates as Array<{ issue: number }>).map((candidate) => candidate.issue))
+      .toEqual([3, 4, 5]);
+    expect(refill?.admitted).toEqual([{ issue: 3, title: "Issue 3" }]);
   });
 
   it("continues after a rejected member and admits its successor", async () => {
@@ -335,8 +377,7 @@ describe("run quota orchestration (#109)", () => {
 
     await expect(run({ ...config, maxParallelIssues: 1 })).resolves.toBeUndefined();
     expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["1", "2"]);
-    expect(vi.mocked(console.log).mock.calls.flat().join("\n"))
-      .not.toContain("Running the merge phase for those alone");
+    expect(vi.mocked(console.log).mock.calls).toEqual([["http://127.0.0.1:7331/"]]);
   });
 
   it("drains and finalizes siblings before announcing a landing halt", async () => {
@@ -364,13 +405,15 @@ describe("run quota orchestration (#109)", () => {
       inputs.some((input: { kind: string; issue: { id: string } }) =>
         input.kind === "needs-info" && input.issue.id === "2")))
       .toBe(true);
-    expect(seams.logLines.findIndex((line) => line.startsWith("finalise #2 needs-info")))
-      .toBeLessThan(seams.logLines.findIndex((line) => line.startsWith("exit: halted")));
-    expect(seams.logLines.some((line) =>
-      line.startsWith("HALTED — internal failure: Error: landing failed")
-    )).toBe(true);
-    expect(seams.logLines.some((line) => line.includes("merger halted unexpectedly")))
-      .toBe(false);
+    const finaliseIndex = seams.events.findIndex((event) =>
+      event.kind === "finalise" && event.issue === 2);
+    const exitIndex = seams.events.findIndex((event) =>
+      event.kind === "exit" && event.tag === "halted");
+    expect(finaliseIndex).toBeLessThan(exitIndex);
+    expect(eventsOf("complaint").some((event) =>
+      String(event.message).includes("landing failed"))).toBe(true);
+    expect(eventsOf("complaint").some((event) =>
+      String(event.message).includes("merger halted unexpectedly"))).toBe(false);
   });
 
   it("exits stuck after the global terminal-without-landing backstop", async () => {
@@ -394,8 +437,12 @@ describe("run quota orchestration (#109)", () => {
 
   it("requests enough planner candidates to fill a wider configured pool", async () => {
     const issues = Array.from({ length: 6 }, (_, index) => issue(String(index + 1)));
+    let firstRecompute = true;
     seams.plan.mockImplementation(async (_repo, options: { k?: number }) => {
-      expect(options.k).toBe(6);
+      if (firstRecompute) {
+        expect(options.k).toBe(6);
+        firstRecompute = false;
+      }
       return resolution(issues);
     });
     seams.innerLoop.mockResolvedValue({
@@ -486,8 +533,8 @@ describe("run quota orchestration (#109)", () => {
     await expect(run({ ...config, maxParallelIssues: 3 })).resolves.toBeUndefined();
     expect(exit).not.toHaveBeenCalled();
     expect(seams.innerLoop).toHaveBeenCalledTimes(8);
-    expect(seams.logLines.some((line) => line.startsWith("exit: stuck"))).toBe(false);
-    expect(seams.logLines.some((line) => line.startsWith("exit: plan-empty"))).toBe(true);
+    expect(eventsOf("exit").some((event) => event.tag === "stuck")).toBe(false);
+    expect(eventsOf("exit").some((event) => event.tag === "plan-empty")).toBe(true);
     // A chunk landing does not move the source branch, so images are built
     // once, at startup, and never rebuilt.
     expect(ensureImages).toHaveBeenCalledTimes(1);
@@ -524,7 +571,7 @@ describe("run quota orchestration (#109)", () => {
     expect(exit).toHaveBeenCalledWith(2);
     expect(seams.merger).toHaveBeenCalledTimes(6);
     expect(seams.innerLoop).not.toHaveBeenCalled();
-    expect(seams.logLines.some((line) => line.startsWith("exit: stuck"))).toBe(true);
+    expect(eventsOf("exit").some((event) => event.tag === "stuck")).toBe(true);
   });
 
   it("exits quota from the shared provider state when the closing issue returned no terminal", async () => {
@@ -545,10 +592,11 @@ describe("run quota orchestration (#109)", () => {
     await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:4");
     expect(exit).toHaveBeenCalledWith(4);
     expect(seams.innerLoop).toHaveBeenCalledOnce();
-    expect(seams.logLines).toContain(
-      "exit: quota — claude seven_day quota window closed; resets at 1970-01-01T00:01:24.000Z",
-    );
-    expect(seams.logLines.some((line) => line.startsWith("HALTED"))).toBe(false);
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
+      tag: "quota",
+      reason: "claude seven_day quota window closed; resets at 1970-01-01T00:01:24.000Z",
+    }));
+    expect(eventsOf("exit").some((event) => event.tag === "halted")).toBe(false);
   });
 
   it("reports a failing drain beside the landing failure and still halts on the original", async () => {
@@ -578,15 +626,12 @@ describe("run quota orchestration (#109)", () => {
 
     await expect(run({ ...config, maxParallelIssues: 2 })).rejects.toThrow("EXIT:1");
     expect(exit).toHaveBeenCalledWith(1);
-    const drainLine = seams.logLines.find((line) =>
-      line.startsWith("drain after landing failure also failed:"));
-    expect(drainLine).toContain("finalize failed");
-    expect(seams.logLines.some((line) =>
-      line.startsWith("HALTED — internal failure: Error: landing failed")
-    )).toBe(true);
-    expect(seams.logLines.some((line) =>
-      line.startsWith("HALTED — internal failure: Error: finalize failed")
-    )).toBe(false);
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining("finalize failed"),
+    }));
+    expect(eventsOf("complaint").some((event) =>
+      String(event.message).includes("landing failed"))).toBe(true);
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({ tag: "halted" }));
   });
 
   it.each([
@@ -609,16 +654,12 @@ describe("run quota orchestration (#109)", () => {
       expect(exit).toHaveBeenCalledWith(1);
       expect(seams.mergerStackStop).toHaveBeenCalledOnce();
       expect(seams.mergerWorktreeRemove).toHaveBeenCalledOnce();
-      expect(seams.logLines.some((line) =>
-        line.includes("landing resource cleanup also failed") &&
-        line.includes("teardown failed")
-      )).toBe(true);
-      expect(seams.logLines.some((line) =>
-        line.startsWith("HALTED — internal failure: Error: landing failed")
-      )).toBe(true);
-      expect(seams.logLines.some((line) =>
-        line.startsWith("HALTED — internal failure: Error: teardown failed")
-      )).toBe(false);
+      expect(eventsOf("complaint").some((event) =>
+        String(event.message).includes("Landing resource cleanup also failed") &&
+        String(event.message).includes("teardown failed"))).toBe(true);
+      expect(eventsOf("complaint").some((event) =>
+        String(event.message).includes("landing failed"))).toBe(true);
+      expect(eventsOf("exit")).toContainEqual(expect.objectContaining({ tag: "halted" }));
     },
   );
 
@@ -638,15 +679,11 @@ describe("run quota orchestration (#109)", () => {
     expect(exit).toHaveBeenCalledWith(1);
     expect(seams.mergerStackStop).toHaveBeenCalledOnce();
     expect(seams.mergerWorktreeRemove).toHaveBeenCalledOnce();
-    expect(seams.logLines.some((line) =>
-      line.includes("landing resource cleanup also failed") &&
-      line.includes("worktree teardown failed")
-    )).toBe(true);
-    expect(seams.logLines.some((line) =>
-      line.startsWith("HALTED — internal failure: Error: stack teardown failed")
-    )).toBe(true);
-    expect(seams.logLines.some((line) =>
-      line.startsWith("HALTED — internal failure: Error: worktree teardown failed")
-    )).toBe(false);
+    expect(eventsOf("complaint").some((event) =>
+      String(event.message).includes("Landing resource cleanup also failed") &&
+      String(event.message).includes("worktree teardown failed"))).toBe(true);
+    expect(eventsOf("complaint").some((event) =>
+      String(event.message).includes("stack teardown failed"))).toBe(true);
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({ tag: "halted" }));
   });
 });

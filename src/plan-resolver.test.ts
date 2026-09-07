@@ -49,7 +49,7 @@ const facts = (
 
 // The plan half of the resolution, for the selection tests below — they are
 // about which issues get picked, and every one of them predates lanes. The
-// lane half (heldForReview, overrides) is asserted on the full resolution in
+// lane half (waiting, overrides) is asserted on the full resolution in
 // its own describe.
 const planOf = (...args: Parameters<typeof resolvePlan>): Plan =>
   resolvePlan(...args).plan;
@@ -103,6 +103,31 @@ describe("parseBlockedBy", () => {
 });
 
 describe("resolvePlan", () => {
+  it("reports every ready issue not admitted with its scheduler reason", () => {
+    const ready = { labels: ["ready-for-agent"] };
+    const resolution = resolvePlan(
+      [
+        issue(1, "", ready),
+        issue(2, "", ready),
+        issue(3, "## Blocked by\n- #9\n", ready),
+        issue(4, "", ready),
+      ],
+      states({ 9: "OPEN" }),
+      new Set([4]),
+      1,
+      "auto",
+      new Map(),
+      new Set([4]),
+    );
+
+    expect(resolution.plan.map((candidate) => candidate.id)).toEqual(["1"]);
+    expect(resolution.waiting).toEqual([
+      { issue: 2, title: "Issue 2", reason: { kind: "no-slot" } },
+      { issue: 3, title: "Issue 3", reason: { kind: "blocked", by: [9] } },
+      { issue: 4, title: "Issue 4", reason: { kind: "ongoing" } },
+    ]);
+  });
+
   it("includes issues with no `## Blocked by` section", () => {
     const plan = planOf([issue(10, "# Just a body")], new Map());
     expect(plan.map((p) => p.id)).toEqual(["10"]);
@@ -274,7 +299,6 @@ describe("resolvePlan lanes (#57)", () => {
     const r = resolvePlan([issue(10, ""), issue(11, "")], new Map());
 
     expect(r.plan.map((p) => p.id)).toEqual(["10", "11"]);
-    expect(r.heldForReview).toEqual([]);
     expect(r.overrides).toEqual([]);
   });
 
@@ -288,7 +312,6 @@ describe("resolvePlan lanes (#57)", () => {
     );
 
     expect(r.plan.map((p) => p.id)).toEqual(["10", "11"]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("plans review-gated issues that are their own chunk's root (#60)", () => {
@@ -301,7 +324,6 @@ describe("resolvePlan lanes (#57)", () => {
       { root: 10, branch: "sandbar/chunk-10-issue-10", landed: [] },
       { root: 11, branch: "sandbar/chunk-11-issue-11", landed: [] },
     ]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("gives an auto-lane issue no chunk, and a review-gated one its own (#60)", () => {
@@ -321,7 +343,6 @@ describe("resolvePlan lanes (#57)", () => {
       ["10", null],
       ["11", { root: 11, branch: "sandbar/chunk-11-issue-11", landed: [] }],
     ]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("holds a review-gated issue whose blockers sit in two different chunks", () => {
@@ -337,7 +358,8 @@ describe("resolvePlan lanes (#57)", () => {
     );
 
     expect(r.plan).toEqual([]);
-    expect(r.heldForReview).toEqual([30]);
+    expect(r.waiting.filter((entry) => entry.reason.kind === "held")
+      .map((entry) => entry.issue)).toEqual([30]);
   });
 
   it("plans an `auto-land` issue onto the chunk it inherited, and reports the override", () => {
@@ -365,7 +387,6 @@ describe("resolvePlan lanes (#57)", () => {
         },
       ],
     ]);
-    expect(r.heldForReview).toEqual([]);
     expect(r.overrides).toEqual([{ issue: 11, gatedBy: 12 }]);
   });
 
@@ -414,7 +435,6 @@ describe("resolvePlan lanes (#57)", () => {
     // #13 is neither planned nor held: it fails the dependency gate, so its
     // lane never got to be the reason it was dropped.
     expect(r.plan.map((p) => p.id)).toEqual(["12"]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("does not count a closed or already-merged issue as held", () => {
@@ -435,7 +455,8 @@ describe("resolvePlan lanes (#57)", () => {
       "review",
     );
 
-    expect(r.heldForReview).toEqual([30]);
+    expect(r.waiting.filter((entry) => entry.reason.kind === "held")
+      .map((entry) => entry.issue)).toEqual([30]);
   });
 
   it("does not count a `waiting` issue as held", () => {
@@ -448,7 +469,6 @@ describe("resolvePlan lanes (#57)", () => {
     );
 
     expect(r.plan).toEqual([]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("holds review-gated issues without shrinking K for the auto ones", () => {
@@ -473,7 +493,8 @@ describe("resolvePlan lanes (#57)", () => {
     );
 
     expect(r.plan.map((p) => p.id)).toEqual(["1", "3", "5"]);
-    expect(r.heldForReview).toEqual([2, 4]);
+    expect(r.waiting.filter((entry) => entry.reason.kind === "held")
+      .map((entry) => entry.issue)).toEqual([2, 4]);
   });
 });
 
@@ -485,9 +506,8 @@ describe("resolvePlan lanes (#57)", () => {
 // satisfied blocker means the dependent reaches the LANE filter, and since #61
 // every member of a chunk clears it, so a satisfied dependent is simply
 // PLANNED — carrying the chunk it will land on and be seeded from. An
-// UNSATISFIED one is in neither `plan` nor `heldForReview`: it drops out at the
-// dependency gate, before the lane filter is reached at all. So "absent from
-// both" is what "not satisfied" looks like here, and the `chunk` a planned
+// An unsatisfied issue is absent from `plan` and appears in `waiting` as
+// blocked, before the lane filter is reached. The `chunk` a planned
 // dependent carries is the second half of the assertion — it is what tells
 // phase 2 to seed from the chunk tip where the blocker's commits actually are
 // (#61), so a member planned with `chunk: null` would be developed against a
@@ -517,7 +537,6 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
         },
       ],
     ]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("does not satisfy a blocker that is merely OPEN", () => {
@@ -534,7 +553,6 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     );
 
     expect(r.plan.map((p) => p.id)).toEqual(["10"]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("keeps cross-chunk dependencies strict: two published parents, two chunks", () => {
@@ -558,7 +576,6 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     );
 
     expect(r.plan).toEqual([]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("does not satisfy a blocker that is in no chunk sandbar can derive", () => {
@@ -574,7 +591,6 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     );
 
     expect(r.plan).toEqual([]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("still satisfies a CLOSED blocker without chunk membership", () => {
@@ -589,7 +605,6 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     );
 
     expect(r.plan.map((p) => p.id)).toEqual(["11"]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("propagates one LAYER at a time along a chain", () => {
@@ -617,7 +632,6 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     );
 
     expect(r.plan.map((p) => p.id)).toEqual(["11"]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   // The other half of "one layer": several members whose blockers have all
@@ -656,7 +670,6 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
         },
       ],
     ]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("does not let a display label de-queue an auto-lane candidate", () => {
@@ -686,7 +699,6 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     );
 
     expect(r.plan).toEqual([]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("uses branch history even when tracker facts have no display label", () => {
@@ -709,7 +721,6 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
         },
       ],
     ]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("uses branch history when the facts batch missed the member", () => {
@@ -732,7 +743,6 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
         },
       ],
     ]);
-    expect(r.heldForReview).toEqual([]);
   });
 
   it("is inert with no chunk membership anywhere, on either lane", () => {
@@ -756,7 +766,6 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     // unlanded #10 and is neither planned nor held. Nothing about that answer
     // came from the label — there isn't one anywhere in the graph.
     expect(review.plan.map((p) => p.id)).toEqual(["10", "12"]);
-    expect(review.heldForReview).toEqual([]);
   });
 });
 
@@ -1094,6 +1103,5 @@ describe("resolvePlan landed chunks (#63, #64)", () => {
 
     expect(r.plan.map((p) => p.id)).toEqual(["50"]);
     expect(r.plan[0]?.chunk?.branch).toBe("sandbar/chunk-10-root");
-    expect(r.heldForReview).toEqual([]);
   });
 });

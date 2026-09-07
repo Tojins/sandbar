@@ -463,6 +463,10 @@ export type PrepareWorktreeOptions = {
   // Only host.onWorktreeReady runs here; sandbox-side hooks need the
   // container and stay in createSandbox.
   hooks?: SandboxHooks;
+  onNotice?: (
+    severity: "warning" | "error",
+    message: string,
+  ) => void | Promise<void>;
 };
 
 // ---------------------------------------------------------------------------
@@ -1274,9 +1278,10 @@ const restoreIssueBranch = async (
 const fastForwardFromOrigin = async (
   worktreePath: string,
   branch: string,
+  notice: (severity: "warning" | "error", message: string) => void | Promise<void>,
 ): Promise<void> => {
   if (!(await isOnIssueBranch(worktreePath, branch))) {
-    console.log(
+    await notice("warning",
       `Reusing worktree at ${worktreePath} (branch '${branch}') — HEAD is not on '${branch}', skipping origin refresh`,
     );
     return;
@@ -1308,7 +1313,7 @@ const fastForwardFromOrigin = async (
   }
   const after = (await execGit(["rev-parse", "HEAD"], worktreePath)).trim();
   if (before && after && before !== after) {
-    console.log(
+    await notice("warning",
       `Fast-forwarded worktree at ${worktreePath} (branch '${branch}') to origin/${branch}`,
     );
   }
@@ -1453,6 +1458,7 @@ const worktreeCreate = (
   repoDir: string,
   branch: string,
   worktreesDir: string,
+  notice: (severity: "warning" | "error", message: string) => void | Promise<void>,
 ): Promise<{ path: string; branch: string }> =>
   withTimeout(
     (async () => {
@@ -1475,14 +1481,14 @@ const worktreeCreate = (
           await refreshIssueClone(repoDir, worktreePath);
           const dirty = await hasUncommittedChanges(worktreePath);
           if (dirty) {
-            console.warn(
+            await notice("warning",
               `Reusing worktree at ${worktreePath} (branch '${branch}') — worktree has uncommitted changes`,
             );
           } else {
             if (!(await isOnIssueBranch(worktreePath, branch))) {
               await restoreIssueBranch(repoDir, worktreePath, branch);
             }
-            await fastForwardFromOrigin(worktreePath, branch);
+            await fastForwardFromOrigin(worktreePath, branch, notice);
           }
           return { path: worktreePath, branch };
         }
@@ -2296,15 +2302,20 @@ export const prepareWorktree = async (
   options: PrepareWorktreeOptions,
 ): Promise<string> => {
   const { repoDir, worktreesDir, hostCwd } = options.layout;
+  const notice = options.onNotice ?? ((severity: "warning" | "error", message: string) => {
+    if (severity === "warning") console.warn(message);
+    else console.error(message);
+  });
 
   const { path: worktreePath } = await withIssueCloneSetupLock(async () => {
-    await pruneStaleIssueClones(repoDir, worktreesDir).catch((err) => {
-      console.error("Stale issue-clone sweep failed (continuing):", err);
+    await pruneStaleIssueClones(repoDir, worktreesDir).catch(async (err) => {
+      await notice("error", `Stale issue-clone sweep failed (continuing): ${String(err)}`);
     });
     return worktreeCreate(
       repoDir,
       options.branch,
       worktreesDir,
+      notice,
     );
   });
 
@@ -2324,7 +2335,7 @@ export const prepareWorktree = async (
     try {
       await rm(worktreePath, { recursive: true, force: true });
     } catch (cleanupError) {
-      console.error("Failed to remove worktree after setup failure:", cleanupError);
+      await notice("error", `Failed to remove worktree after setup failure: ${String(cleanupError)}`);
     }
     throw e;
   }

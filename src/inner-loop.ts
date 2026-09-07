@@ -3,9 +3,8 @@
 // executes its actions, feeds results back as events, and translates the
 // verdict to a Terminal. On HARD-ERROR, decideAfterTerminal may dispose the
 // sandbox and restart from attempt 1 with a fresh one (up to
-// HARD_ERROR_MAX_RETRIES times). Every retry is written both to stderr and to
-// the durable orchestrator log; if retries are exhausted, run.ts records the
-// surfaced terminal's full reason instead.
+// HARD_ERROR_MAX_RETRIES times). Every retry is a `hard-error` event; if
+// retries are exhausted, run.ts records the surfaced terminal's full reason.
 //
 // Setup ordering is load-bearing: the issue worktree comes FIRST, then agent
 // sandbox + gate stack in parallel (#20 — mount sources are read at container
@@ -72,13 +71,12 @@ import { join } from "node:path";
 import {
   type AgentProviderName,
   buildAgentProvider,
-  effortField,
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
 import { AgentError, AgentQuotaError, agentPartialOutput, agentPartialUsage, podman, withPartialOutput } from "./agent-sandbox.js";
-import { formatRateLimitFields, type RateLimitMeasurement } from "./agent-run-end.js";
+import type { RateLimitMeasurement } from "./agent-run-end.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
-import { formatUsageFields, maxContextDepth, sumAgentUsage } from "./agent-usage.js";
+import { maxContextDepth, sumAgentUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
 
 import type { ChunkTarget } from "./chunks.js";
@@ -89,7 +87,8 @@ import {
 } from "./agent-tools.js";
 import type { BranchImages } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
-import { formatGateFields, summarizeGateFailure } from "./gate.js";
+import type { EventInput, UsageFields } from "./events.js";
+import { summarizeGateFailure } from "./gate.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
 import {
   type HeadMismatch,
@@ -113,6 +112,7 @@ import {
   initialAction,
   initialState,
   step,
+  visiblePhases,
 } from "./inner-loop-machine.js";
 import type { AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
@@ -138,14 +138,13 @@ import {
 } from "./reviewer-run.js";
 import type { RepoLayout } from "./repo-cache.js";
 import type { RepoRef } from "./repo-ref.js";
-import { durationField, startTimer } from "./timing.js";
+import { startTimer } from "./timing.js";
 import {
   type ProjectAnchorOptions,
   type PriorReviewRound,
   buildPrompt,
   buildReviewerPrompts,
   buildUiCheckPrompt,
-  qualityReviewContext,
 } from "./prompt.js";
 
 export const FAILURE_TAIL_LINES = 200;
@@ -236,37 +235,6 @@ export function reviewerPassRouting(
       effort: config.reviewerEffort,
     },
   };
-}
-
-// One spelling for the reviewer-round record consumed by operators and later
-// evidence tooling (#88). Keep the reviewed HEAD in both completed and
-// harness-failed records so every recorded judgment is anchored to a commit.
-export function reviewRoundLine(args: {
-  readonly issueId: string;
-  readonly attempt: number;
-  readonly reviewRound: number;
-  readonly head: string;
-  readonly failed: {
-    readonly pass: ReviewerPass;
-    readonly invocations: number;
-  } | null;
-  readonly quality: FinishedReviewRoundDecision["quality"];
-  readonly correctness: FinishedReviewRoundDecision["correctness"];
-  // Not optional: the quality pass runs on every round (#121), so the mode it
-  // ran in is a fact about every round line.
-  readonly qualityMode: "list" | "verify";
-  readonly durationField: string;
-}): string {
-  return (
-    `issue=${args.issueId} attempt=${args.attempt} reviewer round=${args.reviewRound} head=${args.head} ` +
-    (args.failed
-      ? `pass=${args.failed.pass} harness-failed invocations=${args.failed.invocations} `
-      : "") +
-    `quality=${args.quality} correctness=${args.correctness}` +
-    ` mode=${args.qualityMode} ` +
-    args.durationField +
-    (args.failed ? " (budgets not consumed)" : "")
-  );
 }
 
 // The promise nudge (see runImplementer). Loaded at import time like every
@@ -480,7 +448,7 @@ export type InnerLoopOptions = {
   // the logs go under the state directory's `logs/`.
   readonly sandboxLogBaseDir?: string;
   readonly attemptLogger?: AttemptLogger;
-  readonly onOrchestratorLog?: (line: string) => Promise<void> | void;
+  readonly onEvent?: (event: EventInput) => Promise<void> | void;
   readonly quotaState?: RunQuotaState;
 };
 
@@ -489,6 +457,29 @@ type SandboxCycleOutcome = {
   readonly accumulatedCommits: readonly { sha: string }[];
   readonly specGaps: readonly SpecGap[];
 };
+
+function eventUsage(
+  usage: AgentUsage | undefined,
+  toolCalls: number | undefined,
+  peakContext: number | undefined,
+  quota?: RateLimitMeasurement,
+): UsageFields | undefined {
+  const fields: UsageFields = {
+    ...(usage?.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+    ...(usage?.cachedInputTokens === undefined ? {} : { cachedInputTokens: usage.cachedInputTokens }),
+    ...(usage?.cacheWriteInputTokens === undefined ? {} : { cacheWriteInputTokens: usage.cacheWriteInputTokens }),
+    ...(usage?.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+    ...(usage?.reasoningTokens === undefined ? {} : { reasoningTokens: usage.reasoningTokens }),
+    ...(usage?.apiMs === undefined ? {} : { apiMs: usage.apiMs }),
+    ...(usage?.resolvedModel === undefined ? {} : { resolvedModel: usage.resolvedModel }),
+    ...(usage?.models === undefined ? {} : { models: usage.models }),
+    ...(usage?.terminalReason === undefined ? {} : { terminalReason: usage.terminalReason }),
+    ...(toolCalls === undefined ? {} : { toolCalls }),
+    ...(peakContext === undefined ? {} : { peakContext }),
+    ...(quota === undefined ? {} : { quota }),
+  };
+  return Object.keys(fields).length === 0 ? undefined : fields;
+}
 
 export async function runInnerLoop(
   issue: IssueRef,
@@ -500,8 +491,21 @@ export async function runInnerLoop(
 ): Promise<Terminal> {
   let retriesUsed = 0;
   const specGaps: SpecGap[] = [];
+  let admitted = false;
+  const cycleOptions: InnerLoopOptions = opts.onEvent === undefined
+    ? opts
+    : {
+        ...opts,
+        onEvent: async (event) => {
+          if (event.kind === "admitted") {
+            if (admitted) return;
+            admitted = true;
+          }
+          await opts.onEvent?.(event);
+        },
+      };
   for (;;) {
-    const outcome = await runCycle(issue, opts);
+    const outcome = await runCycle(issue, cycleOptions);
     specGaps.push(...outcome.specGaps);
     const decision = decideAfterTerminal(outcome.verdict, retriesUsed);
     if (decision.kind === "surface") {
@@ -509,11 +513,14 @@ export async function runInnerLoop(
     }
     retriesUsed = decision.nextRetriesUsed;
     const reason = outcome.verdict.type === "HARD-ERROR" ? outcome.verdict.reason : "";
-    const line =
-      `  ${issue.id}: HARD-ERROR (${reason.split("\n")[0]}) — retry ` +
-      `${retriesUsed}/${HARD_ERROR_MAX_RETRIES} with a fresh sandbox.`;
-    console.error(line);
-    await opts.onOrchestratorLog?.(line);
+    await opts.onEvent?.({
+      kind: "hard-error",
+      issue: Number(issue.id),
+      title: issue.title,
+      retry: retriesUsed,
+      max: HARD_ERROR_MAX_RETRIES,
+      reason,
+    });
   }
 }
 
@@ -626,6 +633,14 @@ async function runSandboxCycle(
       config.sourceBranch,
       issue.chunk ?? null,
     );
+    await opts.onEvent?.({
+      kind: "admitted",
+      issue: Number(issue.id),
+      title: issue.title,
+      branch: issue.branch,
+      chunk: issue.chunk?.branch ?? null,
+      seedRef: base.ref,
+    });
     // What origin's copy of the branch had to say (#112): a fast-forward, a
     // resume from origin, unpushed work kept, or an origin that could not be
     // asked. An outcome, so it is in the log (#70); nothing for the common
@@ -634,22 +649,31 @@ async function runSandboxCycle(
       base.originSync === undefined
         ? null
         : describeIssueBranchOriginSync(issue.branch, base.originSync);
-    if (originLine !== null && opts.onOrchestratorLog) {
-      await opts.onOrchestratorLog(`issue=${issue.id} ${originLine}`);
+    if (originLine !== null) {
+      await opts.onEvent?.({
+        kind: "repair",
+        issue: Number(issue.id),
+        title: issue.title,
+        attempt: 1,
+        action: "fast-forward",
+        detail: originLine,
+      });
     }
     // Logged for a chunk member either way. The second line is now true by
     // construction rather than by assumption — `ensureIssueBranch` gives the
     // source branch to a chunk member only when that member IS the root, and
     // throws otherwise — so what the log records is which of the two seeds a
     // member got, not a guess about why.
-    if (issue.chunk && opts.onOrchestratorLog) {
-      await opts.onOrchestratorLog(
-        base.chunkBranch
+    if (issue.chunk) {
+      await opts.onEvent?.({
+        kind: "preflight",
+        action: "issue-seed",
+        detail: base.chunkBranch
           ? `issue=${issue.id} seeded from chunk tip ${base.ref} (${base.chunkBranch})`
           : `issue=${issue.id} roots chunk ${issue.chunk.branch} and seeded from ` +
             `${base.ref} — origin carries no such chunk branch yet, which is where ` +
             "the merge phase will create it",
-      );
+      });
     }
 
     // Worktree first (fast git ops), then container bringups in parallel: the
@@ -666,6 +690,11 @@ async function runSandboxCycle(
       layout: config.layout,
       hooks: opts.hooks,
       copyToWorktree: [...opts.copyToWorktree],
+      onNotice: (severity, message) => opts.onEvent?.({
+        kind: "complaint",
+        severity,
+        message,
+      }),
     });
     preparedWorktreePath = worktreePath;
     worktreeMs = worktreeTimer();
@@ -725,8 +754,11 @@ async function runSandboxCycle(
           ),
           onFallback: async (detail) => {
             const line = `issue=${issue.id} sandbox-image fallback — ${detail}`;
-            console.error(`  ${line}`);
-            if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
+            await opts.onEvent?.({
+              kind: "complaint",
+              severity: "warning",
+              message: line,
+            });
           },
         });
         return agentSandbox.createSandbox({
@@ -818,14 +850,15 @@ async function runSandboxCycle(
         : (stackResult as PromiseRejectedResult).reason;
     }
 
-    if (opts.onOrchestratorLog) {
-      await opts.onOrchestratorLog(
-        `issue=${issue.id} setup ${durationField(setupTimer())} ` +
-          `worktreeMs=${worktreeMs}` +
-          (sandboxMs === null ? "" : ` sandboxMs=${sandboxMs}`) +
-          (stackMs === null ? "" : ` stackMs=${stackMs}`),
-      );
-    }
+    await opts.onEvent?.({
+      kind: "setup",
+      issue: Number(issue.id),
+      title: issue.title,
+      durationMs: setupTimer(),
+      worktreeMs,
+      ...(sandboxMs === null ? {} : { sandboxMs }),
+      ...(stackMs === null ? {} : { stackMs }),
+    });
 
     // startStack already registered stack.stop with the cleanup registry before
     // it created any podman resource, so no re-registration is needed here.
@@ -852,6 +885,13 @@ async function runSandboxCycle(
       uiPrototypeCheck: config.uiPrototypeCheck,
     });
     let action: LoopAction = initialAction(state);
+    await opts.onEvent?.({
+      kind: "phase",
+      issue: Number(issue.id),
+      title: issue.title,
+      attempt: state.attempt,
+      phases: visiblePhases(action),
+    });
 
     while (action.kind !== "terminate") {
       const event = await executeAction(action, {
@@ -867,10 +907,31 @@ async function runSandboxCycle(
         priorReviewRounds,
         specGaps,
         sandboxStatuses,
+        state,
       });
       const r = step(state, event);
       state = r.state;
       action = r.action;
+      if (
+        action.kind === "run-implementer" &&
+        (event.kind === "implementer-result" || event.kind === "gate-and-reviewer-result")
+      ) {
+        await opts.onEvent?.({
+          kind: "repair",
+          issue: Number(issue.id),
+          title: issue.title,
+          attempt: action.attempt,
+          action: "re-prompt",
+          detail: action.extraReprompt ?? (action.failureTrace || "review changes requested"),
+        });
+      }
+      await opts.onEvent?.({
+        kind: "phase",
+        issue: Number(issue.id),
+        title: issue.title,
+        attempt: state.attempt,
+        phases: visiblePhases(action),
+      });
     }
 
     return { verdict: action.verdict, accumulatedCommits: accumulated, specGaps };
@@ -929,7 +990,11 @@ async function runSandboxCycle(
       } catch (err) {
         // Never mask the verdict with a teardown failure, but never hide it
         // either — it means leaked podman resources.
-        console.error(err instanceof Error ? err.message : String(err));
+        await opts.onEvent?.({
+          kind: "complaint",
+          severity: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
       }
     }
     // Then the sandbox's own siblings, and BEFORE `sandbox.close()` (#44). They
@@ -944,14 +1009,22 @@ async function runSandboxCycle(
       try {
         await sandboxStack.stop();
       } catch (err) {
-        console.error(err instanceof Error ? err.message : String(err));
+        await opts.onEvent?.({
+          kind: "complaint",
+          severity: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
       }
     }
     if (sandbox) {
       try {
         await sandbox.close();
       } catch (err) {
-        console.error("Failed to close agent sandbox:", err);
+        await opts.onEvent?.({
+          kind: "complaint",
+          severity: "error",
+          message: `Failed to close agent sandbox: ${err instanceof Error ? err.message : String(err)}`,
+        });
       }
     }
   }
@@ -982,6 +1055,9 @@ type ExecuteActionCtx = {
   // What came up beside the agent, for the implementer's prompt slot (#44 D8).
   // Empty when the consumer declares no `inSandbox` container.
   readonly sandboxStatuses: readonly SandboxContainerStatus[];
+  // State before the action. Review aggregation applies the pure transition
+  // once to record both independent budgets after the completed round.
+  readonly state: LoopState;
 };
 
 async function executeAction(
@@ -1019,22 +1095,28 @@ export async function runUiCheck(
     );
     const timer = startTimer();
     const logInvocation = async (
+      result: Extract<EventInput, { kind: "ui-check" }>["result"],
       maxGapMs: number | undefined,
       usage: AgentUsage | undefined,
       toolCalls: number | undefined,
       peakContext: number | undefined,
       rateLimit: RateLimitMeasurement | undefined,
     ): Promise<void> => {
-      if (!opts.onOrchestratorLog) return;
-      await opts.onOrchestratorLog(
-        `issue=${issue.id} ui-check provider=${config.uiCheckAgent} ` +
-          `model=${config.uiCheckModelId}${effortField(config.uiCheckEffort)} ` +
-          `${durationField(timer())}` +
-          formatUsageFields(usage, toolCalls, peakContext) +
-          formatRateLimitFields(rateLimit) +
-          ` invocation=${invocation}` +
-          (maxGapMs === undefined ? "" : ` maxGapMs=${maxGapMs}`),
-      );
+      await opts.onEvent?.({
+        kind: "ui-check",
+        issue: Number(issue.id),
+        title: issue.title,
+        invocation,
+        provider: config.uiCheckAgent,
+        model: config.uiCheckModelId,
+        effort: config.uiCheckEffort ?? null,
+        durationMs: timer(),
+        ...(maxGapMs === undefined ? {} : { maxGapMs }),
+        result,
+        ...(eventUsage(usage, toolCalls, peakContext, rateLimit) === undefined
+          ? {}
+          : { usage: eventUsage(usage, toolCalls, peakContext, rateLimit) }),
+      });
     };
 
     let run: Awaited<ReturnType<Sandbox["run"]>>;
@@ -1049,16 +1131,10 @@ export async function runUiCheck(
           completionSignal: [],
         }),
       );
-      await logInvocation(
-        run.maxGapMs,
-        run.usage,
-        run.toolCalls,
-        run.peakContext,
-        run.rateLimit,
-      );
     } catch (err) {
       const partial = agentPartialUsage(err);
       await logInvocation(
+        err instanceof AgentQuotaError ? "quota" : "failed",
         undefined,
         partial.usage,
         partial.toolCalls,
@@ -1084,8 +1160,26 @@ export async function runUiCheck(
       "UI checker",
       run.stdout,
     );
-    if (wrote !== null) return { kind: "ui-checker-wrote", detail: wrote };
+    if (wrote !== null) {
+      await logInvocation(
+        "wrote",
+        run.maxGapMs,
+        run.usage,
+        run.toolCalls,
+        run.peakContext,
+        run.rateLimit,
+      );
+      return { kind: "ui-checker-wrote", detail: wrote };
+    }
     const result = parseUiCheck(run.stdout);
+    await logInvocation(
+      result.kind,
+      run.maxGapMs,
+      run.usage,
+      run.toolCalls,
+      run.peakContext,
+      run.rateLimit,
+    );
     if (result.kind !== "NO-SIGNAL") {
       return { kind: "ui-check-result", result };
     }
@@ -1129,13 +1223,31 @@ export async function runGateAndReviewer(
   if (
     !gate.ok &&
     reviewer.event.kind !== "reviewer-wrote" &&
-    ctx.opts.onOrchestratorLog
+    ctx.opts.onEvent
   ) {
-    await ctx.opts.onOrchestratorLog(
-      `issue=${ctx.issue.id} attempt=${action.attempt} gate-1 red — discarded concurrent reviewer result`,
-    );
+    await ctx.opts.onEvent({
+      kind: "complaint",
+      severity: "warning",
+      message: `issue=${ctx.issue.id} attempt=${action.attempt} gate-1 red — discarded concurrent reviewer result`,
+    });
   }
-  return { kind: "gate-and-reviewer-result", gate, reviewer: reviewer.event };
+  const aggregate = { kind: "gate-and-reviewer-result", gate, reviewer: reviewer.event } as const;
+  if (reviewer.round !== null) {
+    const after = step(ctx.state, aggregate).state;
+    await ctx.opts.onEvent?.({
+      kind: "review-round",
+      issue: Number(ctx.issue.id),
+      title: ctx.issue.title,
+      attempt: action.attempt,
+      round: action.reviewRound,
+      ...reviewer.round,
+      gateOk: gate.ok,
+      rejectingPass: gate.ok ? reviewer.round.rejectingPass : null,
+      qualityFailures: after.qualityFailures,
+      correctnessFailures: after.correctnessFailures,
+    });
+  }
+  return aggregate;
 }
 
 export async function runImplementer(
@@ -1165,7 +1277,7 @@ export async function runImplementer(
   // reviewer rounds is spending (#82).
   const implementerTimer = startTimer();
   const runAgent = (options: Parameters<Sandbox["run"]>[0]) =>
-    runSandboxAndPublish(sandbox, options, issue.id);
+    runSandboxAndPublish(sandbox, options, issue.id, opts.onEvent);
   let run: Awaited<ReturnType<typeof runAgent>>;
   try {
     run = await runWithQuotaState(opts.quotaState, config.implementerAgent, () => runAgent({
@@ -1177,14 +1289,27 @@ export async function runImplementer(
       completionSignal: PROMISE_COMPLETION_SIGNALS,
     }));
   } catch (err) {
-    if (err instanceof AgentQuotaError && opts.onOrchestratorLog) {
-      await opts.onOrchestratorLog(
-        `issue=${issue.id} attempt=${action.attempt} implementer ` +
-          `provider=${config.implementerAgent} model=${config.implementerModelId}` +
-          `${effortField(config.implementerEffort)} ` +
-          `${durationField(implementerTimer())}` +
-          formatRateLimitFields(err.measurement),
+    if (err instanceof AgentQuotaError) {
+      const partial = agentPartialUsage(err);
+      const usage = eventUsage(
+        partial.usage,
+        partial.toolCalls,
+        partial.peakContext,
+        partial.rateLimit ?? err.measurement,
       );
+      await opts.onEvent?.({
+        kind: "implementer",
+        issue: Number(issue.id),
+        title: issue.title,
+        attempt: action.attempt,
+        signal: "QUOTA",
+        commits: 0,
+        provider: config.implementerAgent,
+        model: config.implementerModelId,
+        effort: config.implementerEffort ?? null,
+        durationMs: implementerTimer(),
+        ...(usage === undefined ? {} : { usage }),
+      });
     }
     throw err;
   }
@@ -1200,6 +1325,8 @@ export async function runImplementer(
   let attemptToolCalls = run.toolCalls;
   let attemptCommits = run.commits.length;
   let attemptPeakContext = run.peakContext;
+  let attemptRateLimit = run.rateLimit;
+  let attemptMaxGapMs = run.maxGapMs;
   let attemptStdout = run.stdout;
 
   // The promise nudge: output with NO tag at all gets one same-conversation
@@ -1242,6 +1369,8 @@ export async function runImplementer(
     attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
     attemptToolCalls += nudge.toolCalls;
     attemptPeakContext = maxContextDepth(attemptPeakContext, nudge.peakContext);
+    attemptRateLimit = nudge.rateLimit ?? attemptRateLimit;
+    attemptMaxGapMs = Math.max(attemptMaxGapMs, nudge.maxGapMs);
     const combined = combinePromiseNudge(run, nudge);
     attemptStdout = combined.stdout;
     attemptCommits = combined.commitCount;
@@ -1255,13 +1384,14 @@ export async function runImplementer(
         combined.stdout,
       );
     }
-    if (opts.onOrchestratorLog) {
-      await opts.onOrchestratorLog(
-        `issue=${issue.id} attempt=${action.attempt} promise-nudge signal=${signal.kind} ` +
-          `${durationField(nudgeTimer())}` +
-          ` maxGapMs=${nudge.maxGapMs}`,
-      );
-    }
+    await opts.onEvent?.({
+      kind: "repair",
+      issue: Number(issue.id),
+      title: issue.title,
+      attempt: action.attempt,
+      action: "promise-nudge",
+      detail: `signal=${signal.kind} durationMs=${nudgeTimer()} maxGapMs=${nudge.maxGapMs}`,
+    });
     // The nudge was the same-session re-ask. If both calls were silent and
     // this attempt committed nothing, there is no evidence that the provider
     // ran successfully. Commits are independent evidence and deliberately keep
@@ -1320,29 +1450,31 @@ export async function runImplementer(
       commitsAccumulated: accumulated.length,
     });
     offBranch = null;
-    if (opts.onOrchestratorLog) {
-      await opts.onOrchestratorLog(
-        `issue=${issue.id} attempt=${action.attempt} off-branch-fast-forward ` +
-          `from=${fastForwarded.fromSha} to=${fastForwarded.toSha}`,
-      );
-    }
+    await opts.onEvent?.({
+      kind: "repair",
+      issue: Number(issue.id),
+      title: issue.title,
+      attempt: action.attempt,
+      action: "fast-forward",
+      detail: `from=${fastForwarded.fromSha} to=${fastForwarded.toSha}`,
+    });
   }
-  if (opts.onOrchestratorLog) {
-    await opts.onOrchestratorLog(
-      `issue=${issue.id} attempt=${action.attempt} implementer ` +
-        `signal=${signal.kind} commits=${attemptCommits} ` +
-        `provider=${config.implementerAgent} model=${config.implementerModelId}` +
-        `${effortField(config.implementerEffort)} ` +
-        `${durationField(implementerMs)}` +
-        formatUsageFields(attemptUsage, attemptToolCalls, attemptPeakContext) +
-        formatRateLimitFields(run.rateLimit) +
-        // Absent when parsed speech carried none of the three promise tokens —
-        // for example, an idle kill or a plain process exit. Omitted rather
-        // than zeroed (#82).
-        (run.signalMs === undefined ? "" : ` signalMs=${run.signalMs}`) +
-        ` maxGapMs=${run.maxGapMs}`,
-    );
-  }
+  await opts.onEvent?.({
+    kind: "implementer",
+    issue: Number(issue.id),
+    title: issue.title,
+    attempt: action.attempt,
+    signal: signal.kind,
+    commits: attemptCommits,
+    provider: config.implementerAgent,
+    model: config.implementerModelId,
+    effort: config.implementerEffort ?? null,
+    durationMs: implementerMs,
+    maxGapMs: attemptMaxGapMs,
+    ...(eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit) === undefined
+      ? {}
+      : { usage: eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit) }),
+  });
   return {
     kind: "implementer-result",
     signal,
@@ -1356,6 +1488,7 @@ export async function runSandboxAndPublish(
   sandbox: Sandbox,
   options: Parameters<Sandbox["run"]>[0],
   issueId: string,
+  onEvent?: (event: EventInput) => Promise<void> | void,
 ): ReturnType<Sandbox["run"]> {
   let result: Awaited<ReturnType<Sandbox["run"]>>;
   try {
@@ -1369,10 +1502,13 @@ export async function runSandboxAndPublish(
     try {
       await sandbox.syncBranchToCache();
     } catch (publishError) {
-      console.error(
-        `Could not publish issue=${issueId} after implementer failure (continuing with original error):`,
-        publishError,
-      );
+      await onEvent?.({
+        kind: "complaint",
+        severity: "error",
+        message:
+          `Could not publish issue=${issueId} after implementer failure ` +
+          `(continuing with original error): ${publishError instanceof Error ? publishError.message : String(publishError)}`,
+      });
     }
     throw agentError;
   }
@@ -1390,14 +1526,16 @@ async function runGate1(
 ): Promise<{ readonly ok: boolean; readonly failureTrace: string }> {
   const { issue, opts, gateStack } = ctx;
   const gate1 = await gateStack.runGate();
-  if (opts.onOrchestratorLog) {
-    // `formatGateFields` renders the three fields this line already carried, in
-    // the same order, then the timings (#82) — so the prefix is byte-identical
-    // and the new fields are appended.
-    await opts.onOrchestratorLog(
-      `issue=${issue.id} attempt=${action.attempt} gate-1 ${formatGateFields(gate1)}`,
-    );
-  }
+  await opts.onEvent?.({
+    kind: "gate",
+    issue: Number(issue.id),
+    title: issue.title,
+    attempt: action.attempt,
+    gate: "gate-1",
+    ok: gate1.ok,
+    durationMs: gate1.durationMs,
+    steps: Object.fromEntries(gate1.steps.map((step) => [step.name, step.durationMs])),
+  });
   return {
     ok: gate1.ok,
     // Summarize the STEP output, then append the container logs — never the
@@ -1496,6 +1634,12 @@ export async function runReviewer(
   readonly event: ReviewerResult;
   readonly historyEntry: PriorReviewRound | null;
   readonly specGap: string | null;
+  readonly round: {
+    readonly quality: FinishedReviewRoundDecision["quality"];
+    readonly correctness: FinishedReviewRoundDecision["correctness"];
+    readonly rejectingPass: "quality" | "correctness" | null;
+    readonly durationMs: number;
+  } | null;
 }> {
   const { issue, sandbox, opts, config } = ctx;
   const head = ctx.accumulated.at(-1)?.sha;
@@ -1531,7 +1675,6 @@ export async function runReviewer(
   // This is the unit every #77 §3.A idea removes, and at 10.2 minutes measured
   // end to end it is ~60% of an issue.
   const roundTimer = startTimer();
-  const qualityMode = qualityReviewContext(ctx.priorReviewRounds).mode;
   const reviewerPrompts = await buildReviewerPrompts(reviewerPromptInputs);
   const routing = reviewerPassRouting(config);
   // Prompt, CLI and model all indexed by the pass name, never passed in
@@ -1564,16 +1707,23 @@ export async function runReviewer(
           peakContext: number | undefined,
           rateLimit: RateLimitMeasurement | undefined,
         ): Promise<void> => {
-          if (!opts.onOrchestratorLog) return;
-          await opts.onOrchestratorLog(
-            `issue=${issue.id} attempt=${action.attempt} reviewer ` +
-              `round=${action.reviewRound} pass=${pass} invocation=${invocation} ` +
-              `provider=${agent} model=${modelId}${effortField(effort)} ` +
-              `${durationField(passTimer())}` +
-              formatUsageFields(usage, toolCalls, peakContext) +
-              formatRateLimitFields(rateLimit) +
-              (maxGapMs === undefined ? "" : ` maxGapMs=${maxGapMs}`),
-          );
+          await opts.onEvent?.({
+            kind: "review-pass",
+            issue: Number(issue.id),
+            title: issue.title,
+            attempt: action.attempt,
+            round: action.reviewRound,
+            pass,
+            invocation,
+            provider: agent,
+            model: modelId,
+            effort: effort ?? null,
+            durationMs: passTimer(),
+            ...(maxGapMs === undefined ? {} : { maxGapMs }),
+            ...(eventUsage(usage, toolCalls, peakContext, rateLimit) === undefined
+              ? {}
+              : { usage: eventUsage(usage, toolCalls, peakContext, rateLimit) }),
+          });
         };
         try {
           const reviewerRun = await runWithQuotaState(opts.quotaState, agent, () => sandbox.run({
@@ -1635,8 +1785,11 @@ export async function runReviewer(
             `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
             `pass=${pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} no-review — ` +
             `retrying (${detail.split("\n")[0]})`;
-          console.error(`  ${line}`);
-          if (opts.onOrchestratorLog) await opts.onOrchestratorLog(line);
+          await opts.onEvent?.({
+            kind: "complaint",
+            severity: "warning",
+            message: line,
+          });
         },
       },
     );
@@ -1666,6 +1819,7 @@ export async function runReviewer(
       event: await preserveReviewerWrite(quality, "quality", []),
       historyEntry: null,
       specGap: null,
+      round: null,
     };
   }
 
@@ -1679,11 +1833,6 @@ export async function runReviewer(
   // reviewer-write outcome, and `decideReviewRound`/`priorReviewRound` are
   // both spelled for completed outcomes.
   let correctness: CompletedReviewerOutcome | undefined;
-  let failed: { readonly pass: ReviewerPass; readonly invocations: number } | null =
-    quality.kind === "harness-failed"
-      ? { pass: "quality", invocations: quality.invocations }
-      : null;
-
   if (afterQuality.kind === "run-correctness") {
     const correctnessOutcome = await runPass("correctness");
     if (correctnessOutcome.kind === "aborted") {
@@ -1695,13 +1844,11 @@ export async function runReviewer(
         ),
         historyEntry: null,
         specGap: null,
+        round: null,
       };
     }
     correctness = correctnessOutcome;
     transcripts.push(passTranscript("correctness", correctness.transcript));
-    if (correctness.kind === "harness-failed") {
-      failed = { pass: "correctness", invocations: correctness.invocations };
-    }
     decision = decideReviewRound(quality, correctness);
   } else {
     decision = afterQuality;
@@ -1720,25 +1867,21 @@ export async function runReviewer(
       transcripts.join("\n\n"),
     );
   }
-  const line = reviewRoundLine({
-    issueId: issue.id,
-    attempt: action.attempt,
-    reviewRound: action.reviewRound,
-    head,
-    failed,
-    quality: decision.quality,
-    correctness: decision.correctness,
-    qualityMode,
-    durationField: durationField(roundTimer()),
-  });
-  if (failed) console.error(`  ${line}`);
-  if (opts.onOrchestratorLog) {
-    await opts.onOrchestratorLog(line);
-  }
+  const roundMs = roundTimer();
+  const rejectingPass = decision.event.kind === "reviewer-result" &&
+      decision.event.verdict === "CHANGES-REQUESTED"
+    ? decision.event.rejectingPass
+    : null;
   return {
     event: decision.event,
     historyEntry,
     specGap:
       correctness?.kind === "reviewed" ? correctness.verdict.specGap : null,
+    round: {
+      quality: decision.quality,
+      correctness: decision.correctness,
+      rejectingPass,
+      durationMs: roundMs,
+    },
   };
 }

@@ -31,21 +31,25 @@ import { existsSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import type { RunConfig } from "./config.js";
+import { resolveConfig, type RunConfig } from "./config.js";
+import { onCleanup, installCleanupTraps } from "./cleanup.js";
 import { SandbarError, faultDetail, isErrno } from "./errors.js";
 import { GATE_EXIT_NO_VERDICT, runGateCommand } from "./gate-run.js";
 import { run } from "./run.js";
+import { repoLayout } from "./repo-cache.js";
+import { startUiServer } from "./ui-server.js";
 import { sandbarVersion } from "./version.js";
 
 const DEFAULT_CONFIG_FILE = "sandbar.config.mjs";
 
-// The one subcommand (#45). A literal rather than a registry: sandbar has one
-// verb and one noun, and a dispatch table for two entries is scaffolding for a
-// third that does not exist.
+// The two subcommands are kept as literals: a registry would hide the small,
+// intentionally distinct argument contracts without buying extensibility.
 const GATE_SUBCOMMAND = "gate";
+const UI_SUBCOMMAND = "ui";
 
 const USAGE = `Usage: sandbar [--config <path>]
        sandbar gate [--config <path>] [--worktree <path>] [--keep]
+       sandbar ui [--config <path>]
 
   --config <path>   Config file to load. Default: ./${DEFAULT_CONFIG_FILE}
                     (resolved against the current directory). The file is an
@@ -54,7 +58,8 @@ const USAGE = `Usage: sandbar [--config <path>]
   --version         Print sandbar's version.
   --help            Print this message.
 
-\`sandbar\` runs the full agent loop. \`sandbar gate\` runs config.gateStack
+\`sandbar\` runs the full agent loop. \`sandbar ui\` serves the newest event
+record for post-mortem browsing. \`sandbar gate\` runs config.gateStack
 against one worktree and nothing else — no tracker, no agents, no lock — and
 exits 0 green, 1 red, 2 if it could not reach a verdict. It is what a laptop and
 a CI job run, so the gate has one implementation.
@@ -68,6 +73,7 @@ Everything else is configured in that file — see the RunConfig type.`;
 
 export type ParsedArgs =
   | { readonly kind: "run"; readonly configPath: string }
+  | { readonly kind: "ui"; readonly configPath: string }
   | {
       readonly kind: "gate";
       readonly configPath: string;
@@ -88,7 +94,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   // things and the wrong one is a full agent run against a repo the operator
   // meant to spot-check.
   const isGate = argv[0] === GATE_SUBCOMMAND;
-  const rest = isGate ? argv.slice(1) : argv;
+  const isUi = argv[0] === UI_SUBCOMMAND;
+  const rest = isGate || isUi ? argv.slice(1) : argv;
 
   let configPath: string | null = null;
   let worktree: string | null = null;
@@ -146,6 +153,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     );
   }
   const resolvedConfigPath = configPath ?? DEFAULT_CONFIG_FILE;
+  if (isUi) return { kind: "ui", configPath: resolvedConfigPath };
   return isGate
     ? {
         kind: "gate",
@@ -215,6 +223,20 @@ async function main(): Promise<number> {
   // reasonably mean by a relative path — and the last place process.cwd() is
   // allowed to decide anything. From here on `cwd` is the config's directory.
   const configPath = resolve(process.cwd(), parsed.configPath);
+  if (parsed.kind === "ui") {
+    const config = resolveConfig(
+      withDefaultCwd(await loadConfig(configPath), configPath),
+    );
+    const layout = repoLayout(config.cwd, config.workDir);
+    installCleanupTraps();
+    const ui = await startUiServer({
+      logsDir: layout.logsDir,
+      port: config.uiPort,
+    });
+    onCleanup(() => ui.close());
+    console.log(ui.url);
+    return 0;
+  }
   if (parsed.kind === "gate") {
     // `runGateCommand` returns its own exit code for every outcome INCLUDING
     // the faults — that is the point of it having a third code, and of that

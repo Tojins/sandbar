@@ -315,6 +315,9 @@ export type ResolveLoopDeps = {
   // nothing, and the loop then reports `logPath: null` rather than pretending
   // a file exists.
   readonly onAttempt?: ResolveAttemptSink;
+  readonly onGate?: (
+    gate: Awaited<ReturnType<ResolveAdapter["runGate"]>>,
+  ) => void | Promise<void>;
 };
 
 export const SOURCE_TARGET_PHRASE = "the source branch";
@@ -514,6 +517,7 @@ export async function runResolveLoop(
     // The same one rendering the other three consumers use, on green and red
     // alike; the verdict-specific lines below keep their own wording.
     await log(`resolve-attempt ${attempt} gate ${formatGateFields(gate)}`);
+    await deps.onGate?.(gate);
     if (gate.ok) {
       // HEAD-advance invariant: a gate-green tree at the same sha as the
       // pre-merge HEAD means the agent walked away without producing a merge
