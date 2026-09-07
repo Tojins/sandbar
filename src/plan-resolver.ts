@@ -127,8 +127,10 @@
 // siblings, which is what the merge phase's per-chunk grouping relies on.
 //
 // `resolvePlan` returns a RESOLUTION rather than a bare plan: every ready issue
-// it did not admit carries the scheduler reason, and inherited `auto-land`
-// overrides remain explicit. Otherwise a full pool and an empty queue are
+// outside its K-sized plan carries the planner reason, and inherited
+// `auto-land` overrides remain explicit. `run.ts` reconciles that answer with
+// the scheduler's actual admission, adding planned candidates displaced by a
+// retry, drain, or start budget. Otherwise a full pool and an empty queue are
 // indistinguishable to the UI. Each planned issue also
 // carries its CHUNK (`PlannedIssue.chunk`), which is how the landing target
 // reaches phase 3: the derivation needs the whole candidate graph and the

@@ -18,6 +18,7 @@ import { join } from "node:path";
 
 import type { ExitTag } from "./exit-conditions.js";
 import type { FinalizeAction, FinalizeInput } from "./finalize.js";
+import type { IssueBranchOriginSync } from "./git-ops.js";
 import {
   createTranscriptTree,
   type TranscriptTree,
@@ -135,6 +136,7 @@ export type EventInput =
   | { readonly kind: "exit"; readonly tag: ExitTag; readonly reason: string; readonly exitCode: number }
   | { readonly kind: "run-end"; readonly reason: string }
   | (TitledEventIssue & { readonly kind: "admitted"; readonly branch: string; readonly chunk: string | null; readonly seedRef: string })
+  | (EventIssue & { readonly kind: "origin-sync"; readonly outcome: IssueBranchOriginSync["kind"]; readonly detail: string })
   | (EventIssue & { readonly kind: "phase"; readonly attempt: number; readonly phases: readonly IssuePhase[] })
   | (EventIssue & { readonly kind: "setup"; readonly durationMs: number; readonly worktreeMs?: number; readonly sandboxMs?: number; readonly stackMs?: number; readonly detail?: string })
   | (EventIssue & { readonly kind: "ui-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly result: "CLEAR" | "PROTOTYPE-NEEDED" | "NO-SIGNAL" | "wrote" | "quota" | "failed"; readonly usage?: UsageFields })

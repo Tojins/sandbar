@@ -132,6 +132,12 @@ function feedText(event: RunEvent): FeedEvent | null {
       text = `admitted #${event.issue}`;
       tone = "dim";
       break;
+    case "origin-sync":
+      text = `origin sync · ${event.detail}`;
+      tone = event.outcome === "origin-unreadable" || event.outcome === "diverged"
+        ? "warn"
+        : "dim";
+      break;
     case "implementer":
       text = `attempt ${event.attempt} complete · ${event.commits} commit${event.commits === 1 ? "" : "s"}`;
       break;

@@ -5,6 +5,10 @@ const seams = vi.hoisted(() => ({
   sandboxRun: vi.fn(),
   createSandbox: vi.fn(),
   dirtyWorktreePaths: vi.fn(async () => [] as string[]),
+  ensureIssueBranch: vi.fn(async () => ({
+    ref: "origin/main",
+    sha: "base-sha",
+  })),
   preserveWorktree: vi.fn(),
   partialUsage: new WeakMap<object, {
     usage?: { inputTokens?: number };
@@ -19,10 +23,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   headMismatch: vi.fn(async () => null),
   branchTip: vi.fn(async () => "implemented-sha"),
   symbolicHeadRef: vi.fn(async () => "refs/heads/test"),
-  ensureIssueBranch: vi.fn(async () => ({
-    ref: "origin/main",
-    sha: "base-sha",
-  })),
+  ensureIssueBranch: seams.ensureIssueBranch,
 }));
 
 vi.mock("./agent-sandbox.js", async (importOriginal) => {
@@ -128,6 +129,10 @@ const config = (
 describe("runInnerLoop run-scoped quota closure (#109)", () => {
   beforeEach(() => {
     seams.sandboxRun.mockReset();
+    seams.ensureIssueBranch.mockReset().mockResolvedValue({
+      ref: "origin/main",
+      sha: "base-sha",
+    });
     seams.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
     seams.preserveWorktree.mockReset();
     seams.createSandbox.mockReset().mockImplementation(async () => ({
@@ -139,6 +144,40 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       branch: "test",
       worktreePath: "/tmp/issue-109-worktree",
     }));
+  });
+
+  it("records branch abandonment as origin synchronization, not a fast-forward repair", async () => {
+    const events: EventInput[] = [];
+    seams.ensureIssueBranch.mockResolvedValueOnce({
+      ref: "origin/main",
+      sha: "base-sha",
+      originSync: { kind: "abandoned", tip: "abcdef123456" },
+    });
+    seams.sandboxRun.mockResolvedValueOnce({
+      stdout: "<promise>NEEDS-INFO</promise><questions>Which environment?</questions>",
+      headBefore: "base-sha",
+      headAfter: "base-sha",
+      signalMs: 1,
+      maxGapMs: 1,
+      toolCalls: 0,
+      peakContext: 1,
+      commits: [],
+    });
+
+    await expect(runInnerLoop(issue("132"), {
+      config: config("claude"), hooks: {}, copyToWorktree: [],
+      onEvent: (event) => events.push(event),
+    })).resolves.toMatchObject({ type: "NEEDS-INFO" });
+
+    expect(events.filter((event) => event.kind === "origin-sync")).toEqual([{
+      kind: "origin-sync",
+      issue: 132,
+      title: "Issue 132",
+      outcome: "abandoned",
+      detail: expect.stringContaining("abandoned"),
+    }]);
+    expect(events.filter((event) =>
+      event.kind === "repair" && event.action === "fast-forward")).toEqual([]);
   });
 
   it("logs the larger peak context across an implementer and its promise nudge", async () => {

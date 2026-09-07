@@ -285,7 +285,12 @@ describe("run quota orchestration (#109)", () => {
 
   it("stops admissions as soon as the shared provider state closes", async () => {
     const issues = [issue("1"), issue("2"), issue("3"), issue("4")];
-    seams.plan.mockResolvedValue(resolution(issues));
+    seams.plan.mockImplementation(async (
+      _repo,
+      options: { ongoing?: ReadonlySet<number>; k?: number },
+    ) => resolution(issues
+      .filter((candidate) => !options.ongoing?.has(Number(candidate.id)))
+      .slice(0, options.k)));
     seams.innerLoop.mockImplementation(async (
       candidate: ReturnType<typeof issue>,
       options: { quotaState: { close(provider: "claude", measurement: object): void } },
@@ -307,6 +312,10 @@ describe("run quota orchestration (#109)", () => {
     await expect(run({ ...config, maxParallelIssues: 3 })).rejects.toThrow("EXIT:4");
     expect(exit).toHaveBeenCalledWith(4);
     expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["1", "2", "3"]);
+    expect(eventsOf("recompute")).toContainEqual(expect.objectContaining({
+      admitted: [],
+      waiting: [{ issue: 4, title: "Issue 4", reason: { kind: "no-slot" } }],
+    }));
   });
 
   it("logs finalized outcomes before a tracker read-back mismatch halts", async () => {

@@ -643,20 +643,22 @@ async function runSandboxCycle(
       seedRef: base.ref,
     });
     // What origin's copy of the branch had to say (#112): a fast-forward, a
-    // resume from origin, unpushed work kept, or an origin that could not be
-    // asked. An outcome, so it is in the log (#70); nothing for the common
-    // in-sync and fresh-seed cases.
+    // resume from origin, unpushed work kept, abandonment, or an origin that
+    // could not be asked. This is its own observation rather than a `repair`:
+    // several outcomes deliberately change nothing, and calling all of them a
+    // fast-forward would make the sole structured record assert a false action.
+    // Nothing is emitted for the common in-sync and fresh-seed cases.
+    const originSync = base.originSync;
     const originLine =
-      base.originSync === undefined
+      originSync === undefined
         ? null
-        : describeIssueBranchOriginSync(issue.branch, base.originSync);
-    if (originLine !== null) {
+        : describeIssueBranchOriginSync(issue.branch, originSync);
+    if (originSync !== undefined && originLine !== null) {
       await opts.onEvent({
-        kind: "repair",
+        kind: "origin-sync",
         issue: Number(issue.id),
         title: issue.title,
-        attempt: 1,
-        action: "fast-forward",
+        outcome: originSync.kind,
         detail: originLine,
       });
     }

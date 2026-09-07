@@ -1003,6 +1003,25 @@ export async function run(
         { issue: Number(issue.id), title: issue.title },
       ] as const),
     );
+    const admitted = new Set(admittedIssues.map((issue) => Number(issue.id)));
+    const waiting = new Map(
+      resolution.waiting.map((entry) => [entry.issue, entry] as const),
+    );
+    // `resolution.waiting` is relative to the planner's K-sized selection,
+    // while this event promises the scheduler's actual admission. A drain,
+    // queued retry, or exhausted start budget can leave a planned issue
+    // unadmitted; keep it visible rather than dropping it between those two
+    // layers. Planned issues are otherwise eligible, so `no-slot` is the one
+    // vocabulary reason that applies at this scheduler boundary.
+    for (const issue of resolution.plan) {
+      const issueNumber = Number(issue.id);
+      if (admitted.has(issueNumber)) continue;
+      waiting.set(issueNumber, {
+        issue: issueNumber,
+        title: issue.title,
+        reason: { kind: "no-slot" },
+      });
+    }
     await runRecord.emit({
       kind: "recompute",
       n: iteration,
@@ -1011,7 +1030,7 @@ export async function run(
         issue: Number(issue.id), title: issue.title,
       })),
       active: [...active.values()],
-      waiting: resolution.waiting,
+      waiting: [...waiting.values()].sort((a, b) => a.issue - b.issue),
       landRequests: landRequests.map((request) => request.branch),
       deferredChunks: deferredChunksForRecompute,
       candidates: resolution.candidates.map((issue) => ({

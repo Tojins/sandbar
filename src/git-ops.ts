@@ -432,8 +432,8 @@ export const issueBranchDeletedOnOriginMessage = (
   (sync.worktree !== null ? ` after removing that worktree` : "") +
   `.`;
 
-// The one line the outcomes worth a line share, for the orchestrator log and
-// preflight's stdout. Null for the two that say nothing happened.
+// The one human-readable detail the origin-sync and preflight events share.
+// Null for the two outcomes that say nothing happened.
 export const describeIssueBranchOriginSync = (
   branch: string,
   sync: IssueBranchOriginSync,
