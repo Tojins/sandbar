@@ -318,6 +318,63 @@ describe("run quota orchestration (#109)", () => {
     }));
   });
 
+  it("keeps planner waiting rows when the scheduler also declines a planned issue", async () => {
+    const eligible = [issue("1"), issue("2"), issue("3"), issue("4")];
+    const blocked = issue("5");
+    seams.plan.mockImplementation(async (
+      _repo,
+      options: { ongoing?: ReadonlySet<number>; k?: number },
+    ) => {
+      const available = eligible.filter(
+        (candidate) => !options.ongoing?.has(Number(candidate.id)),
+      );
+      const plan = available.slice(0, options.k);
+      return {
+        ...resolution(plan),
+        candidates: [...eligible, blocked].map((candidate) => ({
+          ...candidate,
+          ready: true,
+        })),
+        waiting: [
+          ...available.slice(options.k).map((candidate) => ({
+            issue: Number(candidate.id),
+            title: candidate.title,
+            reason: { kind: "no-slot" as const },
+          })),
+          {
+            issue: 5,
+            title: blocked.title,
+            reason: { kind: "blocked" as const, by: [99] },
+          },
+        ],
+      };
+    });
+    seams.innerLoop.mockImplementation(async (
+      _candidate: ReturnType<typeof issue>,
+      options: { quotaState: { close(provider: "claude", measurement: object): void } },
+    ) => {
+      options.quotaState.close("claude", {
+        status: "rejected", window: "five_hour", resetsAt: 42,
+      });
+      return {
+        type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+        specGaps: [],
+      };
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 3 })).rejects.toThrow("EXIT:4");
+    const closedRecompute = eventsOf("recompute").find(
+      (event) => Array.isArray(event.admitted) && event.admitted.length === 0,
+    );
+    expect(closedRecompute?.waiting).toEqual([
+      { issue: 4, title: "Issue 4", reason: { kind: "no-slot" } },
+      { issue: 5, title: "Issue 5", reason: { kind: "blocked", by: [99] } },
+    ]);
+  });
+
   it("logs finalized outcomes before a tracker read-back mismatch halts", async () => {
     const target = issue("87");
     seams.plan.mockResolvedValue(resolution([target]));
