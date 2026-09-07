@@ -12,7 +12,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { readEventsFile } from "./events.js";
+import { readEventsFile, UnsupportedEventSchemaError } from "./events.js";
 import { SandbarError, isErrno } from "./errors.js";
 import {
   finishedIssues,
@@ -66,7 +66,7 @@ export async function readUiState(
   options: { readonly now?: Date; readonly liveRunDir?: string } = {},
 ): Promise<UiState> {
   const dirs = await runDirectories(logsDir);
-  const newest = dirs[0];
+  const newest = options.liveRunDir ?? dirs[0];
   if (!newest) throw new SandbarError(`No sandbar event runs found under ${logsDir}.`);
   const current = await readEventsFile(join(newest, "events.jsonl"));
   const start = current[0];
@@ -101,6 +101,17 @@ export type UiServer = {
   close(): Promise<void>;
 };
 
+export class UiPortInUseError extends SandbarError {
+  constructor(port: number, host: string, cause: unknown) {
+    super(
+      `Sandbar UI port ${port} is already in use on ${host}. ` +
+        "Choose a different uiPort for this workdir.",
+      { cause },
+    );
+    this.name = "UiPortInUseError";
+  }
+}
+
 export type StartUiServerOptions = {
   readonly logsDir: string;
   readonly port: number;
@@ -116,8 +127,8 @@ async function closeServer(server: Server): Promise<void> {
 
 export async function startUiServer(options: StartUiServerOptions): Promise<UiServer> {
   const html = await readFile(UI_PATH);
-  const server = createServer(async (request, response) => {
-    try {
+  const server = createServer((request, response) => {
+    void (async () => {
       if (request.method !== "GET") {
         response.writeHead(405, { Allow: "GET" }).end();
         return;
@@ -140,21 +151,25 @@ export async function startUiServer(options: StartUiServerOptions): Promise<UiSe
         return;
       }
       response.writeHead(404).end("Not found\n");
-    } catch (err) {
-      response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" })
-        .end(err instanceof Error ? err.message : String(err));
-    }
+    })().catch((err: unknown) => {
+      if (err instanceof SandbarError || err instanceof UnsupportedEventSchemaError) {
+        response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" })
+          .end(err.message);
+        return;
+      }
+      // Corrupt records and reducer/programming faults are not a transient HTTP
+      // condition. Surface them through Node's server error channel so the
+      // run's internal-failure path owns the stop.
+      server.emit("error", err);
+      response.destroy();
+    });
   });
   const host = options.host ?? "127.0.0.1";
   await new Promise<void>((resolveListen, reject) => {
     const onError = (err: Error & { code?: string }): void => {
       server.off("listening", onListening);
       if (err.code === "EADDRINUSE") {
-        reject(new SandbarError(
-          `Sandbar UI port ${options.port} is already in use on ${host}. ` +
-            "Choose a different uiPort for this workdir.",
-          { cause: err },
-        ));
+        reject(new UiPortInUseError(options.port, host, err));
       } else {
         reject(err);
       }

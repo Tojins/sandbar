@@ -541,6 +541,8 @@ describe("runGateAndReviewer (#123)", () => {
     historyEntry,
     specGap: null,
     round: {
+      head: "head123",
+      qualityMode: "list" as const,
       quality: "APPROVED" as const,
       correctness: "APPROVED" as const,
       rejectingPass: null,
@@ -595,6 +597,7 @@ describe("runGateAndReviewer (#123)", () => {
       kind: "gate-and-reviewer-result",
       gate: { ok: true, failureTrace: "" },
       reviewer: approved.event,
+      reviewRound: approved.round,
     });
     expect(ctx.priorReviewRounds).toEqual([historyEntry]);
     expect(ctx.specGaps).toEqual([]);
@@ -660,13 +663,12 @@ describe("runGateAndReviewer (#123)", () => {
       kind: "gate-and-reviewer-result",
       gate: { ok: false, failureTrace: "tests failed" },
       reviewer: approved.event,
+      reviewRound: approved.round,
     });
     expect(ctx.priorReviewRounds).toEqual([]);
     expect(events).toEqual([expect.objectContaining({
       kind: "complaint", severity: "warning",
       message: "issue=123 attempt=2 gate-1 red — discarded concurrent reviewer result",
-    }), expect.objectContaining({
-      kind: "review-round", qualityFailures: 1, correctnessFailures: 0,
     })]);
   });
 });
@@ -738,7 +740,7 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
     await expect(
       runInnerLoop(
         { id: "115", title: "logging", branch: "sandbar/issue-115-logging" },
-        {} as Parameters<typeof runInnerLoop>[1],
+        { onEvent: () => undefined } as Parameters<typeof runInnerLoop>[1],
         runCycle,
       ),
     ).resolves.toEqual({

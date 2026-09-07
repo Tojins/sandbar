@@ -381,21 +381,27 @@ export function resolvePlan(
     return theirs !== undefined && theirs === chunkOf.get(dependent);
   };
 
-  const eligibleApartFromSchedulerExclusion = (
-    c: IssueSummary,
-  ): boolean => {
+  type CandidateDisposition =
+    | { readonly kind: "omitted"; readonly reason: "closed" | "not-ready" | "published" | "waiting" | "excluded" }
+    | { readonly kind: "blocked"; readonly by: readonly number[] }
+    | { readonly kind: "held" }
+    | { readonly kind: "ongoing" }
+    | { readonly kind: "eligible" };
+  const classify = (c: IssueSummary): CandidateDisposition => {
     // Drop issues this run already merged, and issues the live tracker now
     // reports CLOSED — both guard against the stale-listing re-pick described in
     // the module header (#16). Unknown state (absent from the map) is treated
     // as OPEN so a single state-fetch miss never silently drops a ready issue.
     const authoritative = issueFacts.get(c.number);
-    if (authoritative?.state === "CLOSED") return false;
+    if (authoritative?.state === "CLOSED") return { kind: "omitted", reason: "closed" };
     // When the batch knows this issue it owns both directions of queue
     // membership (#96): absence means a stale listing row for an issue that is
     // no longer ready, while presence is #94's explicit rework override. A
     // fetch miss keeps the listing's reading. `waiting` differs: either source
     // is enough to hold work, so its union is strictly fail-safe.
-    if (authoritative && !authoritative.labels.includes(READY_LABEL)) return false;
+    if (authoritative && !authoritative.labels.includes(READY_LABEL)) {
+      return { kind: "omitted", reason: "not-ready" };
+    }
     // Already developed and already landed on its chunk's branch (#59), unless
     // the authoritative facts say a human explicitly re-queued it (#94). It is
     // here only to hold its place in the two graphs above, and it is dropped
@@ -404,13 +410,17 @@ export function resolvePlan(
     if (
       publishedChunkMembers.has(c.number) &&
       !authoritative?.labels.includes(READY_LABEL)
-    ) return false;
+    ) return { kind: "omitted", reason: "published" };
     if (
       c.labels.includes(WAITING_LABEL) ||
       authoritative?.labels.includes(WAITING_LABEL)
-    ) return false;
-    const blockers = blockedBy.get(c.number) ?? [];
-    if (!blockers.every((n) => blockerSatisfied(n, c.number))) return false;
+    ) return { kind: "omitted", reason: "waiting" };
+    if (ongoing.has(c.number)) return { kind: "ongoing" };
+    if (excluded.has(c.number)) return { kind: "omitted", reason: "excluded" };
+    const unsatisfied = (blockedBy.get(c.number) ?? []).filter(
+      (blocker) => !blockerSatisfied(blocker, c.number),
+    );
+    if (unsatisfied.length > 0) return { kind: "blocked", by: unsatisfied };
     // LAST, so the waiting resolution names "held" only for issues that would
     // otherwise have been eligible. A review-gated issue that is also blocked,
     // closed or already merged is not being "held" by its lane; it was already
@@ -432,26 +442,31 @@ export function resolvePlan(
     // branch — the one outcome the lane exists to prevent. Asking the same
     // question the answer is built from costs nothing and cannot drift.
     if (lanes.get(c.number)?.lane === "review" && chunkTargetOf(c.number) === null) {
-      return false;
+      return { kind: "held" };
     }
-    return true;
+    return { kind: "eligible" };
   };
-  const eligible = candidates.filter((c) =>
-    !excluded.has(c.number) && eligibleApartFromSchedulerExclusion(c)
-  );
+  const classified = candidates.map((candidate) => ({
+    candidate,
+    disposition: classify(candidate),
+  }));
+  const eligible = classified
+    .filter((entry) => entry.disposition.kind === "eligible")
+    .map((entry) => entry.candidate);
   const sorted = [...eligible].sort((a, b) => a.number - b.number);
   // Human-requested rework follows the planner's eligibility rules except for
   // scheduler exclusion. An ongoing issue is excluded from re-admission but
   // must still defer its chunk's landing; a CLOSED, waiting or blocked member
   // cannot be worked and therefore must not hold the request open forever.
   const trackerReadyNumbers = new Set(
-    candidates
-      .filter((c) => {
-        const authoritative = issueFacts.get(c.number);
-        return eligibleApartFromSchedulerExclusion(c) &&
+    classified
+      .filter(({ candidate, disposition }) => {
+        const authoritative = issueFacts.get(candidate.number);
+        return (disposition.kind === "eligible" || disposition.kind === "ongoing" ||
+          (disposition.kind === "omitted" && disposition.reason === "excluded")) &&
           authoritative?.labels.includes(READY_LABEL);
       })
-      .map((c) => c.number),
+      .map(({ candidate }) => candidate.number),
   );
   const plan = sorted.slice(0, k).map((c) => ({
     id: String(c.number),
@@ -477,46 +492,12 @@ export function resolvePlan(
     readonly title: string;
     readonly reason: WaitingReason;
   }> = [];
-  for (const c of candidates) {
-    const authoritative = issueFacts.get(c.number);
-    const ready = authoritative
-      ? authoritative.labels.includes(READY_LABEL)
-      : true;
-    if (!ready || authoritative?.state === "CLOSED" || admitted.has(c.number)) {
-      continue;
-    }
-    if (ongoing.has(c.number)) {
-      waiting.push({ issue: c.number, title: c.title, reason: { kind: "ongoing" } });
-      continue;
-    }
-    // An exclusion that is not ongoing is work this run already finished; it
-    // is omitted rather than mislabeled as waiting while the listing catches up.
-    if (excluded.has(c.number)) continue;
-    if (
-      c.labels.includes(WAITING_LABEL) ||
-      authoritative?.labels.includes(WAITING_LABEL) ||
-      (publishedChunkMembers.has(c.number) &&
-        !authoritative?.labels.includes(READY_LABEL))
-    ) continue;
-    const unsatisfied = (blockedBy.get(c.number) ?? []).filter(
-      (blocker) => !blockerSatisfied(blocker, c.number),
-    );
-    if (unsatisfied.length > 0) {
-      waiting.push({
-        issue: c.number,
-        title: c.title,
-        reason: { kind: "blocked", by: unsatisfied },
-      });
-      continue;
-    }
-    if (
-      lanes.get(c.number)?.lane === "review" &&
-      chunkTargetOf(c.number) === null
-    ) {
-      waiting.push({ issue: c.number, title: c.title, reason: { kind: "held" } });
-      continue;
-    }
-    waiting.push({ issue: c.number, title: c.title, reason: { kind: "no-slot" } });
+  for (const { candidate: c, disposition } of classified) {
+    if (admitted.has(c.number) || disposition.kind === "omitted") continue;
+    const reason: WaitingReason = disposition.kind === "eligible"
+      ? { kind: "no-slot" }
+      : disposition;
+    waiting.push({ issue: c.number, title: c.title, reason });
   }
   waiting.sort((a, b) => a.issue - b.issue);
   return {

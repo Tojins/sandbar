@@ -15,11 +15,29 @@ import {
   groupByChunk,
   type IssueRef,
   type MergerAdapter,
+  type RunMergerOptions,
   type PushResult,
+  DISCARD_MERGER_OBSERVATIONS,
   issueNumberOf,
-  runMergerWithAdapter,
+  runMergerWithAdapter as runMergerCore,
   sortIssuesAsc,
 } from "./merger.js";
+
+// Most merger tests exercise the standalone procedural layer and deliberately
+// discard structured observations. Production cannot: RunMergerOptions makes
+// the adapter required. Keep that distinction explicit in one test helper.
+const runMergerWithAdapter = (
+  issues: readonly IssueRef[],
+  adapter: MergerAdapter,
+  log?: Parameters<typeof runMergerCore>[2],
+  onGateRed?: Parameters<typeof runMergerCore>[3],
+  options: Omit<RunMergerOptions, "observations"> & {
+    readonly observations?: RunMergerOptions["observations"];
+  } = {},
+) => runMergerCore(issues, adapter, log, onGateRed, {
+  ...options,
+  observations: options.observations ?? DISCARD_MERGER_OBSERVATIONS,
+});
 
 function issue(n: number, title = `t-${n}`): IssueRef {
   return {
@@ -430,7 +448,10 @@ describe("runMergerWithAdapter — clean-merge happy paths", () => {
       adapter,
       undefined,
       undefined,
-      { onOutcome: (outcome) => { outcomes.push(outcome); } },
+      { observations: {
+        onGate: () => undefined,
+        onOutcome: (outcome) => { outcomes.push(outcome); },
+      } },
     );
 
     expect(summary.merged.map((i) => i.id)).toEqual(["42"]);

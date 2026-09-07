@@ -454,6 +454,12 @@ export type CreateSandboxOptions = {
   // formed in, and a writable log mount is a channel out of the sandbox into
   // the host's run-log tree.
   extraMounts?: readonly Mount[];
+  // Run-owned callers route recoverable cleanup/preservation notices into the
+  // event record. Standalone callers retain the terminal renderer.
+  onNotice?: (
+    severity: "warning" | "error",
+    message: string,
+  ) => void | Promise<void>;
 };
 
 export type PrepareWorktreeOptions = {
@@ -2347,6 +2353,10 @@ export const createSandbox = async (
 ): Promise<Sandbox> => {
   const { branch } = options;
   const { repoDir, hostCwd } = options.layout;
+  const notice = options.onNotice ?? ((severity: "warning" | "error", message: string) => {
+    if (severity === "warning") console.warn(message);
+    else console.error(message);
+  });
 
   const prepared = options.preparedWorktreePath !== undefined;
   if (prepared && options.copyToWorktree && options.copyToWorktree.length > 0) {
@@ -2424,7 +2434,7 @@ export const createSandbox = async (
       try {
         await providerHandle.close();
       } catch (cleanupError) {
-        console.error("Failed to close provider after sandbox setup failure:", cleanupError);
+        await notice("error", `Failed to close provider after sandbox setup failure: ${String(cleanupError)}`);
       }
       throw e;
     }
@@ -2438,13 +2448,14 @@ export const createSandbox = async (
       try {
         await rm(worktreePath, { recursive: true, force: true });
       } catch (cleanupError) {
-        console.error("Failed to remove worktree after sandbox failure:", cleanupError);
+        await notice("error", `Failed to remove worktree after sandbox failure: ${String(cleanupError)}`);
       }
     }
     throw e;
   }
 
   const forceCleanup = (): void => {
+    if (options.onNotice) return;
     console.error(`\nWorktree preserved at ${worktreePath}`);
     console.error(`  To review: cd ${worktreePath}`);
     console.error(`  To clean up: remove ${worktreePath}`);
@@ -2605,7 +2616,7 @@ export const createSandbox = async (
       await providerHandle.close();
       const reclaim = await reclaimIssueClone(repoDir, worktreePath, branch, keepReason);
       if (reclaim.kind !== "preserved") return { preservedWorktreePath: undefined };
-      console.error(`Issue clone preserved at ${worktreePath}: ${reclaim.reason}`);
+      await notice("error", `Issue clone preserved at ${worktreePath}: ${reclaim.reason}`);
       return { preservedWorktreePath: worktreePath };
     },
   };

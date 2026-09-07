@@ -249,7 +249,7 @@ describe("run quota orchestration (#109)", () => {
 
     await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:1");
     expect(eventsOf("finalise")).toContainEqual(expect.objectContaining({
-      issue: 87, finaliseKind: "needs-info", outcome: "pushed branch",
+      issue: 87, finaliseKind: "needs-info", outcome: "pushed", detail: "pushed branch",
     }));
     expect(eventsOf("complaint").some((event) =>
       String(event.message).includes("Tracker read-back mismatch"))).toBe(true);
@@ -308,9 +308,9 @@ describe("run quota orchestration (#109)", () => {
       _adapter,
       _log,
       _gateLog,
-      options: { onOutcome?: (outcome: object) => Promise<void> },
+      options: { observations: { onOutcome: (outcome: object) => Promise<void> } },
     ) => {
-      await options.onOutcome?.({
+      await options.observations.onOutcome({
         kind: "skipped",
         issue: done,
         reason: "gate-2 stayed red",

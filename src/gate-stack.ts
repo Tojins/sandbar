@@ -425,6 +425,9 @@ export type StackOptions = {
   // is captured only, which is what a run wants — its steps report through the
   // attempt log and a gate trace, and nobody is watching a terminal.
   readonly onStepOutput?: (chunk: string) => void;
+  // Run-owned stacks record notices as complaints; standalone `sandbar gate`
+  // leaves this absent and keeps its direct diagnostic rendering.
+  readonly onNotice?: (message: string) => void | Promise<void>;
 };
 
 export type Stack = {
@@ -1119,13 +1122,14 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
           running,
           allowDirtyWorktree: opts.allowDirtyWorktree === true,
           onStepOutput: opts.onStepOutput,
+          onNotice: opts.onNotice ?? ((message) => console.error(message)),
         }),
     };
   } catch (err) {
     // The bringup failure is the diagnosis; a teardown failure on top of it is
     // reported but must not replace it.
-    await stop().catch((stopErr: unknown) => {
-      console.error(
+    await stop().catch(async (stopErr: unknown) => {
+      await (opts.onNotice ?? ((message: string) => console.error(message)))(
         stopErr instanceof Error ? stopErr.message : String(stopErr),
       );
     });
@@ -1857,6 +1861,7 @@ type RunGateCtx = {
   // #45; see `StackOptions`. Both false/absent for every gate inside a run.
   readonly allowDirtyWorktree: boolean;
   readonly onStepOutput?: ((chunk: string) => void) | undefined;
+  readonly onNotice: (message: string) => void | Promise<void>;
 };
 
 // The long-lived half of the stack, re-checked before every gate run.
@@ -1999,14 +2004,14 @@ async function assertIssueContainerHealthy(
     // Not silent, even though nothing follows from it: a check that declined to
     // run is exactly the thing an operator debugging a red gate needs to know
     // was not asked.
-    console.error(
+    await ctx.onNotice(
       `gate stack: could not get a health answer for issue-lifecycle container ` +
         `'${c.name}' (${image}), so this gate run proceeds without one` +
         (detail ? `: ${detail}` : "."),
     );
     return;
   }
-  console.error(
+  await ctx.onNotice(
     `gate stack: issue-lifecycle container '${c.name}' (${image}) is running ` +
       `but has been unhealthy for ${c.readinessTimeoutMs}ms ` +
       `(${describeReadiness(c.readiness)}); recreating it in place before ` +
@@ -2409,7 +2414,7 @@ async function reapKilledStep(
     const why = removed.timedOut
       ? `\`${RUNTIME} rm\` timed out`
       : removed.stderr.trim() || removed.errorMessage;
-    console.error(
+    await ctx.onNotice(
       `gate stack: could not remove container '${containerName}' after its ` +
         "step timed out, so the timed-out work may still be running inside " +
         `it: ${why}`,
@@ -2464,7 +2469,7 @@ async function reapKilledStep(
     // and the D9 container logs are all discarded in favour of the bringup
     // error, so the line below is what connects the two for whoever reads the
     // run's output.
-    console.error(
+    await ctx.onNotice(
       `gate stack: step '${stepName}' was killed in issue-lifecycle container ` +
         `'${container.name}', and recreating that container failed. The gate's ` +
         "verdict is being discarded in favour of the bringup failure below.",

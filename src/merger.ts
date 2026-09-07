@@ -843,6 +843,19 @@ export type MergerOutcome =
   | { readonly kind: "chunk-parked"; readonly skipped: SkippedChunkLand }
   | { readonly kind: "chunk-deferred"; readonly deferred: DeferredChunkLand };
 
+export type MergerObservations = {
+  readonly onGate: (
+    key: string,
+    gate: Awaited<ReturnType<MergerAdapter["runGate"]>>,
+  ) => void | Promise<void>;
+  readonly onOutcome: (outcome: MergerOutcome) => void | Promise<void>;
+};
+
+export const DISCARD_MERGER_OBSERVATIONS: MergerObservations = {
+  onGate: () => undefined,
+  onOutcome: () => undefined,
+};
+
 // The post-push close is a tracker side-effect that runs after the irreversible
 // push, so a transient gh/network failure on it is retried with exponential
 // backoff before the issue is recorded as un-closed (issue #14).
@@ -993,16 +1006,10 @@ export type RunMergerOptions = {
   // Per-resolve-attempt output capture (#67). Absent ⇒ nothing is written and
   // every comment says so outright instead of naming a file that is not there.
   readonly onResolveAttempt?: MergerResolveAttemptSink;
-  // Structured gate-2 result for the run event record (#132). The raw output
-  // sink above remains red-only because green gates have no diagnostic file.
-  readonly onGate?: (
-    key: string,
-    gate: Awaited<ReturnType<MergerAdapter["runGate"]>>,
-  ) => void | Promise<void>;
-  // Called at the durable boundary for each landing/park/defer decision. The
-  // orchestrator records it immediately so concurrent issue events retain
-  // their real ordering rather than appearing ahead of a batched summary.
-  readonly onOutcome?: (outcome: MergerOutcome) => void | Promise<void>;
+  // Explicit observation adapter. Run-owned calls supply the event record;
+  // standalone merger tests opt into DISCARD_MERGER_OBSERVATIONS. Neither
+  // gate nor durable outcome reporting can disappear independently.
+  readonly observations: MergerObservations;
   // Verified merge mode (#22). Absent → direct mode (today's push straight to
   // the source branch). Present → the forge gates the landing. The adapter is
   // required *by the type* exactly when the mode is on, so there is no
@@ -1032,10 +1039,10 @@ type MergeAttemptDeps = {
   readonly promptExtension?: PromptExtension;
   readonly resolveLog: ResolveLogger;
   readonly onGateRed?: MergerGateOutputSink | undefined;
-  readonly onGate?: ((
+  readonly onGate: (
     key: string,
     gate: Awaited<ReturnType<MergerAdapter["runGate"]>>,
-  ) => void | Promise<void>) | undefined;
+  ) => void | Promise<void>;
   // Bound to a KEY by the caller (#67) — `attemptMerge` already carries the one
   // the gate artefact is filed under, so a resolve attempt lands beside the
   // gate output it was prompted from.
@@ -1163,10 +1170,8 @@ async function attemptMerge(
   const { adapter, emit, projectAnchor, resolveLog, onGateRed } = deps;
   const { unit, target, label } = args;
   const onAttempt = deps.resolveSinkFor(args.gateKey);
-  const onGate = deps.onGate
-    ? (gate: Awaited<ReturnType<MergerAdapter["runGate"]>>) =>
-        deps.onGate?.(args.gateKey, gate)
-    : undefined;
+  const onGate = (gate: Awaited<ReturnType<MergerAdapter["runGate"]>>) =>
+    deps.onGate(args.gateKey, gate);
   // The whole unit — merge, install, gate-2 and any resolve loop. `#77 §1`'s
   // "merge phase" row was hand-arithmetic off two adjacent log lines; this is
   // the number, and §3.F42 (one gate-2 per pass instead of per branch) is worth
@@ -1195,7 +1200,7 @@ async function attemptMerge(
         preMergeSha,
         target: describeMergeTarget(target),
         ...(onAttempt ? { onAttempt } : {}),
-        ...(onGate ? { onGate } : {}),
+        onGate,
       },
       resolveLog,
     );
@@ -1237,7 +1242,7 @@ async function attemptMerge(
   // cost question — the green gates are the ones that happen every time — and
   // it left a verdict, which is an outcome, out of the log entirely (#70).
   await emit(`gate-2 ${label} ${formatGateFields(g)}`);
-  await deps.onGate?.(args.gateKey, g);
+  await deps.onGate(args.gateKey, g);
   if (!g.ok) {
     if (onGateRed) {
       await onGateRed(args.gateKey, {
@@ -1271,7 +1276,7 @@ async function attemptMerge(
         preMergeSha,
         target: describeMergeTarget(target),
         ...(onAttempt ? { onAttempt } : {}),
-        ...(onGate ? { onGate } : {}),
+        onGate,
       },
       resolveLog,
     );
@@ -1302,7 +1307,7 @@ export async function runMergerWithAdapter(
   adapter: MergerAdapter,
   log?: MergerLog,
   onGateRed?: MergerGateOutputSink,
-  opts: RunMergerOptions = {},
+  opts: RunMergerOptions = { observations: DISCARD_MERGER_OBSERVATIONS },
 ): Promise<MergerSummary> {
   const merged: IssueRef[] = [];
   const chunkLanded: ChunkLanding[] = [];
@@ -1446,7 +1451,7 @@ export async function runMergerWithAdapter(
     promptExtension: opts.promptExtension,
     resolveLog,
     onGateRed,
-    onGate: opts.onGate,
+    onGate: opts.observations.onGate,
     resolveSinkFor,
     clock: opts.clock,
   };
@@ -1475,7 +1480,7 @@ export async function runMergerWithAdapter(
         await adapter.commentOnIssue(n, buildInstallFailedComment(target));
         await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
         skipped.push({ issue, reason: "install-failed" });
-        await opts.onOutcome?.({ kind: "skipped", issue, reason: "install-failed" });
+        await opts.observations.onOutcome({ kind: "skipped", issue, reason: "install-failed" });
         await emit(`skip #${n} reason=install-failed`);
         return false;
       }
@@ -1485,7 +1490,7 @@ export async function runMergerWithAdapter(
         // (fresh attempt next cycle) or escalate to human attention, based
         // on the per-issue retry count it tracks in runState.
         skipped.push({ issue, reason: "silent-noop" });
-        await opts.onOutcome?.({ kind: "skipped", issue, reason: "silent-noop" });
+        await opts.observations.onOutcome({ kind: "skipped", issue, reason: "silent-noop" });
         await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
         return false;
       }
@@ -1501,7 +1506,7 @@ export async function runMergerWithAdapter(
       );
       await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
       skipped.push({ issue, reason: outcome.mode });
-      await opts.onOutcome?.({ kind: "skipped", issue, reason: outcome.mode });
+      await opts.observations.onOutcome({ kind: "skipped", issue, reason: outcome.mode });
       await emit(
         `skip #${n} reason=${outcome.mode} resolve-abandon: ${outcome.reason}`,
       );
@@ -1579,7 +1584,7 @@ export async function runMergerWithAdapter(
     for (const member of landedMembers) {
       const landing = { issue: member, chunkBranch: branch };
       chunkLanded.push(landing);
-      await opts.onOutcome?.({ kind: "chunk-landed", landing });
+      await opts.observations.onOutcome({ kind: "chunk-landed", landing });
     }
     await emit(
       `chunk ${branch}: landed ${landedMembers.map((m) => `#${issueNumberOf(m)}`).join(", ")} and pushed`,
@@ -1690,7 +1695,7 @@ export async function runMergerWithAdapter(
   ): Promise<void> => {
     const skipped = { target: request, reason };
     skippedChunks.push(skipped);
-    await opts.onOutcome?.({ kind: "chunk-parked", skipped });
+    await opts.observations.onOutcome({ kind: "chunk-parked", skipped });
     if (request.pullRequest > 0) {
       await adapter.commentOnPullRequest(request.pullRequest, comment);
       await adapter.removePullRequestLabel(request.pullRequest, LAND_LABEL);
@@ -1722,7 +1727,7 @@ export async function runMergerWithAdapter(
     }
     const deferred = { target: request, landedNow };
     deferredChunks.push(deferred);
-    await opts.onOutcome?.({ kind: "chunk-deferred", deferred });
+    await opts.observations.onOutcome({ kind: "chunk-deferred", deferred });
     await emit(
       `chunk ${request.branch}: not landed (` +
         (reason === "rework" ? "queued for rework: " : "ongoing member work: ") +
@@ -1884,10 +1889,10 @@ export async function runMergerWithAdapter(
 
   const recordSourceLanding = async (): Promise<void> => {
     for (const issue of merged) {
-      await opts.onOutcome?.({ kind: "merged", issue });
+      await opts.observations.onOutcome({ kind: "merged", issue });
     }
     for (const { target } of chunkMergesOnHead) {
-      await opts.onOutcome?.({ kind: "chunk-on-source", target });
+      await opts.observations.onOutcome({ kind: "chunk-on-source", target });
     }
   };
 
@@ -2006,7 +2011,7 @@ export async function runMergerWithAdapter(
           );
           await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
           skipped.push({ issue, reason: "forge-unverified" });
-          await opts.onOutcome?.({
+          await opts.observations.onOutcome({
             kind: "skipped",
             issue,
             reason: "forge-unverified",

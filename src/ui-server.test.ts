@@ -45,6 +45,19 @@ describe("run UI server", () => {
     expect((await readUiState(live.logsDir)).run.status).toBe("crashed");
   });
 
+  it("uses the explicitly hosted run even when another directory sorts newer", async () => {
+    const live = await runTree(false);
+    const future = join(live.logsDir, "run-2099-01-01T00-00-00-000Z");
+    await mkdir(future);
+    await writeFile(join(future, "events.jsonl"), `${JSON.stringify({
+      kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "future",
+      configPath: null, workdir: "/future", maxParallelIssues: 1, pid: 999_999,
+      seq: 1, ts: "2099-01-01T00:00:00.000Z",
+    })}\n`);
+    expect((await readUiState(live.logsDir, { liveRunDir: live.runDir })).run.driver)
+      .toBe("sandbar test");
+  });
+
   it("serves the page and reduced state from the same event file", async () => {
     const tree = await runTree(false);
     const server = await startUiServer({

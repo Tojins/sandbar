@@ -131,6 +131,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // merger, so the set the credential check walks is the one every
     // pre-#72 config produces.
     agentProviders: ["claude"] as readonly AgentProviderName[],
+    onEvent: () => undefined,
   });
   // What `runPreflight` hands `gatherState` once its own `gh` checks pass.
   const GH_READY = { hasGh: true, ghAuthOk: true } as const;

@@ -44,6 +44,13 @@ function render(state, serverGone=false) {
   const events=`<details><summary>Events · ${state.eventCount}</summary><div class="feed">${state.events.map(e=>`<div class="${e.tone}"><span class="dim">${hhmm(e.at)}</span><span class="${e.tone?"":"dim"}">${e.issue?`#${e.issue}`:"run"}</span><span>${esc(e.text)}</span></div>`).join("")}</div></details>`;
   document.getElementById("app").innerHTML=top+pool+waiting+finished+events;
 }
-async function poll(){try{const response=await fetch("/state.json",{cache:"no-store"});if(!response.ok)throw new Error(String(response.status));render(await response.json())}catch(_err){if(lastState)render(lastState,true)}}
+async function poll(){
+  let response;
+  try { response=await fetch("/state.json",{cache:"no-store"}) }
+  catch(_networkError) { if(lastState)render(lastState,true); return }
+  if(!response.ok)throw new Error(`state request failed: ${response.status}`);
+  const state=await response.json();
+  render(state);
+}
 poll(); setInterval(poll,2000);
 </script></body></html>

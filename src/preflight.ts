@@ -292,7 +292,7 @@ export type PreflightConfig = {
   // attempt dying in-container a cycle later. A disabled UI check contributes
   // no provider because it contributes no invocation.
   readonly agentProviders: readonly AgentProviderName[];
-  readonly onEvent?: (event: EventInput) => Promise<void> | void;
+  readonly onEvent: (event: EventInput) => Promise<void> | void;
 };
 
 // A gate-stack mount source, carrying the container that declared it. A stack
@@ -1289,7 +1289,7 @@ export async function runPreflight(
   const reachability = await checkForgeReachability(
     originHost === null ? [ghHost] : [ghHost, originHost],
     reachabilityAdapter,
-    (message) => cfg.onEvent?.({ kind: "complaint", severity: "warning", message }),
+    (message) => cfg.onEvent({ kind: "complaint", severity: "warning", message }),
   );
   if (!reachability.ok) {
     const seconds = (reachability.elapsedMs / 1_000).toFixed(1);
@@ -1360,7 +1360,7 @@ export async function runPreflight(
     chunkMemberIssues,
   });
   if (deleted.length > 0) {
-    await cfg.onEvent?.({
+    await cfg.onEvent({
       kind: "preflight",
       action: "cleaned",
       detail: `Cleaned up merged issue branches: ${deleted.join(", ")}`,
@@ -1376,14 +1376,14 @@ export async function runPreflight(
     ...state.parkedIssueBranches,
   ]);
   for (const line of synced.lines) {
-    await cfg.onEvent?.({ kind: "preflight", action: "synced", detail: line });
+    await cfg.onEvent({ kind: "preflight", action: "synced", detail: line });
   }
   const kept = (branches: readonly string[]) =>
     branches.filter((b) => !synced.abandoned.includes(b));
   const resumable = kept(state.resumableIssueBranches);
   const parked = kept(state.parkedIssueBranches);
   if (resumable.length > 0) {
-    await cfg.onEvent?.({
+    await cfg.onEvent({
       kind: "preflight",
       action: "resumed",
       detail: `Resuming ${resumable.length} stranded issue ` +
@@ -1394,7 +1394,7 @@ export async function runPreflight(
     });
   }
   if (parked.length > 0) {
-    await cfg.onEvent?.({
+    await cfg.onEvent({
       kind: "preflight",
       action: "parked",
       detail: `Keeping ${parked.length} parked issue branch(es): ` +
@@ -1418,7 +1418,7 @@ export async function runPreflight(
   // than the silent split the check exists to catch. Saying so is the honest
   // remainder: the two halves may well disagree and sandbar cannot tell.
   if (state.originUrl !== null && state.originRepo === null) {
-    await cfg.onEvent?.({
+    await cfg.onEvent({
       kind: "complaint",
       severity: "warning",
       message: `WARNING: could not read an <owner>/<repo> out of this repository's ` +
@@ -1437,7 +1437,7 @@ export async function runPreflight(
   // other reason. Soft, because both keys work: what it costs is a bill, and
   // sandbar cannot know which of the two the operator meant to spend.
   for (const warning of billingPrecedenceWarnings(cfg.agentProviders, cfg.env)) {
-    await cfg.onEvent?.({ kind: "complaint", severity: "warning", message: warning });
+    await cfg.onEvent({ kind: "complaint", severity: "warning", message: warning });
   }
 
   const results = checkInvariants(state);
@@ -1461,7 +1461,7 @@ export async function runPreflight(
     cfg.sourceBranch,
   );
   if (ahead > 0) {
-    await cfg.onEvent?.({
+    await cfg.onEvent({
       kind: "complaint",
       severity: "warning",
       message: `WARNING: ${cfg.layout.hostCwd} has local ${cfg.sourceBranch} ${ahead} commit(s) ahead of origin/${cfg.sourceBranch}. ` +
@@ -1480,7 +1480,7 @@ export async function runPreflight(
     }),
   );
   if (staleConfig !== null) {
-    await cfg.onEvent?.({ kind: "complaint", severity: "warning", message: staleConfig });
+    await cfg.onEvent({ kind: "complaint", severity: "warning", message: staleConfig });
   }
 }
 

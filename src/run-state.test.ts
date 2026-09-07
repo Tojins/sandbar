@@ -85,6 +85,7 @@ describe("run event reducer", () => {
       now: new Date("2026-09-07T09:31:00Z"), pidAlive: true,
     });
     expect(duringLanding.pool).toHaveLength(1);
+    expect(duringLanding.run.slots.used).toBe(0);
     expect(duringLanding.finished).toEqual([]);
 
     events.push(at(4, "2026-09-07T09:32:00Z", {
@@ -96,6 +97,44 @@ describe("run event reducer", () => {
     });
     expect(landed.pool).toEqual([]);
     expect(landed.finished[0]).toMatchObject({ issue: 12, outcome: "DONE", landed: "main" });
+  });
+
+  it("counts work across fresh HARD-ERROR cycles and keeps the newest finished record", () => {
+    const start = at(1, "2026-09-07T09:00:00Z", {
+      kind: "run-start", schemaVersion: 1, driver: "sandbar",
+      configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
+    });
+    const current = [
+      start,
+      at(2, "2026-09-07T09:01:00Z", { kind: "implementer", issue: 12, attempt: 1,
+        signal: "COMPLETE", commits: 1, provider: "codex", model: "m", effort: null,
+        durationMs: 1 }),
+      at(3, "2026-09-07T09:02:00Z", { kind: "review-round", issue: 12, attempt: 1,
+        round: 1, head: "a", qualityMode: "list", gateOk: true, quality: "APPROVED",
+        correctness: "APPROVED", rejectingPass: null, qualityFailures: 0,
+        correctnessFailures: 0, durationMs: 1 }),
+      at(4, "2026-09-07T09:03:00Z", { kind: "hard-error", issue: 12, retry: 1, max: 2,
+        reason: "lost stack" }),
+      at(5, "2026-09-07T09:04:00Z", { kind: "implementer", issue: 12, attempt: 1,
+        signal: "COMPLETE", commits: 1, provider: "codex", model: "m", effort: null,
+        durationMs: 1 }),
+      at(6, "2026-09-07T09:05:00Z", { kind: "review-round", issue: 12, attempt: 1,
+        round: 1, head: "b", qualityMode: "list", gateOk: true, quality: "APPROVED",
+        correctness: "APPROVED", rejectingPass: null, qualityFailures: 0,
+        correctnessFailures: 0, durationMs: 1 }),
+      at(7, "2026-09-07T09:06:00Z", { kind: "terminal", issue: 12, title: "Twelve",
+        terminal: "DONE", reason: null, durationMs: 360_000 }),
+      at(8, "2026-09-07T09:07:00Z", { kind: "landed", outcome: "merged", issue: 12,
+        title: "Twelve", branch: "sandbar/issue-12", target: "main", reason: null }),
+    ];
+    const older = { issue: 12, title: "Old title", outcome: "NEEDS-HUMAN", attempts: 8,
+      rounds: 7, ms: 999, landed: "", at: "2026-09-01T00:00:00Z" };
+    const state = reduceRunEvents(current, {
+      now: new Date("2026-09-07T09:08:00Z"), pidAlive: true, recentFinished: [older],
+    });
+    expect(state.finished).toEqual([expect.objectContaining({
+      issue: 12, title: "Twelve", outcome: "DONE", attempts: 2, rounds: 2,
+    })]);
   });
 
   it("does not report a skipped DONE as finished before finalisation", () => {

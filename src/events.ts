@@ -14,12 +14,24 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import type { ExitTag } from "./exit-conditions.js";
+import type { FinalizeAction, FinalizeInput } from "./finalize.js";
 import {
   createTranscriptTree,
   type TranscriptTree,
 } from "./logs.js";
 
 export const EVENT_SCHEMA_VERSION = 1;
+
+export class UnsupportedEventSchemaError extends Error {
+  constructor(path: string, version: unknown) {
+    super(
+      `Unsupported sandbar event schema ${String(version)} in ${path}; ` +
+        `this driver reads schema ${EVENT_SCHEMA_VERSION}.`,
+    );
+    this.name = "UnsupportedEventSchemaError";
+  }
+}
 
 export type RecomputeTrigger =
   | "launch"
@@ -30,6 +42,11 @@ export type RecomputeTrigger =
 export type EventIssue = {
   readonly issue: number;
   readonly title?: string;
+};
+
+export type TitledEventIssue = {
+  readonly issue: number;
+  readonly title: string;
 };
 
 export type IssuePhase = "ui-check" | "implementer" | "gate-1" | "review";
@@ -94,34 +111,34 @@ export type EventInput =
       readonly kind: "recompute";
       readonly n: number;
       readonly trigger: RecomputeTrigger;
-      readonly admitted: readonly EventIssue[];
-      readonly active: readonly EventIssue[];
+      readonly admitted: readonly TitledEventIssue[];
+      readonly active: readonly TitledEventIssue[];
       readonly waiting: readonly RecomputeWaiting[];
       readonly landRequests: readonly string[];
       readonly deferredChunks: readonly string[];
       readonly candidates: readonly RecomputeCandidate[];
       readonly refs: readonly CachedIssueRef[];
     }
-  | { readonly kind: "follow-up"; readonly action: string; readonly detail: string; readonly issue?: number; readonly title?: string }
-  | { readonly kind: "reconcile"; readonly action: string; readonly detail: string }
+  | { readonly kind: "follow-up"; readonly action: "route" | "re-queued" | "lane-override"; readonly detail: string; readonly issue?: number; readonly title?: string }
+  | { readonly kind: "reconcile"; readonly action: "trace" | "landed-chunk" | "land-requested"; readonly detail: string }
   | { readonly kind: "complaint"; readonly severity: "warning" | "error"; readonly message: string }
-  | { readonly kind: "exit"; readonly tag: string; readonly reason: string; readonly exitCode: number }
+  | { readonly kind: "exit"; readonly tag: ExitTag; readonly reason: string; readonly exitCode: number }
   | { readonly kind: "run-end"; readonly reason: string }
-  | (EventIssue & { readonly kind: "admitted"; readonly branch: string; readonly chunk: string | null; readonly seedRef: string })
+  | (TitledEventIssue & { readonly kind: "admitted"; readonly branch: string; readonly chunk: string | null; readonly seedRef: string })
   | (EventIssue & { readonly kind: "phase"; readonly attempt: number; readonly phases: readonly IssuePhase[] })
   | (EventIssue & { readonly kind: "setup"; readonly durationMs: number; readonly worktreeMs?: number; readonly sandboxMs?: number; readonly stackMs?: number; readonly detail?: string })
   | (EventIssue & { readonly kind: "ui-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly result: "CLEAR" | "PROTOTYPE-NEEDED" | "NO-SIGNAL" | "wrote" | "quota" | "failed"; readonly usage?: UsageFields })
-  | (EventIssue & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA"; readonly commits: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA"; readonly commits: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & { readonly kind: "gate"; readonly attempt: number; readonly gate: "gate-1"; readonly ok: boolean; readonly durationMs: number; readonly steps?: Readonly<Record<string, number>> })
   | (EventIssue & { readonly kind: "gate"; readonly gate: "gate-2"; readonly ok: boolean; readonly durationMs: number; readonly steps?: Readonly<Record<string, number>> })
   | (EventIssue & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly pass: "quality" | "correctness"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
-  | (EventIssue & { readonly kind: "review-round"; readonly attempt: number; readonly round: number; readonly gateOk: boolean; readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED"; readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED"; readonly rejectingPass: "quality" | "correctness" | null; readonly qualityFailures: number; readonly correctnessFailures: number; readonly durationMs: number })
+  | (EventIssue & { readonly kind: "review-round"; readonly attempt: number; readonly round: number; readonly head: string; readonly qualityMode: "list" | "verify"; readonly gateOk: boolean; readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED"; readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED"; readonly rejectingPass: "quality" | "correctness" | null; readonly qualityFailures: number; readonly correctnessFailures: number; readonly durationMs: number })
   | (EventIssue & { readonly kind: "repair"; readonly attempt: number; readonly action: "fast-forward" | "re-prompt" | "promise-nudge"; readonly detail: string })
   | (EventIssue & { readonly kind: "hard-error"; readonly retry: number; readonly max: number; readonly reason: string })
   | (EventIssue & { readonly kind: "terminal"; readonly terminal: "DONE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NEEDS-HUMAN" | "NEEDS-HUMAN-REVIEW" | "HARD-ERROR" | "QUOTA"; readonly reason: string | null; readonly durationMs: number })
-  | (EventIssue & { readonly kind: "landed"; readonly outcome: "merged" | "chunk-landed" | "skipped"; readonly branch: string; readonly target: string | null; readonly reason: string | null })
-  | { readonly kind: "landed"; readonly outcome: "chunk-on-source" | "chunk-parked" | "chunk-deferred"; readonly branch: string; readonly target: string | null; readonly reason: string | null }
-  | (EventIssue & { readonly kind: "finalise"; readonly finaliseKind: string; readonly outcome: string });
+  | (EventIssue & { readonly kind: "landed"; readonly outcome: "merged" | "chunk-landed" | "skipped"; readonly branch: string; readonly target: string | null; readonly reason: string | null; readonly durationMs: number })
+  | { readonly kind: "landed"; readonly outcome: "chunk-on-source" | "chunk-parked" | "chunk-deferred"; readonly branch: string; readonly target: string | null; readonly reason: string | null; readonly durationMs: number }
+  | (EventIssue & { readonly kind: "finalise"; readonly finaliseKind: FinalizeInput["kind"]; readonly outcome: FinalizeAction["kind"]; readonly detail?: string });
 
 export type RunEvent = EventInput & {
   readonly seq: number;
@@ -209,10 +226,7 @@ export async function readEventsFile(path: string): Promise<readonly RunEvent[]>
     throw new Error(`Run record ${path} does not begin with run-start`);
   }
   if (first.schemaVersion !== EVENT_SCHEMA_VERSION) {
-    throw new Error(
-      `Unsupported sandbar event schema ${String(first.schemaVersion)} in ${path}; ` +
-        `this driver reads schema ${EVENT_SCHEMA_VERSION}.`,
-    );
+    throw new UnsupportedEventSchemaError(path, first.schemaVersion);
   }
   for (let i = 0; i < events.length; i += 1) {
     if (events[i]?.seq !== i + 1) {

@@ -189,7 +189,7 @@ function feedText(event: RunEvent): FeedEvent | null {
       tone = "warn";
       break;
     case "finalise":
-      text = `finalise ${event.finaliseKind} · ${event.outcome}`;
+      text = `finalise ${event.finaliseKind} · ${event.detail ?? event.outcome}`;
       tone = "dim";
       break;
     case "reconcile":
@@ -247,13 +247,11 @@ function finishedFrom(events: readonly RunEvent[]): readonly FinishedIssueState[
     if ("issue" in event && typeof event.issue === "number" && event.title) {
       titles.set(event.issue, event.title);
     }
-    if ("issue" in event && typeof event.issue === "number" && "attempt" in event &&
-        typeof event.attempt === "number") {
-      attempts.set(event.issue, Math.max(attempts.get(event.issue) ?? 0, event.attempt));
+    if (event.kind === "implementer") {
+      attempts.set(event.issue, (attempts.get(event.issue) ?? 0) + 1);
     }
-    if ("issue" in event && typeof event.issue === "number" && "round" in event &&
-        typeof event.round === "number") {
-      rounds.set(event.issue, Math.max(rounds.get(event.issue) ?? 0, event.round));
+    if (event.kind === "review-round") {
+      rounds.set(event.issue, (rounds.get(event.issue) ?? 0) + 1);
     }
     if (event.kind === "terminal") terminals.set(event.issue, event);
     if (event.kind === "finalise") finalisations.set(event.issue, event);
@@ -481,14 +479,23 @@ export function reduceRunEvents(
   const ownFinished = finishedFrom(events);
   const allFinished = [...ownFinished, ...(options.recentFinished ?? [])]
     .sort((a, b) => b.at.localeCompare(a.at));
-  const dedupedFinished = [...new Map(allFinished.map((item) => [item.issue, item])).values()];
+  const dedupedFinished: FinishedIssueState[] = [];
+  const seenFinished = new Set<number>();
+  for (const item of allFinished) {
+    if (seenFinished.has(item.issue)) continue;
+    seenFinished.add(item.issue);
+    dedupedFinished.push(item);
+  }
+  const occupiedSlots = [...issues.values()].filter(
+    (issue) => issue.phase !== "landing" && issue.phase !== "finalising",
+  ).length;
   return {
     now: options.now.toISOString(),
     run: {
       startedAt: start.ts,
       status,
       driver: start.driver,
-      slots: { used: issues.size, max: start.maxParallelIssues },
+      slots: { used: occupiedSlots, max: start.maxParallelIssues },
       lastRecompute: lastRecompute
         ? {
             n: lastRecompute.n,

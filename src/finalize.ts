@@ -1114,6 +1114,7 @@ export type RealFinalizeAdapterDeps = {
   // means threading the chunk into this adapter, which is #60's shape, not the
   // seeding change's.
   readonly sourceBranch: string;
+  readonly onNotice?: (message: string) => void | Promise<void>;
 };
 
 export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
@@ -1179,7 +1180,9 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       const path = worktreePathFor(deps.layout.worktreesDir, branch);
       const reclaim = await reclaimIssueClone(cwd, path, branch, keep);
       if (reclaim.kind === "preserved") {
-        console.error(`Issue clone preserved at ${path}: ${reclaim.reason}`);
+        await (deps.onNotice ?? ((message: string) => console.error(message)))(
+          `Issue clone preserved at ${path}: ${reclaim.reason}`,
+        );
       }
       return reclaim;
     },

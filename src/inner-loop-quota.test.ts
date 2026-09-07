@@ -213,6 +213,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     try {
       await expect(runInnerLoop(issue("126"), {
         config: config("codex", true), hooks: {}, copyToWorktree: [],
+        onEvent: () => undefined,
       })).resolves.toMatchObject({ type: "NEEDS-INFO" });
     } finally {
       stderr.mockRestore();
@@ -240,7 +241,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("127"), {
       config: config("codex", true, "claude"), hooks: {}, copyToWorktree: [],
-      quotaState: state,
+      quotaState: state, onEvent: () => undefined,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
@@ -250,7 +251,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("128"), {
       config: config("codex", true, "claude"), hooks: {}, copyToWorktree: [],
-      quotaState: state,
+      quotaState: state, onEvent: () => undefined,
     })).resolves.toMatchObject({ type: "QUOTA", provider: "claude" });
     expect(seams.createSandbox).toHaveBeenCalledTimes(2);
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
@@ -313,6 +314,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("109"), {
       config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
+      onEvent: () => undefined,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
@@ -322,6 +324,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("110"), {
       config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
+      onEvent: () => undefined,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
@@ -339,6 +342,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     });
     await expect(runInnerLoop(issue("111"), {
       config: config("codex"), hooks: {}, copyToWorktree: [], quotaState: state,
+      onEvent: () => undefined,
     })).resolves.toMatchObject({ type: "NEEDS-INFO" });
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
   });
@@ -364,6 +368,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("112"), {
       config: config("codex"), hooks: {}, copyToWorktree: [], quotaState: state,
+      onEvent: () => undefined,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
@@ -372,6 +377,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("113"), {
       config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
+      onEvent: () => undefined,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
@@ -400,7 +406,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("114"), {
       config: config("codex"), hooks: {}, copyToWorktree: [],
-      quotaState: createRunQuotaState(),
+      quotaState: createRunQuotaState(), onEvent: () => undefined,
     })).resolves.toMatchObject({ type: "NEEDS-HUMAN-REVIEW" });
     expect(seams.preserveWorktree).toHaveBeenCalledOnce();
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);

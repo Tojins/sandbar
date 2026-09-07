@@ -170,7 +170,7 @@ import {
   reconcileLandedChunks,
 } from "./chunk-reconcile.js";
 import { postLaneOverrideNotices } from "./lanes.js";
-import { type PlannedIssue, buildPlan, readIssueBranchRefs } from "./plan-resolver.js";
+import { type PlanResolution, type PlannedIssue, buildPlan, readIssueBranchRefs } from "./plan-resolver.js";
 import {
   ContinuousPool,
   decideSchedulerAction,
@@ -190,7 +190,7 @@ import {
   ensureSourceWorktree,
   repoLayout,
 } from "./repo-cache.js";
-import { startUiServer } from "./ui-server.js";
+import { startUiServer, UiPortInUseError } from "./ui-server.js";
 
 
 // Each start can produce several recomputes (slot release, finalization and a
@@ -457,6 +457,7 @@ export async function run(
       liveRunDir: runRecord.runDir,
     });
   } catch (err) {
+    if (!(err instanceof UiPortInUseError)) throw err;
     const detail = faultDetail(err);
     cleanupReason = "ui-start-failed";
     await runRecord.emit({ kind: "complaint", severity: "error", message: detail });
@@ -517,10 +518,7 @@ export async function run(
           : "held";
     statusWrites = statusWrites
       .then(() => runRecord.emit({ kind: "wake-lock", state, detail: line }))
-      .then(() => undefined)
-      .catch((err: unknown) => {
-        console.error(`SANDBAR HALTED — internal failure: could not record wake-lock status: ${String(err)}`);
-      });
+      .then(() => undefined);
   });
 
   // The one site that emits an exit (#70/#132), shared by startup refusals and
@@ -853,6 +851,9 @@ export async function run(
       layout,
       repo,
       sourceBranch: config.sourceBranch,
+      onNotice: (message) => runRecord.emit({
+        kind: "complaint", severity: "warning", message,
+      }).then(() => undefined),
     });
     const finalizeResults = await finalizeAll(
       inputs,
@@ -888,7 +889,8 @@ export async function run(
         issue: issueNumberOf(issue),
         title: issue.title,
         finaliseKind: r.input.kind,
-        outcome: tag,
+        outcome: r.action.kind,
+        detail: tag,
       });
     }
     // finalizeAll has already performed durable tracker and branch effects.
@@ -956,6 +958,42 @@ export async function run(
   let deferredChunksForRecompute: string[] = [];
   let landingNumber = 0;
   const maxRecomputes = maxRecomputesFor(config.maxTotalIssues);
+
+  const emitRecompute = async (
+    iteration: number,
+    trigger: RecomputeTrigger,
+    resolution: PlanResolution,
+    admittedIssues: readonly PlannedIssue[],
+    landRequests: readonly { readonly branch: string }[],
+  ): Promise<void> => {
+    const active = new Map(
+      [...pool.ongoingIssues(), ...admittedIssues].map((issue) => [
+        Number(issue.id),
+        { issue: Number(issue.id), title: issue.title },
+      ] as const),
+    );
+    await runRecord.emit({
+      kind: "recompute",
+      n: iteration,
+      trigger,
+      admitted: admittedIssues.map((issue) => ({
+        issue: Number(issue.id), title: issue.title,
+      })),
+      active: [...active.values()],
+      waiting: resolution.waiting,
+      landRequests: landRequests.map((request) => request.branch),
+      deferredChunks: deferredChunksForRecompute,
+      candidates: resolution.candidates.map((issue) => ({
+        issue: Number(issue.id),
+        title: issue.title,
+        branch: issue.branch,
+        chunk: issue.chunk?.branch ?? null,
+        ready: issue.ready,
+      })),
+      refs: await readIssueBranchRefs(layout.repoDir),
+    });
+    deferredChunksForRecompute = [];
+  };
 
   // Consume freed-slot results through the same finalization path whether the
   // landing path is healthy or already halted. DONE has no terminal handoff;
@@ -1029,7 +1067,10 @@ export async function run(
     if (landingFailure === null) throw primaryFailure;
   };
 
-  const recordLandingOutcome = async (outcome: MergerOutcome): Promise<void> => {
+  const recordLandingOutcome = async (
+    outcome: MergerOutcome,
+    durationMs: number,
+  ): Promise<void> => {
     switch (outcome.kind) {
       case "merged":
         await runRecord.emit({
@@ -1040,6 +1081,7 @@ export async function run(
           branch: outcome.issue.branch,
           target: config.sourceBranch,
           reason: null,
+          durationMs,
         });
         return;
       case "chunk-landed":
@@ -1051,6 +1093,7 @@ export async function run(
           branch: outcome.landing.issue.branch,
           target: outcome.landing.chunkBranch,
           reason: null,
+          durationMs,
         });
         return;
       case "skipped":
@@ -1062,6 +1105,7 @@ export async function run(
           branch: outcome.issue.branch,
           target: null,
           reason: outcome.reason,
+          durationMs,
         });
         return;
       case "chunk-on-source":
@@ -1071,6 +1115,7 @@ export async function run(
           branch: outcome.target.branch,
           target: config.sourceBranch,
           reason: null,
+          durationMs,
         });
         return;
       case "chunk-parked":
@@ -1080,6 +1125,7 @@ export async function run(
           branch: outcome.skipped.target.branch,
           target: null,
           reason: outcome.skipped.reason,
+          durationMs,
         });
         return;
       case "chunk-deferred":
@@ -1090,6 +1136,7 @@ export async function run(
           target: null,
           reason: `member work in flight (${outcome.deferred.landedNow
             .map((member) => `#${member.number}`).join(", ")})`,
+          durationMs,
         });
         return;
     }
@@ -1308,22 +1355,7 @@ export async function run(
         quotaClosed,
       });
       if (schedulerAction.kind === "exit") {
-        await runRecord.emit({
-          kind: "recompute",
-          n: iteration,
-          trigger: planTrigger,
-          admitted: [],
-          active: pool.ongoingIssues().map((issue) => ({ issue: Number(issue.id), title: issue.title })),
-          waiting: resolution.waiting,
-          landRequests: landRequests.map((request) => request.branch),
-          deferredChunks: deferredChunksForRecompute,
-          candidates: resolution.candidates.map((issue) => ({
-            issue: Number(issue.id), title: issue.title, branch: issue.branch,
-            chunk: issue.chunk?.branch ?? null,
-            ready: issue.ready,
-          })),
-          refs: await readIssueBranchRefs(layout.repoDir),
-        });
+        await emitRecompute(iteration, planTrigger, resolution, [], landRequests);
         terminalExit = await announceExit(
           schedulerExit(
             schedulerAction.reason,
@@ -1341,23 +1373,7 @@ export async function run(
       const executionIssues = [...admission.issues];
       const issues = executionIssues;
       runState.issuesAttempted += admission.newStarts;
-      await runRecord.emit({
-        kind: "recompute",
-        n: iteration,
-        trigger: planTrigger,
-        admitted: issues.map((issue) => ({ issue: Number(issue.id), title: issue.title })),
-        active: pool.ongoingIssues().map((issue) => ({ issue: Number(issue.id), title: issue.title })),
-        waiting: resolution.waiting,
-        landRequests: landRequests.map((request) => request.branch),
-        deferredChunks: deferredChunksForRecompute,
-        candidates: resolution.candidates.map((issue) => ({
-          issue: Number(issue.id), title: issue.title, branch: issue.branch,
-          chunk: issue.chunk?.branch ?? null,
-          ready: issue.ready,
-        })),
-        refs: await readIssueBranchRefs(layout.repoDir),
-      });
-      deferredChunksForRecompute = [];
+      await emitRecompute(iteration, planTrigger, resolution, issues, landRequests);
 
       await postLaneOverrideNotices(repo, resolution.overrides, (line) =>
         runRecord.emit({ kind: "follow-up", action: "lane-override", detail: line }).then(() => undefined),
@@ -1503,6 +1519,9 @@ export async function run(
             spec: config.gateStack,
             worktreePath: mergerWorktree.path,
             hideWorktreeGit: true,
+            onNotice: (message) => runRecord.emit({
+              kind: "complaint", severity: "warning", message,
+            }).then(() => undefined),
             // gate-2 needs this as much as gate-1 does (#37): the merge result
             // is a tree neither branch had, and two branches that each touched
             // the lockfile compose into a third lockfile. Resolved per gate
@@ -1583,22 +1602,24 @@ export async function run(
               // the path, which is what the abandon comment points at.
               onResolveAttempt: (key, record) =>
                 landingLogger.writeResolveAttempt(key, record),
-              onGate: (key, gate) => {
-                const issueId = key.startsWith("chunk-") ? key.slice("chunk-".length) : key;
-                const planned = completedIssues.find((issue) => issue.id === issueId);
-                return runRecord.emit({
-                  kind: "gate",
-                  gate: "gate-2",
-                  issue: Number(issueId),
-                  ...(planned ? { title: planned.title } : {}),
-                  ok: gate.ok,
-                  durationMs: gate.durationMs,
-                  steps: Object.fromEntries(
-                    gate.steps.map((step) => [step.name, step.durationMs]),
-                  ),
-                }).then(() => undefined);
+              observations: {
+                onGate: (key, gate) => {
+                  const issueId = key.startsWith("chunk-") ? key.slice("chunk-".length) : key;
+                  const planned = completedIssues.find((issue) => issue.id === issueId);
+                  return runRecord.emit({
+                    kind: "gate",
+                    gate: "gate-2",
+                    issue: Number(issueId),
+                    ...(planned ? { title: planned.title } : {}),
+                    ok: gate.ok,
+                    durationMs: gate.durationMs,
+                    steps: Object.fromEntries(
+                      gate.steps.map((step) => [step.name, step.durationMs]),
+                    ),
+                  }).then(() => undefined);
+                },
+                onOutcome: (outcome) => recordLandingOutcome(outcome, mergePhaseTimer()),
               },
-              onOutcome: recordLandingOutcome,
               ...(verified ? { verified } : {}),
               ...(landRequests.length > 0
                 ? {
@@ -1610,7 +1631,6 @@ export async function run(
                 : {}),
             },
           );
-          mergePhaseTimer();
         } catch (err) {
           if (err instanceof MergerError) {
             if (err.cause instanceof AgentQuotaError) {

@@ -36,6 +36,21 @@ describe("event record", () => {
     await expect(readEventsFile(path)).rejects.toThrow(/Unsupported sandbar event schema 99/);
   });
 
+  it.each([
+    ["duplicate", [1, 1]],
+    ["skipped", [1, 3]],
+    ["out-of-order", [1, 3, 2]],
+  ])("refuses a %s sequence", async (_name, sequences) => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbar-events-"));
+    const path = join(dir, "events.jsonl");
+    const rows = sequences.map((seq, index) => index === 0 ? {
+      ...start, kind: "run-start", schemaVersion: 1, seq, ts: "2026-09-07T10:00:00Z",
+    } : { kind: "complaint", severity: "warning", message: String(index), seq,
+      ts: "2026-09-07T10:00:01Z" });
+    await writeFile(path, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    await expect(readEventsFile(path)).rejects.toThrow(/Non-monotonic event sequence/);
+  });
+
   it("ignores an unterminated append tail", async () => {
     const dir = await mkdtemp(join(tmpdir(), "sandbar-events-"));
     const path = join(dir, "events.jsonl");

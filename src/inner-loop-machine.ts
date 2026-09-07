@@ -234,6 +234,17 @@ export type LoopEvent =
       readonly kind: "gate-and-reviewer-result";
       readonly gate: Gate1Result;
       readonly reviewer: ReviewerResult;
+      // Observation produced beside the machine decision. The runner emits it
+      // only after this event has been applied once, using the returned state
+      // for the two post-round budgets (#132).
+      readonly reviewRound?: {
+        readonly head: string;
+        readonly qualityMode: "list" | "verify";
+        readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED";
+        readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED";
+        readonly rejectingPass: "quality" | "correctness" | null;
+        readonly durationMs: number;
+      };
     };
 
 export type Gate1Result = {

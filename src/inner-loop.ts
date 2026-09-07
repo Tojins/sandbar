@@ -145,6 +145,7 @@ import {
   buildPrompt,
   buildReviewerPrompts,
   buildUiCheckPrompt,
+  qualityReviewContext,
 } from "./prompt.js";
 
 export const FAILURE_TAIL_LINES = 200;
@@ -448,7 +449,9 @@ export type InnerLoopOptions = {
   // the logs go under the state directory's `logs/`.
   readonly sandboxLogBaseDir?: string;
   readonly attemptLogger?: AttemptLogger;
-  readonly onEvent?: (event: EventInput) => Promise<void> | void;
+  // Mandatory at this run-owned boundary: dropping it would make a terminal,
+  // phase, or measurement silently disappear from the sole run record.
+  readonly onEvent: (event: EventInput) => Promise<void> | void;
   readonly quotaState?: RunQuotaState;
 };
 
@@ -492,18 +495,16 @@ export async function runInnerLoop(
   let retriesUsed = 0;
   const specGaps: SpecGap[] = [];
   let admitted = false;
-  const cycleOptions: InnerLoopOptions = opts.onEvent === undefined
-    ? opts
-    : {
-        ...opts,
-        onEvent: async (event) => {
-          if (event.kind === "admitted") {
-            if (admitted) return;
-            admitted = true;
-          }
-          await opts.onEvent?.(event);
-        },
-      };
+  const cycleOptions: InnerLoopOptions = {
+    ...opts,
+    onEvent: async (event) => {
+      if (event.kind === "admitted") {
+        if (admitted) return;
+        admitted = true;
+      }
+      await opts.onEvent(event);
+    },
+  };
   for (;;) {
     const outcome = await runCycle(issue, cycleOptions);
     specGaps.push(...outcome.specGaps);
@@ -513,7 +514,7 @@ export async function runInnerLoop(
     }
     retriesUsed = decision.nextRetriesUsed;
     const reason = outcome.verdict.type === "HARD-ERROR" ? outcome.verdict.reason : "";
-    await opts.onEvent?.({
+    await opts.onEvent({
       kind: "hard-error",
       issue: Number(issue.id),
       title: issue.title,
@@ -633,7 +634,7 @@ async function runSandboxCycle(
       config.sourceBranch,
       issue.chunk ?? null,
     );
-    await opts.onEvent?.({
+    await opts.onEvent({
       kind: "admitted",
       issue: Number(issue.id),
       title: issue.title,
@@ -650,7 +651,7 @@ async function runSandboxCycle(
         ? null
         : describeIssueBranchOriginSync(issue.branch, base.originSync);
     if (originLine !== null) {
-      await opts.onEvent?.({
+      await opts.onEvent({
         kind: "repair",
         issue: Number(issue.id),
         title: issue.title,
@@ -665,7 +666,7 @@ async function runSandboxCycle(
     // throws otherwise — so what the log records is which of the two seeds a
     // member got, not a guess about why.
     if (issue.chunk) {
-      await opts.onEvent?.({
+      await opts.onEvent({
         kind: "preflight",
         action: "issue-seed",
         detail: base.chunkBranch
@@ -690,7 +691,7 @@ async function runSandboxCycle(
       layout: config.layout,
       hooks: opts.hooks,
       copyToWorktree: [...opts.copyToWorktree],
-      onNotice: (severity, message) => opts.onEvent?.({
+      onNotice: (severity, message) => opts.onEvent({
         kind: "complaint",
         severity,
         message,
@@ -754,7 +755,7 @@ async function runSandboxCycle(
           ),
           onFallback: async (detail) => {
             const line = `issue=${issue.id} sandbox-image fallback — ${detail}`;
-            await opts.onEvent?.({
+            await opts.onEvent({
               kind: "complaint",
               severity: "warning",
               message: line,
@@ -775,6 +776,9 @@ async function runSandboxCycle(
           hooks: opts.hooks,
           env: config.env,
           preparedWorktreePath: worktreePath,
+          onNotice: (severity, message) => opts.onEvent({
+            kind: "complaint", severity, message,
+          }),
           ...(sbxContainers.length > 0
             ? {
                 extraMounts: [
@@ -817,6 +821,9 @@ async function runSandboxCycle(
         spec: config.gateStack,
         worktreePath,
         hideWorktreeGit: true,
+        onNotice: (message) => opts.onEvent({
+          kind: "complaint", severity: "warning", message,
+        }),
         // A thunk, not a value: the stack calls it before every gate run, and
         // the answer changes as the agent commits (#37). It hands back the
         // tags it runs, so the sandbox's entry is not resolved here (#46).
@@ -850,7 +857,7 @@ async function runSandboxCycle(
         : (stackResult as PromiseRejectedResult).reason;
     }
 
-    await opts.onEvent?.({
+    await opts.onEvent({
       kind: "setup",
       issue: Number(issue.id),
       title: issue.title,
@@ -885,7 +892,7 @@ async function runSandboxCycle(
       uiPrototypeCheck: config.uiPrototypeCheck,
     });
     let action: LoopAction = initialAction(state);
-    await opts.onEvent?.({
+    await opts.onEvent({
       kind: "phase",
       issue: Number(issue.id),
       title: issue.title,
@@ -894,7 +901,8 @@ async function runSandboxCycle(
     });
 
     while (action.kind !== "terminate") {
-      const event = await executeAction(action, {
+      const executedAction = action;
+      const event = await executeAction(executedAction, {
         issue,
         sandbox,
         opts,
@@ -912,11 +920,28 @@ async function runSandboxCycle(
       const r = step(state, event);
       state = r.state;
       action = r.action;
+      if (event.kind === "gate-and-reviewer-result" && event.reviewRound) {
+        if (executedAction.kind !== "run-gate-and-reviewer") {
+          throw new Error("review-round metadata came from a non-review action");
+        }
+        await opts.onEvent({
+          kind: "review-round",
+          issue: Number(issue.id),
+          title: issue.title,
+          attempt: executedAction.attempt,
+          round: executedAction.reviewRound,
+          ...event.reviewRound,
+          gateOk: event.gate.ok,
+          rejectingPass: event.gate.ok ? event.reviewRound.rejectingPass : null,
+          qualityFailures: state.qualityFailures,
+          correctnessFailures: state.correctnessFailures,
+        });
+      }
       if (
         action.kind === "run-implementer" &&
         (event.kind === "implementer-result" || event.kind === "gate-and-reviewer-result")
       ) {
-        await opts.onEvent?.({
+        await opts.onEvent({
           kind: "repair",
           issue: Number(issue.id),
           title: issue.title,
@@ -925,7 +950,7 @@ async function runSandboxCycle(
           detail: action.extraReprompt ?? (action.failureTrace || "review changes requested"),
         });
       }
-      await opts.onEvent?.({
+      await opts.onEvent({
         kind: "phase",
         issue: Number(issue.id),
         title: issue.title,
@@ -990,7 +1015,7 @@ async function runSandboxCycle(
       } catch (err) {
         // Never mask the verdict with a teardown failure, but never hide it
         // either — it means leaked podman resources.
-        await opts.onEvent?.({
+        await opts.onEvent({
           kind: "complaint",
           severity: "error",
           message: err instanceof Error ? err.message : String(err),
@@ -1009,7 +1034,7 @@ async function runSandboxCycle(
       try {
         await sandboxStack.stop();
       } catch (err) {
-        await opts.onEvent?.({
+        await opts.onEvent({
           kind: "complaint",
           severity: "error",
           message: err instanceof Error ? err.message : String(err),
@@ -1020,7 +1045,7 @@ async function runSandboxCycle(
       try {
         await sandbox.close();
       } catch (err) {
-        await opts.onEvent?.({
+        await opts.onEvent({
           kind: "complaint",
           severity: "error",
           message: `Failed to close agent sandbox: ${err instanceof Error ? err.message : String(err)}`,
@@ -1102,7 +1127,7 @@ export async function runUiCheck(
       peakContext: number | undefined,
       rateLimit: RateLimitMeasurement | undefined,
     ): Promise<void> => {
-      await opts.onEvent?.({
+      await opts.onEvent({
         kind: "ui-check",
         issue: Number(issue.id),
         title: issue.title,
@@ -1231,23 +1256,12 @@ export async function runGateAndReviewer(
       message: `issue=${ctx.issue.id} attempt=${action.attempt} gate-1 red — discarded concurrent reviewer result`,
     });
   }
-  const aggregate = { kind: "gate-and-reviewer-result", gate, reviewer: reviewer.event } as const;
-  if (reviewer.round !== null) {
-    const after = step(ctx.state, aggregate).state;
-    await ctx.opts.onEvent?.({
-      kind: "review-round",
-      issue: Number(ctx.issue.id),
-      title: ctx.issue.title,
-      attempt: action.attempt,
-      round: action.reviewRound,
-      ...reviewer.round,
-      gateOk: gate.ok,
-      rejectingPass: gate.ok ? reviewer.round.rejectingPass : null,
-      qualityFailures: after.qualityFailures,
-      correctnessFailures: after.correctnessFailures,
-    });
-  }
-  return aggregate;
+  return {
+    kind: "gate-and-reviewer-result",
+    gate,
+    reviewer: reviewer.event,
+    ...(reviewer.round === null ? {} : { reviewRound: reviewer.round }),
+  };
 }
 
 export async function runImplementer(
@@ -1297,7 +1311,7 @@ export async function runImplementer(
         partial.peakContext,
         partial.rateLimit ?? err.measurement,
       );
-      await opts.onEvent?.({
+      await opts.onEvent({
         kind: "implementer",
         issue: Number(issue.id),
         title: issue.title,
@@ -1384,7 +1398,7 @@ export async function runImplementer(
         combined.stdout,
       );
     }
-    await opts.onEvent?.({
+    await opts.onEvent({
       kind: "repair",
       issue: Number(issue.id),
       title: issue.title,
@@ -1450,7 +1464,7 @@ export async function runImplementer(
       commitsAccumulated: accumulated.length,
     });
     offBranch = null;
-    await opts.onEvent?.({
+    await opts.onEvent({
       kind: "repair",
       issue: Number(issue.id),
       title: issue.title,
@@ -1459,7 +1473,7 @@ export async function runImplementer(
       detail: `from=${fastForwarded.fromSha} to=${fastForwarded.toSha}`,
     });
   }
-  await opts.onEvent?.({
+  await opts.onEvent({
     kind: "implementer",
     issue: Number(issue.id),
     title: issue.title,
@@ -1470,6 +1484,7 @@ export async function runImplementer(
     model: config.implementerModelId,
     effort: config.implementerEffort ?? null,
     durationMs: implementerMs,
+    ...(run.signalMs === undefined ? {} : { signalMs: run.signalMs }),
     maxGapMs: attemptMaxGapMs,
     ...(eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit) === undefined
       ? {}
@@ -1526,7 +1541,7 @@ async function runGate1(
 ): Promise<{ readonly ok: boolean; readonly failureTrace: string }> {
   const { issue, opts, gateStack } = ctx;
   const gate1 = await gateStack.runGate();
-  await opts.onEvent?.({
+  await opts.onEvent({
     kind: "gate",
     issue: Number(issue.id),
     title: issue.title,
@@ -1635,6 +1650,8 @@ export async function runReviewer(
   readonly historyEntry: PriorReviewRound | null;
   readonly specGap: string | null;
   readonly round: {
+    readonly head: string;
+    readonly qualityMode: "list" | "verify";
     readonly quality: FinishedReviewRoundDecision["quality"];
     readonly correctness: FinishedReviewRoundDecision["correctness"];
     readonly rejectingPass: "quality" | "correctness" | null;
@@ -1675,6 +1692,7 @@ export async function runReviewer(
   // This is the unit every #77 §3.A idea removes, and at 10.2 minutes measured
   // end to end it is ~60% of an issue.
   const roundTimer = startTimer();
+  const qualityMode = qualityReviewContext(ctx.priorReviewRounds).mode;
   const reviewerPrompts = await buildReviewerPrompts(reviewerPromptInputs);
   const routing = reviewerPassRouting(config);
   // Prompt, CLI and model all indexed by the pass name, never passed in
@@ -1707,7 +1725,7 @@ export async function runReviewer(
           peakContext: number | undefined,
           rateLimit: RateLimitMeasurement | undefined,
         ): Promise<void> => {
-          await opts.onEvent?.({
+          await opts.onEvent({
             kind: "review-pass",
             issue: Number(issue.id),
             title: issue.title,
@@ -1785,7 +1803,7 @@ export async function runReviewer(
             `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
             `pass=${pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} no-review — ` +
             `retrying (${detail.split("\n")[0]})`;
-          await opts.onEvent?.({
+          await opts.onEvent({
             kind: "complaint",
             severity: "warning",
             message: line,
@@ -1878,6 +1896,8 @@ export async function runReviewer(
     specGap:
       correctness?.kind === "reviewed" ? correctness.verdict.specGap : null,
     round: {
+      head,
+      qualityMode,
       quality: decision.quality,
       correctness: decision.correctness,
       rejectingPass,
