@@ -146,6 +146,7 @@ export type SandboxStackOptions = {
   // anchor has mounted at SANDBOX_LOG_MOUNT — created by `prepareSandboxLogDir`
   // BEFORE the anchor, because a bind-mount source is read at container start.
   readonly logDir: string;
+  readonly onNotice?: (message: string) => void | Promise<void>;
 };
 
 // Everything this module does to podman, behind one seam — because what is
@@ -329,9 +330,9 @@ export async function startSandboxStack(
           // The bringup failure remains in `statuses` and therefore in the
           // prompt. This file is a redundant copy; its failure must not turn a
           // branch-owned attempt failure into an infrastructure retry.
-          console.error("Failed to write sandbox sibling failure log", {
-            cause: err,
-          });
+          await (opts.onNotice ?? ((message: string) => console.error(message)))(
+            `Failed to write sandbox sibling failure log: ${String(err)}`,
+          );
         }
       }
       // Followed whether or not it came up, and the degraded case is the one
@@ -345,12 +346,12 @@ export async function startSandboxStack(
       followers.push(deps.follow(nameOf(c), join(opts.logDir, `${c.name}.log`)));
     }
   } catch (err) {
-    await stop().catch((stopErr: unknown) => {
+    await stop().catch(async (stopErr: unknown) => {
       // The bringup failure is the diagnosis; a teardown failure on top of it
       // is reported but must not replace it.
-      console.error("Failed to stop sandbox stack after bringup failed", {
-        cause: stopErr,
-      });
+      await (opts.onNotice ?? ((message: string) => console.error(message)))(
+        `Failed to stop sandbox stack after bringup failed: ${String(stopErr)}`,
+      );
     });
     throw err;
   }

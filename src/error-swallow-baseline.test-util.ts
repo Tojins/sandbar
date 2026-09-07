@@ -17,7 +17,7 @@
 // no file may grow, and the entries above zero are the remainder #99 designates
 // as the todo list.
 export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
-  "agent-sandbox.ts": 16,
+  "agent-sandbox.ts": 15,
   "chunk-land.ts": 6,
   "cleanup.ts": 1,
   "cli.ts": 2,
@@ -41,9 +41,9 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   "merger.ts": 11,
   "preflight.ts": 5,
   "prompt.ts": 1,
-  // UI startup failure is classified as a recorded startup refusal (#132).
-  // The syntactic matcher counts this braced catch in two of its forms.
-  "run.ts": 11,
+  // UI port contention is classified as a startup refusal; unexpected UI
+  // startup faults share the run's internal-failure path (#132).
+  "run.ts": 10,
   "sandbox-stack.ts": 3,
   // The HTTP request boundary maps record/reducer failures to a 500 response
   // for the polling page (#132).

@@ -114,10 +114,12 @@ describe("runUiCheck (#126)", () => {
     const command = invocation.agent.buildPrintCommand({ prompt: "p" }).command;
     expect(command).toContain("--model 'gpt-5.6-sol'");
     expect(command).toContain("-c 'model_reasoning_effort=low'");
-    expect(events[0]).toMatchObject({
-      kind: "ui-check", issue: 126, provider: "codex", model: "gpt-5.6-sol",
-      invocation: 1, usage: { toolCalls: 1 },
-    });
+    expect(events).toEqual([{
+      kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
+      provider: "codex", model: "gpt-5.6-sol", effort: "low",
+      durationMs: expect.any(Number), maxGapMs: 3, result: "CLEAR",
+      usage: { toolCalls: 1 },
+    }]);
   });
 
   it("logs complete success and failed-invocation telemetry", async () => {
@@ -149,11 +151,16 @@ describe("runUiCheck (#126)", () => {
       },
     });
     await runUiCheck({ kind: "run-ui-check" }, success.ctx);
-    expect(successEvents[0]).toMatchObject({
-      kind: "ui-check", issue: 126, invocation: 1,
+    expect(successEvents).toEqual([{
+      kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
+      provider: "codex", model: "gpt-5.6-sol", effort: "low",
+      durationMs: expect.any(Number), maxGapMs: 9, result: "CLEAR",
       usage: { inputTokens: 1, cachedInputTokens: 2, cacheWriteInputTokens: 3,
-        outputTokens: 4, reasoningTokens: 5, toolCalls: 7, peakContext: 8 },
-    });
+        outputTokens: 4, reasoningTokens: 5, apiMs: 6, resolvedModel: "resolved",
+        models: 2, terminalReason: "end_turn", toolCalls: 7, peakContext: 8,
+        quota: { status: "allowed_warning", window: "five_hour", utilization: 0.9,
+          resetsAt: 42 } },
+    }]);
 
     const failureEvents: EventInput[] = [];
     const failure = context([], failureEvents);
@@ -167,17 +174,21 @@ describe("runUiCheck (#126)", () => {
     );
     vi.mocked(failure.sandbox.run).mockReset().mockRejectedValueOnce(err);
     await expect(runUiCheck({ kind: "run-ui-check" }, failure.ctx)).rejects.toBe(err);
-    expect(failureEvents[0]).toMatchObject({
-      kind: "ui-check", issue: 126, invocation: 1,
-      usage: { inputTokens: 11, outputTokens: 12, toolCalls: 13, peakContext: 14 },
-    });
+    expect(failureEvents).toEqual([{
+      kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
+      provider: "codex", model: "gpt-5.6-sol", effort: "low",
+      durationMs: expect.any(Number), result: "failed",
+      usage: { inputTokens: 11, outputTokens: 12, toolCalls: 13, peakContext: 14,
+        quota: { status: "rejected", window: "weekly", utilization: 1 } },
+    }]);
   });
 
   it("offers one cold correction for a malformed answer", async () => {
+    const events: EventInput[] = [];
     const { sandbox, ctx } = context([
       "<ui-check>PROTOTYPE-NEEDED</ui-check>",
       "<ui-check>CLEAR</ui-check>",
-    ]);
+    ], events);
     await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).resolves.toMatchObject({
       result: { kind: "CLEAR" },
     });
@@ -187,6 +198,12 @@ describe("runUiCheck (#126)", () => {
       prompt: expect.stringContaining("provided no `<ui-impact>` block"),
       completionSignal: [],
     }));
+    expect(events).toEqual([
+      expect.objectContaining({ kind: "ui-check", invocation: 1,
+        result: "NO-SIGNAL", maxGapMs: 3 }),
+      expect.objectContaining({ kind: "ui-check", invocation: 2,
+        result: "CLEAR", maxGapMs: 4 }),
+    ]);
   });
 
   it("treats a second malformed answer as a harness failure", async () => {

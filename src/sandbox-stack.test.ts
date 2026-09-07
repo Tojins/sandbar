@@ -285,8 +285,7 @@ describe("startSandboxStack (#44 D3)", () => {
         stack.statuses.find((status) => status.name === "app")?.up,
       ).toBe(false);
       expect(error).toHaveBeenCalledWith(
-        "Failed to write sandbox sibling failure log",
-        { cause: expect.anything() },
+        expect.stringMatching(/^Failed to write sandbox sibling failure log: .*ENOENT/),
       );
     } finally {
       error.mockRestore();

@@ -6,6 +6,95 @@ const at = (seq: number, ts: string, event: object): RunEvent =>
   ({ seq, ts, ...event }) as RunEvent;
 
 describe("run event reducer", () => {
+  it("projects every event kind into a newest-first, attributed feed", () => {
+    const rows: object[] = [
+      { kind: "run-start", schemaVersion: 1, driver: "sandbar", configPath: null,
+        workdir: "/r", maxParallelIssues: 2, pid: 1 },
+      { kind: "wake-lock", state: "held", detail: "held" },
+      { kind: "preflight", action: "started", detail: "Preflight started" },
+      { kind: "sweep", scope: "startup", removed: ["pod"], failures: [] },
+      { kind: "image", action: "built", image: "base", detail: "built", durationMs: 2 },
+      { kind: "recompute", n: 1, trigger: "launch", admitted: [], active: [], waiting: [],
+        landRequests: [], deferredChunks: [], candidates: [], refs: [] },
+      { kind: "follow-up", action: "re-queued", detail: "requeued #2" },
+      { kind: "reconcile", action: "trace", detail: "checked chunks" },
+      { kind: "complaint", severity: "warning", message: "stale config" },
+      { kind: "admitted", issue: 2, title: "Two", branch: "sandbar/issue-2", chunk: null,
+        seedRef: "origin/main" },
+      { kind: "phase", issue: 2, attempt: 1, phases: ["implementer"] },
+      { kind: "setup", issue: 2, durationMs: 3 },
+      { kind: "ui-check", issue: 2, invocation: 1, provider: "codex", model: "m",
+        effort: null, durationMs: 4, result: "CLEAR" },
+      { kind: "implementer", issue: 2, attempt: 1, signal: "COMPLETE", commits: 1,
+        provider: "codex", model: "m", effort: null, durationMs: 5 },
+      { kind: "gate", issue: 2, attempt: 1, gate: "gate-1", ok: true, durationMs: 6 },
+      { kind: "review-pass", issue: 2, attempt: 1, round: 1, pass: "quality", invocation: 1,
+        provider: "codex", model: "m", effort: null, result: "completed", durationMs: 7 },
+      { kind: "review-round", issue: 2, attempt: 1, round: 1, head: "abc",
+        qualityMode: "list", gateOk: true, quality: "APPROVED", correctness: "APPROVED",
+        rejectingPass: null, qualityFailures: 0, correctnessFailures: 0, durationMs: 8 },
+      { kind: "repair", issue: 2, attempt: 2, action: "re-prompt", detail: "fix" },
+      { kind: "hard-error", issue: 2, retry: 1, max: 2, reason: "pod" },
+      { kind: "terminal", issue: 2, title: "Two", terminal: "DONE", reason: null,
+        durationMs: 9 },
+      { kind: "landed", issue: 2, title: "Two", outcome: "merged",
+        branch: "sandbar/issue-2", target: "main", reason: null, durationMs: 10 },
+      { kind: "finalise", issue: 2, finaliseKind: "merged", outcome: "deleted-local" },
+      { kind: "exit", tag: "plan-empty", reason: "done", exitCode: 0 },
+      { kind: "run-end", reason: "plan-empty" },
+    ];
+    const events = rows.map((row, index) => at(
+      index + 1,
+      `2026-09-07T09:${String(index).padStart(2, "0")}:00Z`,
+      row,
+    ));
+    const state = reduceRunEvents(events, { now: new Date("2026-09-07T10:00:00Z"), pidAlive: false });
+    expect(state.eventCount).toBe(rows.length);
+    expect(state.events.map((event) => [event.issue, event.text, event.tone])).toEqual([
+      [null, "run ended · plan-empty", "dim"],
+      [null, "exit plan-empty · done", "good"],
+      [2, "finalise merged · deleted-local", "dim"],
+      [2, "merged sandbar/issue-2 → main", "good"],
+      [2, "DONE", "good"],
+      [2, "hard error · retry 1/2", "bad"],
+      [2, "repair · re-prompt", "warn"],
+      [2, "round 1 · approved", "good"],
+      [2, "round 1 · quality pass · invocation 1", ""],
+      [2, "gate-1 passed", "good"],
+      [2, "attempt 1 complete · 1 commit", ""],
+      [2, "UI check 1 · CLEAR", "dim"],
+      [2, "setup complete · 3ms", "dim"],
+      [2, "phase · implementer", "dim"],
+      [2, "admitted #2", "dim"],
+      [null, "stale config", "warn"],
+      [null, "reconcile trace · checked chunks", "dim"],
+      [null, "requeued #2", "dim"],
+      [null, "recompute 1 · launch", "dim"],
+      [null, "image built · base", "dim"],
+      [null, "startup sweep · 1 removed · 0 failed", "dim"],
+      [null, "preflight started · Preflight started", "dim"],
+      [null, "wake lock held", "dim"],
+      [null, "run started", "dim"],
+    ]);
+    expect(state.run.complaints).toEqual([{ severity: "warning", text: "stale config" }]);
+  });
+
+  it("limits recent feed rows to 200 without changing the total", () => {
+    const events = [at(1, "2026-09-07T09:00:00Z", {
+      kind: "run-start", schemaVersion: 1, driver: "sandbar", configPath: null,
+      workdir: "/r", maxParallelIssues: 1, pid: 1,
+    })];
+    for (let index = 0; index < 205; index += 1) {
+      events.push(at(index + 2, "2026-09-07T09:01:00Z", {
+        kind: "complaint", severity: "warning", message: `warning ${index}`,
+      }));
+    }
+    const state = reduceRunEvents(events, { now: new Date(), pidAlive: true });
+    expect(state.eventCount).toBe(206);
+    expect(state.events).toHaveLength(200);
+    expect(state.events[0]?.text).toBe("warning 204");
+  });
+
   it("renders pool timelines, waiting reasons and parked refs from one recompute", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
@@ -99,6 +188,28 @@ describe("run event reducer", () => {
     expect(landed.finished[0]).toMatchObject({ issue: 12, outcome: "DONE", landed: "main" });
   });
 
+  it("keeps a handoff visible until finalisation without occupying a slot", () => {
+    const events = [
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
+      }),
+      at(2, "2026-09-07T09:01:00Z", {
+        kind: "admitted", issue: 12, title: "Twelve",
+        branch: "sandbar/issue-12", chunk: null, seedRef: "origin/main",
+      }),
+      at(3, "2026-09-07T09:30:00Z", {
+        kind: "terminal", issue: 12, title: "Twelve", terminal: "NEEDS-INFO",
+        reason: "Which environment?", durationMs: 1_740_000,
+      }),
+    ];
+    const state = reduceRunEvents(events, {
+      now: new Date("2026-09-07T09:31:00Z"), pidAlive: true,
+    });
+    expect(state.run.slots.used).toBe(0);
+    expect(state.pool[0]).toMatchObject({ issue: 12, phase: "NEEDS-INFO" });
+  });
+
   it("counts work across fresh HARD-ERROR cycles and keeps the newest finished record", () => {
     const start = at(1, "2026-09-07T09:00:00Z", {
       kind: "run-start", schemaVersion: 1, driver: "sandbar",
@@ -135,6 +246,28 @@ describe("run event reducer", () => {
     expect(state.finished).toEqual([expect.objectContaining({
       issue: 12, title: "Twelve", outcome: "DONE", attempts: 2, rounds: 2,
     })]);
+  });
+
+  it("shows fresh-sandbox setup immediately after a retried HARD-ERROR", () => {
+    const events = [
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
+      }),
+      at(2, "2026-09-07T09:01:00Z", {
+        kind: "admitted", issue: 12, title: "Twelve",
+        branch: "sandbar/issue-12", chunk: null, seedRef: "origin/main",
+      }),
+      at(3, "2026-09-07T09:02:00Z", {
+        kind: "phase", issue: 12, attempt: 3, phases: [],
+      }),
+      at(4, "2026-09-07T09:03:00Z", {
+        kind: "hard-error", issue: 12, retry: 1, max: 2, reason: "stack failed",
+      }),
+    ];
+    expect(reduceRunEvents(events, {
+      now: new Date("2026-09-07T09:04:00Z"), pidAlive: true,
+    }).pool[0]).toMatchObject({ phase: "setup", phaseSince: "2026-09-07T09:03:00Z", attempt: 1 });
   });
 
   it("does not report a skipped DONE as finished before finalisation", () => {

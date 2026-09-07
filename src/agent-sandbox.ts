@@ -87,7 +87,7 @@ import { existsSync } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { onCleanup } from "./cleanup.js";
+import { onCleanup, reportCleanupNotice } from "./cleanup.js";
 import { resolveSandboxEnv } from "./env.js";
 import { isErrno } from "./errors.js";
 import { RESOURCE_PREFIX, strandedHeadRef } from "./naming.js";
@@ -1086,18 +1086,32 @@ const teardownCallbacks = new Set<() => void>();
 let exitHookInstalled = false;
 let cleanupRegistered = false;
 
-const runTeardowns = (): void => {
+const drainTeardowns = (): unknown[] => {
+  const failures: unknown[] = [];
   // Drained, not iterated — see the note above on arriving twice.
   for (const teardown of [...teardownCallbacks]) {
     teardownCallbacks.delete(teardown);
     try {
       teardown();
     } catch (err) {
-      console.error("Sandbox shutdown cleanup failed:", err);
+      failures.push(err);
     }
   }
+  return failures;
 };
-const handleExit = (): void => runTeardowns();
+const runTeardowns = async (): Promise<void> => {
+  for (const failure of drainTeardowns()) {
+    await reportCleanupNotice(
+      "cleanup-failure",
+      "Sandbox shutdown cleanup failed",
+      failure,
+    );
+  }
+};
+// Node's `exit` hook cannot await. Ordinary and signal exits drain through the
+// cleanup registry first; this last-resort hook can only make the synchronous
+// removal attempt, and any failure is already beyond a writable event loop.
+const handleExit = (): void => { drainTeardowns(); };
 const installHooks = (): void => {
   if (!cleanupRegistered) {
     cleanupRegistered = true;
@@ -1830,14 +1844,10 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
 
       const removeArgs = sandboxRemoveArgs(containerName);
       const removeContainerSync = (): void => {
-        try {
-          execFileSync("podman", removeArgs, {
-            stdio: "ignore",
-            timeout: 5000,
-          });
-        } catch (err) {
-          console.error(`Failed to remove sandbox container ${containerName}:`, err);
-        }
+        execFileSync("podman", removeArgs, {
+          stdio: "ignore",
+          timeout: 5000,
+        });
       };
       const unregisterShutdown = registerShutdown(removeContainerSync);
 

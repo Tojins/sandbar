@@ -307,6 +307,7 @@ export function reduceRunEvents(
     throw new Error("event stream does not begin with run-start");
   }
   const issues = new Map<number, MutableIssue>();
+  const executing = new Set<number>();
   let lastRecompute: Extract<RunEvent, { kind: "recompute" }> | null = null;
   let waiting: readonly RecomputeWaiting[] = [];
   let exit: Extract<RunEvent, { kind: "exit" }> | null = null;
@@ -321,6 +322,7 @@ export function reduceRunEvents(
     switch (event.kind) {
       case "admitted":
         {
+          executing.add(event.issue);
           const issue = issues.get(event.issue);
           if (issue) {
             issue.title = event.title ?? issue.title;
@@ -342,16 +344,18 @@ export function reduceRunEvents(
       case "phase": {
         const issue = issues.get(event.issue);
         if (issue) applyPhase(issue, event);
+        if (event.phases.length > 0) executing.add(event.issue);
+        else executing.delete(event.issue);
         break;
       }
       case "terminal": {
+        executing.delete(event.issue);
         parkedTerminals.set(event.issue, event.terminal);
         const issue = issues.get(event.issue);
         if (issue) {
           finishRunningSpan(issue, event.ts);
           issue.phase = event.terminal === "DONE" ? "landing" : event.terminal;
           issue.phaseSince = event.ts;
-          if (event.terminal !== "DONE") issues.delete(event.issue);
         }
         break;
       }
@@ -362,6 +366,17 @@ export function reduceRunEvents(
           if (issue && last?.kind === "review") {
             issue.spans[issue.spans.length - 1] = { ...last, verdict: "no" };
           }
+        }
+        break;
+      }
+      case "hard-error": {
+        executing.add(event.issue);
+        const issue = issues.get(event.issue);
+        if (issue) {
+          finishRunningSpan(issue, event.ts);
+          issue.phase = "setup";
+          issue.phaseSince = event.ts;
+          issue.attempt = 1;
         }
         break;
       }
@@ -377,6 +392,7 @@ export function reduceRunEvents(
       }
       case "landed":
         if ("issue" in event && typeof event.issue === "number") {
+          executing.delete(event.issue);
           if (event.outcome === "skipped") {
             const issue = issues.get(event.issue);
             if (issue) {
@@ -393,10 +409,12 @@ export function reduceRunEvents(
         const issue = issues.get(event.issue);
         if (!issue) break;
         if (event.finaliseKind === "fresh-attempt") {
+          executing.add(event.issue);
           issue.phase = "setup";
           issue.phaseSince = event.ts;
           issue.attempt = 1;
         } else {
+          executing.delete(event.issue);
           issues.delete(event.issue);
         }
         break;
@@ -405,6 +423,7 @@ export function reduceRunEvents(
         lastRecompute = event;
         waiting = event.waiting;
         for (const admitted of event.admitted) {
+          executing.add(admitted.issue);
           if (!issues.has(admitted.issue)) {
             issues.set(admitted.issue, {
               issue: admitted.issue,
@@ -486,16 +505,13 @@ export function reduceRunEvents(
     seenFinished.add(item.issue);
     dedupedFinished.push(item);
   }
-  const occupiedSlots = [...issues.values()].filter(
-    (issue) => issue.phase !== "landing" && issue.phase !== "finalising",
-  ).length;
   return {
     now: options.now.toISOString(),
     run: {
       startedAt: start.ts,
       status,
       driver: start.driver,
-      slots: { used: occupiedSlots, max: start.maxParallelIssues },
+      slots: { used: executing.size, max: start.maxParallelIssues },
       lastRecompute: lastRecompute
         ? {
             n: lastRecompute.n,

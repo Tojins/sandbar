@@ -80,7 +80,7 @@ import {
   cleanupOrphanContainers,
   findUnattributableResources,
 } from "./containers.js";
-import { installCleanupTraps, onCleanup, runCleanup } from "./cleanup.js";
+import { installCleanupTraps, onCleanup, runCleanup, setCleanupReporter } from "./cleanup.js";
 import {
   routeChunkReviewFollowUps,
   realAdapter as realChunkFollowUpAdapter,
@@ -447,7 +447,43 @@ export async function run(
     },
   });
   let cleanupReason = "normal-exit";
+  const recordInternalFailure = async (detail: string): Promise<TerminalExit> => {
+    const banner = "═".repeat(72);
+    console.error(
+      `\n${banner}\nSANDBAR HALTED — internal failure\n${banner}\n${detail}\n${banner}`,
+    );
+    await runRecord.emit({ kind: "complaint", severity: "error", message: detail });
+    const exit = haltedExit(["sandbar-internal-error"]);
+    cleanupReason = exit.tag;
+    await runRecord.emit({
+      kind: "exit",
+      tag: exit.tag,
+      reason: exit.reason,
+      exitCode: exit.exitCode,
+    });
+    return exit;
+  };
+  const resetCleanupReporter = setCleanupReporter(async (kind, message, cause) => {
+    const detail = cause === undefined ? message : `${message}: ${faultDetail(cause)}`;
+    if (kind === "internal-failure") {
+      await recordInternalFailure(detail);
+      return;
+    }
+    if (kind === "signal") cleanupReason = "signal";
+    await runRecord.emit({
+      kind: "complaint",
+      severity: kind === "signal" ? "warning" : "error",
+      message: detail,
+    });
+  });
+  onCleanup(resetCleanupReporter);
   onCleanup(() => runRecord.finalize(cleanupReason));
+
+  const stopInternalFailure = async (err: unknown): Promise<never> => {
+    const exit = await recordInternalFailure(faultDetail(err));
+    await runCleanup();
+    process.exit(exit.exitCode);
+  };
 
   let ui;
   try {
@@ -457,11 +493,11 @@ export async function run(
       liveRunDir: runRecord.runDir,
     });
   } catch (err) {
-    if (!(err instanceof UiPortInUseError)) throw err;
+    if (!(err instanceof UiPortInUseError)) return await stopInternalFailure(err);
     const detail = faultDetail(err);
-    cleanupReason = "ui-start-failed";
     await runRecord.emit({ kind: "complaint", severity: "error", message: detail });
     const exit = haltedExit(["ui-start-failed"]);
+    cleanupReason = exit.tag;
     await runRecord.emit({ kind: "exit", tag: exit.tag, reason: exit.reason, exitCode: exit.exitCode });
     await runCleanup();
     process.exit(exit.exitCode);
@@ -1577,6 +1613,9 @@ export async function run(
                     cwd: mergerWorktree.path,
                     sourceBranch: config.sourceBranch,
                     repo,
+                    onNotice: (message) => runRecord.emit({
+                      kind: "complaint", severity: "warning", message,
+                    }).then(() => undefined),
                   }),
                   options: verifiedLandingOptionsFrom(
                     config.mergeMode,
@@ -1922,23 +1961,10 @@ export async function run(
     }
 
   } catch (err) {
-    // A sandbar-internal failure escaped the scheduler (a required git/gh side-effect
-    // that could not be completed, or an unexpected bug). FAIL LOUD: this is
-    // the LAST thing printed — no success banner after it to push it up the
-    // scrollback — then run cleanup and exit non-zero. SandbarError is an
-    // expected, operator-actionable fault so we print its message alone; any
-    // other error is an unexpected bug, so we include the stack — which is
-    // `faultDetail`'s rule, shared with the bin and with `runGateCommand`
-    // rather than restated here (#45).
-    const banner = "═".repeat(72);
-    const detail = faultDetail(err);
-    console.error(`\n${banner}\nSANDBAR HALTED — internal failure\n${banner}\n${detail}\n${banner}`);
-    await runRecord.emit({ kind: "complaint", severity: "error", message: detail });
-    // This is the sole post-record stderr rendering. The exit itself is an
-    // event; stdout remains the UI URL only.
-    const exit = await announceExit(haltedExit(["sandbar-internal-error"]));
-    await runCleanup();
-    process.exit(exit.exitCode);
+    // A sandbar-internal failure escaped the scheduler. This shared path also
+    // owns unexpected UI startup failures: only EADDRINUSE is a classified
+    // startup refusal; everything else remains an internal failure.
+    return await stopInternalFailure(err);
   }
 
   // EVERY terminal path arrives here having announced itself exactly once

@@ -24,6 +24,10 @@ describe("raw transcript tree", () => {
     const tree = await makeRun();
     const landing = tree.landing(1);
     await landing.appendMerger("merge branch");
+    await landing.writeMergerGate("64", {
+      stdout: "gate stdout", stderr: "gate stderr", failedStep: "unit",
+      exitCode: 7, containerLogs: "db tail",
+    });
     const path = await landing.writeResolveAttempt("64", {
       attempt: 2, issueId: "64", mode: "still-conflicted",
       stdout: "agent said this", stderr: "agent complained", end: "exit",
@@ -31,6 +35,30 @@ describe("raw transcript tree", () => {
       container: "sandbar-wdeadbeef-resolve-2-uuid",
     });
     expect(await readFile(join(landing.dir, "merger.log"), "utf8")).toContain("merge branch");
-    expect(await readFile(path, "utf8")).toContain("agent said this");
+    expect(await readFile(join(landing.dir, "merger-gate-64.out"), "utf8")).toBe("gate stdout");
+    expect(await readFile(join(landing.dir, "merger-gate-64.err"), "utf8")).toBe("gate stderr");
+    expect(await readFile(join(landing.dir, "merger-gate-64.containers.log"), "utf8")).toBe("db tail");
+    expect(JSON.parse(await readFile(join(landing.dir, "merger-gate-64.meta.json"), "utf8")))
+      .toEqual({ failedStep: "unit", exitCode: 7 });
+    expect(await readFile(path, "utf8")).toBe(
+      "resolve attempt 2 for #64 (mode=still-conflicted)\n" +
+      "container:  sandbar-wdeadbeef-resolve-2-uuid\nended:      exit\n" +
+      "exit code:  1\nsignal:     -\nduration:   6300ms\n" +
+      "stdout:     15 bytes\nstderr:     16 bytes\n\n" +
+      "--- stdout ---\nagent said this\n--- stderr ---\nagent complained\n",
+    );
+  });
+
+  it("keeps the diagnostic header when a resolve process produced no streams", async () => {
+    const tree = await makeRun();
+    const path = await tree.landing(2).writeResolveAttempt("chunk-42", {
+      attempt: 1, issueId: "42", mode: "still-conflicted", stdout: "", stderr: "",
+      end: "spawn-error", exitCode: null, signal: null, durationMs: 12,
+      container: "sandbar-wdeadbeef-resolve-1-uuid", detail: "spawn podman ENOENT",
+    });
+    expect(await readFile(path, "utf8")).toContain(
+      "ended:      spawn-error (spawn podman ENOENT)\nexit code:  -\n" +
+      "signal:     -\nduration:   12ms\nstdout:     0 bytes\nstderr:     0 bytes",
+    );
   });
 });

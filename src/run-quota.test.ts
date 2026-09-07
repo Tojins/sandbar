@@ -18,7 +18,9 @@ vi.mock("./driver-identity.js", () => ({
   formatDriverIdentity: vi.fn(() => "driver: test"),
 }));
 vi.mock("./cleanup.js", () => ({
-  installCleanupTraps: vi.fn(), onCleanup: vi.fn(), runCleanup: vi.fn(async () => undefined),
+  installCleanupTraps: vi.fn(), onCleanup: vi.fn(),
+  setCleanupReporter: vi.fn(() => vi.fn()),
+  runCleanup: vi.fn(async () => undefined),
 }));
 vi.mock("./keepawake.js", () => ({
   startKeepawake: vi.fn(() => ({ stop: vi.fn(), onStatus: vi.fn() })),
@@ -46,7 +48,8 @@ vi.mock("./events.js", () => ({
     })),
   })),
 }));
-vi.mock("./ui-server.js", () => ({
+vi.mock("./ui-server.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./ui-server.js")>(),
   startUiServer: vi.fn(async () => ({ url: "http://127.0.0.1:7331/", close: vi.fn() })),
 }));
 vi.mock("./repo-cache.js", async (importOriginal) => ({
@@ -120,6 +123,7 @@ import { MergerError } from "./merger.js";
 import { ensureImages } from "./ensure-images.js";
 import { createAgentImages } from "./agent-tools.js";
 import { cleanupOrphanContainers } from "./containers.js";
+import { startUiServer } from "./ui-server.js";
 import { run } from "./run.js";
 
 const config: RunConfig = {
@@ -172,6 +176,25 @@ describe("run quota orchestration (#109)", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+
+  it("routes an unexpected UI startup failure through the internal-failure path", async () => {
+    vi.mocked(startUiServer).mockRejectedValueOnce(new Error("UI asset vanished"));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      severity: "error", message: expect.stringContaining("UI asset vanished"),
+    }));
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
+      tag: "halted", exitCode: 1,
+    }));
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("SANDBAR HALTED — internal failure"),
+    );
   });
 
   it("drives issue quota through run(), exits 4, and outranks landed-work relaunch", async () => {

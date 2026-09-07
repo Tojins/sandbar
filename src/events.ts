@@ -57,11 +57,11 @@ export type WaitingReason =
   | { readonly kind: "held" }
   | { readonly kind: "ongoing" };
 
-export type RecomputeWaiting = EventIssue & {
+export type RecomputeWaiting = TitledEventIssue & {
   readonly reason: WaitingReason;
 };
 
-export type RecomputeCandidate = EventIssue & {
+export type RecomputeCandidate = TitledEventIssue & {
   readonly branch: string;
   readonly chunk: string | null;
   readonly ready: boolean;
@@ -131,7 +131,7 @@ export type EventInput =
   | (EventIssue & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA"; readonly commits: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & { readonly kind: "gate"; readonly attempt: number; readonly gate: "gate-1"; readonly ok: boolean; readonly durationMs: number; readonly steps?: Readonly<Record<string, number>> })
   | (EventIssue & { readonly kind: "gate"; readonly gate: "gate-2"; readonly ok: boolean; readonly durationMs: number; readonly steps?: Readonly<Record<string, number>> })
-  | (EventIssue & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly pass: "quality" | "correctness"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly pass: "quality" | "correctness"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "quota"; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & { readonly kind: "review-round"; readonly attempt: number; readonly round: number; readonly head: string; readonly qualityMode: "list" | "verify"; readonly gateOk: boolean; readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED"; readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED"; readonly rejectingPass: "quality" | "correctness" | null; readonly qualityFailures: number; readonly correctnessFailures: number; readonly durationMs: number })
   | (EventIssue & { readonly kind: "repair"; readonly attempt: number; readonly action: "fast-forward" | "re-prompt" | "promise-nudge"; readonly detail: string })
   | (EventIssue & { readonly kind: "hard-error"; readonly retry: number; readonly max: number; readonly reason: string })

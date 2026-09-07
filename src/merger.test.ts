@@ -2316,6 +2316,66 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       ]),
     );
 
+  it("emits every durable outcome shape and both initial and resolve gate observations", async () => {
+    const outcomes: unknown[] = [];
+    const gates: Array<{ key: string; gate: unknown }> = [];
+    const observations = {
+      onOutcome: (outcome: unknown) => { outcomes.push(outcome); },
+      onGate: (key: string, gate: unknown) => { gates.push({ key, gate }); },
+    };
+
+    await runMergerWithAdapter([issue(10)], makeAdapter({
+      merges: ["ok"], gates: [{ ok: false }, { ok: true }],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+    }).adapter, undefined, undefined, { observations });
+    await runMergerWithAdapter([issue(11)], makeAdapter({
+      merges: ["ok"], installs: [false], heads: ["pre"],
+    }).adapter, undefined, undefined, { observations });
+    await runMergerWithAdapter([{
+      ...issue(12), chunk: { root: 12, branch: "sandbar/chunk-12-c" },
+    }], makeAdapter({ merges: ["ok"], gates: [{ ok: true }] }).adapter,
+    undefined, undefined, { observations });
+    await runMergerWithAdapter([], makeAdapter({
+      chunkRefs: originHas(42),
+    }).adapter, undefined, undefined, {
+      ...landing(request(42)),
+      ongoingIssues: [{ ...issue(42), chunk: { root: 42, branch: "sandbar/chunk-42-c" } }],
+      observations,
+    });
+    await runMergerWithAdapter([], makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>ABANDON</promise><reason>irreconcilable</reason>" }],
+      chunkRefs: originHas(43),
+    }).adapter, undefined, undefined, { ...landing(request(43)), observations });
+    await runMergerWithAdapter([], makeAdapter({
+      merges: ["ok"], gates: [{ ok: true }], chunkRefs: originHas(44),
+    }).adapter, undefined, undefined, { ...landing(request(44)), observations });
+
+    expect(gates).toEqual([
+      { key: "10", gate: expect.objectContaining({ ok: false }) },
+      { key: "10", gate: expect.objectContaining({ ok: true }) },
+      { key: "12", gate: expect.objectContaining({ ok: true }) },
+      { key: "chunk-44", gate: expect.objectContaining({ ok: true }) },
+    ]);
+    expect(outcomes).toEqual([
+      { kind: "merged", issue: expect.objectContaining({ id: "10" }) },
+      { kind: "skipped", issue: expect.objectContaining({ id: "11" }), reason: "install-failed" },
+      { kind: "chunk-landed", landing: expect.objectContaining({
+        issue: expect.objectContaining({ id: "12" }), chunkBranch: "sandbar/chunk-12-c",
+      }) },
+      { kind: "chunk-deferred", deferred: expect.objectContaining({
+        target: expect.objectContaining({ branch: "sandbar/chunk-42-c" }),
+      }) },
+      { kind: "chunk-parked", skipped: expect.objectContaining({
+        target: expect.objectContaining({ branch: "sandbar/chunk-43-c" }),
+        reason: "conflict",
+      }) },
+      { kind: "chunk-on-source", target: expect.objectContaining({
+        branch: "sandbar/chunk-44-c",
+      }) },
+    ]);
+  });
+
   it("defers a request for a chunk this cycle grew, keeping `land` on", async () => {
     // #61 plans a layer of a chunk per cycle, so Phase A can put a member on
     // the very branch a human labelled before Phase B reads the request. What

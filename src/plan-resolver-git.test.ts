@@ -9,7 +9,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readChunkMembers } from "./plan-resolver.js";
+import { readChunkMembers, readIssueBranchRefs } from "./plan-resolver.js";
 
 const repos: string[] = [];
 const git = (cwd: string, ...args: string[]): string =>
@@ -81,5 +81,21 @@ describe("chunk membership from branch containment (#93)", () => {
       ["sandbar/chunk-10-alpha", new Set([10])],
       ["sandbar/chunk-20-beta", new Set([10, 20])],
     ]));
+  });
+});
+
+describe("local issue ref snapshot (#132)", () => {
+  it("reads only canonical local issue branches with their exact tips", async () => {
+    const repo = await newRepo("sandbar-issue-refs-");
+    const base = git(repo, "rev-parse", "HEAD");
+    git(repo, "update-ref", "refs/heads/sandbar/issue-12-good", base);
+    git(repo, "update-ref", "refs/heads/sandbar/issue-nope", base);
+    git(repo, "update-ref", "refs/heads/sandbar/chunk-12-good", base);
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/issue-13-remote", base);
+    expect(await readIssueBranchRefs(repo)).toEqual([{
+      issue: 12,
+      branch: "sandbar/issue-12-good",
+      tip: base,
+    }]);
   });
 });

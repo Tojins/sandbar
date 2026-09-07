@@ -1,7 +1,8 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { runInNewContext } from "node:vm";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { EVENT_SCHEMA_VERSION } from "./events.js";
 import { readUiState, startUiServer } from "./ui-server.js";
@@ -36,6 +37,52 @@ async function runTree(withPid: boolean): Promise<{ logsDir: string; runDir: str
 }
 
 describe("run UI server", () => {
+  it("renders, polls repeatedly, and retains the last state after a network failure", async () => {
+    const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    const app = { innerHTML: "" };
+    let interval: (() => Promise<void>) | undefined;
+    const state = {
+      now: "2026-09-07T10:00:00Z",
+      run: { startedAt: "2026-09-07T09:00:00Z", status: "live", driver: "sandbar test",
+        slots: { used: 1, max: 2 }, lastRecompute: { n: 2, trigger: "slot freed", at: "2026-09-07T09:30:00Z" },
+        exit: null, complaints: [] },
+      pool: [{ issue: 2, title: "Pool title", phase: "implementer",
+        phaseSince: "2026-09-07T09:50:00Z", attempt: 1,
+        spans: [{ kind: "impl", from: "2026-09-07T09:50:00Z", to: null, label: "a1" }] }],
+      waiting: [{ issue: 3, title: "Waiting title", why: "blocked by #2" }],
+      finished: [{ issue: 1, title: "Finished title", outcome: "DONE", attempts: 1,
+        rounds: 1, ms: 60_000, landed: "main", at: "2026-09-07T09:40:00Z" }],
+      eventCount: 1,
+      events: [{ at: "2026-09-07T09:50:00Z", issue: 2, text: "attempt started", tone: "" }],
+    };
+    const fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => state })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({
+        ...state, run: { ...state.run, driver: "sandbar updated" },
+      }) })
+      .mockRejectedValueOnce(new TypeError("network down"));
+    runInNewContext(script!, {
+      document: { getElementById: () => app }, fetch,
+      setInterval: (callback: () => Promise<void>, ms: number) => {
+        expect(ms).toBe(2_000); interval = callback; return 1;
+      },
+      Date, Intl, Math, String, Error, TypeError,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(app.innerHTML).toContain("Pool title");
+    expect(app.innerHTML).toContain("Waiting title");
+    expect(app.innerHTML).toContain("Finished title");
+    expect(app.innerHTML).toContain("attempt started");
+    await interval?.();
+    expect(app.innerHTML).toContain("sandbar updated");
+    await interval?.();
+    expect(app.innerHTML).toContain("No run is serving; last state below");
+    expect(app.innerHTML).toContain("sandbar updated");
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
   it("uses both run.pid and process liveness to classify standalone runs", async () => {
     const live = await runTree(true);
     await mkdir(join(live.logsDir, "run-2026-09-06T10-00-00-000Z"));

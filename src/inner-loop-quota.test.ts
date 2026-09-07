@@ -170,9 +170,12 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       onEvent: (event) => events.push(event),
     })).resolves.toMatchObject({ type: "NEEDS-INFO" });
 
-    expect(events.find((event) => event.kind === "implementer")).toMatchObject({
-      kind: "implementer", usage: { toolCalls: 3, peakContext: 41 },
-    });
+    expect(events.filter((event) => event.kind === "implementer")).toEqual([{
+      kind: "implementer", issue: 124, title: "Issue 124", attempt: 1,
+      signal: "NEEDS-INFO", commits: 0, provider: "claude", model: "model",
+      effort: null, durationMs: expect.any(Number), signalMs: 1, maxGapMs: 1,
+      usage: { toolCalls: 3, peakContext: 41 },
+    }]);
   });
 
   it("runs the enabled UI check before attempt 1 and again after a fresh HARD-ERROR cycle", async () => {
@@ -229,6 +232,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
   });
 
   it("closes UI-check quota, surfaces QUOTA, and never invokes a closed provider", async () => {
+    const events: EventInput[] = [];
     const state = createRunQuotaState();
     const measurement = {
       status: "rejected" as const,
@@ -241,13 +245,18 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("127"), {
       config: config("codex", true, "claude"), hooks: {}, copyToWorktree: [],
-      quotaState: state, onEvent: () => undefined,
+      quotaState: state, onEvent: (event) => events.push(event),
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
     });
     expect(seams.createSandbox).toHaveBeenCalledOnce();
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event.kind === "ui-check")).toEqual([{
+      kind: "ui-check", issue: 127, title: "Issue 127", invocation: 1,
+      provider: "claude", model: "model", effort: null,
+      durationMs: expect.any(Number), result: "quota", usage: { quota: measurement },
+    }]);
 
     await expect(runInnerLoop(issue("128"), {
       config: config("codex", true, "claude"), hooks: {}, copyToWorktree: [],
@@ -297,13 +306,40 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     const passes = events.filter((event) => event.kind === "review-pass");
     expect(passes).toEqual([
-      expect.objectContaining({ pass: "quality", invocation: 1, usage: expect.objectContaining({ inputTokens: 7, toolCalls: 2, peakContext: 52 }) }),
-      expect.objectContaining({ pass: "quality", invocation: 2, usage: expect.objectContaining({ toolCalls: 3, peakContext: 61 }) }),
-      expect.objectContaining({ pass: "correctness", invocation: 1, usage: expect.objectContaining({ toolCalls: 4, peakContext: 73 }) }),
+      {
+        kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
+        pass: "quality", invocation: 1, provider: "claude", model: "model",
+        effort: null, result: "failed", durationMs: expect.any(Number),
+        usage: { inputTokens: 7, toolCalls: 2, peakContext: 52 },
+      },
+      {
+        kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
+        pass: "quality", invocation: 2, provider: "claude", model: "model",
+        effort: null, result: "completed", durationMs: expect.any(Number), maxGapMs: 2,
+        usage: { toolCalls: 3, peakContext: 61 },
+      },
+      {
+        kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
+        pass: "correctness", invocation: 1, provider: "claude", model: "model",
+        effort: null, result: "completed", durationMs: expect.any(Number), maxGapMs: 2,
+        usage: { toolCalls: 4, peakContext: 73 },
+      },
     ]);
+    expect(events.filter((event) => event.kind === "phase")).toEqual([
+      { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["implementer"] },
+      { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["gate-1", "review"] },
+      { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: [] },
+    ]);
+    expect(events.filter((event) => event.kind === "review-round")).toEqual([{
+      kind: "review-round", issue: 125, title: "Issue 125", attempt: 1, round: 1,
+      head: "implemented-sha", qualityMode: "list", gateOk: true,
+      quality: "APPROVED", correctness: "APPROVED", rejectingPass: null,
+      qualityFailures: 0, correctnessFailures: 0, durationMs: expect.any(Number),
+    }]);
   });
 
   it("surfaces quota without a fresh-sandbox retry and closes only that provider", async () => {
+    const events: EventInput[] = [];
     const state = createRunQuotaState();
     const measurement = {
       status: "rejected" as const,
@@ -314,13 +350,18 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("109"), {
       config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
-      onEvent: () => undefined,
+      onEvent: (event) => events.push(event),
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
     });
     expect(seams.createSandbox).toHaveBeenCalledOnce();
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event.kind === "implementer")).toEqual([{
+      kind: "implementer", issue: 109, title: "Issue 109", attempt: 1,
+      signal: "QUOTA", commits: 0, provider: "claude", model: "model",
+      effort: null, durationMs: expect.any(Number), usage: { quota: measurement },
+    }]);
 
     await expect(runInnerLoop(issue("110"), {
       config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
@@ -348,6 +389,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
   });
 
   it("surfaces reviewer quota after one invocation without the reviewer retry", async () => {
+    const events: EventInput[] = [];
     const state = createRunQuotaState();
     const measurement = {
       status: "rejected" as const,
@@ -368,12 +410,18 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("112"), {
       config: config("codex"), hooks: {}, copyToWorktree: [], quotaState: state,
-      onEvent: () => undefined,
+      onEvent: (event) => events.push(event),
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
     });
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
+    expect(events.filter((event) => event.kind === "review-pass")).toEqual([{
+      kind: "review-pass", issue: 112, title: "Issue 112", attempt: 1, round: 1,
+      pass: "quality", invocation: 1, provider: "claude", model: "model",
+      effort: null, result: "quota", durationMs: expect.any(Number),
+      usage: { quota: measurement },
+    }]);
 
     await expect(runInnerLoop(issue("113"), {
       config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,

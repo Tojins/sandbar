@@ -807,6 +807,9 @@ async function runSandboxCycle(
                     worktreePath,
                     anchorContainerName: containerName,
                     logDir: sandboxLogDir,
+                    onNotice: (message) => opts.onEvent({
+                      kind: "complaint", severity: "warning", message,
+                    }),
                   });
                 },
               }
@@ -1719,6 +1722,7 @@ export async function runReviewer(
         // `signalMs` has no reviewer meaning: the reviewer names no completion
         // signal (#83), so the grace phase it measures is unreachable here.
         const logPass = async (
+          result: "completed" | "failed" | "quota",
           maxGapMs: number | undefined,
           usage: AgentUsage | undefined,
           toolCalls: number | undefined,
@@ -1736,6 +1740,7 @@ export async function runReviewer(
             provider: agent,
             model: modelId,
             effort: effort ?? null,
+            result,
             durationMs: passTimer(),
             ...(maxGapMs === undefined ? {} : { maxGapMs }),
             ...(eventUsage(usage, toolCalls, peakContext, rateLimit) === undefined
@@ -1757,6 +1762,7 @@ export async function runReviewer(
             completionSignal: [],
           }));
           await logPass(
+            "completed",
             reviewerRun.maxGapMs,
             reviewerRun.usage,
             reviewerRun.toolCalls,
@@ -1773,6 +1779,7 @@ export async function runReviewer(
           // second is a different fault entirely.
           const partial = agentPartialUsage(err);
           await logPass(
+            err instanceof AgentQuotaError ? "quota" : "failed",
             undefined,
             partial.usage,
             partial.toolCalls,

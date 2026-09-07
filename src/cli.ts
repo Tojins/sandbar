@@ -209,8 +209,11 @@ export async function loadConfig(configPath: string): Promise<RunConfig> {
   return config as RunConfig;
 }
 
-async function main(): Promise<number> {
-  const parsed = parseArgs(process.argv.slice(2));
+export async function main(
+  argv: readonly string[] = process.argv.slice(2),
+  invocationCwd: string = process.cwd(),
+): Promise<number> {
+  const parsed = parseArgs(argv);
   if (parsed.kind === "help") {
     console.log(USAGE);
     return 0;
@@ -222,7 +225,7 @@ async function main(): Promise<number> {
   // Against the process cwd, which is the one thing a shell invocation can
   // reasonably mean by a relative path — and the last place process.cwd() is
   // allowed to decide anything. From here on `cwd` is the config's directory.
-  const configPath = resolve(process.cwd(), parsed.configPath);
+  const configPath = resolve(invocationCwd, parsed.configPath);
   if (parsed.kind === "ui") {
     const config = resolveConfig(
       withDefaultCwd(await loadConfig(configPath), configPath),
