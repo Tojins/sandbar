@@ -1071,47 +1071,64 @@ export const codex = (model: string, options?: CodexOptions): AgentProvider => (
 //
 // `process.on("exit")` stays. It is synchronous and last-resort by nature, and
 // it is what covers a bare `process.exit` from elsewhere in the run, which
-// runs no cleanup action at all. Teardowns are therefore DRAINED rather than
-// iterated: a signal now reaches them twice — once through `runCleanup`, then
-// again through the `exit` event that `runCleanup`'s own `process.exit` fires
-// — and running them twice would `podman rm -f` a container that is already
-// gone and print the worktree-preserved notice to the operator twice.
+// runs no cleanup action at all. Each entry therefore has an ordinary cleanup
+// callback, which may await the run's event writer, and a synchronous exit
+// fallback. Entries are DRAINED rather than iterated: a signal reaches the
+// registry first and the exit hook second, and running either callback twice
+// would remove an already-gone container or duplicate a preservation notice.
 //
 // The dependency this creates is on `installCleanupTraps()` having run, which
 // `run()` does before the first sandbox. Deliberately NOT called from here:
 // those traps also catch uncaughtException/unhandledRejection and exit the
 // process, which is entry-point policy, and this module is imported by tests.
 
-const teardownCallbacks = new Set<() => void>();
+type ShutdownTeardown = {
+  readonly cleanup: () => Promise<void> | void;
+  readonly exitFallback: () => void;
+};
+
+const teardownCallbacks = new Set<ShutdownTeardown>();
 let exitHookInstalled = false;
 let cleanupRegistered = false;
 
-const drainTeardowns = (): unknown[] => {
-  const failures: unknown[] = [];
+const takeTeardowns = (): ShutdownTeardown[] => {
+  const pending = [...teardownCallbacks];
   // Drained, not iterated — see the note above on arriving twice.
-  for (const teardown of [...teardownCallbacks]) {
+  for (const teardown of pending) {
     teardownCallbacks.delete(teardown);
+  }
+  return pending;
+};
+const drainTeardowns = async (mode: "cleanup" | "exit"): Promise<void> => {
+  for (const teardown of takeTeardowns()) {
     try {
-      teardown();
+      if (mode === "cleanup") await teardown.cleanup();
+      else teardown.exitFallback();
     } catch (err) {
-      failures.push(err);
+      if (mode === "cleanup") {
+        await reportCleanupNotice(
+          "cleanup-failure",
+          "Sandbox shutdown cleanup failed",
+          err,
+        );
+      } else {
+        // There is no writable event loop here. The ordinary cleanup mode is
+        // the event-reporting path; this mode can only leave a synchronous
+        // diagnostic while continuing the remaining last-chance removals.
+        console.error("Sandbox shutdown fallback failed:", err);
+      }
     }
   }
-  return failures;
 };
-const runTeardowns = async (): Promise<void> => {
-  for (const failure of drainTeardowns()) {
-    await reportCleanupNotice(
-      "cleanup-failure",
-      "Sandbox shutdown cleanup failed",
-      failure,
-    );
-  }
-};
+const runTeardowns = (): Promise<void> => drainTeardowns("cleanup");
 // Node's `exit` hook cannot await. Ordinary and signal exits drain through the
 // cleanup registry first; this last-resort hook can only make the synchronous
 // removal attempt, and any failure is already beyond a writable event loop.
-const handleExit = (): void => { drainTeardowns(); };
+const handleExit = (): void => {
+  // The exit-mode branch contains no await, so the async function runs through
+  // the full drained snapshot before returning its already-settled promise.
+  void drainTeardowns("exit");
+};
 const installHooks = (): void => {
   if (!cleanupRegistered) {
     cleanupRegistered = true;
@@ -1126,19 +1143,27 @@ function removeExitHook(): void {
   exitHookInstalled = false;
   process.removeListener("exit", handleExit);
 }
-export const registerShutdown = (teardown: () => void): (() => void) => {
-  teardownCallbacks.add(teardown);
+const registerShutdownEntry = (entry: ShutdownTeardown): (() => void) => {
+  teardownCallbacks.add(entry);
   installHooks();
   let active = true;
   return () => {
     if (!active) return;
     active = false;
-    teardownCallbacks.delete(teardown);
+    teardownCallbacks.delete(entry);
     // The `onCleanup` entry cannot be withdrawn and is not withdrawn: it fans
     // out over a set that is empty by then, which costs nothing.
     if (teardownCallbacks.size === 0) removeExitHook();
   };
 };
+
+export const registerShutdown = (teardown: () => void): (() => void) =>
+  registerShutdownEntry({ cleanup: teardown, exitFallback: teardown });
+
+const registerAsyncShutdown = (
+  cleanup: () => Promise<void>,
+  exitFallback: () => void,
+): (() => void) => registerShutdownEntry({ cleanup, exitFallback });
 
 // ---------------------------------------------------------------------------
 // Mount formatting / image naming — verbatim from mountUtils.ts
@@ -2464,13 +2489,14 @@ export const createSandbox = async (
     throw e;
   }
 
-  const forceCleanup = (): void => {
-    if (options.onNotice) return;
-    console.error(`\nWorktree preserved at ${worktreePath}`);
-    console.error(`  To review: cd ${worktreePath}`);
-    console.error(`  To clean up: remove ${worktreePath}`);
-  };
-  const unregisterShutdown = registerShutdown(forceCleanup);
+  const preservedNotice =
+    `Worktree preserved at ${worktreePath}\n` +
+    `  To review: cd ${worktreePath}\n` +
+    `  To clean up: remove ${worktreePath}`;
+  const unregisterShutdown = registerAsyncShutdown(
+    () => Promise.resolve(notice("error", preservedNotice)),
+    () => console.error(`\n${preservedNotice}`),
+  );
 
   let closed = false;
   let keepReason: string | undefined;

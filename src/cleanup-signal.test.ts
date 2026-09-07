@@ -91,6 +91,28 @@ console.log("ready");
 setInterval(() => {}, 1000);
 `;
 
+const failingTeardownSource = (markerPath: string) => `
+import { appendFileSync } from "node:fs";
+import {
+  installCleanupTraps,
+  onCleanup,
+  setCleanupReporter,
+} from ${JSON.stringify(join(SRC_DIR, "cleanup.ts"))};
+import { registerShutdown } from ${JSON.stringify(join(SRC_DIR, "agent-sandbox.ts"))};
+
+const note = (line) => appendFileSync(${JSON.stringify(markerPath)}, line + "\\n");
+
+setCleanupReporter((kind, message, cause) => {
+  note(kind + ":" + message + ":" + (cause instanceof Error ? cause.message : String(cause)));
+});
+installCleanupTraps();
+onCleanup(() => note("remaining-cleanup-finished"));
+registerShutdown(() => { throw new Error("sandbox teardown exploded"); });
+
+console.log("ready");
+setInterval(() => {}, 1000);
+`;
+
 type ChildRun = { code: number | null; signal: string | null; lines: string[] };
 
 // `name` keeps each case's marker and script distinct — they share `dir`, and a
@@ -178,6 +200,16 @@ describe("SIGINT during a run", () => {
     // gets the worktree-preserved notice twice.
     expect(run.lines.filter((l) => l === "sandbox-teardown")).toHaveLength(1);
   });
+
+  it("reports a failed sandbox teardown and continues draining cleanup", async () => {
+    const failed = await sigintChild("failing-sandbox", failingTeardownSource);
+    expect(failed.lines).toContain(
+      "cleanup-failure:Sandbox shutdown cleanup failed:sandbox teardown exploded",
+    );
+    expect(failed.lines).toContain("remaining-cleanup-finished");
+    expect(failed.code).toBe(130);
+    expect(failed.signal).toBeNull();
+  }, 30_000);
 
   it("exits 130, the code cleanup.ts chose for SIGINT", () => {
     // The old handler's `process.exit(1)` won this race, so the run reported a
