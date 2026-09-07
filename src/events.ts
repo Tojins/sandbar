@@ -4,7 +4,8 @@
 // typed event. `seq` is allocated synchronously and writes are chained, so the
 // file order is the event order even when issue tasks finish concurrently.
 // `ts` is wall-clock display data only; no decision reads it. Raw subprocess
-// transcripts remain separate files through `logs.ts`.
+// transcripts remain separate files through `logs.ts`. A `landed` duration is
+// one merge unit; `landing-batch` carries the distinct whole-phase duration.
 //
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
@@ -107,6 +108,7 @@ export type EventInput =
   | { readonly kind: "preflight"; readonly action: string; readonly detail: string }
   | { readonly kind: "sweep"; readonly scope: "startup" | "quiescent"; readonly removed: readonly string[]; readonly failures: readonly string[] }
   | { readonly kind: "image"; readonly action: string; readonly image: string; readonly durationMs?: number; readonly detail: string }
+  | { readonly kind: "landing-batch"; readonly n: number; readonly durationMs: number }
   | {
       readonly kind: "recompute";
       readonly n: number;

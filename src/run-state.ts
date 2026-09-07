@@ -124,6 +124,10 @@ function feedText(event: RunEvent): FeedEvent | null {
       text = `image ${event.action} · ${event.image}`;
       tone = "dim";
       break;
+    case "landing-batch":
+      text = `landing batch ${event.n} complete · ${event.durationMs}ms`;
+      tone = "dim";
+      break;
     case "admitted":
       text = `admitted #${event.issue}`;
       tone = "dim";

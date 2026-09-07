@@ -463,7 +463,35 @@ describe("runMergerWithAdapter — clean-merge happy paths", () => {
     expect(calls.closes).toEqual([
       { n: 42, comment: "Completed by Sandbar" },
     ]);
-    expect(outcomes).toEqual([{ kind: "merged", issue: issue(42) }]);
+    expect(outcomes).toEqual([{ kind: "merged", issue: issue(42), durationMs: 0 }]);
+  });
+
+  it("reports each source landing's merge-unit duration rather than cumulative batch time", async () => {
+    const { adapter } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+    });
+    const durations: number[] = [];
+    let now = 0;
+    await runMergerWithAdapter(
+      [issue(41), issue(42)],
+      adapter,
+      undefined,
+      undefined,
+      {
+        clock: () => {
+          now += 10;
+          return now;
+        },
+        observations: {
+          onGate: () => undefined,
+          onOutcome: (outcome) => {
+            if (outcome.kind === "merged") durations.push(outcome.durationMs);
+          },
+        },
+      },
+    );
+    expect(durations).toEqual([30, 30]);
   });
 
   it("clean merge + npm install fails: resets to preMergeSha, comments install-failed, skips, no gate", async () => {
@@ -2358,21 +2386,21 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       { key: "chunk-44", gate: expect.objectContaining({ ok: true }) },
     ]);
     expect(outcomes).toEqual([
-      { kind: "merged", issue: expect.objectContaining({ id: "10" }) },
-      { kind: "skipped", issue: expect.objectContaining({ id: "11" }), reason: "install-failed" },
+      { kind: "merged", issue: expect.objectContaining({ id: "10" }), durationMs: expect.any(Number) },
+      { kind: "skipped", issue: expect.objectContaining({ id: "11" }), reason: "install-failed", durationMs: expect.any(Number) },
       { kind: "chunk-landed", landing: expect.objectContaining({
         issue: expect.objectContaining({ id: "12" }), chunkBranch: "sandbar/chunk-12-c",
-      }) },
+      }), durationMs: expect.any(Number) },
       { kind: "chunk-deferred", deferred: expect.objectContaining({
         target: expect.objectContaining({ branch: "sandbar/chunk-42-c" }),
-      }) },
+      }), durationMs: expect.any(Number) },
       { kind: "chunk-parked", skipped: expect.objectContaining({
         target: expect.objectContaining({ branch: "sandbar/chunk-43-c" }),
         reason: "conflict",
-      }) },
+      }), durationMs: expect.any(Number) },
       { kind: "chunk-on-source", target: expect.objectContaining({
         branch: "sandbar/chunk-44-c",
-      }) },
+      }), durationMs: expect.any(Number) },
     ]);
   });
 

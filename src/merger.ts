@@ -576,7 +576,7 @@ export type MergeUnit = {
 
 // What one `attemptMerge` did to the worktree, with the tracker deliberately
 // untouched. `install-failed` and `abandon` have both already been reverted.
-type MergeAttempt =
+type MergeAttempt = (
   | { readonly kind: "merged" }
   | { readonly kind: "install-failed" }
   | {
@@ -594,7 +594,8 @@ type MergeAttempt =
       // paths were still unmerged when it gave up.
       readonly attempts: readonly ResolveAttemptSummary[];
       readonly conflictPaths: readonly string[];
-    };
+    }
+) & { readonly durationMs: number };
 
 export type PushResult =
   | { readonly kind: "ok" }
@@ -753,7 +754,10 @@ type ChunkLandingUnit = {
 // chunk head afterwards (`preflight.ts` — the merger pushes from a detached
 // HEAD). So every prompt that names these commits has to name this, not
 // `request.branch`.
-type MergedChunkUnit = ChunkLandingUnit & { readonly ref: string };
+type FetchedChunkUnit = ChunkLandingUnit & { readonly ref: string };
+type MergedChunkUnit = FetchedChunkUnit & {
+  readonly durationMs: number;
+};
 
 // A member whose branch is on its chunk's branch AND that branch is on origin
 // (#60). Recorded only after the push, so the label finalise applies from it
@@ -836,18 +840,20 @@ export type MergerSummary = {
 };
 
 export type MergerOutcome =
-  | { readonly kind: "merged"; readonly issue: IssueRef }
-  | { readonly kind: "chunk-landed"; readonly landing: ChunkLanding }
-  | { readonly kind: "skipped"; readonly issue: IssueRef; readonly reason: SkipReason }
-  | { readonly kind: "chunk-on-source"; readonly target: ChunkLandTarget }
-  | { readonly kind: "chunk-parked"; readonly skipped: SkippedChunkLand }
-  | { readonly kind: "chunk-deferred"; readonly deferred: DeferredChunkLand };
+  | { readonly kind: "merged"; readonly issue: IssueRef; readonly durationMs: number }
+  | { readonly kind: "chunk-landed"; readonly landing: ChunkLanding; readonly durationMs: number }
+  | { readonly kind: "skipped"; readonly issue: IssueRef; readonly reason: SkipReason; readonly durationMs: number }
+  | { readonly kind: "chunk-on-source"; readonly target: ChunkLandTarget; readonly durationMs: number }
+  | { readonly kind: "chunk-parked"; readonly skipped: SkippedChunkLand; readonly durationMs: number }
+  | { readonly kind: "chunk-deferred"; readonly deferred: DeferredChunkLand; readonly durationMs: number };
 
 export type MergerObservations = {
   readonly onGate: (
     key: string,
     gate: Awaited<ReturnType<MergerAdapter["runGate"]>>,
   ) => void | Promise<void>;
+  // Emitted at the durable outcome boundary. durationMs is the corresponding
+  // merge unit (or request decision), never elapsed time for the whole batch.
   readonly onOutcome: (outcome: MergerOutcome) => void | Promise<void>;
 };
 
@@ -1217,12 +1223,14 @@ async function attemptMerge(
         silent: outcome.silent === true,
         attempts: outcome.attempts,
         conflictPaths: outcome.conflictPaths,
+        durationMs: unitTimer(),
       };
     }
+    const durationMs = unitTimer();
     await emit(
-      `merged ${label} (via resolve-loop) ${durationField(unitTimer())}`,
+      `merged ${label} (via resolve-loop) ${durationField(durationMs)}`,
     );
-    return { kind: "merged" };
+    return { kind: "merged", durationMs };
   }
 
   // `npm install` runs on every clean merge and on every resolve attempt, and
@@ -1234,7 +1242,7 @@ async function attemptMerge(
   await emit(`install ${label} ok=${inst.ok} ${durationField(installTimer())}`);
   if (!inst.ok) {
     await adapter.resetHardSha(preMergeSha);
-    return { kind: "install-failed" };
+    return { kind: "install-failed", durationMs: unitTimer() };
   }
 
   const g = await adapter.runGate();
@@ -1289,25 +1297,28 @@ async function attemptMerge(
         silent: outcome.silent === true,
         attempts: outcome.attempts,
         conflictPaths: outcome.conflictPaths,
+        durationMs: unitTimer(),
       };
     }
+    const durationMs = unitTimer();
     await emit(
       `merged ${label} (gate-red recovered via resolve-loop) ` +
-        durationField(unitTimer()),
+        durationField(durationMs),
     );
-    return { kind: "merged" };
+    return { kind: "merged", durationMs };
   }
 
-  await emit(`merged ${label} ${durationField(unitTimer())}`);
-  return { kind: "merged" };
+  const durationMs = unitTimer();
+  await emit(`merged ${label} ${durationField(durationMs)}`);
+  return { kind: "merged", durationMs };
 }
 
 export async function runMergerWithAdapter(
   issues: readonly IssueRef[],
   adapter: MergerAdapter,
-  log?: MergerLog,
-  onGateRed?: MergerGateOutputSink,
-  opts: RunMergerOptions = { observations: DISCARD_MERGER_OBSERVATIONS },
+  log: MergerLog | undefined,
+  onGateRed: MergerGateOutputSink | undefined,
+  opts: RunMergerOptions,
 ): Promise<MergerSummary> {
   const merged: IssueRef[] = [];
   const chunkLanded: ChunkLanding[] = [];
@@ -1456,12 +1467,13 @@ export async function runMergerWithAdapter(
     clock: opts.clock,
   };
 
-  // One DONE issue branch. True means its commits are on HEAD; false means it
-  // was skipped and HEAD is back where it started.
+  // One DONE issue branch. A number means its commits are on HEAD and carries
+  // the measured merge-unit duration; null means it was skipped and HEAD is
+  // back where it started.
   const mergeOne = async (
     issue: IssueRef,
     target: MergeTarget,
-  ): Promise<boolean> => {
+  ): Promise<number | null> => {
     try {
       const n = issueNumberOf(issue);
       const outcome = await attemptMerge(
@@ -1474,15 +1486,20 @@ export async function runMergerWithAdapter(
         },
         mergeDeps,
       );
-      if (outcome.kind === "merged") return true;
+      if (outcome.kind === "merged") return outcome.durationMs;
 
       if (outcome.kind === "install-failed") {
         await adapter.commentOnIssue(n, buildInstallFailedComment(target));
         await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
         skipped.push({ issue, reason: "install-failed" });
-        await opts.observations.onOutcome({ kind: "skipped", issue, reason: "install-failed" });
+        await opts.observations.onOutcome({
+          kind: "skipped",
+          issue,
+          reason: "install-failed",
+          durationMs: outcome.durationMs,
+        });
         await emit(`skip #${n} reason=install-failed`);
-        return false;
+        return null;
       }
       if (outcome.silent) {
         // Silent abandon: no comment, no label flip. The orchestrator's
@@ -1490,9 +1507,14 @@ export async function runMergerWithAdapter(
         // (fresh attempt next cycle) or escalate to human attention, based
         // on the per-issue retry count it tracks in runState.
         skipped.push({ issue, reason: "silent-noop" });
-        await opts.observations.onOutcome({ kind: "skipped", issue, reason: "silent-noop" });
+        await opts.observations.onOutcome({
+          kind: "skipped",
+          issue,
+          reason: "silent-noop",
+          durationMs: outcome.durationMs,
+        });
         await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
-        return false;
+        return null;
       }
       await adapter.commentOnIssue(
         n,
@@ -1506,11 +1528,16 @@ export async function runMergerWithAdapter(
       );
       await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
       skipped.push({ issue, reason: outcome.mode });
-      await opts.observations.onOutcome({ kind: "skipped", issue, reason: outcome.mode });
+      await opts.observations.onOutcome({
+        kind: "skipped",
+        issue,
+        reason: outcome.mode,
+        durationMs: outcome.durationMs,
+      });
       await emit(
         `skip #${n} reason=${outcome.mode} resolve-abandon: ${outcome.reason}`,
       );
-      return false;
+      return null;
     } catch (err) {
       // Not a hypothetical throw site: `getIssueBody` throws by design when
       // `gh` fails (see realAdapter below), and `runGate` throws — rather than
@@ -1540,7 +1567,7 @@ export async function runMergerWithAdapter(
   // whether or not the review surface came up.
   const landChunkGroup = async (group: ChunkGroup): Promise<void> => {
     const branch = group.target.branch;
-    const landedMembers: IssueRef[] = [];
+    const landedMembers: Array<{ issue: IssueRef; durationMs: number }> = [];
     try {
       const base = await adapter.chunkBase(branch);
       await emit(`chunk ${branch}: base ${base}`);
@@ -1549,7 +1576,8 @@ export async function runMergerWithAdapter(
       asHalt(`Chunk landing failed to base ${branch}`)(err);
     }
     for (const member of group.members) {
-      if (await mergeOne(member, group.target)) landedMembers.push(member);
+      const durationMs = await mergeOne(member, group.target);
+      if (durationMs !== null) landedMembers.push({ issue: member, durationMs });
     }
     if (landedMembers.length === 0) {
       await emit(`chunk ${branch}: nothing landed`);
@@ -1561,9 +1589,9 @@ export async function runMergerWithAdapter(
     const push = await adapter
       .pushChunkBranch(
         branch,
-        landedMembers.map((member) => ({
-          source: member.branch,
-          destination: memberBranchName(issueNumberOf(member)),
+        landedMembers.map(({ issue }) => ({
+          source: issue.branch,
+          destination: memberBranchName(issueNumberOf(issue)),
         })),
       )
       .catch(asHalt(`Chunk push failed for ${branch}`));
@@ -1576,18 +1604,18 @@ export async function runMergerWithAdapter(
       throw new MergerError(
         `Could not push chunk branch ${branch} (${push.kind === "race" ? "rejected — the branch moved under this cycle" : push.reason}). ` +
           `${landedMembers.length} issue(s) merged onto it locally and were NOT landed: ` +
-          `${landedMembers.map((m) => `#${issueNumberOf(m)}`).join(", ")}. ` +
+          `${landedMembers.map(({ issue }) => `#${issueNumberOf(issue)}`).join(", ")}. ` +
           `They keep ready-for-agent and their branches; the composition is discarded with the merger worktree.`,
         nothingLanded(),
       );
     }
-    for (const member of landedMembers) {
-      const landing = { issue: member, chunkBranch: branch };
+    for (const { issue, durationMs } of landedMembers) {
+      const landing = { issue, chunkBranch: branch };
       chunkLanded.push(landing);
-      await opts.observations.onOutcome({ kind: "chunk-landed", landing });
+      await opts.observations.onOutcome({ kind: "chunk-landed", landing, durationMs });
     }
     await emit(
-      `chunk ${branch}: landed ${landedMembers.map((m) => `#${issueNumberOf(m)}`).join(", ")} and pushed`,
+      `chunk ${branch}: landed ${landedMembers.map(({ issue }) => `#${issueNumberOf(issue)}`).join(", ")} and pushed`,
     );
 
     // The review surface (#62), last and never first: a pull request is a
@@ -1596,9 +1624,9 @@ export async function runMergerWithAdapter(
     // above, so a failure here costs the PR and not the landing.
     const prMembers = chunkMembersOnBranch(
       group.landed,
-      landedMembers.map((m) => ({
-        number: issueNumberOf(m),
-        title: m.title,
+      landedMembers.map(({ issue }) => ({
+        number: issueNumberOf(issue),
+        title: issue.title,
       })),
     );
     const pr = await adapter
@@ -1618,7 +1646,7 @@ export async function runMergerWithAdapter(
         // been shown.
         asHalt(
           `Chunk branch ${branch} is on origin with ` +
-            `${landedMembers.map((m) => `#${issueNumberOf(m)}`).join(", ")} landed on it, ` +
+            `${landedMembers.map(({ issue }) => `#${issueNumberOf(issue)}`).join(", ")} landed on it, ` +
             `but its draft pull request could not be opened or updated. Those issues keep ` +
             `their landing and are labelled needs-review when that display write succeeds; ` +
             `open or update the PR by hand (or fix ` +
@@ -1670,7 +1698,7 @@ export async function runMergerWithAdapter(
   // only `origin/<chunk>` exists here, which is why the caller passes the ref
   // `fetchChunkRef` resolved rather than `request.branch`. See
   // `MergedChunkUnit`.
-  const chunkMemberRefs = (unit: MergedChunkUnit): readonly IssueRef[] =>
+  const chunkMemberRefs = (unit: FetchedChunkUnit): readonly IssueRef[] =>
     unit.target.members.map((m) => ({
       id: String(m.number),
       title: m.title,
@@ -1692,10 +1720,11 @@ export async function runMergerWithAdapter(
     request: ChunkLandTarget,
     comment: string,
     reason: ChunkLandSkipReason,
+    durationMs: number,
   ): Promise<void> => {
     const skipped = { target: request, reason };
     skippedChunks.push(skipped);
-    await opts.observations.onOutcome({ kind: "chunk-parked", skipped });
+    await opts.observations.onOutcome({ kind: "chunk-parked", skipped, durationMs });
     if (request.pullRequest > 0) {
       await adapter.commentOnPullRequest(request.pullRequest, comment);
       await adapter.removePullRequestLabel(request.pullRequest, LAND_LABEL);
@@ -1713,6 +1742,7 @@ export async function runMergerWithAdapter(
     landedNow: readonly ChunkMember[],
     sourceBranch: string,
     reason: "ongoing" | "rework",
+    durationMs: number,
   ): Promise<void> => {
     if (request.pullRequest > 0) {
       await adapter.commentOnPullRequest(
@@ -1727,7 +1757,7 @@ export async function runMergerWithAdapter(
     }
     const deferred = { target: request, landedNow };
     deferredChunks.push(deferred);
-    await opts.observations.onOutcome({ kind: "chunk-deferred", deferred });
+    await opts.observations.onOutcome({ kind: "chunk-deferred", deferred, durationMs });
     await emit(
       `chunk ${request.branch}: not landed (` +
         (reason === "rework" ? "queued for rework: " : "ongoing member work: ") +
@@ -1751,20 +1781,33 @@ export async function runMergerWithAdapter(
     if (!chunkLanding) return [];
     const onHead: MergedChunkUnit[] = [];
     for (const request of chunkLanding.requests) {
+      const requestTimer = startTimer(opts.clock);
       const pending: ChunkLandingUnit = {
         target: request,
         sourceBranch: chunkLanding.sourceBranch,
       };
       try {
         if (request.rework.length > 0) {
-          await deferChunk(request, request.rework, pending.sourceBranch, "rework");
+          await deferChunk(
+            request,
+            request.rework,
+            pending.sourceBranch,
+            "rework",
+            requestTimer(),
+          );
           continue;
         }
         const targeting = cycle
           .filter((issue) => issue.chunk?.branch === request.branch)
           .map((issue) => ({ number: issueNumberOf(issue), title: issue.title }));
         if (targeting.length > 0) {
-          await deferChunk(request, targeting, pending.sourceBranch, "ongoing");
+          await deferChunk(
+            request,
+            targeting,
+            pending.sourceBranch,
+            "ongoing",
+            requestTimer(),
+          );
           continue;
         }
         const found = await adapter.fetchChunkRef(request.branch);
@@ -1792,10 +1835,11 @@ export async function runMergerWithAdapter(
             request,
             CHUNK_BRANCH_MISSING_PR_COMMENT({ chunkBranch: request.branch }),
             "branch-missing",
+            requestTimer(),
           );
           continue;
         }
-        const unit: MergedChunkUnit = { ...pending, ref: found.ref };
+        const unit: FetchedChunkUnit = { ...pending, ref: found.ref };
         const outcome = await attemptMerge(
           {
             unit: {
@@ -1815,7 +1859,7 @@ export async function runMergerWithAdapter(
           mergeDeps,
         );
         if (outcome.kind === "merged") {
-          onHead.push(unit);
+          onHead.push({ ...unit, durationMs: outcome.durationMs });
           continue;
         }
         await parkChunk(
@@ -1837,6 +1881,7 @@ export async function runMergerWithAdapter(
               outcome.kind === "install-failed" ? [] : outcome.conflictPaths,
           }),
           outcome.kind === "install-failed" ? "install-failed" : outcome.mode,
+          outcome.durationMs,
         );
       } catch (err) {
         asHalt(`Chunk landing failed on ${request.branch}`)(err);
@@ -1850,9 +1895,13 @@ export async function runMergerWithAdapter(
   // and for the same reason.
   const chunkMergesOnHead = await landRequestedChunks();
 
+  const sourceLandings: Array<{ issue: IssueRef; durationMs: number }> = [];
   for (const issue of sorted) {
     if (issue.chunk) continue;
-    if (await mergeOne(issue, SOURCE_TARGET)) merged.push(issue);
+    const durationMs = await mergeOne(issue, SOURCE_TARGET);
+    if (durationMs === null) continue;
+    merged.push(issue);
+    sourceLandings.push({ issue, durationMs });
   }
 
   // Everything that has to happen once the source branch has moved, in one
@@ -1888,11 +1937,19 @@ export async function runMergerWithAdapter(
   };
 
   const recordSourceLanding = async (): Promise<void> => {
-    for (const issue of merged) {
-      await opts.observations.onOutcome({ kind: "merged", issue });
+    for (const { issue, durationMs } of sourceLandings) {
+      await opts.observations.onOutcome({
+        kind: "merged",
+        issue,
+        durationMs,
+      });
     }
-    for (const { target } of chunkMergesOnHead) {
-      await opts.observations.onOutcome({ kind: "chunk-on-source", target });
+    for (const { target, durationMs } of chunkMergesOnHead) {
+      await opts.observations.onOutcome({
+        kind: "chunk-on-source",
+        target,
+        durationMs,
+      });
     }
   };
 
@@ -1990,7 +2047,7 @@ export async function runMergerWithAdapter(
       // by issue, so a `gh` failure on the second of three must not discard
       // what the first one already applied.
       await adapter.resetHardSha(verified.cycleBaseSha).catch(haltVerified);
-      for (const issue of merged) {
+      for (const { issue, durationMs } of sourceLandings) {
         // The whole body, not a `.catch` per call: `buildForgeUnverifiedComment`
         // is evaluated as an ARGUMENT, so it runs before the promise it feeds
         // exists and a throw from it lands outside any `.catch` attached to
@@ -2015,6 +2072,7 @@ export async function runMergerWithAdapter(
             kind: "skipped",
             issue,
             reason: "forge-unverified",
+            durationMs,
           });
           await emit(`skip #${n} reason=forge-unverified`);
         } catch (err) {
@@ -2025,7 +2083,7 @@ export async function runMergerWithAdapter(
       // issues beside them and parked the same way: `land` comes off and the
       // pull request says the forge judged the whole composition, not this
       // chunk. The revert above already took their merges with it.
-      for (const { target, sourceBranch } of chunkMergesOnHead) {
+      for (const { target, sourceBranch, durationMs } of chunkMergesOnHead) {
         try {
           await parkChunk(
             target,
@@ -2036,6 +2094,7 @@ export async function runMergerWithAdapter(
               siblings: merged.map((m) => issueNumberOf(m)),
             }),
             "forge-unverified",
+            durationMs,
           );
         } catch (err) {
           haltVerified(err);

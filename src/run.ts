@@ -1103,10 +1103,7 @@ export async function run(
     if (landingFailure === null) throw primaryFailure;
   };
 
-  const recordLandingOutcome = async (
-    outcome: MergerOutcome,
-    durationMs: number,
-  ): Promise<void> => {
+  const recordLandingOutcome = async (outcome: MergerOutcome): Promise<void> => {
     switch (outcome.kind) {
       case "merged":
         await runRecord.emit({
@@ -1117,7 +1114,7 @@ export async function run(
           branch: outcome.issue.branch,
           target: config.sourceBranch,
           reason: null,
-          durationMs,
+          durationMs: outcome.durationMs,
         });
         return;
       case "chunk-landed":
@@ -1129,7 +1126,7 @@ export async function run(
           branch: outcome.landing.issue.branch,
           target: outcome.landing.chunkBranch,
           reason: null,
-          durationMs,
+          durationMs: outcome.durationMs,
         });
         return;
       case "skipped":
@@ -1141,7 +1138,7 @@ export async function run(
           branch: outcome.issue.branch,
           target: null,
           reason: outcome.reason,
-          durationMs,
+          durationMs: outcome.durationMs,
         });
         return;
       case "chunk-on-source":
@@ -1151,7 +1148,7 @@ export async function run(
           branch: outcome.target.branch,
           target: config.sourceBranch,
           reason: null,
-          durationMs,
+          durationMs: outcome.durationMs,
         });
         return;
       case "chunk-parked":
@@ -1161,7 +1158,7 @@ export async function run(
           branch: outcome.skipped.target.branch,
           target: null,
           reason: outcome.skipped.reason,
-          durationMs,
+          durationMs: outcome.durationMs,
         });
         return;
       case "chunk-deferred":
@@ -1172,7 +1169,7 @@ export async function run(
           target: null,
           reason: `member work in flight (${outcome.deferred.landedNow
             .map((member) => `#${member.number}`).join(", ")})`,
-          durationMs,
+          durationMs: outcome.durationMs,
         });
         return;
     }
@@ -1625,7 +1622,9 @@ export async function run(
               : undefined;
 
           // The whole merge phase — #77 §1's "merge phase, 3 branches" row,
-          // which was hand-arithmetic off two adjacent timestamps (#82).
+          // which was hand-arithmetic off two adjacent timestamps (#82). This
+          // timer becomes one landing-batch event; each landed event receives
+          // its own merge-unit duration from the merger observation boundary.
           const mergePhaseTimer = startTimer();
           mergerSummary = await runMergerWithAdapter(
             completedIssues,
@@ -1657,7 +1656,7 @@ export async function run(
                     ),
                   }).then(() => undefined);
                 },
-                onOutcome: (outcome) => recordLandingOutcome(outcome, mergePhaseTimer()),
+                onOutcome: recordLandingOutcome,
               },
               ...(verified ? { verified } : {}),
               ...(landRequests.length > 0
@@ -1670,6 +1669,11 @@ export async function run(
                 : {}),
             },
           );
+          await runRecord.emit({
+            kind: "landing-batch",
+            n: landingNumber,
+            durationMs: mergePhaseTimer(),
+          });
         } catch (err) {
           if (err instanceof MergerError) {
             if (err.cause instanceof AgentQuotaError) {

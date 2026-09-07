@@ -337,6 +337,7 @@ describe("run quota orchestration (#109)", () => {
         kind: "skipped",
         issue: done,
         reason: "gate-2 stayed red",
+        durationMs: 17,
       });
       throw new MergerError("merge halted", partial);
     });
@@ -349,6 +350,7 @@ describe("run quota orchestration (#109)", () => {
       issue: 1,
       outcome: "skipped",
       reason: "gate-2 stayed red",
+      durationMs: 17,
     }));
   });
 

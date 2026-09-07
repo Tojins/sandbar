@@ -479,7 +479,9 @@ starts, ongoing work, landings, and the terminal-without-landing backstop;
   every container in the run executes — was announced to a terminal and nowhere
   else. `GateResult` carries `durationMs` plus a per-phase `steps` split filled
   in `runStackGate`, the only place a step runs; run events retain that
-  structure, and `sandbar gate` is its only terminal renderer. All three image build entry
+  structure. A `landed.durationMs` is one merge unit, while the distinct
+  `landing-batch.durationMs` is the whole serialized phase. `sandbar gate` is
+  the gate's only terminal renderer. All three image build entry
   points hand an `ImageBuildRecord` to an `onImage` seam kept separate from the
   CLI progress seam; `run()` suppresses progress and captures build output so
   stdout remains the UI URL. Two
