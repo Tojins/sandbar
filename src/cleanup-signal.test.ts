@@ -113,6 +113,48 @@ console.log("ready");
 setInterval(() => {}, 1000);
 `;
 
+const asyncPreservationSource = (markerPath: string) => `
+import { appendFileSync } from "node:fs";
+import {
+  installCleanupTraps,
+  onCleanup,
+} from ${JSON.stringify(join(SRC_DIR, "cleanup.ts"))};
+import { createSandbox } from ${JSON.stringify(join(SRC_DIR, "agent-sandbox.ts"))};
+
+const note = (line) => appendFileSync(${JSON.stringify(markerPath)}, line + "\\n");
+
+installCleanupTraps();
+onCleanup(() => note("later-cleanup-finished"));
+await createSandbox({
+  branch: "sandbar/issue-132-event-ui",
+  sandbox: {
+    env: {},
+    create: async () => ({
+      containerName: "fake-sandbox",
+      worktreePath: "/workspace",
+      close: async () => undefined,
+    }),
+  },
+  layout: {
+    hostCwd: "/unused/host",
+    stateDir: "/unused/state",
+    repoDir: "/unused/cache.git",
+    sourceWorktreeDir: "/unused/source",
+    worktreesDir: "/unused/worktrees",
+    logsDir: "/unused/logs",
+  },
+  env: {},
+  preparedWorktreePath: "/tmp/preserved-issue-132",
+  onNotice: async (severity, message) => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    note("preservation-event:" + severity + ":" + message.replaceAll("\\n", " | "));
+  },
+});
+
+console.log("ready");
+setInterval(() => {}, 1000);
+`;
+
 type ChildRun = { code: number | null; signal: string | null; lines: string[] };
 
 // `name` keeps each case's marker and script distinct — they share `dir`, and a
@@ -209,6 +251,20 @@ describe("SIGINT during a run", () => {
     expect(failed.lines).toContain("remaining-cleanup-finished");
     expect(failed.code).toBe(130);
     expect(failed.signal).toBeNull();
+  }, 30_000);
+
+  it("awaits the sandbox's asynchronous preservation event before later cleanup and exit", async () => {
+    const preserved = await sigintChild("async-preservation", asyncPreservationSource);
+    const event =
+      "preservation-event:error:Worktree preserved at /tmp/preserved-issue-132 | " +
+      "  To review: cd /tmp/preserved-issue-132 | " +
+      "  To clean up: remove /tmp/preserved-issue-132";
+    expect(preserved.lines).toContain(event);
+    expect(preserved.lines.indexOf(event)).toBeLessThan(
+      preserved.lines.indexOf("later-cleanup-finished"),
+    );
+    expect(preserved.code).toBe(130);
+    expect(preserved.signal).toBeNull();
   }, 30_000);
 
   it("exits 130, the code cleanup.ts chose for SIGINT", () => {

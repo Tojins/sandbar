@@ -354,6 +354,26 @@ describe("run quota orchestration (#109)", () => {
     }));
   });
 
+  it("records exactly one duration-bearing event for a completed landing batch", async () => {
+    const done = issue("1");
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValue(resolution([]));
+    seams.innerLoop.mockResolvedValue({
+      type: "DONE",
+      commits: [{ sha: "abc" }],
+    });
+    seams.merger.mockResolvedValue(summary([done]));
+
+    await expect(run(config)).resolves.toBeUndefined();
+    expect(seams.merger).toHaveBeenCalledOnce();
+    expect(eventsOf("landing-batch")).toEqual([{
+      kind: "landing-batch",
+      n: 1,
+      durationMs: expect.any(Number),
+    }]);
+  });
+
   it("refills a freed slot before landing while a sibling remains active", async () => {
     const issues = [issue("1"), issue("2"), issue("3"), issue("4"), issue("5")];
     const slow = deferred<{ type: "DONE"; commits: { sha: string }[] }>();
