@@ -316,7 +316,9 @@ starts, ongoing work, landings, and the terminal-without-landing backstop;
 - **One cleanup registry owns signals and the exit (#35).** No module but
   `src/cleanup.ts` may trap a signal or exit on one. Anything created in a
   loop registers with `registerDisposable` and withdraws itself when its
-  idempotence latch flips (#55).
+  idempotence latch flips (#55). Cleanup reporting is best-effort: a rejected
+  event write cannot gate the drain, and one failed action or notice never
+  prevents the remaining resource teardowns.
 - **The host must not sleep while sandbar is working (#117).** On WSL2 the
   *Windows* host suspends the VM under a running series, and the failure was
   never the request — it was WHEN it is held: every sleep observed on this
@@ -446,6 +448,8 @@ starts, ongoing work, landings, and the terminal-without-landing backstop;
   `run-<stamp>/events.jsonl`; every event has monotonic `seq`, wall-clock `ts`
   and a typed `kind`, and `run-start` declares the schema version. Readers
   reject unknown schemas; older log-only runs are intentionally unreadable.
+  Appends are serialized, but a rejected append does not poison that latch or
+  consume a sequence number; a later write can resume with a contiguous record.
   Every outcome or refusal after the lock is an event. Refused config, missing
   `GH_TOKEN`, and losing the lock remain stderr-only because no record can be
   owned safely. Raw agent, reviewer, gate, merger, and resolve transcripts stay
@@ -460,7 +464,9 @@ starts, ongoing work, landings, and the terminal-without-landing backstop;
   module for post-mortem browsing. The page polls every two seconds. A growing
   file plus live matching `run.pid` means working; a dead/missing PID without
   `run-end` means crashed. `uiPort` is per-workdir host configuration and a
-  bind collision refuses the run.
+  bind collision refuses the run. Unreadable history is omitted, and any
+  current request failure is an HTTP error only—the observing UI cannot stop a
+  healthy run.
 - **Every outcome carries how long it took, and nothing decides on it (#82).**
   `src/timing.ts` is the one measurement — `startTimer` on a MONOTONIC clock,
   injectable because suites assert event objects exactly, and `durationMs` as

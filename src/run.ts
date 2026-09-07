@@ -1044,11 +1044,6 @@ export async function run(
       if (event.status === "fulfilled") {
         outcomes.push({ issue: event.issue, terminal: event.value });
       } else {
-        await runRecord.emit({
-          kind: "complaint",
-          severity: "error",
-          message: `#${event.issue.id} (${event.issue.branch}) failed: ${event.reason}`,
-        });
         pool.finish(event.issue);
       }
     }
@@ -1461,10 +1456,14 @@ export async function run(
             });
             return terminal;
           } catch (err) {
+            const reason = err instanceof Error ? err.message : String(err);
             await runRecord.emit({
-              kind: "complaint",
-              severity: "error",
-              message: `terminal #${issue.id} REJECTED: ${err instanceof Error ? err.message : String(err)}`,
+              kind: "terminal",
+              issue: Number(issue.id),
+              title: issue.title,
+              terminal: "REJECTED",
+              reason,
+              durationMs: issueTimer(),
             });
             throw err;
           }

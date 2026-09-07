@@ -105,6 +105,16 @@ describe("run UI server", () => {
       .toBe("sandbar test");
   });
 
+  it("skips an unreadable historical record", async () => {
+    const live = await runTree(false);
+    const corrupt = join(live.logsDir, "run-2026-09-06T10-00-00-000Z");
+    await mkdir(corrupt);
+    await writeFile(join(corrupt, "events.jsonl"), "not json\n");
+
+    await expect(readUiState(live.logsDir, { liveRunDir: live.runDir }))
+      .resolves.toMatchObject({ run: { driver: "sandbar test" } });
+  });
+
   it("serves the page and reduced state from the same event file", async () => {
     const tree = await runTree(false);
     const server = await startUiServer({
@@ -122,6 +132,33 @@ describe("run UI server", () => {
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({
         run: { status: "live", driver: "sandbar test" },
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("returns a request error without terminating the server", async () => {
+    const tree = await runTree(false);
+    const eventsPath = join(tree.runDir, "events.jsonl");
+    const valid = await readFile(eventsPath, "utf8");
+    const server = await startUiServer({
+      logsDir: tree.logsDir,
+      liveRunDir: tree.runDir,
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      await writeFile(eventsPath, "not json\n");
+      const failed = await fetch(new URL("state.json", server.url));
+      expect(failed.status).toBe(500);
+      expect(await failed.text()).toMatch(/Invalid event JSON/);
+
+      await writeFile(eventsPath, valid);
+      const recovered = await fetch(new URL("state.json", server.url));
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toMatchObject({
+        run: { driver: "sandbar test" },
       });
     } finally {
       await server.close();

@@ -113,6 +113,27 @@ console.log("ready");
 setInterval(() => {}, 1000);
 `;
 
+const rejectingReporterSource = (markerPath: string) => `
+import { appendFileSync } from "node:fs";
+import {
+  installCleanupTraps,
+  onCleanup,
+  setCleanupReporter,
+} from ${JSON.stringify(join(SRC_DIR, "cleanup.ts"))};
+import { registerShutdown } from ${JSON.stringify(join(SRC_DIR, "agent-sandbox.ts"))};
+
+const note = (line) => appendFileSync(${JSON.stringify(markerPath)}, line + "\\n");
+
+setCleanupReporter(async () => { throw new Error("event filesystem unavailable"); });
+installCleanupTraps();
+onCleanup(() => note("remaining-cleanup-finished"));
+registerShutdown(() => { throw new Error("first cleanup failed"); });
+registerShutdown(() => note("remaining-sandbox-cleanup-finished"));
+
+console.log("ready");
+setInterval(() => {}, 1000);
+`;
+
 const asyncPreservationSource = (markerPath: string) => `
 import { appendFileSync } from "node:fs";
 import {
@@ -248,6 +269,14 @@ describe("SIGINT during a run", () => {
     expect(failed.lines).toContain(
       "cleanup-failure:Sandbox shutdown cleanup failed:sandbox teardown exploded",
     );
+    expect(failed.lines).toContain("remaining-cleanup-finished");
+    expect(failed.code).toBe(130);
+    expect(failed.signal).toBeNull();
+  }, 30_000);
+
+  it("drains after both the signal notice and a cleanup-failure notice reject", async () => {
+    const failed = await sigintChild("rejecting-reporter", rejectingReporterSource);
+    expect(failed.lines).toContain("remaining-sandbox-cleanup-finished");
     expect(failed.lines).toContain("remaining-cleanup-finished");
     expect(failed.code).toBe(130);
     expect(failed.signal).toBeNull();

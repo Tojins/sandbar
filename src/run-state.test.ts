@@ -212,6 +212,33 @@ describe("run event reducer", () => {
     expect(state.pool[0]).toMatchObject({ issue: 12, phase: "NEEDS-INFO" });
   });
 
+  it("clears a rejected issue task from the pool and occupied slots", () => {
+    const events = [
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
+      }),
+      at(2, "2026-09-07T09:01:00Z", {
+        kind: "admitted", issue: 12, title: "Twelve",
+        branch: "sandbar/issue-12", chunk: null, seedRef: "origin/main",
+      }),
+      at(3, "2026-09-07T09:02:00Z", {
+        kind: "phase", issue: 12, attempt: 1, phases: ["implementer"],
+      }),
+      at(4, "2026-09-07T09:03:00Z", {
+        kind: "terminal", issue: 12, title: "Twelve", terminal: "REJECTED",
+        reason: "event write failed", durationMs: 120_000,
+      }),
+    ];
+    const state = reduceRunEvents(events, {
+      now: new Date("2026-09-07T09:04:00Z"), pidAlive: true,
+    });
+    expect(state.run.slots.used).toBe(0);
+    expect(state.pool).toEqual([]);
+    expect(state.finished).toEqual([]);
+    expect(state.events[0]).toMatchObject({ issue: 12, text: "REJECTED · event write failed" });
+  });
+
   it("counts work across fresh HARD-ERROR cycles and keeps the newest finished record", () => {
     const start = at(1, "2026-09-07T09:00:00Z", {
       kind: "run-start", schemaVersion: 1, driver: "sandbar",

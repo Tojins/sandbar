@@ -374,6 +374,23 @@ describe("run quota orchestration (#109)", () => {
     }]);
   });
 
+  it("records a rejected issue task as its terminal outcome", async () => {
+    const target = issue("12");
+    seams.plan
+      .mockResolvedValueOnce(resolution([target]))
+      .mockResolvedValue(resolution([]));
+    seams.innerLoop.mockRejectedValue(new Error("sandbox disappeared"));
+
+    await expect(run({ ...config, maxParallelIssues: 1 })).resolves.toBeUndefined();
+    expect(eventsOf("terminal")).toContainEqual(expect.objectContaining({
+      issue: 12,
+      title: "Issue 12",
+      terminal: "REJECTED",
+      reason: "sandbox disappeared",
+      durationMs: expect.any(Number),
+    }));
+  });
+
   it("refills a freed slot before landing while a sibling remains active", async () => {
     const issues = [issue("1"), issue("2"), issue("3"), issue("4"), issue("5")];
     const slow = deferred<{ type: "DONE"; commits: { sha: string }[] }>();

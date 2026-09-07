@@ -9,6 +9,8 @@
 // `setCleanupReporter` lets a lock-owning run route those notices into its
 // event record; standalone commands retain the terminal reporter above that
 // boundary. The run restores the prior reporter after its record is finalized.
+// Reporting is best-effort at this boundary: a full/deleted event filesystem
+// must not prevent the resource drain the notice was meant to describe.
 //
 // That holds only while this handler OWNS THE EXIT (#35): `runCleanup()` is
 // async, and a `process.exit` from any later signal listener kills the
@@ -50,7 +52,13 @@ export async function reportCleanupNotice(
   message: string,
   cause?: unknown,
 ): Promise<void> {
-  await report(kind, message, cause);
+  // Invoke through a promise so both synchronous throws and rejected reporter
+  // promises become data. There is deliberately no second reporter for a
+  // reporter failure: recursively reporting it cannot recover the unavailable
+  // destination, while continuing cleanup can still recover real resources.
+  await Promise.allSettled([
+    Promise.resolve().then(() => report(kind, message, cause)),
+  ]);
 }
 
 export function onCleanup(action: CleanupAction): void {
@@ -138,19 +146,19 @@ export function installCleanupTraps(): void {
   installed = true;
 
   const handler = (signal: NodeJS.Signals) => {
-    void Promise.resolve(report("signal", `Received ${signal}, cleaning up…`))
-      .then(() => runCleanup())
+    void reportCleanupNotice("signal", `Received ${signal}, cleaning up…`)
+      .then(runCleanup)
       .finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
   };
 
   process.once("SIGINT", () => handler("SIGINT"));
   process.once("SIGTERM", () => handler("SIGTERM"));
   process.once("uncaughtException", (err) => {
-    void Promise.resolve(report("internal-failure", "Uncaught exception", err))
-      .then(() => runCleanup()).finally(() => process.exit(1));
+    void reportCleanupNotice("internal-failure", "Uncaught exception", err)
+      .then(runCleanup).finally(() => process.exit(1));
   });
   process.once("unhandledRejection", (reason) => {
-    void Promise.resolve(report("internal-failure", "Unhandled rejection", reason))
-      .then(() => runCleanup()).finally(() => process.exit(1));
+    void reportCleanupNotice("internal-failure", "Unhandled rejection", reason)
+      .then(runCleanup).finally(() => process.exit(1));
   });
 }

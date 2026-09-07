@@ -1,8 +1,9 @@
 // The single structured record for a sandbar run (#132).
 //
 // Every fact after the workdir lock is won is appended to `events.jsonl` as a
-// typed event. `seq` is allocated synchronously and writes are chained, so the
-// file order is the event order even when issue tasks finish concurrently.
+// typed event. Submissions are chained, and `seq` advances only after a durable
+// append, so file order is event order even when issue tasks finish concurrently
+// and one failed append cannot poison later writes or leave a sequence gap.
 // `ts` is wall-clock display data only; no decision reads it. Raw subprocess
 // transcripts remain separate files through `logs.ts`. A `landed` duration is
 // one merge unit; `landing-batch` carries the distinct whole-phase duration.
@@ -24,7 +25,14 @@ import {
 
 export const EVENT_SCHEMA_VERSION = 1;
 
-export class UnsupportedEventSchemaError extends Error {
+export class EventRecordReadError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "EventRecordReadError";
+  }
+}
+
+export class UnsupportedEventSchemaError extends EventRecordReadError {
   constructor(path: string, version: unknown) {
     super(
       `Unsupported sandbar event schema ${String(version)} in ${path}; ` +
@@ -137,7 +145,7 @@ export type EventInput =
   | (EventIssue & { readonly kind: "review-round"; readonly attempt: number; readonly round: number; readonly head: string; readonly qualityMode: "list" | "verify"; readonly gateOk: boolean; readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED"; readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED"; readonly rejectingPass: "quality" | "correctness" | null; readonly qualityFailures: number; readonly correctnessFailures: number; readonly durationMs: number })
   | (EventIssue & { readonly kind: "repair"; readonly attempt: number; readonly action: "fast-forward" | "re-prompt" | "promise-nudge"; readonly detail: string })
   | (EventIssue & { readonly kind: "hard-error"; readonly retry: number; readonly max: number; readonly reason: string })
-  | (EventIssue & { readonly kind: "terminal"; readonly terminal: "DONE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NEEDS-HUMAN" | "NEEDS-HUMAN-REVIEW" | "HARD-ERROR" | "QUOTA"; readonly reason: string | null; readonly durationMs: number })
+  | (EventIssue & { readonly kind: "terminal"; readonly terminal: "DONE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NEEDS-HUMAN" | "NEEDS-HUMAN-REVIEW" | "HARD-ERROR" | "QUOTA" | "REJECTED"; readonly reason: string | null; readonly durationMs: number })
   | (EventIssue & { readonly kind: "landed"; readonly outcome: "merged" | "chunk-landed" | "skipped"; readonly branch: string; readonly target: string | null; readonly reason: string | null; readonly durationMs: number })
   | { readonly kind: "landed"; readonly outcome: "chunk-on-source" | "chunk-parked" | "chunk-deferred"; readonly branch: string; readonly target: string | null; readonly reason: string | null; readonly durationMs: number }
   | (EventIssue & { readonly kind: "finalise"; readonly finaliseKind: FinalizeInput["kind"]; readonly outcome: FinalizeAction["kind"]; readonly detail?: string });
@@ -161,6 +169,7 @@ export type StartEventRecordOptions = {
   readonly baseDir: string;
   readonly now?: Date;
   readonly clock?: () => Date;
+  readonly append?: (path: string, data: string) => Promise<void>;
   readonly start: Omit<Extract<EventInput, { kind: "run-start" }>, "kind" | "schemaVersion">;
 };
 
@@ -168,6 +177,7 @@ export async function startEventRecord(
   options: StartEventRecordOptions,
 ): Promise<EventRecord> {
   const clock = options.clock ?? (() => new Date());
+  const append = options.append ?? appendFile;
   const runDir = join(options.baseDir, `run-${runStampFromDate(options.now ?? clock())}`);
   await mkdir(runDir, { recursive: true });
   const transcripts = await createTranscriptTree(runDir);
@@ -177,10 +187,17 @@ export async function startEventRecord(
   let finalized = false;
 
   const emit = async (input: EventInput): Promise<RunEvent> => {
-    const event = { ...input, seq: ++seq, ts: clock().toISOString() } as RunEvent;
-    tail = tail.then(() => appendFile(eventsPath, `${JSON.stringify(event)}\n`));
-    await tail;
-    return event;
+    const write = tail.then(async () => {
+      const event = { ...input, seq: seq + 1, ts: clock().toISOString() } as RunEvent;
+      await append(eventsPath, `${JSON.stringify(event)}\n`);
+      seq += 1;
+      return event;
+    });
+    // `tail` is only the serialization latch. The caller still receives this
+    // emission's rejection through `write`, while the recovered latch permits
+    // a later append to retry after a transient filesystem failure.
+    tail = write.then(() => undefined, () => undefined);
+    return await write;
   };
 
   const record: EventRecord = {
@@ -216,23 +233,28 @@ export async function readEventsFile(path: string): Promise<readonly RunEvent[]>
     try {
       value = JSON.parse(line);
     } catch (cause) {
-      throw new Error(`Invalid event JSON at line ${index + 1} of ${path}`, { cause });
+      throw new EventRecordReadError(
+        `Invalid event JSON at line ${index + 1} of ${path}`,
+        { cause },
+      );
     }
     if (typeof value !== "object" || value === null) {
-      throw new Error(`Invalid event object at line ${index + 1} of ${path}`);
+      throw new EventRecordReadError(`Invalid event object at line ${index + 1} of ${path}`);
     }
     return value as RunEvent;
   });
   const first = events[0];
   if (!first || first.kind !== "run-start") {
-    throw new Error(`Run record ${path} does not begin with run-start`);
+    throw new EventRecordReadError(`Run record ${path} does not begin with run-start`);
   }
   if (first.schemaVersion !== EVENT_SCHEMA_VERSION) {
     throw new UnsupportedEventSchemaError(path, first.schemaVersion);
   }
   for (let i = 0; i < events.length; i += 1) {
     if (events[i]?.seq !== i + 1) {
-      throw new Error(`Non-monotonic event sequence at line ${i + 1} of ${path}`);
+      throw new EventRecordReadError(
+        `Non-monotonic event sequence at line ${i + 1} of ${path}`,
+      );
     }
   }
   return events;

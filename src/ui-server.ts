@@ -4,7 +4,9 @@
 // pure reducer's `/state.json`. A live run and `sandbar ui` use this same
 // module. The server never holds scheduler state in memory: every request
 // rereads the newest events.jsonl, so post-mortem and in-process views cannot
-// disagree. Binding is exclusive and EADDRINUSE is a startup refusal.
+// disagree. An unreadable historical record is omitted; a request failure is
+// an HTTP 500 and can never terminate the run being observed. Binding is
+// exclusive and EADDRINUSE is a startup refusal.
 
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -12,7 +14,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { readEventsFile, UnsupportedEventSchemaError } from "./events.js";
+import { EventRecordReadError, readEventsFile } from "./events.js";
 import { SandbarError, isErrno } from "./errors.js";
 import {
   finishedIssues,
@@ -74,14 +76,19 @@ export async function readUiState(
     throw new Error(`Run ${newest} has no run-start event`);
   }
   const history: FinishedIssueState[] = [];
-  for (const dir of dirs.slice(1, HISTORY_RUN_LIMIT + 1)) {
+  const historyDirs = dirs
+    .filter((dir) => resolve(dir) !== resolve(newest))
+    .slice(0, HISTORY_RUN_LIMIT);
+  for (const dir of historyDirs) {
     let events;
     try {
       events = await readEventsFile(join(dir, "events.jsonl"));
     } catch (err) {
-      // Pre-schema runs have no event file. They are intentionally unreadable,
-      // but they must not make a newer readable run's history endpoint fail.
-      if (isErrno(err, "ENOENT")) continue;
+      // Pre-schema runs have no event file; interrupted older runs can have an
+      // incomplete or corrupt one. Both are unreadable history, not a fault in
+      // the current run. Other filesystem faults still propagate to this
+      // request's 500 response.
+      if (isErrno(err, "ENOENT") || err instanceof EventRecordReadError) continue;
       throw err;
     }
     history.push(...finishedIssues(events));
@@ -152,16 +159,11 @@ export async function startUiServer(options: StartUiServerOptions): Promise<UiSe
       }
       response.writeHead(404).end("Not found\n");
     })().catch((err: unknown) => {
-      if (err instanceof SandbarError || err instanceof UnsupportedEventSchemaError) {
-        response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" })
-          .end(err.message);
-        return;
-      }
-      // Corrupt records and reducer/programming faults are not a transient HTTP
-      // condition. Surface them through Node's server error channel so the
-      // run's internal-failure path owns the stop.
-      server.emit("error", err);
-      response.destroy();
+      // The browser is an observer. No malformed record, reducer bug, or other
+      // request-scoped failure may become an unhandled server error that kills
+      // the live run it is observing.
+      response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" })
+        .end(err instanceof Error ? err.message : String(err));
     });
   });
   const host = options.host ?? "127.0.0.1";

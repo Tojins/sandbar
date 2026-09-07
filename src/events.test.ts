@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -27,6 +27,33 @@ describe("event record", () => {
       [1, "run-start"], [2, "complaint"], [3, "complaint"], [4, "run-end"],
     ]);
     expect(await readFile(record.eventsPath, "utf8")).toMatch(/\n$/);
+  });
+
+  it("recovers the serialization latch after one append fails", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "sandbar-events-"));
+    let calls = 0;
+    const record = await startEventRecord({
+      baseDir,
+      now: new Date("2026-05-05T21:15:32.101Z"),
+      start,
+      append: async (path, data) => {
+        calls += 1;
+        if (calls === 2) throw new Error("transient append failure");
+        await appendFile(path, data);
+      },
+    });
+    await expect(record.emit({
+      kind: "complaint", severity: "warning", message: "lost",
+    })).rejects.toThrow("transient append failure");
+    await expect(record.emit({
+      kind: "complaint", severity: "warning", message: "recovered",
+    })).resolves.toMatchObject({ seq: 2, message: "recovered" });
+
+    const events = await readEventsFile(record.eventsPath);
+    expect(events.map((event) => [event.seq, event.kind])).toEqual([
+      [1, "run-start"], [2, "complaint"],
+    ]);
+    expect(events[1]).toMatchObject({ message: "recovered" });
   });
 
   it("refuses an unknown schema", async () => {

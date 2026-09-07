@@ -264,6 +264,10 @@ function finishedFrom(events: readonly RunEvent[]): readonly FinishedIssueState[
     }
   }
   return [...terminals.values()].flatMap((terminal) => {
+    // An escaped issue-task exception ended this execution slot but did not
+    // run tracker finalisation. Its branch is rediscovered as waiting/parked by
+    // the next recompute; it is not a completed issue for cross-run history.
+    if (terminal.terminal === "REJECTED") return [];
     const landed = landings.get(terminal.issue);
     // DONE is still in the pool while the merger owns it. Publishing it as
     // finished before a landing outcome arrives would put one issue in both
@@ -356,6 +360,10 @@ export function reduceRunEvents(
         executing.delete(event.issue);
         parkedTerminals.set(event.issue, event.terminal);
         const issue = issues.get(event.issue);
+        if (event.terminal === "REJECTED") {
+          issues.delete(event.issue);
+          break;
+        }
         if (issue) {
           finishRunningSpan(issue, event.ts);
           issue.phase = event.terminal === "DONE" ? "landing" : event.terminal;
