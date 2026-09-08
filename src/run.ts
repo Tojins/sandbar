@@ -5,10 +5,11 @@
 // reachability probe, an independent ten-minute lease at
 // `refs/sandbar/lock` protects the origin shared by every host. The event
 // record starts only after both are held, so a second host's refusal remains
-// stderr-only. Every scheduler poll/slot-freed wake renews the lease before
-// planning, admission, finalization or landing. A replacement ref, or an
-// expired lease that origin cannot renew, exits halted immediately: no drain,
-// no landing, and issue clones deferred at inner-loop close remain in place.
+// stderr-only. A serialized one-minute heartbeat covers long operations;
+// scheduler wakes and every remote-write adapter also renew immediately before
+// control can admit, finalize or land. A replacement ref, or an expired lease
+// that origin cannot renew, exits halted immediately: no drain, no landing,
+// and issue clones deferred at inner-loop close remain in place.
 //
 //   Recompute:                 Deterministic resolver picks the unblocked
 //                              `ready-for-agent` issues by parsing each body's
@@ -89,7 +90,8 @@
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work. The
 // origin lease renewal wraps that same wait and therefore precedes either wake's
-// effects; it is not a second timer.
+// effects. A separate heartbeat uses the same serialized renewal operation so
+// a long gate or forge wait cannot consume the lease between scheduler wakes.
 
 import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
@@ -106,7 +108,13 @@ import {
   cleanupOrphanContainers,
   findUnattributableResources,
 } from "./containers.js";
-import { installCleanupTraps, onCleanup, runCleanup, setCleanupReporter } from "./cleanup.js";
+import {
+  installCleanupTraps,
+  onCleanup,
+  registerDisposable,
+  runCleanup,
+  setCleanupReporter,
+} from "./cleanup.js";
 import {
   routeChunkReviewFollowUps,
   realAdapter as realChunkFollowUpAdapter,
@@ -171,6 +179,7 @@ import { requiredAgentProviders } from "./agent-providers.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
 import {
   OriginLockHeldError,
+  ORIGIN_LOCK_RENEW_INTERVAL_MS,
   acquireOriginLock,
   formatOriginLockHolder,
   type OriginLockHandle,
@@ -539,7 +548,9 @@ export async function run(
     configPath: options.configPath ?? null,
     agentProviders,
   };
-  const stopBeforeOriginLock = async (err: unknown): Promise<never> => {
+  const stopBeforeOriginLock = async (
+    err: PreflightError | SandbarError,
+  ): Promise<never> => {
     const detail = err instanceof PreflightError ? err.message : faultDetail(err);
     console.error(detail);
     await runCleanup();
@@ -554,7 +565,11 @@ export async function run(
       },
     });
   } catch (err) {
-    return await stopBeforeOriginLock(err);
+    if (err instanceof PreflightError || err instanceof SandbarError) {
+      return await stopBeforeOriginLock(err);
+    }
+    await runCleanup();
+    throw err;
   }
 
   const runStartedAt = new Date();
@@ -579,9 +594,15 @@ export async function run(
       await runCleanup();
       process.exit(1);
     }
-    return await stopBeforeOriginLock(err);
+    if (err instanceof SandbarError) return await stopBeforeOriginLock(err);
+    await runCleanup();
+    throw err;
   }
-  onCleanup(() => originLock.release());
+  // Until the event record owns cleanup ordering, this disposable closes the
+  // acquisition-to-record gap. Once the record exists it is replaced below by
+  // an ordinary action ordered ahead of record finalization.
+  const releaseOriginLock = (): Promise<void> => originLock.release();
+  const unregisterEarlyOriginRelease = registerDisposable(releaseOriginLock);
 
   // -------------------------------------------------------------------------
   // Per-run event record and UI
@@ -606,26 +627,32 @@ export async function run(
   // Which exits stay outside the record, and why, is the header's to say: it is
   // one enumeration and it belongs in one place, where it can be counted.
   // -------------------------------------------------------------------------
-  const runRecord = await startEventRecord({
-    baseDir: layout.logsDir,
-    now: runStartedAt,
-    start: {
-      driver: driverIdentity,
-      configPath: options.configPath ?? null,
-      workdir: layout.stateDir,
-      maxParallelIssues: config.maxParallelIssues,
-      pid: process.pid,
-    },
-  });
-  await runRecord.emit({
-    kind: "preflight",
-    action: displacedOriginHolder === null
-      ? "origin-lock-acquired"
-      : "origin-lock-taken-over",
-    detail: displacedOriginHolder === null
-      ? `Acquired repository lease ${originLock.claim().sha}`
-      : `Took over expired repository lease from ${formatOriginLockHolder(displacedOriginHolder)}`,
-  });
+  let runRecord: Awaited<ReturnType<typeof startEventRecord>>;
+  try {
+    runRecord = await startEventRecord({
+      baseDir: layout.logsDir,
+      now: runStartedAt,
+      start: {
+        driver: driverIdentity,
+        configPath: options.configPath ?? null,
+        workdir: layout.stateDir,
+        maxParallelIssues: config.maxParallelIssues,
+        pid: process.pid,
+      },
+    });
+    await runRecord.emit({
+      kind: "preflight",
+      action: displacedOriginHolder === null
+        ? "origin-lock-acquired"
+        : "origin-lock-taken-over",
+      detail: displacedOriginHolder === null
+        ? `Acquired repository lease ${originLock.claim().sha}`
+        : `Took over expired repository lease from ${formatOriginLockHolder(displacedOriginHolder)}`,
+    });
+  } catch (err) {
+    await runCleanup();
+    throw err;
+  }
   let cleanupReason = "normal-exit";
   const recordInternalFailure = async (detail: string): Promise<TerminalExit> => {
     const banner = "═".repeat(72);
@@ -658,6 +685,11 @@ export async function run(
   });
   onCleanup(resetCleanupReporter);
   onCleanup(() => runRecord.finalize(cleanupReason));
+  unregisterEarlyOriginRelease();
+  // LIFO: resource teardowns and the heartbeat stop first, then release is
+  // attempted while the reporter and event record are still live, then
+  // run-end is appended and only afterwards is the reporter reset.
+  onCleanup(releaseOriginLock);
 
   const stopInternalFailure = async (err: unknown): Promise<never> => {
     const exit = await recordInternalFailure(faultDetail(err));
@@ -758,6 +790,49 @@ export async function run(
     });
     return exit;
   };
+
+  const observeOriginLockRenewal = async (
+    renewal: OriginLockRenewal,
+  ): Promise<void> => {
+    const decision = decideOriginLockWake(renewal);
+    if (decision.kind === "continue") {
+      if (decision.warning === null) return;
+      await runRecord.emit({
+        kind: "complaint",
+        severity: "warning",
+        message: decision.warning,
+      });
+      return;
+    }
+
+    await runRecord.emit({
+      kind: "complaint",
+      severity: "error",
+      message: decision.complaint,
+    });
+    const exit = await announceExit(decision.exit);
+    await runCleanup();
+    process.exit(exit.exitCode);
+  };
+
+  // Scheduler wakes remain explicit renewal barriers, while this heartbeat
+  // keeps the ten-minute lease alive during long preflight, image, gate,
+  // resolve and forge-verification calls. All callers share one in-flight
+  // renewal so a timer and a freed slot can never race two CAS updates.
+  let renewalInFlight: Promise<void> | null = null;
+  const renewOriginLease = (): Promise<void> => {
+    if (renewalInFlight !== null) return renewalInFlight;
+    const renewal = originLock.renew().then(observeOriginLockRenewal);
+    renewalInFlight = renewal.finally(() => {
+      renewalInFlight = null;
+    });
+    return renewalInFlight;
+  };
+  const originLeaseHeartbeat = setInterval(() => {
+    void renewOriginLease().catch((err: unknown) => stopInternalFailure(err));
+  }, ORIGIN_LOCK_RENEW_INTERVAL_MS);
+  originLeaseHeartbeat.unref();
+  onCleanup(() => clearInterval(originLeaseHeartbeat));
 
   // Every stop between here and the first cycle goes through this, so none of
   // them can be the silent one again (#70). It records the complaint verbatim,
@@ -1061,6 +1136,7 @@ export async function run(
       layout,
       repo,
       sourceBranch: config.sourceBranch,
+      beforeOriginWrite: renewOriginLease,
       onNotice: (message) => runRecord.emit({
         kind: "complaint", severity: "warning", message,
       }).then(() => undefined),
@@ -1173,39 +1249,9 @@ export async function run(
   let lastPlanDiagnostics: string | null = null;
   const deferredLandBranches = new Set<string>();
 
-  // The scheduler wake is the lease cadence (#139). This wrapper is the only
-  // way the main loop waits, so both timer polls and freed-slot wakes renew
-  // before control can reach planning, admission, finalization or landing.
-  // On loss it does not drain: draining would finalize DONE work and could
-  // enter the landing path. Sandboxes already defer clone reclamation until
-  // this boundary, and cleanup stops their containers while leaving those
-  // clones in place.
-  const observeOriginLockRenewal = async (
-    renewal: OriginLockRenewal,
-  ): Promise<void> => {
-    const decision = decideOriginLockWake(renewal);
-    if (decision.kind === "continue") {
-      if (decision.warning === null) return;
-      await runRecord.emit({
-        kind: "complaint",
-        severity: "warning",
-        message: decision.warning,
-      });
-      return;
-    }
-
-    await runRecord.emit({
-      kind: "complaint",
-      severity: "error",
-      message: decision.complaint,
-    });
-    const exit = await announceExit(decision.exit);
-    await runCleanup();
-    process.exit(exit.exitCode);
-  };
   const waitForSchedulerWake = async (): Promise<RecomputeTrigger> => {
     const wake = await pool.waitForWake(config.pollIntervalMs);
-    await observeOriginLockRenewal(await originLock.renew());
+    await renewOriginLease();
     return wake;
   };
 
@@ -1272,6 +1318,7 @@ export async function run(
     settled: readonly ExecutionEvent[],
     finishDone = false,
   ): Promise<IssueOutcome[]> => {
+    await renewOriginLease();
     const outcomes: IssueOutcome[] = [];
     for (const event of settled) {
       if (event.status === "fulfilled") {
@@ -1443,7 +1490,7 @@ export async function run(
     // Image preparation can be the longest part of startup. Refresh the claim
     // once more before the launch recompute so even a slow build cannot enter
     // the scheduler on its acquisition-time expiry.
-    await observeOriginLockRenewal(await originLock.renew());
+    await renewOriginLease();
     for (;;) {
       iteration += 1;
       const planTrigger: RecomputeTrigger = nextPlanTrigger;
@@ -1569,6 +1616,7 @@ export async function run(
         repo,
         sourceBranch: config.sourceBranch,
         chunks: resolution.landedChunks,
+        beforeOriginWrite: renewOriginLease,
         log: (line) => runRecord.emit({ kind: "reconcile", action: "trace", detail: line }).then(() => undefined),
       });
       if (reconciliation.reconciled.length > 0) {
@@ -1918,6 +1966,7 @@ export async function run(
             env,
             ...(codexAuthMount === undefined ? {} : { codexAuthMount }),
             runStackGate: () => stackForGate2.runGate(),
+            beforeOriginWrite: renewOriginLease,
           });
 
           // The only site that supplies the probe tree by hand — the two
@@ -1954,6 +2003,7 @@ export async function run(
                     onNotice: (message) => runRecord.emit({
                       kind: "complaint", severity: "warning", message,
                     }).then(() => undefined),
+                    beforeOriginWrite: renewOriginLease,
                   }),
                   options: verifiedLandingOptionsFrom(
                     config.mergeMode,

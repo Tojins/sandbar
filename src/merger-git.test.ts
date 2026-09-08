@@ -245,7 +245,7 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     await rm(root, { recursive: true, force: true });
   });
 
-  const adapter = () =>
+  const adapter = (beforeOriginWrite?: () => Promise<void>) =>
     realAdapter({
       cwd: wt,
       cacheDir: cache,
@@ -253,6 +253,7 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
       botName: "bot",
       botEmail: "bot@e",
       coauthorTrailer: "",
+      ...(beforeOriginWrite === undefined ? {} : { beforeOriginWrite }),
     } as unknown as Parameters<typeof realAdapter>[0]);
 
   const originHas = async (branch: string): Promise<string | null> =>
@@ -339,6 +340,27 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1]);
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBeNull();
     expect(await originHas("refs/heads/sandbar/member-1")).toBeNull();
+  });
+
+  it("checks repository ownership before a chunk ref push", async () => {
+    await commit(wt, "lease.txt", "guarded\n");
+    await git(wt, "branch", "sandbar/issue-139-member", "HEAD");
+    let barriers = 0;
+
+    await expect(adapter(async () => { barriers += 1; }).pushChunkBranch(
+      "sandbar/chunk-139-c",
+      [{ source: "sandbar/issue-139-member", destination: "sandbar/member-139" }],
+    )).resolves.toEqual({ kind: "ok" });
+    expect(barriers).toBe(1);
+  });
+
+  it("checks repository ownership before the source ref push", async () => {
+    await commit(wt, "source-lease.txt", "guarded\n");
+    let barriers = 0;
+
+    await expect(adapter(async () => { barriers += 1; }).push())
+      .resolves.toEqual({ kind: "ok" });
+    expect(barriers).toBe(1);
   });
 
   it("reports a rejected member ref as a membership failure, not a chunk race", async () => {

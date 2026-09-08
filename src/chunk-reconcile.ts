@@ -285,6 +285,7 @@ export async function reconcileLandedChunks(cfg: {
   // The plan's derivation: how a branch learns which issues are on it.
   readonly chunks: readonly LandedChunk[];
   readonly log?: (line: string) => void | Promise<void>;
+  readonly beforeOriginWrite?: () => Promise<void>;
   // Test seam. The real one talks to `gh` and to origin.
   readonly adapter?: ChunkWrapupAdapter;
   readonly findLanded?: (
@@ -323,6 +324,9 @@ export async function reconcileLandedChunks(cfg: {
       repo: cfg.repo,
       gitCwd: repoDir,
       errPrefix: "reconcile",
+      ...(cfg.beforeOriginWrite === undefined
+        ? {}
+        : { beforeOriginWrite: cfg.beforeOriginWrite }),
     });
 
   const reconciled: ChunkWrapup[] = [];

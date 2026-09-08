@@ -491,11 +491,11 @@ export type InnerLoopOptions = {
   // phase, or measurement silently disappear from the sole run record.
   readonly onEvent: (event: EventInput) => Promise<void> | void;
   readonly providerState?: RunProviderState;
-  // A daemon defers clone deletion until the scheduler has renewed its origin
-  // lease at the slot-freed wake (#139). The ordinary finalization path calls
-  // reclaimIssueClone again once ownership is known; on lease loss the kept
-  // clone is the only safe place for unpublished work to remain.
-  readonly deferIssueCloneReclaim?: string;
+  // A daemon must defer clone deletion until its run-level lease guard has
+  // renewed after the slot frees (#139). The ordinary finalization path calls
+  // reclaimIssueClone again behind that barrier; on lease loss the kept clone
+  // is the only safe place for unpublished work to remain.
+  readonly deferIssueCloneReclaim: string;
 };
 
 type SandboxCycleOutcome = {
@@ -1099,9 +1099,7 @@ async function runSandboxCycle(
     }
     if (sandbox) {
       try {
-        if (opts.deferIssueCloneReclaim !== undefined) {
-          sandbox.preserveWorktree(opts.deferIssueCloneReclaim);
-        }
+        sandbox.preserveWorktree(opts.deferIssueCloneReclaim);
         await sandbox.close();
       } catch (err) {
         await opts.onEvent({

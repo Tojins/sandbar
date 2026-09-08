@@ -18,6 +18,7 @@ const seams = vi.hoisted(() => ({
     status: WakeLockStatus;
   }>,
   cleanupCallbacks: [] as Array<() => unknown>,
+  cleanupOrder: [] as string[],
   wakeLocks: [] as Array<{
     stop: ReturnType<typeof vi.fn>;
     onStatus: ReturnType<typeof vi.fn>;
@@ -37,8 +38,17 @@ const seams = vi.hoisted(() => ({
       expires: "2099-09-08T12:10:00.000Z",
     },
   },
+  originDisplaced: null as null | {
+    sha: string;
+    lease: {
+      hostname: string; workdir: string; pid: number; run: string;
+      startedAt: string; expires: string;
+    };
+  },
   originRenew: vi.fn(),
   originRelease: vi.fn(async () => undefined),
+  recordFinalize: vi.fn(async () => undefined),
+  reclaimIssueClone: vi.fn(async () => ({ kind: "removed" as const })),
 }));
 
 vi.mock("./codex-auth.js", async (importOriginal) => ({
@@ -54,6 +64,13 @@ vi.mock("./cleanup.js", () => ({
   installCleanupTraps: vi.fn(),
   onCleanup: vi.fn((callback: () => unknown) => {
     seams.cleanupCallbacks.push(callback);
+  }),
+  registerDisposable: vi.fn((callback: () => unknown) => {
+    seams.cleanupCallbacks.push(callback);
+    return () => {
+      const at = seams.cleanupCallbacks.indexOf(callback);
+      if (at >= 0) seams.cleanupCallbacks.splice(at, 1);
+    };
   }),
   setCleanupReporter: vi.fn(() => vi.fn()),
   runCleanup: vi.fn(async () => {
@@ -83,7 +100,7 @@ vi.mock("./lock.js", async (importOriginal) => ({
 vi.mock("./origin-lock.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./origin-lock.js")>(),
   acquireOriginLock: vi.fn(async () => ({
-    displaced: null,
+    displaced: seams.originDisplaced,
     lock: {
       claim: () => seams.originClaim,
       renew: seams.originRenew,
@@ -95,7 +112,7 @@ vi.mock("./events.js", () => ({
   runStampFromDate: vi.fn(() => "test-run"),
   startEventRecord: vi.fn(async () => ({
     runDir: "/tmp/run-quota-test",
-    finalize: vi.fn(),
+    finalize: seams.recordFinalize,
     emit: seams.emit,
     issue: vi.fn(async (id: string) => ({
       dir: `/tmp/run-quota-test/issue-${id}`,
@@ -106,6 +123,10 @@ vi.mock("./events.js", () => ({
       writeMergerGate: vi.fn(), writeResolveAttempt: vi.fn(),
     })),
   })),
+}));
+vi.mock("./agent-sandbox.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./agent-sandbox.js")>(),
+  reclaimIssueClone: seams.reclaimIssueClone,
 }));
 vi.mock("./ui-server.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./ui-server.js")>(),
@@ -167,7 +188,11 @@ vi.mock("./inner-loop.js", async (importOriginal) => ({
 }));
 vi.mock("./finalize.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./finalize.js")>(),
-  realAdapter: vi.fn(() => ({ issueLabels: seams.issueLabels })), finalizeAll: seams.finalize,
+  realAdapter: vi.fn(() => ({
+    issueLabels: seams.issueLabels,
+    reclaimIssueClone: seams.reclaimIssueClone,
+  })),
+  finalizeAll: seams.finalize,
 }));
 vi.mock("./merger-worktree.js", () => ({
   createMergerWorktree: vi.fn(async () => ({
@@ -272,7 +297,17 @@ describe("run quota orchestration (#109)", () => {
     seams.originRenew.mockReset();
     seams.originRenew.mockResolvedValue({ kind: "renewed", claim: seams.originClaim });
     seams.originRelease.mockReset();
-    seams.originRelease.mockResolvedValue(undefined);
+    seams.originDisplaced = null;
+    seams.originRelease.mockImplementation(async () => {
+      seams.cleanupOrder.push("origin-release");
+    });
+    seams.recordFinalize.mockReset();
+    seams.recordFinalize.mockImplementation(async () => {
+      seams.cleanupOrder.push("record-finalize");
+    });
+    seams.reclaimIssueClone.mockReset();
+    seams.reclaimIssueClone.mockResolvedValue({ kind: "removed" });
+    seams.cleanupOrder.length = 0;
     seams.wakeStatusReports.length = 0;
     vi.mocked(fetchOriginRefs).mockReset();
     vi.mocked(fetchOriginRefs).mockRejectedValue(new Error("stop after idle poll"));
@@ -332,6 +367,42 @@ describe("run quota orchestration (#109)", () => {
       .toBeLessThan(vi.mocked(runPreflightAfterReachability).mock.invocationCallOrder[0]!);
   });
 
+  it.each([
+    ["origin-lock-acquired", null],
+    ["origin-lock-taken-over", {
+      ...seams.originClaim,
+      sha: "expired-holder",
+      lease: { ...seams.originClaim.lease, hostname: "old-host" },
+    }],
+  ] as const)("records %s with holder evidence", async (action, displaced) => {
+    seams.originDisplaced = displaced;
+    seams.plan.mockResolvedValue(resolution([]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(eventsOf("preflight")).toContainEqual(expect.objectContaining({
+      action,
+      detail: expect.stringContaining(displaced === null ? "lease-sha" : "old-host"),
+    }));
+  });
+
+  it.each(["record creation", "first lease event"])(
+    "releases the origin lease when %s fails",
+    async (failurePoint) => {
+      const failure = new Error(`${failurePoint} failed`);
+      if (failurePoint === "record creation") {
+        vi.mocked(startEventRecord).mockRejectedValueOnce(failure);
+      } else {
+        seams.emit.mockRejectedValueOnce(failure);
+      }
+
+      await expect(run(config)).rejects.toBe(failure);
+      expect(seams.originRelease).toHaveBeenCalledOnce();
+    },
+  );
+
   it("keeps an origin-lock refusal stderr-only with no event record", async () => {
     vi.mocked(acquireOriginLock).mockRejectedValueOnce(
       new OriginLockHeldError({
@@ -346,6 +417,33 @@ describe("run quota orchestration (#109)", () => {
     await expect(run(config)).rejects.toThrow("EXIT:1");
     expect(startEventRecord).not.toHaveBeenCalled();
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining("holder-host"));
+    expect(seams.originRelease).not.toHaveBeenCalled();
+  });
+
+  it("cleans up and propagates an unexpected origin-lock programming failure", async () => {
+    const bug = new Error("origin adapter invariant broke");
+    vi.mocked(acquireOriginLock).mockRejectedValueOnce(bug);
+
+    await expect(run(config)).rejects.toBe(bug);
+    expect(startEventRecord).not.toHaveBeenCalled();
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining("origin adapter invariant broke"),
+    );
+    expect(seams.originRelease).not.toHaveBeenCalled();
+  });
+
+  it("releases origin before finalizing the event record", async () => {
+    seams.plan.mockResolvedValue(resolution([]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(seams.cleanupOrder).toEqual(expect.arrayContaining([
+      "origin-release", "record-finalize",
+    ]));
+    expect(seams.cleanupOrder.indexOf("origin-release"))
+      .toBeLessThan(seams.cleanupOrder.indexOf("record-finalize"));
   });
 
   it("records wake-lock state from the structured status, not its rendered prose", async () => {
@@ -477,7 +575,49 @@ describe("run quota orchestration (#109)", () => {
     expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
       tag: "halted", exitCode: 1,
     }));
+    expect(seams.reclaimIssueClone).not.toHaveBeenCalled();
+    expect(seams.originRelease).toHaveBeenCalledOnce();
   });
+
+  it.each(["fulfilled", "rejected"] as const)(
+    "reclaims a %s issue clone only after a successful wake renewal",
+    async (settlement) => {
+      seams.plan.mockResolvedValue(resolution([issue("139")]));
+      if (settlement === "fulfilled") {
+        seams.innerLoop.mockResolvedValue({
+          type: "NEEDS-INFO", questions: "question", commits: [], specGaps: [],
+        });
+        seams.finalize.mockImplementation(async (inputs, adapter) => {
+          for (const input of inputs) {
+            await adapter.reclaimIssueClone(input.issue.branch);
+          }
+          return [];
+        });
+      } else {
+        seams.innerLoop.mockRejectedValue(new Error("sandbox failed"));
+      }
+      vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        throw new Error(`EXIT:${code}`);
+      }) as never);
+
+      await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+        .rejects.toThrow("EXIT:1");
+      expect(seams.originRenew.mock.calls.length).toBeGreaterThanOrEqual(2);
+      if (settlement === "fulfilled") {
+        expect(seams.reclaimIssueClone).toHaveBeenCalledWith(
+          "sandbar/issue-139-test",
+        );
+      } else {
+        expect(seams.reclaimIssueClone).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.stringContaining("sandbar-issue-139-test"),
+          "sandbar/issue-139-test",
+        );
+      }
+      expect(seams.originRenew.mock.invocationCallOrder[1])
+        .toBeLessThan(seams.reclaimIssueClone.mock.invocationCallOrder[0]!);
+    },
+  );
 
   it("reports a failed poll refresh and retries instead of halting", async () => {
     vi.useFakeTimers();
@@ -505,7 +645,7 @@ describe("run quota orchestration (#109)", () => {
 
     try {
       await flushMicrotasksUntil(
-        () => vi.getTimerCount() === 1,
+        () => vi.getTimerCount() === 2,
         "the initial idle poll timer",
       );
       await vi.advanceTimersByTimeAsync(pollIntervalMs);
@@ -516,7 +656,7 @@ describe("run quota orchestration (#109)", () => {
       expect(fetchOriginRefs).toHaveBeenCalledOnce();
 
       await flushMicrotasksUntil(
-        () => vi.getTimerCount() === 1,
+        () => vi.getTimerCount() === 2,
         "the failed refresh to re-arm the poll timer",
       );
       await vi.advanceTimersByTimeAsync(pollIntervalMs - 1);

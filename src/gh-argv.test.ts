@@ -20,7 +20,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { chunkForgeWrites } from "./chunk-land.js";
 import {
@@ -105,6 +105,20 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       expect(argv).toContain("handoff body");
     });
 
+    it("checks repository ownership before tracker writes", async () => {
+      const beforeOriginWrite = vi.fn(async () => undefined);
+      const guarded = realFinalizeAdapter({
+        layout: repoLayout("/nonexistent-host-cwd", ".sandbar"),
+        repo: REPO,
+        sourceBranch: "main",
+        beforeOriginWrite,
+      });
+
+      await guarded.postComment(42, "handoff body");
+      await guarded.editLabels(42, ["ready-for-agent"], ["agent-stuck"]);
+      expect(beforeOriginWrite).toHaveBeenCalledTimes(3);
+    });
+
     // Two separate `gh issue edit` calls, remove first (#8). BOTH must carry
     // the flag — a labelled-in-one-repo, de-queued-in-another split would
     // re-pick the issue forever.
@@ -147,6 +161,20 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       const [argv] = await calls();
       expect(argv?.slice(0, 3)).toEqual(["issue", "comment", "7"]);
       expect(repoFlagOf(argv ?? [])).toBe("acme/app");
+    });
+
+    it("checks repository ownership before merger and chunk-wrapup writes", async () => {
+      const beforeOriginWrite = vi.fn(async () => undefined);
+      const guarded = realMergerAdapter({
+        cwd: "/nonexistent-merger-worktree",
+        repo: REPO,
+        sourceBranch: "main",
+        beforeOriginWrite,
+      } as unknown as Parameters<typeof realMergerAdapter>[0]);
+
+      await guarded.commentOnIssue(7, "reverted because…");
+      await guarded.closeIssue(7, "landed");
+      expect(beforeOriginWrite).toHaveBeenCalledTimes(2);
     });
 
     // #62 — the chunk PR is a WRITE too, and the wrong repo here is a review

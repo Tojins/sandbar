@@ -2243,6 +2243,9 @@ export type RealAdapterDeps = {
   // build the stack itself: run.ts owns the stack's lifecycle for the whole
   // merge phase, so a single bringup covers every branch in the cycle.
   readonly runStackGate: () => Promise<GateResult>;
+  // Daemon ownership barrier (#139), immediately before each origin/tracker
+  // write. Adapter tests and non-daemon consumers may omit it.
+  readonly beforeOriginWrite?: () => Promise<void>;
 };
 
 type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "usage" | "toolCalls" | "peakContext" | "rateLimit" | "cause" | "verdict">;
@@ -2539,6 +2542,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   };
   const pushHeadTo = async (dest: string): Promise<PushResult> => {
     try {
+      await deps.beforeOriginWrite?.();
       await exec("git", ["push", "origin", `HEAD:${dest}`], { cwd });
       return { kind: "ok" };
     } catch (err) {
@@ -2629,7 +2633,14 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     // given this worktree as the cwd `git push --delete` runs in; the
     // reconciler passes the bare cache instead and that is the whole of the
     // difference. See `chunk-land.ts`.
-    ...chunkForgeWrites({ repo: deps.repo, gitCwd: cwd, errPrefix: "merger" }),
+    ...chunkForgeWrites({
+      repo: deps.repo,
+      gitCwd: cwd,
+      errPrefix: "merger",
+      ...(deps.beforeOriginWrite === undefined
+        ? {}
+        : { beforeOriginWrite: deps.beforeOriginWrite }),
+    }),
     async mergeNoFf(unit) {
       // Fetch failures are infrastructure failures, not merge conflicts. Keep
       // this outside the merge-only catch so the caller's halt path preserves
@@ -2871,6 +2882,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // Required: this comment is the merger's explanation of an abandon/revert.
       // Swallowing it would strand the human without the reason — fail loud.
       try {
+        await deps.beforeOriginWrite?.();
         await exec("gh", [
           "issue",
           "comment",
@@ -2958,6 +2970,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
             };
           }
         }
+        await deps.beforeOriginWrite?.();
         await exec("git", [
           "push",
           "--atomic",
@@ -2994,6 +3007,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // and never touches its draft state, so a human who marked this one
       // ready for review keeps that decision. chunk-pr.ts's header owns the
       // argument.
+      await deps.beforeOriginWrite?.();
       return ensurePullRequest({
         cwd,
         repoFlag: repoSlug(deps.repo),

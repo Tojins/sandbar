@@ -25,15 +25,18 @@
 // dwarfs the scheduler's default one-minute wake cadence and absorbs ordinary
 // clock skew. `decideAcquire`, `decideRenew` and `decideRelease` contain every
 // ownership decision as pure functions over a ref lookup, a time and our
-// claim. The adapter only creates commits, executes their returned CAS, and
-// classifies named command statuses.
+// claim. Failed-CAS reconciliation is pure too; the adapter only creates
+// commits, executes returned CAS operations, and classifies the named
+// `OriginLockCommandError` produced by its child-process boundary.
 //
-// A live run renews after every `ContinuousPool.waitForWake` result, before it
-// can admit or land. If another host replaced the ref, or our lease is expired
-// while origin cannot complete a renewal, the run must halt immediately. The
-// orchestrator owns that terminal transition because it owns admissions,
-// landings, clone preservation and the event record; this module returns a
-// `lost` value carrying the only truthful holder description.
+// A live run serializes all renewals through one guard: a one-minute heartbeat
+// covers long gates and forge waits, every `ContinuousPool.waitForWake` result
+// is a barrier before admission, and remote-write adapters renew immediately
+// before a push or tracker mutation. If another host replaced the ref, or our
+// lease is expired while origin cannot complete a renewal, the run must halt
+// immediately. The orchestrator owns that terminal transition because it owns
+// admissions, landings, clone preservation and the event record; this module
+// returns a `lost` value carrying the only truthful holder description.
 // `sandbar gate` never enters run.ts and takes neither daemon lock; it remains
 // a standalone verdict command, not a repository writer.
 
@@ -46,6 +49,7 @@ const execFileAsync = promisify(execFile);
 
 export const ORIGIN_LOCK_REF = "refs/sandbar/lock";
 export const ORIGIN_LOCK_LEASE_MS = 10 * 60 * 1000;
+export const ORIGIN_LOCK_RENEW_INTERVAL_MS = 60 * 1000;
 
 export type OriginLockIdentity = {
   readonly hostname: string;

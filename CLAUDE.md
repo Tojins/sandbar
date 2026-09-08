@@ -322,9 +322,10 @@ outcomes.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
 - **One repository-wide origin lease**, acquired after forge reachability and
-  before preflight's ref work, renewed at every scheduler wake, and released by
-  exact-sha CAS (#139). Loss halts before admission or landing and preserves
-  issue clones. `src/origin-lock.ts` owns the argument and Git contract.
+  before preflight's ref work, renewed by one serialized heartbeat plus every
+  scheduler wake and remote-write barrier, and released by exact-sha CAS
+  (#139). Loss halts before admission or landing and preserves issue clones.
+  `src/origin-lock.ts` owns the argument and Git contract.
 - **One cleanup registry owns signals and the exit (#35).** No module but
   `src/cleanup.ts` may trap a signal or exit on one. Anything created in a
   loop registers with `registerDisposable` and withdraws itself when its
@@ -451,7 +452,7 @@ outcomes.
   keeps only structure. Every git range a prompt renders anchors at the issue
   branch's SEED REF, never a bare branch name (#40, #61) — `src/prompt.ts`.
 - **One append-only event record is the run's source of truth (#70/#132).**
-  Immediately after `acquireLock`, `src/events.ts` creates
+  Immediately after both daemon locks are acquired, `src/events.ts` creates
   `run-<stamp>/events.jsonl`; every event has monotonic `seq`, wall-clock `ts`
   and a typed `kind`, and `run-start` declares the schema version. Readers
   reject unknown schemas; older log-only runs are intentionally unreadable.

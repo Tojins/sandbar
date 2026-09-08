@@ -1099,6 +1099,8 @@ export type RealVerifyAdapterDeps = {
   readonly repo: RepoRef;
   readonly exec?: ExecFn;
   readonly onNotice?: (message: string) => void | Promise<void>;
+  // Daemon ownership barrier (#139), immediately before each remote write.
+  readonly beforeOriginWrite?: () => Promise<void>;
 };
 
 // Operator-facing reason out of a failed git invocation. BOTH streams matter:
@@ -1209,6 +1211,7 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
         ? [`--force-with-lease=refs/heads/${branch}:${remoteSha}`]
         : [];
       try {
+        await deps.beforeOriginWrite?.();
         await exec(
           "git",
           ["push", ...force, "origin", `HEAD:refs/heads/${branch}`],
@@ -1368,6 +1371,7 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
 
     async fastForwardSource(sha) {
       try {
+        await deps.beforeOriginWrite?.();
         await exec(
           "git",
           ["push", "origin", `${sha}:refs/heads/${deps.sourceBranch}`],
@@ -1421,6 +1425,7 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
       // it would only make the merge button GitHub is not being asked to press
       // look disabled for a reason that does not apply here. The chunk PR (#62)
       // is the one that draws on the draft mechanism.
+      await deps.beforeOriginWrite?.();
       return ensureForgePullRequest({
         exec,
         cwd,
@@ -1435,6 +1440,7 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
     async closePullRequest(number, comment) {
       if (number <= 0) return;
       try {
+        await deps.beforeOriginWrite?.();
         await exec(
           "gh",
           ["pr", "close", String(number), "--repo", repoFlag, "--comment", comment],

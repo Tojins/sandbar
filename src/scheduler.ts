@@ -63,10 +63,10 @@
 // keeps one removable completion waiter; a poll winner withdraws it, so a hung
 // issue cannot retain one callback for every interval it survives.
 //
-// `run.ts` wraps this one wait with the repository lease renewal (#139). Keep
-// poll and slot completion coalesced here: a second timer or wait site would
-// create a scheduler path that can admit or land without first proving the
-// origin ref is still ours.
+// `run.ts` wraps this one wait with a repository-lease renewal barrier (#139).
+// A separate heartbeat covers operations that outlast the wait cadence, but
+// poll and slot completion stay coalesced here so neither scheduler path can
+// admit or land without first proving the origin ref is still ours.
 
 export type SettledIssue<T, R> =
   | { readonly status: "fulfilled"; readonly issue: T; readonly value: R }

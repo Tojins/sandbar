@@ -614,6 +614,8 @@ export function chunkForgeWrites(deps: {
   // callers are a whole cycle apart, and the residue an operator reads is the
   // only thing that says which of them was standing there.
   readonly errPrefix: string;
+  // Daemon ownership barrier (#139), immediately before each remote write.
+  readonly beforeOriginWrite?: () => Promise<void>;
 }): ChunkWrapupAdapter {
   // Read per call, not once at construction. `realAdapter` is built for its git
   // primitives alone in places that have no tracker to name (merger-git's
@@ -627,6 +629,7 @@ export function chunkForgeWrites(deps: {
     );
   const gh = async (args: readonly string[], what: string): Promise<void> => {
     try {
+      await deps.beforeOriginWrite?.();
       await exec("gh", [...args]);
     } catch (err) {
       throw wrap(what, err);
@@ -679,6 +682,7 @@ export function chunkForgeWrites(deps: {
       // establishes first — the branch's commits are contained in
       // `origin/<sourceBranch>`, so nothing is lost with the ref.
       try {
+        await deps.beforeOriginWrite?.();
         // Delete only the strict membership set this wrap-up closed. Older
         // chunks kept for a failed close may be ancestors of this branch; their
         // member refs remain their recovery record and must survive.
