@@ -59,7 +59,9 @@
 // and reading `#completed` on the same tick would miss the event that woke
 // us. The settled events move to `#pendingTerminals` here and nowhere else, so
 // "in `#active`", "completed but unobserved" and "observed, awaiting a landing"
-// are three disjoint places and an issue is in at most one of them.
+// are three disjoint places and an issue is in at most one of them. The pool
+// keeps one removable completion waiter; a poll winner withdraws it, so a hung
+// issue cannot retain one callback for every interval it survives.
 
 export type SettledIssue<T, R> =
   | { readonly status: "fulfilled"; readonly issue: T; readonly value: R }
@@ -126,6 +128,7 @@ export function decideSchedulerAction(state: SchedulerSnapshot): SchedulerAction
 export class ContinuousPool<T, R> {
   readonly #active = new Map<string, Promise<SettledIssue<T, R>>>();
   readonly #completed: SettledIssue<T, R>[] = [];
+  #completionWaiter: (() => void) | null = null;
   readonly #pendingTerminals: SettledIssue<T, R>[] = [];
   readonly #ongoing = new Map<string, T>();
   readonly #started = new Set<string>();
@@ -181,7 +184,13 @@ export class ContinuousPool<T, R> {
       .catch<SettledIssue<T, R>>((reason: unknown) => ({
         status: "rejected", issue, reason,
       }))
-      .then((event) => { this.#completed.push(event); return event; });
+      .then((event) => {
+        this.#completed.push(event);
+        const wake = this.#completionWaiter;
+        this.#completionWaiter = null;
+        wake?.();
+        return event;
+      });
     this.#active.set(id, task);
   }
 
@@ -201,23 +210,35 @@ export class ContinuousPool<T, R> {
   // completion observed in the winner's microtask is named `slot-freed`, so
   // two sources in one tick still produce one wake and one recompute.
   async waitForWake(pollIntervalMs: number): Promise<PoolWake> {
-    if (this.#active.size >= this.width) {
-      await Promise.race(this.#active.values());
-      await Promise.resolve();
+    if (this.#completed.length > 0) {
       await this.waitForFreedSlot();
       return "slot-freed";
     }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const poll = new Promise<PoolWake>((resolve) => {
-      timer = setTimeout(() => resolve("poll"), pollIntervalMs);
+    const waitForPoll = this.#active.size < this.width;
+    const wake = await new Promise<PoolWake>((resolve) => {
+      if (this.#completionWaiter !== null) {
+        throw new Error("pool already has an active wake wait");
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let finished = false;
+      const slotFreed = (): void => finish("slot-freed");
+      const finish = (trigger: PoolWake): void => {
+        if (finished) return;
+        finished = true;
+        if (this.#completionWaiter === slotFreed) this.#completionWaiter = null;
+        if (timer !== undefined) clearTimeout(timer);
+        resolve(trigger);
+      };
+      this.#completionWaiter = slotFreed;
+      if (waitForPoll) {
+        timer = setTimeout(() => finish("poll"), pollIntervalMs);
+      }
     });
-    const slot = this.#active.size === 0
-      ? null
-      : Promise.race(this.#active.values()).then((): PoolWake => "slot-freed");
-    const wake = await (slot === null ? poll : Promise.race([slot, poll]));
-    if (timer !== undefined) clearTimeout(timer);
+    // Let a task completion queued in the timer winner's tick publish its
+    // event before naming the single wake. That coalesces simultaneous sources
+    // into the slot-freed recompute which already carries the terminal.
     await Promise.resolve();
-    if (this.#completed.length > 0) {
+    if (wake === "slot-freed" || this.#completed.length > 0) {
       await this.waitForFreedSlot();
       return "slot-freed";
     }

@@ -101,6 +101,8 @@
 // member refs before running the ordinary plan. A no-op poll is silent; work,
 // source movement, and changed config-staleness evidence are recorded. Source
 // movement from either a human push or this process refreshes the image inputs.
+// Agent and branch images are replaced as one bundle and captured by each
+// admission, so a poll cannot change the images beneath in-flight work.
 
 import { realpathSync } from "node:fs";
 
@@ -341,6 +343,55 @@ function schedulerExit(
   }
 }
 
+type RunActivity = {
+  readonly isIdle: () => boolean;
+  readonly enterBusy: () => void;
+  readonly enterIdle: () => void;
+  readonly stop: () => void;
+};
+
+// One owner for the daemon's activity state and wake-lock lifetime (#133).
+// Callers report state transitions; they never pair a flag mutation with a
+// separate lock operation. A replacement holder is observed before it can
+// report a status, and `stop` always targets the holder current at cleanup.
+function createRunActivity(args: {
+  readonly initialLock: ReturnType<typeof startKeepawake>;
+  readonly keepAwakeWhileIdle: boolean;
+  readonly startLock: () => ReturnType<typeof startKeepawake>;
+  readonly observeLock: (lock: ReturnType<typeof startKeepawake>) => void;
+}): RunActivity {
+  let lock: ReturnType<typeof startKeepawake> | null = args.initialLock;
+  let idle = false;
+  args.observeLock(lock);
+  return {
+    isIdle: () => idle,
+    enterBusy: () => {
+      if (lock === null) {
+        lock = args.startLock();
+        args.observeLock(lock);
+      }
+      idle = false;
+    },
+    enterIdle: () => {
+      if (idle) return;
+      idle = true;
+      if (!args.keepAwakeWhileIdle && lock !== null) {
+        lock.stop();
+        lock = null;
+      }
+    },
+    stop: () => {
+      lock?.stop();
+      lock = null;
+    },
+  };
+}
+
+type RunImages = {
+  readonly agentImages: AgentImages;
+  readonly branchImages: BranchImages;
+};
+
 export async function run(
   rawConfig: RunConfig,
   options: RunOptions = {},
@@ -393,7 +444,7 @@ export async function run(
   // sit two `process.exit` calls that run no cleanup at all (`GH_TOKEN`, and
   // losing the lock), and neither leaks: the lock's lifetime is the stdin pipe,
   // so a process that dies without releasing releases anyway.
-  let wakeLock: ReturnType<typeof startKeepawake> | null = startKeepawake();
+  const initialWakeLock = startKeepawake();
 
   // The lock comes BEFORE preflight (#32). Preflight is not read-only: it
   // fetches, and it `git branch -D`s every `sandbar/issue-*` branch it finds
@@ -484,10 +535,6 @@ export async function run(
   // exit-0 path alone. The chain is awaited so the last thing the lock says is
   // in the record it is claimed to be in.
   let statusWrites: Promise<void> = Promise.resolve();
-  onCleanup(async () => {
-    wakeLock?.stop();
-    await statusWrites;
-  });
 
   // Whether the host can sleep under this run is an OUTCOME, and before #117 it
   // was in no record at all — not the log, not stdout — so "was the lock held
@@ -509,17 +556,16 @@ export async function run(
         console.error(`Could not log wake-lock status: ${String(err)}`);
       });
   });
-  watchWakeLock(wakeLock);
-  const ensureWakeLock = (): void => {
-    if (wakeLock !== null) return;
-    wakeLock = startKeepawake();
-    watchWakeLock(wakeLock);
-  };
-  const releaseIdleWakeLock = (): void => {
-    if (config.keepAwakeWhileIdle || wakeLock === null) return;
-    wakeLock.stop();
-    wakeLock = null;
-  };
+  const activity = createRunActivity({
+    initialLock: initialWakeLock,
+    keepAwakeWhileIdle: config.keepAwakeWhileIdle,
+    startLock: startKeepawake,
+    observeLock: watchWakeLock,
+  });
+  onCleanup(async () => {
+    activity.stop();
+    await statusWrites;
+  });
 
   // THE one site that emits a terminal (#70), and it is declared up here
   // because the startup stops below reach it as well as the scheduler loop does:
@@ -771,15 +817,15 @@ export async function run(
   const recordImage = (r: ImageBuildRecord): Promise<void> =>
     runLogger.appendOrchestrator(formatImageRecord(r));
 
-  let sourceWorktree: string;
-  let baseFingerprints: ReadonlyMap<string, string>;
-  let agentImages: AgentImages;
+  let initialSourceWorktree: string;
+  let initialBaseFingerprints: ReadonlyMap<string, string>;
+  let initialAgentImages: AgentImages;
   try {
-    sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
-    baseFingerprints = await ensureImages(config.images, sourceWorktree, {
+    initialSourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
+    initialBaseFingerprints = await ensureImages(config.images, initialSourceWorktree, {
       onImage: recordImage,
     });
-    agentImages = await createAgentImages({
+    initialAgentImages = await createAgentImages({
       declaredBaseTag: config.sandboxImage,
       providers: requiredAgentProviders(config),
       scope,
@@ -806,9 +852,13 @@ export async function run(
       worktreeMountingTags: worktreeMountingTagsOf(config.gateStack),
       hostUid: process.getuid?.() ?? 0,
     });
-  let branchImages = makeBranchImages(baseFingerprints);
-  const branchImageRuns = [branchImages];
-  const agentImageRuns = [agentImages];
+  const initialBranchImages = makeBranchImages(initialBaseFingerprints);
+  let currentImages: RunImages = {
+    agentImages: initialAgentImages,
+    branchImages: initialBranchImages,
+  };
+  const branchImageRuns = [initialBranchImages];
+  const agentImageRuns = [initialAgentImages];
   onCleanup(async () => {
     // Augmented images are FROM-children of branch variants. Remove leaves
     // first so podman can then remove their parents.
@@ -966,7 +1016,6 @@ export async function run(
     maxQualityRounds: config.maxQualityRounds,
     maxReviewRounds: config.maxReviewRounds,
     sandboxImage: config.sandboxImage,
-    agentImages,
     scope,
     gateStack: config.gateStack,
     claudeMdPath: config.claudeMdPath,
@@ -985,7 +1034,6 @@ export async function run(
   let nextPlanTrigger: Parameters<typeof runLogger.writePlan>[0] = "launch";
   let landingNumber = 0;
   let iteration = 0;
-  let idle = false;
   let lastPlanDiagnostics: string | null = null;
   const deferredLandBranches = new Set<string>();
 
@@ -1062,22 +1110,24 @@ export async function run(
   };
 
   const refreshSourceImages = async (): Promise<void> => {
-    ensureWakeLock();
-    idle = false;
-    sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
-    baseFingerprints = await ensureImages(config.images, sourceWorktree, {
+    activity.enterBusy();
+    const nextSourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
+    const nextBaseFingerprints = await ensureImages(config.images, nextSourceWorktree, {
       onImage: recordImage,
     });
-    agentImages = await createAgentImages({
+    const nextAgentImages = await createAgentImages({
       declaredBaseTag: config.sandboxImage,
       providers: requiredAgentProviders(config),
       scope,
       onImage: recordImage,
     });
-    branchImages = makeBranchImages(baseFingerprints);
-    agentImageRuns.push(agentImages);
-    branchImageRuns.push(branchImages);
-    innerLoopCfg.agentImages = agentImages;
+    const nextBranchImages = makeBranchImages(nextBaseFingerprints);
+    currentImages = {
+      agentImages: nextAgentImages,
+      branchImages: nextBranchImages,
+    };
+    agentImageRuns.push(nextAgentImages);
+    branchImageRuns.push(nextBranchImages);
   };
 
   // -------------------------------------------------------------------------
@@ -1367,8 +1417,7 @@ export async function run(
         reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land";
       if (planTrigger === "poll" && pollDidWork) {
-        ensureWakeLock();
-        idle = false;
+        activity.enterBusy();
       }
       if (planTrigger !== "poll" || pollDidWork) {
         if (planTrigger === "poll") {
@@ -1403,8 +1452,7 @@ export async function run(
       const executionIssues = [...admission];
       const issues = executionIssues;
       if (issues.length > 0) {
-        ensureWakeLock();
-        idle = false;
+        activity.enterBusy();
         await runLogger.appendOrchestrator(
           `admit: ${issues.length} issue(s) — ${issues.map((i) => `#${i.id}`).join(", ")}`,
         );
@@ -1497,16 +1545,21 @@ export async function run(
       // two-stream split (#70) doing the job it exists for, which is why "just
       // move the console.log too" is the wrong fix.
       const phase2Timer = startTimer();
+      const admissionImages = currentImages;
+      const admissionConfig = {
+        ...innerLoopCfg,
+        agentImages: admissionImages.agentImages,
+      };
       for (const issue of executionIssues) {
         const issueLogger = await runLogger.issue(issue.id);
         const task: Promise<Terminal> = (async () => {
           const issueTimer = startTimer();
           try {
             const terminal = await runInnerLoop(issue, {
-              config: innerLoopCfg,
+              config: admissionConfig,
               hooks: config.sandboxHooks,
               copyToWorktree: config.copyToWorktree,
-              branchImages,
+              branchImages: admissionImages.branchImages,
               // Sandbox-sibling logs land beside this issue's attempt
               // transcripts (#44 D4), so the offline artefact of what the
               // agent's stack was doing sits next to the transcript of what the
@@ -1539,16 +1592,14 @@ export async function run(
         schedulerAction.kind === "land" ||
         (schedulerAction.kind === "admit" && schedulerAction.next === "land")
       ) {
-        ensureWakeLock();
-        idle = false;
+        activity.enterBusy();
         settled = [...pool.takeLandingBatch()];
       } else {
-        if (pool.activeCount === 0 && !idle) {
+        if (pool.activeCount === 0 && !activity.isIdle()) {
           const line = `Idle; polling every ${config.pollIntervalMs}ms.`;
           console.log(line);
           await runLogger.appendOrchestrator(line);
-          idle = true;
-          releaseIdleWakeLock();
+          activity.enterIdle();
         }
         const wake = await pool.waitForWake(config.pollIntervalMs);
         if (wake === "slot-freed") {
@@ -1610,6 +1661,7 @@ export async function run(
       // same resolve loop a DONE branch does, and a cycle can have one without
       // the other.
       if (completedIssues.length > 0 || landRequests.length > 0) {
+        const landingImages = currentImages;
         // The merger runs in a dedicated worktree detached at
         // origin/<sourceBranch>, NOT a checkout anyone stands in — so the
         // operator's uncommitted edits can never be swept into a merge commit
@@ -1638,7 +1690,7 @@ export async function run(
             // is a tree neither branch had, and two branches that each touched
             // the lockfile compose into a third lockfile. Resolved per gate
             // run, so each merge in the landing is gated against its own.
-            images: (only) => branchImages.resolve(mergerWorktreePath, only),
+            images: (only) => landingImages.branchImages.resolve(mergerWorktreePath, only),
           });
           const stackForGate2 = mergerStack;
           const adapter = realAdapter({
@@ -1653,7 +1705,7 @@ export async function run(
             mergerAgent: config.mergerAgent,
             mergerModelId: config.mergerModelId,
             mergerEffort: config.mergerEffort,
-            sandboxImage: agentImages.declaredTag,
+            sandboxImage: landingImages.agentImages.declaredTag,
             env,
             runStackGate: () => stackForGate2.runGate(),
           });

@@ -78,7 +78,7 @@ describe("continuous pool", () => {
     expect(pool.admit([target])).toEqual([target]);
   });
 
-  it("uses one cancellable wake for a freed slot or the poll timer", async () => {
+  it("wakes an empty pool from the poll timer and a full pool from its slot", async () => {
     vi.useFakeTimers();
     try {
       const idle = new ContinuousPool<Issue, string>(1, (i) => i.id);
@@ -94,6 +94,37 @@ describe("continuous pool", () => {
       job.resolve("done");
       await expect(slotWake).resolves.toBe("slot-freed");
       expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("races both wake sources while the pool is partially occupied", async () => {
+    vi.useFakeTimers();
+    try {
+      const pollFirst = new ContinuousPool<Issue, string>(2, (i) => i.id);
+      const hung = deferred<string>();
+      const first = pollFirst.admit([issue("1")])[0]!;
+      pollFirst.start(first, hung.promise);
+      const pollWake = pollFirst.waitForWake(100);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(pollWake).resolves.toBe("poll");
+
+      const slotFirst = new ContinuousPool<Issue, string>(2, (i) => i.id);
+      const completing = deferred<string>();
+      const second = slotFirst.admit([issue("2")])[0]!;
+      slotFirst.start(second, completing.promise);
+      const slotWake = slotFirst.waitForWake(100);
+      completing.resolve("done");
+      await expect(slotWake).resolves.toBe("slot-freed");
+      expect(vi.getTimerCount()).toBe(0);
+
+      // The poll winner withdrew its completion subscription. Settling that
+      // old task is observed only by a fresh wait, not by a callback retained
+      // from the completed race.
+      hung.resolve("late");
+      await Promise.resolve();
+      await expect(pollFirst.waitForWake(100)).resolves.toBe("slot-freed");
     } finally {
       vi.useRealTimers();
     }

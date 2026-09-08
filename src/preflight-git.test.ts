@@ -146,15 +146,32 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     await chmod(gh, 0o755);
   };
 
-  it("reports when refreshing origin observes a moved source tip (#133)", async () => {
+  it("refreshes source, chunk, and member refs together and prunes namespaces (#133)", async () => {
+    await git(target, "update-ref", "refs/heads/sandbar/chunk-1-test", "HEAD");
+    await git(target, "update-ref", "refs/heads/sandbar/member-1", "HEAD");
     await writeFile(join(target, "a.txt"), "moved\n");
     await git(target, "add", "a.txt");
     await git(target, "commit", "-qm", "move source");
 
     const first = await fetchOriginRefs(target, "main");
-    const second = await fetchOriginRefs(target, "main");
     expect(first).toEqual({ sourceChanged: true, failures: [] });
+    await expect(git(
+      target, "show-ref", "--verify", "refs/remotes/origin/sandbar/chunk-1-test",
+    )).resolves.toBeDefined();
+    await expect(git(
+      target, "show-ref", "--verify", "refs/remotes/origin/sandbar/member-1",
+    )).resolves.toBeDefined();
+
+    await git(target, "update-ref", "-d", "refs/heads/sandbar/chunk-1-test");
+    await git(target, "update-ref", "-d", "refs/heads/sandbar/member-1");
+    const second = await fetchOriginRefs(target, "main");
     expect(second).toEqual({ sourceChanged: false, failures: [] });
+    await expect(git(
+      target, "show-ref", "--verify", "refs/remotes/origin/sandbar/chunk-1-test",
+    )).rejects.toBeDefined();
+    await expect(git(
+      target, "show-ref", "--verify", "refs/remotes/origin/sandbar/member-1",
+    )).rejects.toBeDefined();
   });
 
   it("fetches origin member refs before later preflight checks", async () => {

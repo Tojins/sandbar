@@ -1,7 +1,7 @@
 // Self-hosted launcher contract (#66, #133). The launcher installs one pinned
 // release and starts the daemon once; continuity belongs to run.ts's poll loop.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { constants, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -58,6 +58,41 @@ describe("driver install (#66)", () => {
     expect(readInstallState(paths)).toEqual({ cliPresent: true, installedSpec: PIN });
   });
 
+  it("invokes npm with the exact install argv", () => {
+    const paths = driverPaths(root);
+    const calls: unknown[][] = [];
+    installDriver(paths, PIN, {
+      spawn: ((...args: unknown[]) => {
+        calls.push(args);
+        mkdirSync(dirname(paths.cli), { recursive: true });
+        writeFileSync(paths.cli, "#!/usr/bin/env node\n");
+        return { status: 0 };
+      }) as never,
+      log: () => {},
+    });
+    expect(calls).toEqual([["npm", installArgv(paths.dir, PIN), { stdio: "inherit" }]]);
+  });
+
+  it("preserves an existing manifest with install-script approval", () => {
+    const paths = driverPaths(root);
+    mkdirSync(paths.dir, { recursive: true });
+    const approved = JSON.stringify({
+      name: "sandbar-driver",
+      private: true,
+      allowScripts: { "@offergeist/sandbar": true },
+    });
+    writeFileSync(paths.manifest, approved);
+    installDriver(paths, PIN, {
+      spawn: (() => {
+        mkdirSync(dirname(paths.cli), { recursive: true });
+        writeFileSync(paths.cli, "#!/usr/bin/env node\n");
+        return { status: 0 };
+      }) as never,
+      log: () => {},
+    });
+    expect(readFileSync(paths.manifest, "utf8")).toBe(approved);
+  });
+
   it("does not stamp a failed or bin-less install", () => {
     const paths = driverPaths(root);
     expect(() => installDriver(paths, PIN, {
@@ -67,6 +102,20 @@ describe("driver install (#66)", () => {
     expect(() => installDriver(paths, PIN, {
       spawn: (() => ({ status: 0 })) as never, log: () => {},
     })).toThrow(/reported success.*missing/s);
+  });
+
+  it("removes an old stamp before attempting a replacement install", () => {
+    const paths = driverPaths(root);
+    mkdirSync(paths.dir, { recursive: true });
+    writeFileSync(paths.stamp, "github:Tojins/sandbar#v0.20.0\n");
+    expect(() => installDriver(paths, PIN, {
+      spawn: (() => {
+        expect(existsSync(paths.stamp)).toBe(false);
+        return { status: 1 };
+      }) as never,
+      log: () => {},
+    })).toThrow(LaunchError);
+    expect(existsSync(paths.stamp)).toBe(false);
   });
 
   it("reads the pin and skips a matching installed driver", () => {

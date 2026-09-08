@@ -12,7 +12,11 @@ const seams = vi.hoisted(() => ({
   writePlan: vi.fn(async () => undefined),
   landRequestPullRequests: vi.fn(async () => [] as PullRequestSummary[]),
   logLines: [] as string[],
-  wakeLockStops: [] as ReturnType<typeof vi.fn>[],
+  cleanupCallbacks: [] as Array<() => unknown>,
+  wakeLocks: [] as Array<{
+    stop: ReturnType<typeof vi.fn>;
+    onStatus: ReturnType<typeof vi.fn>;
+  }>,
 }));
 
 vi.mock("./driver-identity.js", () => ({
@@ -20,13 +24,21 @@ vi.mock("./driver-identity.js", () => ({
   formatDriverIdentity: vi.fn(() => "driver: test"),
 }));
 vi.mock("./cleanup.js", () => ({
-  installCleanupTraps: vi.fn(), onCleanup: vi.fn(), runCleanup: vi.fn(async () => undefined),
+  installCleanupTraps: vi.fn(),
+  onCleanup: vi.fn((callback: () => unknown) => {
+    seams.cleanupCallbacks.push(callback);
+  }),
+  runCleanup: vi.fn(async () => {
+    while (seams.cleanupCallbacks.length > 0) {
+      await seams.cleanupCallbacks.pop()?.();
+    }
+  }),
 }));
 vi.mock("./keepawake.js", () => ({
   startKeepawake: vi.fn(() => {
-    const stop = vi.fn();
-    seams.wakeLockStops.push(stop);
-    return { stop, onStatus: vi.fn() };
+    const lock = { stop: vi.fn(), onStatus: vi.fn() };
+    seams.wakeLocks.push(lock);
+    return lock;
   }),
 }));
 vi.mock("./lock.js", async (importOriginal) => ({
@@ -126,7 +138,7 @@ vi.mock("./merger.js", async (importOriginal) => ({
 import type { RunConfig } from "./config.js";
 import { AgentQuotaError } from "./agent-sandbox.js";
 import { MergerError } from "./merger.js";
-import { ensureImages } from "./ensure-images.js";
+import { createBranchImages, ensureImages } from "./ensure-images.js";
 import { createAgentImages } from "./agent-tools.js";
 import { cleanupOrphanContainers } from "./containers.js";
 import { fetchOriginRefs, readConfigStaleness } from "./preflight.js";
@@ -184,8 +196,19 @@ describe("run quota orchestration (#109)", () => {
       configPath: null, sourceBranch: "main", hostCwd: "/repo",
       behind: 0, touchingConfig: 0,
     });
+    vi.mocked(ensureImages).mockReset();
+    vi.mocked(ensureImages).mockResolvedValue(new Map());
+    vi.mocked(createBranchImages).mockReset();
+    vi.mocked(createBranchImages).mockReturnValue({
+      resolve: vi.fn(async () => new Map()), builtTags: () => [],
+    });
+    vi.mocked(createAgentImages).mockReset();
+    vi.mocked(createAgentImages).mockResolvedValue({
+      declaredTag: "image", augment: vi.fn(async () => "image"), builtTags: () => [],
+    });
     seams.logLines.length = 0;
-    seams.wakeLockStops.length = 0;
+    seams.cleanupCallbacks.length = 0;
+    seams.wakeLocks.length = 0;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -221,28 +244,75 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.logLines.filter((line) => line.startsWith("Idle; polling every")))
       .toHaveLength(1);
     expect(startKeepawake).toHaveBeenCalledTimes(2);
-    expect(seams.wakeLockStops[0]).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[0]?.onStatus).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[0]?.stop).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[1]?.onStatus).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[1]?.stop).toHaveBeenCalledOnce();
   });
 
-  it("refreshes images when a poll observes a moved source tip", async () => {
+  it("gives post-refresh work new images while an older admission stays immutable", async () => {
+    const slow = issue("1");
+    const fast = issue("2");
     const arrived = issue("134");
-    seams.plan
-      .mockResolvedValueOnce(resolution([]))
-      .mockResolvedValue(resolution([arrived]));
-    vi.mocked(fetchOriginRefs).mockResolvedValue({ sourceChanged: true, failures: [] });
-    seams.innerLoop.mockResolvedValue({
-      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    const slowTerminal = deferred<{
+      type: "NEEDS-INFO"; questions: string; strandedHead: null;
+    }>();
+    const oldAgentImages = {
+      declaredTag: "agent-old", augment: vi.fn(async () => "agent-old"), builtTags: () => [],
+    };
+    const newAgentImages = {
+      declaredTag: "agent-new", augment: vi.fn(async () => "agent-new"), builtTags: () => [],
+    };
+    const oldBranchImages = {
+      resolve: vi.fn(async () => new Map()), builtTags: () => [],
+    };
+    const newBranchImages = {
+      resolve: vi.fn(async () => new Map()), builtTags: () => [],
+    };
+    vi.mocked(createAgentImages)
+      .mockResolvedValueOnce(oldAgentImages)
+      .mockResolvedValue(newAgentImages);
+    vi.mocked(createBranchImages)
+      .mockReturnValueOnce(oldBranchImages)
+      .mockReturnValue(newBranchImages);
+    let polled = false;
+    seams.plan.mockImplementation(async () =>
+      resolution(polled ? [arrived] : [slow, fast]));
+    vi.mocked(fetchOriginRefs).mockImplementation(async () => {
+      polled = true;
+      return { sourceChanged: true, failures: [] };
+    });
+    seams.innerLoop.mockImplementation(async (candidate: ReturnType<typeof issue>) => {
+      if (candidate.id === slow.id) return slowTerminal.promise;
+      if (candidate.id === fast.id) {
+        return { type: "NEEDS-INFO", questions: "answer", strandedHead: null };
+      }
+      slowTerminal.resolve({ type: "NEEDS-INFO", questions: "answer", strandedHead: null });
+      return { type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42 };
     });
     vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`EXIT:${code}`);
     }) as never);
 
-    await expect(run({ ...config, pollIntervalMs: 1, keepAwakeWhileIdle: true }))
+    await expect(run({
+      ...config, maxParallelIssues: 2, pollIntervalMs: 1, keepAwakeWhileIdle: true,
+    }))
       .rejects.toThrow("EXIT:4");
     expect(ensureImages).toHaveBeenCalledTimes(2);
     expect(createAgentImages).toHaveBeenCalledTimes(2);
     expect(seams.logLines).toContain("origin/main moved during poll; refreshing source images");
+    const slowOptions = seams.innerLoop.mock.calls.find(([candidate]) =>
+      candidate.id === slow.id)?.[1];
+    const arrivedOptions = seams.innerLoop.mock.calls.find(([candidate]) =>
+      candidate.id === arrived.id)?.[1];
+    expect(slowOptions.config.agentImages).toBe(oldAgentImages);
+    expect(slowOptions.branchImages).toBe(oldBranchImages);
+    expect(arrivedOptions.config.agentImages).toBe(newAgentImages);
+    expect(arrivedOptions.branchImages).toBe(newBranchImages);
     expect(startKeepawake).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[0]?.onStatus).toHaveBeenCalledOnce();
+    // The only stop is terminal cleanup: idle did not release this holder.
+    expect(seams.wakeLocks[0]?.stop).toHaveBeenCalledOnce();
   });
 
   it("reports a changed stale-config count once, not on every poll", async () => {
@@ -652,6 +722,9 @@ describe("run quota orchestration (#109)", () => {
       ...summary([]),
       deferredChunks: [{ target, landedNow: target.rework }],
     });
+    vi.mocked(fetchOriginRefs)
+      .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+      .mockRejectedValueOnce(new Error("stop after deferred-request retry"));
     const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`EXIT:${code}`);
     }) as never);
@@ -659,7 +732,8 @@ describe("run quota orchestration (#109)", () => {
     await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
       .rejects.toThrow("EXIT:1");
     expect(exit).toHaveBeenCalledWith(1);
-    expect(seams.merger).toHaveBeenCalledOnce();
+    expect(fetchOriginRefs).toHaveBeenCalledTimes(2);
+    expect(seams.merger).toHaveBeenCalledTimes(2);
     expect(seams.innerLoop).not.toHaveBeenCalled();
     expect(seams.logLines.some((line) => line.startsWith("Idle; polling every"))).toBe(true);
   });
