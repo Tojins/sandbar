@@ -21,10 +21,10 @@
 // prompts being a function of the same tree.
 //
 // The import is from the installed driver rather than `./dist/`, for that same
-// reason: there is no build in this checkout during a series, and the env
-// helpers should be the ones from the version being run. `npm run driver`
-// installs it without starting a series, which is what the hand paths
-// (`sandbar gate`, or just loading this file) need.
+// reason: there is no build in this checkout during a series, and `readEnvFile`
+// should be the one from the version being run. `npm run driver` installs it
+// without starting a series, which is what the hand paths (`sandbar gate`, or
+// just loading this file) need.
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -45,11 +45,7 @@ if (!existsSync(DRIVER_ENTRY)) {
       "the driver it is run by (#66).",
   );
 }
-const { readEnvFile, splitRoleRouting } = await import(DRIVER_ENTRY.href);
-const { routing, env } = splitRoleRouting(
-  readEnvFile(new URL("sandbar.env", import.meta.url)),
-);
-const CODEX_AUTH_PATH = join(homedir(), ".codex/auth.json");
+const { readEnvFile } = await import(DRIVER_ENTRY.href);
 
 // One image serves both roles — the agent sandbox (`--user 1000:1000
 // --userns=keep-id`) and the gate runner (a pod member, where keep-id is
@@ -283,33 +279,91 @@ export default {
     { tag: IMAGE, containerfile: "Containerfile", rebuildOn: ["Containerfile"] },
   ],
 
-  // sandbar.env holds this installation's credentials and fifteen optional
-  // per-role routing values (#137). `splitRoleRouting` removes every reserved
-  // SANDBAR_* key before this allowlist can enter a sandbox, and `...routing`
-  // below applies the non-empty deviations over the committed claude/opus
-  // defaults. See sandbar.env.example for the complete key set.
-  //
-  // Codex's subscription credential remains program-derived (#73): its source
-  // is pretty JSON rather than the line-based env file. It is included only
-  // when present, so an installation routed entirely to claude needs no codex
-  // login; preflight still refuses a routed codex role with no credential.
-  // Re-run `codex login` on this host if a series is refused for a stale token.
-  // Avoid declaring an OPENAI_API_KEY too; codex prefers it and preflight warns
-  // about the resulting billing precedence.
+  // The credential the codex routing below spends is the ChatGPT subscription,
+  // not the API (#73). The included pool is the whole discount — top-up credits
+  // are priced at API parity — and `OPENAI_API_KEY` bills the API without
+  // touching it. The subscription is a FILE: `codex login` on this host writes
+  // `~/.codex/auth.json`, and `CODEX_AUTH_JSON` carries its content as a value,
+  // which this file is a program and reads for itself. Not `sandbar.env`: that
+  // parser is line-based and `auth.json` is pretty JSON. Declare ONE of the
+  // two — codex prefers `OPENAI_API_KEY` when both are visible, so a config
+  // carrying both pays the subscription and bills the API anyway, which
+  // preflight warns about. Re-run `codex login` here if a series is ever
+  // refused for a stale token: the container's copy refreshes in place and
+  // this host's can be left behind.
   env: {
-    ...env,
-    ...(existsSync(CODEX_AUTH_PATH)
-      ? { CODEX_AUTH_JSON: readFileSync(CODEX_AUTH_PATH, "utf8") }
-      : {}),
+    ...readEnvFile(new URL("sandbar.env", import.meta.url)),
+    CODEX_AUTH_JSON: readFileSync(join(homedir(), ".codex/auth.json"), "utf8"),
   },
+
+  // The implementer runs codex (#72), on the subscription above (#73); the
+  // pair is deviations from "claude"/"opus", so only the routed role is
+  // spelled. The model id is the same field the claude default used, holding
+  // the other vendor's id — the driver enforces the pairing rather than
+  // trusting it (`assertRoleModelIdNamed`): a model id left unset is the
+  // claude alias "opus", so a half-moved config would ask codex for it on
+  // every attempt. Preflight refuses the run when no codex credential is
+  // declared in `env`, rather than letting the failure arrive as an
+  // implementer dying in-container.
+  //
+  // The REVIEWER is two independently routed passes since #121, and they are
+  // split across the two vendors: quality (tests and standards) runs first on
+  // codex and gates correctness (correctness and spec), which keeps the
+  // deciding verdict on claude/opus. That is #72's argument applied one level
+  // down — the strongest model belongs where the judgement is, and after #121
+  // the judgement that ends an issue is correctness's — and it moves the ~64%
+  // of reviewer rounds that never reach correctness off the Claude
+  // subscription window, which is the binding constraint on this host (#93
+  // ended `You've hit your session limit`; #109 is open about a closing window
+  // read as a harness failure). Possible only because the passes no longer
+  // share a session: a resumed one cannot cross vendor CLIs.
+  //
+  // The thing to watch, and the reason to back these two lines out rather than
+  // tune them: quality's test findings must keep naming a concrete deletion
+  // that leaves the suite green. That mutation-checking is the most valuable
+  // thing the pass does (21 of 26 sampled test findings were substantive,
+  // against 7 of 31 standards findings), and it is exactly what a vendor swap
+  // can quietly lose while still producing confident prose. Reverting is a
+  // two-line edit to this file and needs no landing.
+  //
+  // The MERGER runs codex too (#130), on the same knobs it has had since #74.
+  // It sat on the claude/opus defaults until then on the reviewer's argument —
+  // conflict resolution is judgement — but the resolve loop is a short
+  // bounded chain on a prompt that carries the whole state, and it spends on
+  // the Claude subscription window that is this host's binding constraint,
+  // so it goes where the implementer went.
+  //
+  // Every codex role names its EFFORT (#130). Left unset, codex runs at the
+  // per-model default the server ships — `low` for gpt-5.6-sol — because the
+  // sandbox reads no host config.toml (only the credential is seeded, #73),
+  // so the `high` this host's interactive codex sessions run at never reached
+  // a run. The field is the explicit spelling; the level a call ran at is on
+  // its implementer/review-pass event as `effort`. The correctness pass stays on
+  // claude's default, which is already `high`.
+  //
+  // These fields are what `requiresSandbar` above had to rise for: they are
+  // meaningless to a driver older than #130, which would spread them through
+  // and ignore them (#66). The pin below therefore had to move FIRST — it
+  // names v0.32.5, the release that carries #130 — as it did for #121's
+  // per-pass reviewer fields before it.
+  //
+  // Nothing here takes effect through the pin. This file comes from the
+  // checkout, not from `.sandbar/driver/`, so an edit applies on the next run
+  // — but the DRIVER that reads it must already understand the field, which is
+  // what `requiresSandbar` is checking.
+  implementerAgent: "codex",
+  implementerModelId: "gpt-5.6-sol",
+  reviewerQualityAgent: "codex",
+  reviewerQualityModelId: "gpt-5.6-sol",
+  mergerAgent: "codex",
+  mergerModelId: "gpt-5.6-sol",
+  implementerEffort: "high",
+  reviewerQualityEffort: "high",
+  mergerEffort: "high",
 
   // No `mergeMode`: the default `{ kind: "direct" }` is what this repo wants,
   // and restating a default is noise (see RunConfig's deviations-only rule).
   // Nothing downstream of `main` here trusts it blindly — `auto-tag.yml` reads
   // package.json and creates a tag, which is bookkeeping, not a deploy — so the
   // one thing `verified` protects against does not apply.
-
-  // Installation routing is deliberately last: its non-empty fields override
-  // every committed host default above, while omitted fields keep one.
-  ...routing,
 };

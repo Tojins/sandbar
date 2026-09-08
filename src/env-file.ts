@@ -42,7 +42,10 @@ const ROLE_ROUTING_FIELDS = [
 
 type RoleRoutingField = (typeof ROLE_ROUTING_FIELDS)[number];
 
-type RoleRouting = Partial<Pick<RunConfig, RoleRoutingField>>;
+// The split precedes config resolution, so every value is still the raw string
+// read from the env record. In particular, an agent value has not yet been
+// narrowed to AgentProviderName.
+type RoleRouting = Partial<Record<RoleRoutingField, string>>;
 
 function routingEnvKey(field: RoleRoutingField): string {
   return `SANDBAR_${field.replace(/[A-Z]/g, (letter) => `_${letter}`).toUpperCase()}`;
@@ -121,7 +124,5 @@ export function splitRoleRouting(record: Record<string, string>): {
     if (value !== undefined && value !== "") routingValues[field] = value;
   }
 
-  // Agent names are still strings at this boundary. The cast describes the
-  // config fields they populate; resolveConfig performs the runtime narrowing.
-  return { routing: routingValues as RoleRouting, env };
+  return { routing: routingValues, env };
 }

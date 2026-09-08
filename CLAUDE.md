@@ -573,9 +573,8 @@ outcomes.
 ## This repo runs itself (#39)
 
 `sandbar.config.mjs` at the root is the host-side surface, `Containerfile`
-builds the one image, `sandbar.env` (gitignored) holds credentials and this
-installation's role routing, `sandbar.pin` names the release that drives a run,
-and `npm run sandbar`
+builds the one image, `sandbar.env` (gitignored) holds credentials, `sandbar.pin`
+names the release that drives a run, and `npm run sandbar`
 (`scripts/sandbar-launch.mjs`) installs the pin and starts the daemon once.
 
 - **The driver is PINNED, not built from the checkout (#66).** The launcher

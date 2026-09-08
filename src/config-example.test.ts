@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -68,7 +68,14 @@ describe("sandbar.config.example.mjs", () => {
     const fixtureDir = await mkdtemp(join(fixtureParent, "config-example-"));
     const fixtureConfig = join(fixtureDir, "sandbar.config.mjs");
     await copyFile(exampleUrl, fixtureConfig);
-    await copyFile(envExampleUrl, join(fixtureDir, "sandbar.env"));
+    await writeFile(
+      join(fixtureDir, "sandbar.env"),
+      `${envExampleSource}\n` +
+        "GH_TOKEN=fixture-token\n" +
+        "SANDBAR_IMPLEMENTER_AGENT=codex\n" +
+        "SANDBAR_IMPLEMENTER_MODEL_ID=gpt-5.6-sol\n" +
+        "SANDBAR_IMPLEMENTER_EFFORT=high\n",
+    );
     let example: RunConfig;
     try {
       example = (
@@ -91,14 +98,22 @@ describe("sandbar.config.example.mjs", () => {
           !envExampleSource.includes(`# ${routingEnvKey(field)}=`),
       ),
     ).toEqual([]);
+    expect(example.env).toMatchObject({ GH_TOKEN: "fixture-token" });
+    expect(example.env).not.toHaveProperty("SANDBAR_IMPLEMENTER_AGENT");
+    expect(example).toMatchObject({
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+      implementerEffort: "high",
+    });
     expect(() => resolveConfig(example)).not.toThrow();
   });
 
-  it("is included in the published package manifest", () => {
+  it("ships both files that make up the published example", () => {
     const packageJson = JSON.parse(
       readFileSync(new URL("../package.json", import.meta.url), "utf8"),
     ) as { readonly files: readonly string[] };
 
     expect(packageJson.files).toContain("sandbar.config.example.mjs");
+    expect(packageJson.files).toContain("sandbar.env.example");
   });
 });
