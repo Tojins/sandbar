@@ -321,6 +321,10 @@ outcomes.
   without the merge. `src/chunk-land.ts`'s header owns the rest.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
+- **One repository-wide origin lease**, acquired after forge reachability and
+  before preflight's ref work, renewed at every scheduler wake, and released by
+  exact-sha CAS (#139). Loss halts before admission or landing and preserves
+  issue clones. `src/origin-lock.ts` owns the argument and Git contract.
 - **One cleanup registry owns signals and the exit (#35).** No module but
   `src/cleanup.ts` may trap a signal or exit on one. Anything created in a
   loop registers with `registerDisposable` and withdraws itself when its

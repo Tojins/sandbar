@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import type { Terminal } from "./inner-loop.js";
 import { AgentQuotaError } from "./agent-sandbox.js";
 import {
+  decideOriginLockWake,
   selectTerminalExit,
   terminalReason,
   verifyFinalizedTrackerState,
 } from "./run.js";
+import type { OriginLockClaim } from "./origin-lock.js";
 
 describe("terminal event reasons (#132)", () => {
   const terminals: readonly [Terminal, string | null][] = [
@@ -72,6 +74,60 @@ describe("provider terminal precedence (#134)", () => {
       terminals: [credential],
       otherwise: () => null,
     })).toMatchObject({ tag: "credential", exitCode: 4 });
+  });
+});
+
+describe("origin lease loss (#139)", () => {
+  const claim: OriginLockClaim = {
+    sha: "abc",
+    lease: {
+      hostname: "host-a",
+      workdir: "/srv/app/.sandbar",
+      pid: 123,
+      run: "run-a",
+      startedAt: "2026-09-08T12:00:00.000Z",
+      expires: "2026-09-08T12:10:00.000Z",
+    },
+  };
+
+  it.each([
+    {
+      name: "rejected renewal",
+      renewal: {
+        kind: "lost" as const,
+        holder: { ...claim, sha: "replacement" },
+        reason: "replaced" as const,
+        detail: "current holder is host-b",
+      },
+      detail: "current holder is host-b",
+    },
+    {
+      name: "expired lease with unreachable origin",
+      renewal: {
+        kind: "lost" as const,
+        holder: null,
+        reason: "expired-unrenewable" as const,
+        detail: "origin could not be asked",
+      },
+      detail: "origin could not be asked",
+    },
+  ])("halts without a landing continuation on $name", ({ renewal, detail }) => {
+    expect(decideOriginLockWake(renewal)).toEqual({
+      kind: "halt",
+      complaint: expect.stringContaining(detail),
+      exit: expect.objectContaining({ tag: "halted", exitCode: 1 }),
+    });
+  });
+
+  it("continues only while an unrenewed lease is still valid", () => {
+    expect(decideOriginLockWake({
+      kind: "retained",
+      claim,
+      reason: "network down",
+    })).toEqual({
+      kind: "continue",
+      warning: expect.stringContaining("network down"),
+    });
   });
 });
 

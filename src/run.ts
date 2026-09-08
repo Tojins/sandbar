@@ -1,5 +1,15 @@
 // Sandbar orchestrator — continuous execution pool plus serialized landing.
 //
+// Repository ownership (#139) is the prerequisite for all of it. The local
+// workdir lock still protects `.sandbar/`; after the read-only forge
+// reachability probe, an independent ten-minute lease at
+// `refs/sandbar/lock` protects the origin shared by every host. The event
+// record starts only after both are held, so a second host's refusal remains
+// stderr-only. Every scheduler poll/slot-freed wake renews the lease before
+// planning, admission, finalization or landing. A replacement ref, or an
+// expired lease that origin cannot renew, exits halted immediately: no drain,
+// no landing, and issue clones deferred at inner-loop close remain in place.
+//
 //   Recompute:                 Deterministic resolver picks the unblocked
 //                              `ready-for-agent` issues by parsing each body's
 //                              `## Blocked by` section — and routes each by
@@ -53,19 +63,21 @@
 //                              finalises the merger's own outcomes after.
 //
 // One event record at <cwd>/<workDir>/logs/run-<UTC-ISO>/events.jsonl captures
-// every fact after the workdir lock is won (#132). Raw agent, gate, merger and
-// resolve transcripts stay beside it as files. `run()` hosts the file-fed UI;
-// stdout contains its URL only. After the record exists, operator complaints
-// are events; stderr is reserved for the internal-failure banner.
+// every fact after both the workdir and origin locks are won (#132, #139). Raw
+// agent, gate, merger and resolve transcripts stay beside it as files. `run()`
+// hosts the file-fed UI; stdout contains its URL only. After the record exists,
+// operator complaints are events; stderr is reserved for the internal-failure
+// banner.
 //
-// The lock is the record boundary (#70). Refused config, missing GH_TOKEN and
-// a lost lock remain stderr-only because no run owns the workdir yet (or, for a
-// lost lock, another run owns it). The winner immediately emits run-start,
-// including driver identity, before preflight and image preparation. Every
-// terminal path the run selects emits one structured exit, and cleanup appends
-// run-end; a signal is the one ending with no exit event — cleanup.ts owns
-// that exit (#35), so the record carries a complaint and `run-end (signal)`.
-// Readers use run.pid plus run-end to distinguish live, crashed and ended runs.
+// The locks are the record boundary (#70, #139). Refused config, missing
+// GH_TOKEN, forge-unreachable-before-origin-lock and either refused lock remain
+// stderr-only because no run owns both scopes yet. The winner immediately emits
+// run-start, including driver identity, before preflight and image preparation.
+// Every terminal path the run selects emits one structured exit, and cleanup
+// appends run-end; a signal is the one ending with no exit event — cleanup.ts
+// owns that exit (#35), so the record carries a complaint and `run-end
+// (signal)`. Readers use run.pid plus run-end to distinguish live, crashed and
+// ended runs.
 //
 // At capacity below `maxParallelIssues`, one cancellable wait races the next
 // slot completion against `pollIntervalMs`. A poll refreshes source, issue,
@@ -75,13 +87,20 @@
 // changed config-staleness evidence are recorded. Source movement from either
 // a human push or this process refreshes the image inputs.
 // Agent and branch images are replaced as one bundle and captured by each
-// admission, so a poll cannot change the images beneath in-flight work.
+// admission, so a poll cannot change the images beneath in-flight work. The
+// origin lease renewal wraps that same wait and therefore precedes either wake's
+// effects; it is not a second timer.
 
 import { realpathSync } from "node:fs";
+import { hostname } from "node:os";
 import { dirname } from "node:path";
 
 import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
-import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
+import {
+  AgentCredentialError,
+  AgentQuotaError,
+  reclaimIssueClone,
+} from "./agent-sandbox.js";
 import {
   type SweepResult,
   cleanupOrphanContainers,
@@ -116,7 +135,12 @@ import {
 import { makeEnvReader } from "./env.js";
 import { startTimer } from "./timing.js";
 import { SandbarError, faultDetail } from "./errors.js";
-import { startEventRecord, type EventInput, type RecomputeTrigger } from "./events.js";
+import {
+  runStampFromDate,
+  startEventRecord,
+  type EventInput,
+  type RecomputeTrigger,
+} from "./events.js";
 import {
   type TerminalExit,
   MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
@@ -145,6 +169,13 @@ import { startKeepawake } from "./keepawake.js";
 import { runInnerLoop, type Terminal } from "./inner-loop.js";
 import { requiredAgentProviders } from "./agent-providers.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
+import {
+  OriginLockHeldError,
+  acquireOriginLock,
+  formatOriginLockHolder,
+  type OriginLockHandle,
+  type OriginLockRenewal,
+} from "./origin-lock.js";
 import { runScope } from "./naming.js";
 import {
   MergerError,
@@ -181,10 +212,11 @@ import {
 } from "./scheduler.js";
 import {
   absoluteMountSources,
+  checkForgeReachabilityForPreflight,
   fetchOriginRefs,
   PreflightError,
   readConfigStaleness,
-  runPreflight,
+  runPreflightAfterReachability,
   staleConfigWarning,
 } from "./preflight.js";
 import { buildProjectAnchor } from "./prompt.js";
@@ -192,6 +224,7 @@ import {
   ensureRepoCache,
   ensureSourceWorktree,
   repoLayout,
+  worktreePathFor,
 } from "./repo-cache.js";
 import { startUiServer, UiPortInUseError } from "./ui-server.js";
 
@@ -255,6 +288,32 @@ export function selectTerminalExit(args: {
   if (args.haltReasons.length > 0) return haltedExit(args.haltReasons);
   const quota = args.terminals.find((terminal) => terminal.type === "QUOTA");
   return quota?.type === "QUOTA" ? quotaExit(quota) : args.otherwise();
+}
+
+export type OriginLockWakeDecision =
+  | { readonly kind: "continue"; readonly warning: string | null }
+  | { readonly kind: "halt"; readonly complaint: string; readonly exit: TerminalExit };
+
+// The scheduler-side half of the origin lease contract (#139), pure so both
+// loss shapes are pinned without running a daemon. A halt has no "drain" or
+// "land" continuation by construction; the caller records it and exits.
+export function decideOriginLockWake(
+  renewal: OriginLockRenewal,
+): OriginLockWakeDecision {
+  if (renewal.kind === "renewed") return { kind: "continue", warning: null };
+  if (renewal.kind === "retained") {
+    return {
+      kind: "continue",
+      warning: `Origin lease renewal failed while our lease remains valid ` +
+        `until ${renewal.claim.lease.expires}: ${renewal.reason}`,
+    };
+  }
+  return {
+    kind: "halt",
+    complaint: `Origin lease lost; ${renewal.detail}. Stopping admissions, ` +
+      "landing nothing, and preserving every issue clone.",
+    exit: haltedExit(["origin-lock-lost"]),
+  };
 }
 
 export function terminalReason(terminal: Terminal): string | null {
@@ -434,13 +493,10 @@ export async function run(
   // so a process that dies without releasing releases anyway.
   const initialWakeLock = startKeepawake();
 
-  // The lock comes BEFORE preflight (#32). Preflight is not read-only: it
-  // fetches, and it `git branch -D`s every `sandbar/issue-*` branch it finds
-  // merged. That delete was the one operation in the whole startup path that
-  // mutates the repo, and it was the one operation the single-instance lock did
-  // not cover — two launches racing on the same workdir, precisely what the
-  // lock exists to stop, both reached it and the loser was only turned away
-  // afterwards.
+  // The workdir lock comes before every operation on local `.sandbar/` state
+  // (#32). It remains distinct from #139's origin lease below: this one guards
+  // the cache and event files on one host; the other guards shared repository
+  // refs across hosts.
   //
   // Ordering it this way costs nothing. `acquireLock` is `retries: 0`, so a
   // held lock fails immediately — there is no "lock wait" for a config error to
@@ -462,6 +518,70 @@ export async function run(
   onCleanup(async () => {
     if (release) await release();
   });
+
+  // The cache must exist before either the reachability probe can read its
+  // origin URL or the origin-lock adapter can run Git in it. Creation is local,
+  // under the workdir lock, and makes no remote write.
+  //
+  // The forge probe is deliberately the last operation before acquiring the
+  // repository-wide lease (#139). Everything after it in preflight fetches,
+  // cleans or reconciles repository state and therefore requires the shared
+  // single-writer claim. A loser owns no event record: like a workdir-lock
+  // loser it reports only to stderr, then releases local state and exits.
+  const repo = { owner: config.ghOwner, name: config.ghRepo };
+  const preflightBase = {
+    layout,
+    env,
+    sourceBranch: config.sourceBranch,
+    repo,
+    pulledImages: pulledImagesOf(config),
+    mountSources: absoluteMountSources(config.gateStack.containers),
+    configPath: options.configPath ?? null,
+    agentProviders,
+  };
+  const stopBeforeOriginLock = async (err: unknown): Promise<never> => {
+    const detail = err instanceof PreflightError ? err.message : faultDetail(err);
+    console.error(detail);
+    await runCleanup();
+    process.exit(1);
+  };
+  try {
+    await ensureRepoCache(layout, () => undefined);
+    await checkForgeReachabilityForPreflight({
+      ...preflightBase,
+      onEvent: (event) => {
+        if (event.kind === "complaint") console.error(event.message);
+      },
+    });
+  } catch (err) {
+    return await stopBeforeOriginLock(err);
+  }
+
+  const runStartedAt = new Date();
+  let originLock: OriginLockHandle;
+  let displacedOriginHolder: Awaited<ReturnType<typeof acquireOriginLock>>["displaced"];
+  try {
+    const acquired = await acquireOriginLock({
+      repoDir: layout.repoDir,
+      identity: {
+        hostname: hostname(),
+        workdir: realpathSync(lockPaths.workDir),
+        pid: process.pid,
+        run: runStampFromDate(runStartedAt),
+        startedAt: runStartedAt.toISOString(),
+      },
+    });
+    originLock = acquired.lock;
+    displacedOriginHolder = acquired.displaced;
+  } catch (err) {
+    if (err instanceof OriginLockHeldError) {
+      console.error(err.message);
+      await runCleanup();
+      process.exit(1);
+    }
+    return await stopBeforeOriginLock(err);
+  }
+  onCleanup(() => originLock.release());
 
   // -------------------------------------------------------------------------
   // Per-run event record and UI
@@ -488,6 +608,7 @@ export async function run(
   // -------------------------------------------------------------------------
   const runRecord = await startEventRecord({
     baseDir: layout.logsDir,
+    now: runStartedAt,
     start: {
       driver: driverIdentity,
       configPath: options.configPath ?? null,
@@ -495,6 +616,15 @@ export async function run(
       maxParallelIssues: config.maxParallelIssues,
       pid: process.pid,
     },
+  });
+  await runRecord.emit({
+    kind: "preflight",
+    action: displacedOriginHolder === null
+      ? "origin-lock-acquired"
+      : "origin-lock-taken-over",
+    detail: displacedOriginHolder === null
+      ? `Acquired repository lease ${originLock.claim().sha}`
+      : `Took over expired repository lease from ${formatOriginLockHolder(displacedOriginHolder)}`,
   });
   let cleanupReason = "normal-exit";
   const recordInternalFailure = async (detail: string): Promise<TerminalExit> => {
@@ -664,13 +794,6 @@ export async function run(
     process.exit(exit.exitCode);
   };
 
-  // One `repo` for the whole run (#34). Every `gh` call sandbar makes — the
-  // planner's queue, the issue anchor, the finalise writes, the merger's closes
-  // and the forge-verify polls — names this rather than letting gh infer a
-  // repository from whatever directory the command ran in. Preflight is where
-  // it is checked against the cache's `origin`, which is the one repository
-  // identity sandbar does NOT get from config.
-  const repo = { owner: config.ghOwner, name: config.ghRepo };
   let codexAuthMount: CodexAuthMount | undefined;
 
   // Preflight is still ahead of the sweep and every container operation below,
@@ -682,41 +805,8 @@ export async function run(
       action: "started",
       detail: "Preflight started",
     });
-    // The object cache, before anything reads a ref (#38). Created from
-    // `config.cwd` when absent — a local clone, so hardlinked and offline —
-    // and its `origin` retargeted to whatever URL that checkout carries. Under
-    // the lock, because it writes into the state directory; before preflight,
-    // because preflight fetches into it.
-    //
-    // Inside preflight's catch because its failures are the same KIND of
-    // failure: `cwd` is not a repo, it has no `origin`, the clone did not
-    // work. Every one is a startup complaint an operator acts on, so it is
-    // stored as its message alone — a `SandbarError` by `faultDetail`'s own
-    // rule, a `PreflightError` by `stopAtStartup`'s one exception to it — and exits,
-    // and, unlike letting it escape to the bin, it runs cleanup first, which is
-    // what recovers the `run.pid` sidecar.
-    await ensureRepoCache(layout, (line) => runRecord.emit({
-      kind: "preflight",
-      action: "cache-created",
-      detail: line,
-    }).then(() => undefined));
-    const initialConfigStaleness = await runPreflight({
-      layout,
-      env,
-      sourceBranch: config.sourceBranch,
-      repo,
-      pulledImages: pulledImagesOf(config),
-      // The gate stack is the whole of sandbar's consumer-supplied host-path
-      // surface (#51), and a source podman cannot resolve is host state that
-      // would otherwise redden the gate against the branch.
-      mountSources: absoluteMountSources(config.gateStack.containers),
-      // For the one warning that is about the config FILE rather than its
-      // contents: nothing refreshes the checkout it was imported from (#66).
-      configPath: options.configPath ?? null,
-      // Every CLI the three roles route to (#72, #74). A
-      // missing key for one of them is a refusal here, where it costs a
-      // startup, rather than an in-container death an attempt at a time.
-      agentProviders,
+    const initialConfigStaleness = await runPreflightAfterReachability({
+      ...preflightBase,
       onEvent: (event) => runRecord.emit(event).then(() => undefined),
     });
     const configuredCodexAuth = agentProviders.includes("codex")
@@ -1066,6 +1156,8 @@ export async function run(
     adrDir: config.adrDir,
     promptExtensions: config.promptExtensions,
   };
+  const leaseDeferredCloneReason =
+    "repository lease ownership is awaiting the scheduler wake";
 
   type IssueOutcome = { issue: PlannedIssue; terminal: Terminal };
   type ExecutionEvent = SettledIssue<PlannedIssue, Terminal>;
@@ -1080,6 +1172,42 @@ export async function run(
   let iteration = 0;
   let lastPlanDiagnostics: string | null = null;
   const deferredLandBranches = new Set<string>();
+
+  // The scheduler wake is the lease cadence (#139). This wrapper is the only
+  // way the main loop waits, so both timer polls and freed-slot wakes renew
+  // before control can reach planning, admission, finalization or landing.
+  // On loss it does not drain: draining would finalize DONE work and could
+  // enter the landing path. Sandboxes already defer clone reclamation until
+  // this boundary, and cleanup stops their containers while leaving those
+  // clones in place.
+  const observeOriginLockRenewal = async (
+    renewal: OriginLockRenewal,
+  ): Promise<void> => {
+    const decision = decideOriginLockWake(renewal);
+    if (decision.kind === "continue") {
+      if (decision.warning === null) return;
+      await runRecord.emit({
+        kind: "complaint",
+        severity: "warning",
+        message: decision.warning,
+      });
+      return;
+    }
+
+    await runRecord.emit({
+      kind: "complaint",
+      severity: "error",
+      message: decision.complaint,
+    });
+    const exit = await announceExit(decision.exit);
+    await runCleanup();
+    process.exit(exit.exitCode);
+  };
+  const waitForSchedulerWake = async (): Promise<RecomputeTrigger> => {
+    const wake = await pool.waitForWake(config.pollIntervalMs);
+    await observeOriginLockRenewal(await originLock.renew());
+    return wake;
+  };
 
   const emitRecompute = async (
     iteration: number,
@@ -1149,6 +1277,11 @@ export async function run(
       if (event.status === "fulfilled") {
         outcomes.push({ issue: event.issue, terminal: event.value });
       } else {
+        await reclaimIssueClone(
+          layout.repoDir,
+          worktreePathFor(layout.worktreesDir, event.issue.branch),
+          event.issue.branch,
+        );
         pool.finishRejected(event.issue);
       }
     }
@@ -1307,6 +1440,10 @@ export async function run(
   // -------------------------------------------------------------------------
 
   try {
+    // Image preparation can be the longest part of startup. Refresh the claim
+    // once more before the launch recompute so even a slow build cannot enter
+    // the scheduler on its acquisition-time expiry.
+    await observeOriginLockRenewal(await originLock.renew());
     for (;;) {
       iteration += 1;
       const planTrigger: RecomputeTrigger = nextPlanTrigger;
@@ -1318,7 +1455,7 @@ export async function run(
             `Poll refresh failed; retrying in ${config.pollIntervalMs}ms: ` +
             refresh.failures.join("; ");
           await runRecord.emit({ kind: "complaint", severity: "warning", message });
-          nextPlanTrigger = await pool.waitForWake(config.pollIntervalMs);
+          nextPlanTrigger = await waitForSchedulerWake();
           continue;
         }
         // A terminal is eligible again only after the poll has refreshed the
@@ -1641,6 +1778,7 @@ export async function run(
               attemptLogger: issueLogger,
               onEvent: (event) => runRecord.emit(event).then(() => undefined),
               providerState,
+              deferIssueCloneReclaim: leaseDeferredCloneReason,
             });
             const durationMs = issueTimer();
             await runRecord.emit({
@@ -1683,7 +1821,7 @@ export async function run(
           await runRecord.emit({ kind: "idle", pollIntervalMs: config.pollIntervalMs });
           activity.enterIdle();
         }
-        const wake = await pool.waitForWake(config.pollIntervalMs);
+        const wake = await waitForSchedulerWake();
         nextPlanTrigger = wake;
         continue;
       }

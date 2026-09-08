@@ -1,4 +1,8 @@
-// Single-instance lock for sandbar runs.
+// Per-workdir single-instance lock for sandbar runs.
+//
+// This protects one host's `.sandbar/` state. The repository-wide writer lease
+// in origin-lock.ts is separate and protects origin across hosts (#139); neither
+// lock replaces the other.
 //
 // Uses proper-lockfile for the atomic acquire (mkdir-based) and a sidecar PID
 // file for stale-PID takeover: if the lock dir is left behind by a crashed

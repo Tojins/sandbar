@@ -38,11 +38,17 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   "keepawake.ts": 1,
   "lock.ts": 4,
   "merger.ts": 11,
+  // Ref lookup and CAS push failures are classified into the origin-lock
+  // decision vocabulary (#139); malformed leases and unclassified failures
+  // still throw.
+  "origin-lock.ts": 3,
   "preflight.ts": 5,
   "prompt.ts": 1,
   // UI port contention is classified as a startup refusal; unexpected UI
-  // startup faults share the run's internal-failure path (#132).
-  "run.ts": 10,
+  // startup faults share the run's internal-failure path (#132). The two
+  // pre-record startup catches classify workdir/preflight and origin-lock
+  // refusal while running the cleanup that releases the local lock (#139).
+  "run.ts": 12,
   "sandbox-stack.ts": 3,
   // The HTTP request boundary maps record/reducer failures to a 500 response
   // for the polling page (#132).

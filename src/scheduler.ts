@@ -62,6 +62,11 @@
 // are three disjoint places and an issue is in at most one of them. The pool
 // keeps one removable completion waiter; a poll winner withdraws it, so a hung
 // issue cannot retain one callback for every interval it survives.
+//
+// `run.ts` wraps this one wait with the repository lease renewal (#139). Keep
+// poll and slot completion coalesced here: a second timer or wait site would
+// create a scheduler path that can admit or land without first proving the
+// origin ref is still ours.
 
 export type SettledIssue<T, R> =
   | { readonly status: "fulfilled"; readonly issue: T; readonly value: R }
