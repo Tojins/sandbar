@@ -766,6 +766,9 @@ export async function run(
   // changes what every container in the run executes, which is an outcome —
   // and it used to be announced by `console.log` alone. `run()` now records the
   // image event and captures build output; `sandbar gate` retains CLI progress.
+  // All THREE seams are silenced — the per-branch one too, since
+  // `branchImages.resolve` runs per attempt and per landing for the whole run
+  // and a `Rebuilding …` line from it would interleave with the UI URL.
   const recordImage = (r: ImageBuildRecord): Promise<void> =>
     runRecord.emit({
       kind: "image",
@@ -810,6 +813,7 @@ export async function run(
       scope,
       baseFingerprints: fingerprints,
       onImage: recordImage,
+      log: () => undefined,
       worktreeMountingTags: worktreeMountingTagsOf(config.gateStack),
       hostUid: process.getuid?.() ?? 0,
     });

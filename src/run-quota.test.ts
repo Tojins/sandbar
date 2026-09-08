@@ -128,7 +128,7 @@ vi.mock("./merger.js", async (importOriginal) => ({
 import type { RunConfig } from "./config.js";
 import { AgentQuotaError } from "./agent-sandbox.js";
 import { MergerError } from "./merger.js";
-import { ensureImages } from "./ensure-images.js";
+import { createBranchImages, ensureImages } from "./ensure-images.js";
 import { createAgentImages } from "./agent-tools.js";
 import { cleanupOrphanContainers } from "./containers.js";
 import { startUiServer } from "./ui-server.js";
@@ -270,6 +270,18 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.merger).toHaveBeenCalledOnce();
     expect(ensureImages).toHaveBeenCalledTimes(2);
     expect(createAgentImages).toHaveBeenCalledTimes(2);
+    // Every image-build seam is silenced: stdout is the UI URL only, and the
+    // per-branch resolver runs per attempt and per landing (#37), not at startup.
+    for (const seam of [ensureImages, createAgentImages, createBranchImages]) {
+      expect(vi.mocked(seam).mock.calls.length).toBeGreaterThan(0);
+      for (const call of vi.mocked(seam).mock.calls) {
+        const opts = (call as unknown[]).find((arg) =>
+          typeof arg === "object" && arg !== null && "log" in arg) as { log?: (line: string) => void };
+        expect(opts.log).toBeTypeOf("function");
+        opts.log?.("Rebuilding x");
+      }
+    }
+    expect(vi.mocked(console.log).mock.calls).toEqual([["http://127.0.0.1:7331/"]]);
     expect(seams.innerLoop.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
       config: expect.objectContaining({ promptExtensions: config.promptExtensions }),
     }));
