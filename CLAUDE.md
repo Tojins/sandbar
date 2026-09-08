@@ -340,19 +340,26 @@ outcomes.
    event. The release is registered immediately after record finalization so
    #35's LIFO drain puts it after every teardown and before `run-end`, and its
    event writes are awaited because `process.exit` grants no event-loop turn.
-- **Credentials enter as values, including Codex auth (#38, #73, #134).**
-  `config.env` is an allowlist record (empty value ⇒ inherit from
-  `process.env`); `readEnvFile` is the opt-in loader. `src/env.ts`. Codex's
-  ChatGPT subscription is `auth.json`, so `CODEX_AUTH_JSON` carries its content.
-  At preflight the driver reconciles that value by `last_refresh` into one
-  `<workDir>/codex-auth.json`; every Codex sandbox and merger container mounts
-  the run-owned file read-write at `$CODEX_HOME/auth.json`, and the augmented
-  image pre-creates that directory owned by the uid-1000 agent so Codex can
-  write its per-sandbox session state beside the mount. This is the one
-  deliberate exception to per-sandbox write isolation: same-trust holders need
-  Codex's reload-before-refresh cooperation around one token family. The host
-  config should read a dedicated login (this repo uses `~/.codex-sandbar`) so
-  the operator's ordinary TUI never shares that family. `src/codex-auth.ts`.
+- **Credentials and per-installation routing enter as values (#38, #73, #134,
+  #137).** `config.env` is an allowlist record (empty value ⇒ inherit from
+  `process.env`); `readEnvFile` is the opt-in loader. A host may keep
+  per-installation role routing in that same gitignored record:
+  `splitRoleRouting` consumes the fifteen
+  `SANDBAR_<ROLE>_{AGENT,MODEL_ID,EFFORT}` keys, omits absent/empty deviations,
+  and returns the remainder for `config.env`, so no routing key crosses into a
+  sandbox. The committed config remains a program and spreads `routing` over
+  its defaults; `resolveConfig` remains the one validation boundary.
+  `src/env-file.ts`, `src/env.ts`. Codex's ChatGPT subscription is `auth.json`,
+  so `CODEX_AUTH_JSON` carries its content. At preflight the driver reconciles
+  that value by `last_refresh` into one `<workDir>/codex-auth.json`; every Codex
+  sandbox and merger container mounts the run-owned file read-write at
+  `$CODEX_HOME/auth.json`, and the augmented image pre-creates that directory
+  owned by the uid-1000 agent so Codex can write its per-sandbox session state
+  beside the mount. This is the one deliberate exception to per-sandbox write
+  isolation: same-trust holders need Codex's reload-before-refresh cooperation
+  around one token family. The host config should read a dedicated login (this
+  repo uses `~/.codex-sandbar`) so the operator's ordinary TUI never shares that
+  family. `src/codex-auth.ts`.
 - **A role names its CLI as well as its model (#19, #72, #74, #121, #126).**
   `implementerAgent` / `reviewerAgent` / `mergerAgent`, all defaulting to
   `claude`, plus `uiCheckAgent` defaulting to `implementerAgent` and
@@ -370,7 +377,10 @@ outcomes.
   (`--effort`, `-c model_reasoning_effort=`) and the implementer/review-pass
   event carries it as `effort`; unset emits no flag and stays absent, because
   the sandbox reads no host `config.toml` and a driver default would be the
-  same invisible setting in a different place. `AgentProvider`
+  same invisible setting in a different place. These three per-role fields are
+  also the unit one installation may override through #137's env split; the
+  ordinary pairing check rejects a half-moved non-claude role after the config
+  spreads those deviations. `AgentProvider`
   (`src/agent-sandbox.ts`) was already the whole seam — argv plus a line parser,
   with the explicitly named completion watch, the idle timeout and commit collection reading
   parsed events and git — so `codex` is a second implementation of it and

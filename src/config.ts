@@ -632,10 +632,12 @@ export type RunConfig = {
   // The credentials, as a VALUE rather than a path (#38). Sandbar names no
   // file: where a host keeps its secrets is a property of that host's
   // environment, and `.env` at a repo root is already spoken for by compose,
-  // Vite, Next and Laravel. `readEnvFile` (exported from the package root) is
-  // the one-liner for hosts that do want a file:
+  // Vite, Next and Laravel. `readEnvFile` and `splitRoleRouting` (exported from
+  // the package root) are the idiom for hosts that keep credentials and
+  // per-installation role routing in one file:
   //
-  //   env: readEnvFile(new URL("sandbar.env", import.meta.url)),
+  //   const { routing, env } = splitRoleRouting(readEnvFile(file));
+  //   export default { env, ...routing };
   //
   // Allowlist semantics, unchanged from the file this replaced: only keys
   // declared HERE cross into a sandbox container, each falling back to

@@ -126,7 +126,11 @@ letting node drain cannot. Faults are rendered to stderr on the way out; pass
 
 ```js
 // sandbar.config.mjs
-import { readEnvFile } from "@offergeist/sandbar";
+import { readEnvFile, splitRoleRouting } from "@offergeist/sandbar";
+
+const { routing, env } = splitRoleRouting(
+  readEnvFile(new URL("sandbar.env", import.meta.url)),
+);
 
 export default {
   // Required — no sensible default exists:
@@ -190,24 +194,34 @@ export default {
     ],
   },
 
-  // Credentials: a VALUE, not a path. Only the keys declared here cross into a
-  // sandbox container, each falling back to `process.env[key]` when the value
-  // is empty — so `GH_TOKEN: ""` means "inherit it", and CI needs no file.
-  // `readEnvFile` is a convenience; where the file lives (and whether there is
-  // one) is entirely yours.
-  env: readEnvFile(new URL("sandbar.env", import.meta.url)),
+  // Credentials: a VALUE, not a path. Only non-routing keys declared in the
+  // file cross into a sandbox container, each falling back to process.env when
+  // empty — so GH_TOKEN= means "inherit it", and CI needs no secret in Git.
+  env,
 
-  // Everything else is OPTIONAL — see sandbar.config.example.mjs for every
-  // field and its default. Omit any line you're happy with.
+  // Everything else is OPTIONAL — see sandbar.config.example.mjs for host
+  // fields and sandbar.env.example for installation routing. Omit any value
+  // you're happy to inherit.
+  // Non-empty SANDBAR_* role values from the installation's gitignored env
+  // file override those committed defaults.
+  ...routing,
 };
 ```
+
+`splitRoleRouting` recognizes `SANDBAR_<ROLE>_AGENT`,
+`SANDBAR_<ROLE>_MODEL_ID`, and `SANDBAR_<ROLE>_EFFORT` for `IMPLEMENTER`,
+`UI_CHECK`, `REVIEWER`, `REVIEWER_QUALITY`, and `MERGER`. An absent or empty
+value keeps the committed field. The helper removes all fifteen reserved keys
+from `env`, so they never enter a sandbox; `resolveConfig` still performs the
+ordinary provider, model-pairing, and effort validation on the merged object.
+See `sandbar.env.example` for the complete list.
 
 ### What sandbar puts in your repo
 
 ```
 your-repo/
   sandbar.config.mjs   <- committed; the whole host-side surface
-  sandbar.env          <- gitignored, if you use a file at all
+  sandbar.env          <- gitignored; required by the published example config
   .sandbar/            <- gitignored; node_modules-shaped, `rm -rf` at will
     repo.git/            bare object cache; re-created if you delete it
     worktrees/           source/ (image build context), issue-<n>-<slug>/, merger/
@@ -239,11 +253,15 @@ sits in).
 
 ### Optional fields and their defaults
 
-The published package includes
-[`sandbar.config.example.mjs`](./sandbar.config.example.mjs), a complete
-copyable config with every optional `RunConfig` field commented out at its
-default. Copy it beside your `package.json`, fill in the required placeholders,
-then uncomment only the settings this repository needs to change.
+The published package includes the paired
+[`sandbar.config.example.mjs`](./sandbar.config.example.mjs) and
+[`sandbar.env.example`](./sandbar.env.example) templates. Copy the first beside
+your `package.json` as `sandbar.config.mjs` and the second beside it as
+gitignored `sandbar.env`; the config reads that file at module load, even when
+all its values inherit from the launching process. Fill in the required config
+placeholders, then uncomment only the host settings this repository needs to
+change. Optional host fields are documented in the config; the fifteen
+per-installation role-routing fields are documented in the env template.
 
 ### Daemon pool and launcher
 
@@ -642,7 +660,7 @@ rather than spending the rest of its budget on it.
 The host project also supplies on disk:
 - A `Containerfile` for the sandbox image (or whatever `images` names)
 - Optionally, files named by `{ path }` entries in `promptExtensions`; implementer and reviewer roles still receive the built-in coding standards in `prompts/coding-standards.md`
-- `GH_TOKEN` and a credential for every routed agent provider, reachable through `config.env` — as literal values, as keys declared empty so they inherit from the launching environment, or read from a file of your choosing with `readEnvFile`
+- `GH_TOKEN` and a credential for every routed agent provider, reachable through `config.env` — as literal values, as keys declared empty so they inherit from the launching environment, or read from a file of your choosing with `readEnvFile`; `splitRoleRouting` can reserve that same file's `SANDBAR_*` keys for per-installation routing
 
 `verified` mode additionally uses the host's own `gh` auth (not the container's
 `GH_TOKEN`) for `gh api .../check-runs`, `gh api .../commits/<sha>/status`,

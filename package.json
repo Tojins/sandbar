@@ -1,6 +1,6 @@
 {
   "name": "@offergeist/sandbar",
-  "version": "0.37.4",
+  "version": "0.37.5",
   "description": "Self-hosted issue-tracker-driven coding agent orchestrator.",
   "type": "module",
   "main": "dist/index.js",
@@ -20,7 +20,8 @@
     "ui/",
     "prompts/",
     "deploy/",
-    "sandbar.config.example.mjs"
+    "sandbar.config.example.mjs",
+    "sandbar.env.example"
   ],
   "engines": {
     "node": ">=20"

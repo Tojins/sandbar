@@ -1,10 +1,18 @@
-// Copy this file to `sandbar.config.mjs`, then replace the ALL_CAPS
-// placeholders and the gate command for your repository.
+// Copy this file to `sandbar.config.mjs` and copy `sandbar.env.example` to
+// `sandbar.env` beside it, then replace the ALL_CAPS placeholders and the gate
+// command for your repository. The env file is required because this config
+// reads it when the module loads; keep it gitignored even if every value comes
+// from the launching process.
 //
-// Required fields are active. Every optional RunConfig field is commented out
-// at its default, so uncommenting one before changing it is a no-op.
+// Required fields are active. Optional host fields are commented out at their
+// defaults; per-installation role fields live in sandbar.env instead.
+
+import { readEnvFile, splitRoleRouting } from "@offergeist/sandbar";
 
 const SANDBOX_IMAGE = "localhost/YOUR_PROJECT:sandbar";
+const { routing, env } = splitRoleRouting(
+  readEnvFile(new URL("sandbar.env", import.meta.url)),
+);
 
 export default {
   // Required: the GitHub repository sandbar reads and writes. Preflight checks
@@ -62,30 +70,6 @@ export default {
   // more entries when the gate stack uses additional locally-built images.
   // images: [{ tag: SANDBOX_IMAGE, containerfile: "Containerfile" }],
 
-  // Model names are interpreted by the corresponding role's provider. The two
-  // reviewer fields are the final correctness pass and first quality pass.
-  // The UI check inherits the implementer's model unless set separately.
-  // implementerModelId: "opus",
-  // uiCheckModelId: undefined,
-  // reviewerModelId: "opus",
-  // reviewerQualityModelId: "opus",
-  // mergerModelId: "opus",
-
-  // The roles default to claude. The UI check inherits implementerAgent;
-  // leaving the quality reviewer unset makes it inherit reviewerAgent.
-  // implementerAgent: "claude",
-  // uiCheckAgent: undefined,
-  // reviewerAgent: "claude",
-  // reviewerQualityAgent: undefined,
-  // mergerAgent: "claude",
-
-  // Unset passes no effort flag, leaving the choice to the provider/CLI.
-  // implementerEffort: undefined,
-  // uiCheckEffort: undefined,
-  // reviewerEffort: undefined,
-  // reviewerQualityEffort: undefined,
-  // mergerEffort: undefined,
-
   // Run one cold UI/prototype classification after sandbox setup and before
   // attempt 1. Disable this in hosts that cannot ship user-visible UI.
   // uiPrototypeCheck: true,
@@ -102,9 +86,10 @@ export default {
   // Per-role additions are `{ text: "..." }` or `{ path: "RULES.md" }`.
   // promptExtensions: {},
 
-  // Only keys declared here enter agent containers. An empty value inherits
-  // that key from the process environment; undeclared host variables stay out.
-  // env: {},
+  // Only non-routing keys declared in sandbar.env enter agent containers. An
+  // empty value inherits that key from the process environment; undeclared
+  // host variables stay out.
+  env,
 
   // Independent consecutive-failure budgets. Quality counts rejections, red
   // gates, NO-SIGNAL, dirty trees and off-branch HEADs, then resets when a
@@ -144,4 +129,8 @@ export default {
   // live, do not close a member or retitle its root, because those issues
   // determine the chunk's membership and derived branch name.
   // defaultLane: "auto",
+
+  // Keep host defaults above. The fifteen SANDBAR_* entries documented in
+  // sandbar.env.example are this installation's per-role deviations.
+  ...routing,
 };

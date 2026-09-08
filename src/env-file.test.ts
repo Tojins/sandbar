@@ -1,5 +1,5 @@
-// Unit tests for the dotenv parser, and for the `readEnvFile` wrapper a host
-// calls from its own config file (#38).
+// Unit tests for the dotenv parser, the `readEnvFile` wrapper, and the reserved
+// role-routing partition a host calls from its own config file (#38, #137).
 //
 // The parser stopped being contract when `envFilePath` became `env`; the
 // wrapper is what a consumer now writes in `sandbar.config.mjs`, which makes
@@ -9,7 +9,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { parseEnvFile, readEnvFile } from "./env-file.js";
+import { parseEnvFile, readEnvFile, splitRoleRouting } from "./env-file.js";
 
 describe("parseEnvFile", () => {
   it("parses plain KEY=value pairs", () => {
@@ -77,5 +77,63 @@ describe("readEnvFile", () => {
     expect(() => readEnvFile(join(dir, "does-not-exist.env"))).toThrow(
       /readEnvFile/,
     );
+  });
+});
+
+describe("splitRoleRouting", () => {
+  it("maps all fifteen reserved keys to their config field names", () => {
+    const pairs = [
+      ["SANDBAR_IMPLEMENTER_AGENT", "implementerAgent"],
+      ["SANDBAR_IMPLEMENTER_MODEL_ID", "implementerModelId"],
+      ["SANDBAR_IMPLEMENTER_EFFORT", "implementerEffort"],
+      ["SANDBAR_UI_CHECK_AGENT", "uiCheckAgent"],
+      ["SANDBAR_UI_CHECK_MODEL_ID", "uiCheckModelId"],
+      ["SANDBAR_UI_CHECK_EFFORT", "uiCheckEffort"],
+      ["SANDBAR_REVIEWER_AGENT", "reviewerAgent"],
+      ["SANDBAR_REVIEWER_MODEL_ID", "reviewerModelId"],
+      ["SANDBAR_REVIEWER_EFFORT", "reviewerEffort"],
+      ["SANDBAR_REVIEWER_QUALITY_AGENT", "reviewerQualityAgent"],
+      ["SANDBAR_REVIEWER_QUALITY_MODEL_ID", "reviewerQualityModelId"],
+      ["SANDBAR_REVIEWER_QUALITY_EFFORT", "reviewerQualityEffort"],
+      ["SANDBAR_MERGER_AGENT", "mergerAgent"],
+      ["SANDBAR_MERGER_MODEL_ID", "mergerModelId"],
+      ["SANDBAR_MERGER_EFFORT", "mergerEffort"],
+    ] as const;
+    const record = Object.fromEntries(
+      pairs.map(([key, field]) => [key, `value-for-${field}`]),
+    );
+
+    expect(splitRoleRouting(record)).toEqual({
+      routing: Object.fromEntries(
+        pairs.map(([, field]) => [field, `value-for-${field}`]),
+      ),
+      env: {},
+    });
+  });
+
+  it("removes empty routing keys and leaves their committed fields unset", () => {
+    expect(splitRoleRouting({
+      GH_TOKEN: "ghp_x",
+      SANDBAR_IMPLEMENTER_AGENT: "",
+      SANDBAR_IMPLEMENTER_MODEL_ID: "gpt-5.6-sol",
+      EXTRA: "kept",
+    })).toEqual({
+      routing: { implementerModelId: "gpt-5.6-sol" },
+      env: { GH_TOKEN: "ghp_x", EXTRA: "kept" },
+    });
+  });
+
+  it("does not mutate the source record", () => {
+    const record = {
+      GH_TOKEN: "ghp_x",
+      SANDBAR_REVIEWER_EFFORT: "high",
+    };
+
+    splitRoleRouting(record);
+
+    expect(record).toEqual({
+      GH_TOKEN: "ghp_x",
+      SANDBAR_REVIEWER_EFFORT: "high",
+    });
   });
 });

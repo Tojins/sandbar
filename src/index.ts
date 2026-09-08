@@ -11,10 +11,10 @@ export {
   runGateCommand,
 } from "./gate-run.js";
 export { SandbarError } from "./errors.js";
-// Opt-in, not contract (#38). `config.env` is a plain record; this is the
-// convenience for hosts that keep their credentials in a dotenv-style file
-// whose name and location THEY choose.
-export { readEnvFile } from "./env-file.js";
+// Opt-in, not contract (#38, #137). `config.env` is a plain record; these are
+// conveniences for hosts that keep credentials and per-installation routing
+// in a dotenv-style file whose name and location THEY choose.
+export { readEnvFile, splitRoleRouting } from "./env-file.js";
 export type {
   RunConfig,
   LabelConfig,
