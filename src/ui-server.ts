@@ -130,7 +130,7 @@ export class UiPortInUseError extends SandbarError {
   constructor(port: number, host: string, cause: unknown) {
     super(
       `Sandbar UI port ${port} is already in use on ${host}. ` +
-        "Choose a different uiPort for this workdir.",
+        "Choose a different port.",
       { cause },
     );
     this.name = "UiPortInUseError";

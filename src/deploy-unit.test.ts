@@ -17,6 +17,8 @@ const UI_TEMPLATE = readFileSync(
 );
 const CADDY_TEMPLATE = readFileSync(new URL("templates/Caddyfile.j2", ROLE), "utf8");
 const MAIN_TASKS = readFileSync(new URL("tasks/main.yml", ROLE), "utf8");
+const UI_TASKS = readFileSync(new URL("tasks/ui.yml", ROLE), "utf8");
+const HANDLERS = readFileSync(new URL("handlers/main.yml", ROLE), "utf8");
 const DEFAULTS = readFileSync(new URL("defaults/main.yml", ROLE), "utf8");
 
 const PLACEHOLDER = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
@@ -152,6 +154,30 @@ describe("deploy/ansible standalone UI templates", () => {
   it("skips the whole UI task file when sandbar_ui_port is zero", () => {
     expect(MAIN_TASKS).toMatch(
       /ansible\.builtin\.import_tasks: ui\.yml\n  when: sandbar_ui_port > 0/,
+    );
+  });
+
+  it("installs and enables the standalone reader", () => {
+    expect(UI_TASKS).toMatch(
+      /- name: Install the standalone UI unit\n  ansible\.builtin\.template:\n    src: sandbar-ui\.service\.j2\n    dest: "\{\{ sandbar_home \}\}\/\.config\/systemd\/user\/sandbar-ui\.service"/,
+    );
+    expect(UI_TASKS).toMatch(
+      /- name: Enable the standalone UI unit at boot\n  ansible\.builtin\.systemd_service:\n    name: sandbar-ui\.service\n    scope: user\n    enabled: true\n    daemon_reload: true/,
+    );
+  });
+
+  it("installs and starts Caddy, reloading it when its config changes", () => {
+    expect(UI_TASKS).toMatch(
+      /- name: Install Caddy\n  ansible\.builtin\.apt:\n    name: caddy\n    state: present/,
+    );
+    expect(UI_TASKS).toMatch(
+      /- name: Configure Caddy for the run UI\n  ansible\.builtin\.template:\n    src: Caddyfile\.j2\n    dest: \/etc\/caddy\/Caddyfile[\s\S]*?  notify: Reload Caddy/,
+    );
+    expect(UI_TASKS).toMatch(
+      /- name: Enable and start Caddy\n  ansible\.builtin\.systemd_service:\n    name: caddy\n    enabled: true\n    state: started/,
+    );
+    expect(HANDLERS).toMatch(
+      /- name: Reload Caddy\n  ansible\.builtin\.systemd_service:\n    name: caddy\n    state: reloaded/,
     );
   });
 });

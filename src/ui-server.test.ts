@@ -249,12 +249,11 @@ describe("run UI server", () => {
     }
   });
 
-  it("refuses a port already owned by another workdir", async () => {
+  it("gives invocation-neutral guidance when a standalone host's port is occupied", async () => {
     const firstTree = await runTree(false);
     const secondTree = await runTree(false);
     const first = await startUiServer({
       logsDir: firstTree.logsDir,
-      liveRunDir: firstTree.runDir,
       host: "127.0.0.1",
       port: 0,
     });
@@ -262,10 +261,12 @@ describe("run UI server", () => {
       const port = Number(new URL(first.url).port);
       await expect(startUiServer({
         logsDir: secondTree.logsDir,
-        liveRunDir: secondTree.runDir,
         host: "127.0.0.1",
         port,
-      })).rejects.toThrow(`Sandbar UI port ${port} is already in use`);
+      })).rejects.toThrow(
+        `Sandbar UI port ${port} is already in use on 127.0.0.1. ` +
+          "Choose a different port.",
+      );
     } finally {
       await first.close();
     }
