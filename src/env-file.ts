@@ -112,7 +112,7 @@ export function splitRoleRouting(record: Record<string, string>): {
   readonly routing: RoleRouting;
   readonly env: Record<string, string>;
 } {
-  const routingValues: Record<string, string> = {};
+  const routing: RoleRouting = {};
   const env = { ...record };
 
   for (const field of ROLE_ROUTING_FIELDS) {
@@ -121,8 +121,8 @@ export function splitRoleRouting(record: Record<string, string>): {
 
     delete env[key];
     const value = record[key];
-    if (value !== undefined && value !== "") routingValues[field] = value;
+    if (value !== undefined && value !== "") routing[field] = value;
   }
 
-  return { routing: routingValues, env };
+  return { routing, env };
 }
