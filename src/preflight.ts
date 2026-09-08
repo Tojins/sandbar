@@ -750,7 +750,9 @@ export async function gatherState(
       ? []
       : [number];
   });
-  const openLookup = await fetchOpenIssueNumbers(cfg.repo, undecided);
+  const openLookup = hasGh && ghAuthOk
+    ? await fetchOpenIssueNumbers(cfg.repo, undecided)
+    : { ok: false } as const;
   const { unmerged, discarded, resumable, parked } = classifySandbarBranches({
     branches,
     upstreamTracks,

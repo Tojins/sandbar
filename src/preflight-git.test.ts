@@ -514,6 +514,40 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       ).toHaveLength(1);
     });
 
+    it("reports missing gh and leaves issue branches unclassified", async () => {
+      await git(target, "checkout", "-qb", "sandbar/issue-7-parked");
+      await git(target, "commit", "--allow-empty", "-qm", "parked work");
+      await git(target, "checkout", "-q", "main");
+
+      const noGhBin = await mkdtemp(join(tmpdir(), "sandbar-no-gh-"));
+      const gitPath = (await exec("sh", ["-c", "command -v git"])).stdout.trim();
+      const whichPath = (await exec("sh", ["-c", "command -v which"])).stdout.trim();
+      await symlink(gitPath, join(noGhBin, "git"));
+      await symlink(whichPath, join(noGhBin, "which"));
+      const savedPath = process.env["PATH"];
+      process.env["PATH"] = noGhBin;
+      try {
+        await expect(runPreflight(
+          cfg(layoutAt(target)),
+          {
+            lookup: async () => undefined,
+            connect: async () => undefined,
+            wait: async () => undefined,
+            now: () => 0,
+          },
+        )).rejects.toSatisfy(
+          (err: unknown) =>
+            err instanceof PreflightError &&
+            err.failures.some((failure) => failure.includes("`gh` is not on PATH")) &&
+            err.failures.some((failure) => failure.includes("could not be classified")),
+        );
+      } finally {
+        if (savedPath === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = savedPath;
+        await rm(noGhBin, { recursive: true, force: true });
+      }
+    });
+
     it("parks a labelled branch when the queue label actor is not admitted", async () => {
       await git(target, "checkout", "-qb", "sandbar/issue-7-outsider");
       await git(target, "commit", "--allow-empty", "-qm", "outsider work");
