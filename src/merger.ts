@@ -2726,14 +2726,12 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         botName: deps.botName,
         botEmail: deps.botEmail,
       });
-      let run: CapturedAgentRun | undefined;
-      let primaryFailure: unknown;
-      try {
+      const processResult = await Promise.resolve().then(async () => {
         const started = await captureResolveProcess(RUNTIME, args, "", {
           container,
           timeoutMs: CONTROL_TIMEOUT_MS,
         });
-        run = started.exitCode === 0 && started.end === "exit"
+        const run = started.exitCode === 0 && started.end === "exit"
           ? await captureResolveProcess(
               RUNTIME,
               buildResolveExecArgv(container, command.command),
@@ -2741,9 +2739,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
               { container, timeoutMs: RESOLVE_AGENT_TIMEOUT_MS },
             )
           : started;
-      } catch (err) {
-        primaryFailure = err;
-      }
+        return { run } as const;
+      }, (failure: unknown) => ({ failure }) as const);
 
       const measured = await Promise.allSettled([
         readContainerResources(container, systemContainerResourceDeps(podman)),
@@ -2767,7 +2764,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         ? measurement.reason
         : undefined;
 
-      if (primaryFailure !== undefined) {
+      if ("failure" in processResult) {
         if (measurementFailure !== undefined) {
           await reportCleanupNotice(
             "cleanup-failure",
@@ -2782,7 +2779,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
             removalFailure,
           );
         }
-        throw primaryFailure;
+        throw processResult.failure;
       }
       if (removalFailure !== undefined) {
         if (measurementFailure !== undefined) {
@@ -2795,9 +2792,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         throw removalFailure;
       }
       if (measurementFailure !== undefined) throw measurementFailure;
-      if (run === undefined) throw new Error("resolve process produced no result");
       const resources = measurement?.status === "fulfilled" ? measurement.value : {};
-      return parseCapturedAgentRun({ ...run, ...resources }, agentProvider);
+      return parseCapturedAgentRun({ ...processResult.run, ...resources }, agentProvider);
     },
     async isMergeInProgress() {
       // NOT `<cwd>/.git/MERGE_HEAD`. Since #10 the merger always runs in a
