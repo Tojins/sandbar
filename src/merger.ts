@@ -2739,8 +2739,11 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
               { container, timeoutMs: RESOLVE_AGENT_TIMEOUT_MS },
             )
           : started;
-        return { run } as const;
-      }, (failure: unknown) => ({ failure }) as const);
+        return run;
+      }).then(
+        (run) => ({ run }) as const,
+        (failure: unknown) => ({ failure }) as const,
+      );
 
       const measured = await Promise.allSettled([
         readContainerResources(container, systemContainerResourceDeps(podman)),

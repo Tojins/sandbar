@@ -502,8 +502,10 @@ describe("resolve provider invocation (#74)", () => {
 
   it.each([
     ["exit", 0, null],
+    ["exit", 7, null],
     ["timeout", null, "SIGTERM"],
     ["signal", null, "SIGKILL"],
+    ["spawn-error", null, null],
   ] as const)(
     "measures a live resolve cgroup before explicit removal after %s",
     async (end, exitCode, signal) => {
@@ -572,4 +574,54 @@ describe("resolve provider invocation (#74)", () => {
       expect(order.indexOf("inspect")).toBeLessThan(order.indexOf("rm"));
     },
   );
+
+  it("removes the resolve container and preserves a thrown capture failure", async () => {
+    const primary = new Error("capture seam failed");
+    const order: string[] = [];
+    const runtimeResult = (stdout = ""): BoundedRuntimeResult => ({
+      stdout,
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+      maxBufferExceeded: false,
+      errorMessage: "",
+    });
+    const podman = vi.fn(async (args: readonly string[]) => {
+      order.push(args[0] ?? "");
+      if (args[0] === "inspect") return runtimeResult("\nfalse\n");
+      if (args[0] === "stats") return runtimeResult("1024 / 2048\n");
+      return runtimeResult();
+    });
+    const captureResolveProcess = vi.fn(async (
+      _file: string,
+      args: readonly string[],
+    ) => {
+      order.push(args[0] ?? "");
+      if (args[0] === "exec") throw primary;
+      return {
+        stdout: "container-id\n", stderr: "", end: "exit" as const,
+        exitCode: 0, signal: null, durationMs: 1, container: "resolve-test",
+      };
+    });
+    const adapter = realAdapter({
+      cwd: "/worktree",
+      cacheDir: "/cache.git",
+      scope: runScope("/worktree"),
+      repo: { owner: "acme", name: "app" },
+      sourceBranch: "main",
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+      sandboxImage: "sandbox-image",
+      env: () => undefined,
+      runStackGate: async () => { throw new Error("not called"); },
+      podman,
+      captureResolveProcess,
+    });
+
+    await expect(adapter.runResolveAgent("resolve this", 1)).rejects.toBe(primary);
+    expect(order).toEqual(["run", "exec", "inspect", "stats", "rm"]);
+  });
 });
