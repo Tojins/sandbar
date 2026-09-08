@@ -63,6 +63,33 @@ describe("gate semaphore (#142)", () => {
     expect(starts).toEqual(["first", "second"]);
   });
 
+  it("admits up to a configured bound greater than one", async () => {
+    const semaphore = createGateSemaphore(2, () => 0);
+    const firstFinished = deferred<void>();
+    const secondFinished = deferred<void>();
+    const thirdFinished = deferred<void>();
+    const starts: number[] = [];
+    const finishes = [firstFinished, secondFinished, thirdFinished];
+
+    const gates = finishes.map((finish, index) => semaphore.run(async () => {
+      starts.push(index + 1);
+      await finish.promise;
+      return index + 1;
+    }));
+
+    await Promise.resolve();
+    expect(starts).toEqual([1, 2]);
+    firstFinished.resolve();
+    await expect(gates[0]).resolves.toEqual({ value: 1 });
+    await Promise.resolve();
+    expect(starts).toEqual([1, 2, 3]);
+    secondFinished.resolve();
+    thirdFinished.resolve();
+    await expect(Promise.all(gates.slice(1))).resolves.toEqual([
+      { value: 2 }, { value: 3, queuedMs: 0 },
+    ]);
+  });
+
   it("is unlimited when the bound is unset", async () => {
     const semaphore = createGateSemaphore(undefined, () => 0);
     const finish = deferred<void>();
