@@ -10,6 +10,10 @@
 // control can admit, finalize or land. A replacement ref, or an expired lease
 // that origin cannot renew, exits halted immediately: no drain, no landing,
 // and issue clones deferred at inner-loop close remain in place.
+// Cleanup owns terminal serialization too: once another caller has begun its
+// drain, lease loss rejects the write barrier without appending another
+// complaint or exit event. No adapter may interpret teardown as permission to
+// write after cleanup has released the ref.
 //
 //   Recompute:                 Deterministic resolver picks the unblocked
 //                              `ready-for-agent` issues by parsing each body's
@@ -324,6 +328,16 @@ export function decideOriginLockWake(
       "landing nothing, and preserving every issue clone.",
     exit: haltedExit(["origin-lock-lost"]),
   };
+}
+
+// A named control-flow condition for a remote-write barrier racing terminal
+// cleanup. Cleanup and the heartbeat classify it; adapter callers receive the
+// rejection unchanged, which is what prevents their write after lease release.
+export class OriginLeaseLostDuringCleanupError extends SandbarError {
+  constructor(message: string) {
+    super(message);
+    this.name = "OriginLeaseLostDuringCleanupError";
+  }
 }
 
 export function terminalReason(terminal: Terminal): string | null {
@@ -807,18 +821,27 @@ export async function run(
       return;
     }
 
-    await runRecord.emit({
+    // Claim cleanup before submitting either terminal event. If a signal or
+    // another terminal already owns the drain, this renewal is a rejected
+    // write barrier only: that owner has already selected the run's ending.
+    // `leaseLossIsCleaningUp` keeps the cleanup action from awaiting the
+    // renewal promise that is currently executing this observer.
+    leaseLossIsCleaningUp = true;
+    const cleanup = beginCleanup();
+    if (!cleanup.owner) {
+      throw new OriginLeaseLostDuringCleanupError(decision.complaint);
+    }
+    const complaintWrite = runRecord.emit({
       kind: "complaint",
       severity: "error",
       message: decision.complaint,
     });
-    const exit = await announceExit(decision.exit);
-    // The cleanup action below normally waits for an in-flight renewal before
-    // releasing. This call is itself inside that renewal, so mark the one path
-    // where waiting would await the current promise and deadlock.
-    leaseLossIsCleaningUp = true;
-    const cleanup = beginCleanup();
-    if (!cleanup.owner) return;
+    // Submit both writes synchronously before yielding. `beginCleanup` may
+    // already be draining resources, but EventRecord serializes these ahead of
+    // its later run-end append.
+    const exitWrite = announceExit(decision.exit);
+    await complaintWrite;
+    const exit = await exitWrite;
     await cleanup.done;
     process.exit(exit.exitCode);
   };
@@ -839,14 +862,20 @@ export async function run(
   const originLeaseHeartbeat = setInterval(() => {
     void renewOriginLease().then(
       () => undefined,
-      (err: unknown) => stopInternalFailure(err),
+      (err: unknown) => err instanceof OriginLeaseLostDuringCleanupError
+        ? undefined
+        : stopInternalFailure(err),
     );
   }, ORIGIN_LOCK_RENEW_INTERVAL_MS);
   originLeaseHeartbeat.unref();
   onCleanup(async () => {
     clearInterval(originLeaseHeartbeat);
     if (!leaseLossIsCleaningUp && renewalInFlight !== null) {
-      await renewalInFlight;
+      try {
+        await renewalInFlight;
+      } catch (err) {
+        if (!(err instanceof OriginLeaseLostDuringCleanupError)) throw err;
+      }
     }
   });
 
@@ -1249,9 +1278,6 @@ export async function run(
     adrDir: config.adrDir,
     promptExtensions: config.promptExtensions,
   };
-  const leaseDeferredCloneReason =
-    "repository lease ownership is awaiting the run-level renewal barrier";
-
   type IssueOutcome = { issue: PlannedIssue; terminal: Terminal };
   type ExecutionEvent = SettledIssue<PlannedIssue, Terminal>;
   const pool = new ContinuousPool<PlannedIssue, Terminal>(
@@ -1845,7 +1871,6 @@ export async function run(
               attemptLogger: issueLogger,
               onEvent: (event) => runRecord.emit(event).then(() => undefined),
               providerState,
-              deferIssueCloneReclaim: leaseDeferredCloneReason,
             });
             const durationMs = issueTimer();
             await runRecord.emit({
@@ -2086,6 +2111,9 @@ export async function run(
           });
         } catch (err) {
           if (err instanceof MergerError) {
+            if (err.cause instanceof OriginLeaseLostDuringCleanupError) {
+              throw err.cause;
+            }
             if (
               err.cause instanceof AgentQuotaError ||
               err.cause instanceof AgentCredentialError
@@ -2367,6 +2395,10 @@ export async function run(
     }
 
   } catch (err) {
+    // Cleanup already owns the terminal transition. The rejected barrier has
+    // stopped the remote write; do not turn that expected race into another
+    // complaint/exit pair in the record.
+    if (err instanceof OriginLeaseLostDuringCleanupError) throw err;
     // A sandbar-internal failure escaped the scheduler. This shared path also
     // owns unexpected UI startup failures: only EADDRINUSE is a classified
     // startup refusal; everything else remains an internal failure.

@@ -61,7 +61,11 @@
 // `refs/heads/<branch>`, an off-branch HEAD under
 // `refs/sandbar/stranded/<sha>` — and delete only once the cache holds both.
 // A publish that fails, an uncommitted tree, or a caller asking for evidence
-// to be kept all leave the clone in place and say why. Structural on purpose:
+// to be kept all leave the clone in place and say why. A run-level ownership
+// barrier may instead defer reclamation at sandbox close: that keeps the clone
+// silently until the orchestrator reclaims it after renewing its origin lease,
+// and it never replaces a genuine human-inspection reason (#139). Structural
+// on purpose:
 // an earlier version decided preservation by terminal kind and by flags
 // threaded out of the inner loop, and every review round found one more arm
 // where the classification and the deletion disagreed. Clean crash leftovers
@@ -402,6 +406,9 @@ export interface Sandbox {
   // The reviewer-write handoff uses this: the human is told to inspect the
   // clone, so it must still be there. `reason` is what close() reports.
   preserveWorktree(reason: string): void;
+  // Leave reclamation to the run-level lease barrier. Unlike preservation,
+  // this is not an operator-actionable fault and produces no notice by itself.
+  deferWorktreeReclaim(): void;
   close(): Promise<{ preservedWorktreePath?: string }>;
 }
 
@@ -2482,6 +2489,7 @@ export const createSandbox = async (
 
   let closed = false;
   let keepReason: string | undefined;
+  let reclaimDeferred = false;
 
   const runOneIteration = async (
     agent: AgentProvider,
@@ -2627,11 +2635,19 @@ export const createSandbox = async (
     preserveWorktree(reason) {
       keepReason = reason;
     },
+    deferWorktreeReclaim() {
+      reclaimDeferred = true;
+    },
     async close() {
       if (closed) return { preservedWorktreePath: undefined };
       closed = true;
       unregisterShutdown();
       await providerHandle.close();
+      if (reclaimDeferred) {
+        if (keepReason === undefined) return { preservedWorktreePath: undefined };
+        await notice("error", `Issue clone preserved at ${worktreePath}: ${keepReason}`);
+        return { preservedWorktreePath: worktreePath };
+      }
       const reclaim = await reclaimIssueClone(repoDir, worktreePath, branch, keepReason);
       if (reclaim.kind !== "preserved") return { preservedWorktreePath: undefined };
       await notice("error", `Issue clone preserved at ${worktreePath}: ${reclaim.reason}`);

@@ -62,6 +62,9 @@
 // which still parks. Reviewer history is recorded only after a green gate.
 // UI-check and reviewer invocations snapshot the tip and status; any mutation
 // parks the issue and preserves the clone rather than trusting that call.
+// Sandbox close defers clone reclamation silently to run.ts's next origin-lease
+// barrier; this is distinct from the human-inspection preservation channel and
+// therefore cannot overwrite or manufacture an operator-facing reason (#139).
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -491,11 +494,6 @@ export type InnerLoopOptions = {
   // phase, or measurement silently disappear from the sole run record.
   readonly onEvent: (event: EventInput) => Promise<void> | void;
   readonly providerState?: RunProviderState;
-  // A daemon must defer clone deletion until its run-level lease guard has
-  // renewed after the slot frees (#139). The ordinary finalization path calls
-  // reclaimIssueClone again behind that barrier; on lease loss the kept clone
-  // is the only safe place for unpublished work to remain.
-  readonly deferIssueCloneReclaim: string;
 };
 
 type SandboxCycleOutcome = {
@@ -1099,7 +1097,7 @@ async function runSandboxCycle(
     }
     if (sandbox) {
       try {
-        sandbox.preserveWorktree(opts.deferIssueCloneReclaim);
+        sandbox.deferWorktreeReclaim();
         await sandbox.close();
       } catch (err) {
         await opts.onEvent({

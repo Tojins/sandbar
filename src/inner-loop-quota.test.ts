@@ -10,6 +10,7 @@ const seams = vi.hoisted(() => ({
     sha: "base-sha",
   })),
   preserveWorktree: vi.fn(),
+  deferWorktreeReclaim: vi.fn(),
   partialUsage: new WeakMap<object, {
     usage?: { inputTokens?: number };
     toolCalls?: number;
@@ -135,10 +136,12 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     });
     seams.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
     seams.preserveWorktree.mockReset();
+    seams.deferWorktreeReclaim.mockReset();
     seams.createSandbox.mockReset().mockImplementation(async () => ({
       run: seams.sandboxRun,
       syncBranchToCache: vi.fn(async () => undefined),
       preserveWorktree: seams.preserveWorktree,
+      deferWorktreeReclaim: seams.deferWorktreeReclaim,
       close: vi.fn(),
       containerName: "sandbox",
       branch: "test",
@@ -177,7 +180,6 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("132"), {
       config: config("claude"), hooks: {}, copyToWorktree: [],
-      deferIssueCloneReclaim: "test lease pending",
       onEvent: (event) => events.push(event),
     })).resolves.toMatchObject({ type: "NEEDS-INFO" });
 
@@ -190,7 +192,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     }]);
     expect(events.filter((event) =>
       event.kind === "repair" && event.action === "fast-forward")).toEqual([]);
-    expect(seams.preserveWorktree).toHaveBeenCalledWith("test lease pending");
+    expect(seams.deferWorktreeReclaim).toHaveBeenCalledOnce();
   });
 
   it("logs the larger peak context across an implementer and its promise nudge", async () => {
@@ -219,7 +221,6 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("124"), {
       config: config("claude"), hooks: {}, copyToWorktree: [],
-      deferIssueCloneReclaim: "test lease pending",
       onEvent: (event) => events.push(event),
     })).resolves.toMatchObject({ type: "NEEDS-INFO" });
 
@@ -269,7 +270,6 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     try {
       await expect(runInnerLoop(issue("126"), {
         config: config("codex", true), hooks: {}, copyToWorktree: [],
-        deferIssueCloneReclaim: "test lease pending",
         onEvent: () => undefined,
       })).resolves.toMatchObject({ type: "NEEDS-INFO" });
     } finally {
@@ -299,7 +299,6 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("127"), {
       config: config("codex", true, "claude"), hooks: {}, copyToWorktree: [],
-      deferIssueCloneReclaim: "test lease pending",
       providerState: state, onEvent: (event) => events.push(event),
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
@@ -315,7 +314,6 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("128"), {
       config: config("codex", true, "claude"), hooks: {}, copyToWorktree: [],
-      deferIssueCloneReclaim: "test lease pending",
       providerState: state, onEvent: () => undefined,
     })).resolves.toMatchObject({ type: "QUOTA", provider: "claude" });
     expect(seams.createSandbox).toHaveBeenCalledTimes(2);
@@ -384,7 +382,6 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("125"), {
       config: config("codex"), hooks: {}, copyToWorktree: [],
-      deferIssueCloneReclaim: "test lease pending",
       onEvent: (event) => events.push(event),
     })).resolves.toMatchObject({ type: "DONE" });
 
@@ -617,13 +614,12 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("114"), {
       config: config("codex"), hooks: {}, copyToWorktree: [],
-      deferIssueCloneReclaim: "test lease pending",
       providerState: createRunProviderState(), onEvent: () => undefined,
     })).resolves.toMatchObject({ type: "NEEDS-HUMAN-REVIEW" });
     expect(seams.preserveWorktree).toHaveBeenCalledWith(
       expect.stringContaining("reviewer changed the repository"),
     );
-    expect(seams.preserveWorktree).toHaveBeenCalledWith("test lease pending");
+    expect(seams.deferWorktreeReclaim).toHaveBeenCalledOnce();
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
   });
 });

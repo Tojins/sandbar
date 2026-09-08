@@ -250,7 +250,7 @@ import {
   runPreflightAfterReachability,
 } from "./preflight.js";
 import { startKeepawake } from "./keepawake.js";
-import { run } from "./run.js";
+import { OriginLeaseLostDuringCleanupError, run } from "./run.js";
 import { OriginLockHeldError, acquireOriginLock } from "./origin-lock.js";
 import { ensureRepoCache } from "./repo-cache.js";
 import { startEventRecord } from "./events.js";
@@ -582,6 +582,10 @@ describe("run quota orchestration (#109)", () => {
       });
       expect(await result).toEqual(expect.objectContaining({ message: "EXIT:1" }));
       expect(exit).toHaveBeenCalledOnce();
+      expect(eventsOf("exit")).toHaveLength(1);
+      expect(eventsOf("complaint").filter((event) =>
+        String(event["message"]).includes("origin could not be asked during cleanup"),
+      )).toEqual([]);
       expect(seams.originRelease.mock.invocationCallOrder[0])
         .toBeLessThan(exit.mock.invocationCallOrder[0]!);
       expect(seams.recordFinalize.mock.invocationCallOrder[0])
@@ -589,6 +593,35 @@ describe("run quota orchestration (#109)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("rejects a remote-write barrier after terminal cleanup released the lease", async () => {
+    seams.plan
+      .mockResolvedValueOnce(resolution([issue("139")]))
+      .mockResolvedValue(resolution([]));
+    seams.innerLoop.mockResolvedValue({
+      type: "NEEDS-INFO", questions: "question", commits: [], specGaps: [],
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    const adapterArgs = vi.mocked(realFinalizeAdapter).mock.calls.at(-1)?.[0];
+    expect(adapterArgs).toBeDefined();
+    const exitsBefore = eventsOf("exit").length;
+    const complaintsBefore = eventsOf("complaint").length;
+    seams.originRenew.mockResolvedValueOnce({
+      kind: "lost",
+      holder: null,
+      reason: "replaced",
+      detail: "the released lease is no longer active",
+    });
+
+    await expect(adapterArgs!.beforeOriginWrite())
+      .rejects.toBeInstanceOf(OriginLeaseLostDuringCleanupError);
+    expect(eventsOf("exit")).toHaveLength(exitsBefore);
+    expect(eventsOf("complaint")).toHaveLength(complaintsBefore);
   });
 
   it("records a release failure before run-end and continues cleanup", async () => {
@@ -730,9 +763,10 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.finalize).not.toHaveBeenCalled();
     expect(seams.innerLoop).toHaveBeenCalledWith(
       expect.objectContaining({ id: "139" }),
-      expect.objectContaining({
-        deferIssueCloneReclaim: expect.stringContaining("repository lease"),
-      }),
+      expect.any(Object),
+    );
+    expect(seams.innerLoop.mock.calls[0]?.[1]).not.toHaveProperty(
+      "deferIssueCloneReclaim",
     );
     expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
       severity: "error",
