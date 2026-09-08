@@ -19,6 +19,9 @@ const seams = vi.hoisted(() => ({
   }>,
   cleanupCallbacks: [] as Array<() => unknown>,
   cleanupOrder: [] as string[],
+  cleanupReporter: (async () => undefined) as (
+    kind: string, message: string, cause?: unknown,
+  ) => Promise<void> | void,
   wakeLocks: [] as Array<{
     stop: ReturnType<typeof vi.fn>;
     onStatus: ReturnType<typeof vi.fn>;
@@ -72,10 +75,20 @@ vi.mock("./cleanup.js", () => ({
       if (at >= 0) seams.cleanupCallbacks.splice(at, 1);
     };
   }),
-  setCleanupReporter: vi.fn(() => vi.fn()),
+  setCleanupReporter: vi.fn((next: typeof seams.cleanupReporter) => {
+    const previous = seams.cleanupReporter;
+    seams.cleanupReporter = next;
+    return () => { seams.cleanupReporter = previous; };
+  }),
   runCleanup: vi.fn(async () => {
     while (seams.cleanupCallbacks.length > 0) {
-      await seams.cleanupCallbacks.pop()?.();
+      const action = seams.cleanupCallbacks.pop();
+      if (!action) continue;
+      try {
+        await action();
+      } catch (err) {
+        await seams.cleanupReporter("cleanup-failure", "Cleanup action failed", err);
+      }
     }
   }),
 }));
@@ -214,6 +227,7 @@ vi.mock("./merger.js", async (importOriginal) => ({
 import type { RunConfig } from "./config.js";
 import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
 import { MergerError, realAdapter } from "./merger.js";
+import { realAdapter as realFinalizeAdapter } from "./finalize.js";
 import { createBranchImages, ensureImages } from "./ensure-images.js";
 import { createAgentImages } from "./agent-tools.js";
 import { cleanupOrphanContainers } from "./containers.js";
@@ -308,6 +322,7 @@ describe("run quota orchestration (#109)", () => {
     seams.reclaimIssueClone.mockReset();
     seams.reclaimIssueClone.mockResolvedValue({ kind: "removed" });
     seams.cleanupOrder.length = 0;
+    seams.cleanupReporter = async () => undefined;
     seams.wakeStatusReports.length = 0;
     vi.mocked(fetchOriginRefs).mockReset();
     vi.mocked(fetchOriginRefs).mockRejectedValue(new Error("stop after idle poll"));
@@ -444,6 +459,44 @@ describe("run quota orchestration (#109)", () => {
     ]));
     expect(seams.cleanupOrder.indexOf("origin-release"))
       .toBeLessThan(seams.cleanupOrder.indexOf("record-finalize"));
+  });
+
+  it("threads the serialized lease barrier into finalization and landing adapters", async () => {
+    seams.plan.mockResolvedValue(resolution([issue("139")]));
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "work" }] });
+    seams.merger.mockResolvedValue(summary([issue("139")]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+    expect(vi.mocked(realFinalizeAdapter)).toHaveBeenCalledWith(
+      expect.objectContaining({ beforeOriginWrite: expect.any(Function) }),
+    );
+    expect(vi.mocked(realAdapter)).toHaveBeenCalledWith(
+      expect.objectContaining({ beforeOriginWrite: expect.any(Function) }),
+    );
+  });
+
+  it("records a release failure before run-end and continues cleanup", async () => {
+    seams.plan.mockResolvedValue(resolution([]));
+    seams.originRelease.mockImplementationOnce(async () => {
+      seams.cleanupOrder.push("origin-release");
+      throw new Error("lease delete failed");
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      severity: "error",
+      message: expect.stringContaining("lease delete failed"),
+    }));
+    expect(seams.cleanupOrder).toEqual([
+      "origin-release", "record-finalize",
+    ]);
   });
 
   it("records wake-lock state from the structured status, not its rendered prose", async () => {

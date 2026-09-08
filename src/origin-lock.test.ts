@@ -347,6 +347,36 @@ describe("origin lock git argv (#139)", () => {
       .rejects.toBeInstanceOf(OriginLockHeldError);
   });
 
+  it.each(["acknowledged-late", "absent", "unavailable"] as const)(
+    "reconciles an $shape failed acquisition CAS",
+    async (shape) => {
+      let remoteSha: string | null = null;
+      let lookups = 0;
+      const exec: OriginLockExec = async (_file, args) => {
+        if (args[0] === "ls-remote") {
+          lookups += 1;
+          if (lookups === 1 || shape === "absent") throw commandError("absent", 2);
+          if (shape === "unavailable") throw commandError("offline");
+          return { stdout: `${remoteSha}\t${ORIGIN_LOCK_REF}\n`, stderr: "" };
+        }
+        if (args[0] === "hash-object") return { stdout: "tree\n", stderr: "" };
+        if (args[0] === "commit-tree") return { stdout: "proposed\n", stderr: "" };
+        if (args[0] === "push") {
+          if (shape === "acknowledged-late") remoteSha = "proposed";
+          throw commandError("push failed");
+        }
+        throw new Error(`unexpected command: ${args.join(" ")}`);
+      };
+
+      const acquisition = acquireOriginLock({ repoDir: "/cache", identity, exec });
+      if (shape === "acknowledged-late") {
+        await expect(acquisition).resolves.toMatchObject({ displaced: null });
+      } else {
+        await expect(acquisition).rejects.toThrow(/Could not update origin lock/);
+      }
+    },
+  );
+
   it.each([
     {
       name: "acknowledged-late renewal",
@@ -406,6 +436,23 @@ describe("origin lock git argv (#139)", () => {
     await expect(acquired.lock.release()).resolves.toBeUndefined();
     expect(seam.remoteSha()).toBe(afterPush);
   });
+
+  it.each(["unchanged", "unavailable"] as const)(
+    "fails release when a rejected delete reread is $shape",
+    async (shape) => {
+      const seam = leaseExec({
+        rereadUnavailable: shape === "unavailable",
+        onSecondPush: () => ({
+          remoteSha: "commit-1",
+          error: commandError("delete failed"),
+        }),
+      });
+      const acquired = await acquireOriginLock({
+        repoDir: "/cache", identity, exec: seam.exec,
+      });
+      await expect(acquired.lock.release()).rejects.toThrow(/Could not release origin lock/);
+    },
+  );
 
   it("propagates unexpected exec-seam failures unchanged", async () => {
     const bug = new Error("adapter bug");
