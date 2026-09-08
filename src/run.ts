@@ -1556,8 +1556,10 @@ export async function run(
         sourceChangedOnPoll || configStalenessChanged || planDiagnosticsChanged ||
         followUps.length > 0 || laneNotices.length > 0 ||
         reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
-        resolution.waiting.some((entry) => entry.reason.kind === "label-actor") ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land";
+      const pollIsReportable = pollDidWork || resolution.waiting.some(
+        (entry) => entry.reason.kind === "label-actor",
+      );
       if (planTrigger === "poll" && pollDidWork) {
         activity.enterBusy();
       }
@@ -1581,7 +1583,7 @@ export async function run(
       if (issues.length > 0) {
         activity.enterBusy();
       }
-      if (planTrigger !== "poll" || pollDidWork) {
+      if (planTrigger !== "poll" || pollIsReportable) {
         await emitRecompute(iteration, planTrigger, resolution, issues, landRequests);
         for (const line of chunkDriftLines) {
           await runRecord.emit({ kind: "complaint", severity: "warning", message: line });

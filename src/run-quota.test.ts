@@ -728,6 +728,9 @@ describe("run quota orchestration (#109)", () => {
       .toHaveLength(2);
     expect(eventsOf("recompute").slice(0, 3).map((event) => event.trigger))
       .toEqual(["launch", "poll", "poll"]);
+    expect(startKeepawake).toHaveBeenCalledTimes(2);
+    expect(seams.wakeLocks[0]?.stop).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[1]?.stop).toHaveBeenCalledOnce();
   });
 
   it("keeps planner waiting rows when the scheduler also declines a planned issue", async () => {

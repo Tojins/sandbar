@@ -185,10 +185,12 @@ describe("this repository's pin (#66)", () => {
     const current = parseVersion(pkg.version);
     const configSource = readFileSync(new URL("../sandbar.config.mjs", import.meta.url), "utf8");
     const floorText = configSource.match(/requiresSandbar:\s*"([^"]+)"/)?.[1];
+    const developers = configSource.match(/developers:\s*\[([^\]]+)\]/)?.[1];
     const floor = floorText === undefined ? null : parseVersion(floorText);
     expect(pinned).not.toBeNull();
     expect(current).not.toBeNull();
     expect(floor).not.toBeNull();
+    expect(developers).toContain('"Tojins"');
     expect(compareVersions(pinned!, current!)).toBeLessThan(0);
     expect(compareVersions(pinned!, floor!)).toBeGreaterThanOrEqual(0);
   });
