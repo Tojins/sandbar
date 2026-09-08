@@ -273,8 +273,9 @@ const summary = (merged: ReturnType<typeof issue>[], pushed = true) => ({
 });
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((yes) => { resolve = yes; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 };
 const eventsOf = (kind: string) => seams.events.filter((event) => event.kind === kind);
 
@@ -477,6 +478,32 @@ describe("run quota orchestration (#109)", () => {
     expect(vi.mocked(realAdapter)).toHaveBeenCalledWith(
       expect.objectContaining({ beforeOriginWrite: expect.any(Function) }),
     );
+  });
+
+  it("renews by heartbeat while post-acquisition preflight is still running", async () => {
+    vi.useFakeTimers();
+    try {
+      const slowPreflight = deferred<Awaited<ReturnType<typeof runPreflightAfterReachability>>>();
+      vi.mocked(runPreflightAfterReachability).mockReturnValueOnce(slowPreflight.promise);
+      vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        throw new Error(`EXIT:${code}`);
+      }) as never);
+      const result = run(config).catch((error: unknown) => error);
+      await flushMicrotasksUntil(
+        () => vi.mocked(runPreflightAfterReachability).mock.calls.length === 1,
+        "post-acquisition preflight to start",
+      );
+
+      expect(seams.originRenew).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(seams.originRenew).toHaveBeenCalledOnce();
+
+      slowPreflight.reject(new Error("stop slow preflight"));
+      expect(await result).toEqual(expect.objectContaining({ message: "EXIT:1" }));
+      expect(seams.originRelease).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("records a release failure before run-end and continues cleanup", async () => {

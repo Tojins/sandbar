@@ -1246,7 +1246,7 @@ export async function run(
     promptExtensions: config.promptExtensions,
   };
   const leaseDeferredCloneReason =
-    "repository lease ownership is awaiting the scheduler wake";
+    "repository lease ownership is awaiting the run-level renewal barrier";
 
   type IssueOutcome = { issue: PlannedIssue; terminal: Terminal };
   type ExecutionEvent = SettledIssue<PlannedIssue, Terminal>;
