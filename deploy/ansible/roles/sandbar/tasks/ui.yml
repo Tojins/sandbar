@@ -1,0 +1,40 @@
+---
+- name: Install Caddy
+  ansible.builtin.apt:
+    name: caddy
+    state: present
+
+- name: Install the standalone UI unit
+  ansible.builtin.template:
+    src: sandbar-ui.service.j2
+    dest: "{{ sandbar_home }}/.config/systemd/user/sandbar-ui.service"
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0644"
+
+- name: Enable the standalone UI unit at boot
+  ansible.builtin.systemd_service:
+    name: sandbar-ui.service
+    scope: user
+    enabled: true
+    daemon_reload: true
+  become: true
+  become_user: "{{ sandbar_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_result.uid }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ sandbar_user_result.uid }}/bus"
+
+- name: Configure Caddy for the run UI
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: /etc/caddy/Caddyfile
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload Caddy
+
+- name: Enable and start Caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    enabled: true
+    state: started

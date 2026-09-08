@@ -1,0 +1,18 @@
+# Installed by deploy/ansible (role sandbar). Edit the template there, not
+# the rendered user unit. Plain placeholders keep this contract directly
+# renderable by src/deploy-unit.test.ts.
+[Unit]
+Description=sandbar standalone run UI in {{ sandbar_checkout }}
+# An explicit daemon stop or restart carries the reader with it, while a crash
+# does not. Start ordering keeps the reader behind the daemon's pull + npm ci.
+PartOf={{ sandbar_service_name }}.service
+After={{ sandbar_service_name }}.service
+
+[Service]
+Type=simple
+WorkingDirectory={{ sandbar_checkout }}
+ExecStart={{ sandbar_ui_command }}
+Restart=no
+
+[Install]
+WantedBy=default.target

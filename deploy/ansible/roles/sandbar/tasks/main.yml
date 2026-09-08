@@ -46,3 +46,7 @@
 
 - name: Install the daemon unit
   ansible.builtin.import_tasks: service.yml
+
+- name: Configure the always-on run UI
+  ansible.builtin.import_tasks: ui.yml
+  when: sandbar_ui_port > 0

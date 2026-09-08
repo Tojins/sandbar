@@ -493,7 +493,8 @@ outcomes.
   module for post-mortem browsing. The page polls every two seconds. A growing
   file plus live matching `run.pid` means working; a dead/missing PID without
   `run-end` means crashed. `uiPort` is per-workdir host configuration and a
-  bind collision refuses the run. Unreadable history is omitted, and any
+  bind collision refuses the run; `sandbar ui --port` overrides it for a
+  standalone deployment reader. Unreadable history is omitted, and any
   current request or post-listen server failure stays inside the observing UI;
   its best-effort complaint callback cannot stop a healthy run.
 - **Every outcome carries how long it took, and nothing decides on it (#82).**
@@ -642,8 +643,10 @@ names the release that drives a run, and `npm run sandbar`
   key-only SSH, no automatic reboot — and `roles/sandbar` provides it. The
   systemd USER unit pulls and `npm ci`s before every launch (the only thing
   that refreshes a checkout since #66), never restarts on its own, and is
-  table-tested as a rendered string in `src/deploy-unit.test.ts`. Secrets are
-  placed by hand and only asserted; no GitHub Actions deploy, no timers.
+  table-tested as a rendered string in `src/deploy-unit.test.ts`. The box
+  serves the UI through Caddy from a second user unit running `sandbar ui`.
+  Secrets are placed by hand and only asserted; no GitHub Actions deploy, no
+  timers.
 - **One image, both roles** (agent sandbox and gate pod member): the driver's
   augmentation supplies the sandbox's uid-1000 `agent` user, while the base
   keeps default `USER` root — `checkWorktreeImageUids` refuses the run if that

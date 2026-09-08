@@ -10,9 +10,9 @@
 // The four constraints, written down so they are decisions and not drift:
 //   - EXACTLY ONE flag that carries configuration: `--config`. Every flag that
 //     duplicates a config field creates a second source of truth. (`--help`,
-//     `--version` and `gate`'s `--worktree`/`--keep` (#45) duplicate nothing —
-//     the latter name what a stack-only invocation has to be told and the
-//     config has no opinion about.)
+//     `--version`, `gate`'s `--worktree`/`--keep` (#45), and `ui`'s `--port`
+//     (#138) duplicate nothing — the latter flags name what a standalone
+//     invocation has to be told and the config has no opinion about.)
 //   - NO config search up the directory tree. `./sandbar.config.mjs` or an
 //     explicit path — an ambiguous "which config did it find" is a run against
 //     the wrong repo.
@@ -49,7 +49,7 @@ const UI_SUBCOMMAND = "ui";
 
 const USAGE = `Usage: sandbar [--config <path>]
        sandbar gate [--config <path>] [--worktree <path>] [--keep]
-       sandbar ui [--config <path>]
+       sandbar ui [--config <path>] [--port <n>]
 
   --config <path>   Config file to load. Default: ./${DEFAULT_CONFIG_FILE}
                     (resolved against the current directory). The file is an
@@ -59,7 +59,8 @@ const USAGE = `Usage: sandbar [--config <path>]
   --help            Print this message.
 
 \`sandbar\` runs the full agent loop. \`sandbar ui\` serves the newest event
-record for post-mortem browsing. \`sandbar gate\` runs config.gateStack
+record for post-mortem browsing; \`--port\` overrides uiPort for this standalone
+host only. \`sandbar gate\` runs config.gateStack
 against one worktree and nothing else — no tracker, no agents, no lock — and
 exits 0 green, 1 red, 2 if it could not reach a verdict. It is what a laptop and
 a CI job run, so the gate has one implementation.
@@ -73,7 +74,7 @@ Everything else is configured in that file — see the RunConfig type.`;
 
 export type ParsedArgs =
   | { readonly kind: "run"; readonly configPath: string }
-  | { readonly kind: "ui"; readonly configPath: string }
+  | { readonly kind: "ui"; readonly configPath: string; readonly port: number | null }
   | {
       readonly kind: "gate";
       readonly configPath: string;
@@ -99,6 +100,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 
   let configPath: string | null = null;
   let worktree: string | null = null;
+  let port: number | null = null;
   let keep = false;
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
@@ -117,6 +119,24 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       const value = arg.slice("--config=".length);
       if (!value) throw new SandbarError(`--config needs a path.\n\n${USAGE}`);
       configPath = value;
+      continue;
+    }
+    if (arg === "--port" || arg.startsWith("--port=")) {
+      if (!isUi) {
+        throw new SandbarError(
+          `'${arg}' is a \`sandbar ui\` flag; the full run uses config.uiPort. ` +
+            `Did you mean \`sandbar ${UI_SUBCOMMAND} ${arg}\`?\n\n${USAGE}`,
+        );
+      }
+      const value = arg === "--port" ? rest[i + 1] : arg.slice("--port=".length);
+      const parsedPort = value !== undefined && /^\d+$/.test(value)
+        ? Number(value)
+        : Number.NaN;
+      if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65_535) {
+        throw new SandbarError(`--port needs an integer from 1 through 65535.\n\n${USAGE}`);
+      }
+      port = parsedPort;
+      if (arg === "--port") i++;
       continue;
     }
     // Gate-only flags are rejected on the run path by NAME rather than falling
@@ -153,7 +173,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     );
   }
   const resolvedConfigPath = configPath ?? DEFAULT_CONFIG_FILE;
-  if (isUi) return { kind: "ui", configPath: resolvedConfigPath };
+  if (isUi) return { kind: "ui", configPath: resolvedConfigPath, port };
   return isGate
     ? {
         kind: "gate",
@@ -234,7 +254,7 @@ export async function main(
     installCleanupTraps();
     const ui = await startUiServer({
       logsDir: layout.logsDir,
-      port: config.uiPort,
+      port: parsed.port ?? config.uiPort,
     });
     onCleanup(() => ui.close());
     console.log(ui.url);

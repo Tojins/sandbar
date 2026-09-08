@@ -13,6 +13,13 @@
 // event callback. The same seam takes a server error after listen, which would
 // otherwise be an unhandled 'error' and the internal-failure halt the first
 // sentence rules out. Binding is exclusive and EADDRINUSE is a startup refusal.
+//
+// Both production callers omit `host`: the production bind contract is
+// loopback only, and the page deliberately has no authentication. A server
+// exposes it through a same-box reverse proxy, never by moving this bind
+// onto a public interface. There, the standalone `sandbar ui` is the always-on
+// reader: unlike run()'s in-process host, it survives a daemon crash and can
+// render that crashed state (#138).
 
 import {
   createServer,
@@ -123,7 +130,7 @@ export class UiPortInUseError extends SandbarError {
   constructor(port: number, host: string, cause: unknown) {
     super(
       `Sandbar UI port ${port} is already in use on ${host}. ` +
-        "Choose a different uiPort for this workdir.",
+        "Choose a different port.",
       { cause },
     );
     this.name = "UiPortInUseError";

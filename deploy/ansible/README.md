@@ -26,7 +26,8 @@ The role, `roles/sandbar`, provides:
 - rootless **podman** with netavark and aardvark-dns, a subordinate
   uid/gid range for the service user, and a check that the host runs cgroup v2
   with `memory` and `pids` delegated to user managers;
-- **Node** (major from NodeSource, default 24), **git**, **gh**;
+- **Node** (major from NodeSource, default 24), **git**, **gh**, and Ubuntu's
+  **Caddy** package when the public run UI is enabled;
 - a dedicated **`sandbar` user** with linger, so its user manager, its
   `podman.socket` and the daemon unit run with no login session and come back
   after a reboot; git identity and the gh credential helper configured for it;
@@ -50,9 +51,18 @@ The role, `roles/sandbar`, provides:
     `npm run sandbar`);
   - `Restart=no`. Exits 2 (stuck) and 4 (quota) are deliberate stops; a
     human reads why and restarts. No timers, no log sweep, no memory limit.
+- a second **systemd user unit**, `sandbar-ui.service`, running the standalone
+  `sandbar ui` reader on loopback. It starts after the daemon's refresh and is
+  part of the daemon for explicit stops and restarts, but it stays up when the
+  daemon crashes so the report can show that crash. It has no install step and
+  no automatic restart;
+- **Caddy**, enabled as a system service, serving plain HTTP on
+  `sandbar_ui_http_port` (default 80) and proxying to the standalone reader on
+  `127.0.0.1:sandbar_ui_port` (default 7332). Set `sandbar_ui_port: 0` to
+  disable this feature.
 
 What the role deliberately does NOT do: place a secret, clone the checkout,
-restart a running daemon, or run anything on a schedule.
+restart a running daemon, run anything on a schedule, or manage a firewall.
 
 ## Running the playbook
 
@@ -105,10 +115,10 @@ readable by every developer there, which is the opposite of the point.
 All as the service user:
 
 ```sh
-systemctl --user start sandbar        # first start, and every restart
+systemctl --user start sandbar sandbar-ui  # first start, and after a deliberate stop
 systemctl --user stop sandbar         # SIGTERM: sandbar's own cleanup, up to sandbar_stop_timeout_sec
-systemctl --user status sandbar
-journalctl --user -u sandbar -f       # stdout is the UI URL, stderr the failure banner
+systemctl --user status sandbar sandbar-ui
+journalctl --user -u sandbar -u sandbar-ui -f
 ```
 
 The daemon exits 2 after six consecutive issue terminals without a landing
@@ -118,9 +128,17 @@ picked up at the next start — the unit pulls before it launches — and a
 running daemon reports how far behind it is through preflight's stale-config
 warning.
 
-The run UI binds `127.0.0.1:<uiPort>` (default 7331) with no
-authentication, by design. Reach it with
+The team report is `http://<ip>/`; with a non-default public port, use
+`http://<ip>:<sandbar_ui_http_port>/`. It deliberately has no authentication:
+it contains only the tracker-visible issue state, compact event prose and
+complaints. A host that adds a firewall must allow the public HTTP port.
+
+The daemon's own in-process UI is unchanged: it still binds the consumer
+config's loopback `uiPort` (default 7331), and dies with that process. An
+operator can still reach that copy with
 `ssh -L 7331:127.0.0.1:7331 sandbar@<box>` and open `http://127.0.0.1:7331`.
+The Caddy-backed report instead comes from `sandbar-ui.service`, whose
+`--port` must differ from the daemon's `uiPort`.
 
 Reinstalling the box: run the playbook, take the by-hand steps, start. The
 `.sandbar` workdir under the checkout is a cache; losing it costs agent time,
