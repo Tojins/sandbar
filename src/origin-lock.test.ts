@@ -3,11 +3,15 @@ import { describe, expect, it } from "vitest";
 import {
   ORIGIN_LOCK_LEASE_MS,
   ORIGIN_LOCK_REF,
+  OriginLockCommandError,
   OriginLockHeldError,
   acquireOriginLock,
   decideAcquire,
+  decideAcquireAfterPushFailure,
   decideRelease,
+  decideReleaseAfterPushFailure,
   decideRenew,
+  decideRenewAfterPushFailure,
   parseOriginLockLease,
   type OriginLockClaim,
   type OriginLockExec,
@@ -30,6 +34,8 @@ const claim = (over: Partial<OriginLockClaim["lease"]> = {}): OriginLockClaim =>
     ...over,
   },
 });
+const commandError = (message: string, code?: number): OriginLockCommandError =>
+  new OriginLockCommandError(message, code);
 
 describe("origin lock decisions (#139)", () => {
   it("acquires only against an absent ref", () => {
@@ -100,10 +106,64 @@ describe("origin lock decisions (#139)", () => {
     }, ours)).toEqual({ kind: "released" });
   });
 
-  it("fails closed on malformed lease commits", () => {
-    expect(() => parseOriginLockLease("not json")).toThrow(/invalid lease commit/);
-    expect(() => parseOriginLockLease(JSON.stringify({ ...identity })))
-      .toThrow(/incomplete or invalid lease/);
+  it("reconciles failed acquire, renew and release CAS outcomes purely", () => {
+    const ours = claim();
+    const proposed = { ...claim(), sha: "proposed-sha" };
+    const replacement = { ...claim({ hostname: "host-b" }), sha: "replacement-sha" };
+    expect(decideAcquireAfterPushFailure(
+      { kind: "found", claim: proposed }, null, proposed,
+    )).toEqual({ kind: "acquired" });
+    expect(decideAcquireAfterPushFailure(
+      { kind: "found", claim: replacement }, null, proposed,
+    )).toEqual({ kind: "refuse", holder: replacement });
+    expect(decideAcquireAfterPushFailure(
+      { kind: "unavailable", reason: "offline" }, null, proposed,
+    )).toEqual({ kind: "failed" });
+
+    expect(decideRenewAfterPushFailure(
+      { kind: "found", claim: proposed }, now, ours, proposed, "push failed",
+    )).toEqual({ kind: "renewed", claim: proposed });
+    expect(decideRenewAfterPushFailure(
+      { kind: "found", claim: replacement }, now, ours, proposed, "push failed",
+    )).toMatchObject({ kind: "lost", reason: "replaced", holder: replacement });
+    expect(decideRenewAfterPushFailure(
+      { kind: "found", claim: ours }, now, ours, proposed, "push failed",
+    )).toEqual({ kind: "retained", claim: ours, reason: "push failed" });
+    expect(decideRenewAfterPushFailure(
+      { kind: "unavailable", reason: "offline" },
+      new Date(ours.lease.expires), ours, proposed, "push failed",
+    )).toMatchObject({ kind: "lost", reason: "expired-unrenewable" });
+
+    expect(decideReleaseAfterPushFailure({ kind: "absent" }, ours))
+      .toEqual({ kind: "released" });
+    expect(decideReleaseAfterPushFailure(
+      { kind: "found", claim: replacement }, ours,
+    )).toEqual({ kind: "released" });
+    expect(decideReleaseAfterPushFailure(
+      { kind: "found", claim: ours }, ours,
+    )).toEqual({ kind: "failed" });
+    expect(decideReleaseAfterPushFailure(
+      { kind: "unavailable", reason: "offline" }, ours,
+    )).toEqual({ kind: "failed" });
+  });
+
+  it.each([
+    ["invalid JSON", "not json"],
+    ["null", "null"],
+    ["array", "[]"],
+    ["missing hostname", JSON.stringify({ ...claim().lease, hostname: undefined })],
+    ["blank hostname", JSON.stringify({ ...claim().lease, hostname: " " })],
+    ["non-string workdir", JSON.stringify({ ...claim().lease, workdir: 1 })],
+    ["zero pid", JSON.stringify({ ...claim().lease, pid: 0 })],
+    ["fractional pid", JSON.stringify({ ...claim().lease, pid: 1.5 })],
+    ["non-number pid", JSON.stringify({ ...claim().lease, pid: "1" })],
+    ["missing run", JSON.stringify({ ...claim().lease, run: undefined })],
+    ["invalid startedAt", JSON.stringify({ ...claim().lease, startedAt: "soon" })],
+    ["non-string startedAt", JSON.stringify({ ...claim().lease, startedAt: 1 })],
+    ["missing expires", JSON.stringify({ ...identity })],
+    ["invalid expires", JSON.stringify({ ...claim().lease, expires: "later" })],
+  ])("fails closed on a %s lease commit", (_name, message) => {
+    expect(() => parseOriginLockLease(message)).toThrow(/Origin lock/);
   });
 });
 
@@ -114,6 +174,53 @@ type ExecCall = {
 };
 
 describe("origin lock git argv (#139)", () => {
+  const leaseExec = (options: {
+    readonly onSecondPush?: (state: { remoteSha: string | null }) =>
+      { readonly remoteSha: string | null; readonly error?: OriginLockCommandError };
+    readonly rereadUnavailable?: boolean;
+    readonly replacement?: OriginLockClaim;
+  } = {}) => {
+    let remoteSha: string | null = null;
+    let nextCommit = 0;
+    let pushes = 0;
+    const exec: OriginLockExec = async (_file, args) => {
+      if (args[0] === "ls-remote") {
+        if (options.rereadUnavailable && pushes >= 2) {
+          throw commandError("origin offline");
+        }
+        if (remoteSha === null) throw commandError("absent", 2);
+        return { stdout: `${remoteSha}\t${ORIGIN_LOCK_REF}\n`, stderr: "" };
+      }
+      if (args[0] === "fetch") return { stdout: "", stderr: "" };
+      if (args[0] === "rev-parse") return { stdout: `${remoteSha}\n`, stderr: "" };
+      if (args[0] === "show" && options.replacement) {
+        return { stdout: JSON.stringify(options.replacement.lease), stderr: "" };
+      }
+      if (args[0] === "hash-object") return { stdout: "tree\n", stderr: "" };
+      if (args[0] === "commit-tree") {
+        nextCommit += 1;
+        return { stdout: `commit-${nextCommit}\n`, stderr: "" };
+      }
+      if (args[0] === "push") {
+        pushes += 1;
+        const refspec = args.at(-1)!;
+        const proposed = refspec === `:${ORIGIN_LOCK_REF}`
+          ? null
+          : refspec.split(":")[0]!;
+        if (pushes === 2 && options.onSecondPush) {
+          const result = options.onSecondPush({ remoteSha });
+          remoteSha = result.remoteSha;
+          if (result.error) throw result.error;
+          return { stdout: "", stderr: "" };
+        }
+        remoteSha = proposed;
+        return { stdout: "", stderr: "" };
+      }
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    };
+    return { exec, remoteSha: () => remoteSha };
+  };
+
   it("uses explicit CAS argv for acquire, renew and release", async () => {
     const calls: ExecCall[] = [];
     let remoteSha: string | null = null;
@@ -123,7 +230,7 @@ describe("origin lock git argv (#139)", () => {
       calls.push({ file, args: [...args], cwd: options.cwd });
       if (args[0] === "ls-remote") {
         if (remoteSha === null) {
-          throw Object.assign(new Error("no ref"), { code: 2 });
+          throw commandError("no ref", 2);
         }
         return { stdout: `${remoteSha}\t${ORIGIN_LOCK_REF}\n`, stderr: "" };
       }
@@ -222,7 +329,7 @@ describe("origin lock git argv (#139)", () => {
     const exec: OriginLockExec = async (_file, args) => {
       if (args[0] === "ls-remote") {
         lookup += 1;
-        if (lookup === 1) throw Object.assign(new Error("absent"), { code: 2 });
+        if (lookup === 1) throw commandError("absent", 2);
         return { stdout: `${winner.sha}\t${ORIGIN_LOCK_REF}\n`, stderr: "" };
       }
       if (args[0] === "fetch") return { stdout: "", stderr: "" };
@@ -232,11 +339,78 @@ describe("origin lock git argv (#139)", () => {
       }
       if (args[0] === "hash-object") return { stdout: "tree\n", stderr: "" };
       if (args[0] === "commit-tree") return { stdout: "ours\n", stderr: "" };
-      if (args[0] === "push") throw new Error("push failed");
+      if (args[0] === "push") throw commandError("push failed");
       throw new Error("unexpected command");
     };
 
     await expect(acquireOriginLock({ repoDir: "/cache", identity, exec }))
       .rejects.toBeInstanceOf(OriginLockHeldError);
+  });
+
+  it.each([
+    {
+      name: "acknowledged-late renewal",
+      replacement: undefined,
+      onSecondPush: () => ({ remoteSha: "commit-2", error: commandError("ack lost") }),
+      expected: { kind: "renewed" },
+    },
+    {
+      name: "replacement renewal",
+      replacement: { ...claim({ hostname: "host-b" }), sha: "replacement" },
+      onSecondPush: () => ({ remoteSha: "replacement", error: commandError("lease rejected") }),
+      expected: { kind: "lost", reason: "replaced" },
+    },
+    {
+      name: "unchanged expected sha",
+      replacement: undefined,
+      onSecondPush: () => ({ remoteSha: "commit-1", error: commandError("push failed") }),
+      expected: { kind: "retained" },
+    },
+  ])("reconciles a failed $name CAS", async ({ replacement, onSecondPush, expected }) => {
+    const seam = leaseExec({ onSecondPush, ...(replacement ? { replacement } : {}) });
+    const acquired = await acquireOriginLock({ repoDir: "/cache", identity, exec: seam.exec });
+    await expect(acquired.lock.renew()).resolves.toMatchObject(expected);
+  });
+
+  it("uses classification time for expiry after a failed renewal and unavailable reread", async () => {
+    let clockMs = now.getTime();
+    const seam = leaseExec({
+      rereadUnavailable: true,
+      onSecondPush: () => {
+        clockMs = now.getTime() + ORIGIN_LOCK_LEASE_MS;
+        return { remoteSha: "commit-1", error: commandError("push failed") };
+      },
+    });
+    const acquired = await acquireOriginLock({
+      repoDir: "/cache", identity, exec: seam.exec, now: () => new Date(clockMs),
+    });
+    await expect(acquired.lock.renew()).resolves.toMatchObject({
+      kind: "lost",
+      reason: "expired-unrenewable",
+      detail: "origin could not be asked",
+    });
+  });
+
+  it.each([
+    ["acknowledged-late delete", null],
+    ["replacement", "replacement"],
+  ] as const)("recovers release after %s", async (_name, afterPush) => {
+    const seam = leaseExec({
+      onSecondPush: () => ({
+        remoteSha: afterPush,
+        error: commandError("delete acknowledgement lost"),
+      }),
+      ...(afterPush === null ? {} : { replacement: { ...claim(), sha: afterPush } }),
+    });
+    const acquired = await acquireOriginLock({ repoDir: "/cache", identity, exec: seam.exec });
+    await expect(acquired.lock.release()).resolves.toBeUndefined();
+    expect(seam.remoteSha()).toBe(afterPush);
+  });
+
+  it("propagates unexpected exec-seam failures unchanged", async () => {
+    const bug = new Error("adapter bug");
+    const exec: OriginLockExec = async () => { throw bug; };
+    await expect(acquireOriginLock({ repoDir: "/cache", identity, exec }))
+      .rejects.toBe(bug);
   });
 });

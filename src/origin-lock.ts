@@ -40,7 +40,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { isExitCode, faultDetail, SandbarError } from "./errors.js";
+import { faultDetail, SandbarError } from "./errors.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -112,14 +112,42 @@ export type OriginLockExec = (
   },
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 
+// The only failures the adapter classifies as Git/transport outcomes. A test
+// seam that throws an ordinary Error is a programming failure and propagates;
+// the real process boundary converts child-process failures into this named
+// condition before any lookup or CAS code sees them.
+export class OriginLockCommandError extends SandbarError {
+  readonly code: number | undefined;
+
+  constructor(message: string, code?: number, cause?: unknown) {
+    super(message, { cause });
+    this.name = "OriginLockCommandError";
+    this.code = code;
+  }
+}
+
 const realExec: OriginLockExec = async (file, args, options) => {
-  const result = await execFileAsync(file, args, {
-    cwd: options.cwd,
-    env: options.env,
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  return { stdout: result.stdout, stderr: result.stderr };
+  try {
+    const result = await execFileAsync(file, args, {
+      cwd: options.cwd,
+      env: options.env,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return { stdout: result.stdout, stderr: result.stderr };
+  } catch (cause) {
+    const failure = cause as { code?: unknown; stderr?: unknown; message?: unknown };
+    const detail = typeof failure.stderr === "string" && failure.stderr.trim()
+      ? failure.stderr.trim()
+      : typeof failure.message === "string"
+        ? failure.message
+        : String(cause);
+    throw new OriginLockCommandError(
+      `${file} ${args.join(" ")} failed: ${detail}`,
+      typeof failure.code === "number" ? failure.code : undefined,
+      cause,
+    );
+  }
 };
 
 const validDate = (value: unknown): value is string =>
@@ -258,6 +286,63 @@ export function decideRelease(
   return { kind: "delete", expectedSha: ours.sha };
 }
 
+export type AcquirePushReconciliation =
+  | { readonly kind: "acquired" }
+  | { readonly kind: "refuse"; readonly holder: OriginLockClaim }
+  | { readonly kind: "failed" };
+
+export function decideAcquireAfterPushFailure(
+  lookup: OriginLockLookup,
+  expectedSha: string | null,
+  proposed: OriginLockClaim,
+): AcquirePushReconciliation {
+  if (lookup.kind !== "found") return { kind: "failed" };
+  if (lookup.claim.sha === proposed.sha) return { kind: "acquired" };
+  return lookup.claim.sha !== expectedSha
+    ? { kind: "refuse", holder: lookup.claim }
+    : { kind: "failed" };
+}
+
+export function decideRenewAfterPushFailure(
+  lookup: OriginLockLookup,
+  now: Date,
+  ours: OriginLockClaim,
+  proposed: OriginLockClaim,
+  failureReason: string,
+): OriginLockRenewal {
+  if (lookup.kind === "found" && lookup.claim.sha === proposed.sha) {
+    return { kind: "renewed", claim: proposed };
+  }
+  const renewal = decideRenew(lookup, now, ours);
+  if (renewal.kind === "lost") return renewal;
+  if (renewal.kind === "retained") return { ...renewal, claim: ours };
+  return isExpired(ours.lease, now)
+    ? {
+        kind: "lost",
+        holder: lookup.kind === "found" ? lookup.claim : null,
+        reason: "expired-unrenewable",
+        detail: lookup.kind === "found"
+          ? `current holder is ${formatOriginLockHolder(lookup.claim)}, ` +
+            "but origin could not accept the renewal"
+          : "origin could not accept the renewal",
+      }
+    : { kind: "retained", claim: ours, reason: failureReason };
+}
+
+export type ReleasePushReconciliation =
+  | { readonly kind: "released" }
+  | { readonly kind: "failed" };
+
+export function decideReleaseAfterPushFailure(
+  lookup: OriginLockLookup,
+  ours: OriginLockClaim,
+): ReleasePushReconciliation {
+  return lookup.kind === "absent" ||
+      (lookup.kind === "found" && lookup.claim.sha !== ours.sha)
+    ? { kind: "released" }
+    : { kind: "failed" };
+}
+
 export class OriginLockHeldError extends SandbarError {
   readonly holder: OriginLockClaim;
 
@@ -294,7 +379,8 @@ async function lookupOriginLock(
       { cwd: repoDir },
     ));
   } catch (err) {
-    if (isExitCode(err, 2)) return { kind: "absent" };
+    if (!(err instanceof OriginLockCommandError)) throw err;
+    if (err.code === 2) return { kind: "absent" };
     return { kind: "unavailable", reason: faultDetail(err) };
   }
   const line = stdout.trim().split("\n")[0];
@@ -331,8 +417,10 @@ async function lookupOriginLock(
       claim: { sha: fetchedSha, lease: parseOriginLockLease(message.stdout) },
     };
   } catch (err) {
-    if (err instanceof SandbarError) throw err;
-    return { kind: "unavailable", reason: faultDetail(err) };
+    if (err instanceof OriginLockCommandError) {
+      return { kind: "unavailable", reason: faultDetail(err) };
+    }
+    throw err;
   }
 }
 
@@ -389,11 +477,12 @@ async function pushClaim(
   claim: OriginLockClaim,
   expectedSha: string | null,
   exec: OriginLockExec,
-): Promise<unknown | null> {
+): Promise<OriginLockCommandError | null> {
   try {
     await exec("git", pushArgs(claim, expectedSha), { cwd: repoDir });
     return null;
   } catch (err) {
+    if (!(err instanceof OriginLockCommandError)) throw err;
     return err;
   }
 }
@@ -423,12 +512,15 @@ export async function acquireOriginLock(
       exec,
       [proposed, ...(initial.kind === "found" ? [initial.claim] : [])],
     );
-    if (observed.kind === "found" && observed.claim.sha === proposed.sha) {
-      // The ref is the commit we proposed: the server applied the CAS and only
-      // the command's acknowledgement failed.
-    } else if (observed.kind === "found" && observed.claim.sha !== decision.expectedSha) {
-      throw new OriginLockHeldError(observed.claim);
-    } else {
+    const reconciliation = decideAcquireAfterPushFailure(
+      observed,
+      decision.expectedSha,
+      proposed,
+    );
+    if (reconciliation.kind === "refuse") {
+      throw new OriginLockHeldError(reconciliation.holder);
+    }
+    if (reconciliation.kind === "failed") {
       throw new SandbarError(
         `Could not update origin lock ${ORIGIN_LOCK_REF}.`,
         { cause: pushFailure },
@@ -449,9 +541,8 @@ export async function acquireOriginLock(
           detail: "this process no longer owns an active origin lease",
         };
       }
-      const now = clock();
       const observed = await lookupOriginLock(options.repoDir, exec, [current]);
-      const renewal = decideRenew(observed, now, current);
+      const renewal = decideRenew(observed, clock(), current);
       if (renewal.kind !== "write") {
         if (renewal.kind === "lost") active = false;
         return renewal.kind === "retained"
@@ -466,34 +557,18 @@ export async function acquireOriginLock(
       }
 
       const after = await lookupOriginLock(options.repoDir, exec, [current, next]);
-      if (after.kind === "found" && after.claim.sha === next.sha) {
-        current = next;
-        return { kind: "renewed", claim: current };
-      }
-      const resolved = decideRenew(after, now, current);
+      // Sample after every failed push and reread. A renewal begun before
+      // expiry cannot retain a lease that expired while Git was failing.
+      const resolved = decideRenewAfterPushFailure(
+        after,
+        clock(),
+        current,
+        next,
+        faultDetail(failure),
+      );
+      if (resolved.kind === "renewed") current = resolved.claim;
       if (resolved.kind === "lost") active = false;
-      if (resolved.kind === "write") {
-        if (isExpired(current.lease, now)) {
-          active = false;
-          return {
-            kind: "lost",
-            holder: after.kind === "found" ? after.claim : null,
-            reason: "expired-unrenewable",
-            detail: after.kind === "found"
-              ? `current holder is ${formatOriginLockHolder(after.claim)}, ` +
-                "but origin could not accept the renewal"
-              : "origin could not accept the renewal",
-          };
-        }
-        return {
-          kind: "retained",
-          claim: current,
-          reason: faultDetail(failure),
-        };
-      }
-      return resolved.kind === "retained"
-        ? { ...resolved, claim: current }
-        : resolved;
+      return resolved;
     },
     async release() {
       if (!active) return;
@@ -510,9 +585,9 @@ export async function acquireOriginLock(
         await exec("git", deleteArgs(release.expectedSha), { cwd: options.repoDir });
         active = false;
       } catch (cause) {
+        if (!(cause instanceof OriginLockCommandError)) throw cause;
         const after = await lookupOriginLock(options.repoDir, exec, [current]);
-        if (after.kind === "absent" ||
-          (after.kind === "found" && after.claim.sha !== current.sha)) {
+        if (decideReleaseAfterPushFailure(after, current).kind === "released") {
           active = false;
           return;
         }

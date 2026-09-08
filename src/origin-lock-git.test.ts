@@ -13,14 +13,31 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   ORIGIN_LOCK_REF,
+  OriginLockCommandError,
   OriginLockHeldError,
   acquireOriginLock,
   type OriginLockHandle,
   type OriginLockIdentity,
+  type OriginLockExec,
 } from "./origin-lock.js";
 
 const exec = promisify(execFile);
 const git = (cwd: string, ...args: string[]) => exec("git", args, { cwd });
+const gitExec: OriginLockExec = async (file, args, options) => {
+  try {
+    const result = await exec(file, [...args], { cwd: options.cwd, env: options.env });
+    return { stdout: result.stdout, stderr: result.stderr };
+  } catch (cause) {
+    const failure = cause as { code?: unknown; stderr?: unknown; message?: unknown };
+    throw new OriginLockCommandError(
+      typeof failure.stderr === "string" && failure.stderr.trim()
+        ? failure.stderr.trim()
+        : String(failure.message ?? cause),
+      typeof failure.code === "number" ? failure.code : undefined,
+      cause,
+    );
+  }
+};
 
 let root: string;
 let origin: string;
@@ -49,8 +66,14 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  while (locks.length > 0) await locks.pop()?.release().catch(() => undefined);
-  await rm(root, { recursive: true, force: true });
+  try {
+    while (locks.length > 0) {
+      const lock = locks.pop();
+      if (lock) await lock.release();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 describe("origin ref lease against a bare remote", () => {
@@ -120,5 +143,44 @@ describe("origin ref lease against a bare remote", () => {
       reason: "replaced",
       holder: { lease: { hostname: "host-b" } },
     });
+  });
+
+  it("rejects a renewal CAS when takeover occurs after its lookup", async () => {
+    let clock = Date.parse("2026-09-08T12:00:00.000Z");
+    let raced = false;
+    let pushes = 0;
+    let winner: OriginLockHandle | null = null;
+    const racingExec: OriginLockExec = async (file, args, options) => {
+      if (args[0] === "push") pushes += 1;
+      if (!raced && pushes === 2) {
+        // Interpose a second real-Git acquirer immediately before the first
+        // holder's renewal CAS reaches the bare origin.
+        raced = true;
+        const takeover = await acquireOriginLock({
+          repoDir: cacheB,
+          identity: identity("host-b"),
+          now: () => new Date(clock + 11 * 60_000),
+        });
+        winner = takeover.lock;
+        locks.push(takeover.lock);
+      }
+      return gitExec(file, args, options);
+    };
+    const first = await acquireOriginLock({
+      repoDir: cacheA,
+      identity: identity("host-a"),
+      now: () => new Date(clock),
+      exec: racingExec,
+    });
+    locks.push(first.lock);
+
+    clock += 60_000;
+    await expect(first.lock.renew()).resolves.toMatchObject({
+      kind: "lost",
+      reason: "replaced",
+      holder: { lease: { hostname: "host-b" } },
+    });
+    expect(raced).toBe(true);
+    expect(winner).not.toBeNull();
   });
 });
