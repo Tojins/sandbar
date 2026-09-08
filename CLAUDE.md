@@ -460,10 +460,11 @@ outcomes.
   consume a sequence number; a later write can resume with a contiguous record.
   Finalization becomes complete only after its `run-end` append succeeds, so
   concurrent calls share one write and a failed write remains retryable.
-  Every outcome or refusal after the lock is an event. Refused config, missing
-  `GH_TOKEN`, and losing the lock remain stderr-only because no record can be
-  owned safely. Raw agent, reviewer, gate, merger, and resolve transcripts stay
-  as files through `src/logs.ts`; they are artefacts, not a second event stream.
+  Every outcome or refusal after both daemon locks are held is an event.
+  Refused config, missing `GH_TOKEN`, forge unreachability before the origin
+  lease, and either startup lock refusal remain stderr-only because no record
+  can be owned safely. Raw agent, reviewer, gate, merger, and resolve transcripts
+  stay as files through `src/logs.ts`; they are artefacts, not a second event stream.
   `run()` hosts the file-fed UI and writes its URL—and nothing else—to stdout.
   The internal-failure banner is the sole post-record stderr rendering.
 - **The UI is a projection, never scheduler state (#132).** `src/run-state.ts`
