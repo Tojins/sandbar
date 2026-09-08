@@ -1,8 +1,15 @@
 // Sandbar orchestrator — continuous execution pool plus serialized landing.
 //
 //   Recompute:                 Deterministic resolver picks the unblocked
-//                              `ready-for-agent` issues by parsing each body's
-//                              `## Blocked by` section — and routes each by
+//                              `ready-for-agent` issues after checking the
+//                              latest label actor against required configured
+//                              developers or this run's token login (#136;
+//                              `"anyone"` disables the check). The token login
+//                              is resolved once during preflight. Exclusions
+//                              are recorded once per issue per recompute and
+//                              shown in the plan, then admitted work is picked
+//                              by parsing each body's `## Blocked by` section
+//                              and routed by
 //                              LANE (#57), holding back the review-gated ones
 //                              that have nowhere to land at all (#61: the ones
 //                              `chunks.ts` could give no chunk) and saying on
@@ -72,7 +79,9 @@
 // chunk and member refs before running the ordinary plan. A failed refresh is
 // reported and waits for the next wake instead of killing the daemon; startup
 // preflight remains fatal. A no-op poll is silent; work, source movement, and
-// changed config-staleness evidence are recorded. Source movement from either
+// changed config-staleness evidence are recorded. A stable label-actor
+// exclusion is also recorded on each poll because its required diagnostic
+// makes that recompute reportable. Source movement from either
 // a human push or this process refreshes the image inputs.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.

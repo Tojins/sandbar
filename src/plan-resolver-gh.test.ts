@@ -29,6 +29,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { selectLandRequests } from "./chunk-land.js";
+import { SandbarError } from "./errors.js";
 import {
   buildPlan,
   fetchCandidates,
@@ -51,7 +52,7 @@ describe("authoritative ready-for-agent provenance (#136)", () => {
       'printf "%s\\n" "$*" >> "$SANDBAR_TEST_GH_CALLS"',
       'case "$*" in',
       '  *"query=query{viewer{login}}"*)',
-      '    printf \'{"data":{"viewer":{"login":"token-bot"}}}\' ;;',
+      '    printf "%s" "$SANDBAR_TEST_VIEWER_RESPONSE" ;;',
       "  *)",
       '    printf \'{"data":{"repository":{"i12":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]},"timelineItems":{"nodes":[{"actor":{"login":"alice"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T10:00:00Z"},{"actor":{"login":"mallory"},"label":{"name":"waiting"},"createdAt":"2026-09-08T12:00:00Z"},{"actor":{"login":"bob"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T11:00:00Z"}]}}}}}\' ;;',
       "esac",
@@ -59,12 +60,15 @@ describe("authoritative ready-for-agent provenance (#136)", () => {
     originalPath = process.env["PATH"];
     process.env["PATH"] = `${shimBin}:${originalPath ?? ""}`;
     process.env["SANDBAR_TEST_GH_CALLS"] = callsPath;
+    process.env["SANDBAR_TEST_VIEWER_RESPONSE"] =
+      '{"data":{"viewer":{"login":"token-bot"}}}';
   });
 
   afterEach(async () => {
     if (originalPath === undefined) delete process.env["PATH"];
     else process.env["PATH"] = originalPath;
     delete process.env["SANDBAR_TEST_GH_CALLS"];
+    delete process.env["SANDBAR_TEST_VIEWER_RESPONSE"];
     await rm(shimBin, { recursive: true, force: true });
   });
 
@@ -87,6 +91,19 @@ describe("authoritative ready-for-agent provenance (#136)", () => {
     expect(await resolveReadyLabelPolicy("anyone")).toBe("anyone");
     const calls = (await readFile(callsPath, "utf8")).trim().split("\n");
     expect(calls.filter((line) => line.includes("viewer{login}")).length).toBe(1);
+  });
+
+  it.each([
+    { name: "malformed JSON", response: "not-json", error: SyntaxError },
+    { name: "a missing viewer", response: '{"data":{}}', error: SandbarError },
+    {
+      name: "an empty login",
+      response: '{"data":{"viewer":{"login":""}}}',
+      error: SandbarError,
+    },
+  ])("refuses $name in the viewer response", async ({ response, error }) => {
+    process.env["SANDBAR_TEST_VIEWER_RESPONSE"] = response;
+    await expect(resolveReadyLabelPolicy(["alice"])).rejects.toBeInstanceOf(error);
   });
 });
 

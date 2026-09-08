@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
+import type { Lane } from "./lanes.js";
 import { chunkBranchName } from "./naming.js";
 import {
   type IssueFacts,
   type IssueState,
   type IssueSummary,
   type Plan,
+  type PlanResolution,
+  type ReadyLabelPolicy,
   parseBlockedBy,
-  resolvePlan,
+  resolvePlan as resolvePlanDecision,
 } from "./plan-resolver.js";
 
 const membersOn = (
@@ -25,8 +28,33 @@ function issue(
     number,
     title: opts.title ?? `Issue ${number}`,
     body,
-    labels: opts.labels ?? [],
+    labels: ["ready-for-agent", ...(opts.labels ?? [])],
   };
+}
+
+// Most tables predate #136 and exercise other planner dimensions. Keep their
+// compact positional fixtures while the production contract requires the
+// security-sensitive policy by name.
+function resolvePlan(
+  candidates: readonly IssueSummary[],
+  issueFacts: ReadonlyMap<number, IssueFacts>,
+  excluded: ReadonlySet<number> = new Set(),
+  k = 3,
+  defaultLane: Lane = "auto",
+  chunkMembers: ReadonlyMap<string, ReadonlySet<number>> = new Map(),
+  ongoing: ReadonlySet<number> = new Set(),
+  readyLabelPolicy: ReadyLabelPolicy = "anyone",
+  trustedReady: ReadonlySet<number> = new Set(),
+): PlanResolution {
+  return resolvePlanDecision(candidates, issueFacts, {
+    excluded,
+    k,
+    defaultLane,
+    chunkMembers,
+    ongoing,
+    readyLabelPolicy,
+    trustedReady,
+  });
 }
 
 const closed = (...ns: number[]): ReadonlyMap<number, IssueFacts> =>
@@ -164,6 +192,37 @@ describe("ready-for-agent actor admission (#136)", () => {
     expect(result.waiting).toEqual([
       { issue: 10, title: "Issue 10", reason: { kind: "label-actor", actor: reported } },
     ]);
+  });
+
+  it("fails closed when the authoritative batch misses a listed issue", () => {
+    const result = resolvePlan(
+      [issue(10, "")],
+      new Map(),
+      new Set(),
+      3,
+      "auto",
+      new Map(),
+      new Set(),
+      policy,
+    );
+    expect(result.plan).toEqual([]);
+    expect(result.waiting[0]?.reason).toEqual({ kind: "label-actor", actor: null });
+  });
+
+  it("honors authoritative label removal even when the last actor was allowed", () => {
+    const result = resolvePlan(
+      [issue(10, "")],
+      facts({ 10: { labels: [], actor: "alice" } }),
+      new Set(),
+      3,
+      "auto",
+      new Map(),
+      new Set(),
+      policy,
+    );
+    expect(result.plan).toEqual([]);
+    expect(result.candidates[0]?.ready).toBe(false);
+    expect(result.waiting).toEqual([]);
   });
 
   it("keeps anyone mode's existing behavior without timeline evidence", () => {

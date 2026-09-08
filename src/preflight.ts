@@ -144,9 +144,9 @@
 //                 from the branch's commits, so a killed run just restarts and
 //                 finishes.
 //   - parked    — the branch maps to an issue that is still OPEN but not
-//                 `ready-for-agent`: parked by finalise (`needs-info`,
-//                 `agent-stuck`) or held back by a human with a label of their
-//                 own. NOT an error either, and the branch is KEPT: a preflight
+//                 admitted to the queue: `ready-for-agent` is absent, or its
+//                 latest actor fails #136's restricted policy. NOT an error
+//                 either, and the branch is KEPT: a preflight
 //                 that refused over it forced the operator to destroy exactly
 //                 the branch finalise's parking comment told them to push a fix
 //                 on and re-queue. Announced every run so a branch the operator
@@ -251,7 +251,7 @@ import {
   fetchCandidates,
   fetchIssueStates,
   readChunkMembers,
-  readyLabelApplicationAllowed,
+  readyQueueVerdict,
   resolveReadyLabelPolicy,
 } from "./plan-resolver.js";
 import {
@@ -860,22 +860,22 @@ async function fetchOpenReadyIssueNumbers(
   if (policy === null) return { ok: false };
   try {
     const candidates = await fetchCandidates(repo);
-    if (policy === "anyone") {
-      return { ok: true, numbers: new Set(candidates.map((c) => c.number)) };
-    }
     const facts = await fetchIssueStates(candidates.map((c) => c.number), repo);
     return {
       ok: true,
       numbers: new Set(candidates.flatMap((candidate) => {
-        const issue = facts.get(candidate.number);
-        return issue?.state === "OPEN" &&
-          issue.labels.includes("ready-for-agent") &&
-          readyLabelApplicationAllowed(issue.readyLabelApplication, policy)
+        return readyQueueVerdict({
+          listedLabels: candidate.labels,
+          authoritative: facts.get(candidate.number),
+          policy,
+          trusted: false,
+        }).kind === "admitted"
           ? [candidate.number]
           : [];
       })),
     };
-  } catch {
+  } catch (err) {
+    if (!hasExitCode(err)) throw err;
     return { ok: false };
   }
 }
@@ -898,7 +898,8 @@ async function fetchOpenIssueNumbers(
         [...facts].flatMap(([n, f]) => (f.state === "OPEN" ? [n] : [])),
       ),
     };
-  } catch {
+  } catch (err) {
+    if (!hasExitCode(err)) throw err;
     return { ok: false };
   }
 }
@@ -1464,13 +1465,19 @@ export async function runPreflight(
     });
   }
   if (parked.length > 0) {
+    const reason = readyLabelPolicy === "anyone"
+      ? "Each maps to an open issue that is not `ready-for-agent`; re-applying " +
+        "the label resumes from the branch's commits."
+      : "Each maps to an open issue outside the admitted queue: the " +
+        "`ready-for-agent` label is absent or its latest recorded actor is " +
+        "not a configured developer or this run's token login. An admitted " +
+        "actor can remove and re-apply the label to resume from the branch's commits.";
     await cfg.onEvent({
       kind: "preflight",
       action: "parked",
       detail: `Keeping ${parked.length} parked issue branch(es): ` +
-        `${parked.join(", ")}. Each maps to an open issue ` +
-        "that is not `ready-for-agent`; re-applying the label resumes from " +
-        "the branch's commits, brought level with origin's copy wherever " +
+        `${parked.join(", ")}. ${reason} Kept branches were brought level ` +
+        "with origin's copy wherever " +
         "origin is ahead. Deleting the branch on origin is what abandons them.",
     });
   }

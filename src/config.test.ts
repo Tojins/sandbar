@@ -87,6 +87,7 @@ describe("resolveConfig — developers is an explicit queue policy (#136)", () =
   it.each([
     { name: "an empty list", developers: [] },
     { name: "an empty login", developers: ["alice", " "] },
+    { name: "a non-string login", developers: ["alice", 42] },
     { name: "a non-list string", developers: "alice" },
   ])("refuses $name", ({ developers }) => {
     expect(() => resolveConfig({ ...minimal, developers } as RunConfig)).toThrow(

@@ -539,6 +539,93 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       expect(state.parkedIssueBranches).toEqual(["sandbar/issue-7-outsider"]);
     });
 
+    it("does not resume a stale listing row after an admitted actor's label was removed", async () => {
+      await git(target, "checkout", "-qb", "sandbar/issue-7-stale-listing");
+      await git(target, "commit", "--allow-empty", "-qm", "stale listing work");
+      await writeGhShim([
+        "#!/bin/sh",
+        'if [ "$1 $2" = "issue list" ]; then',
+        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"ready-for-agent"}]}]\'',
+        "  exit 0",
+        "fi",
+        'if [ "$1 $2" = "api graphql" ]; then',
+        '  printf \'{"data":{"repository":{"i7":{"state":"OPEN","labels":{"nodes":[]},"timelineItems":{"nodes":[{"actor":{"login":"alice"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T12:00:00Z"}]}}}}}\'',
+        "  exit 0",
+        "fi",
+        "exit 1",
+      ]);
+
+      const state = await gatherState(
+        cfg(layoutAt(target)),
+        GH_READY,
+        { developers: ["alice"], viewerLogin: "token-bot" },
+      );
+      expect(state.resumableIssueBranches).toEqual([]);
+      expect(state.parkedIssueBranches).toEqual(["sandbar/issue-7-stale-listing"]);
+    });
+
+    it("propagates a malformed authoritative response", async () => {
+      await git(target, "checkout", "-qb", "sandbar/issue-7-malformed");
+      await git(target, "commit", "--allow-empty", "-qm", "malformed response work");
+      await writeGhShim([
+        "#!/bin/sh",
+        'if [ "$1 $2" = "issue list" ]; then',
+        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"ready-for-agent"}]}]\'',
+        "  exit 0",
+        "fi",
+        'if [ "$1 $2" = "api graphql" ]; then printf "not-json"; exit 0; fi',
+        "exit 1",
+      ]);
+
+      await expect(gatherState(
+        cfg(layoutAt(target)),
+        GH_READY,
+        { developers: ["alice"], viewerLogin: "token-bot" },
+      )).rejects.toBeInstanceOf(SyntaxError);
+    });
+
+    it("explains how a restricted-policy parked branch can be resumed", async () => {
+      await git(target, "checkout", "-qb", "sandbar/issue-7-outsider");
+      await git(target, "commit", "--allow-empty", "-qm", "outsider work");
+      const events: Array<{ action?: string; detail?: string }> = [];
+      await writeGhShim([
+        "#!/bin/sh",
+        'if [ "$1 $2" = "auth status" ]; then exit 0; fi',
+        'if [ "$1 $2" = "issue list" ]; then',
+        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"ready-for-agent"}]}]\'',
+        "  exit 0",
+        "fi",
+        'if [ "$1 $2" = "api graphql" ]; then',
+        '  case "$*" in',
+        '    *"viewer{login}"*) printf \'{"data":{"viewer":{"login":"token-bot"}}}\' ;;',
+        '    *) printf \'{"data":{"repository":{"i7":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]},"timelineItems":{"nodes":[{"actor":{"login":"mallory"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T12:00:00Z"}]}}}}}\' ;;',
+        "  esac",
+        "  exit 0",
+        "fi",
+        "exit 1",
+      ]);
+
+      await runPreflight(
+        {
+          ...cfg(layoutAt(target)),
+          developers: ["alice"],
+          onEvent: (event) => events.push(event),
+        },
+        {
+          lookup: async () => undefined,
+          connect: async () => undefined,
+          wait: async () => undefined,
+          now: () => 0,
+        },
+      ).catch(() => undefined);
+
+      const parked = events.find((event) => event.action === "parked")?.detail ?? "";
+      expect(parked).toContain("outside the admitted queue");
+      expect(parked).toContain("configured developer or this run's token login");
+      expect(parked).toContain("remove and re-apply the label");
+      expect(parked).not.toContain("that is not `ready-for-agent`");
+    });
+
     it("classifies the target's issue branches, not the launch directory's", async () => {
       await git(launchedFrom, "checkout", "-q", "-b", "sandbar/issue-9-launch");
       await git(launchedFrom, "commit", "-q", "--allow-empty", "-m", "work");
