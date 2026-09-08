@@ -29,6 +29,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
 
 import { withPartialOutput, type Sandbox } from "./agent-sandbox.js";
 import {
+  agentInvocationFilename,
   enforceReviewerSnapshot,
   priorReviewRound,
   reviewerPassRouting,
@@ -54,6 +55,20 @@ const deferred = <T,>() => {
   });
   return { promise, resolve };
 };
+
+describe("agent invocation records (#135)", () => {
+  it.each([
+    [{ role: "implementer", attempt: 3, nudge: false }, "attempt-3.log"],
+    [{ role: "implementer", attempt: 3, nudge: true }, "attempt-3-nudge.log"],
+    [{ role: "reviewer", attempt: 3, pass: "quality", invocation: 1 },
+      "attempt-3-reviewer-quality-1.log"],
+    [{ role: "reviewer", attempt: 3, pass: "correctness", invocation: 2 },
+      "attempt-3-reviewer-correctness-2.log"],
+    [{ role: "ui-check", invocation: 2 }, "ui-check-2.log"],
+  ] as const)("names %j as %s", (identity, expected) => {
+    expect(agentInvocationFilename(identity)).toBe(expected);
+  });
+});
 
 describe("runUiCheck (#126)", () => {
   const context = (runs: readonly string[], events: EventInput[] = []) => {
@@ -286,9 +301,29 @@ describe("silent implementer attempt policy (#116)", () => {
     );
     const writes: string[] = [];
     const lines: EventInput[] = [];
+    const record = async (
+      result: ReturnType<typeof sandboxResult>,
+      options: Parameters<Sandbox["run"]>[0],
+    ) => {
+      await options.onInvocationEnd?.({
+        agent: options.name ?? options.agent.name,
+        provider: options.agent.name,
+        model: options.model ?? null,
+        end: "exit",
+        detail: null,
+        exitCode: 0,
+        durationMs: 1,
+        speech: result.stdout,
+        stdout: result.stdout,
+        stderr: "",
+      });
+      return result;
+    };
     const sandbox = {
       worktreePath: "/unused",
-      run: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(nudge),
+      run: vi.fn()
+        .mockImplementationOnce((options) => record(first, options))
+        .mockImplementationOnce((options) => record(nudge, options)),
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
     const ctx = {
@@ -296,7 +331,7 @@ describe("silent implementer attempt policy (#116)", () => {
       sandbox,
       opts: {
         attemptLogger: {
-          writeAttempt: vi.fn(async (_id, _attempt, text) => writes.push(text)),
+          writeInvocation: vi.fn(async (_filename, record) => writes.push(record.speech)),
         },
         onEvent: (event: EventInput) => lines.push(event),
       },
@@ -344,7 +379,7 @@ describe("silent implementer attempt policy (#116)", () => {
     );
 
     await expect(pending).resolves.toMatchObject({ kind: "implementer-result" });
-    expect(writes).toEqual(["", "\n"]);
+    expect(writes).toEqual(["", ""]);
     expect(lines.at(-1)).toMatchObject({ kind: "implementer", commits: 2 });
   });
 
@@ -359,7 +394,7 @@ describe("silent implementer attempt policy (#116)", () => {
       kind: "implementer-result",
       signal: { kind: "NEEDS-INFO" },
     });
-    expect(writes).toEqual(["", `\n${spoken}`]);
+    expect(writes).toEqual(["", spoken]);
     expect(lines.at(-1)).toMatchObject({ kind: "implementer", commits: 0 });
   });
 

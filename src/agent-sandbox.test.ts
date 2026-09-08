@@ -37,6 +37,7 @@ import {
   AgentError,
   AgentQuotaError,
   AgentIdleTimeoutError,
+  agentFailureMessage,
   agentPartialOutput,
   agentPartialUsage,
   claudeCode,
@@ -55,6 +56,7 @@ import {
   sandboxExecArgs,
   sandboxRunArgs,
 } from "./agent-sandbox.js";
+import { createTranscriptTree } from "./logs.js";
 
 const CODEX_REFRESH_FAILURE_LITERALS = [
   "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
@@ -63,6 +65,19 @@ const CODEX_REFRESH_FAILURE_LITERALS = [
   "Your access token could not be refreshed. Please log out and sign in again.",
   "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.",
 ] as const;
+
+describe("agent failure message (#135)", () => {
+  it.each([
+    ["codex", 1, "provider gave up", true,
+      "provider gave up\n(codex exited with code 1)"],
+    ["codex", 0, "provider gave up", true,
+      "provider gave up\n(codex reported a failed turn and produced no output)"],
+    ["claude-code", 7, "stderr diagnostic", false,
+      "stderr diagnostic\n(claude-code exited with code 7)"],
+  ])("leads %s exit %i with its diagnostic", (agent, code, diagnostic, failed, expected) => {
+    expect(agentFailureMessage(agent, code, diagnostic, failed)).toBe(expected);
+  });
+});
 
 const execFileP = promisify(execFile);
 
@@ -1768,7 +1783,9 @@ describe("createSandbox integration (local provider)", () => {
       // empty — which is what keeps the REVIEWER path unchanged: no verdict
       // token in "", so #41 classifies it harness-failed and the round is not
       // consumed.
-      expect((err as Error).message).toContain("401 Unauthorized");
+      expect((err as Error).message).toBe(
+        "401 Unauthorized\n(codex reported a failed turn and produced no output)",
+      );
       expect(agentPartialOutput(err)).toBe("");
     } finally {
       await sandbox.close();
@@ -1790,6 +1807,9 @@ describe("createSandbox integration (local provider)", () => {
       layout: layoutFor(dir),
     });
     try {
+      const logRoot = await mkdtemp(join(tmpdir(), "asb-invocation-log-"));
+      cleanups.push(logRoot);
+      const issueLogger = await (await createTranscriptTree(logRoot)).issue("10");
       const failed = JSON.stringify({
         type: "turn.failed",
         error: { message: "unexpected status 401 Unauthorized" },
@@ -1807,14 +1827,33 @@ describe("createSandbox integration (local provider)", () => {
         parseStreamLine: parseCodexJsonLine,
       };
       const err = await sandbox
-        .run({ agent, prompt: "go", completionSignal: [] })
+        .run({
+          name: "implementer-10-attempt-1",
+          model: "test-model",
+          agent,
+          prompt: "go",
+          completionSignal: [],
+          onInvocationEnd: (record) =>
+            issueLogger.writeInvocation("attempt-1.log", record),
+        })
         .then(() => null)
         .catch((e: unknown) => e);
       expect(err).toBeInstanceOf(AgentError);
       const message = (err as Error).message;
-      expect(message).toContain("exited with code 1");
-      expect(message).toContain("unexpected status 401 Unauthorized");
+      expect(message).toBe(
+        "unexpected status 401 Unauthorized\n(codex exited with code 1)",
+      );
       expect(message).not.toContain("responses_websocket");
+      const record = await readFile(join(issueLogger.dir, "attempt-1.log"), "utf8");
+      expect(record).toContain(
+        "agent:      implementer-10-attempt-1\nprovider:   codex\n" +
+        "model:      test-model\nended:      exit\nexit code:  1",
+      );
+      expect(record).toContain("--- speech ---\n\n--- stdout tail ---\n");
+      expect(record).toContain("unexpected status 401 Unauthorized");
+      expect(record).toContain(
+        "--- stderr tail ---\nERROR codex_api::endpoint::responses_websocket: failed to connect",
+      );
     } finally {
       await sandbox.close();
     }

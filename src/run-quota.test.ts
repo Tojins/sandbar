@@ -74,7 +74,7 @@ vi.mock("./events.js", () => ({
     emit: seams.emit,
     issue: vi.fn(async (id: string) => ({
       dir: `/tmp/run-quota-test/issue-${id}`,
-      writeAttempt: vi.fn(), writeAttemptReviewer: vi.fn(),
+      writeInvocation: vi.fn(),
     })),
     landing: vi.fn(() => ({
       dir: "/tmp/run-quota-test/landing-1", appendMerger: vi.fn(),

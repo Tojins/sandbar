@@ -75,7 +75,7 @@ import {
 import * as agentSandbox from "./agent-sandbox.js";
 import { AgentCredentialError, AgentError, AgentQuotaError, agentPartialOutput, agentPartialUsage, podman, withPartialOutput } from "./agent-sandbox.js";
 import type { RateLimitMeasurement } from "./agent-run-end.js";
-import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
+import type { AgentInvocationRecord, Sandbox, SandboxHooks } from "./agent-sandbox.js";
 import { maxContextDepth, sumAgentUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
 
@@ -520,6 +520,35 @@ function eventUsage(
     ...(quota === undefined ? {} : { quota }),
   };
   return Object.keys(fields).length === 0 ? undefined : fields;
+}
+
+const invocationLog = (
+  logger: AttemptLogger | undefined,
+  filename: string,
+): { readonly onInvocationEnd?: (record: AgentInvocationRecord) => Promise<void> } =>
+  logger === undefined
+    ? {}
+    : { onInvocationEnd: (record) => logger.writeInvocation(filename, record) };
+
+export type AgentInvocationIdentity =
+  | { readonly role: "implementer"; readonly attempt: number; readonly nudge: boolean }
+  | {
+      readonly role: "reviewer";
+      readonly attempt: number;
+      readonly pass: ReviewerPass;
+      readonly invocation: number;
+    }
+  | { readonly role: "ui-check"; readonly invocation: number };
+
+export function agentInvocationFilename(identity: AgentInvocationIdentity): string {
+  switch (identity.role) {
+    case "implementer":
+      return `attempt-${identity.attempt}${identity.nudge ? "-nudge" : ""}.log`;
+    case "reviewer":
+      return `attempt-${identity.attempt}-reviewer-${identity.pass}-${identity.invocation}.log`;
+    case "ui-check":
+      return `ui-check-${identity.invocation}.log`;
+  }
 }
 
 export async function runInnerLoop(
@@ -1200,11 +1229,15 @@ export async function runUiCheck(
       run = await runWithProviderState(opts.providerState, config.uiCheckAgent, () =>
         sandbox.run({
           name: `ui-check-${issue.id}${invocation === 1 ? "" : "-reprompt"}`,
+          model: config.uiCheckModelId,
           agent: buildAgentProvider(config.uiCheckAgent, config.uiCheckModelId, {
             effort: config.uiCheckEffort,
           }),
           prompt,
           completionSignal: [],
+          ...invocationLog(opts.attemptLogger, agentInvocationFilename({
+            role: "ui-check", invocation,
+          })),
         }),
       );
     } catch (err) {
@@ -1351,11 +1384,15 @@ export async function runImplementer(
   try {
     run = await runWithProviderState(opts.providerState, config.implementerAgent, () => runAgent({
       name: `implementer-${issue.id}-attempt-${action.attempt}`,
+      model: config.implementerModelId,
       agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
         effort: config.implementerEffort,
       }),
       prompt,
       completionSignal: PROMISE_COMPLETION_SIGNALS,
+      ...invocationLog(opts.attemptLogger, agentInvocationFilename({
+        role: "implementer", attempt: action.attempt, nudge: false,
+      })),
     }));
   } catch (err) {
     if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) {
@@ -1381,9 +1418,6 @@ export async function runImplementer(
       });
     }
     throw err;
-  }
-  if (opts.attemptLogger) {
-    await opts.attemptLogger.writeAttempt(issue.id, action.attempt, run.stdout);
   }
   accumulated.push(...run.commits);
 
@@ -1426,6 +1460,7 @@ export async function runImplementer(
     const nudgeTimer = startTimer();
     const nudge = await runAgent({
       name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
+      model: config.implementerModelId,
       agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
         continueSession: true,
         effort: config.implementerEffort,
@@ -1433,6 +1468,9 @@ export async function runImplementer(
       prompt: PROMISE_NUDGE_TPL,
       // Any of the three tags ends the wait, not just COMPLETE.
       completionSignal: PROMISE_COMPLETION_SIGNALS,
+      ...invocationLog(opts.attemptLogger, agentInvocationFilename({
+        role: "implementer", attempt: action.attempt, nudge: true,
+      })),
     });
     accumulated.push(...nudge.commits);
     attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
@@ -1446,13 +1484,6 @@ export async function runImplementer(
     signal = parsePromise(combined.stdout, {
       commitsAccumulated: accumulated.length,
     });
-    if (opts.attemptLogger) {
-      await opts.attemptLogger.writeAttempt(
-        issue.id,
-        action.attempt,
-        combined.stdout,
-      );
-    }
     await opts.onEvent({
       kind: "repair",
       issue: Number(issue.id),
@@ -1694,9 +1725,6 @@ export async function enforceReviewerSnapshot(
   };
 }
 
-const passTranscript = (pass: ReviewerPass, transcript: string): string =>
-  `=== ${pass} pass ===\n${transcript}`;
-
 export async function runReviewer(
   action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
   ctx: ExecuteActionCtx,
@@ -1805,6 +1833,7 @@ export async function runReviewer(
             name:
               `reviewer-${issue.id}-round-${action.reviewRound}-${pass}` +
               (invocation > 1 ? `-invocation-${invocation}` : ""),
+            model: modelId,
             // Cold, always (#121): neither pass resumes the other's session, so
             // each is self-sufficient and the two may run on different vendors.
             agent: buildAgentProvider(agent, modelId, { effort }),
@@ -1812,6 +1841,12 @@ export async function runReviewer(
             // A reviewer owns no completion signal. Process exit is the honest
             // end of its single artefact; inherited role contracts are banned.
             completionSignal: [],
+            ...invocationLog(
+              opts.attemptLogger,
+              agentInvocationFilename({
+                role: "reviewer", attempt: action.attempt, pass, invocation,
+              }),
+            ),
           }));
           await logPass(
             "completed",
@@ -1876,38 +1911,16 @@ export async function runReviewer(
     );
   };
 
-  const preserveReviewerWrite = async (
-    aborted: Extract<ReviewerOutcome, { kind: "aborted" }>,
-    pass: ReviewerPass,
-    completedTranscripts: readonly string[],
-  ): Promise<Extract<ReviewerResult, { kind: "reviewer-wrote" }>> => {
-    if (opts.attemptLogger) {
-      await opts.attemptLogger.writeAttemptReviewer(
-        issue.id,
-        action.attempt,
-        [
-          ...completedTranscripts,
-          passTranscript(pass, aborted.transcript),
-        ].join("\n\n"),
-      );
-    }
-    return aborted.event;
-  };
-
   const quality = await runPass("quality");
   if (quality.kind === "aborted") {
     return {
-      event: await preserveReviewerWrite(quality, "quality", []),
+      event: quality.event,
       historyEntry: null,
       specGap: null,
       round: null,
     };
   }
 
-  const transcripts = [passTranscript("quality", quality.transcript)];
-  // Every invocation's output, not just the reviewing one: the observed failure
-  // left a 73-byte log for a 15-minute run, and this file is the only offline
-  // artefact of what the reviewer did or did not say.
   const afterQuality = decideReviewRound(quality);
   let decision: FinishedReviewRoundDecision;
   // Completed only: the abort arm below returns, so nothing past it holds a
@@ -1918,18 +1931,13 @@ export async function runReviewer(
     const correctnessOutcome = await runPass("correctness");
     if (correctnessOutcome.kind === "aborted") {
       return {
-        event: await preserveReviewerWrite(
-          correctnessOutcome,
-          "correctness",
-          transcripts,
-        ),
+        event: correctnessOutcome.event,
         historyEntry: null,
         specGap: null,
         round: null,
       };
     }
     correctness = correctnessOutcome;
-    transcripts.push(passTranscript("correctness", correctness.transcript));
     decision = decideReviewRound(quality, correctness);
   } else {
     decision = afterQuality;
@@ -1941,13 +1949,6 @@ export async function runReviewer(
     quality,
     correctness,
   );
-  if (opts.attemptLogger) {
-    await opts.attemptLogger.writeAttemptReviewer(
-      issue.id,
-      action.attempt,
-      transcripts.join("\n\n"),
-    );
-  }
   const roundMs = roundTimer();
   const rejectingPass = decision.event.kind === "reviewer-result" &&
       decision.event.verdict === "CHANGES-REQUESTED"

@@ -14,10 +14,27 @@ describe("raw transcript tree", () => {
   it("writes attempts without creating an orchestration log", async () => {
     const tree = await makeRun();
     const issue = await tree.issue("47");
-    await issue.writeAttempt("47", 2, "implementer stdout");
-    await issue.writeAttemptReviewer("47", 2, "reviewer stdout");
+    await issue.writeInvocation("attempt-2.log", {
+      agent: "implementer-47-attempt-2",
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      end: "exit",
+      detail: null,
+      exitCode: 0,
+      durationMs: 42,
+      speech: "implementer speech",
+      stdout: "implementer stdout",
+      stderr: "implementer stderr",
+    });
     expect((await readdir(tree.runDir)).sort()).toEqual(["issue-47"]);
-    expect(await readFile(join(issue.dir, "attempt-2.log"), "utf8")).toBe("implementer stdout");
+    expect(await readFile(join(issue.dir, "attempt-2.log"), "utf8")).toBe(
+      "agent:      implementer-47-attempt-2\n" +
+      "provider:   codex\nmodel:      gpt-5.6-sol\nended:      exit\n" +
+      "exit code:  0\nduration:   42ms\n\n" +
+      "--- speech ---\nimplementer speech\n" +
+      "--- stdout tail ---\nimplementer stdout\n" +
+      "--- stderr tail ---\nimplementer stderr\n",
+    );
   });
 
   it("keeps merger and resolve transcripts as raw artefacts", async () => {

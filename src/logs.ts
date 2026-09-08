@@ -1,9 +1,11 @@
 // Raw per-run transcripts (#132).
 //
-// This module writes only files whose bytes are the output of another process:
-// implementer/reviewer attempts, merger traces, gate artefacts and resolve
-// attempts. They are evidence to inspect, not scheduler facts. Structured run
-// facts have one write path, `events.ts`, and live in `events.jsonl`; adding an
+// This module writes only files whose bytes describe the output of another
+// process: agent invocations, merger traces, gate artefacts and resolve
+// attempts. They are evidence to inspect, not scheduler facts. An invocation
+// file has a small diagnostic header because an agent that dies before emitting
+// a byte otherwise leaves no evidence at all (#135). Structured run facts have
+// one write path, `events.ts`, and live in `events.jsonl`; adding an
 // orchestration/status writer here would recreate the two hand-paired records
 // #132 removed.
 
@@ -14,18 +16,10 @@ import { join } from "node:path";
 // loads prompt templates from disk at import, and the log tree must not depend
 // on those existing.
 import type { ResolveAttemptRecord } from "./resolve-loop.js";
+import type { AgentInvocationRecord } from "./agent-sandbox.js";
 
 export type AttemptLogger = {
-  writeAttempt(
-    issueId: string,
-    attempt: number,
-    content: string,
-  ): Promise<void>;
-  writeAttemptReviewer(
-    issueId: string,
-    attempt: number,
-    content: string,
-  ): Promise<void>;
+  writeInvocation(filename: string, record: AgentInvocationRecord): Promise<void>;
 };
 
 // `failedStep` is the name of the gate step that went red — free-form since
@@ -99,11 +93,22 @@ async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLo
   await mkdir(dir, { recursive: true });
   return {
     dir,
-    async writeAttempt(_issueId, attempt, content) {
-      await writeFile(join(dir, `attempt-${attempt}.log`), content);
-    },
-    async writeAttemptReviewer(_issueId, attempt, content) {
-      await writeFile(join(dir, `attempt-${attempt}-reviewer.log`), content);
+    async writeInvocation(filename, record) {
+      const header = [
+        `agent:      ${record.agent}`,
+        `provider:   ${record.provider}`,
+        `model:      ${record.model ?? "-"}`,
+        `ended:      ${record.end}${record.detail ? ` (${record.detail})` : ""}`,
+        `exit code:  ${record.exitCode ?? "-"}`,
+        `duration:   ${record.durationMs}ms`,
+        "",
+      ].join("\n");
+      await writeFile(
+        join(dir, filename),
+        `${header}\n--- speech ---\n${record.speech}\n` +
+          `--- stdout tail ---\n${record.stdout}\n` +
+          `--- stderr tail ---\n${record.stderr}\n`,
+      );
     },
   };
 }
