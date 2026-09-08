@@ -115,7 +115,7 @@ without consuming one of `maxParallelIssues` slots.
    order, the aggregation and what a failed reviewer invocation means (#41).
    Terminals: `DONE | NEEDS-INFO |
    NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | QUOTA |
-   HARD-ERROR` (infra-only).
+   CREDENTIAL | HARD-ERROR` (infra-only).
 
 3. **Landing** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
    + `src/forge-verify.ts` + `src/chunk-land.ts`) — procedural, in a dedicated
@@ -145,7 +145,8 @@ without consuming one of `maxParallelIssues` slots.
    REMOVES, from a pull request a human labelled).
    A terminal is finalised before its landing is attempted. Handoffs that decide
    to remove `ready-for-agent` read that state back before the issue ceases to
-   be ongoing; quota and infrastructure terminals deliberately remain queued.
+   be ongoing; quota, credential, and infrastructure terminals deliberately
+   remain queued.
 
 ### Daemon polling and exits (`src/scheduler.ts`, `src/exit-conditions.ts`)
 
@@ -158,13 +159,15 @@ No-op polls write nothing. A failed poll fetch is reported and retried after
 another interval; only the startup fetch remains a preflight refusal.
 The wake lock is released at quiescence unless `keepAwakeWhileIdle` is true.
 
-Provider quota stops admissions and drains running and landing work before exit
-4. Six consecutive issue terminals without a landing stop admissions and drain
+Provider closure by quota or a permanent credential refusal stops admissions
+and drains running and landing work before exit 4. Six consecutive issue
+terminals without a landing stop admissions and drain
 running work before exit 2. An unchanged `land` deferral waits for another
-trigger and advances no counter. Remaining exits are `stuck`, `quota`, and
-`halted`; plan-empty, relaunch, budget, and the recompute ceiling are gone.
+trigger and advances no counter. Remaining exits are `stuck`, `quota`,
+`credential`, and `halted`; plan-empty, relaunch, budget, and the recompute
+ceiling are gone.
 
-All three are one type, `TerminalExit`, and the run ends with exactly one
+All four are one type, `TerminalExit`, and the run ends with exactly one
 `exit` event whichever fired (#70/#132). `EXIT_TAGS` is exhaustive over the
 union and a table test asserts every tag has a code and reason. The pool owns
 run-wide starts, ongoing work, landings, and the terminal-without-landing
@@ -184,8 +187,10 @@ outcomes.
   `config.cwd` is the operator's real checkout; sandbar works only inside
   `<cwd>/<workDir>` — a **bare** object cache plus worktrees, threaded as one
   `RepoLayout` — so destructive git ops provably cannot reach the operator's
-  refs. Nothing in the state directory is authoritative: `rm -rf .sandbar`
-  costs agent time, never correctness. One hazard: `run.lock` lives there, so
+  refs. Nothing in the state directory is authoritative for repository
+  correctness. `rm -rf .sandbar` normally costs agent time, and since #134 may
+  also lose Codex's live token family and require one dedicated re-login. One
+  hazard: `run.lock` lives there, so
   a `git clean -x` in the checkout during a run deletes the lock out from
   under it — never clean while a run is in flight. `src/repo-cache.ts` and
   `src/preflight.ts` headers.
@@ -335,17 +340,19 @@ outcomes.
    event. The release is registered immediately after record finalization so
    #35's LIFO drain puts it after every teardown and before `run-end`, and its
    event writes are awaited because `process.exit` grants no event-loop turn.
-- **Credentials are a value, not a path (#38).** `config.env` is an allowlist
-  record (empty value ⇒ inherit from `process.env`); `readEnvFile` is the
-  opt-in loader. `src/env.ts`. A credential whose vendor interface is a FILE is
-  not an exception (#73): codex's ChatGPT subscription IS
-  `codex login`'s `~/.codex/auth.json`, so `CODEX_AUTH_JSON` carries that file's
-  CONTENT — the config is a program and reads its own host copy — and the
-  provider writes it into the sandbox's `$HOME` **only if absent**, because
-  codex refreshes tokens in place and a re-seed would restore one the refresh
-  rotated away. Not a bind mount: that would be a writable channel from a
-  sandbox back onto the host's credential, with three parallel sandboxes as
-  concurrent writers on one file.
+- **Credentials enter as values, including Codex auth (#38, #73, #134).**
+  `config.env` is an allowlist record (empty value ⇒ inherit from
+  `process.env`); `readEnvFile` is the opt-in loader. `src/env.ts`. Codex's
+  ChatGPT subscription is `auth.json`, so `CODEX_AUTH_JSON` carries its content.
+  At preflight the driver reconciles that value by `last_refresh` into one
+  `<workDir>/codex-auth.json`; every Codex sandbox and merger container mounts
+  the run-owned file read-write at `$CODEX_HOME/auth.json`, and the augmented
+  image pre-creates that directory owned by the uid-1000 agent so Codex can
+  write its per-sandbox session state beside the mount. This is the one
+  deliberate exception to per-sandbox write isolation: same-trust holders need
+  Codex's reload-before-refresh cooperation around one token family. The host
+  config should read a dedicated login (this repo uses `~/.codex-sandbar`) so
+  the operator's ordinary TUI never shares that family. `src/codex-auth.ts`.
 - **A role names its CLI as well as its model (#19, #72, #74, #121, #126).**
   `implementerAgent` / `reviewerAgent` / `mergerAgent`, all defaulting to
   `claude`, plus `uiCheckAgent` defaulting to `implementerAgent` and

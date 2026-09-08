@@ -11,7 +11,7 @@
 // an image the operator's own checkout no longer matches.
 
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -200,10 +200,11 @@ describe.runIf(available)("ensureImages against real podman", () => {
   );
 
   it.concurrent(
-    "renames an existing uid-1000 user and preserves its writable home contract",
+    "preserves uid-1000 home ownership and a writable shared Codex credential mount",
     async ({ expect, task, onTestFinished }) => {
       const uidBaseTag = testImageTag(`uid-base-${task.id}`);
       const tag = testImageTag(`uid-recipe-${task.id}`);
+      const codexHome = "/var/lib/sandbar-codex";
       const baseContext = await mkdtemp(join(tmpdir(), "sandbar-agent-uid-base-"));
       onTestFinished(() => rm(baseContext, { recursive: true, force: true }), 60_000);
       await writeFile(
@@ -213,11 +214,14 @@ describe.runIf(available)("ensureImages against real podman", () => {
       await buildImage({ tag: uidBaseTag, containerfile: "<generated>" }, {
         root: "", contextRoot: baseContext, capture: true,
       });
+      await exec(RUNTIME, ["run", "--rm", uidBaseTag, "test", "!", "-e", codexHome]);
       const context = await mkdtemp(join(tmpdir(), "sandbar-agent-uid-recipe-"));
       onTestFinished(() => rm(context, { recursive: true, force: true }), 60_000);
+      const hostAuth = join(context, "codex-auth.json");
+      await writeFile(hostAuth, "before", { mode: 0o600 });
       await writeFile(
         join(context, "Containerfile"),
-        agentToolsContainerfile(uidBaseTag, ["codex"], { libc: "musl" }),
+        agentToolsContainerfile(uidBaseTag, ["codex"], { libc: "musl", codexHome }),
       );
       await writeFile(join(context, "codex-static"), "#!/bin/sh\necho fixture\n");
       // The recipe installs every binary the provider declares (#120), so the
@@ -230,10 +234,18 @@ describe.runIf(available)("ensureImages against real podman", () => {
         root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
       });
       const result = await exec(RUNTIME, [
-        "run", "--rm", tag, "sh", "-c",
-        "test $(id -u agent) = 1000 && ! id node >/dev/null 2>&1 && test $(stat -c %u /home/agent) = 1000 && test -w /home/agent",
+        "run", "--rm",
+        "--userns=keep-id:uid=1000,gid=1000",
+        "--user", "1000:1000",
+        "-v", `${hostAuth}:${codexHome}/auth.json:z`,
+        tag, "sh", "-c",
+        `test $(id -u) = 1000 && ! id node >/dev/null 2>&1 && ` +
+          `test $(stat -c %u /home/agent) = 1000 && test -w /home/agent && ` +
+          `printf refreshed > ${codexHome}/auth.json && ` +
+          `printf session > ${codexHome}/history.jsonl`,
       ]);
       expect(result.stderr).toBe("");
+      expect(await readFile(hostAuth, "utf8")).toBe("refreshed");
     },
     600_000,
   );

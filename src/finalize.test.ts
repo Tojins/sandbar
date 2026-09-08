@@ -352,6 +352,25 @@ describe("finalizeOne", () => {
       }, adapter, LABELS)).rejects.toThrow(`${operation} failed`);
     },
   );
+  it("credential reclaims, pushes, and tells the operator which configured value to refresh", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(134);
+    const action = await finalizeOne({
+      kind: "credential",
+      issue: i,
+      provider: "codex",
+      detail: "Your access token could not be refreshed.",
+    }, adapter, LABELS);
+
+    expect(action).toEqual({ kind: "pushed" });
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
+    expect(calls.pushes).toEqual([i.branch]);
+    expect(calls.comments[0]?.body).toContain("refused its credential");
+    expect(calls.comments[0]?.body).toContain("CODEX_AUTH_JSON");
+    expect(calls.comments[0]?.body).toContain("Log in again on the host");
+    expect(calls.comments[0]?.body).toContain("remains `ready-for-agent`");
+    expect(calls.labelEdits).toEqual([]);
+  });
   it("merged: removes worktree before deleting branch, drops ready-for-agent on the closed issue, no push, no comment", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);

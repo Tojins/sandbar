@@ -80,6 +80,10 @@ describe("terminalFinalizeInputs", () => {
         issue: issue("7"),
         terminal: { type: "QUOTA", provider: "codex", window: "seven_day", resetsAt: 42 },
       },
+      {
+        issue: issue("8"),
+        terminal: { type: "CREDENTIAL", provider: "codex", detail: "refresh refused" },
+      },
     ];
     expect(terminalFinalizeInputs(outcomes).map((i) => i.kind)).toEqual([
       "needs-info",
@@ -89,6 +93,7 @@ describe("terminalFinalizeInputs", () => {
       "hard-error",
       "read-only-agent-wrote",
       "quota",
+      "credential",
     ]);
   });
 

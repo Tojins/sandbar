@@ -73,13 +73,14 @@ import {
   buildAgentProvider,
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
-import { AgentError, AgentQuotaError, agentPartialOutput, agentPartialUsage, podman, withPartialOutput } from "./agent-sandbox.js";
+import { AgentCredentialError, AgentError, AgentQuotaError, agentPartialOutput, agentPartialUsage, podman, withPartialOutput } from "./agent-sandbox.js";
 import type { RateLimitMeasurement } from "./agent-run-end.js";
 import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
 import { maxContextDepth, sumAgentUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
 
 import type { ChunkTarget } from "./chunks.js";
+import type { CodexAuthMount } from "./codex-auth.js";
 import type { PromptExtensions, ResolvedGateStack } from "./config.js";
 import {
   type AgentImages,
@@ -326,6 +327,12 @@ export type Terminal =
       readonly window: string;
       readonly resetsAt?: number;
       readonly specGaps: readonly SpecGap[];
+    }
+  | {
+      readonly type: "CREDENTIAL";
+      readonly provider: "codex";
+      readonly detail: string;
+      readonly specGaps: readonly SpecGap[];
     };
 
 export type SpecGap = {
@@ -333,41 +340,63 @@ export type SpecGap = {
   readonly text: string;
 };
 
-export type RunQuotaState = {
-  get(provider: AgentProviderName): RateLimitMeasurement | undefined;
-  close(provider: AgentProviderName, measurement: RateLimitMeasurement): void;
+export type ProviderClosure =
+  | { readonly cause: "quota"; readonly measurement: RateLimitMeasurement }
+  | { readonly cause: "credential"; readonly detail: string };
+
+export type RunProviderState = {
+  get(provider: AgentProviderName): ProviderClosure | undefined;
+  closeQuota(provider: AgentProviderName, measurement: RateLimitMeasurement): void;
+  closeCredential(detail: string): void;
 };
 
-export const createRunQuotaState = (): RunQuotaState => {
-  const closed = new Map<AgentProviderName, RateLimitMeasurement>();
+export const recordProviderClosure = (
+  state: RunProviderState | undefined,
+  err: AgentQuotaError | AgentCredentialError,
+): void => {
+  if (err instanceof AgentQuotaError) state?.closeQuota(err.provider, err.measurement);
+  else state?.closeCredential(err.detail);
+};
+
+export const createRunProviderState = (): RunProviderState => {
+  const closed = new Map<AgentProviderName, ProviderClosure>();
+  const close = (provider: AgentProviderName, closure: ProviderClosure): void => {
+    const existing = closed.get(provider);
+    if (existing?.cause === "credential") return;
+    if (existing === undefined || closure.cause === "credential") {
+      closed.set(provider, closure);
+    }
+  };
   return {
     get: (provider) => closed.get(provider),
-    close: (provider, measurement) => { closed.set(provider, measurement); },
+    closeQuota: (provider, measurement) => close(provider, { cause: "quota", measurement }),
+    closeCredential: (detail) => close("codex", { cause: "credential", detail }),
   };
 };
 
 export const assertProviderOpen = (
-  quotaState: RunQuotaState | undefined,
+  providerState: RunProviderState | undefined,
   provider: AgentProviderName,
 ): void => {
-  const closed = quotaState?.get(provider);
-  if (closed) throw new AgentQuotaError(provider, closed);
+  const closed = providerState?.get(provider);
+  if (closed?.cause === "quota") throw new AgentQuotaError(provider, closed.measurement);
+  if (closed?.cause === "credential") throw new AgentCredentialError(closed.detail);
 };
 
 // One invocation boundary owns both halves of run-scoped closure: an already
-// closed provider is never called, and the first structural quota failure is
-// recorded before it escapes. Keeping this here prevents implementer and
-// reviewer call sites from drifting on either rule (#109).
-export async function runWithQuotaState<T>(
-  quotaState: RunQuotaState | undefined,
+// closed provider is never called, and the first structural quota or permanent
+// credential failure is recorded before it escapes (#109, #134).
+export async function runWithProviderState<T>(
+  providerState: RunProviderState | undefined,
   provider: AgentProviderName,
   invoke: () => Promise<T>,
 ): Promise<T> {
-  assertProviderOpen(quotaState, provider);
+  assertProviderOpen(providerState, provider);
   try {
     return await invoke();
   } catch (err) {
-    if (err instanceof AgentQuotaError) quotaState?.close(err.provider, err.measurement);
+    if (err instanceof AgentQuotaError || err instanceof AgentCredentialError)
+      recordProviderClosure(providerState, err);
     throw err;
   }
 }
@@ -377,6 +406,12 @@ export const quotaVerdict = (err: AgentQuotaError): Verdict => ({
   provider: err.provider,
   window: err.measurement.window,
   ...(err.measurement.resetsAt === undefined ? {} : { resetsAt: err.measurement.resetsAt }),
+});
+
+export const credentialVerdict = (err: AgentCredentialError): Verdict => ({
+  type: "CREDENTIAL",
+  provider: err.provider,
+  detail: err.detail,
 });
 
 export type InnerLoopConfig = {
@@ -424,6 +459,9 @@ export type InnerLoopConfig = {
   readonly maxReviewRounds: number;
   readonly sandboxImage: string;
   readonly agentImages: AgentImages;
+  // One run-owned writable credential file shared by every Codex holder
+  // (#134). Absent for runs that use only API credentials or only Claude.
+  readonly codexAuthMount?: CodexAuthMount;
   // This run's podman resource scope (#28) — see naming.ts. Both the agent
   // sandbox container and the gate stack are named under it.
   readonly scope: RunScope;
@@ -452,7 +490,7 @@ export type InnerLoopOptions = {
   // Mandatory at this run-owned boundary: dropping it would make a terminal,
   // phase, or measurement silently disappear from the sole run record.
   readonly onEvent: (event: EventInput) => Promise<void> | void;
-  readonly quotaState?: RunQuotaState;
+  readonly providerState?: RunProviderState;
 };
 
 type SandboxCycleOutcome = {
@@ -585,6 +623,13 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
         provider: verdict.provider,
         window: verdict.window,
         ...(verdict.resetsAt === undefined ? {} : { resetsAt: verdict.resetsAt }),
+        specGaps,
+      };
+    case "CREDENTIAL":
+      return {
+        type: "CREDENTIAL",
+        provider: verdict.provider,
+        detail: verdict.detail,
         specGaps,
       };
   }
@@ -753,6 +798,17 @@ async function runSandboxCycle(
             });
           },
         });
+        const extraMounts: agentSandbox.Mount[] = [
+          ...(config.codexAuthMount === undefined ? [] : [{
+            hostPath: config.codexAuthMount.hostPath,
+            sandboxPath: config.codexAuthMount.sandboxPath,
+          }]),
+          ...(sbxContainers.length === 0 ? [] : [{
+            hostPath: sandboxLogDir,
+            sandboxPath: SANDBOX_LOG_MOUNT,
+            readonly: true,
+          }]),
+        ];
         return agentSandbox.createSandbox({
           branch: issue.branch,
           layout: config.layout,
@@ -767,18 +823,12 @@ async function runSandboxCycle(
           hooks: opts.hooks,
           env: config.env,
           preparedWorktreePath: worktreePath,
+          ...(extraMounts.length === 0 ? {} : { extraMounts }),
           onNotice: (severity, message) => opts.onEvent({
             kind: "complaint", severity, message,
           }),
           ...(sbxContainers.length > 0
             ? {
-                extraMounts: [
-                  {
-                    hostPath: sandboxLogDir,
-                    sandboxPath: SANDBOX_LOG_MOUNT,
-                    readonly: true,
-                  },
-                ],
                 // The siblings attach to the agent container, so they cannot be
                 // started before it — but they must be up before the
                 // `onSandboxReady` hooks, which is exactly where a consumer runs
@@ -955,9 +1005,17 @@ async function runSandboxCycle(
     return { verdict: action.verdict, accumulatedCommits: accumulated, specGaps };
   } catch (err) {
     if (err instanceof AgentQuotaError) {
-      opts.quotaState?.close(err.provider, err.measurement);
+      recordProviderClosure(opts.providerState, err);
       return {
         verdict: quotaVerdict(err),
+        accumulatedCommits: accumulated,
+        specGaps,
+      };
+    }
+    if (err instanceof AgentCredentialError) {
+      recordProviderClosure(opts.providerState, err);
+      return {
+        verdict: credentialVerdict(err),
         accumulatedCommits: accumulated,
         specGaps,
       };
@@ -1139,7 +1197,7 @@ export async function runUiCheck(
 
     let run: Awaited<ReturnType<Sandbox["run"]>>;
     try {
-      run = await runWithQuotaState(opts.quotaState, config.uiCheckAgent, () =>
+      run = await runWithProviderState(opts.providerState, config.uiCheckAgent, () =>
         sandbox.run({
           name: `ui-check-${issue.id}${invocation === 1 ? "" : "-reprompt"}`,
           agent: buildAgentProvider(config.uiCheckAgent, config.uiCheckModelId, {
@@ -1152,7 +1210,11 @@ export async function runUiCheck(
     } catch (err) {
       const partial = agentPartialUsage(err);
       await logInvocation(
-        err instanceof AgentQuotaError ? "quota" : "failed",
+        err instanceof AgentQuotaError
+          ? "quota"
+          : err instanceof AgentCredentialError
+            ? "credential"
+            : "failed",
         undefined,
         partial.usage,
         partial.toolCalls,
@@ -1287,7 +1349,7 @@ export async function runImplementer(
     runSandboxAndPublish(sandbox, options, issue.id, opts.onEvent);
   let run: Awaited<ReturnType<typeof runAgent>>;
   try {
-    run = await runWithQuotaState(opts.quotaState, config.implementerAgent, () => runAgent({
+    run = await runWithProviderState(opts.providerState, config.implementerAgent, () => runAgent({
       name: `implementer-${issue.id}-attempt-${action.attempt}`,
       agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
         effort: config.implementerEffort,
@@ -1296,20 +1358,20 @@ export async function runImplementer(
       completionSignal: PROMISE_COMPLETION_SIGNALS,
     }));
   } catch (err) {
-    if (err instanceof AgentQuotaError) {
+    if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) {
       const partial = agentPartialUsage(err);
       const usage = eventUsage(
         partial.usage,
         partial.toolCalls,
         partial.peakContext,
-        partial.rateLimit ?? err.measurement,
+        partial.rateLimit ?? (err instanceof AgentQuotaError ? err.measurement : undefined),
       );
       await opts.onEvent({
         kind: "implementer",
         issue: Number(issue.id),
         title: issue.title,
         attempt: action.attempt,
-        signal: "QUOTA",
+        signal: err instanceof AgentQuotaError ? "QUOTA" : "CREDENTIAL",
         commits: 0,
         provider: config.implementerAgent,
         model: config.implementerModelId,
@@ -1712,7 +1774,7 @@ export async function runReviewer(
         // `signalMs` has no reviewer meaning: the reviewer names no completion
         // signal (#83), so the grace phase it measures is unreachable here.
         const logPass = async (
-          result: "completed" | "failed" | "quota",
+          result: "completed" | "failed" | "quota" | "credential",
           maxGapMs: number | undefined,
           usage: AgentUsage | undefined,
           toolCalls: number | undefined,
@@ -1739,7 +1801,7 @@ export async function runReviewer(
           });
         };
         try {
-          const reviewerRun = await runWithQuotaState(opts.quotaState, agent, () => sandbox.run({
+          const reviewerRun = await runWithProviderState(opts.providerState, agent, () => sandbox.run({
             name:
               `reviewer-${issue.id}-round-${action.reviewRound}-${pass}` +
               (invocation > 1 ? `-invocation-${invocation}` : ""),
@@ -1769,7 +1831,11 @@ export async function runReviewer(
           // second is a different fault entirely.
           const partial = agentPartialUsage(err);
           await logPass(
-            err instanceof AgentQuotaError ? "quota" : "failed",
+            err instanceof AgentQuotaError
+              ? "quota"
+              : err instanceof AgentCredentialError
+                ? "credential"
+                : "failed",
             undefined,
             partial.usage,
             partial.toolCalls,
@@ -1780,7 +1846,7 @@ export async function runReviewer(
           const transcript = agentPartialOutput(err);
           const event = await detectWrite(beforeInvocation, transcript);
           if (event !== null) return { kind: "aborted", event, transcript };
-          if (err instanceof AgentQuotaError) throw err;
+          if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) throw err;
           // The bytes the agent had emitted before it failed ride out on the
           // error (#41, agent-sandbox F9). Without them a reviewer that emitted
           // a verdict and then died is indistinguishable from one that emitted

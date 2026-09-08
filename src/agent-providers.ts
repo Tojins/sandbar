@@ -47,9 +47,9 @@
 // WHAT A CREDENTIAL IS ALLOWED TO BE (#73): a value in `config.env`, and that
 // held even for the one whose interface is a FILE. codex's ChatGPT
 // subscription is `~/.codex/auth.json`, so `CODEX_AUTH_JSON` carries the file's
-// CONTENT and the provider materialises it in-container (`CODEX_AUTH_SEED`) —
-// the config reads its own host file, sandbar names none, and no host
-// credential is mounted writable into a sandbox (#38). Adding the key was
+// CONTENT. Since #134 the driver reconciles that value into its own shared
+// `<workDir>/codex-auth.json` and mounts it read-write into every Codex holder;
+// the operator's source file remains untouched (#38). Adding the key was
 // otherwise a data change: `PROVIDER_CREDENTIALS` was already any-of, so a
 // second accepted key needed no new mechanism, and an older driver handed a
 // config declaring only it refuses the run LOUDLY (it finds no accepted codex
@@ -284,12 +284,10 @@ export const PROVIDER_CREDENTIALS: Record<
         "`~/.codex/auth.json` (`$CODEX_HOME`) that `codex login` wrote on a " +
         "host, as a value (#38, #73): `readFileSync(join(homedir(), " +
         '".codex/auth.json"), "utf8")` in the config, which is a program. ' +
-        "The provider writes it into each sandbox's own `$HOME` on first use " +
-        "and never over a file already there, so in-container refreshes are " +
-        "kept. Two costs to have chosen knowingly: parallel sandboxes hold " +
-        "concurrent copies of one credential, which OpenAI's CI/CD guidance " +
-        "advises against, and a refresh can rotate the token away from the " +
-        "host's copy — after which a later series needs `codex login` again",
+        "The driver keeps one writable copy under `<workDir>` for every Codex " +
+        "sandbox and merger container in the run, so concurrent holders use " +
+        "Codex's cooperative reload path. Run `codex login` for this " +
+        "dedicated credential when Sandbar reports that it was refused",
       bills: "subscription",
     },
   ],

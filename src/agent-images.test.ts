@@ -113,6 +113,30 @@ describe("run-owned agent images", () => {
     );
   });
 
+  it("forwards a configured Codex home into the generated build recipe", async () => {
+    const codexHome = "/var/lib/sandbar-codex";
+    let containerfile = "";
+    await createAgentImages({
+      declaredBaseTag: "localhost/app:base",
+      providers: ["codex"],
+      codexHome,
+      scope: runScope("/agent-images-codex-home"),
+      prepareArtifacts: fakeAgentArtifacts,
+      inputsLabel: async (tag) => (tag === "localhost/app:base" ? "base-fp" : null),
+      build: async (_image, opts) => {
+        containerfile = await readFile(join(opts.contextRoot!, "Containerfile"), "utf8");
+      },
+      log: () => {},
+    });
+
+    expect(containerfile).toContain(
+      `if [ ! -e '${codexHome}' ]; then mkdir -p '${codexHome}'`,
+    );
+    expect(containerfile).toContain(
+      `test "$(stat -c %u '${codexHome}')" = 1000`,
+    );
+  });
+
   // #82. The augment build happens on EVERY run since #75 — the end-of-run
   // cleanup drops the tag unconditionally, so the next startup finds it gone —
   // and its cost has never been measured on any run, because the last logged
@@ -266,13 +290,30 @@ describe("run-owned agent images", () => {
     expect(file).toContain("useradd -u 1000 -m -d /home/agent agent");
     expect(file).toContain("adduser -D -u 1000 -h /home/agent agent");
     expect(file).toContain("chown -R 1000:$(id -g agent) /home/agent");
+    expect(file).toContain("if [ ! -e '/home/agent/.codex' ]; then mkdir -p '/home/agent/.codex'");
+    expect(file).toContain("chown 1000:$(id -g agent) '/home/agent/.codex'");
     expect(file).toContain('test "$(id -u agent)" = 1000');
     expect(file).toContain('test "$(stat -c %u /home/agent)" = 1000');
+    expect(file).toContain(
+      'test "$(stat -c %u \'/home/agent/.codex\')" = 1000',
+    );
     for (const artifacts of Object.values(AGENT_PROVIDER_PACKAGES.claude.artifacts)) {
       for (const artifact of artifacts) expect(file).toContain(artifact.sha256);
     }
     expect(file).toContain(AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64[0]!.sha256);
     expect(file).not.toContain("npm");
+  });
+
+  it("creates a configured Codex home without interpolating it as shell", () => {
+    const file = agentToolsContainerfile("base", ["codex"], {
+      libc: "glibc",
+      codexHome: "/home/agent/codex's state",
+    });
+    expect(file).toContain(
+      "if [ ! -e '/home/agent/codex'\\''s state' ]; then " +
+        "mkdir -p '/home/agent/codex'\\''s state'",
+    );
+    expect(file).toContain("chown 1000:$(id -g agent) '/home/agent/codex'\\''s state'");
   });
 
   // The inverse of the guard this used to be. While the host Containerfile still

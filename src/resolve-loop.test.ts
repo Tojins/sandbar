@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { MergerGateOutput } from "./merger.js";
 import { classifyAgentRunEnd } from "./agent-run-end.js";
 import { SandbarError } from "./errors.js";
-import { AgentQuotaError } from "./agent-sandbox.js";
+import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
 import {
   RESOLVE_MAX_ATTEMPTS,
   type IssueRef,
@@ -62,7 +62,9 @@ function agentRun(over: Partial<ResolveAgentRun> = {}): ResolveAgentRun {
     end: over.end ?? "exit",
     exitCode: over.exitCode ?? 0,
     spoken: output,
-    failure: (over.exitCode ?? 0) !== 0 ? over.detail : undefined,
+    failure: (over.exitCode ?? 0) !== 0 && over.detail !== undefined
+      ? { kind: "provider", message: over.detail }
+      : undefined,
     silentRunRecovery: "infra",
   });
   return {
@@ -868,6 +870,30 @@ describe("runResolveLoop — quota capture (#109)", () => {
     expect(lines).toContainEqual(expect.stringContaining(
       "quotaStatus=rejected quotaWindow=five_hour quotaUtilization=1 quotaResetsAt=42",
     ));
+    expect(calls.agentRuns).toBe(1);
+  });
+});
+
+describe("runResolveLoop — credential closure (#134)", () => {
+  it("records one attempt and surfaces the permanent Codex failure", async () => {
+    const detail = "Your access token could not be refreshed. Please log out and sign in again.";
+    const { adapter, calls } = makeAdapter({
+      initiallyConflicted: true,
+      agentRuns: [{
+        stdout: "credential transport",
+        run: { exitCode: 1, verdict: "credential", cause: "credential", detail },
+      }],
+    });
+    const { sink, records } = makeSink();
+
+    const err = await runResolveLoop(issue(134), [], conflictMode, adapter, {
+      projectAnchor,
+      onAttempt: sink,
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AgentCredentialError);
+    expect(err).toMatchObject({ provider: "codex", detail });
+    expect(records).toHaveLength(1);
     expect(calls.agentRuns).toBe(1);
   });
 });

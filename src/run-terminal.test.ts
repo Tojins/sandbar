@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { Terminal } from "./inner-loop.js";
+import { AgentQuotaError } from "./agent-sandbox.js";
 import {
+  selectTerminalExit,
   terminalReason,
   verifyFinalizedTrackerState,
 } from "./run.js";
@@ -44,11 +46,32 @@ describe("terminal event reasons (#132)", () => {
       "correctness-budget-exhausted: review",
     ],
     [{ type: "QUOTA", provider: "codex", window: "five_hour" }, "codex five_hour"],
+    [{ type: "CREDENTIAL", provider: "codex", detail: "refresh refused" }, "codex: refresh refused"],
     [{ type: "HARD-ERROR", reason: "bringup failed\nstack", commits: [] }, "bringup failed\nstack"],
   ];
 
   it.each(terminals)("keeps structured terminal detail", (terminal, reason) => {
     expect(terminalReason(terminal)).toBe(reason);
+  });
+});
+
+describe("provider terminal precedence (#134)", () => {
+  it("keeps credential refusal ahead of quota and halt", () => {
+    const credential: Terminal = {
+      type: "CREDENTIAL",
+      provider: "codex",
+      detail: "refresh refused",
+      specGaps: [],
+    };
+    expect(selectTerminalExit({
+      mergerProviderError: new AgentQuotaError("claude", {
+        status: "rejected",
+        window: "five_hour",
+      }),
+      haltReasons: ["merger-halted"],
+      terminals: [credential],
+      otherwise: () => null,
+    })).toMatchObject({ tag: "credential", exitCode: 4 });
   });
 });
 
@@ -91,6 +114,13 @@ describe("tracker finalization read-back (#87)", () => {
           specGaps: [],
         },
         action: { kind: "deleted-local" },
+      },
+      {
+        input: {
+          kind: "credential", issue: result.input.issue, provider: "codex",
+          detail: "refresh refused", specGaps: [],
+        },
+        action: { kind: "pushed" },
       },
       {
         input: result.input,

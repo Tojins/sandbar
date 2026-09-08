@@ -150,6 +150,15 @@ export function terminalFinalizeInputs(
           specGaps: t.specGaps,
         });
         break;
+      case "CREDENTIAL":
+        inputs.push({
+          kind: "credential",
+          issue: o.issue,
+          provider: t.provider,
+          detail: t.detail,
+          specGaps: t.specGaps,
+        });
+        break;
       default: {
         const unhandled: never = t;
         throw new Error(

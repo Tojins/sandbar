@@ -282,18 +282,19 @@ export default {
   // The credential the codex routing below spends is the ChatGPT subscription,
   // not the API (#73). The included pool is the whole discount — top-up credits
   // are priced at API parity — and `OPENAI_API_KEY` bills the API without
-  // touching it. The subscription is a FILE: `codex login` on this host writes
-  // `~/.codex/auth.json`, and `CODEX_AUTH_JSON` carries its content as a value,
+  // touching it. The subscription is a FILE: run
+  // `CODEX_HOME=~/.codex-sandbar codex login` once on this host, and
+  // `CODEX_AUTH_JSON` carries that dedicated file as a value,
   // which this file is a program and reads for itself. Not `sandbar.env`: that
   // parser is line-based and `auth.json` is pretty JSON. Declare ONE of the
   // two — codex prefers `OPENAI_API_KEY` when both are visible, so a config
   // carrying both pays the subscription and bills the API anyway, which
-  // preflight warns about. Re-run `codex login` here if a series is ever
-  // refused for a stale token: the container's copy refreshes in place and
-  // this host's can be left behind.
+  // preflight warns about. There is deliberately no fallback to the operator's
+  // `~/.codex/auth.json`: its TUI and Sandbar must use different token families
+  // so either side can refresh without invalidating the other (#134).
   env: {
     ...readEnvFile(new URL("sandbar.env", import.meta.url)),
-    CODEX_AUTH_JSON: readFileSync(join(homedir(), ".codex/auth.json"), "utf8"),
+    CODEX_AUTH_JSON: readFileSync(join(homedir(), ".codex-sandbar/auth.json"), "utf8"),
   },
 
   // The implementer runs codex (#72), on the subscription above (#73); the

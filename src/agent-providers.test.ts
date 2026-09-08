@@ -88,8 +88,8 @@ describe("PROVIDER_CREDENTIALS", () => {
 
   // #72 accepted only the API key here and said the subscription "will not
   // work". #73 made it work without moving anything but data: the file's
-  // CONTENT is a value like any other credential (#38), so it is a second
-  // any-of entry rather than a mount or a path.
+  // CONTENT is a value at the config boundary (#38), so it remains a second
+  // any-of entry even though #134 reconciles it into a driver-owned mount.
   it("accepts either the API key or the ChatGPT session for codex (#73)", () => {
     expect(PROVIDER_CREDENTIALS.codex.map((c) => c.key)).toEqual([
       "OPENAI_API_KEY",
@@ -98,8 +98,8 @@ describe("PROVIDER_CREDENTIALS", () => {
     const chatgpt = PROVIDER_CREDENTIALS.codex[1]!;
     expect(chatgpt.note).toContain("auth.json");
     // The note is what preflight quotes at an operator with no codex
-    // credential, so the two costs #73 named have to be IN it: they are the
-    // thin edge of this design and the operator is the one choosing it.
+    // credential, so it has to name both the concurrent-holder mechanism and
+    // the operator recovery action.
     expect(chatgpt.note).toContain("concurrent");
     expect(chatgpt.note).toContain("codex login");
   });

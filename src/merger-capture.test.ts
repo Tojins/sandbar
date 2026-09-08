@@ -11,6 +11,10 @@
 // The one bound on a test here is vitest's own; every case exits on its own or
 // is killed by a timeout this file sets in milliseconds.
 
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { buildAgentProvider } from "./agent-providers.js";
@@ -18,8 +22,10 @@ import {
   buildResolveRunArgv,
   captureAgentRun,
   parseCapturedAgentRun,
+  realAdapter,
   resolveAgentCredentials,
 } from "./merger.js";
+import { runScope } from "./naming.js";
 import { isInfraFailure, parseResolveSignal } from "./resolve-loop.js";
 
 const opts = (timeoutMs = 30_000) => ({ container: "c-under-test", timeoutMs });
@@ -251,6 +257,19 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(isInfraFailure(run)).toBe(true);
   });
 
+  it("retains the permanent Codex credential classification for the resolve loop", () => {
+    const detail = "Your access token could not be refreshed. Please log out and sign in again.";
+    const run = parseCapturedAgentRun(captured(JSON.stringify({
+      type: "turn.failed",
+      error: { message: detail },
+    })), buildAgentProvider("codex", "m"));
+    expect(run).toMatchObject({
+      cause: "credential",
+      verdict: "credential",
+      detail,
+    });
+  });
+
   it("does not promote raw stderr into the merger's narrow detail", () => {
     const run = parseCapturedAgentRun(
       { ...captured(""), exitCode: 125, stderr: "unbounded runtime stderr" },
@@ -334,8 +353,8 @@ describe("resolve provider invocation (#74)", () => {
     ],
     [
       "codex",
-      ["CODEX_AUTH_JSON", "OPENAI_API_KEY"],
-      ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+      ["OPENAI_API_KEY"],
+      ["CODEX_AUTH_JSON", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
     ],
   ] as const)(
     "routes only %s credentials into the resolve argv",
@@ -393,5 +412,78 @@ describe("resolve provider invocation (#74)", () => {
       "--entrypoint", "/bin/sh", "sandbox-image", "-c", "agent --print",
     ]);
     expect(argv).not.toContain("--init");
+  });
+
+  it("mounts the shared Codex credential read-write without putting it in env", () => {
+    const argv = buildResolveRunArgv({
+      container: "resolve-1",
+      cwd: "/worktree",
+      extraMounts: [],
+      codexAuthMount: {
+        hostPath: "/state/codex-auth.json",
+        sandboxPath: "/home/agent/.codex/auth.json",
+      },
+      image: "sandbox-image",
+      command: "codex exec",
+      credentials: {},
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+    });
+    expect(argv).toContain("/state/codex-auth.json:/home/agent/.codex/auth.json:z");
+    expect(argv).toContain("CODEX_HOME=/home/agent/.codex");
+    expect(argv.join(" ")).not.toContain("CODEX_AUTH_JSON=");
+  });
+
+  it("forwards the shared credential through the real adapter into Podman argv", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandbar-resolve-auth-"));
+    const argvLog = join(root, "podman-argv.json");
+    const originalPath = process.env["PATH"];
+    const podman = join(root, "podman");
+    await writeFile(podman, [
+      `#!${process.execPath}`,
+      'const { appendFileSync } = require("node:fs");',
+      `appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+      'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"<promise>ABANDON</promise>"}}) + "\\n");',
+    ].join("\n"), { mode: 0o755 });
+    process.env["PATH"] = `${root}:${originalPath ?? ""}`;
+
+    const codexAuthMount = {
+      hostPath: join(root, "codex-auth.json"),
+      sandboxPath: "/var/lib/codex/auth.json",
+    };
+    try {
+      const adapter = realAdapter({
+        cwd: root,
+        cacheDir: join(root, "repo.git"),
+        scope: runScope(root),
+        repo: { owner: "acme", name: "app" },
+        sourceBranch: "main",
+        botName: "sandbar-bot",
+        botEmail: "bot@example.test",
+        coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+        mergerAgent: "codex",
+        mergerModelId: "gpt-5.6-sol",
+        sandboxImage: "sandbox-image",
+        env: (key) => key === "CODEX_AUTH_JSON" ? "secret-json" : undefined,
+        codexAuthMount,
+        runStackGate: async () => { throw new Error("not called"); },
+      });
+
+      const run = await adapter.runResolveAgent("resolve this", 1);
+      expect(run.output).toBe("<promise>ABANDON</promise>");
+      const [argv] = (await readFile(argvLog, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[]);
+      expect(argv).toContain(
+        `${codexAuthMount.hostPath}:${codexAuthMount.sandboxPath}:z`,
+      );
+      expect(argv).toContain("CODEX_HOME=/var/lib/codex");
+      expect(argv?.join(" ")).not.toContain("CODEX_AUTH_JSON=");
+    } finally {
+      if (originalPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = originalPath;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

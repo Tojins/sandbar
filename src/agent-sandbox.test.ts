@@ -9,6 +9,7 @@
 // and the two-phase completion timer (F5).
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { appendFile, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -25,13 +26,14 @@ import {
 } from "./repo-cache.js";
 import {
   BoundedTail,
-  CODEX_AUTH_SEED,
+  CODEX_REFRESH_FAILURE_MESSAGES,
   MAX_TAIL_CHARS,
   type AgentProvider,
   type Mount,
   type ProviderCreateOptions,
   type SandboxProvider,
   SANDBOX_REPO_DIR,
+  AgentCredentialError,
   AgentError,
   AgentQuotaError,
   AgentIdleTimeoutError,
@@ -53,7 +55,14 @@ import {
   sandboxExecArgs,
   sandboxRunArgs,
 } from "./agent-sandbox.js";
-import { existsSync } from "node:fs";
+
+const CODEX_REFRESH_FAILURE_LITERALS = [
+  "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
+  "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+  "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+  "Your access token could not be refreshed. Please log out and sign in again.",
+  "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.",
+] as const;
 
 const execFileP = promisify(execFile);
 
@@ -586,7 +595,7 @@ describe("parseCodexJsonLine", () => {
       parseCodexJsonLine(
         '{"type":"turn.failed","error":{"message":"unexpected status 401"}}',
       ),
-    ).toEqual([{ type: "failure", message: "unexpected status 401" }]);
+    ).toEqual([{ type: "failure", kind: "provider", message: "unexpected status 401" }]);
   });
 
   // The give-up `error` event is shaped identically to the retries above it —
@@ -611,9 +620,31 @@ describe("parseCodexJsonLine", () => {
       '{"type":"turn.failed","error":"401 Unauthorized"}',
     ]) {
       expect(parseCodexJsonLine(line)).toEqual([
-        { type: "failure", message: "no message" },
+        { type: "failure", kind: "provider", message: "no message" },
       ]);
     }
+  });
+
+  it("pins every permanent refresh failure sentence shipped by Codex 0.152.0", () => {
+    expect(CODEX_REFRESH_FAILURE_MESSAGES).toEqual(CODEX_REFRESH_FAILURE_LITERALS);
+  });
+
+  it.each(CODEX_REFRESH_FAILURE_LITERALS)(
+    "tags the pinned permanent refresh failure as credential: %s",
+    (message) => {
+      expect(parseCodexJsonLine(JSON.stringify({
+        type: "turn.failed",
+        error: { message },
+      }))).toEqual([{ type: "failure", kind: "credential", message }]);
+    },
+  );
+
+  it("keeps credential classification when Codex appends server detail", () => {
+    const message = `${CODEX_REFRESH_FAILURE_LITERALS[3]} request id: abc`;
+    expect(parseCodexJsonLine(JSON.stringify({
+      type: "turn.failed",
+      error: { message },
+    }))).toEqual([{ type: "failure", kind: "credential", message }]);
   });
 
   it("reports command execution and web search as informational tool calls", () => {
@@ -671,7 +702,7 @@ describe("codex command line", () => {
       dangerouslySkipPermissions: true,
     });
     expect(cmd.command).toBe(
-      `${CODEX_AUTH_SEED} codex exec --json --dangerously-bypass-approvals-and-sandbox --model 'gpt-5.6-sol'`,
+      "codex exec --json --dangerously-bypass-approvals-and-sandbox --model 'gpt-5.6-sol'",
     );
     expect(cmd.stdin).toBe("hello");
     expect(cmd.command).not.toContain("hello");
@@ -721,7 +752,7 @@ describe("codex command line", () => {
       dangerouslySkipPermissions: true,
     }).command;
     expect(cmd).toBe(
-      `${CODEX_AUTH_SEED} codex exec --json --dangerously-bypass-approvals-and-sandbox ` +
+      "codex exec --json --dangerously-bypass-approvals-and-sandbox " +
         "-c 'model_reasoning_effort=high' --model 'gpt-5.6-sol'",
     );
     expect(
@@ -732,122 +763,6 @@ describe("codex command line", () => {
         "model_reasoning_effort",
       );
     }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// codex ChatGPT-subscription seeding (#73)
-// ---------------------------------------------------------------------------
-//
-// Two halves, deliberately split. The argv half is this module's decision —
-// that the guard runs ahead of every codex invocation and carries no secret —
-// and is asserted on the string. The rest is what `sh` defines, so it is
-// asserted by RUNNING the snippet against a real temp $HOME, in the spirit of
-// the `*-git.test.ts` files: only-if-missing, the mode, the $CODEX_HOME
-// override, and the refusal to fall through to codex when the write fails.
-
-describe("codex auth seeding — argv", () => {
-  it("runs the guard ahead of codex exec, on both the fresh and resume forms", () => {
-    for (const opts of [undefined, { continueSession: true }]) {
-      const cmd = codex("m", opts).buildPrintCommand({ prompt: "p" }).command;
-      expect(cmd.startsWith(`${CODEX_AUTH_SEED} codex exec`)).toBe(true);
-    }
-  });
-
-  // The credential is in the container's environment already, so the command
-  // REFERENCES it. Interpolating the host-side value here would put a refresh
-  // token in the `podman exec` argv, readable from any `ps` on the host — and
-  // the provider is built with a model id and nothing else, which is what makes
-  // that impossible rather than merely avoided.
-  it("names the variable, and has no way to carry the value", () => {
-    expect(CODEX_AUTH_SEED).toContain('"$CODEX_AUTH_JSON"');
-    expect(codex.length).toBe(2);
-  });
-});
-
-describe("codex auth seeding — what sh does with it", () => {
-  const AUTH = '{"OPENAI_API_KEY":null,"tokens":{"refresh_token":"r"},"auth_mode":"chatgpt"}';
-  let home: string;
-
-  beforeEach(async () => {
-    home = await mkdtemp(join(tmpdir(), "asb-codexauth-"));
-  });
-  afterEach(async () => {
-    await rm(home, { recursive: true, force: true });
-  });
-
-  // `printf ran` stands in for `codex exec`: it is what the seed falls through
-  // to, so its output is the evidence that the guard did not swallow the run.
-  const runSeed = async (
-    env: Record<string, string | undefined>,
-  ): Promise<{ stdout: string; code: number; stderr: string }> => {
-    try {
-      const { stdout, stderr } = await execFileP(
-        "sh",
-        ["-c", `${CODEX_AUTH_SEED} printf ran`],
-        { env: { PATH: process.env["PATH"] ?? "", HOME: home, ...env } as NodeJS.ProcessEnv },
-      );
-      return { stdout, stderr, code: 0 };
-    } catch (err) {
-      const e = err as { code?: number; stdout?: string; stderr?: string };
-      return { stdout: e.stdout ?? "", stderr: e.stderr ?? "", code: e.code ?? 1 };
-    }
-  };
-
-  it("writes the value to $HOME/.codex/auth.json, 0600, then runs codex", async () => {
-    const r = await runSeed({ CODEX_AUTH_JSON: AUTH });
-    expect(r.code).toBe(0);
-    expect(r.stdout).toBe("ran");
-    const authPath = join(home, ".codex", "auth.json");
-    expect(await readFile(authPath, "utf8")).toBe(AUTH);
-    expect((await stat(authPath)).mode & 0o777).toBe(0o600);
-    expect((await stat(join(home, ".codex"))).mode & 0o777).toBe(0o700);
-  });
-
-  // The load-bearing one. codex refreshes tokens in place, and the sandbox
-  // outlives the attempt that seeded it — a second attempt that re-seeded would
-  // roll the credential back to a token the refresh may have rotated away.
-  it("never overwrites a file already there, so an in-container refresh survives", async () => {
-    await mkdir(join(home, ".codex"), { recursive: true });
-    await writeFile(join(home, ".codex", "auth.json"), "refreshed");
-    const r = await runSeed({ CODEX_AUTH_JSON: AUTH });
-    expect(r.code).toBe(0);
-    expect(await readFile(join(home, ".codex", "auth.json"), "utf8")).toBe("refreshed");
-  });
-
-  it("is inert when the key is undeclared, and when it is declared empty", async () => {
-    for (const env of [{}, { CODEX_AUTH_JSON: "" }]) {
-      const r = await runSeed(env);
-      expect(r.code).toBe(0);
-      expect(r.stdout).toBe("ran");
-      expect(existsSync(join(home, ".codex"))).toBe(false);
-    }
-  });
-
-  // codex's own resolution order: a config that declares CODEX_HOME would
-  // otherwise be handed a file in a directory the CLI never reads.
-  it("follows $CODEX_HOME when one is set", async () => {
-    const elsewhere = join(home, "state", "codex");
-    const r = await runSeed({ CODEX_AUTH_JSON: AUTH, CODEX_HOME: elsewhere });
-    expect(r.code).toBe(0);
-    expect(await readFile(join(elsewhere, "auth.json"), "utf8")).toBe(AUTH);
-    expect(existsSync(join(home, ".codex"))).toBe(false);
-  });
-
-  // A write that failed must not fall through to `codex exec`: unauthenticated,
-  // codex spends the idle budget on retries and reports a 401 as a `turn.failed`
-  // — an answer-shaped account of a filesystem problem. Non-zero puts it on
-  // invokeAgent's infra path with the real cause on stderr (#67).
-  it("exits non-zero without running codex when the seed cannot be written", async () => {
-    const blocked = join(home, "not-a-dir");
-    await writeFile(blocked, "");
-    const r = await runSeed({ CODEX_AUTH_JSON: AUTH, CODEX_HOME: blocked });
-    expect(r.code).not.toBe(0);
-    expect(r.stdout).not.toContain("ran");
-    expect(r.stderr).toContain("CODEX_AUTH_JSON");
-    // Never the credential itself: this text reaches an AgentError and a
-    // NEEDS-HUMAN trace a human reads.
-    expect(r.stderr).not.toContain("refresh_token");
   });
 });
 
@@ -1449,6 +1364,26 @@ describe("createSandbox integration (local provider)", () => {
       await sandbox.close();
       if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = oldCodexHome;
+    }
+  });
+
+  it("turns a permanent Codex refresh failure into a credential error ahead of quota", async () => {
+    const branch = "sandbar/issue-134-codex-credential";
+    await git(["branch", branch], dir);
+    const detail = CODEX_REFRESH_FAILURE_MESSAGES[1];
+    const line = JSON.stringify({ type: "turn.failed", error: { message: detail } });
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
+    });
+    try {
+      const err = await sandbox.run({
+        agent: scriptedCodexAgent(`printf '%s\\n' '${line}'; exit 1`),
+        prompt: "go", completionSignal: [],
+      }).then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(AgentCredentialError);
+      expect(err).toMatchObject({ provider: "codex", detail });
+    } finally {
+      await sandbox.close();
     }
   });
 

@@ -78,9 +78,10 @@
 // admission, so a poll cannot change the images beneath in-flight work.
 
 import { realpathSync } from "node:fs";
+import { dirname } from "node:path";
 
 import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
-import { AgentQuotaError } from "./agent-sandbox.js";
+import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
 import {
   type SweepResult,
   cleanupOrphanContainers,
@@ -99,6 +100,7 @@ import {
   type AgentImages,
   createAgentImages,
 } from "./agent-tools.js";
+import { type CodexAuthMount, prepareCodexAuth } from "./codex-auth.js";
 import {
   type BranchImages,
   type ImageBuildRecord,
@@ -119,10 +121,11 @@ import {
   type TerminalExit,
   MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
   haltedExit,
+  credentialExit,
   quotaExit,
   stuckExit,
 } from "./exit-conditions.js";
-import { type RunQuotaState, createRunQuotaState } from "./inner-loop.js";
+import { type RunProviderState, createRunProviderState, recordProviderClosure } from "./inner-loop.js";
 import {
   type FinalizeInput,
   type FinalizeResult,
@@ -227,21 +230,26 @@ export type RunOptions = {
   readonly configPath?: string;
 };
 
-// Terminal precedence in one testable place (#109). The fallback is lazy so a
-// quota result cannot be displaced by a lower-priority run-state exit.
+// Terminal precedence in one testable place (#109, #134). The fallback is lazy
+// so a provider closure cannot be displaced by a lower-priority run-state exit.
 export function selectTerminalExit(args: {
-  readonly mergerQuota: AgentQuotaError | null;
+  readonly mergerProviderError: AgentQuotaError | AgentCredentialError | null;
   readonly haltReasons: readonly string[];
   readonly terminals: readonly Terminal[];
   readonly otherwise: () => TerminalExit | null;
 }): TerminalExit | null {
-  if (args.mergerQuota) {
+  if (args.mergerProviderError instanceof AgentCredentialError) {
+    return credentialExit(args.mergerProviderError);
+  }
+  const credential = args.terminals.find((terminal) => terminal.type === "CREDENTIAL");
+  if (credential?.type === "CREDENTIAL") return credentialExit(credential);
+  if (args.mergerProviderError instanceof AgentQuotaError) {
     return quotaExit({
-      provider: args.mergerQuota.provider,
-      window: args.mergerQuota.measurement.window,
-      ...(args.mergerQuota.measurement.resetsAt === undefined
+      provider: args.mergerProviderError.provider,
+      window: args.mergerProviderError.measurement.window,
+      ...(args.mergerProviderError.measurement.resetsAt === undefined
         ? {}
-        : { resetsAt: args.mergerQuota.measurement.resetsAt }),
+        : { resetsAt: args.mergerProviderError.measurement.resetsAt }),
     });
   }
   if (args.haltReasons.length > 0) return haltedExit(args.haltReasons);
@@ -258,6 +266,7 @@ export function terminalReason(terminal: Terminal): string | null {
     case "NEEDS-HUMAN-REVIEW": return `${terminal.cause}: ${terminal.latestReviewerProse}`;
     case "HARD-ERROR": return terminal.reason;
     case "QUOTA": return `${terminal.provider} ${terminal.window}`;
+    case "CREDENTIAL": return `${terminal.provider}: ${terminal.detail}`;
   }
 }
 
@@ -278,22 +287,31 @@ export async function verifyFinalizedTrackerState(
   }
 }
 
-// The quota exit for a provider the run's shared state closed, when no QUOTA
-// terminal and no merger quota built one. That happens when the issue that
+// The exit for a provider the run's shared state closed, when no matching
+// terminal and no merger error built one. That happens when the issue that
 // closed the provider never returned a terminal at all — its inner loop
 // rejected after the close — so the scheduler is right that the run must
-// stop, and the measurement the state recorded is the only description left.
+// stop, and the recorded closure is the only description left.
 export function closedProviderExit(
   config: Parameters<typeof requiredAgentProviders>[0],
-  quotaState: RunQuotaState,
+  providerState: RunProviderState,
 ): TerminalExit | null {
-  for (const provider of requiredAgentProviders(config)) {
-    const closed = quotaState.get(provider);
-    if (!closed) continue;
+  const providers = requiredAgentProviders(config);
+  for (const provider of providers) {
+    const closed = providerState.get(provider);
+    if (closed?.cause === "credential") {
+      return credentialExit({ provider: "codex", detail: closed.detail });
+    }
+  }
+  for (const provider of providers) {
+    const closed = providerState.get(provider);
+    if (closed?.cause !== "quota") continue;
     return quotaExit({
       provider,
-      window: closed.window,
-      ...(closed.resetsAt === undefined ? {} : { resetsAt: closed.resetsAt }),
+      window: closed.measurement.window,
+      ...(closed.measurement.resetsAt === undefined
+        ? {}
+        : { resetsAt: closed.measurement.resetsAt }),
     });
   }
   return null;
@@ -302,14 +320,12 @@ export function closedProviderExit(
 function schedulerExit(
   reason: SchedulerExit,
   pool: ContinuousPool<PlannedIssue, Terminal>,
-  quota: TerminalExit | null,
+  providerExit: TerminalExit | null,
 ): TerminalExit {
   switch (reason) {
-    case "quota": {
-      // `quotaClosed` is derived from the same two sources the caller resolves
-      // `quota` from, so a miss here is a bug in that derivation, not a state.
-      if (!quota) throw new Error("scheduler selected quota without a quota exit");
-      return quota;
+    case "provider-closed": {
+      if (!providerExit) throw new Error("scheduler selected provider closure without an exit");
+      return providerExit;
     }
     case "stuck": return stuckExit(pool.noProgressSinceLanding);
   }
@@ -379,6 +395,7 @@ export async function run(
 
   const config = resolveConfig(rawConfig);
   const env = makeEnvReader(config.env);
+  const agentProviders = requiredAgentProviders(config);
   // Every directory the run uses, derived once (#38). `config.cwd` is the
   // operator's checkout and is READ, never operated on; everything sandbar
   // owns hangs off `<cwd>/<workDir>` and is disposable.
@@ -654,6 +671,7 @@ export async function run(
   // it is checked against the cache's `origin`, which is the one repository
   // identity sandbar does NOT get from config.
   const repo = { owner: config.ghOwner, name: config.ghRepo };
+  let codexAuthMount: CodexAuthMount | undefined;
 
   // Preflight is still ahead of the sweep and every container operation below,
   // which is the dependency that matters: those assume a working container
@@ -698,9 +716,20 @@ export async function run(
       // Every CLI the three roles route to (#72, #74). A
       // missing key for one of them is a refusal here, where it costs a
       // startup, rather than an in-container death an attempt at a time.
-      agentProviders: requiredAgentProviders(config),
+      agentProviders,
       onEvent: (event) => runRecord.emit(event).then(() => undefined),
     });
+    const configuredCodexAuth = agentProviders.includes("codex")
+      ? env("CODEX_AUTH_JSON")
+      : undefined;
+    if (configuredCodexAuth !== undefined) {
+      const configuredCodexHome = env("CODEX_HOME");
+      codexAuthMount = await prepareCodexAuth({
+        stateDir: layout.stateDir,
+        configuredJson: configuredCodexAuth,
+        ...(configuredCodexHome === undefined ? {} : { codexHome: configuredCodexHome }),
+      });
+    }
     lastConfigStalenessCount = initialConfigStaleness.touchingConfig;
   } catch (err) {
     return await stopAtStartup("preflight-failed", err);
@@ -836,7 +865,10 @@ export async function run(
     });
     initialAgentImages = await createAgentImages({
       declaredBaseTag: config.sandboxImage,
-      providers: requiredAgentProviders(config),
+      providers: agentProviders,
+      ...(codexAuthMount === undefined
+        ? {}
+        : { codexHome: dirname(codexAuthMount.sandboxPath) }),
       scope,
       onImage: recordImage,
       log: () => undefined,
@@ -908,7 +940,12 @@ export async function run(
   }
 
   const silentNoopAttemptsByIssue = new Map<string, number>();
-  const quotaState = createRunQuotaState();
+  const providerState = createRunProviderState();
+  // CODEX_AUTH_JSON is a driver input now, not a process credential. The
+  // shared file above is the only copy containers need (#134).
+  const sandboxEnv = Object.fromEntries(
+    Object.entries(config.env).filter(([key]) => key !== "CODEX_AUTH_JSON"),
+  );
   // The one stop this run ends on (#70). Every break out of the loop below
   // assigns it what `announceExit` has already emitted, and the process exit
   // code comes off it at the bottom of the function — so "did this stop
@@ -1004,7 +1041,7 @@ export async function run(
     layout,
     repo,
     sourceBranch: config.sourceBranch,
-    env: config.env,
+    env: sandboxEnv,
     implementerModelId: config.implementerModelId,
     uiPrototypeCheck: config.uiPrototypeCheck,
     uiCheckModelId: config.uiCheckModelId,
@@ -1021,6 +1058,7 @@ export async function run(
     maxQualityRounds: config.maxQualityRounds,
     maxReviewRounds: config.maxReviewRounds,
     sandboxImage: config.sandboxImage,
+    ...(codexAuthMount === undefined ? {} : { codexAuthMount }),
     scope,
     gateStack: config.gateStack,
     claudeMdPath: config.claudeMdPath,
@@ -1035,7 +1073,7 @@ export async function run(
     config.maxParallelIssues,
     (issue) => issue.id,
   );
-  let quotaPending: TerminalExit | null = null;
+  let providerExitPending: TerminalExit | null = null;
   let nextPlanTrigger: RecomputeTrigger = "launch";
   let deferredChunksForRecompute: string[] = [];
   let landingNumber = 0;
@@ -1247,7 +1285,10 @@ export async function run(
     });
     const nextAgentImages = await createAgentImages({
       declaredBaseTag: config.sandboxImage,
-      providers: requiredAgentProviders(config),
+      providers: agentProviders,
+      ...(codexAuthMount === undefined
+        ? {}
+        : { codexHome: dirname(codexAuthMount.sandboxPath) }),
       scope,
       onImage: recordImage,
       log: () => undefined,
@@ -1502,8 +1543,8 @@ export async function run(
         );
       });
 
-      const quotaClosed = quotaPending !== null || requiredAgentProviders(config).some(
-        (provider) => quotaState.get(provider) !== undefined,
+      const providerClosed = providerExitPending !== null || agentProviders.some(
+        (provider) => providerState.get(provider) !== undefined,
       );
       // The plan record is the resolver's answer, not the narrower admission
       // this observation may make. Active slots, cooldown and scheduler state
@@ -1519,7 +1560,7 @@ export async function run(
         hasCapacity: pool.activeCount < config.maxParallelIssues,
         noProgressSinceLanding: pool.noProgressSinceLanding,
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
-        quotaClosed,
+        providerClosed,
       });
       const pollDidWork =
         sourceChangedOnPoll || configStalenessChanged || planDiagnosticsChanged ||
@@ -1535,7 +1576,7 @@ export async function run(
           schedulerExit(
             schedulerAction.reason,
             pool,
-            quotaPending ?? closedProviderExit(config, quotaState),
+            providerExitPending ?? closedProviderExit(config, providerState),
           ),
         );
         break;
@@ -1599,7 +1640,7 @@ export async function run(
               sandboxLogBaseDir: issueLogger.dir,
               attemptLogger: issueLogger,
               onEvent: (event) => runRecord.emit(event).then(() => undefined),
-              quotaState,
+              providerState,
             });
             const durationMs = issueTimer();
             await runRecord.emit({
@@ -1676,7 +1717,7 @@ export async function run(
       // MergerError.partial). Finalised even though the run is stopping.
       let haltPartial: MergerSummary | undefined;
       let halt = false;
-      let mergerQuota: AgentQuotaError | null = null;
+      let mergerProviderError: AgentQuotaError | AgentCredentialError | null = null;
       let unexpectedLandingFailure: { readonly error: unknown } | null = null;
       // Why the run is stopping, in the short names the run log already uses.
       // Declared up here rather than beside the reports that fill it because
@@ -1737,6 +1778,7 @@ export async function run(
             mergerEffort: config.mergerEffort,
             sandboxImage: landingImages.agentImages.declaredTag,
             env,
+            ...(codexAuthMount === undefined ? {} : { codexAuthMount }),
             runStackGate: () => stackForGate2.runGate(),
           });
 
@@ -1837,9 +1879,12 @@ export async function run(
           });
         } catch (err) {
           if (err instanceof MergerError) {
-            if (err.cause instanceof AgentQuotaError) {
-              mergerQuota = err.cause;
-              quotaState.close(err.cause.provider, err.cause.measurement);
+            if (
+              err.cause instanceof AgentQuotaError ||
+              err.cause instanceof AgentCredentialError
+            ) {
+              mergerProviderError = err.cause;
+              recordProviderClosure(providerState, err.cause);
             }
             // A MergerError built by the merger's `asHalt` wraps an underlying
             // error as `cause`. When that was an unexpected bug rather than an
@@ -2072,7 +2117,7 @@ export async function run(
       if (haltReasons.length > 0) halt = true;
 
       const selectedExit = selectTerminalExit({
-        mergerQuota,
+        mergerProviderError,
         haltReasons: halt ? haltReasons : [],
         terminals: outcomes.map((outcome) => outcome.terminal),
         otherwise: () => null,
@@ -2100,7 +2145,9 @@ export async function run(
       if (sourceLandings > 0) {
         await refreshSourceImages();
       }
-      if (selectedExit?.tag === "quota") quotaPending = selectedExit;
+      if (selectedExit?.tag === "quota" || selectedExit?.tag === "credential") {
+        providerExitPending = selectedExit;
+      }
       if (selectedExit?.tag === "halted") {
         // No new admission occurs between selecting this halt and leaving the
         // loop. Let every sibling reach a terminal and persist its handoff;

@@ -142,7 +142,7 @@ describe("scheduler decisions", () => {
     active: 0, ongoing: 0, hasCompleted: false, hasPendingTerminals: false,
     hasCandidates: false, hasRetries: false, hasLandRequests: false, hasCapacity: true,
     noProgressSinceLanding: 0,
-    noProgressBackstop: 6, quotaClosed: false, ...overrides,
+    noProgressBackstop: 6, providerClosed: false, ...overrides,
   });
 
   // Every row names the WHOLE action, reason included: the exit tags are the
@@ -151,11 +151,11 @@ describe("scheduler decisions", () => {
   it.each([
     ["recompute", snapshot({ hasCompleted: true, active: 1, ongoing: 1 }), { kind: "recompute" }],
     ["land pending terminals", snapshot({ hasPendingTerminals: true, ongoing: 1 }), { kind: "land" }],
-    ["quota lands first", snapshot({ quotaClosed: true, hasPendingTerminals: true, ongoing: 1 }), { kind: "land" }],
-    ["quota drains", snapshot({ quotaClosed: true, active: 1, ongoing: 1 }), { kind: "drain" }],
-    ["quota exits", snapshot({ quotaClosed: true }), { kind: "exit", reason: "quota" }],
-    ["quota outranks stuck", snapshot({ quotaClosed: true, noProgressSinceLanding: 6 }), { kind: "exit", reason: "quota" }],
-    ["quota outranks admission", snapshot({ quotaClosed: true, hasCandidates: true }), { kind: "exit", reason: "quota" }],
+    ["provider closure lands first", snapshot({ providerClosed: true, hasPendingTerminals: true, ongoing: 1 }), { kind: "land" }],
+    ["provider closure drains", snapshot({ providerClosed: true, active: 1, ongoing: 1 }), { kind: "drain" }],
+    ["provider closure exits", snapshot({ providerClosed: true }), { kind: "exit", reason: "provider-closed" }],
+    ["provider closure outranks stuck", snapshot({ providerClosed: true, noProgressSinceLanding: 6 }), { kind: "exit", reason: "provider-closed" }],
+    ["provider closure outranks admission", snapshot({ providerClosed: true, hasCandidates: true }), { kind: "exit", reason: "provider-closed" }],
     ["stuck exits", snapshot({ noProgressSinceLanding: 6 }), { kind: "exit", reason: "stuck" }],
     ["stuck outranks admission", snapshot({ noProgressSinceLanding: 6, hasCandidates: true }), { kind: "exit", reason: "stuck" }],
     ["stuck drains on every observation, not at quiescence", snapshot({ noProgressSinceLanding: 6, active: 3, ongoing: 3, hasCandidates: true }), { kind: "drain" }],

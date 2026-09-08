@@ -510,6 +510,12 @@ type FinalizeKindInput =
       readonly window: string;
       readonly resetsAt?: number;
     }
+  | {
+      readonly kind: "credential";
+      readonly issue: IssueRef;
+      readonly provider: "codex";
+      readonly detail: string;
+    }
   // Silent-noop under the retry cap: discard the branch + worktree so the
   // next execution starts fresh against current source. The issue
   // stays `ready-for-agent` and the planner re-picks it.
@@ -961,6 +967,22 @@ export async function finalizeOne(
         `**Sandbar:** The \`${input.provider}\` subscription quota window ` +
           `\`${input.window}\` closed; it resets at ${reset}. The branch ` +
           `\`${input.issue.branch}\` was pushed. This issue remains ` +
+          `\`ready-for-agent\` for the next run.`,
+      );
+      return { kind: "pushed" };
+    }
+    case "credential": {
+      const n = issueNumberOf(input.issue);
+      const detail = input.detail.trim();
+      await adapter.reclaimIssueClone(input.issue.branch);
+      await adapter.pushBranch(input.issue.branch);
+      await adapter.postComment(
+        n,
+        `**Sandbar:** The \`${input.provider}\` provider refused its credential: ` +
+          `${detail}${/[.!?]$/.test(detail) ? " " : ". "}` +
+          `Log in again on the host using the credential file ` +
+          `your config reads into \`CODEX_AUTH_JSON\`, then restart Sandbar. The ` +
+          `branch \`${input.issue.branch}\` was pushed. This issue remains ` +
           `\`ready-for-agent\` for the next run.`,
       );
       return { kind: "pushed" };
