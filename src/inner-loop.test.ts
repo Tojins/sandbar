@@ -1,3 +1,6 @@
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 const innerLoopMocks = vi.hoisted(() => ({
@@ -41,6 +44,10 @@ import {
   runSandboxAndPublish,
   type ReadOnlyAgentSnapshot,
 } from "./inner-loop.js";
+import {
+  createAgentInvocationSequencer,
+  createTranscriptTree,
+} from "./logs.js";
 import { qualityReviewContext } from "./prompt.js";
 import type { ReviewerOutcome } from "./reviewer-run.js";
 import type { HeadMismatch } from "./git-ops.js";
@@ -62,21 +69,32 @@ describe("runUiCheck (#126)", () => {
     innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
       "refs/heads/sandbar/issue-126",
     );
+    const writes: string[] = [];
+    const run = async (
+      stdout: string,
+      maxGapMs: number,
+      toolCalls: number,
+      options: Parameters<Sandbox["run"]>[0],
+    ) => {
+      await options.onInvocationEnd?.({
+        agent: options.name ?? options.agent.name,
+        provider: options.agent.name,
+        model: options.model ?? null,
+        end: "exit",
+        detail: null,
+        exitCode: 0,
+        durationMs: 1,
+        speech: stdout,
+        stdout,
+        stderr: "",
+      });
+      return { stdout, commits: [], maxGapMs, toolCalls };
+    };
     const sandbox = {
       worktreePath: "/worktree",
       run: vi.fn()
-        .mockResolvedValueOnce({
-          stdout: runs[0] ?? "",
-          commits: [],
-          maxGapMs: 3,
-          toolCalls: 1,
-        })
-        .mockResolvedValueOnce({
-          stdout: runs[1] ?? "",
-          commits: [],
-          maxGapMs: 4,
-          toolCalls: 2,
-        }),
+        .mockImplementationOnce((options) => run(runs[0] ?? "", 3, 1, options))
+        .mockImplementationOnce((options) => run(runs[1] ?? "", 4, 2, options)),
       preserveWorktree: vi.fn(),
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
@@ -85,20 +103,27 @@ describe("runUiCheck (#126)", () => {
       ctx: {
         issue: { id: "126", title: "ui check", branch: "sandbar/issue-126" },
         sandbox,
-        opts: { onEvent: (event: EventInput) => events.push(event) },
+        opts: {
+          attemptLogger: {
+            writeInvocation: vi.fn(async (filename) => writes.push(filename)),
+          },
+          onEvent: (event: EventInput) => events.push(event),
+        },
         config: {
           repo: { owner: "owner", name: "repo" },
           uiCheckAgent: "codex",
           uiCheckModelId: "gpt-5.6-sol",
           uiCheckEffort: "low",
         },
+        invocationSequence: createAgentInvocationSequencer().startCycle(),
       } as unknown as Parameters<typeof runUiCheck>[1],
+      writes,
     };
   };
 
   it("returns a classification from a cold call with no completion signal", async () => {
     const events: EventInput[] = [];
-    const { sandbox, ctx } = context(["<ui-check>CLEAR</ui-check>"], events);
+    const { sandbox, ctx, writes } = context(["<ui-check>CLEAR</ui-check>"], events);
     await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).resolves.toEqual({
       kind: "ui-check-result",
       result: { kind: "CLEAR" },
@@ -114,6 +139,7 @@ describe("runUiCheck (#126)", () => {
     const command = invocation.agent.buildPrintCommand({ prompt: "p" }).command;
     expect(command).toContain("--model 'gpt-5.6-sol'");
     expect(command).toContain("-c 'model_reasoning_effort=low'");
+    expect(writes).toEqual(["ui-check-1.log"]);
     expect(events).toEqual([{
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
@@ -172,8 +198,25 @@ describe("runUiCheck (#126)", () => {
       14,
       { status: "rejected", window: "weekly", utilization: 1 },
     );
-    vi.mocked(failure.sandbox.run).mockReset().mockRejectedValueOnce(err);
+    vi.mocked(failure.sandbox.run).mockReset().mockImplementationOnce(
+      async (options) => {
+        await options.onInvocationEnd?.({
+          agent: options.name ?? options.agent.name,
+          provider: options.agent.name,
+          model: options.model ?? null,
+          end: "exec-error",
+          detail: "disconnected",
+          exitCode: null,
+          durationMs: 1,
+          speech: "partial",
+          stdout: "raw partial",
+          stderr: "disconnected",
+        });
+        throw err;
+      },
+    );
     await expect(runUiCheck({ kind: "run-ui-check" }, failure.ctx)).rejects.toBe(err);
+    expect(failure.writes).toEqual(["ui-check-1.log"]);
     expect(failureEvents).toEqual([{
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
@@ -185,7 +228,7 @@ describe("runUiCheck (#126)", () => {
 
   it("offers one cold correction for a malformed answer", async () => {
     const events: EventInput[] = [];
-    const { sandbox, ctx } = context([
+    const { sandbox, ctx, writes } = context([
       "<ui-check>PROTOTYPE-NEEDED</ui-check>",
       "<ui-check>CLEAR</ui-check>",
     ], events);
@@ -198,6 +241,7 @@ describe("runUiCheck (#126)", () => {
       prompt: expect.stringContaining("provided no `<ui-impact>` block"),
       completionSignal: [],
     }));
+    expect(writes).toEqual(["ui-check-1.log", "ui-check-2.log"]);
     expect(events).toEqual([
       expect.objectContaining({ kind: "ui-check", invocation: 1,
         result: "NO-SIGNAL", maxGapMs: 3 }),
@@ -286,9 +330,29 @@ describe("silent implementer attempt policy (#116)", () => {
     );
     const writes: string[] = [];
     const lines: EventInput[] = [];
+    const record = async (
+      result: ReturnType<typeof sandboxResult>,
+      options: Parameters<Sandbox["run"]>[0],
+    ) => {
+      await options.onInvocationEnd?.({
+        agent: options.name ?? options.agent.name,
+        provider: options.agent.name,
+        model: options.model ?? null,
+        end: "exit",
+        detail: null,
+        exitCode: 0,
+        durationMs: 1,
+        speech: result.stdout,
+        stdout: result.stdout,
+        stderr: "",
+      });
+      return result;
+    };
     const sandbox = {
       worktreePath: "/unused",
-      run: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(nudge),
+      run: vi.fn()
+        .mockImplementationOnce((options) => record(first, options))
+        .mockImplementationOnce((options) => record(nudge, options)),
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
     const ctx = {
@@ -296,7 +360,7 @@ describe("silent implementer attempt policy (#116)", () => {
       sandbox,
       opts: {
         attemptLogger: {
-          writeAttempt: vi.fn(async (_id, _attempt, text) => writes.push(text)),
+          writeInvocation: vi.fn(async (_filename, record) => writes.push(record.speech)),
         },
         onEvent: (event: EventInput) => lines.push(event),
       },
@@ -313,6 +377,7 @@ describe("silent implementer attempt policy (#116)", () => {
       accumulated: [],
       priorReviewRounds: [],
       sandboxStatuses: [],
+      invocationSequence: createAgentInvocationSequencer().startCycle(),
     } as unknown as Parameters<typeof runImplementer>[1];
     const pending = runImplementer(
       {
@@ -344,7 +409,7 @@ describe("silent implementer attempt policy (#116)", () => {
     );
 
     await expect(pending).resolves.toMatchObject({ kind: "implementer-result" });
-    expect(writes).toEqual(["", "\n"]);
+    expect(writes).toEqual(["", ""]);
     expect(lines.at(-1)).toMatchObject({ kind: "implementer", commits: 2 });
   });
 
@@ -359,7 +424,7 @@ describe("silent implementer attempt policy (#116)", () => {
       kind: "implementer-result",
       signal: { kind: "NEEDS-INFO" },
     });
-    expect(writes).toEqual(["", `\n${spoken}`]);
+    expect(writes).toEqual(["", spoken]);
     expect(lines.at(-1)).toMatchObject({ kind: "implementer", commits: 0 });
   });
 
@@ -536,6 +601,88 @@ describe("role prompt-extension wiring (#91)", () => {
       }),
     );
   });
+
+  it("records successful, failed, and retried reviewer invocations separately", async () => {
+    innerLoopMocks.buildReviewerPrompts.mockResolvedValueOnce({
+      quality: "quality prompt",
+      correctness: "correctness prompt",
+    });
+    innerLoopMocks.branchTip.mockReset().mockResolvedValue("head123");
+    innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
+    innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
+      "refs/heads/sandbar/issue-91",
+    );
+    const filenames: string[] = [];
+    const invocationSequence = createAgentInvocationSequencer().startCycle();
+    const outputs = [
+      { output: "", error: new Error("review provider failed") },
+      { output: "<verdict>APPROVED</verdict>", error: null },
+      { output: "<verdict>APPROVED</verdict>", error: null },
+    ];
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(async (options: Parameters<Sandbox["run"]>[0]) => {
+        const result = outputs.shift()!;
+        await options.onInvocationEnd?.({
+          agent: options.name ?? options.agent.name,
+          provider: options.agent.name,
+          model: options.model ?? null,
+          end: result.error === null ? "exit" : "exec-error",
+          detail: result.error?.message ?? null,
+          exitCode: result.error === null ? 0 : null,
+          durationMs: 1,
+          speech: result.output,
+          stdout: result.output,
+          stderr: result.error?.message ?? "",
+        });
+        if (result.error !== null) throw result.error;
+        return {
+          stdout: result.output,
+          commits: [],
+          silent: false,
+          maxGapMs: 1,
+          toolCalls: 0,
+        };
+      }),
+    } as unknown as Sandbox;
+    const ctx = {
+      issue: { id: "91", title: "records", branch: "sandbar/issue-91" },
+      sandbox,
+      opts: {
+        attemptLogger: {
+          writeInvocation: vi.fn(async (filename) => filenames.push(filename)),
+        },
+        onEvent: vi.fn(),
+      },
+      config: {
+        repo: { owner: "owner", name: "repo" },
+        layout: { repoDir: "/repo" },
+        sourceBranch: "main",
+        claudeMdPath: "CLAUDE.md",
+        reviewerQualityAgent: "codex",
+        reviewerQualityModelId: "quality-model",
+        reviewerAgent: "codex",
+        reviewerModelId: "correctness-model",
+      },
+      base: { ref: "origin/main" },
+      accumulated: [{ sha: "head123" }],
+      priorReviewRounds: [],
+      invocationSequence,
+    } as unknown as Parameters<typeof runReviewer>[1];
+
+    await expect(runReviewer({
+      kind: "run-gate-and-reviewer",
+      attempt: 2,
+      reviewRound: 1,
+    }, ctx)).resolves.toMatchObject({
+      event: { kind: "reviewer-result", verdict: "APPROVED" },
+    });
+    expect(filenames).toEqual([
+      "attempt-2-reviewer-quality-1.log",
+      "attempt-2-reviewer-quality-2.log",
+      "attempt-2-reviewer-correctness-1.log",
+    ]);
+  });
 });
 
 describe("runGateAndReviewer (#123)", () => {
@@ -708,6 +855,107 @@ const harnessFailed: ReviewerOutcome = {
 };
 
 describe("runInnerLoop HARD-ERROR logging (#115)", () => {
+  it("keeps every invocation record across retries and later admissions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandbar-invocation-cycles-"));
+    try {
+      const transcriptTree = await createTranscriptTree(root);
+      const issueLogger = await transcriptTree.issue("135");
+      let cycle = 0;
+      const runCycle = vi.fn(async (
+        _issue,
+        opts,
+        sequence,
+      ) => {
+        cycle += 1;
+        const record = {
+          agent: `cycle-${cycle}`,
+          provider: "codex",
+          model: "model",
+          end: "exit" as const,
+          detail: null,
+          exitCode: cycle < 3 ? 1 : 0,
+          durationMs: 1,
+          speech: `speech-${cycle}`,
+          stdout: `stdout-${cycle}`,
+          stderr: `stderr-${cycle}`,
+        };
+        await opts.attemptLogger.writeInvocation(
+          sequence.filename({ role: "ui-check", invocation: 1 }),
+          record,
+        );
+        await opts.attemptLogger.writeInvocation(
+          sequence.filename({ role: "implementer", attempt: 1, nudge: false }),
+          record,
+        );
+        await opts.attemptLogger.writeInvocation(
+          sequence.filename({ role: "implementer", attempt: 1, nudge: true }),
+          record,
+        );
+        await opts.attemptLogger.writeInvocation(
+          sequence.filename({
+            role: "reviewer",
+            attempt: 1,
+            pass: "quality",
+            invocation: 1,
+          }),
+          record,
+        );
+        return cycle < 3
+          ? {
+              verdict: { type: "HARD-ERROR" as const, reason: `failed-${cycle}` },
+              accumulatedCommits: [],
+              specGaps: [],
+            }
+          : {
+              verdict: { type: "DONE" as const, commits: [] },
+              accumulatedCommits: [],
+              specGaps: [],
+            };
+      });
+
+      await expect(runInnerLoop(
+        { id: "135", title: "records", branch: "sandbar/issue-135-records" },
+        { attemptLogger: issueLogger, onEvent: () => undefined } as Parameters<
+          typeof runInnerLoop
+        >[1],
+        runCycle,
+      )).resolves.toMatchObject({ type: "DONE" });
+      const readmittedLogger = await transcriptTree.issue("135");
+      expect(readmittedLogger).toBe(issueLogger);
+      await expect(runInnerLoop(
+        { id: "135", title: "records", branch: "sandbar/issue-135-records" },
+        { attemptLogger: readmittedLogger, onEvent: () => undefined } as Parameters<
+          typeof runInnerLoop
+        >[1],
+        runCycle,
+      )).resolves.toMatchObject({ type: "DONE" });
+      expect((await readdir(issueLogger.dir)).sort()).toEqual([
+        "attempt-1-nudge.log",
+        "attempt-1-reviewer-quality-1.log",
+        "attempt-1.log",
+        "attempt-2-nudge.log",
+        "attempt-2-reviewer-quality-1.log",
+        "attempt-2.log",
+        "attempt-3-nudge.log",
+        "attempt-3-reviewer-quality-1.log",
+        "attempt-3.log",
+        "attempt-4-nudge.log",
+        "attempt-4-reviewer-quality-1.log",
+        "attempt-4.log",
+        "ui-check-1.log",
+        "ui-check-2.log",
+        "ui-check-3.log",
+        "ui-check-4.log",
+      ]);
+      await expect(readFile(join(issueLogger.dir, "attempt-1.log"), "utf8"))
+        .resolves.toContain("speech-1");
+      await expect(readFile(join(issueLogger.dir, "attempt-3.log"), "utf8"))
+        .resolves.toContain("speech-3");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("writes each recovering retry identically to stderr and the durable log", async () => {
     const outcomes = [
       {
@@ -733,6 +981,10 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
         runInnerLoop(
           { id: "115", title: "logging", branch: "sandbar/issue-115-logging" },
           {
+            attemptLogger: {
+              writeInvocation: vi.fn(),
+              startInvocationCycle: createAgentInvocationSequencer().startCycle,
+            },
             onEvent: (event) => events.push(event),
           } as unknown as Parameters<typeof runInnerLoop>[1],
           runCycle,
@@ -757,7 +1009,13 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
     await expect(
       runInnerLoop(
         { id: "115", title: "logging", branch: "sandbar/issue-115-logging" },
-        { onEvent: () => undefined } as Parameters<typeof runInnerLoop>[1],
+        {
+          attemptLogger: {
+            writeInvocation: vi.fn(),
+            startInvocationCycle: createAgentInvocationSequencer().startCycle,
+          },
+          onEvent: () => undefined,
+        } as Parameters<typeof runInnerLoop>[1],
         runCycle,
       ),
     ).resolves.toEqual({

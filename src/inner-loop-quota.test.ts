@@ -75,9 +75,11 @@ vi.mock("./prompt.js", async (importOriginal) => ({
 import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
 import {
   createRunProviderState,
-  runInnerLoop,
+  runInnerLoop as runInnerLoopActual,
   type InnerLoopConfig,
+  type InnerLoopOptions,
 } from "./inner-loop.js";
+import { createAgentInvocationSequencer } from "./logs.js";
 import type { PlannedIssue } from "./plan-resolver.js";
 
 const issue = (id: string): PlannedIssue => ({
@@ -86,6 +88,20 @@ const issue = (id: string): PlannedIssue => ({
   branch: `sandbar/issue-${id}-quota-test`,
   chunk: null,
 });
+
+const runInnerLoop = (
+  plannedIssue: PlannedIssue,
+  opts: Omit<InnerLoopOptions, "attemptLogger">,
+) => {
+  const invocationSequencer = createAgentInvocationSequencer();
+  return runInnerLoopActual(plannedIssue, {
+    ...opts,
+    attemptLogger: {
+      writeInvocation: vi.fn(),
+      startInvocationCycle: () => invocationSequencer.startCycle(),
+    },
+  });
+};
 
 const config = (
   implementerAgent: "claude" | "codex",

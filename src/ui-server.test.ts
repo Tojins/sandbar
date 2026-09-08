@@ -53,7 +53,8 @@ describe("run UI server", () => {
         phaseSince: "2026-09-07T09:50:00Z", attempt: 1,
         spans: [{ kind: "impl", from: "2026-09-07T09:50:00Z", to: null, label: "a1" }] }],
       waiting: [{ issue: 3, title: "Waiting title", why: "blocked by #2" }],
-      finished: [{ issue: 1, title: "Finished title", outcome: "DONE", attempts: 1,
+      finished: [{ issue: 1, title: "Finished title", outcome: "HARD-ERROR",
+        reason: "provider cause\n(codex exited with code 1)", attempts: 1,
         rounds: 1, ms: 60_000, landed: "main", at: "2026-09-07T09:40:00Z" }],
       eventCount: 1,
       events: [{ at: "2026-09-07T09:50:00Z", issue: 2, text: "attempt started", tone: "" }],
@@ -75,6 +76,8 @@ describe("run UI server", () => {
     expect(app.innerHTML).toContain("Pool title");
     expect(app.innerHTML).toContain("Waiting title");
     expect(app.innerHTML).toContain("Finished title");
+    expect(app.innerHTML).toContain("HARD-ERROR · provider cause");
+    expect(app.innerHTML).not.toContain("codex exited with code 1");
     expect(app.innerHTML).toContain("attempt started");
     await interval?.();
     expect(app.innerHTML).toContain("sandbar updated");

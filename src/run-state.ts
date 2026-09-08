@@ -39,6 +39,7 @@ export type FinishedIssueState = {
   readonly issue: number;
   readonly title: string;
   readonly outcome: string;
+  readonly reason: string;
   readonly attempts: number;
   readonly rounds: number;
   readonly ms: number;
@@ -76,6 +77,14 @@ export type UiState = {
 };
 
 const RECENT_EVENT_LIMIT = 200;
+
+const firstLine = (text: string | null): string => text?.split(/\r?\n/, 1)[0] ?? "";
+
+const parkedReason = (
+  outcome: string,
+  reason: string | null,
+  when: "this run" | "before this run",
+): string => `parked · ${outcome}${reason ? ` · ${firstLine(reason)}` : ""} · ${when}`;
 
 type MutableIssue = {
   issue: number;
@@ -179,7 +188,7 @@ function feedText(event: RunEvent): FeedEvent | null {
       tone = "dim";
       break;
     case "hard-error":
-      text = `hard error · retry ${event.retry}/${event.max}`;
+      text = `hard error · retry ${event.retry}/${event.max} · ${firstLine(event.reason)}`;
       tone = "bad";
       break;
     case "phase":
@@ -292,6 +301,7 @@ function finishedFrom(events: readonly RunEvent[]): readonly FinishedIssueState[
         issue: terminal.issue,
         title: terminal.title ?? titles.get(terminal.issue) ?? "",
         outcome: "NEEDS-HUMAN",
+        reason: landed.reason ?? terminal.reason ?? "",
         attempts: attempts.get(terminal.issue) ?? 0,
         rounds: rounds.get(terminal.issue) ?? 0,
         ms: terminal.durationMs,
@@ -304,6 +314,7 @@ function finishedFrom(events: readonly RunEvent[]): readonly FinishedIssueState[
       issue: terminal.issue,
       title: terminal.title ?? titles.get(terminal.issue) ?? "",
       outcome: terminal.terminal,
+      reason: terminal.reason ?? "",
       attempts: attempts.get(terminal.issue) ?? 0,
       rounds: rounds.get(terminal.issue) ?? 0,
       ms: terminal.durationMs,
@@ -335,7 +346,10 @@ export function reduceRunEvents(
   let ended = false;
   const complaints: Array<{ severity: "warning" | "error"; text: string }> = [];
   const feed: FeedEvent[] = [];
-  const parkedTerminals = new Map<number, string>();
+  const parkedTerminals = new Map<
+    number,
+    Extract<RunEvent, { kind: "terminal" }>
+  >();
 
   for (const event of events) {
     const feedEvent = feedText(event);
@@ -371,7 +385,7 @@ export function reduceRunEvents(
       }
       case "terminal": {
         executing.delete(event.issue);
-        parkedTerminals.set(event.issue, event.terminal);
+        parkedTerminals.set(event.issue, event);
         const issue = issues.get(event.issue);
         if (event.terminal === "REJECTED") {
           issues.delete(event.issue);
@@ -491,14 +505,14 @@ export function reduceRunEvents(
       waitingRows.push({
         issue: issue.issue,
         title: issue.title,
-        why: `parked · ${terminal} · this run`,
+        why: parkedReason(terminal.terminal, terminal.reason, "this run"),
         parked: true,
       });
     }
   }
   if (lastRecompute) {
     const previousOutcomes = new Map(
-      (options.recentFinished ?? []).map((item) => [item.issue, item.outcome] as const),
+      (options.recentFinished ?? []).map((item) => [item.issue, item] as const),
     );
     const candidates = new Map(
       lastRecompute.candidates.map((candidate) => [candidate.issue, candidate] as const),
@@ -516,7 +530,13 @@ export function reduceRunEvents(
       waitingRows.push({
         issue: ref.issue,
         title: candidates.get(ref.issue)?.title ?? "",
-        why: `parked · ${parked ?? previous ?? "unknown terminal"} · ${parked ? "this run" : "before this run"}`,
+        why: parked
+          ? parkedReason(parked.terminal, parked.reason, "this run")
+          : parkedReason(
+              previous?.outcome ?? "unknown terminal",
+              previous?.reason ?? null,
+              "before this run",
+            ),
         parked: true,
       });
     }

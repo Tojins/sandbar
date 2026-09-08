@@ -28,6 +28,7 @@ import {
   BoundedTail,
   CODEX_REFRESH_FAILURE_MESSAGES,
   MAX_TAIL_CHARS,
+  type AgentInvocationRecord,
   type AgentProvider,
   type Mount,
   type ProviderCreateOptions,
@@ -37,6 +38,7 @@ import {
   AgentError,
   AgentQuotaError,
   AgentIdleTimeoutError,
+  agentFailureMessage,
   agentPartialOutput,
   agentPartialUsage,
   claudeCode,
@@ -55,6 +57,7 @@ import {
   sandboxExecArgs,
   sandboxRunArgs,
 } from "./agent-sandbox.js";
+import { createTranscriptTree } from "./logs.js";
 
 const CODEX_REFRESH_FAILURE_LITERALS = [
   "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
@@ -63,6 +66,19 @@ const CODEX_REFRESH_FAILURE_LITERALS = [
   "Your access token could not be refreshed. Please log out and sign in again.",
   "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.",
 ] as const;
+
+describe("agent failure message (#135)", () => {
+  it.each([
+    ["codex", 1, "provider gave up", true,
+      "provider gave up\n(codex exited with code 1)"],
+    ["codex", 0, "provider gave up", true,
+      "provider gave up\n(codex reported a failed turn and produced no output)"],
+    ["claude-code", 7, "stderr diagnostic", false,
+      "stderr diagnostic\n(claude-code exited with code 7)"],
+  ])("leads %s exit %i with its diagnostic", (agent, code, diagnostic, failed, expected) => {
+    expect(agentFailureMessage(agent, code, diagnostic, failed)).toBe(expected);
+  });
+});
 
 const execFileP = promisify(execFile);
 
@@ -935,6 +951,7 @@ describe("registerShutdown", () => {
 function makeLocalProvider(
   live: Set<ChildProcess> = new Set(),
   rolloutProbe: "run" | "reject" | "reject-first" | "hang" = "run",
+  agentExecFailure?: { readonly marker: string; readonly error: Error },
 ): SandboxProvider & {
   capturedEnv?: Record<string, string>;
   capturedMounts?: readonly Mount[];
@@ -971,6 +988,12 @@ function makeLocalProvider(
               }
               if (rolloutProbe === "hang") return;
             }
+            if (agentExecFailure && command.includes(agentExecFailure.marker)) {
+              execOpts?.onStdout?.("stdout before exec rejection\n");
+              execOpts?.onStderr?.("stderr before exec rejection\n");
+              rejectExec(agentExecFailure.error);
+              return;
+            }
             const proc = spawn("sh", ["-c", command], {
               cwd: execOpts?.cwd ?? worktreePath,
               env: { ...process.env },
@@ -1000,9 +1023,14 @@ function makeLocalProvider(
             }
             proc.on("error", rejectExec);
             const stderrChunks: string[] = [];
-            proc.stderr!.on("data", (c) => stderrChunks.push(c.toString()));
+            proc.stderr!.on("data", (c) => {
+              const chunk = c.toString();
+              execOpts?.onStderr?.(chunk);
+              stderrChunks.push(chunk);
+            });
             if (execOpts?.onLine) {
               const stdoutLines: string[] = [];
+              proc.stdout!.on("data", (c) => execOpts.onStdout?.(c.toString()));
               const rl = createInterface({ input: proc.stdout! });
               rl.on("line", (line) => {
                 stdoutLines.push(line);
@@ -1017,7 +1045,11 @@ function makeLocalProvider(
               );
             } else {
               const stdoutChunks: string[] = [];
-              proc.stdout!.on("data", (c) => stdoutChunks.push(c.toString()));
+              proc.stdout!.on("data", (c) => {
+                const chunk = c.toString();
+                execOpts?.onStdout?.(chunk);
+                stdoutChunks.push(chunk);
+              });
               proc.on("close", (code) =>
                 resolveExec({
                   stdout: stdoutChunks.join(""),
@@ -1768,7 +1800,9 @@ describe("createSandbox integration (local provider)", () => {
       // empty — which is what keeps the REVIEWER path unchanged: no verdict
       // token in "", so #41 classifies it harness-failed and the round is not
       // consumed.
-      expect((err as Error).message).toContain("401 Unauthorized");
+      expect((err as Error).message).toBe(
+        "401 Unauthorized\n(codex reported a failed turn and produced no output)",
+      );
       expect(agentPartialOutput(err)).toBe("");
     } finally {
       await sandbox.close();
@@ -1790,6 +1824,9 @@ describe("createSandbox integration (local provider)", () => {
       layout: layoutFor(dir),
     });
     try {
+      const logRoot = await mkdtemp(join(tmpdir(), "asb-invocation-log-"));
+      cleanups.push(logRoot);
+      const issueLogger = await (await createTranscriptTree(logRoot)).issue("10");
       const failed = JSON.stringify({
         type: "turn.failed",
         error: { message: "unexpected status 401 Unauthorized" },
@@ -1807,14 +1844,33 @@ describe("createSandbox integration (local provider)", () => {
         parseStreamLine: parseCodexJsonLine,
       };
       const err = await sandbox
-        .run({ agent, prompt: "go", completionSignal: [] })
+        .run({
+          name: "implementer-10-attempt-1",
+          model: "test-model",
+          agent,
+          prompt: "go",
+          completionSignal: [],
+          onInvocationEnd: (record) =>
+            issueLogger.writeInvocation("attempt-1.log", record),
+        })
         .then(() => null)
         .catch((e: unknown) => e);
       expect(err).toBeInstanceOf(AgentError);
       const message = (err as Error).message;
-      expect(message).toContain("exited with code 1");
-      expect(message).toContain("unexpected status 401 Unauthorized");
+      expect(message).toBe(
+        "unexpected status 401 Unauthorized\n(codex exited with code 1)",
+      );
       expect(message).not.toContain("responses_websocket");
+      const record = await readFile(join(issueLogger.dir, "attempt-1.log"), "utf8");
+      expect(record).toContain(
+        "agent:      implementer-10-attempt-1\nprovider:   codex\n" +
+        "model:      test-model\nended:      exit\nexit code:  1",
+      );
+      expect(record).toContain("--- speech ---\n\n--- stdout tail ---\n");
+      expect(record).toContain("unexpected status 401 Unauthorized");
+      expect(record).toContain(
+        "--- stderr tail ---\nERROR codex_api::endpoint::responses_websocket: failed to connect",
+      );
     } finally {
       await sandbox.close();
     }
@@ -2065,26 +2121,43 @@ describe("createSandbox integration (local provider)", () => {
       layout: layoutFor(dir),
     });
     try {
+      const records: AgentInvocationRecord[] = [];
       // Emit the completion signal, commit, then hold the pipe open (sleep) so
       // the exec never reaches EOF. The grace timer must resolve with commits.
       const agent = scriptedAgent(
         `git commit --allow-empty -m "graced" >/dev/null 2>&1 && ` +
           `printf '%s\\n' '${JSON.stringify({ type: "result", result: "<promise>COMPLETE</promise>" })}' && ` +
+          `printf '%s\\n' 'completion stderr tail' >&2 && ` +
           `sleep 30`,
       );
       const start = Date.now();
       const err = await sandbox.run({
+        name: "implementer-4-attempt-1",
+        model: "test-model",
         agent,
         prompt: "go",
         completionSignal: ["<promise>COMPLETE</promise>"],
         completionTimeoutSeconds: 0.2,
         idleTimeoutSeconds: 30,
+        onInvocationEnd: async (record) => {
+          records.push(record);
+        },
       }).then(() => null, (e: unknown) => e);
       const elapsed = Date.now() - start;
       expect(err).toBeInstanceOf(AgentError);
       expect((err as Error).message).toContain("without exiting");
       expect(agentPartialOutput(err)).toContain("<promise>COMPLETE</promise>");
       expect(elapsed).toBeLessThan(5000);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        agent: "implementer-4-attempt-1",
+        model: "test-model",
+        end: "completion-timeout",
+        exitCode: null,
+        speech: "<promise>COMPLETE</promise>",
+      });
+      expect(records[0]?.stdout).toContain("<promise>COMPLETE</promise>");
+      expect(records[0]?.stderr).toContain("completion stderr tail");
     } finally {
       await sandbox.close();
     }
@@ -2131,12 +2204,13 @@ describe("createSandbox integration (local provider)", () => {
       layout: layoutFor(dir),
     });
     try {
+      const records: AgentInvocationRecord[] = [];
       const agent: AgentProvider = {
         name: "claude-code",
         env: {},
         buildPrintCommand: () => ({
           command:
-            `printf '%s\\n%s\\n' ` +
+            `printf '%s\\n' 'parser stderr tail' >&2; sleep 0.1; printf '%s\\n%s\\n' ` +
             `${JSON.stringify(JSON.stringify({ type: "speech" }))} ` +
             `${JSON.stringify(JSON.stringify({ type: "broken" }))}`,
           stdin: "",
@@ -2148,7 +2222,14 @@ describe("createSandbox integration (local provider)", () => {
         },
       };
       const err = await sandbox
-        .run({ agent, prompt: "go", completionSignal: [] })
+        .run({
+          agent,
+          prompt: "go",
+          completionSignal: [],
+          onInvocationEnd: async (record) => {
+            records.push(record);
+          },
+        })
         .then(() => null, (e: unknown) => e);
 
       expect(err).toBeInstanceOf(AgentError);
@@ -2156,6 +2237,54 @@ describe("createSandbox integration (local provider)", () => {
         "claude-code stream parse failed on a JSON line: invalid provider shape",
       );
       expect(agentPartialOutput(err)).toBe("partial agent speech");
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        end: "stream-error",
+        exitCode: null,
+        speech: "partial agent speech",
+      });
+      expect(records[0]?.stdout).toContain('"type":"broken"');
+      expect(records[0]?.stderr).toContain("parser stderr tail");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  it("records an exec rejection once with the raw stream tails", async () => {
+    await git(["branch", "sandbar/issue-135-exec-reject"], dir);
+    const execError = new Error("exec transport disconnected");
+    const provider = makeLocalProvider(
+      new Set(),
+      "run",
+      { marker: "sandbar-exec-reject", error: execError },
+    );
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-135-exec-reject",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const records: AgentInvocationRecord[] = [];
+      const err = await sandbox.run({
+        agent: scriptedAgent("sandbar-exec-reject"),
+        prompt: "go",
+        completionSignal: [],
+        onInvocationEnd: async (record) => {
+          records.push(record);
+        },
+      }).then(() => null, (error: unknown) => error);
+
+      expect(err).toBe(execError);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        end: "exec-error",
+        detail: "exec transport disconnected",
+        exitCode: null,
+        speech: "",
+        stdout: "stdout before exec rejection\n",
+        stderr: "stderr before exec rejection\n",
+      });
     } finally {
       await sandbox.close();
     }
@@ -2172,13 +2301,14 @@ describe("createSandbox integration (local provider)", () => {
       layout: layoutFor(dir),
     });
     try {
+      const records: AgentInvocationRecord[] = [];
       // A reviewer that says something and then goes quiet. The observed #41
       // run emitted nothing at all, but the interesting assertion is the
       // opposite case: those bytes are the ONLY thing that tells a caller
       // "the agent produced no review" apart from "the agent produced a
       // review and the run died", and the two are handled differently.
       const agent = scriptedAgent(
-        `printf '%s\\n' '${JSON.stringify({
+        `printf '%s\\n' 'idle stderr tail' >&2; printf '%s\\n' '${JSON.stringify({
           type: "rate_limit_event",
           rate_limit_info: {
             status: "allowed", rateLimitType: "five_hour", resetsAt: 42,
@@ -2201,7 +2331,15 @@ describe("createSandbox integration (local provider)", () => {
         })}' && sleep 30`,
       );
       const err = await sandbox
-        .run({ agent, prompt: "go", completionSignal: [], idleTimeoutSeconds: 0.4 })
+        .run({
+          agent,
+          prompt: "go",
+          completionSignal: [],
+          idleTimeoutSeconds: 0.4,
+          onInvocationEnd: async (record) => {
+            records.push(record);
+          },
+        })
         .then(
           () => null,
           (e: unknown) => e,
@@ -2221,6 +2359,14 @@ describe("createSandbox integration (local provider)", () => {
         utilization: 0.98,
         resetsAt: 42,
       });
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        end: "idle-timeout",
+        exitCode: null,
+        speech: "partial review findings",
+      });
+      expect(records[0]?.stdout).toContain("partial review findings");
+      expect(records[0]?.stderr).toContain("idle stderr tail");
 
       // And the half the message never covered: the run stopped waiting for the
       // exec, so the exec is stopped. Before this, `sleep 30` (in production, a

@@ -49,6 +49,10 @@
 //   F10 — `agent-run-end.ts` owns end classification. This wrapper supplies
 //         `retryable` for silence because its same-session nudge can recover;
 //         it maps the classifier's exit diagnostic into AgentError.
+//   F11 — each run-owned invocation record is written HERE, before F10 judges
+//         the exit. It contains parsed speech and both bounded raw stream tails;
+//         timeout paths retain their own tails so recording never waits for a
+//         descendant that kept an exec pipe open (#135).
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
@@ -275,6 +279,10 @@ export type ExecOptions = {
   cwd?: string;
   sudo?: boolean;
   onLine?: (line: string) => void;
+  // Raw chunks let the invocation boundary retain its own bounded tails even
+  // when a timeout must reject before the exec client's pipes reach EOF.
+  onStdout?: (chunk: string) => void;
+  onStderr?: (chunk: string) => void;
   // Kills the exec CLIENT when aborted (#41). Be precise about what that
   // reaps: the host-side `podman exec` process, its pipes and the readline
   // interface reading them — nothing more. The process INSIDE the container is
@@ -352,11 +360,36 @@ export type RunOptions = {
   readonly agent: AgentProvider;
   readonly prompt?: string;
   readonly name?: string;
+  readonly model?: string;
+  // The process record is written at the invocation boundary, while both raw
+  // stream tails and parsed speech are still in hand and before either one is
+  // classified into a provider/run verdict (#135). Optional because the
+  // standalone sandbox API has no run transcript tree; sandbar's inner loop
+  // supplies it for every role invocation.
+  readonly onInvocationEnd?: (record: AgentInvocationRecord) => Promise<void>;
   // Required because a role's signal is its contract, never a default. `[]`
   // ends only on process exit or idle timeout; grace is unreachable (#83).
   readonly completionSignal: readonly string[];
   readonly idleTimeoutSeconds?: number;
   readonly completionTimeoutSeconds?: number;
+};
+
+export type AgentInvocationRecord = {
+  readonly agent: string;
+  readonly provider: string;
+  readonly model: string | null;
+  readonly end:
+    | "exit"
+    | "idle-timeout"
+    | "completion-timeout"
+    | "stream-error"
+    | "exec-error";
+  readonly detail: string | null;
+  readonly exitCode: number | null;
+  readonly durationMs: number;
+  readonly speech: string;
+  readonly stdout: string;
+  readonly stderr: string;
 };
 
 export type SandboxRunResult = {
@@ -506,6 +539,18 @@ export class AgentIdleTimeoutError extends Error {
     super(message);
     this.timeoutMs = timeoutMs;
   }
+}
+
+export function agentFailureMessage(
+  agent: string,
+  exitCode: number,
+  diagnostic: string | undefined,
+  providerFailureWithoutOutput: boolean,
+): string {
+  const cause = diagnostic?.trim() || "No diagnostic output.";
+  return providerFailureWithoutOutput && exitCode === 0
+    ? `${cause}\n(${agent} reported a failed turn and produced no output)`
+    : `${cause}\n(${agent} exited with code ${exitCode})`;
 }
 
 // What the agent had emitted when a run failed (#41).
@@ -1889,11 +1934,13 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
               const stdoutTail = new BoundedTail(maxOutputTailChars, "\n");
               const stderrTail = new BoundedTail(maxOutputTailChars, "");
               const rl = createInterface({ input: stdout });
+              stdout.on("data", (chunk) => opts.onStdout?.(chunk.toString()));
               rl.on("line", (line) => {
                 stdoutTail.push(line);
                 onLine(line);
               });
               stderr.on("data", (chunk) => {
+                opts.onStderr?.(chunk.toString());
                 stderrTail.push(chunk.toString());
               });
               proc.on("close", (code) => {
@@ -1906,8 +1953,14 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
             } else {
               const stdoutChunks: string[] = [];
               const stderrChunks: string[] = [];
-              stdout.on("data", (chunk) => stdoutChunks.push(chunk.toString()));
-              stderr.on("data", (chunk) => stderrChunks.push(chunk.toString()));
+              stdout.on("data", (chunk) => {
+                opts?.onStdout?.(chunk.toString());
+                stdoutChunks.push(chunk.toString());
+              });
+              stderr.on("data", (chunk) => {
+                opts?.onStderr?.(chunk.toString());
+                stderrChunks.push(chunk.toString());
+              });
               proc.on("close", (code) => {
                 resolveExec({
                   stdout: stdoutChunks.join(""),
@@ -2064,6 +2117,11 @@ const invokeAgent = async (
   completionSignals: readonly string[],
   // Elapsed since `run()` began, which is the instant `signalMs` records (#82).
   elapsed: () => number,
+  invocation: {
+    readonly agent: string;
+    readonly model: string | null;
+    readonly onEnd?: (record: AgentInvocationRecord) => Promise<void>;
+  },
 ): Promise<{
   result: string;
   silent: boolean;
@@ -2080,6 +2138,7 @@ const invokeAgent = async (
   const rolloutCursor = agent.name === "codex"
     ? await captureCodexRolloutCursor(handle, sandboxRepoDir)
     : { kind: "unknown" } as const;
+  const invocationTimer = startTimer();
 
   return new Promise((resolveRun, rejectRun) => {
     const speech = createAgentSpeechAccumulator();
@@ -2087,11 +2146,14 @@ const invokeAgent = async (
     let signalMs: number | undefined;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
+    let forcedEnd = false;
     // Both timers stop waiting for the exec; this is how they also stop it
     // (#41). One controller per agent run, so the listener it installs on the
     // exec cannot outlive the run that made it.
     const abort = new AbortController();
     const gaps = startGapTimer();
+    const stdoutTail = new BoundedTail(MAX_TAIL_CHARS, "");
+    const stderrTail = new BoundedTail(MAX_TAIL_CHARS, "");
 
     const clearTimer = (): void => {
       if (timer !== null) {
@@ -2131,6 +2193,46 @@ const invokeAgent = async (
         speech.rateLimit,
       ));
     };
+    const recordEnd = async (
+      end: AgentInvocationRecord["end"],
+      detail: string | null,
+      execResult: {
+        readonly stdout: string;
+        readonly stderr: string;
+        readonly exitCode: number | null;
+      },
+    ): Promise<void> => {
+      await invocation.onEnd?.({
+        agent: invocation.agent,
+        provider: agent.name,
+        model: invocation.model,
+        end,
+        detail,
+        exitCode: execResult.exitCode,
+        durationMs: invocationTimer(),
+        speech: speech.spoken,
+        stdout: execResult.stdout,
+        stderr: execResult.stderr,
+      });
+    };
+    const stopWith = (
+      end: AgentInvocationRecord["end"],
+      error: unknown,
+    ): void => {
+      if (settled || forcedEnd) return;
+      forcedEnd = true;
+      clearTimer();
+      abort.abort();
+      const detail = error instanceof Error ? error.message : String(error);
+      void recordEnd(end, detail, {
+        stdout: stdoutTail.toString(),
+        stderr: stderrTail.toString(),
+        exitCode: null,
+      }).then(
+        () => settleReject(error),
+        (recordError) => settleReject(recordError),
+      );
+    };
 
     // Two-phase: pre-signal → idle kill timer; post-signal → completion-grace
     // timer that rejects: announcing completion without exiting is an
@@ -2147,22 +2249,22 @@ const invokeAgent = async (
       clearTimer();
       if (matchedSignal !== undefined) {
         timer = setTimeout(() => {
-          // Settle FIRST, then abort: the abort makes the exec resolve, and
-          // settling first is what makes that resolution a no-op instead of a
-          // race with this one. The agent has already emitted its completion
-          // signal and whatever is still holding the pipe open is producing
-          // output nobody will read, so there is nothing here worth waiting on.
-          settleReject(
+          // Abort makes the exec return its bounded stream tails. Rejection is
+          // deliberately deferred until those tails have been recorded: the
+          // record precedes judgement on timeout paths just as it does on an
+          // ordinary process exit (#135).
+          stopWith(
+            "completion-timeout",
             new AgentError(
               `${agent.name} emitted completion signal ${JSON.stringify(matchedSignal)} at ` +
                 `${signalMs}ms, then produced no output for ${completionTimeoutMs}ms without exiting.`,
             ),
           );
-          abort.abort();
         }, completionTimeoutMs);
       } else {
         timer = setTimeout(() => {
-          settleReject(
+          stopWith(
+            "idle-timeout",
             new AgentIdleTimeoutError(
               `Agent idle for ${idleTimeoutMs / 1000} seconds — no output received.`,
               idleTimeoutMs,
@@ -2173,7 +2275,6 @@ const invokeAgent = async (
           // growing output buffer alive for the rest of the ISSUE — the sandbox
           // is per-issue, so nothing else was going to collect them. See
           // ExecOptions.signal for what this does and does not reap.
-          abort.abort();
         }, idleTimeoutMs);
       }
     };
@@ -2190,16 +2291,18 @@ const invokeAgent = async (
         cwd: sandboxRepoDir,
         stdin: printCmd.stdin,
         signal: abort.signal,
+        onStdout: (chunk) => stdoutTail.push(chunk),
+        onStderr: (chunk) => stderrTail.push(chunk),
         onLine: (line) => {
           gaps.line();
           try {
             speech.ingest(agent.parseStreamLine(line));
           } catch (err) {
             const detail = err instanceof Error ? err.message : String(err);
-            settleReject(
+            stopWith(
+              "stream-error",
               new AgentError(`${agent.name} stream parse failed on a JSON line: ${detail}`),
             );
-            abort.abort();
             return;
           }
           if (matchedSignal === undefined) {
@@ -2219,6 +2322,12 @@ const invokeAgent = async (
         // The agent process has ended. Its idle/grace clock must not govern the
         // optional post-run evidence read below (#109).
         clearTimer();
+        if (forcedEnd) {
+          // stopWith owns both the record and the rejection. The exec may
+          // close first or much later depending on which descendants retain
+          // its pipes; neither timing may duplicate the invocation record.
+          return;
+        }
         if (agent.name === "codex") {
           // The rollout is inside this still-live sandbox. Missing files or
           // malformed lines or a post-run exec failure preserve the invocation's
@@ -2253,6 +2362,7 @@ const invokeAgent = async (
             // channel cannot be inspected.
           }
         }
+        await recordEnd("exit", null, execResult);
         // The persistent sandbox can cheaply re-ask in the same provider
         // session, so a silent successful exit is retryable here (#114).
         const classification = classifyAgentRunEnd({
@@ -2289,9 +2399,12 @@ const invokeAgent = async (
           // leads for it, exactly as before #72.
           settleReject(
             new AgentError(
-              classification.cause === "provider-failure" && execResult.exitCode === 0
-                ? `${agent.name} reported a failed turn and produced no output:\n${classification.diagnostic}`
-                : `${agent.name} exited with code ${execResult.exitCode}:\n${classification.diagnostic}`,
+              agentFailureMessage(
+                agent.name,
+                execResult.exitCode,
+                classification.diagnostic,
+                classification.cause === "provider-failure",
+              ),
             ),
           );
           return;
@@ -2306,6 +2419,16 @@ const invokeAgent = async (
           ...(speech.rateLimit === undefined ? {} : { rateLimit: speech.rateLimit }),
           toolCalls: speech.toolCalls,
         });
+      }, async (err) => {
+        clearTimer();
+        if (forcedEnd) return;
+        const detail = err instanceof Error ? err.message : String(err);
+        await recordEnd("exec-error", detail, {
+          stdout: stdoutTail.toString(),
+          stderr: stderrTail.toString(),
+          exitCode: null,
+        });
+        settleReject(err);
       })
       .catch((err) => settleReject(err));
   });
@@ -2490,6 +2613,11 @@ export const createSandbox = async (
     completionTimeoutMs: number,
     completionSignals: readonly string[],
     elapsed: () => number,
+    invocation: {
+      readonly agent: string;
+      readonly model: string | null;
+      readonly onEnd?: (record: AgentInvocationRecord) => Promise<void>;
+    },
   ): Promise<{
     result: string;
     commits: { sha: string }[];
@@ -2559,6 +2687,7 @@ export const createSandbox = async (
         completionTimeoutMs,
         completionSignals,
         elapsed,
+        invocation,
       );
 
     // Explicit-branch commit capture: fully-qualified ref, the cache repo,
@@ -2607,6 +2736,11 @@ export const createSandbox = async (
         completionTimeoutMs,
         o.completionSignal,
         startTimer(),
+        {
+          agent: o.name ?? o.agent.name,
+          model: o.model ?? null,
+          onEnd: o.onInvocationEnd,
+        },
       );
 
       return {

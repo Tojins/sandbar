@@ -3,21 +3,66 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { createTranscriptTree } from "./logs.js";
+import { agentInvocationFilename, createTranscriptTree } from "./logs.js";
 
 const makeRun = async () => {
   const base = await mkdtemp(join(tmpdir(), "sandbar-transcripts-"));
   return createTranscriptTree(join(base, "run-test"));
 };
 
+describe("agent invocation records (#135)", () => {
+  it.each([
+    [{ role: "implementer", attempt: 3, nudge: false }, "attempt-3.log"],
+    [{ role: "implementer", attempt: 3, nudge: true }, "attempt-3-nudge.log"],
+    [{ role: "reviewer", attempt: 3, pass: "quality", invocation: 1 },
+      "attempt-3-reviewer-quality-1.log"],
+    [{ role: "reviewer", attempt: 3, pass: "correctness", invocation: 2 },
+      "attempt-3-reviewer-correctness-2.log"],
+    [{ role: "ui-check", invocation: 2 }, "ui-check-2.log"],
+  ] as const)("names %j as %s", (identity, expected) => {
+    expect(agentInvocationFilename(identity)).toBe(expected);
+  });
+});
+
 describe("raw transcript tree", () => {
   it("writes attempts without creating an orchestration log", async () => {
     const tree = await makeRun();
     const issue = await tree.issue("47");
-    await issue.writeAttempt("47", 2, "implementer stdout");
-    await issue.writeAttemptReviewer("47", 2, "reviewer stdout");
+    await issue.writeInvocation("attempt-2.log", {
+      agent: "implementer-47-attempt-2",
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      end: "exit",
+      detail: null,
+      exitCode: 0,
+      durationMs: 42,
+      speech: "implementer speech",
+      stdout: "implementer stdout",
+      stderr: "implementer stderr",
+    });
     expect((await readdir(tree.runDir)).sort()).toEqual(["issue-47"]);
-    expect(await readFile(join(issue.dir, "attempt-2.log"), "utf8")).toBe("implementer stdout");
+    expect(await readFile(join(issue.dir, "attempt-2.log"), "utf8")).toBe(
+      "agent:      implementer-47-attempt-2\n" +
+      "provider:   codex\nmodel:      gpt-5.6-sol\nended:      exit\n" +
+      "exit code:  0\nduration:   42ms\n\n" +
+      "--- speech ---\nimplementer speech\n" +
+      "--- stdout tail ---\nimplementer stdout\n" +
+      "--- stderr tail ---\nimplementer stderr\n",
+    );
+    await expect(issue.writeInvocation("attempt-2.log", {
+      agent: "replacement",
+      provider: "codex",
+      model: null,
+      end: "exit",
+      detail: null,
+      exitCode: 0,
+      durationMs: 1,
+      speech: "replacement",
+      stdout: "replacement",
+      stderr: "",
+    })).rejects.toMatchObject({ code: "EEXIST" });
+    expect(await readFile(join(issue.dir, "attempt-2.log"), "utf8"))
+      .toContain("implementer speech");
   });
 
   it("keeps merger and resolve transcripts as raw artefacts", async () => {

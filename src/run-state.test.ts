@@ -36,7 +36,7 @@ describe("run event reducer", () => {
         qualityMode: "list", gateOk: true, quality: "APPROVED", correctness: "APPROVED",
         rejectingPass: null, qualityFailures: 0, correctnessFailures: 0, durationMs: 8 },
       { kind: "repair", issue: 2, attempt: 2, action: "re-prompt", detail: "fix" },
-      { kind: "hard-error", issue: 2, retry: 1, max: 2, reason: "pod" },
+      { kind: "hard-error", issue: 2, retry: 1, max: 2, reason: "pod\ntrace" },
       { kind: "terminal", issue: 2, title: "Two", terminal: "DONE", reason: null,
         durationMs: 9 },
       { kind: "landed", issue: 2, title: "Two", outcome: "merged",
@@ -58,7 +58,7 @@ describe("run event reducer", () => {
       [2, "finalise merged · deleted-local", "dim"],
       [2, "merged sandbar/issue-2 → main", "good"],
       [2, "DONE", "good"],
-      [2, "hard error · retry 1/2", "bad"],
+      [2, "hard error · retry 1/2 · pod", "bad"],
       [2, "repair · re-prompt", "warn"],
       [2, "round 1 · approved", "good"],
       [2, "round 1 · quality pass · invocation 1", ""],
@@ -81,6 +81,28 @@ describe("run event reducer", () => {
       [null, "run started", "dim"],
     ]);
     expect(state.run.complaints).toEqual([{ severity: "warning", text: "stale config" }]);
+  });
+
+  it.each([
+    [
+      { kind: "hard-error", issue: 2, retry: 2, max: 2,
+        reason: "provider cause\n(codex exited with code 1)" },
+      "hard error · retry 2/2 · provider cause",
+    ],
+    [
+      { kind: "terminal", issue: 2, terminal: "HARD-ERROR",
+        reason: "provider cause\n(codex exited with code 1)", durationMs: 10 },
+      "HARD-ERROR · provider cause\n(codex exited with code 1)",
+    ],
+  ] as const)("projects the cause for %j", (event, expected) => {
+    const state = reduceRunEvents([
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: 1, driver: "sandbar", configPath: null,
+        workdir: "/r", maxParallelIssues: 1, pid: 1,
+      }),
+      at(2, "2026-09-07T09:01:00Z", event),
+    ], { now: new Date("2026-09-07T09:02:00Z"), pidAlive: true });
+    expect(state.events[0]?.text).toBe(expected);
   });
 
   it("limits recent feed rows to 200 without changing the total", () => {
@@ -145,6 +167,47 @@ describe("run event reducer", () => {
       { issue: 104, title: "Picker", why: "blocked by #102" },
       { issue: 111, title: "Export", why: "no free slot" },
     ]);
+  });
+
+  it("renders a historical parked ref with its recorded first-line cause", () => {
+    const events: RunEvent[] = [
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
+      }),
+      at(2, "2026-09-07T09:01:00Z", {
+        kind: "recompute", n: 1, trigger: "startup", admitted: [], active: [],
+        waiting: [], landRequests: [], deferredChunks: [],
+        candidates: [
+          { issue: 87, title: "Nightly job", branch: "sandbar/issue-87-job",
+            chunk: null, ready: false },
+        ],
+        refs: [{ issue: 87, branch: "sandbar/issue-87-job", tip: "abc" }],
+      }),
+    ];
+    const previous = {
+      issue: 87,
+      title: "Nightly job",
+      outcome: "HARD-ERROR",
+      reason: "provider cause\n(codex exited with code 1)",
+      attempts: 1,
+      rounds: 0,
+      ms: 10,
+      landed: "",
+      at: "2026-09-06T09:00:00Z",
+    };
+    const state = reduceRunEvents(events, {
+      now: new Date("2026-09-07T09:02:00Z"),
+      pidAlive: true,
+      recentFinished: [previous],
+    });
+
+    expect(state.waiting).toEqual([{
+      issue: 87,
+      title: "Nightly job",
+      why: "parked · HARD-ERROR · provider cause · before this run",
+      parked: true,
+    }]);
   });
 
   it("distinguishes a crash from an orderly end", () => {
@@ -243,6 +306,32 @@ describe("run event reducer", () => {
     expect(state.pool[0]).toMatchObject({ issue: 12, phase: "NEEDS-INFO" });
   });
 
+  it("carries a terminal cause into finished and parked projections", () => {
+    const events = [
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
+      }),
+      at(2, "2026-09-07T09:01:00Z", {
+        kind: "admitted", issue: 12, title: "Twelve",
+        branch: "sandbar/issue-12", chunk: null, seedRef: "origin/main",
+      }),
+      at(3, "2026-09-07T09:30:00Z", {
+        kind: "terminal", issue: 12, title: "Twelve", terminal: "HARD-ERROR",
+        reason: "provider cause\n(codex exited with code 1)", durationMs: 1_740_000,
+      }),
+      at(4, "2026-09-07T09:31:00Z", { kind: "run-end", reason: "stuck" }),
+    ];
+    const state = reduceRunEvents(events, {
+      now: new Date("2026-09-07T09:32:00Z"), pidAlive: false,
+    });
+    expect(state.finished[0]).toMatchObject({
+      outcome: "HARD-ERROR",
+      reason: "provider cause\n(codex exited with code 1)",
+    });
+    expect(state.waiting[0]?.why).toBe("parked · HARD-ERROR · provider cause · this run");
+  });
+
   it("clears a rejected issue task from the pool and occupied slots", () => {
     const events = [
       at(1, "2026-09-07T09:00:00Z", {
@@ -298,7 +387,7 @@ describe("run event reducer", () => {
       at(8, "2026-09-07T09:07:00Z", { kind: "landed", outcome: "merged", issue: 12,
         title: "Twelve", branch: "sandbar/issue-12", target: "main", reason: null }),
     ];
-    const older = { issue: 12, title: "Old title", outcome: "NEEDS-HUMAN", attempts: 8,
+    const older = { issue: 12, title: "Old title", outcome: "NEEDS-HUMAN", reason: "old cause", attempts: 8,
       rounds: 7, ms: 999, landed: "", at: "2026-09-01T00:00:00Z" };
     const state = reduceRunEvents(current, {
       now: new Date("2026-09-07T09:08:00Z"), pidAlive: true, recentFinished: [older],

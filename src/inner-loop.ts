@@ -62,6 +62,11 @@
 // which still parks. Reviewer history is recorded only after a green gate.
 // UI-check and reviewer invocations snapshot the tip and status; any mutation
 // parks the issue and preserves the clone rather than trusting that call.
+// Invocation filenames use one run-owned, per-issue sequence across fresh
+// HARD-ERROR cycles and later admissions: the state machine's attempt and
+// UI-check counters restart at both boundaries, but an earlier invocation
+// record must never be overwritten (#135). The cached IssueLogger owns that
+// sequence beside the directory whose names it allocates.
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -75,7 +80,7 @@ import {
 import * as agentSandbox from "./agent-sandbox.js";
 import { AgentCredentialError, AgentError, AgentQuotaError, agentPartialOutput, agentPartialUsage, podman, withPartialOutput } from "./agent-sandbox.js";
 import type { RateLimitMeasurement } from "./agent-run-end.js";
-import type { Sandbox, SandboxHooks } from "./agent-sandbox.js";
+import type { AgentInvocationRecord, Sandbox, SandboxHooks } from "./agent-sandbox.js";
 import { maxContextDepth, sumAgentUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
 
@@ -115,7 +120,7 @@ import {
   step,
   visiblePhases,
 } from "./inner-loop-machine.js";
-import type { AttemptLogger } from "./logs.js";
+import type { AgentInvocationSequence, AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
@@ -486,7 +491,9 @@ export type InnerLoopOptions = {
   // tree nobody remembers to look in. Absent, the sandbox stack still runs and
   // the logs go under the state directory's `logs/`.
   readonly sandboxLogBaseDir?: string;
-  readonly attemptLogger?: AttemptLogger;
+  // Every launched invocation must have a durable record before its result is
+  // classified (#135). The run owns this logger and always supplies it.
+  readonly attemptLogger: AttemptLogger;
   // Mandatory at this run-owned boundary: dropping it would make a terminal,
   // phase, or measurement silently disappear from the sole run record.
   readonly onEvent: (event: EventInput) => Promise<void> | void;
@@ -522,12 +529,20 @@ function eventUsage(
   return Object.keys(fields).length === 0 ? undefined : fields;
 }
 
+const invocationLog = (
+  logger: AttemptLogger,
+  filename: string,
+): { readonly onInvocationEnd: (record: AgentInvocationRecord) => Promise<void> } => ({
+  onInvocationEnd: (record) => logger.writeInvocation(filename, record),
+});
+
 export async function runInnerLoop(
   issue: IssueRef,
   opts: InnerLoopOptions,
   runCycle: (
     issue: IssueRef,
     opts: InnerLoopOptions,
+    invocationSequence: AgentInvocationSequence,
   ) => Promise<SandboxCycleOutcome> = runSandboxCycle,
 ): Promise<Terminal> {
   let retriesUsed = 0;
@@ -544,7 +559,11 @@ export async function runInnerLoop(
     },
   };
   for (;;) {
-    const outcome = await runCycle(issue, cycleOptions);
+    const outcome = await runCycle(
+      issue,
+      cycleOptions,
+      opts.attemptLogger.startInvocationCycle(),
+    );
     specGaps.push(...outcome.specGaps);
     const decision = decideAfterTerminal(outcome.verdict, retriesUsed);
     if (decision.kind === "surface") {
@@ -638,6 +657,7 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
 async function runSandboxCycle(
   issue: IssueRef,
   opts: InnerLoopOptions,
+  invocationSequence: AgentInvocationSequence,
 ): Promise<SandboxCycleOutcome> {
   const { config } = opts;
   const branchImages = opts.branchImages;
@@ -960,6 +980,7 @@ async function runSandboxCycle(
         specGaps,
         sandboxStatuses,
         state,
+        invocationSequence,
       });
       const r = step(state, event);
       state = r.state;
@@ -1134,6 +1155,7 @@ type ExecuteActionCtx = {
   // State before the action. Review aggregation applies the pure transition
   // once to record both independent budgets after the completed round.
   readonly state: LoopState;
+  readonly invocationSequence: AgentInvocationSequence;
 };
 
 async function executeAction(
@@ -1200,11 +1222,15 @@ export async function runUiCheck(
       run = await runWithProviderState(opts.providerState, config.uiCheckAgent, () =>
         sandbox.run({
           name: `ui-check-${issue.id}${invocation === 1 ? "" : "-reprompt"}`,
+          model: config.uiCheckModelId,
           agent: buildAgentProvider(config.uiCheckAgent, config.uiCheckModelId, {
             effort: config.uiCheckEffort,
           }),
           prompt,
           completionSignal: [],
+          ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
+            role: "ui-check", invocation,
+          })),
         }),
       );
     } catch (err) {
@@ -1351,11 +1377,15 @@ export async function runImplementer(
   try {
     run = await runWithProviderState(opts.providerState, config.implementerAgent, () => runAgent({
       name: `implementer-${issue.id}-attempt-${action.attempt}`,
+      model: config.implementerModelId,
       agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
         effort: config.implementerEffort,
       }),
       prompt,
       completionSignal: PROMISE_COMPLETION_SIGNALS,
+      ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
+        role: "implementer", attempt: action.attempt, nudge: false,
+      })),
     }));
   } catch (err) {
     if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) {
@@ -1381,9 +1411,6 @@ export async function runImplementer(
       });
     }
     throw err;
-  }
-  if (opts.attemptLogger) {
-    await opts.attemptLogger.writeAttempt(issue.id, action.attempt, run.stdout);
   }
   accumulated.push(...run.commits);
 
@@ -1426,6 +1453,7 @@ export async function runImplementer(
     const nudgeTimer = startTimer();
     const nudge = await runAgent({
       name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
+      model: config.implementerModelId,
       agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
         continueSession: true,
         effort: config.implementerEffort,
@@ -1433,6 +1461,9 @@ export async function runImplementer(
       prompt: PROMISE_NUDGE_TPL,
       // Any of the three tags ends the wait, not just COMPLETE.
       completionSignal: PROMISE_COMPLETION_SIGNALS,
+      ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
+        role: "implementer", attempt: action.attempt, nudge: true,
+      })),
     });
     accumulated.push(...nudge.commits);
     attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
@@ -1446,13 +1477,6 @@ export async function runImplementer(
     signal = parsePromise(combined.stdout, {
       commitsAccumulated: accumulated.length,
     });
-    if (opts.attemptLogger) {
-      await opts.attemptLogger.writeAttempt(
-        issue.id,
-        action.attempt,
-        combined.stdout,
-      );
-    }
     await opts.onEvent({
       kind: "repair",
       issue: Number(issue.id),
@@ -1694,9 +1718,6 @@ export async function enforceReviewerSnapshot(
   };
 }
 
-const passTranscript = (pass: ReviewerPass, transcript: string): string =>
-  `=== ${pass} pass ===\n${transcript}`;
-
 export async function runReviewer(
   action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
   ctx: ExecuteActionCtx,
@@ -1805,6 +1826,7 @@ export async function runReviewer(
             name:
               `reviewer-${issue.id}-round-${action.reviewRound}-${pass}` +
               (invocation > 1 ? `-invocation-${invocation}` : ""),
+            model: modelId,
             // Cold, always (#121): neither pass resumes the other's session, so
             // each is self-sufficient and the two may run on different vendors.
             agent: buildAgentProvider(agent, modelId, { effort }),
@@ -1812,6 +1834,12 @@ export async function runReviewer(
             // A reviewer owns no completion signal. Process exit is the honest
             // end of its single artefact; inherited role contracts are banned.
             completionSignal: [],
+            ...invocationLog(
+              opts.attemptLogger,
+              ctx.invocationSequence.filename({
+                role: "reviewer", attempt: action.attempt, pass, invocation,
+              }),
+            ),
           }));
           await logPass(
             "completed",
@@ -1876,38 +1904,16 @@ export async function runReviewer(
     );
   };
 
-  const preserveReviewerWrite = async (
-    aborted: Extract<ReviewerOutcome, { kind: "aborted" }>,
-    pass: ReviewerPass,
-    completedTranscripts: readonly string[],
-  ): Promise<Extract<ReviewerResult, { kind: "reviewer-wrote" }>> => {
-    if (opts.attemptLogger) {
-      await opts.attemptLogger.writeAttemptReviewer(
-        issue.id,
-        action.attempt,
-        [
-          ...completedTranscripts,
-          passTranscript(pass, aborted.transcript),
-        ].join("\n\n"),
-      );
-    }
-    return aborted.event;
-  };
-
   const quality = await runPass("quality");
   if (quality.kind === "aborted") {
     return {
-      event: await preserveReviewerWrite(quality, "quality", []),
+      event: quality.event,
       historyEntry: null,
       specGap: null,
       round: null,
     };
   }
 
-  const transcripts = [passTranscript("quality", quality.transcript)];
-  // Every invocation's output, not just the reviewing one: the observed failure
-  // left a 73-byte log for a 15-minute run, and this file is the only offline
-  // artefact of what the reviewer did or did not say.
   const afterQuality = decideReviewRound(quality);
   let decision: FinishedReviewRoundDecision;
   // Completed only: the abort arm below returns, so nothing past it holds a
@@ -1918,18 +1924,13 @@ export async function runReviewer(
     const correctnessOutcome = await runPass("correctness");
     if (correctnessOutcome.kind === "aborted") {
       return {
-        event: await preserveReviewerWrite(
-          correctnessOutcome,
-          "correctness",
-          transcripts,
-        ),
+        event: correctnessOutcome.event,
         historyEntry: null,
         specGap: null,
         round: null,
       };
     }
     correctness = correctnessOutcome;
-    transcripts.push(passTranscript("correctness", correctness.transcript));
     decision = decideReviewRound(quality, correctness);
   } else {
     decision = afterQuality;
@@ -1941,13 +1942,6 @@ export async function runReviewer(
     quality,
     correctness,
   );
-  if (opts.attemptLogger) {
-    await opts.attemptLogger.writeAttemptReviewer(
-      issue.id,
-      action.attempt,
-      transcripts.join("\n\n"),
-    );
-  }
   const roundMs = roundTimer();
   const rejectingPass = decision.event.kind === "reviewer-result" &&
       decision.event.verdict === "CHANGES-REQUESTED"

@@ -467,15 +467,22 @@ outcomes.
   concurrent calls share one write and a failed write remains retryable.
   Every outcome or refusal after the lock is an event. Refused config, missing
   `GH_TOKEN`, and losing the lock remain stderr-only because no record can be
-  owned safely. Raw agent, reviewer, gate, merger, and resolve transcripts stay
-  as files through `src/logs.ts`; they are artefacts, not a second event stream.
+  owned safely. Every launched inner-loop agent invocation writes one bounded
+  record before its result is classified: a diagnostic header, parsed speech,
+  and raw stdout/stderr tails. The run-cached per-issue logger owns invocation
+  names, so they remain sequenced across fresh HARD-ERROR sandboxes and later
+  admissions of the same issue; an existing name is never overwritten. Those
+  records, gate artefacts, merger logs and resolve transcripts stay as files
+  through `src/logs.ts`; they are artefacts, not a second event stream.
   `run()` hosts the file-fed UI and writes its URL—and nothing else—to stdout.
   The internal-failure banner is the sole post-record stderr rendering.
 - **The UI is a projection, never scheduler state (#132).** `src/run-state.ts`
   purely reduces events into the pool timeline, waiting and parked rows, recent
   events, and finished issues across recent run directories. `src/ui-server.ts`
   serves the shipped vanilla page and `/state.json`, rereading the record on
-  every request. A live run hosts it in-process; `sandbar ui` hosts the same
+  every request. Terminal causes stay full in the event feed and lead the
+  compact HARD-ERROR retry, parked and recently-finished projections. A live
+  run hosts it in-process; `sandbar ui` hosts the same
   module for post-mortem browsing. The page polls every two seconds. A growing
   file plus live matching `run.pid` means working; a dead/missing PID without
   `run-end` means crashed. `uiPort` is per-workdir host configuration and a
