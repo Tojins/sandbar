@@ -30,7 +30,11 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   symbolicHeadRef: innerLoopMocks.symbolicHeadRef,
 }));
 
-import { withPartialOutput, type Sandbox } from "./agent-sandbox.js";
+import {
+  withPartialContainerResources,
+  withPartialOutput,
+  type Sandbox,
+} from "./agent-sandbox.js";
 import {
   enforceReviewerSnapshot,
   priorReviewRound,
@@ -53,7 +57,10 @@ import type { ReviewerOutcome } from "./reviewer-run.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { EventInput } from "./events.js";
 import { initialState } from "./inner-loop-machine.js";
-import type { ContainerResources } from "./container-resources.js";
+import {
+  containerResourcesOf,
+  type ContainerResources,
+} from "./container-resources.js";
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -323,10 +330,14 @@ describe("silent implementer attempt policy (#116)", () => {
     toolCalls: 0,
     ...resources,
   });
+  type ScriptedImplementerRun = ReturnType<typeof sandboxResult> | {
+    readonly error: Error;
+    readonly resources: ContainerResources;
+  };
 
   const runPath = (
-    first: ReturnType<typeof sandboxResult>,
-    nudge: ReturnType<typeof sandboxResult>,
+    first: ScriptedImplementerRun,
+    nudge: ScriptedImplementerRun,
     promptExtensions?: Parameters<typeof runImplementer>[1]["config"]["promptExtensions"],
     mismatch: HeadMismatch | null = null,
   ) => {
@@ -341,21 +352,28 @@ describe("silent implementer attempt policy (#116)", () => {
     const writes: string[] = [];
     const lines: EventInput[] = [];
     const record = async (
-      result: ReturnType<typeof sandboxResult>,
+      result: ScriptedImplementerRun,
       options: Parameters<Sandbox["run"]>[0],
     ) => {
+      const failed = "error" in result;
+      const resources = failed ? result.resources : containerResourcesOf(result);
+      const stdout = failed ? "" : result.stdout;
       await options.onInvocationEnd?.({
         agent: options.name ?? options.agent.name,
         provider: options.agent.name,
         model: options.model ?? null,
-        end: "exit",
-        detail: null,
-        exitCode: 0,
+        end: failed ? "exec-error" : "exit",
+        detail: failed ? result.error.message : null,
+        exitCode: failed ? null : 0,
         durationMs: 1,
-        speech: result.stdout,
-        stdout: result.stdout,
+        speech: stdout,
+        stdout,
         stderr: "",
+        ...resources,
       });
+      if (failed) {
+        throw withPartialContainerResources(result.error, resources);
+      }
       return result;
     };
     const sandbox = {
@@ -455,6 +473,41 @@ describe("silent implementer attempt policy (#116)", () => {
       kind: "implementer",
       peakMemoryBytes: 2048,
       oomKilled: true,
+    });
+  });
+
+  it("records an OOM-killed first invocation before propagating its failure", async () => {
+    const { pending, lines } = runPath(
+      {
+        error: new Error("agent exited 137"),
+        resources: { peakMemoryBytes: 4096, oomKilled: true },
+      },
+      sandboxResult("unused", false),
+    );
+
+    await expect(pending).rejects.toThrow("agent exited 137");
+    expect(lines.at(-1)).toMatchObject({
+      kind: "implementer", signal: "FAILED", commits: 0,
+      peakMemoryBytes: 4096, oomKilled: true,
+    });
+  });
+
+  it("merges prior evidence into an OOM-killed nudge failure event", async () => {
+    const { pending, lines } = runPath(
+      sandboxResult("no signal", false, ["a"], {
+        peakMemoryBytes: 1024,
+        oomKilled: false,
+      }),
+      {
+        error: new Error("nudge exited 137"),
+        resources: { peakMemoryBytes: 8192, oomKilled: true },
+      },
+    );
+
+    await expect(pending).rejects.toThrow("nudge exited 137");
+    expect(lines.at(-1)).toMatchObject({
+      kind: "implementer", signal: "FAILED", commits: 1,
+      peakMemoryBytes: 8192, oomKilled: true,
     });
   });
 
@@ -645,9 +698,18 @@ describe("role prompt-extension wiring (#91)", () => {
     const filenames: string[] = [];
     const invocationSequence = createAgentInvocationSequencer().startCycle();
     const outputs = [
-      { output: "", error: new Error("review provider failed") },
-      { output: "<verdict>APPROVED</verdict>", error: null },
-      { output: "<verdict>APPROVED</verdict>", error: null },
+      {
+        output: "", error: new Error("review provider failed"),
+        resources: { peakMemoryBytes: 1000, oomKilled: true },
+      },
+      {
+        output: "<verdict>APPROVED</verdict>", error: null,
+        resources: { peakMemoryBytes: 2000, oomKilled: false },
+      },
+      {
+        output: "<verdict>APPROVED</verdict>", error: null,
+        resources: { peakMemoryBytes: 3000, oomKilled: true },
+      },
     ];
     const sandbox = {
       worktreePath: "/worktree",
@@ -664,14 +726,18 @@ describe("role prompt-extension wiring (#91)", () => {
           speech: result.output,
           stdout: result.output,
           stderr: result.error?.message ?? "",
+          ...result.resources,
         });
-        if (result.error !== null) throw result.error;
+        if (result.error !== null) {
+          throw withPartialContainerResources(result.error, result.resources);
+        }
         return {
           stdout: result.output,
           commits: [],
           silent: false,
           maxGapMs: 1,
           toolCalls: 0,
+          ...result.resources,
         };
       }),
     } as unknown as Sandbox;
@@ -712,6 +778,14 @@ describe("role prompt-extension wiring (#91)", () => {
       "attempt-2-reviewer-quality-2.log",
       "attempt-2-reviewer-correctness-1.log",
     ]);
+    expect(ctx.opts.onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "review-pass", pass: "quality", invocation: 1, result: "failed",
+      peakMemoryBytes: 1000, oomKilled: true,
+    }));
+    expect(ctx.opts.onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "review-pass", pass: "correctness", result: "completed",
+      peakMemoryBytes: 3000, oomKilled: true,
+    }));
   });
 });
 

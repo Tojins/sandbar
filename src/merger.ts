@@ -218,14 +218,13 @@
 // container. The same provider object owns its argv and line parser; credential
 // keys come from `PROVIDER_CREDENTIALS`, so no vendor detail is re-spelled here.
 // It deliberately does not route through createSandbox/invokeAgent: each
-// attempt needs a fresh conversation, a wall-clock kill of the whole container,
+// attempt needs a fresh conversation, a wall-clock kill of the agent process,
 // and byte-verbatim stdout/stderr capture before judgement. The shared end
 // classification lives in agent-run-end.ts; the lifecycles stay different.
-// Unlike the long-lived sandbox's `sleep infinity` pid 1, this short-lived
-// container runs the agent as pid 1, so #42's `--init` does not transfer. It
-// remains named after exit just long enough to inspect cgroup memory.peak and
-// OOMKilled, then is explicitly removed (#141); `--rm` would erase the record
-// before it could be measured.
+// A held `sleep infinity` pid 1 keeps the cgroup live while the fresh agent runs
+// through `podman exec`; after that exec ends Sandbar inspects memory.peak and
+// OOMKilled, then explicitly removes the container (#141). This is not the
+// issue sandbox's resumable conversation: only the resource lifetime is held.
 // `captureAgentRun` keeps both raw streams for the byte-verbatim attempt log,
 // then `parseCapturedAgentRun` puts only parsed agent speech in the output
 // register that the resolve promise parser may read. It answers with the exit
@@ -323,16 +322,18 @@ import {
   runVerifiedLanding,
 } from "./forge-verify.js";
 import { type GateResult, formatGateFields } from "./gate.js";
-import {
-  CONTAINER_RM_ARGS,
-  CONTROL_TIMEOUT_MS,
-  boundedOk,
-  boundedPodman,
-} from "./gate-stack.js";
+import { CONTAINER_RM_ARGS, CONTROL_TIMEOUT_MS } from "./gate-stack.js";
 import {
   readContainerResources,
   systemContainerResourceDeps,
 } from "./container-resources.js";
+import { reportCleanupNotice } from "./cleanup.js";
+import {
+  boundedRuntime,
+  boundedRuntimeOk,
+  type BoundedRuntime,
+  RUNTIME,
+} from "./runtime.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import {
   memberBranchName,
@@ -341,7 +342,6 @@ import {
   scopedResourcePrefix,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
-import { RUNTIME } from "./runtime.js";
 import {
   RESOLVE_AGENT_TIMEOUT_MS,
   type ResolveAdapter,
@@ -2256,6 +2256,11 @@ export type RealAdapterDeps = {
   // build the stack itself: run.ts owns the stack's lifecycle for the whole
   // merge phase, so a single bringup covers every branch in the cycle.
   readonly runStackGate: () => Promise<GateResult>;
+  // Process seams for the resolve container lifecycle. Production uses the
+  // shared bounded runtime and byte-verbatim capture; tests inject both to pin
+  // inspect-before-remove ordering without pretending a stopped cgroup lives.
+  readonly podman?: BoundedRuntime;
+  readonly captureResolveProcess?: typeof captureAgentRun;
 };
 
 type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "usage" | "toolCalls" | "peakContext" | "rateLimit" | "cause" | "verdict">;
@@ -2395,7 +2400,7 @@ export function captureAgentRun(
   });
 }
 
-// Codex merger quota remains the deliberate #109 gap: its short-lived
+// Codex merger quota remains the deliberate #109 gap: its held per-attempt
 // container's session rollout disappears when it is explicitly removed after
 // resource measurement. Permanent credential
 // refusal is not part of that gap: it arrives on JSONL and closes the provider
@@ -2452,14 +2457,13 @@ export function buildResolveRunArgv(args: {
   readonly extraMounts: readonly string[];
   readonly codexAuthMount?: CodexAuthMount;
   readonly image: string;
-  readonly command: string;
   readonly credentials: Readonly<Record<string, string | undefined>>;
   readonly botName: string;
   readonly botEmail: string;
 }): readonly string[] {
   const argv = [
     "run",
-    "-i",
+    "-d",
     "--image-volume=ignore",
     "--name",
     args.container,
@@ -2496,12 +2500,18 @@ export function buildResolveRunArgv(args: {
     "-e",
     `GIT_COMMITTER_EMAIL=${args.botEmail}`,
     "--entrypoint",
-    "/bin/sh",
+    "sleep",
     args.image,
-    "-c",
-    args.command,
+    "infinity",
   );
   return argv;
+}
+
+export function buildResolveExecArgv(
+  container: string,
+  command: string,
+): readonly string[] {
+  return ["exec", "-i", container, "/bin/sh", "-c", command];
 }
 
 export function resolveAgentCredentials(
@@ -2524,6 +2534,8 @@ export function resolveAgentCredentials(
 
 export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   const cwd = deps.cwd;
+  const podman = deps.podman ?? boundedRuntime;
+  const captureResolveProcess = deps.captureResolveProcess ?? captureAgentRun;
   // No resume semantics: every resolve attempt is a fresh container whose
   // prompt carries the complete state.
   const agentProvider = buildAgentProvider(deps.mergerAgent, deps.mergerModelId, {
@@ -2710,26 +2722,81 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           ? { codexAuthMount: deps.codexAuthMount }
           : {}),
         image: deps.sandboxImage,
-        command: command.command,
         credentials: resolveAgentCredentials(deps.mergerAgent, deps.env),
         botName: deps.botName,
         botEmail: deps.botEmail,
       });
-      const run = await captureAgentRun(RUNTIME, args, command.stdin ?? "", {
-        container,
-        timeoutMs: RESOLVE_AGENT_TIMEOUT_MS,
-      });
-      const resources = await readContainerResources(
-        container,
-        systemContainerResourceDeps(boundedPodman),
-      );
-      const removed = await boundedPodman(CONTAINER_RM_ARGS(container), CONTROL_TIMEOUT_MS);
-      if (!boundedOk(removed)) {
-        throw new SandbarError(
-          `merger: failed to remove resolve container '${container}': ` +
-            (removed.timedOut ? "podman rm timed out" : removed.errorMessage),
-        );
+      let run: CapturedAgentRun | undefined;
+      let primaryFailure: unknown;
+      try {
+        const started = await captureResolveProcess(RUNTIME, args, "", {
+          container,
+          timeoutMs: CONTROL_TIMEOUT_MS,
+        });
+        run = started.exitCode === 0 && started.end === "exit"
+          ? await captureResolveProcess(
+              RUNTIME,
+              buildResolveExecArgv(container, command.command),
+              command.stdin ?? "",
+              { container, timeoutMs: RESOLVE_AGENT_TIMEOUT_MS },
+            )
+          : started;
+      } catch (err) {
+        primaryFailure = err;
       }
+
+      const measured = await Promise.allSettled([
+        readContainerResources(container, systemContainerResourceDeps(podman)),
+      ]);
+      const removal = await Promise.allSettled([
+        podman(CONTAINER_RM_ARGS(container), CONTROL_TIMEOUT_MS),
+      ]);
+      const removed = removal[0];
+      const removalFailure = removed?.status === "rejected"
+        ? removed.reason
+        : removed !== undefined && !boundedRuntimeOk(removed.value)
+          ? new SandbarError(
+              `merger: failed to remove resolve container '${container}': ` +
+                (removed.value.timedOut
+                  ? "podman rm timed out"
+                  : removed.value.errorMessage),
+            )
+          : undefined;
+      const measurement = measured[0];
+      const measurementFailure = measurement?.status === "rejected"
+        ? measurement.reason
+        : undefined;
+
+      if (primaryFailure !== undefined) {
+        if (measurementFailure !== undefined) {
+          await reportCleanupNotice(
+            "cleanup-failure",
+            `Resolve container '${container}' resource measurement also failed`,
+            measurementFailure,
+          );
+        }
+        if (removalFailure !== undefined) {
+          await reportCleanupNotice(
+            "cleanup-failure",
+            `Resolve container '${container}' cleanup also failed`,
+            removalFailure,
+          );
+        }
+        throw primaryFailure;
+      }
+      if (removalFailure !== undefined) {
+        if (measurementFailure !== undefined) {
+          await reportCleanupNotice(
+            "cleanup-failure",
+            `Resolve container '${container}' resource measurement also failed`,
+            measurementFailure,
+          );
+        }
+        throw removalFailure;
+      }
+      if (measurementFailure !== undefined) throw measurementFailure;
+      if (run === undefined) throw new Error("resolve process produced no result");
+      const resources = measurement?.status === "fulfilled" ? measurement.value : {};
       return parseCapturedAgentRun({ ...run, ...resources }, agentProvider);
     },
     async isMergeInProgress() {

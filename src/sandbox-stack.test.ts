@@ -472,6 +472,59 @@ describe("startSandboxStack (#44 D3)", () => {
     ]);
   });
 
+  it("drains every sibling before surfacing an optional measurement failure", async () => {
+    const r = recorder();
+    const measurementFailure = new Error("cgroup reader failed");
+    const stack = await startSandboxStack(
+      {
+        issueId: "44",
+        scope: SCOPE,
+        spec: twoLifecycles(),
+        worktreePath: "/wt",
+        anchorContainerName: ANCHOR,
+        logDir,
+      },
+      {
+        ...r.deps,
+        measure: async (name) => {
+          if (name.endsWith("-app")) throw measurementFailure;
+          return { peakMemoryBytes: 1024 };
+        },
+      },
+    );
+
+    await expect(stack.stop()).rejects.toBe(measurementFailure);
+    expect(r.removed).toEqual([
+      `sandbar-${SCOPE}-sbx-44-app`,
+      `sandbar-${SCOPE}-sbx-44-db`,
+    ]);
+  });
+
+  it("attempts every teardown event even when one event sink rejects", async () => {
+    const r = recorder();
+    const reported: string[] = [];
+    const sinkFailure = new Error("event append failed");
+    const stack = await startSandboxStack(
+      {
+        issueId: "44",
+        scope: SCOPE,
+        spec: twoLifecycles(),
+        worktreePath: "/wt",
+        anchorContainerName: ANCHOR,
+        logDir,
+        onContainerTeardown: async (record) => {
+          reported.push(record.name);
+          if (record.name === "app") throw sinkFailure;
+        },
+      },
+      r.deps,
+    );
+
+    await expect(stack.stop()).rejects.toBe(sinkFailure);
+    expect(reported).toEqual(["app", "db"]);
+    expect(r.removed).toHaveLength(2);
+  });
+
   // What leaks here is a running container holding a worktree mount, and the
   // next scoped sweep does not run on the last cycle or on a halt — so the
   // operator gets the names and the command.

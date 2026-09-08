@@ -64,7 +64,7 @@ import { createWriteStream, type WriteStream } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
-import { registerDisposable } from "./cleanup.js";
+import { registerDisposable, reportCleanupNotice } from "./cleanup.js";
 import type { ResolvedGateStack, ResolvedStackContainer } from "./config.js";
 import { SandbarError } from "./errors.js";
 import {
@@ -216,6 +216,7 @@ export async function startSandboxStack(
   const created: string[] = [];
   const lifetimes = new Map<string, () => number>();
   const teardowns: ContainerTeardown[] = [];
+  const teardownFailures: unknown[] = [];
   let stopped = false;
 
   const stop = async (): Promise<void> => {
@@ -241,33 +242,67 @@ export async function startSandboxStack(
     // to skip: two ordinary paths arrive here with the container already gone.
     const failures: string[] = [];
     const leaked: string[] = [];
-    for (const name of [...created].reverse()) {
+    const names = [...created].reverse();
+    const measured = await Promise.allSettled(names.map(async (name) => {
       const configured = containers.find((c) => nameOf(c) === name);
       const elapsed = lifetimes.get(name);
       if (configured !== undefined && elapsed !== undefined) {
-        teardowns.push({
+        return {
           name: configured.name,
           container: name,
           lifecycle: configured.lifecycle,
           durationMs: elapsed(),
           ...(await deps.measure(name)),
-        });
-        lifetimes.delete(name);
+        } satisfies ContainerTeardown;
       }
+      return null;
+    }));
+    for (let i = 0; i < names.length; i++) {
+      const result = measured[i];
+      if (result?.status === "fulfilled") {
+        if (result.value !== null) teardowns.push(result.value);
+      } else if (result?.status === "rejected") {
+        teardownFailures.push(result.reason);
+      }
+      lifetimes.delete(names[i]!);
+    }
+    for (const name of names) {
       const failure = await deps.remove(name);
       if (failure === null) continue;
       failures.push(failure);
       leaked.push(name);
     }
-    if (failures.length > 0) {
-      throw new SandbarError(
+    const removalFailure = failures.length > 0
+      ? new SandbarError(
         `sandbox stack: teardown of the sandbox siblings for issue ` +
           `${opts.issueId} failed, leaking podman resources:\n` +
           `${failures.join("\n")}\n` +
           `Clean up with: ${RUNTIME} rm -f -t 0 ${leaked.join(" ")}`,
+      )
+      : undefined;
+    const reported = await Promise.allSettled(
+      teardowns.map((record) => opts.onContainerTeardown?.(record)),
+    );
+    for (const result of reported) {
+      if (result.status === "rejected") teardownFailures.push(result.reason);
+    }
+    if (removalFailure !== undefined) {
+      for (const failure of teardownFailures) {
+        await reportCleanupNotice(
+          "cleanup-failure",
+          `Sandbox stack for issue ${opts.issueId} resource reporting also failed`,
+          failure,
+        );
+      }
+      throw removalFailure;
+    }
+    if (teardownFailures.length === 1) throw teardownFailures[0];
+    if (teardownFailures.length > 1) {
+      throw new AggregateError(
+        teardownFailures,
+        `Sandbox stack for issue ${opts.issueId} resource reporting failed`,
       );
     }
-    for (const record of teardowns) await opts.onContainerTeardown?.(record);
   };
   // Registered before the first container exists, so a signal anywhere in the
   // bringup below still sweeps what was created. ONE entry for the whole stack
@@ -279,9 +314,7 @@ export async function startSandboxStack(
   // comment above leans on when it says the LIFO drain reaches this stack
   // before the agent-sandbox teardown. `registerDisposable`'s own header owns
   // the rest of that argument.
-  const dispose = registerDisposable(async () => {
-    await stop();
-  });
+  const dispose = registerDisposable(stop);
 
   const attach: ContainerAttachment = {
     kind: "netns",
@@ -383,13 +416,14 @@ export async function startSandboxStack(
       followers.push(deps.follow(nameOf(c), join(opts.logDir, `${c.name}.log`)));
     }
   } catch (err) {
-    await stop().catch(async (stopErr: unknown) => {
-      // The bringup failure is the diagnosis; a teardown failure on top of it
-      // is reported but must not replace it.
-      await (opts.onNotice ?? ((message: string) => console.error(message)))(
-        `Failed to stop sandbox stack after bringup failed: ${String(stopErr)}`,
+    const stoppedResult = await Promise.allSettled([stop()]);
+    if (stoppedResult[0]?.status === "rejected") {
+      await reportCleanupNotice(
+        "cleanup-failure",
+        "Sandbox stack cleanup also failed after bringup failed",
+        stoppedResult[0].reason,
       );
-    });
+    }
     throw err;
   }
 

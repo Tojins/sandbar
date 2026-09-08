@@ -1143,7 +1143,13 @@ describe("createSandbox integration (local provider)", () => {
   });
 
   it("creates a managed worktree under .sandbar/worktrees and captures a commit", async () => {
-    const provider = makeLocalProvider();
+    const provider = {
+      ...makeLocalProvider(),
+      containerResources: async () => ({
+        peakMemoryBytes: 512_000_000,
+        oomKilled: false,
+      }),
+    };
     const sandbox = await createSandbox({
       env: {},
       branch: "sandbar/issue-1-demo",
@@ -1160,12 +1166,26 @@ describe("createSandbox integration (local provider)", () => {
         `git commit --allow-empty -m "agent work" >/dev/null 2>&1 && ` +
           `printf '%s\\n' '${JSON.stringify({ type: "result", result: "done <promise>COMPLETE</promise>" })}'`,
       );
-      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
+      let invocation: AgentInvocationRecord | undefined;
+      const run = await sandbox.run({
+        agent,
+        prompt: "go",
+        completionSignal: [],
+        onInvocationEnd: (record) => { invocation = record; },
+      });
 
       expect(run.stdout).toContain("<promise>COMPLETE</promise>");
       expect(run.commits).toHaveLength(1);
       expect(typeof run.maxGapMs).toBe("number");
       expect(run.commits[0]!.sha).toMatch(/^[0-9a-f]{40}$/);
+      expect(run).toMatchObject({
+        peakMemoryBytes: 512_000_000,
+        oomKilled: false,
+      });
+      expect(invocation).toMatchObject({
+        peakMemoryBytes: 512_000_000,
+        oomKilled: false,
+      });
       await sandbox.syncBranchToCache();
       // The captured commit is the one the agent made on the branch.
       const log = await git(["log", "-1", "--format=%H", "sandbar/issue-1-demo"], dir);

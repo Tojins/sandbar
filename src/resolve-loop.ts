@@ -81,6 +81,7 @@ import {
 } from "./agent-run-end.js";
 import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
 import {
+  containerResourcesOf,
   formatContainerResources,
   type ContainerResources,
 } from "./container-resources.js";
@@ -455,8 +456,7 @@ export async function runResolveLoop(
         exitCode: run.exitCode,
         signal: run.signal,
         durationMs: run.durationMs,
-        ...(run.peakMemoryBytes === undefined ? {} : { peakMemoryBytes: run.peakMemoryBytes }),
-        ...(run.oomKilled === undefined ? {} : { oomKilled: run.oomKilled }),
+        ...containerResourcesOf(run),
         container: run.container,
         stdoutBytes: run.stdout.length,
         stderrBytes: run.stderr.length,

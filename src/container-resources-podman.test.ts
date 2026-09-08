@@ -43,6 +43,12 @@ describe.runIf(available && rootless)("container resource cgroup evidence", () =
         "run", "-d", "--name", name, "--image-volume=ignore",
         "--entrypoint", "sleep", IMAGE, "infinity",
       ]);
+      // Resolve agents use this exact lifecycle: a short-lived exec finishes,
+      // while the held PID 1 keeps the cgroup and its historical peak readable
+      // until Sandbar has inspected it and explicitly removes the container.
+      await exec(RUNTIME, [
+        "exec", name, "sh", "-c", "head -c 1048576 /dev/zero >/dev/null",
+      ]);
       const inspected = await exec(RUNTIME, [
         "inspect", "--format", "{{.State.CgroupPath}}\n{{.State.OOMKilled}}", name,
       ]);

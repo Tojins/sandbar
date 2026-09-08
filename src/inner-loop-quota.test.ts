@@ -41,12 +41,15 @@ vi.mock("./agent-sandbox.js", async (importOriginal) => {
 
 vi.mock("./gate-stack.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./gate-stack.js")>(),
-  startStack: vi.fn(async () => ({
+  startStack: vi.fn(async (opts) => ({
     runGate: vi.fn(async () => ({
       ok: true, stdout: "", stderr: "", exitCode: 0, failedStep: null,
       durationMs: 1, steps: [], containerLogs: "",
     })),
-    stop: vi.fn(),
+    stop: vi.fn(async () => opts.onContainerTeardown?.({
+      name: "gate-db", container: "gate-db-1", lifecycle: "issue",
+      durationMs: 10, peakMemoryBytes: 1000, oomKilled: false,
+    })),
   })),
 }));
 
@@ -54,7 +57,13 @@ vi.mock("./sandbox-stack.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./sandbox-stack.js")>(),
   prepareSandboxLogDir: vi.fn(async () => "/tmp/issue-109-logs"),
   sandboxContainers: vi.fn(() => []),
-  startSandboxStack: vi.fn(async () => ({ statuses: [], stop: vi.fn() })),
+  startSandboxStack: vi.fn(async (opts) => ({
+    statuses: [],
+    stop: vi.fn(async () => opts.onContainerTeardown?.({
+      name: "sandbox-db", container: "sandbox-db-1", lifecycle: "attempt",
+      durationMs: 20, peakMemoryBytes: 2000, oomKilled: true,
+    })),
+  })),
 }));
 
 vi.mock("./agent-tools.js", async (importOriginal) => ({
@@ -81,6 +90,7 @@ import {
 } from "./inner-loop.js";
 import { createAgentInvocationSequencer } from "./logs.js";
 import type { PlannedIssue } from "./plan-resolver.js";
+import { sandboxContainers } from "./sandbox-stack.js";
 
 const issue = (id: string): PlannedIssue => ({
   id,
@@ -151,15 +161,18 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     });
     seams.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
     seams.preserveWorktree.mockReset();
-    seams.createSandbox.mockReset().mockImplementation(async () => ({
-      run: seams.sandboxRun,
-      syncBranchToCache: vi.fn(async () => undefined),
-      preserveWorktree: seams.preserveWorktree,
-      close: vi.fn(),
-      containerName: "sandbox",
-      branch: "test",
-      worktreePath: "/tmp/issue-109-worktree",
-    }));
+    seams.createSandbox.mockReset().mockImplementation(async (opts) => {
+      await opts.beforeSandboxReady?.("sandbox");
+      return {
+        run: seams.sandboxRun,
+        syncBranchToCache: vi.fn(async () => undefined),
+        preserveWorktree: seams.preserveWorktree,
+        close: vi.fn(),
+        containerName: "sandbox",
+        branch: "test",
+        worktreePath: "/tmp/issue-109-worktree",
+      };
+    });
   });
 
   it("keeps credential as the provider's highest-priority closure cause", () => {
@@ -242,6 +255,36 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       effort: null, durationMs: expect.any(Number), signalMs: 1, maxGapMs: 1,
       usage: { toolCalls: 3, peakContext: 41 },
     }]);
+  });
+
+  it("attributes gate and sandbox sibling teardown evidence to the issue", async () => {
+    const events: EventInput[] = [];
+    vi.mocked(sandboxContainers).mockReturnValueOnce([{} as never]);
+    seams.sandboxRun.mockResolvedValueOnce({
+      stdout: "<promise>NEEDS-INFO</promise><questions>Which?</questions>",
+      headBefore: "base-sha",
+      headAfter: "base-sha",
+      signalMs: 1,
+      maxGapMs: 1,
+      toolCalls: 0,
+      commits: [],
+    });
+
+    await expect(runInnerLoop(issue("141"), {
+      config: config("claude"), hooks: {}, copyToWorktree: [],
+      onEvent: (event) => events.push(event),
+    })).resolves.toMatchObject({ type: "NEEDS-INFO" });
+
+    expect(events.filter((event) => event.kind === "container")).toEqual([
+      expect.objectContaining({
+        kind: "container", stack: "gate", issue: 141, title: "Issue 141",
+        name: "gate-db", peakMemoryBytes: 1000, oomKilled: false,
+      }),
+      expect.objectContaining({
+        kind: "container", stack: "sandbox", issue: 141, title: "Issue 141",
+        name: "sandbox-db", peakMemoryBytes: 2000, oomKilled: true,
+      }),
+    ]);
   });
 
   it("runs the enabled UI check before attempt 1 and again after a fresh HARD-ERROR cycle", async () => {

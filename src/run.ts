@@ -161,6 +161,7 @@ import {
   createMergerWorktree,
 } from "./merger-worktree.js";
 import { type Stack, startStack } from "./gate-stack.js";
+import { containerResourcesOf } from "./container-resources.js";
 import {
   CHUNK_LANDED_UNNAMED_BANNER,
   CHUNK_RESIDUE_KEPT_BANNER,
@@ -1859,12 +1860,7 @@ export async function run(
                   exitCode: record.exitCode,
                   signal: record.signal,
                   durationMs: record.durationMs,
-                  ...(record.peakMemoryBytes === undefined
-                    ? {}
-                    : { peakMemoryBytes: record.peakMemoryBytes }),
-                  ...(record.oomKilled === undefined
-                    ? {}
-                    : { oomKilled: record.oomKilled }),
+                  ...containerResourcesOf(record),
                 });
                 return path;
               },

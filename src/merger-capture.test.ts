@@ -15,11 +15,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { buildAgentProvider } from "./agent-providers.js";
 import {
   buildResolveRunArgv,
+  buildResolveExecArgv,
   captureAgentRun,
   parseCapturedAgentRun,
   realAdapter,
@@ -27,6 +28,7 @@ import {
 } from "./merger.js";
 import { runScope } from "./naming.js";
 import { isInfraFailure, parseResolveSignal } from "./resolve-loop.js";
+import type { BoundedRuntimeResult } from "./runtime.js";
 
 const opts = (timeoutMs = 30_000) => ({ container: "c-under-test", timeoutMs });
 
@@ -365,7 +367,6 @@ describe("resolve provider invocation (#74)", () => {
         cwd: "/worktree",
         extraMounts: ["/git-common"],
         image: "sandbox-image",
-        command: "agent --print",
         credentials,
         botName: "sandbar-bot",
         botEmail: "bot@example.test",
@@ -376,12 +377,11 @@ describe("resolve provider invocation (#74)", () => {
       }
       for (const key of absent) expect(joined).not.toContain(`${key}=`);
       expect(joined).toContain("GH_TOKEN=github-key");
-      expect(argv.slice(-5)).toEqual([
+      expect(argv.slice(-4)).toEqual([
         "--entrypoint",
-        "/bin/sh",
+        "sleep",
         "sandbox-image",
-        "-c",
-        "agent --print",
+        "infinity",
       ]);
       expect(argv).toContain("/git-common:/git-common");
     },
@@ -393,13 +393,12 @@ describe("resolve provider invocation (#74)", () => {
       cwd: "/worktree",
       extraMounts: ["/git-common"],
       image: "sandbox-image",
-      command: "agent --print",
       credentials: {},
       botName: "sandbar-bot",
       botEmail: "bot@example.test",
     });
     expect(argv).toEqual([
-      "run", "-i", "--image-volume=ignore",
+      "run", "-d", "--image-volume=ignore",
       "--name", "resolve-1",
       "--userns=keep-id", "--user", "1000:1000",
       "-v", "/worktree:/workspace", "-v", "/git-common:/git-common",
@@ -409,12 +408,15 @@ describe("resolve provider invocation (#74)", () => {
       "-e", "GIT_AUTHOR_EMAIL=bot@example.test",
       "-e", "GIT_COMMITTER_NAME=sandbar-bot",
       "-e", "GIT_COMMITTER_EMAIL=bot@example.test",
-      "--entrypoint", "/bin/sh", "sandbox-image", "-c", "agent --print",
+      "--entrypoint", "sleep", "sandbox-image", "infinity",
     ]);
     expect(argv).not.toContain("--init");
-    // #141 reads inspect/cgroup evidence after the process exits, then the
-    // adapter removes the named container explicitly.
+    // #141 runs the agent through exec while this PID 1 keeps its cgroup live,
+    // then the adapter measures and explicitly removes the container.
     expect(argv).not.toContain("--rm");
+    expect(buildResolveExecArgv("resolve-1", "agent --print")).toEqual([
+      "exec", "-i", "resolve-1", "/bin/sh", "-c", "agent --print",
+    ]);
   });
 
   it("mounts the shared Codex credential read-write without putting it in env", () => {
@@ -427,7 +429,6 @@ describe("resolve provider invocation (#74)", () => {
         sandboxPath: "/home/agent/.codex/auth.json",
       },
       image: "sandbox-image",
-      command: "codex exec",
       credentials: {},
       botName: "sandbar-bot",
       botEmail: "bot@example.test",
@@ -445,8 +446,12 @@ describe("resolve provider invocation (#74)", () => {
     await writeFile(podman, [
       `#!${process.execPath}`,
       'const { appendFileSync } = require("node:fs");',
-      `appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
-      'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"<promise>ABANDON</promise>"}}) + "\\n");',
+      'const args = process.argv.slice(2);',
+      `appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(args) + "\\n");`,
+      'if (args[0] === "run") process.stdout.write("container-id\\n");',
+      'if (args[0] === "exec") process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"<promise>ABANDON</promise>"}}) + "\\n");',
+      'if (args[0] === "inspect") process.stdout.write("\\nfalse\\n");',
+      'if (args[0] === "stats") process.stdout.write("2048 / 4096\\n");',
     ].join("\n"), { mode: 0o755 });
     process.env["PATH"] = `${root}:${originalPath ?? ""}`;
 
@@ -474,19 +479,97 @@ describe("resolve provider invocation (#74)", () => {
 
       const run = await adapter.runResolveAgent("resolve this", 1);
       expect(run.output).toBe("<promise>ABANDON</promise>");
-      const [argv] = (await readFile(argvLog, "utf8"))
+      const calls = (await readFile(argvLog, "utf8"))
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as string[]);
+      const argv = calls.find((args) => args[0] === "run")!;
       expect(argv).toContain(
         `${codexAuthMount.hostPath}:${codexAuthMount.sandboxPath}:z`,
       );
       expect(argv).toContain("CODEX_HOME=/var/lib/codex");
       expect(argv?.join(" ")).not.toContain("CODEX_AUTH_JSON=");
+      expect(calls.map((args) => args[0])).toEqual([
+        "run", "exec", "inspect", "stats", "rm",
+      ]);
+      expect(run).toMatchObject({ peakMemoryBytes: 2048, oomKilled: false });
     } finally {
       if (originalPath === undefined) delete process.env["PATH"];
       else process.env["PATH"] = originalPath;
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it.each([
+    ["exit", 0, null],
+    ["timeout", null, "SIGTERM"],
+    ["signal", null, "SIGKILL"],
+  ] as const)(
+    "measures a live resolve cgroup before explicit removal after %s",
+    async (end, exitCode, signal) => {
+      const order: string[] = [];
+      const runtimeResult = (stdout = ""): BoundedRuntimeResult => ({
+        stdout,
+        stderr: "",
+        exitCode: 0,
+        timedOut: false,
+        maxBufferExceeded: false,
+        errorMessage: "",
+      });
+      const podman = vi.fn(async (args: readonly string[]) => {
+        order.push(args[0] ?? "");
+        if (args[0] === "inspect") {
+          return runtimeResult("\ntrue\n");
+        }
+        if (args[0] === "stats") return runtimeResult("8192 / 16384\n");
+        return runtimeResult();
+      });
+      const captureResolveProcess = vi.fn(async (
+        _file: string,
+        args: readonly string[],
+      ) => {
+        order.push(args[0] ?? "");
+        if (args[0] === "run") {
+          return {
+            stdout: "container-id\n", stderr: "", end: "exit" as const,
+            exitCode: 0, signal: null, durationMs: 1, container: "resolve-test",
+          };
+        }
+        return {
+          stdout: JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: "<promise>ABANDON</promise>" },
+          }),
+          stderr: "",
+          end,
+          exitCode,
+          signal,
+          durationMs: 2,
+          container: "resolve-test",
+        };
+      });
+      const adapter = realAdapter({
+        cwd: "/worktree",
+        cacheDir: "/cache.git",
+        scope: runScope("/worktree"),
+        repo: { owner: "acme", name: "app" },
+        sourceBranch: "main",
+        botName: "sandbar-bot",
+        botEmail: "bot@example.test",
+        coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+        mergerAgent: "codex",
+        mergerModelId: "gpt-5.6-sol",
+        sandboxImage: "sandbox-image",
+        env: () => undefined,
+        runStackGate: async () => { throw new Error("not called"); },
+        podman,
+        captureResolveProcess,
+      });
+
+      const run = await adapter.runResolveAgent("resolve this", 1);
+      expect(run).toMatchObject({ peakMemoryBytes: 8192, oomKilled: true });
+      expect(order).toEqual(["run", "exec", "inspect", "stats", "rm"]);
+      expect(order.indexOf("inspect")).toBeLessThan(order.indexOf("rm"));
+    },
+  );
 });

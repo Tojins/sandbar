@@ -13,9 +13,11 @@ import {
 
 const result = (stdout: string, exitCode: number | null = 0): ContainerResourceResult => ({
   stdout,
+  stderr: "",
   exitCode,
   timedOut: false,
   maxBufferExceeded: false,
+  errorMessage: "",
 });
 
 describe("container resource evidence", () => {

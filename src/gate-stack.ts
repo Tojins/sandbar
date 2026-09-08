@@ -94,11 +94,9 @@
 // escape hatches are a static probe binary or `hold: true` + a
 // `postReadyCommand`.
 
-import { execFile } from "node:child_process";
 import { isAbsolute, resolve as resolvePath } from "node:path";
-import { promisify } from "node:util";
 
-import { registerDisposable } from "./cleanup.js";
+import { registerDisposable, reportCleanupNotice } from "./cleanup.js";
 import type {
   ResolvedGateStack,
   ResolvedStackContainer,
@@ -115,17 +113,19 @@ import {
   podNameFor,
   stackContainerNameFor,
 } from "./naming.js";
-import { RUNTIME } from "./runtime.js";
+import {
+  boundedRuntime,
+  boundedRuntimeOk,
+  type BoundedRuntimeResult,
+  RUNTIME,
+  RUNTIME_MAX_BUFFER,
+} from "./runtime.js";
 import {
   readContainerResources,
   systemContainerResourceDeps,
   type ContainerResources,
   type ContainerTeardown,
 } from "./container-resources.js";
-
-const exec = promisify(execFile);
-
-const MAX_BUFFER = 50 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Bounded podman calls (#26)
@@ -154,16 +154,7 @@ const MAX_BUFFER = 50 * 1024 * 1024;
 // tell "it failed" from "it never answered" — a readiness probe that exits 1 is
 // not ready, one that hangs is not ready AND has left a process behind — and an
 // exception collapses those into one channel.
-export type BoundedResult = {
-  readonly stdout: string;
-  readonly stderr: string;
-  // null when the process was killed rather than exiting on its own.
-  readonly exitCode: number | null;
-  readonly timedOut: boolean;
-  readonly maxBufferExceeded: boolean;
-  // Node's own message ("Command failed: …"), for prose. "" on success.
-  readonly errorMessage: string;
-};
+export type BoundedResult = BoundedRuntimeResult;
 
 // Exported since #44: sandbox-stack.ts drives podman for the sandbox siblings
 // and every claim this module makes about not hanging (and about `podman exec`
@@ -183,62 +174,18 @@ export function boundedPodman(
   timeoutMs: number,
   onChunk?: (chunk: string) => void,
 ): Promise<BoundedResult> {
-  return new Promise((resolve) => {
-    let killedByTimer = false;
-    // Hoisted, not declared after `execFile`. `clearTimeout(timer)` below is
-    // safe only because execFile never invokes its callback synchronously, and
-    // a TDZ ReferenceError raised inside that callback would surface as an
-    // uncaught throw rather than a rejected promise.
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const child = execFile(
-      RUNTIME,
-      [...args],
-      { maxBuffer: MAX_BUFFER },
-      (err, stdout, stderr) => {
-        clearTimeout(timer);
-        const e = err as
-          | (Error & { code?: number | string; signal?: string })
-          | null;
-        resolve({
-          stdout,
-          stderr,
-          exitCode: e === null ? 0 : typeof e.code === "number" ? e.code : null,
-          // `e !== null` keeps a call that exited 0 in the same tick the timer
-          // fired from being read as a timeout — a false red costing an
-          // implementation attempt. It does NOT cover the mirror case: a call
-          // that exits NON-ZERO inside that same window is reported as a
-          // timeout. Against a 15-minute default the window is microseconds,
-          // and both readings are red, so the asymmetry is priced in rather
-          // than closed.
-          timedOut: killedByTimer && e !== null,
-          maxBufferExceeded: e?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
-          errorMessage: e?.message ?? "",
-        });
-      },
-    );
-    if (onChunk !== undefined) {
-      // ANSI-stripped here rather than at the sink, so the live view and the
-      // trace read alike — a stream showing raw `^[[90m` where the trace shows
-      // clean text is two accounts of one step. Per CHUNK, so an escape or a
-      // multi-byte character straddling a chunk boundary survives into the live
-      // view; that is a cosmetic artefact of the tee alone and never reaches
-      // the buffer, which node decodes whole.
-      const tee = (buf: Buffer | string): void => {
-        onChunk(stripAnsi(buf.toString()));
-      };
-      child.stdout?.on("data", tee);
-      child.stderr?.on("data", tee);
-    }
-    timer = setTimeout(() => {
-      killedByTimer = true;
-      child.kill("SIGKILL");
-    }, timeoutMs);
-  });
+  return boundedRuntime(
+    args,
+    timeoutMs,
+    onChunk === undefined
+      ? undefined
+      : (chunk) => onChunk(stripAnsi(chunk.toString())),
+  );
 }
 
 // Did the call exit 0 on its own?
 export function boundedOk(r: BoundedResult): boolean {
-  return r.exitCode === 0 && !r.timedOut && !r.maxBufferExceeded;
+  return boundedRuntimeOk(r);
 }
 
 // A control-plane call whose failure means the stack cannot exist. Throws a
@@ -868,6 +815,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     readContainerResources(containerName, systemContainerResourceDeps(boundedPodman)));
   const lifetimes = new Map<string, () => number>();
   const teardowns: ContainerTeardown[] = [];
+  const teardownFailures: unknown[] = [];
   const measureTeardown = async (
     c: ResolvedStackContainer,
   ): Promise<ContainerTeardown | null> => {
@@ -889,10 +837,38 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     lifetimes.delete(record.container);
   };
   const recordTeardown = async (c: ResolvedStackContainer): Promise<void> => {
-    retainTeardown(await measureTeardown(c));
+    const measured = await Promise.allSettled([measureTeardown(c)]);
+    const result = measured[0];
+    if (result?.status === "fulfilled") retainTeardown(result.value);
+    else if (result?.status === "rejected") teardownFailures.push(result.reason);
   };
   const reportTeardowns = async (): Promise<void> => {
-    for (const record of teardowns) await opts.onContainerTeardown?.(record);
+    const reported = await Promise.allSettled(
+      teardowns.map((record) => opts.onContainerTeardown?.(record)),
+    );
+    for (const result of reported) {
+      if (result.status === "rejected") teardownFailures.push(result.reason);
+    }
+  };
+  const finishTeardown = async (primaryFailure?: unknown): Promise<void> => {
+    await reportTeardowns();
+    if (primaryFailure !== undefined) {
+      for (const failure of teardownFailures) {
+        await reportCleanupNotice(
+          "cleanup-failure",
+          `Gate stack '${opts.stackId}' resource reporting also failed`,
+          failure,
+        );
+      }
+      throw primaryFailure;
+    }
+    if (teardownFailures.length === 1) throw teardownFailures[0];
+    if (teardownFailures.length > 1) {
+      throw new AggregateError(
+        teardownFailures,
+        `Gate stack '${opts.stackId}' resource reporting failed`,
+      );
+    }
   };
   const bringUpCtx = (
     attach: ContainerAttachment,
@@ -976,11 +952,10 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // that path never enters the catch and `broughtUp` is long since true.
     if (opts.keepAlive === true && broughtUp) {
       podKept = true;
-      await reportTeardowns();
+      await finishTeardown();
       return;
     }
-    const records = await Promise.all(opts.spec.containers.map(measureTeardown));
-    for (const record of records) retainTeardown(record);
+    await Promise.all(opts.spec.containers.map(recordTeardown));
     // `pod rm -f` takes the member containers AND the infra container with it.
     // The infra container is named `<pod-id-prefix>-infra`, which matches no
     // sandbar prefix — removing containers by name would leave it, and the pod,
@@ -1013,15 +988,15 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     };
     await attempt(POD_RM_ARGS(podName));
     await attempt(["network", "rm", "-f", networkName]);
-    if (failures.length > 0) {
-      throw new SandbarError(
+    const removalFailure = failures.length > 0
+      ? new SandbarError(
         `gate stack: teardown of pod '${podName}' / network '${networkName}' ` +
           `failed, leaking podman resources:\n${failures.join("\n")}\n` +
           `Clean up with: ${RUNTIME} ${POD_RM_ARGS(podName).join(" ")} && ` +
           `${RUNTIME} network rm -f ${networkName}`,
-      );
-    }
-    await reportTeardowns();
+      )
+      : undefined;
+    await finishTeardown(removalFailure);
   };
   // Registered before the first resource exists, so a signal anywhere in the
   // bringup window below still sweeps whatever was created. The local catch
@@ -1033,9 +1008,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   // leaves the window above and this entry's LIFO position exactly as they
   // were — it is an ordinary registry entry that can be taken back out — while
   // letting `stop` forget itself once it has run.
-  const dispose = registerDisposable(async () => {
-    await stop();
-  });
+  const dispose = registerDisposable(stop);
 
   try {
     // Is there a stack up that this call may adopt (#45)? Only ever true for a
@@ -1192,11 +1165,14 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   } catch (err) {
     // The bringup failure is the diagnosis; a teardown failure on top of it is
     // reported but must not replace it.
-    await stop().catch(async (stopErr: unknown) => {
-      await (opts.onNotice ?? ((message: string) => console.error(message)))(
-        stopErr instanceof Error ? stopErr.message : String(stopErr),
+    const stoppedResult = await Promise.allSettled([stop()]);
+    if (stoppedResult[0]?.status === "rejected") {
+      await reportCleanupNotice(
+        "cleanup-failure",
+        "Gate stack cleanup also failed after bringup failed",
+        stoppedResult[0].reason,
       );
-    });
+    }
     // What that `stop` DID with the pod, carried out on the error rather than
     // left for whoever catches it to infer (#45). This is the one place that
     // knows both — the pod identity, and whether its own early return kept it
@@ -2404,7 +2380,7 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
         "the work is genuinely this slow.\n"
       : r.maxBufferExceeded
         ? `\n\n[sandbar] step '${step.name}' produced more than ` +
-          `${MAX_BUFFER} bytes of output and was killed; the output above is ` +
+          `${RUNTIME_MAX_BUFFER} bytes of output and was killed; the output above is ` +
           "truncated and the exit code is unknown. This is an output-volume " +
           "failure, not necessarily a test failure — quieten the step's " +
           "reporter.\n"

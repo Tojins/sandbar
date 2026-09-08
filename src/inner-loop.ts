@@ -89,6 +89,7 @@ import {
   agentPartialOutput,
   agentPartialUsage,
   podman,
+  withPartialContainerResources,
   withPartialOutput,
 } from "./agent-sandbox.js";
 import type { RateLimitMeasurement } from "./agent-run-end.js";
@@ -1410,6 +1411,45 @@ export async function runImplementer(
   const implementerTimer = startTimer();
   const runAgent = (options: Parameters<Sandbox["run"]>[0]) =>
     runSandboxAndPublish(sandbox, options, issue.id, opts.onEvent);
+  const logFailure = async (
+    err: unknown,
+    prior?: Awaited<ReturnType<typeof runAgent>>,
+  ): Promise<void> => {
+    const partial = agentPartialUsage(err);
+    const resources = prior === undefined
+      ? agentPartialContainerResources(err)
+      : mergeContainerResources(prior, agentPartialContainerResources(err));
+    const toolCalls = prior?.toolCalls === undefined && partial.toolCalls === undefined
+      ? undefined
+      : (prior?.toolCalls ?? 0) + (partial.toolCalls ?? 0);
+    const usage = eventUsage(
+      prior === undefined
+        ? partial.usage
+        : sumAgentUsage(prior.usage, partial.usage),
+      toolCalls,
+      maxContextDepth(prior?.peakContext, partial.peakContext),
+      partial.rateLimit ?? prior?.rateLimit ??
+        (err instanceof AgentQuotaError ? err.measurement : undefined),
+    );
+    await opts.onEvent({
+      kind: "implementer",
+      issue: Number(issue.id),
+      title: issue.title,
+      attempt: action.attempt,
+      signal: err instanceof AgentQuotaError
+        ? "QUOTA"
+        : err instanceof AgentCredentialError
+          ? "CREDENTIAL"
+          : "FAILED",
+      commits: prior?.commits.length ?? 0,
+      provider: config.implementerAgent,
+      model: config.implementerModelId,
+      effort: config.implementerEffort ?? null,
+      durationMs: implementerTimer(),
+      ...(usage === undefined ? {} : { usage }),
+      ...resources,
+    });
+  };
   let run: Awaited<ReturnType<typeof runAgent>>;
   try {
     run = await runWithProviderState(opts.providerState, config.implementerAgent, () => runAgent({
@@ -1425,30 +1465,7 @@ export async function runImplementer(
       })),
     }));
   } catch (err) {
-    if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) {
-      const partial = agentPartialUsage(err);
-      const resources = agentPartialContainerResources(err);
-      const usage = eventUsage(
-        partial.usage,
-        partial.toolCalls,
-        partial.peakContext,
-        partial.rateLimit ?? (err instanceof AgentQuotaError ? err.measurement : undefined),
-      );
-      await opts.onEvent({
-        kind: "implementer",
-        issue: Number(issue.id),
-        title: issue.title,
-        attempt: action.attempt,
-        signal: err instanceof AgentQuotaError ? "QUOTA" : "CREDENTIAL",
-        commits: 0,
-        provider: config.implementerAgent,
-        model: config.implementerModelId,
-        effort: config.implementerEffort ?? null,
-        durationMs: implementerTimer(),
-        ...(usage === undefined ? {} : { usage }),
-        ...resources,
-      });
-    }
+    await logFailure(err);
     throw err;
   }
   accumulated.push(...run.commits);
@@ -1491,20 +1508,26 @@ export async function runImplementer(
   // next attempt either, and swallowing it would hide the infra fault.
   if (signal.kind === "NO-SIGNAL" && signal.missingTag) {
     const nudgeTimer = startTimer();
-    const nudge = await runAgent({
-      name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
-      model: config.implementerModelId,
-      agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
-        continueSession: true,
-        effort: config.implementerEffort,
-      }),
-      prompt: PROMISE_NUDGE_TPL,
-      // Any of the three tags ends the wait, not just COMPLETE.
-      completionSignal: PROMISE_COMPLETION_SIGNALS,
-      ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
-        role: "implementer", attempt: action.attempt, nudge: true,
-      })),
-    });
+    let nudge: Awaited<ReturnType<typeof runAgent>>;
+    try {
+      nudge = await runAgent({
+        name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
+        model: config.implementerModelId,
+        agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
+          continueSession: true,
+          effort: config.implementerEffort,
+        }),
+        prompt: PROMISE_NUDGE_TPL,
+        // Any of the three tags ends the wait, not just COMPLETE.
+        completionSignal: PROMISE_COMPLETION_SIGNALS,
+        ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
+          role: "implementer", attempt: action.attempt, nudge: true,
+        })),
+      });
+    } catch (err) {
+      await logFailure(err, run);
+      throw err;
+    }
     accumulated.push(...nudge.commits);
     attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
     attemptToolCalls += nudge.toolCalls;
@@ -1533,14 +1556,23 @@ export async function runImplementer(
     try {
       requireImplementerAttemptEvidence(run, nudge);
     } catch (err) {
-      throw withPartialOutput(
+      await logFailure(err, {
+        ...nudge,
+        commits: [...run.commits, ...nudge.commits],
+        usage: attemptUsage,
+        toolCalls: attemptToolCalls,
+        peakContext: attemptPeakContext,
+        rateLimit: attemptRateLimit,
+        ...attemptResources,
+      });
+      throw withPartialContainerResources(withPartialOutput(
         err,
         combined.stdout,
         attemptUsage,
         attemptToolCalls,
         attemptPeakContext,
         nudge.rateLimit ?? run.rateLimit,
-      );
+      ), attemptResources);
     }
   }
   // Stopped BEFORE the two git reads below: they are the state machine's

@@ -14,11 +14,15 @@
 // fallback only: it is weaker than a peak, but is still better capacity
 // evidence on a host where `memory.peak` is unavailable.
 
-import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 
-import { RUNTIME } from "./runtime.js";
+import {
+  boundedRuntime,
+  boundedRuntimeOk,
+  type BoundedRuntime,
+  type BoundedRuntimeResult,
+} from "./runtime.js";
 
 export type ContainerResources = {
   readonly peakMemoryBytes?: number;
@@ -32,12 +36,7 @@ export type ContainerTeardown = ContainerResources & {
   readonly durationMs: number;
 };
 
-export type ContainerResourceResult = {
-  readonly stdout: string;
-  readonly exitCode: number | null;
-  readonly timedOut: boolean;
-  readonly maxBufferExceeded: boolean;
-};
+export type ContainerResourceResult = BoundedRuntimeResult;
 
 export type ContainerResourcePodman = (
   args: readonly string[],
@@ -51,10 +50,8 @@ export type ContainerResourceDeps = {
 
 export const CGROUP_ROOT = "/sys/fs/cgroup";
 export const CONTAINER_RESOURCE_TIMEOUT_MS = 15_000;
-const MAX_RESOURCE_OUTPUT = 1024 * 1024;
-
 const ok = (result: ContainerResourceResult): boolean =>
-  result.exitCode === 0 && !result.timedOut && !result.maxBufferExceeded;
+  boundedRuntimeOk(result);
 
 const bytes = (value: string): number | undefined => {
   const trimmed = value.trim();
@@ -161,39 +158,8 @@ export async function readContainerResources(
   };
 }
 
-const systemContainerResourcePodman: ContainerResourcePodman = (
-  args,
-  timeoutMs,
-) => new Promise((done) => {
-  let killedByTimer = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const child = execFile(
-    RUNTIME,
-    [...args],
-    { maxBuffer: MAX_RESOURCE_OUTPUT },
-    (err, stdout) => {
-      clearTimeout(timer);
-      const error = err as (Error & { code?: number | string }) | null;
-      done({
-        stdout,
-        exitCode: error === null
-          ? 0
-          : typeof error.code === "number"
-            ? error.code
-            : null,
-        timedOut: killedByTimer && error !== null,
-        maxBufferExceeded: error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
-      });
-    },
-  );
-  timer = setTimeout(() => {
-    killedByTimer = true;
-    child.kill("SIGKILL");
-  }, timeoutMs);
-});
-
 export const systemContainerResourceDeps = (
-  podman: ContainerResourcePodman = systemContainerResourcePodman,
+  podman: BoundedRuntime = boundedRuntime,
 ): ContainerResourceDeps => ({
   podman,
   read: (path) => readFile(path, "utf8"),
