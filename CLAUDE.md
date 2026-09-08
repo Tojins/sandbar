@@ -610,11 +610,14 @@ run it, and around again only on exit 75.
   chain, #44).
 - **`mergeMode` stays `direct` (#39)** — personal project; tests run on host
   machines, not hosted CI.
-- **Serialize issues touching `run.ts`/`inner-loop`/`merger`** (blocked-by
-  chains, not parallel). #66 softened the blast radius — a merged regression is
-  not the driver until the pin moves — but a queued chain still lands slice N+1
-  on top of slice N without either having driven anything, and the gate stack
-  judging both is this checkout's config either way.
+- **One issue per change, however many modules it touches.** Do not carve a
+  change into slices to keep an issue's module count or diff small: a chain of
+  slices lands N+1 on top of N without either having driven anything, and each
+  slice is reviewed without the half that gives it its reason. Two issues that
+  are genuinely separate and both touch `run.ts`/`inner-loop`/`merger` are
+  ordered with `## Blocked by`, not run in parallel. #66 keeps a merged
+  regression out of the driver until the pin moves, so the blast radius of one
+  larger landing is a pin decision, not a reason to split.
 - **The suite must not depend on ambient git config** (the gate runner has no
   global identity) **nor on `process.cwd()` being a repository** (`/workspace/.git`
   is not a repository inside gate containers — name the directory in every git
