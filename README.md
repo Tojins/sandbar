@@ -136,6 +136,10 @@ export default {
   // Required — no sensible default exists:
   ghOwner: "your-org",
   ghRepo: "your-repo",
+  // Restrict queue admission to the latest ready-for-agent application by one
+  // of these forge logins (or by this run's token login). Bots and GitHub Apps
+  // can be listed by their recorded login. Use "anyone" for the legacy policy.
+  developers: ["your-github-login"],
   // The image the AGENT runs in (your toolchain). Built from ./Containerfile
   // unless you override `images` below; sandbar appends the routed agent CLIs.
   sandboxImage: "localhost/your-repo-sandbar:latest",
@@ -246,6 +250,7 @@ sits in).
 | Field | Why it can't default |
 | --- | --- |
 | `ghOwner`, `ghRepo` | Repo identity. Every `gh` call names this repository, so it — not `cwd`'s `origin` — decides which tracker sandbar reads and writes. Each must be a single GitHub name (no slashes). Preflight refuses to start if it disagrees with `origin`. |
+| `developers` | Queue-label policy. A non-empty list admits an issue only when the latest recorded `ready-for-agent` application came from one of these forge logins or the run token's login; matching is case-insensitive and listed bot/App logins count. `"anyone"` restores the pre-0.37 behavior. There is deliberately no default: every host upgrading to 0.37 must choose and commit one policy. |
 | `sandboxImage` | The image the agent (and the merger's resolve agent) runs in. |
 | `botName`, `botEmail` | Commit/author identity. |
 | `sandboxHooks` | Host-specific build/setup. |

@@ -1,14 +1,21 @@
 import { describe, expect, it } from "vitest";
 import type { RunEvent } from "./events.js";
-import { reduceRunEvents } from "./run-state.js";
+import { reduceRunEvents, waitingReasonText } from "./run-state.js";
 
 const at = (seq: number, ts: string, event: object): RunEvent =>
   ({ seq, ts, ...event }) as RunEvent;
 
 describe("run event reducer", () => {
+  it("renders excluded label actors in the waiting list", () => {
+    expect(waitingReasonText({ kind: "label-actor", actor: "mallory" }))
+      .toBe("excluded: ready-for-agent applied by @mallory");
+    expect(waitingReasonText({ kind: "label-actor", actor: null }))
+      .toBe("excluded: ready-for-agent label actor unknown");
+  });
+
   it("projects every event kind into a newest-first, attributed feed", () => {
     const rows: object[] = [
-      { kind: "run-start", schemaVersion: 1, driver: "sandbar", configPath: null,
+      { kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
         workdir: "/r", maxParallelIssues: 2, pid: 1 },
       { kind: "wake-lock", state: "held", detail: "held" },
       { kind: "preflight", action: "started", detail: "Preflight started" },
@@ -107,7 +114,7 @@ describe("run event reducer", () => {
 
   it("limits recent feed rows to 200 without changing the total", () => {
     const events = [at(1, "2026-09-07T09:00:00Z", {
-      kind: "run-start", schemaVersion: 1, driver: "sandbar", configPath: null,
+      kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
       workdir: "/r", maxParallelIssues: 1, pid: 1,
     })];
     for (let index = 0; index < 205; index += 1) {
@@ -124,7 +131,7 @@ describe("run event reducer", () => {
   it("renders pool timelines, waiting reasons and parked refs from one recompute", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 1, driver: "sandbar 0.36.0",
+        kind: "run-start", schemaVersion: 2, driver: "sandbar 0.36.0",
         configPath: "/r/sandbar.config.mjs", workdir: "/r/.sandbar",
         maxParallelIssues: 3, pid: 10,
       }),
@@ -212,7 +219,7 @@ describe("run event reducer", () => {
 
   it("distinguishes a crash from an orderly end", () => {
     const start = at(1, "2026-09-07T09:00:00Z", {
-      kind: "run-start", schemaVersion: 1, driver: "sandbar", configPath: null,
+      kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
       workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
     });
     expect(reduceRunEvents([start], { now: new Date(), pidAlive: false }).run.status)
@@ -225,7 +232,7 @@ describe("run event reducer", () => {
   it("keeps DONE in the pool until its landing outcome is recorded", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        kind: "run-start", schemaVersion: 2, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -258,7 +265,7 @@ describe("run event reducer", () => {
   it("labels teardown 'finishing' until the terminal names the outcome", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        kind: "run-start", schemaVersion: 2, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -287,7 +294,7 @@ describe("run event reducer", () => {
   it("keeps a handoff visible until finalisation without occupying a slot", () => {
     const events = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        kind: "run-start", schemaVersion: 2, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -335,7 +342,7 @@ describe("run event reducer", () => {
   it("clears a rejected issue task from the pool and occupied slots", () => {
     const events = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        kind: "run-start", schemaVersion: 2, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -361,7 +368,7 @@ describe("run event reducer", () => {
 
   it("counts work across fresh HARD-ERROR cycles and keeps the newest finished record", () => {
     const start = at(1, "2026-09-07T09:00:00Z", {
-      kind: "run-start", schemaVersion: 1, driver: "sandbar",
+      kind: "run-start", schemaVersion: 2, driver: "sandbar",
       configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
     });
     const current = [
@@ -400,7 +407,7 @@ describe("run event reducer", () => {
   it("shows fresh-sandbox setup immediately after a retried HARD-ERROR", () => {
     const events = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        kind: "run-start", schemaVersion: 2, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -422,7 +429,7 @@ describe("run event reducer", () => {
   it("does not report a skipped DONE as finished before finalisation", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        kind: "run-start", schemaVersion: 2, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -458,7 +465,7 @@ describe("run event reducer", () => {
   it("turns a finalised merger skip into a human handoff", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        kind: "run-start", schemaVersion: 2, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {

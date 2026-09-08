@@ -70,6 +70,7 @@ describe("realAdapter.isMergeInProgress (real linked worktree)", () => {
       coauthorTrailer: "",
       mergerModelId: "opus",
       ghOwner: "o",
+      developers: "anyone",
       ghRepo: "r",
       sandboxImage: "img",
       // These cases exercise only the git primitives; the cast covers the
@@ -583,6 +584,7 @@ describe("resolveVersionCollision (real conflicting merge in a linked worktree)"
       coauthorTrailer: "Co-authored-by: Claude <noreply@anthropic.com>",
       mergerModelId: "opus",
       ghOwner: "o",
+      developers: "anyone",
       ghRepo: "r",
       sandboxImage: "img",
     } as unknown as Parameters<typeof realAdapter>[0]);

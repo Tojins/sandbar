@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
+import type { Lane } from "./lanes.js";
 import { chunkBranchName } from "./naming.js";
 import {
   type IssueFacts,
   type IssueState,
   type IssueSummary,
   type Plan,
+  type PlanResolution,
+  type ReadyLabelPolicy,
   parseBlockedBy,
-  resolvePlan,
+  resolvePlan as resolvePlanDecision,
 } from "./plan-resolver.js";
 
 const membersOn = (
@@ -25,25 +28,68 @@ function issue(
     number,
     title: opts.title ?? `Issue ${number}`,
     body,
-    labels: opts.labels ?? [],
+    labels: ["ready-for-agent", ...(opts.labels ?? [])],
   };
 }
 
+// Most tables predate #136 and exercise other planner dimensions. Keep their
+// compact positional fixtures while the production contract requires the
+// security-sensitive policy by name.
+function resolvePlan(
+  candidates: readonly IssueSummary[],
+  issueFacts: ReadonlyMap<number, IssueFacts>,
+  excluded: ReadonlySet<number> = new Set(),
+  k = 3,
+  defaultLane: Lane = "auto",
+  chunkMembers: ReadonlyMap<string, ReadonlySet<number>> = new Map(),
+  ongoing: ReadonlySet<number> = new Set(),
+  readyLabelPolicy: ReadyLabelPolicy = "anyone",
+  trustedReady: ReadonlySet<number> = new Set(),
+): PlanResolution {
+  return resolvePlanDecision(candidates, issueFacts, {
+    excluded,
+    k,
+    defaultLane,
+    chunkMembers,
+    ongoing,
+    readyLabelPolicy,
+    trustedReady,
+  });
+}
+
 const closed = (...ns: number[]): ReadonlyMap<number, IssueFacts> =>
-  new Map(ns.map((n) => [n, { state: "CLOSED" as IssueState, labels: [] }]));
+  new Map(ns.map((n) => [n, {
+    state: "CLOSED" as IssueState,
+    labels: [],
+    readyLabelApplication: null,
+  }]));
 const states = (
   o: Record<number, IssueState>,
 ): ReadonlyMap<number, IssueFacts> =>
   new Map(
-    Object.entries(o).map(([n, s]) => [Number(n), { state: s, labels: [] }]),
+    Object.entries(o).map(([n, s]) => [Number(n), {
+      state: s,
+      labels: [],
+      readyLabelApplication: null,
+    }]),
   );
 const facts = (
-  o: Record<number, { state?: IssueState; labels?: readonly string[] }>,
+  o: Record<number, {
+    state?: IssueState;
+    labels?: readonly string[];
+    actor?: string | null;
+  }>,
 ): ReadonlyMap<number, IssueFacts> =>
   new Map(
     Object.entries(o).map(([n, f]) => [
       Number(n),
-      { state: f.state ?? "OPEN", labels: f.labels ?? [] },
+      {
+        state: f.state ?? "OPEN",
+        labels: f.labels ?? [],
+        readyLabelApplication: f.actor === undefined
+          ? null
+          : { actor: f.actor, createdAt: "2026-09-08T12:00:00Z" },
+      },
     ]),
   );
 
@@ -99,6 +145,126 @@ describe("parseBlockedBy", () => {
 
   it("ignores malformed `## Blocked by` lines without #N refs", () => {
     expect(parseBlockedBy("## Blocked by\n- some text\n")).toEqual([]);
+  });
+});
+
+describe("ready-for-agent actor admission (#136)", () => {
+  const policy = {
+    developers: ["Alice", "release-bot[bot]"],
+    viewerLogin: "sandbar-bot",
+  } as const;
+
+  it.each(["alice", "RELEASE-BOT[BOT]", "SANDBAR-BOT"])(
+    "admits a configured or token actor case-insensitively: %s",
+    (actor) => {
+      const result = resolvePlan(
+        [issue(10, "", { labels: ["ready-for-agent"] })],
+        facts({ 10: { labels: ["ready-for-agent"], actor } }),
+        new Set(),
+        3,
+        "auto",
+        new Map(),
+        new Set(),
+        policy,
+      );
+      expect(result.plan.map((candidate) => candidate.id)).toEqual(["10"]);
+      expect(result.waiting).toEqual([]);
+    },
+  );
+
+  it.each([
+    { name: "another login", actor: "mallory", reported: "mallory" },
+    { name: "no event in the bounded window", actor: undefined, reported: null },
+    { name: "an event whose actor has no login", actor: null, reported: null },
+  ])("excludes and reports $name", ({ actor, reported }) => {
+    const result = resolvePlan(
+      [issue(10, "", { labels: ["ready-for-agent"] })],
+      facts({ 10: { labels: ["ready-for-agent"], actor } }),
+      new Set(),
+      3,
+      "auto",
+      new Map(),
+      new Set(),
+      policy,
+    );
+    expect(result.plan).toEqual([]);
+    expect(result.candidates[0]?.ready).toBe(false);
+    expect(result.waiting).toEqual([
+      { issue: 10, title: "Issue 10", reason: { kind: "label-actor", actor: reported } },
+    ]);
+  });
+
+  it("fails closed when the authoritative batch misses a listed issue", () => {
+    const result = resolvePlan(
+      [issue(10, "")],
+      new Map(),
+      new Set(),
+      3,
+      "auto",
+      new Map(),
+      new Set(),
+      policy,
+    );
+    expect(result.plan).toEqual([]);
+    expect(result.waiting[0]?.reason).toEqual({ kind: "label-actor", actor: null });
+  });
+
+  it("honors authoritative label removal even when the last actor was allowed", () => {
+    const result = resolvePlan(
+      [issue(10, "")],
+      facts({ 10: { labels: [], actor: "alice" } }),
+      new Set(),
+      3,
+      "auto",
+      new Map(),
+      new Set(),
+      policy,
+    );
+    expect(result.plan).toEqual([]);
+    expect(result.candidates[0]?.ready).toBe(false);
+    expect(result.waiting).toEqual([]);
+  });
+
+  it("keeps anyone mode's existing behavior without timeline evidence", () => {
+    const result = resolvePlan(
+      [issue(10, "", { labels: ["ready-for-agent"] })],
+      facts({ 10: { labels: ["ready-for-agent"], actor: "mallory" } }),
+    );
+    expect(result.plan.map((candidate) => candidate.id)).toEqual(["10"]);
+  });
+
+  it("trusts a same-cycle extra candidate re-queued by sandbar", () => {
+    const result = resolvePlan(
+      [issue(10, "", { labels: ["ready-for-agent"] })],
+      facts({ 10: { labels: ["ready-for-agent"] } }),
+      new Set(),
+      3,
+      "auto",
+      new Map(),
+      new Set(),
+      policy,
+      new Set([10]),
+    );
+    expect(result.plan.map((candidate) => candidate.id)).toEqual(["10"]);
+  });
+
+  it("does not treat an outsider's chunk relabelling as a rework request", () => {
+    const result = resolvePlan(
+      [issue(47, "", { title: "Root", labels: ["ready-for-agent"] })],
+      facts({ 47: { labels: ["ready-for-agent"], actor: "mallory" } }),
+      new Set(),
+      3,
+      "review",
+      membersOn(47, "Root", 47),
+      new Set(),
+      policy,
+    );
+    expect(result.plan).toEqual([]);
+    expect(result.landedChunks[0]?.rework).toEqual([]);
+    expect(result.waiting[0]?.reason).toEqual({
+      kind: "label-actor",
+      actor: "mallory",
+    });
   });
 });
 

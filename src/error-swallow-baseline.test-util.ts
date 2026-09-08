@@ -38,7 +38,7 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   "keepawake.ts": 1,
   "lock.ts": 4,
   "merger.ts": 11,
-  "preflight.ts": 5,
+  "preflight.ts": 3,
   "prompt.ts": 1,
   // UI port contention is classified as a startup refusal; unexpected UI
   // startup faults share the run's internal-failure path (#132).

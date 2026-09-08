@@ -99,7 +99,7 @@ describe("event record", () => {
     const dir = await mkdtemp(join(tmpdir(), "sandbar-events-"));
     const path = join(dir, "events.jsonl");
     const rows = sequences.map((seq, index) => index === 0 ? {
-      ...start, kind: "run-start", schemaVersion: 1, seq, ts: "2026-09-07T10:00:00Z",
+      ...start, kind: "run-start", schemaVersion: 2, seq, ts: "2026-09-07T10:00:00Z",
     } : { kind: "complaint", severity: "warning", message: String(index), seq,
       ts: "2026-09-07T10:00:01Z" });
     await writeFile(path, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
@@ -112,7 +112,7 @@ describe("event record", () => {
     await writeFile(path, `${JSON.stringify({
       ...start,
       kind: "run-start",
-      schemaVersion: 1,
+      schemaVersion: 2,
       seq: 1,
       ts: "2026-09-07T10:00:00Z",
     })}\n{\"kind\":\"compl`);

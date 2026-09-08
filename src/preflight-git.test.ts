@@ -123,6 +123,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
   const cfg = (layout: RepoLayout) => ({
     layout,
     repo: { owner: "acme", name: "app" },
+    developers: "anyone" as const,
     env: makeEnvReader({}),
     sourceBranch: "main",
     pulledImages: [] as readonly string[],
@@ -513,6 +514,152 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       ).toHaveLength(1);
     });
 
+    it("reports missing gh and leaves issue branches unclassified", async () => {
+      await git(target, "checkout", "-qb", "sandbar/issue-7-parked");
+      await git(target, "commit", "--allow-empty", "-qm", "parked work");
+      await git(target, "checkout", "-q", "main");
+
+      const noGhBin = await mkdtemp(join(tmpdir(), "sandbar-no-gh-"));
+      const gitPath = (await exec("sh", ["-c", "command -v git"])).stdout.trim();
+      const whichPath = (await exec("sh", ["-c", "command -v which"])).stdout.trim();
+      await symlink(gitPath, join(noGhBin, "git"));
+      await symlink(whichPath, join(noGhBin, "which"));
+      const savedPath = process.env["PATH"];
+      process.env["PATH"] = noGhBin;
+      try {
+        await expect(runPreflight(
+          cfg(layoutAt(target)),
+          {
+            lookup: async () => undefined,
+            connect: async () => undefined,
+            wait: async () => undefined,
+            now: () => 0,
+          },
+        )).rejects.toSatisfy(
+          (err: unknown) =>
+            err instanceof PreflightError &&
+            err.failures.some((failure) => failure.includes("`gh` is not on PATH")) &&
+            err.failures.some((failure) => failure.includes("could not be classified")),
+        );
+      } finally {
+        if (savedPath === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = savedPath;
+        await rm(noGhBin, { recursive: true, force: true });
+      }
+    });
+
+    it("parks a labelled branch when the queue label actor is not admitted", async () => {
+      await git(target, "checkout", "-qb", "sandbar/issue-7-outsider");
+      await git(target, "commit", "--allow-empty", "-qm", "outsider work");
+      await writeGhShim([
+        "#!/bin/sh",
+        'if [ "$1 $2" = "issue list" ]; then',
+        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"ready-for-agent"}]}]\'',
+        "  exit 0",
+        "fi",
+        'if [ "$1 $2" = "api graphql" ]; then',
+        '  printf \'{"data":{"repository":{"i7":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]},"timelineItems":{"nodes":[{"actor":{"login":"mallory"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T12:00:00Z"}]}}}}}\'',
+        "  exit 0",
+        "fi",
+        "exit 1",
+      ]);
+
+      const state = await gatherState(
+        cfg(layoutAt(target)),
+        GH_READY,
+        { developers: ["alice"], viewerLogin: "token-bot" },
+      );
+      expect(state.resumableIssueBranches).toEqual([]);
+      expect(state.parkedIssueBranches).toEqual(["sandbar/issue-7-outsider"]);
+    });
+
+    it("does not resume a stale listing row after an admitted actor's label was removed", async () => {
+      await git(target, "checkout", "-qb", "sandbar/issue-7-stale-listing");
+      await git(target, "commit", "--allow-empty", "-qm", "stale listing work");
+      await writeGhShim([
+        "#!/bin/sh",
+        'if [ "$1 $2" = "issue list" ]; then',
+        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"ready-for-agent"}]}]\'',
+        "  exit 0",
+        "fi",
+        'if [ "$1 $2" = "api graphql" ]; then',
+        '  printf \'{"data":{"repository":{"i7":{"state":"OPEN","labels":{"nodes":[]},"timelineItems":{"nodes":[{"actor":{"login":"alice"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T12:00:00Z"}]}}}}}\'',
+        "  exit 0",
+        "fi",
+        "exit 1",
+      ]);
+
+      const state = await gatherState(
+        cfg(layoutAt(target)),
+        GH_READY,
+        { developers: ["alice"], viewerLogin: "token-bot" },
+      );
+      expect(state.resumableIssueBranches).toEqual([]);
+      expect(state.parkedIssueBranches).toEqual(["sandbar/issue-7-stale-listing"]);
+    });
+
+    it("propagates a malformed authoritative response", async () => {
+      await git(target, "checkout", "-qb", "sandbar/issue-7-malformed");
+      await git(target, "commit", "--allow-empty", "-qm", "malformed response work");
+      await writeGhShim([
+        "#!/bin/sh",
+        'if [ "$1 $2" = "issue list" ]; then',
+        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"ready-for-agent"}]}]\'',
+        "  exit 0",
+        "fi",
+        'if [ "$1 $2" = "api graphql" ]; then printf "not-json"; exit 0; fi',
+        "exit 1",
+      ]);
+
+      await expect(gatherState(
+        cfg(layoutAt(target)),
+        GH_READY,
+        { developers: ["alice"], viewerLogin: "token-bot" },
+      )).rejects.toBeInstanceOf(SyntaxError);
+    });
+
+    it("explains how a restricted-policy parked branch can be resumed", async () => {
+      await git(target, "checkout", "-qb", "sandbar/issue-7-outsider");
+      await git(target, "commit", "--allow-empty", "-qm", "outsider work");
+      const events: Array<{ action?: string; detail?: string }> = [];
+      await writeGhShim([
+        "#!/bin/sh",
+        'if [ "$1 $2" = "auth status" ]; then exit 0; fi',
+        'if [ "$1 $2" = "issue list" ]; then',
+        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"ready-for-agent"}]}]\'',
+        "  exit 0",
+        "fi",
+        'if [ "$1 $2" = "api graphql" ]; then',
+        '  case "$*" in',
+        '    *"viewer{login}"*) printf \'{"data":{"viewer":{"login":"token-bot"}}}\' ;;',
+        '    *) printf \'{"data":{"repository":{"i7":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]},"timelineItems":{"nodes":[{"actor":{"login":"mallory"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T12:00:00Z"}]}}}}}\' ;;',
+        "  esac",
+        "  exit 0",
+        "fi",
+        "exit 1",
+      ]);
+
+      await expect(runPreflight(
+        {
+          ...cfg(layoutAt(target)),
+          developers: ["alice"],
+          onEvent: (event) => events.push(event),
+        },
+        {
+          lookup: async () => undefined,
+          connect: async () => undefined,
+          wait: async () => undefined,
+          now: () => 0,
+        },
+      )).rejects.toBeInstanceOf(PreflightError);
+
+      const parked = events.find((event) => event.action === "parked")?.detail ?? "";
+      expect(parked).toContain("outside the admitted queue");
+      expect(parked).toContain("configured developer or this run's token login");
+      expect(parked).toContain("remove and re-apply the label");
+      expect(parked).not.toContain("that is not `ready-for-agent`");
+    });
+
     it("classifies the target's issue branches, not the launch directory's", async () => {
       await git(launchedFrom, "checkout", "-q", "-b", "sandbar/issue-9-launch");
       await git(launchedFrom, "commit", "-q", "--allow-empty", "-m", "work");
@@ -520,7 +667,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
 
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
     });
@@ -544,7 +691,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
 
       expect(state.issueStatesKnown).toBe(true);
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
@@ -568,7 +715,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
 
       expect(state.issueStatesKnown).toBe(false);
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
@@ -585,7 +732,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await git(target, "commit", "-q", "--allow-empty", "-m", "work");
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
 
       expect(state.unmergedIssueBranches).toEqual([]);
       expect(state.discardedIssueBranches).toEqual([]);
@@ -627,7 +774,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       );
       await git(target, "checkout", "-q", "main");
 
-      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
 
       expect(state.unmergedIssueBranches).toEqual([]);
       expect(state.discardedIssueBranches).toEqual([]);
@@ -654,7 +801,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         "https://github.com/acme/app.git",
       );
 
-      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
 
       expect(state.originUrl).toBe("https://github.com/acme/app-fork.git");
       expect(state.originRepo).toEqual({ owner: "acme", name: "app-fork" });
@@ -666,7 +813,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // fixture repo built with a self-remote is exactly that shape — so this is
     // also the default state of every other test in this file.
     it("reports a remote it cannot read as a repo without guessing", async () => {
-      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
 
       expect(state.originUrl).toBe(target);
       expect(state.originRepo).toBeNull();
@@ -686,7 +833,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         "git@gitserver.internal:/srv/git/app.git",
       );
 
-      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
 
       expect(state.originUrl).toBe("git@gitserver.internal:/srv/git/app.git");
       expect(state.originRepo).toBeNull();
@@ -694,14 +841,14 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("reads origin/<sourceBranch> from the named repo", async () => {
-      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
       expect(state.hasOriginBranch).toBe(true);
 
       // A repo with no `origin/main` at all — the invariant must be about the
       // repo it was pointed at, not about the one the process stands in.
       const bare = await mkdtemp(join(tmpdir(), "sandbar-empty-"));
       await git(bare, "init", "-q", "-b", "main");
-      const empty = await gatherState(cfg(layoutAt(bare, target)), GH_READY);
+      const empty = await gatherState(cfg(layoutAt(bare, target)), GH_READY, "anyone");
       expect(empty.hasOriginBranch).toBe(false);
       await rm(bare, { recursive: true, force: true });
     });
@@ -720,7 +867,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
           { container: "gate", hostPath: present },
           { container: "gate", hostPath: absent },
         ],
-      }, GH_READY);
+      }, GH_READY, "anyone");
 
       expect(state.missingMountSources).toEqual([
         {
@@ -740,7 +887,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const state = await gatherState({
         ...cfg(layoutAt(target)),
         mountSources: [{ container: "db", hostPath: dangling }],
-      }, GH_READY);
+      }, GH_READY, "anyone");
 
       expect(state.missingMountSources).toEqual([
         {
@@ -752,7 +899,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("reports nothing when the stack declares no absolute sources", async () => {
-      const state = await gatherState(cfg(layoutAt(target)), GH_READY);
+      const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
       expect(state.missingMountSources).toEqual([]);
     });
 
@@ -765,7 +912,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         const state = await gatherState({
           ...cfg(layoutAt(target)),
           env: makeEnvReader({ [key]: "v" }),
-        }, GH_READY);
+        }, GH_READY, "anyone");
         expect(state.uncredentialledProviders).toEqual([]);
       }
     });
@@ -775,7 +922,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         ...cfg(layoutAt(target)),
         agentProviders: ["claude", "codex"],
         env: makeEnvReader({ ANTHROPIC_API_KEY: "v" }),
-      }, GH_READY);
+      }, GH_READY, "anyone");
       expect(state.uncredentialledProviders).toEqual(["codex"]);
     });
 
@@ -792,14 +939,14 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         const missing = await gatherState({
           ...cfg(layoutAt(target)),
           env: makeEnvReader({ [KEY]: "" }),
-        }, GH_READY);
+        }, GH_READY, "anyone");
         expect(missing.uncredentialledProviders).toEqual(["claude"]);
 
         process.env[KEY] = "from-the-host";
         const inherited = await gatherState({
           ...cfg(layoutAt(target)),
           env: makeEnvReader({ [KEY]: "" }),
-        }, GH_READY);
+        }, GH_READY, "anyone");
         expect(inherited.uncredentialledProviders).toEqual([]);
       } finally {
         if (saved === undefined) delete process.env[KEY];
@@ -812,7 +959,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         ...cfg(layoutAt(target)),
         agentProviders: ["codex"],
         env: makeEnvReader({ OPENAI_API_KEY: "v" }),
-      }, GH_READY);
+      }, GH_READY, "anyone");
       expect(state.uncredentialledProviders).toEqual([]);
     });
   });

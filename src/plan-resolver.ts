@@ -15,14 +15,18 @@
 // fail-safe unions, so either the listing or the authoritative batch keeps an
 // issue out. `ready-for-agent` is authoritative-only whenever the batch knows
 // the issue: absence de-queues it, presence is the explicit chunk-rework
-// override, and the lagging listing decides neither direction. On a batch miss
-// the listing remains the answer, so one failed lookup cannot silently drop
-// ready work.
+// override, and the lagging listing decides neither direction. In restricted
+// mode (#136), presence is not enough: the most recent `ready-for-agent`
+// LABELED_EVENT in the same batch must name a configured developer or the
+// token's viewer login. A missing issue or an event outside the bounded
+// timeline window is an unknown verdict and fails closed. `"anyone"` keeps the
+// earlier batch-miss fallback unchanged.
 //
 // All ranking logic lives in pure functions (parseBlockedBy, resolvePlan) so it
 // can be table-driven tested. The I/O wrappers (fetchCandidates,
-// fetchIssueStates) are thin adapters over `gh`. The branch name a plan carries
-// is built by `naming.ts`, which owns both of sandbar's branch shapes (#58) —
+// fetchIssueStates, resolveReadyLabelPolicy) are thin adapters over `gh`. The
+// branch name a plan carries is built by `naming.ts`, which owns both of
+// sandbar's branch shapes (#58) —
 // the planner used to spell `sandbar/issue-<n>-<slug>` inline, which made the
 // one thing preflight's globs key on a string in two modules.
 //
@@ -176,6 +180,7 @@ import {
   landedChunksOf,
 } from "./chunks.js";
 import { DEFAULT_MAX_PARALLEL_ISSUES } from "./config.js";
+import { SandbarError } from "./errors.js";
 import {
   DEFAULT_LANE,
   type Lane,
@@ -200,8 +205,21 @@ const exec = promisify(execFile);
 
 const WAITING_LABEL = "waiting";
 const READY_LABEL = "ready-for-agent";
+const LABEL_EVENT_WINDOW = 100;
 
 export type IssueState = "OPEN" | "CLOSED";
+
+export type ReadyLabelApplication = {
+  readonly actor: string | null;
+  readonly createdAt: string;
+};
+
+export type ReadyLabelPolicy =
+  | "anyone"
+  | {
+      readonly developers: readonly string[];
+      readonly viewerLogin: string;
+    };
 
 // What the authoritative (GraphQL) batch knows about one issue. Labels are here
 // because #94's rework override must never read the lagging listing. An issue absent
@@ -210,6 +228,9 @@ export type IssueState = "OPEN" | "CLOSED";
 export type IssueFacts = {
   readonly state: IssueState;
   readonly labels: readonly string[];
+  // Null means the bounded timeline window contains no usable application of
+  // `ready-for-agent`; restricted admission treats that unknown as excluded.
+  readonly readyLabelApplication: ReadyLabelApplication | null;
 };
 
 export type IssueSummary = {
@@ -218,6 +239,40 @@ export type IssueSummary = {
   readonly body: string;
   readonly labels: readonly string[];
 };
+
+export type ReadyQueueVerdict =
+  | { readonly kind: "admitted" }
+  | { readonly kind: "closed" }
+  | { readonly kind: "not-ready" }
+  | { readonly kind: "label-actor"; readonly actor: string | null };
+
+// The one queue-membership decision (#136). The authoritative batch owns
+// state and current label presence when it answered; the listing is only the
+// fallback in `anyone` mode. Restricted mode additionally requires that same
+// batch to contain an admitted latest label application. A same-cycle requeue
+// is trusted only for actor provenance: current label presence and closure
+// remain authoritative when facts are available.
+export function readyQueueVerdict(input: {
+  readonly listedLabels: readonly string[];
+  readonly authoritative: IssueFacts | undefined;
+  readonly policy: ReadyLabelPolicy;
+  readonly trusted: boolean;
+}): ReadyQueueVerdict {
+  const { authoritative } = input;
+  if (authoritative?.state === "CLOSED") return { kind: "closed" };
+  const ready = authoritative
+    ? authoritative.labels.includes(READY_LABEL)
+    : input.listedLabels.includes(READY_LABEL);
+  if (!ready) return { kind: "not-ready" };
+  if (input.policy === "anyone" || input.trusted) return { kind: "admitted" };
+  const actor = authoritative?.readyLabelApplication?.actor ?? null;
+  if (actor === null) return { kind: "label-actor", actor: null };
+  const normalized = actor.toLowerCase();
+  return normalized === input.policy.viewerLogin.toLowerCase() ||
+      input.policy.developers.some((login) => login.toLowerCase() === normalized)
+    ? { kind: "admitted" }
+    : { kind: "label-actor", actor };
+}
 
 export type PlannedIssue = {
   readonly id: string;
@@ -291,17 +346,36 @@ export function parseBlockedBy(body: string): readonly number[] {
   return [...new Set(refs)];
 }
 
+export type ResolvePlanOptions = {
+  readonly readyLabelPolicy: ReadyLabelPolicy;
+  readonly excluded?: ReadonlySet<number>;
+  readonly k?: number;
+  readonly defaultLane?: Lane;
+  readonly chunkMembers?: ReadonlyMap<string, ReadonlySet<number>>;
+  readonly ongoing?: ReadonlySet<number>;
+  readonly trustedReady?: ReadonlySet<number>;
+};
+
 export function resolvePlan(
   // `candidates` is the whole graph, not just the queue: `buildPlan` unions the
   // git-derived chunk members in (header), and the filter below drops them again.
   candidates: readonly IssueSummary[],
   issueFacts: ReadonlyMap<number, IssueFacts>,
-  excluded: ReadonlySet<number> = new Set(),
-  k: number = DEFAULT_MAX_PARALLEL_ISSUES,
-  defaultLane: Lane = DEFAULT_LANE,
-  chunkMembers: ReadonlyMap<string, ReadonlySet<number>> = new Map(),
-  ongoing: ReadonlySet<number> = new Set(),
+  options: ResolvePlanOptions,
 ): PlanResolution {
+  const excluded = options.excluded ?? new Set<number>();
+  const k = options.k ?? DEFAULT_MAX_PARALLEL_ISSUES;
+  const defaultLane = options.defaultLane ?? DEFAULT_LANE;
+  const chunkMembers = options.chunkMembers ?? new Map<string, ReadonlySet<number>>();
+  const ongoing = options.ongoing ?? new Set<number>();
+  const trustedReady = options.trustedReady ?? new Set<number>();
+  const queueVerdict = (candidate: IssueSummary): ReadyQueueVerdict =>
+    readyQueueVerdict({
+      listedLabels: candidate.labels,
+      authoritative: issueFacts.get(candidate.number),
+      policy: options.readyLabelPolicy,
+      trusted: trustedReady.has(candidate.number),
+    });
   // Parsed once and shared with the lane graph: the `## Blocked by` section is
   // the dependency gate below AND the edge set gating inherits along, and two
   // parses of one body are two chances for them to disagree.
@@ -386,6 +460,7 @@ export function resolvePlan(
 
   type CandidateDisposition =
     | { readonly kind: "omitted"; readonly reason: "closed" | "not-ready" | "published" | "waiting" | "excluded" }
+    | { readonly kind: "label-actor"; readonly actor: string | null }
     | { readonly kind: "blocked"; readonly by: readonly number[] }
     | { readonly kind: "held" }
     | { readonly kind: "ongoing" }
@@ -393,18 +468,13 @@ export function resolvePlan(
   const classify = (c: IssueSummary): CandidateDisposition => {
     // Drop issues this run already merged, and issues the live tracker now
     // reports CLOSED — both guard against the stale-listing re-pick described in
-    // the module header (#16). Unknown state (absent from the map) is treated
-    // as OPEN so a single state-fetch miss never silently drops a ready issue.
+    // the module header (#16). In `anyone` mode an absent batch row keeps the
+    // listing answer; restricted mode fails that unknown provenance closed.
     const authoritative = issueFacts.get(c.number);
-    if (authoritative?.state === "CLOSED") return { kind: "omitted", reason: "closed" };
-    // When the batch knows this issue it owns both directions of queue
-    // membership (#96): absence means a stale listing row for an issue that is
-    // no longer ready, while presence is #94's explicit rework override. A
-    // fetch miss keeps the listing's reading. `waiting` differs: either source
-    // is enough to hold work, so its union is strictly fail-safe.
-    if (authoritative && !authoritative.labels.includes(READY_LABEL)) {
-      return { kind: "omitted", reason: "not-ready" };
-    }
+    const queue = queueVerdict(c);
+    if (queue.kind === "closed") return { kind: "omitted", reason: "closed" };
+    if (queue.kind === "not-ready") return { kind: "omitted", reason: "not-ready" };
+    if (queue.kind === "label-actor") return queue;
     // Already developed and already landed on its chunk's branch (#59), unless
     // the authoritative facts say a human explicitly re-queued it (#94). It is
     // here only to hold its place in the two graphs above, and it is dropped
@@ -479,15 +549,12 @@ export function resolvePlan(
   }));
   const admitted = new Set(plan.map((issue) => Number(issue.id)));
   const resolutionCandidates: PlanCandidate[] = candidates.map((c) => {
-    const authoritative = issueFacts.get(c.number);
     return {
       id: String(c.number),
       title: c.title,
       branch: issueBranchName(c.number, c.title),
       chunk: chunkTargetOf(c.number),
-      ready: authoritative
-        ? authoritative.state !== "CLOSED" && authoritative.labels.includes(READY_LABEL)
-        : true,
+      ready: queueVerdict(c).kind === "admitted",
     };
   });
   const waiting: Array<{
@@ -671,7 +738,59 @@ type GhIssueRecord = {
   readonly labels?: {
     readonly nodes?: ReadonlyArray<{ readonly name?: string } | null> | null;
   };
+  readonly timelineItems?: {
+    readonly nodes?: ReadonlyArray<{
+      readonly actor?: { readonly login?: string } | null;
+      readonly label?: { readonly name?: string } | null;
+      readonly createdAt?: string;
+    } | null> | null;
+  };
 };
+
+function latestReadyLabelApplication(
+  issue: GhIssueRecord,
+): ReadyLabelApplication | null {
+  const applications = (issue.timelineItems?.nodes ?? []).flatMap((event) => {
+    if (
+      event?.label?.name !== READY_LABEL ||
+      typeof event.createdAt !== "string"
+    ) return [];
+    const login = event.actor?.login;
+    return [{
+      actor: typeof login === "string" && login !== "" ? login : null,
+      createdAt: event.createdAt,
+    }];
+  });
+  return applications.reduce<ReadyLabelApplication | null>(
+    (latest, event) => latest === null || event.createdAt > latest.createdAt
+      ? event
+      : latest,
+    null,
+  );
+}
+
+// Resolve the run token's forge identity once. In `anyone` mode no identity is
+// needed and no call is made, preserving the old queue path exactly.
+export async function resolveReadyLabelPolicy(
+  developers: readonly string[] | "anyone",
+): Promise<ReadyLabelPolicy> {
+  if (developers === "anyone") return "anyone";
+  const { stdout } = await exec("gh", [
+    "api",
+    "graphql",
+    "-f",
+    "query=query{viewer{login}}",
+  ]);
+  const login = (JSON.parse(stdout) as {
+    readonly data?: { readonly viewer?: { readonly login?: unknown } | null };
+  }).data?.viewer?.login;
+  if (typeof login !== "string" || login === "") {
+    throw new SandbarError(
+      "GitHub's viewer query did not return the login for the token running sandbar.",
+    );
+  }
+  return { developers, viewerLogin: login };
+}
 
 async function ghIssueBatch(
   numbers: readonly number[],
@@ -704,7 +823,10 @@ export async function fetchIssueStates(
   const records = await ghIssueBatch(
     numbers,
     repo,
-    "state labels(first: 100) { nodes { name } }",
+    `state labels(first: 100) { nodes { name } }
+     timelineItems(last: ${LABEL_EVENT_WINDOW}, itemTypes: [LABELED_EVENT]) {
+       nodes { ... on LabeledEvent { actor { login } label { name } createdAt } }
+     }`,
   );
   for (const n of numbers) {
     const v = records[`i${n}`];
@@ -712,6 +834,7 @@ export async function fetchIssueStates(
     result.set(n, {
       state: v.state === "CLOSED" ? "CLOSED" : "OPEN",
       labels: (v.labels?.nodes ?? []).flatMap((l) => l?.name ? [l.name] : []),
+      readyLabelApplication: latestReadyLabelApplication(v),
     });
   }
   return result;
@@ -728,6 +851,7 @@ export type BuildPlanOptions = {
   readonly ongoing?: ReadonlySet<number>;
   readonly k?: number;
   readonly defaultLane?: Lane;
+  readonly readyLabelPolicy: ReadyLabelPolicy;
   // Issues to add to the listing, whatever its lagging index says (#63, #95,
   // #96). Exactly one caller: the chunk-review scan re-queues members and then
   // re-plans so they are queued from that cycle rather than the next run,
@@ -785,10 +909,16 @@ export async function buildPlan(
   return resolvePlan(
     candidates,
     facts,
-    excluded,
-    k,
-    options.defaultLane ?? DEFAULT_LANE,
-    chunkMembers,
-    options.ongoing ?? new Set(),
+    {
+      excluded,
+      k,
+      defaultLane: options.defaultLane,
+      chunkMembers,
+      ongoing: options.ongoing,
+      readyLabelPolicy: options.readyLabelPolicy,
+      trustedReady: new Set(
+        (options.extraCandidates ?? []).map((issue) => issue.number),
+      ),
+    },
   );
 }

@@ -26,7 +26,7 @@ import {
   type TranscriptTree,
 } from "./logs.js";
 
-export const EVENT_SCHEMA_VERSION = 1;
+export const EVENT_SCHEMA_VERSION = 2;
 
 export class EventRecordReadError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -68,7 +68,8 @@ export type WaitingReason =
   | { readonly kind: "blocked"; readonly by: readonly number[] }
   | { readonly kind: "no-slot" }
   | { readonly kind: "held" }
-  | { readonly kind: "ongoing" };
+  | { readonly kind: "ongoing" }
+  | { readonly kind: "label-actor"; readonly actor: string | null };
 
 export type RecomputeWaiting = TitledEventIssue & {
   readonly reason: WaitingReason;

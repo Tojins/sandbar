@@ -68,6 +68,7 @@ const PODMAN_SOCKET = `/run/user/${process.getuid()}/podman/podman.sock`;
 export default {
   ghOwner: "Tojins",
   ghRepo: "sandbar",
+  developers: ["Tojins"],
   sandboxImage: IMAGE,
 
   // The oldest sandbar that can read this file (#66). Since the driver is

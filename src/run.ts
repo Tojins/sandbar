@@ -1,8 +1,15 @@
 // Sandbar orchestrator — continuous execution pool plus serialized landing.
 //
 //   Recompute:                 Deterministic resolver picks the unblocked
-//                              `ready-for-agent` issues by parsing each body's
-//                              `## Blocked by` section — and routes each by
+//                              `ready-for-agent` issues after checking the
+//                              latest label actor against required configured
+//                              developers or this run's token login (#136;
+//                              `"anyone"` disables the check). The token login
+//                              is resolved once during preflight. Exclusions
+//                              are recorded once per issue per recompute and
+//                              shown in the plan, then admitted work is picked
+//                              by parsing each body's `## Blocked by` section
+//                              and routed by
 //                              LANE (#57), holding back the review-gated ones
 //                              that have nowhere to land at all (#61: the ones
 //                              `chunks.ts` could give no chunk) and saying on
@@ -72,7 +79,9 @@
 // chunk and member refs before running the ordinary plan. A failed refresh is
 // reported and waits for the next wake instead of killing the daemon; startup
 // preflight remains fatal. A no-op poll is silent; work, source movement, and
-// changed config-staleness evidence are recorded. Source movement from either
+// changed config-staleness evidence are recorded. A stable label-actor
+// exclusion is also recorded on each poll because its required diagnostic
+// makes that recompute reportable. Source movement from either
 // a human push or this process refreshes the image inputs.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
@@ -172,7 +181,13 @@ import {
   reconcileLandedChunks,
 } from "./chunk-reconcile.js";
 import { postLaneOverrideNotices } from "./lanes.js";
-import { type PlanResolution, type PlannedIssue, buildPlan, readIssueBranchRefs } from "./plan-resolver.js";
+import {
+  type PlanResolution,
+  type PlannedIssue,
+  type ReadyLabelPolicy,
+  buildPlan,
+  readIssueBranchRefs,
+} from "./plan-resolver.js";
 import {
   ContinuousPool,
   decideSchedulerAction,
@@ -672,6 +687,7 @@ export async function run(
   // identity sandbar does NOT get from config.
   const repo = { owner: config.ghOwner, name: config.ghRepo };
   let codexAuthMount: CodexAuthMount | undefined;
+  let readyLabelPolicy: ReadyLabelPolicy;
 
   // Preflight is still ahead of the sweep and every container operation below,
   // which is the dependency that matters: those assume a working container
@@ -705,6 +721,7 @@ export async function run(
       env,
       sourceBranch: config.sourceBranch,
       repo,
+      developers: config.developers,
       pulledImages: pulledImagesOf(config),
       // The gate stack is the whole of sandbar's consumer-supplied host-path
       // surface (#51), and a source podman cannot resolve is host state that
@@ -730,7 +747,8 @@ export async function run(
         ...(configuredCodexHome === undefined ? {} : { codexHome: configuredCodexHome }),
       });
     }
-    lastConfigStalenessCount = initialConfigStaleness.touchingConfig;
+    lastConfigStalenessCount = initialConfigStaleness.configStaleness.touchingConfig;
+    readyLabelPolicy = initialConfigStaleness.readyLabelPolicy;
   } catch (err) {
     return await stopAtStartup("preflight-failed", err);
   }
@@ -1133,6 +1151,18 @@ export async function run(
       })),
       refs: await readIssueBranchRefs(layout.repoDir),
     });
+    for (const excluded of resolution.waiting) {
+      if (excluded.reason.kind !== "label-actor") continue;
+      const actor = excluded.reason.actor === null
+        ? "an unknown actor (no usable application was present in the fetched timeline window)"
+        : `@${excluded.reason.actor}`;
+      await runRecord.emit({
+        kind: "complaint",
+        severity: "warning",
+        message: `Issue #${excluded.issue} (${excluded.title}) excluded from the queue: ` +
+          `the most recent recorded \`ready-for-agent\` application was by ${actor}.`,
+      });
+    }
     deferredChunksForRecompute = [];
   };
 
@@ -1376,6 +1406,7 @@ export async function run(
           ...[...pool.startedIds()].map(Number),
         ]),
         defaultLane: config.defaultLane,
+        readyLabelPolicy,
         k: Math.max(0, config.maxParallelIssues - pool.activeCount),
         repoDir: layout.repoDir,
         ongoing: new Set([...pool.startedIds()].map(Number)),
@@ -1567,6 +1598,9 @@ export async function run(
         followUps.length > 0 || laneNotices.length > 0 ||
         reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land";
+      const pollIsReportable = pollDidWork || resolution.waiting.some(
+        (entry) => entry.reason.kind === "label-actor",
+      );
       if (planTrigger === "poll" && pollDidWork) {
         activity.enterBusy();
       }
@@ -1590,7 +1624,7 @@ export async function run(
       if (issues.length > 0) {
         activity.enterBusy();
       }
-      if (planTrigger !== "poll" || pollDidWork) {
+      if (planTrigger !== "poll" || pollIsReportable) {
         await emitRecompute(iteration, planTrigger, resolution, issues, landRequests);
         for (const line of chunkDriftLines) {
           await runRecord.emit({ kind: "complaint", severity: "warning", message: line });

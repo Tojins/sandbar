@@ -73,6 +73,7 @@ async function gateRunFixture(taskId: string, onTestFinished: FinishedHook) {
   const SANDBOX_ONLY_TAG = testImageTag(`sandbox-${taskId}`);
   const config = (steps: RunConfig["gateStack"]["steps"]): RunConfig => ({
     ghOwner: "acme",
+    developers: "anyone",
     ghRepo: "app",
     sandboxImage: IMAGE,
     botName: "b",
