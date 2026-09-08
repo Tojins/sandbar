@@ -791,6 +791,7 @@ export async function run(
     return exit;
   };
 
+  let leaseLossIsCleaningUp = false;
   const observeOriginLockRenewal = async (
     renewal: OriginLockRenewal,
   ): Promise<void> => {
@@ -811,6 +812,10 @@ export async function run(
       message: decision.complaint,
     });
     const exit = await announceExit(decision.exit);
+    // The cleanup action below normally waits for an in-flight renewal before
+    // releasing. This call is itself inside that renewal, so mark the one path
+    // where waiting would await the current promise and deadlock.
+    leaseLossIsCleaningUp = true;
     await runCleanup();
     process.exit(exit.exitCode);
   };
@@ -829,10 +834,18 @@ export async function run(
     return renewalInFlight;
   };
   const originLeaseHeartbeat = setInterval(() => {
-    void renewOriginLease().catch((err: unknown) => stopInternalFailure(err));
+    void renewOriginLease().then(
+      () => undefined,
+      (err: unknown) => stopInternalFailure(err),
+    );
   }, ORIGIN_LOCK_RENEW_INTERVAL_MS);
   originLeaseHeartbeat.unref();
-  onCleanup(() => clearInterval(originLeaseHeartbeat));
+  onCleanup(async () => {
+    clearInterval(originLeaseHeartbeat);
+    if (!leaseLossIsCleaningUp && renewalInFlight !== null) {
+      await renewalInFlight;
+    }
+  });
 
   // Every stop between here and the first cycle goes through this, so none of
   // them can be the silent one again (#70). It records the complaint verbatim,

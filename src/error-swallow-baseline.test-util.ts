@@ -38,10 +38,10 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   "keepawake.ts": 1,
   "lock.ts": 4,
   "merger.ts": 11,
-  // Ref lookup and CAS push failures are classified into the origin-lock
-  // decision vocabulary (#139); malformed leases and unclassified failures
-  // still throw.
-  "origin-lock.ts": 3,
+  // Ref lookup failures are classified into the origin-lock decision
+  // vocabulary (#139); malformed leases, unexpected seam failures and CAS
+  // failures outside the named command boundary still throw.
+  "origin-lock.ts": 2,
   "preflight.ts": 5,
   "prompt.ts": 1,
   // UI port contention is classified as a startup refusal; unexpected UI
