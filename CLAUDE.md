@@ -459,8 +459,9 @@ outcomes.
   `GH_TOKEN`, and losing the lock remain stderr-only because no record can be
   owned safely. Every launched inner-loop agent invocation writes one bounded
   record before its result is classified: a diagnostic header, parsed speech,
-  and raw stdout/stderr tails. Invocation names are sequenced across fresh
-  HARD-ERROR sandboxes, and an existing name is never overwritten. Those
+  and raw stdout/stderr tails. The run-cached per-issue logger owns invocation
+  names, so they remain sequenced across fresh HARD-ERROR sandboxes and later
+  admissions of the same issue; an existing name is never overwritten. Those
   records, gate artefacts, merger logs and resolve transcripts stay as files
   through `src/logs.ts`; they are artefacts, not a second event stream.
   `run()` hosts the file-fed UI and writes its URL—and nothing else—to stdout.

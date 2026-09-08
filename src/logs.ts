@@ -7,8 +7,11 @@
 // a byte otherwise leaves no evidence at all (#135). Structured run facts have
 // one write path, `events.ts`, and live in `events.jsonl`; adding an
 // orchestration/status writer here would recreate the two hand-paired records
-// #132 removed. Invocation writes are create-only: a naming collision must
-// fail rather than erase the earlier invocation's evidence (#135).
+// #132 removed. The cached per-issue logger also owns the filename sequence,
+// so a later admission in the same run continues after every file already
+// allocated for that issue. Invocation writes are create-only: a naming
+// collision must fail rather than erase the earlier invocation's evidence
+// (#135).
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -21,7 +24,58 @@ import type { AgentInvocationRecord } from "./agent-sandbox.js";
 
 export type AttemptLogger = {
   writeInvocation(filename: string, record: AgentInvocationRecord): Promise<void>;
+  startInvocationCycle(): AgentInvocationSequence;
 };
+
+export type AgentInvocationIdentity =
+  | { readonly role: "implementer"; readonly attempt: number; readonly nudge: boolean }
+  | {
+      readonly role: "reviewer";
+      readonly attempt: number;
+      readonly pass: "quality" | "correctness";
+      readonly invocation: number;
+    }
+  | { readonly role: "ui-check"; readonly invocation: number };
+
+export type AgentInvocationSequence = {
+  filename(identity: AgentInvocationIdentity): string;
+};
+
+export function agentInvocationFilename(identity: AgentInvocationIdentity): string {
+  switch (identity.role) {
+    case "implementer":
+      return `attempt-${identity.attempt}${identity.nudge ? "-nudge" : ""}.log`;
+    case "reviewer":
+      return `attempt-${identity.attempt}-reviewer-${identity.pass}-${identity.invocation}.log`;
+    case "ui-check":
+      return `ui-check-${identity.invocation}.log`;
+  }
+}
+
+export function createAgentInvocationSequencer(): {
+  startCycle(): AgentInvocationSequence;
+} {
+  let nextAttempt = 1;
+  let nextUiCheck = 1;
+  return {
+    startCycle() {
+      const attemptOffset = nextAttempt - 1;
+      const uiCheckOffset = nextUiCheck - 1;
+      return {
+        filename(identity) {
+          if (identity.role === "ui-check") {
+            const invocation = uiCheckOffset + identity.invocation;
+            nextUiCheck = Math.max(nextUiCheck, invocation + 1);
+            return agentInvocationFilename({ ...identity, invocation });
+          }
+          const attempt = attemptOffset + identity.attempt;
+          nextAttempt = Math.max(nextAttempt, attempt + 1);
+          return agentInvocationFilename({ ...identity, attempt });
+        },
+      };
+    },
+  };
+}
 
 // `failedStep` is the name of the gate step that went red — free-form since
 // #24, since the steps are the consumer's.
@@ -92,8 +146,10 @@ export async function createTranscriptTree(runDir: string): Promise<TranscriptTr
 async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLogger> {
   const dir = join(runDir, `issue-${issueId}`);
   await mkdir(dir, { recursive: true });
+  const invocationSequencer = createAgentInvocationSequencer();
   return {
     dir,
+    startInvocationCycle: () => invocationSequencer.startCycle(),
     async writeInvocation(filename, record) {
       const header = [
         `agent:      ${record.agent}`,

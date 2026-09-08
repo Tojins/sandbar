@@ -62,9 +62,11 @@
 // which still parks. Reviewer history is recorded only after a green gate.
 // UI-check and reviewer invocations snapshot the tip and status; any mutation
 // parks the issue and preserves the clone rather than trusting that call.
-// Invocation filenames use one run-owned sequence across fresh HARD-ERROR
-// cycles: the state machine's attempt and UI-check counters restart with each
-// sandbox, but an earlier invocation record must never be overwritten (#135).
+// Invocation filenames use one run-owned, per-issue sequence across fresh
+// HARD-ERROR cycles and later admissions: the state machine's attempt and
+// UI-check counters restart at both boundaries, but an earlier invocation
+// record must never be overwritten (#135). The cached IssueLogger owns that
+// sequence beside the directory whose names it allocates.
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -118,7 +120,7 @@ import {
   step,
   visiblePhases,
 } from "./inner-loop-machine.js";
-import type { AttemptLogger } from "./logs.js";
+import type { AgentInvocationSequence, AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
@@ -534,56 +536,6 @@ const invocationLog = (
   onInvocationEnd: (record) => logger.writeInvocation(filename, record),
 });
 
-export type AgentInvocationIdentity =
-  | { readonly role: "implementer"; readonly attempt: number; readonly nudge: boolean }
-  | {
-      readonly role: "reviewer";
-      readonly attempt: number;
-      readonly pass: ReviewerPass;
-      readonly invocation: number;
-    }
-  | { readonly role: "ui-check"; readonly invocation: number };
-
-export function agentInvocationFilename(identity: AgentInvocationIdentity): string {
-  switch (identity.role) {
-    case "implementer":
-      return `attempt-${identity.attempt}${identity.nudge ? "-nudge" : ""}.log`;
-    case "reviewer":
-      return `attempt-${identity.attempt}-reviewer-${identity.pass}-${identity.invocation}.log`;
-    case "ui-check":
-      return `ui-check-${identity.invocation}.log`;
-  }
-}
-
-export type AgentInvocationSequence = {
-  filename(identity: AgentInvocationIdentity): string;
-};
-
-export function createAgentInvocationSequencer(): {
-  startCycle(): AgentInvocationSequence;
-} {
-  let nextAttempt = 1;
-  let nextUiCheck = 1;
-  return {
-    startCycle() {
-      const attemptOffset = nextAttempt - 1;
-      const uiCheckOffset = nextUiCheck - 1;
-      return {
-        filename(identity) {
-          if (identity.role === "ui-check") {
-            const invocation = uiCheckOffset + identity.invocation;
-            nextUiCheck = Math.max(nextUiCheck, invocation + 1);
-            return agentInvocationFilename({ ...identity, invocation });
-          }
-          const attempt = attemptOffset + identity.attempt;
-          nextAttempt = Math.max(nextAttempt, attempt + 1);
-          return agentInvocationFilename({ ...identity, attempt });
-        },
-      };
-    },
-  };
-}
-
 export async function runInnerLoop(
   issue: IssueRef,
   opts: InnerLoopOptions,
@@ -606,12 +558,11 @@ export async function runInnerLoop(
       await opts.onEvent(event);
     },
   };
-  const invocationSequencer = createAgentInvocationSequencer();
   for (;;) {
     const outcome = await runCycle(
       issue,
       cycleOptions,
-      invocationSequencer.startCycle(),
+      opts.attemptLogger.startInvocationCycle(),
     );
     specGaps.push(...outcome.specGaps);
     const decision = decideAfterTerminal(outcome.verdict, retriesUsed);

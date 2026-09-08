@@ -75,6 +75,7 @@ vi.mock("./events.js", () => ({
     issue: vi.fn(async (id: string) => ({
       dir: `/tmp/run-quota-test/issue-${id}`,
       writeInvocation: vi.fn(),
+      startInvocationCycle: vi.fn(),
     })),
     landing: vi.fn(() => ({
       dir: "/tmp/run-quota-test/landing-1", appendMerger: vi.fn(),

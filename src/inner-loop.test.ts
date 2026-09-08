@@ -32,8 +32,6 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
 
 import { withPartialOutput, type Sandbox } from "./agent-sandbox.js";
 import {
-  agentInvocationFilename,
-  createAgentInvocationSequencer,
   enforceReviewerSnapshot,
   priorReviewRound,
   reviewerPassRouting,
@@ -46,7 +44,10 @@ import {
   runSandboxAndPublish,
   type ReadOnlyAgentSnapshot,
 } from "./inner-loop.js";
-import { createTranscriptTree } from "./logs.js";
+import {
+  createAgentInvocationSequencer,
+  createTranscriptTree,
+} from "./logs.js";
 import { qualityReviewContext } from "./prompt.js";
 import type { ReviewerOutcome } from "./reviewer-run.js";
 import type { HeadMismatch } from "./git-ops.js";
@@ -60,20 +61,6 @@ const deferred = <T,>() => {
   });
   return { promise, resolve };
 };
-
-describe("agent invocation records (#135)", () => {
-  it.each([
-    [{ role: "implementer", attempt: 3, nudge: false }, "attempt-3.log"],
-    [{ role: "implementer", attempt: 3, nudge: true }, "attempt-3-nudge.log"],
-    [{ role: "reviewer", attempt: 3, pass: "quality", invocation: 1 },
-      "attempt-3-reviewer-quality-1.log"],
-    [{ role: "reviewer", attempt: 3, pass: "correctness", invocation: 2 },
-      "attempt-3-reviewer-correctness-2.log"],
-    [{ role: "ui-check", invocation: 2 }, "ui-check-2.log"],
-  ] as const)("names %j as %s", (identity, expected) => {
-    expect(agentInvocationFilename(identity)).toBe(expected);
-  });
-});
 
 describe("runUiCheck (#126)", () => {
   const context = (runs: readonly string[], events: EventInput[] = []) => {
@@ -868,10 +855,11 @@ const harnessFailed: ReviewerOutcome = {
 };
 
 describe("runInnerLoop HARD-ERROR logging (#115)", () => {
-  it("keeps every invocation record across fresh-sandbox retries", async () => {
+  it("keeps every invocation record across retries and later admissions", async () => {
     const root = await mkdtemp(join(tmpdir(), "sandbar-invocation-cycles-"));
     try {
-      const issueLogger = await (await createTranscriptTree(root)).issue("135");
+      const transcriptTree = await createTranscriptTree(root);
+      const issueLogger = await transcriptTree.issue("135");
       let cycle = 0;
       const runCycle = vi.fn(async (
         _issue,
@@ -932,6 +920,15 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
         >[1],
         runCycle,
       )).resolves.toMatchObject({ type: "DONE" });
+      const readmittedLogger = await transcriptTree.issue("135");
+      expect(readmittedLogger).toBe(issueLogger);
+      await expect(runInnerLoop(
+        { id: "135", title: "records", branch: "sandbar/issue-135-records" },
+        { attemptLogger: readmittedLogger, onEvent: () => undefined } as Parameters<
+          typeof runInnerLoop
+        >[1],
+        runCycle,
+      )).resolves.toMatchObject({ type: "DONE" });
       expect((await readdir(issueLogger.dir)).sort()).toEqual([
         "attempt-1-nudge.log",
         "attempt-1-reviewer-quality-1.log",
@@ -942,9 +939,13 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
         "attempt-3-nudge.log",
         "attempt-3-reviewer-quality-1.log",
         "attempt-3.log",
+        "attempt-4-nudge.log",
+        "attempt-4-reviewer-quality-1.log",
+        "attempt-4.log",
         "ui-check-1.log",
         "ui-check-2.log",
         "ui-check-3.log",
+        "ui-check-4.log",
       ]);
       await expect(readFile(join(issueLogger.dir, "attempt-1.log"), "utf8"))
         .resolves.toContain("speech-1");
@@ -980,7 +981,10 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
         runInnerLoop(
           { id: "115", title: "logging", branch: "sandbar/issue-115-logging" },
           {
-            attemptLogger: { writeInvocation: vi.fn() },
+            attemptLogger: {
+              writeInvocation: vi.fn(),
+              startInvocationCycle: createAgentInvocationSequencer().startCycle,
+            },
             onEvent: (event) => events.push(event),
           } as unknown as Parameters<typeof runInnerLoop>[1],
           runCycle,
@@ -1006,7 +1010,10 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
       runInnerLoop(
         { id: "115", title: "logging", branch: "sandbar/issue-115-logging" },
         {
-          attemptLogger: { writeInvocation: vi.fn() },
+          attemptLogger: {
+            writeInvocation: vi.fn(),
+            startInvocationCycle: createAgentInvocationSequencer().startCycle,
+          },
           onEvent: () => undefined,
         } as Parameters<typeof runInnerLoop>[1],
         runCycle,

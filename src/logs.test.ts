@@ -3,12 +3,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { createTranscriptTree } from "./logs.js";
+import { agentInvocationFilename, createTranscriptTree } from "./logs.js";
 
 const makeRun = async () => {
   const base = await mkdtemp(join(tmpdir(), "sandbar-transcripts-"));
   return createTranscriptTree(join(base, "run-test"));
 };
+
+describe("agent invocation records (#135)", () => {
+  it.each([
+    [{ role: "implementer", attempt: 3, nudge: false }, "attempt-3.log"],
+    [{ role: "implementer", attempt: 3, nudge: true }, "attempt-3-nudge.log"],
+    [{ role: "reviewer", attempt: 3, pass: "quality", invocation: 1 },
+      "attempt-3-reviewer-quality-1.log"],
+    [{ role: "reviewer", attempt: 3, pass: "correctness", invocation: 2 },
+      "attempt-3-reviewer-correctness-2.log"],
+    [{ role: "ui-check", invocation: 2 }, "ui-check-2.log"],
+  ] as const)("names %j as %s", (identity, expected) => {
+    expect(agentInvocationFilename(identity)).toBe(expected);
+  });
+});
 
 describe("raw transcript tree", () => {
   it("writes attempts without creating an orchestration log", async () => {
