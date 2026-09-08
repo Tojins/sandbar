@@ -320,6 +320,7 @@ import {
   runVerifiedLanding,
 } from "./forge-verify.js";
 import { type GateResult, formatGateFields } from "./gate.js";
+import type { AdmittedGate } from "./gate-semaphore.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import {
   memberBranchName,
@@ -2242,7 +2243,7 @@ export type RealAdapterDeps = {
   // Gate-2, already bound to the merger worktree's stack. The merger does not
   // build the stack itself: run.ts owns the stack's lifecycle for the whole
   // merge phase, so a single bringup covers every branch in the cycle.
-  readonly runStackGate: () => Promise<GateResult>;
+  readonly runStackGate: () => Promise<AdmittedGate<GateResult>>;
 };
 
 type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "usage" | "toolCalls" | "peakContext" | "rateLimit" | "cause" | "verdict">;
@@ -2851,11 +2852,16 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       return { ok: true };
     },
     async runGate() {
-      const r: GateResult = await deps.runStackGate();
+      const admitted = await deps.runStackGate();
+      const r = admitted.value;
       // The timings ride out on BOTH branches (#82). A green gate-2 narrows to
       // `{ ok: true }` because there is no failure to describe, and that is
       // exactly the gate whose cost the merge phase is made of.
-      const timings = { durationMs: r.durationMs, steps: r.steps };
+      const timings = {
+        durationMs: r.durationMs,
+        steps: r.steps,
+        ...(admitted.queuedMs === undefined ? {} : { queuedMs: admitted.queuedMs }),
+      };
       if (r.ok) return { ok: true, ...timings };
       return {
         ok: false,

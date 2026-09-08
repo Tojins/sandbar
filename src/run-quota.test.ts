@@ -8,6 +8,7 @@ const seams = vi.hoisted(() => ({
   plan: vi.fn(),
   finalize: vi.fn(async () => []),
   issueLabels: vi.fn(async () => [] as string[]),
+  mergerStackRunGate: vi.fn(),
   mergerStackStop: vi.fn(async () => undefined),
   mergerWorktreeRemove: vi.fn(async () => undefined),
   landRequestPullRequests: vi.fn(async () => [] as PullRequestSummary[]),
@@ -154,7 +155,10 @@ vi.mock("./merger-worktree.js", () => ({
 }));
 vi.mock("./gate-stack.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./gate-stack.js")>(),
-  startStack: vi.fn(async () => ({ runGate: vi.fn(), stop: seams.mergerStackStop })),
+  startStack: vi.fn(async () => ({
+    runGate: seams.mergerStackRunGate,
+    stop: seams.mergerStackStop,
+  })),
 }));
 vi.mock("./prompt.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./prompt.js")>(), buildProjectAnchor: vi.fn(async () => "anchor"),
@@ -166,7 +170,8 @@ vi.mock("./merger.js", async (importOriginal) => ({
 
 import type { RunConfig } from "./config.js";
 import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
-import { MergerError, realAdapter } from "./merger.js";
+import type { InnerLoopOptions } from "./inner-loop.js";
+import { MergerError, realAdapter, type RunMergerOptions } from "./merger.js";
 import { createBranchImages, ensureImages } from "./ensure-images.js";
 import { createAgentImages } from "./agent-tools.js";
 import { cleanupOrphanContainers } from "./containers.js";
@@ -227,6 +232,7 @@ describe("run quota orchestration (#109)", () => {
     seams.innerLoop.mockReset(); seams.merger.mockReset(); seams.plan.mockReset();
     seams.finalize.mockReset(); seams.finalize.mockResolvedValue([]);
     seams.issueLabels.mockReset(); seams.issueLabels.mockResolvedValue([]);
+    seams.mergerStackRunGate.mockReset();
     seams.mergerStackStop.mockReset(); seams.mergerStackStop.mockResolvedValue(undefined);
     seams.mergerWorktreeRemove.mockReset();
     seams.mergerWorktreeRemove.mockResolvedValue(undefined);
@@ -1112,6 +1118,107 @@ describe("run quota orchestration (#109)", () => {
     expect((refill?.candidates as Array<{ issue: number }>).map((candidate) => candidate.issue))
       .toEqual([3, 4, 5]);
     expect(refill?.admitted).toEqual([{ issue: 3, title: "Issue 3" }]);
+  });
+
+  it("shares the configured gate bound between an inner loop and the merger", async () => {
+    const done = issue("1");
+    const gating = issue("2");
+    const releaseGate1 = deferred<void>();
+    const gate1Started = deferred<void>();
+    const starts: string[] = [];
+    const gateResult = {
+      ok: true,
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+      failedStep: null,
+      durationMs: 7,
+      steps: [],
+      containerLogs: "",
+    };
+    seams.plan.mockResolvedValue(resolution([done, gating]));
+    seams.innerLoop.mockImplementation(async (
+      candidate: ReturnType<typeof issue>,
+      options: InnerLoopOptions,
+    ) => {
+      if (candidate.id === done.id) {
+        return { type: "DONE", commits: [{ sha: "abc" }], specGaps: [] };
+      }
+      await options.gateSemaphore.run(async () => {
+        starts.push("gate-1");
+        gate1Started.resolve();
+        await releaseGate1.promise;
+      });
+      return {
+        type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+        specGaps: [],
+      };
+    });
+    seams.mergerStackRunGate.mockImplementation(async () => {
+      starts.push("gate-2");
+      return gateResult;
+    });
+    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) => {
+      await gate1Started.promise;
+      const adapterDeps = vi.mocked(realAdapter).mock.calls[0]?.[0];
+      if (adapterDeps === undefined) throw new Error("merger adapter was not created");
+      const gate2 = adapterDeps.runStackGate();
+      await Promise.resolve();
+      expect(starts).toEqual(["gate-1"]);
+      releaseGate1.resolve();
+      await expect(gate2).resolves.toEqual({ value: gateResult, queuedMs: expect.any(Number) });
+      expect(starts).toEqual(["gate-1", "gate-2"]);
+      return summary(batch);
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 2, maxConcurrentGates: 1 }))
+      .rejects.toThrow("EXIT:4");
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(seams.merger).toHaveBeenCalledOnce();
+  });
+
+  it("records queued gate-2 time and omits it for immediate admission", async () => {
+    const done = issue("1");
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValue(resolution([]));
+    seams.innerLoop.mockResolvedValue({
+      type: "DONE", commits: [{ sha: "abc" }], specGaps: [],
+    });
+    seams.merger.mockImplementation(async (
+      batch: ReturnType<typeof issue>[],
+      _adapter: unknown,
+      _log: unknown,
+      _gateLog: unknown,
+      options: RunMergerOptions,
+    ) => {
+      await options.observations.onGate("1", {
+        ok: true, durationMs: 7, queuedMs: 31, steps: [],
+      });
+      await options.observations.onGate("1", {
+        ok: true, durationMs: 8, steps: [],
+      });
+      return summary(batch);
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(eventsOf("gate")).toEqual([
+      {
+        kind: "gate", gate: "gate-2", issue: 1, title: "Issue 1",
+        ok: true, durationMs: 7, queuedMs: 31, steps: {},
+      },
+      {
+        kind: "gate", gate: "gate-2", issue: 1, title: "Issue 1",
+        ok: true, durationMs: 8, steps: {},
+      },
+    ]);
+    expect(eventsOf("gate")[1]).not.toHaveProperty("queuedMs");
   });
 
   it("continues after a rejected member and admits its successor", async () => {

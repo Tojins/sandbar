@@ -143,6 +143,45 @@ describe("captureAgentRun (#67)", () => {
   });
 });
 
+describe("realAdapter gate admission (#142)", () => {
+  it("carries the shared semaphore wait into gate-2 observations", async () => {
+    const adapter = realAdapter({
+      cwd: "/tmp",
+      cacheDir: "/tmp/repo.git",
+      scope: runScope("/tmp"),
+      repo: { owner: "acme", name: "app" },
+      sourceBranch: "main",
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+      sandboxImage: "sandbox-image",
+      env: () => undefined,
+      runStackGate: async () => ({
+        queuedMs: 31,
+        value: {
+          ok: true,
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+          failedStep: null,
+          durationMs: 7,
+          steps: [],
+          containerLogs: "",
+        },
+      }),
+    });
+
+    await expect(adapter.runGate()).resolves.toEqual({
+      ok: true,
+      durationMs: 7,
+      steps: [],
+      queuedMs: 31,
+    });
+  });
+});
+
 describe("parseCapturedAgentRun (#74)", () => {
   const captured = (stdout: string) => ({
     stdout,

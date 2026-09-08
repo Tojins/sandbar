@@ -489,6 +489,11 @@ export type ResolvedMergeMode =
 // exists" (repo identity, the sandbox image, the gate stack, the bot identity,
 // the sandbox hooks). Optional ⇔ "has a de-facto-standard value sandbar fills
 // in".
+//
+// Execution has two orthogonal bounds (#142): `maxParallelIssues` owns agent
+// inner-loop slots, while `maxConcurrentGates` owns one run-wide FIFO shared
+// by gate-1 and gate-2. The gate bound defaults to unlimited so adding the
+// field changes no existing host until its config opts in.
 export type RunConfig = {
   // ---- Required: repo-specific facts with no sensible default -------------
   readonly ghOwner: string;
@@ -679,6 +684,12 @@ export type RunConfig = {
   // Default: 3.
   readonly maxParallelIssues?: number;
 
+  // Number of gate stacks that may execute concurrently across the whole run
+  // (#142). Gate-1 and gate-2 share one FIFO semaphore; waiting consumes no
+  // failure budget, and `sandbar gate` is standalone so it ignores this knob.
+  // Default: unlimited.
+  readonly maxConcurrentGates?: number;
+
   // Overrides any subset of the default label vocabulary; unset keys fall back
   // to DEFAULT_LABELS.
   readonly labels?: Partial<LabelConfig>;
@@ -782,15 +793,12 @@ export type RunConfig = {
   readonly defaultLane?: Lane;
 };
 
-// After resolution every defaultable field is concrete. `requiresSandbar` is a
-// gate on
-// `resolveConfig` itself (#66), spent by the time there is a resolved config —
-// and inventing a value for it here would make "this host declared a floor"
-// indistinguishable from "this host did not". The other three
-// are re-declared rather than merely `Required<>`d because resolution changes
-// their TYPE, not just their presence: `labels` widens from Partial to the
-// fully-populated vocabulary, `gateStack` and `mergeMode` become their
-// resolved-and-validated forms.
+// After resolution every defaultable field is concrete except values whose
+// absence IS their default: `requiresSandbar`, the per-role effort flags, and
+// `maxConcurrentGates` (unlimited). The other three are re-declared rather than
+// merely `Required<>`d because resolution changes their TYPE, not just their
+// presence: `labels` widens from Partial to the fully-populated vocabulary,
+// `gateStack` and `mergeMode` become their resolved-and-validated forms.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
@@ -803,6 +811,7 @@ export type ResolvedConfig = Required<
     | "reviewerEffort"
     | "reviewerQualityEffort"
     | "mergerEffort"
+    | "maxConcurrentGates"
   >
 > & {
   readonly requiresSandbar?: string;
@@ -814,6 +823,8 @@ export type ResolvedConfig = Required<
   readonly reviewerEffort?: string;
   readonly reviewerQualityEffort?: string;
   readonly mergerEffort?: string;
+  // Optional after resolution because absence is the unlimited default.
+  readonly maxConcurrentGates?: number;
   readonly labels: LabelConfig;
   readonly gateStack: ResolvedGateStack;
   readonly mergeMode: ResolvedMergeMode;
@@ -842,6 +853,8 @@ export const DEFAULT_MAX_QUALITY_ROUNDS = 4;
 // each correctness rejection may be preceded by a fresh quality-failure streak.
 export const DEFAULT_MAX_REVIEW_ROUNDS = 4;
 export const DEFAULT_MAX_PARALLEL_ISSUES = 3;
+// Absence is load-bearing: it keeps every existing host's gates unlimited.
+export const DEFAULT_MAX_CONCURRENT_GATES: number | undefined = undefined;
 export const DEFAULT_UI_PORT = 7331;
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 export const DEFAULT_KEEP_AWAKE_WHILE_IDLE = false;
@@ -1997,6 +2010,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       "maxParallelIssues",
       config.maxParallelIssues ?? DEFAULT_MAX_PARALLEL_ISSUES,
     ),
+    maxConcurrentGates:
+      config.maxConcurrentGates === undefined
+        ? DEFAULT_MAX_CONCURRENT_GATES
+        : requirePositiveInteger("maxConcurrentGates", config.maxConcurrentGates),
     copyToWorktree: config.copyToWorktree ?? [],
     labels: { ...DEFAULT_LABELS, ...config.labels },
     gateStack,

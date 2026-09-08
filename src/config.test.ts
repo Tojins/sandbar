@@ -17,6 +17,7 @@ import {
   DEFAULT_MAX_REVIEW_ROUNDS,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_KEEP_AWAKE_WHILE_IDLE,
+  DEFAULT_MAX_CONCURRENT_GATES,
   DEFAULT_IMPLEMENTER_MODEL_ID,
   DEFAULT_UI_PROTOTYPE_CHECK,
   DEFAULT_UI_PORT,
@@ -177,6 +178,9 @@ describe("resolveConfig", () => {
     expect(r.copyToWorktree).toEqual([]);
     expect(r.labels).toEqual(DEFAULT_LABELS);
     expect(r.maxParallelIssues).toBe(3);
+    expect(r.maxConcurrentGates).toBe(DEFAULT_MAX_CONCURRENT_GATES);
+    expect(resolveConfig({ ...minimal, maxConcurrentGates: 2 }).maxConcurrentGates)
+      .toBe(2);
     expect(r.uiPort).toBe(DEFAULT_UI_PORT);
     // The auto lane (#57): the pre-lane behaviour, so a host that never sets
     // this — and this repo — is routed exactly as it was before lanes existed.
@@ -255,6 +259,15 @@ describe("resolveConfig", () => {
     (maxParallelIssues) => {
       expect(() => resolveConfig({ ...minimal, maxParallelIssues })).toThrow(
         /config\.maxParallelIssues.*positive integer/,
+      );
+    },
+  );
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "refuses invalid maxConcurrentGates %s (#142)",
+    (maxConcurrentGates) => {
+      expect(() => resolveConfig({ ...minimal, maxConcurrentGates })).toThrow(
+        /config\.maxConcurrentGates.*positive integer/,
       );
     },
   );
