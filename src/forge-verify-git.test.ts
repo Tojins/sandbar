@@ -82,6 +82,9 @@ describe("realVerifyAdapter git primitives (real repos)", () => {
       cwd: work,
       sourceBranch: "main",
       repo: { owner: "o", name: "r" },
+      // This standalone Git-contract suite has no daemon lease; production
+      // callers must supply the real serialized renewal barrier.
+      beforeOriginWrite: async () => undefined,
     });
   });
 
@@ -208,6 +211,7 @@ describe("realVerifyAdapter git primitives (real repos)", () => {
       cwd: work,
       sourceBranch: "main",
       repo: { owner: "o", name: "r" },
+      beforeOriginWrite: async () => undefined,
       exec: async (file, args, opts) => {
         const out = await exec(file, [...args], opts);
         if (args[0] === "ls-remote") {
