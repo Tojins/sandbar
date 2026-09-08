@@ -62,9 +62,12 @@ loop runs. DONE work therefore queues for the one serialized landing path
 without consuming one of `maxParallelIssues` slots.
 
 1. **Plan** (`src/plan-resolver.ts` + `src/chunk-reconcile.ts`) — purely
-   deterministic, no LLM: lists issues labelled `ready-for-agent`, parses
-   `## Blocked by` sections, selects up to `maxParallelIssues` unblocked issues
-   by number. Each candidate also gets a **lane** (`src/lanes.ts`, #57) and, when
+   deterministic, no LLM: lists issues labelled `ready-for-agent`, admits them
+   only when the label's latest recorded actor matches required
+   `config.developers` or the run token (`"anyone"` restores the unfiltered
+   queue, #136), parses `## Blocked by` sections, and selects up to
+   `maxParallelIssues` unblocked issues by number. Each candidate also gets a
+   **lane** (`src/lanes.ts`, #57) and, when
    review-gated, a `chunk` target (#61) that tells execution what to seed from
    and the landing path where to land. Ahead of the plan proper two passes make the
    tracker agree with the forge and with git: the **chunk-review scan**
@@ -154,8 +157,10 @@ slot with `pollIntervalMs` (default 60 seconds); a poll fetches source plus the
 issue, chunk and member namespaces before running the ordinary planner. A moved source tip refreshes
 image inputs whether sandbar or a human moved it; each admission captures one
 immutable agent/branch-image bundle, so in-flight work keeps its original pair.
-No-op polls write nothing. A failed poll fetch is reported and retried after
-another interval; only the startup fetch remains a preflight refusal.
+No-op polls write nothing; a queue-label actor exclusion is a required
+per-recompute diagnostic and therefore makes that poll reportable. A failed
+poll fetch is reported and retried after another interval; only the startup
+fetch remains a preflight refusal.
 The wake lock is released at quiescence unless `keepAwakeWhileIdle` is true.
 
 Provider quota stops admissions and drains running and landing work before exit
@@ -269,8 +274,9 @@ outcomes.
   component, since a member that has never been worked has no commits
   anywhere. De-queueing alone is broader and fail-safe: a member ref contained
   by any fetched chunk branch is never reimplemented after title drift or re-rooting,
-  unless the authoritative issue batch says a human re-applied
-  `ready-for-agent` to request rework (#94). That member is planned back onto
+  unless the authoritative issue batch says an actor admitted by
+  `config.developers` (or the run token) re-applied `ready-for-agent` to request
+  rework (#94). That member is planned back onto
   the same chunk, and an outstanding `land` request is deferred until the
   rework leaves the queue.
   It also carries the ORDER those closes must go in, for the reason
@@ -286,7 +292,8 @@ outcomes.
   LEDGER COMMENT on the PR, never the member's queue state, and sandbar never
   resolves a thread;
   `src/chunk-follow-up.ts`'s header owns both arguments and what the planner
-  has to supply the scan.
+  has to supply the scan. The re-applied queue label is trusted as the run
+  token's own write under #136, without waiting for the listing index.
 - **`land` on the chunk PR is what lands it (#64).** A label rather than an
   approval, so approve-now-land-later stays available, and on the PR because
   that is where the reviewer is standing. It is a QUEUE: a merge the resolve

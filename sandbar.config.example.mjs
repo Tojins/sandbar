@@ -12,6 +12,12 @@ export default {
   ghOwner: "YOUR_GITHUB_OWNER",
   ghRepo: "YOUR_GITHUB_REPO",
 
+  // Required: only these forge logins (plus the login behind this run's token)
+  // may apply the most recent `ready-for-agent` label. Bots and GitHub Apps may
+  // be listed by their recorded login. Use `"anyone"` to admit every labelled
+  // issue, matching sandbar's behavior before 0.37.0.
+  developers: ["YOUR_GITHUB_LOGIN"],
+
   // Required: the image used by the implementer and merge-resolution agents.
   sandboxImage: SANDBOX_IMAGE,
 

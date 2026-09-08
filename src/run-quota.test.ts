@@ -84,8 +84,11 @@ vi.mock("./repo-cache.js", async (importOriginal) => ({
 vi.mock("./preflight.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./preflight.js")>(),
   runPreflight: vi.fn(async () => ({
-    configPath: null, sourceBranch: "main", hostCwd: "/repo",
-    behind: 0, touchingConfig: 0,
+    configStaleness: {
+      configPath: null, sourceBranch: "main", hostCwd: "/repo",
+      behind: 0, touchingConfig: 0,
+    },
+    readyLabelPolicy: "anyone",
   })), absoluteMountSources: vi.fn(() => []),
   fetchOriginRefs: vi.fn(async () => ({ sourceChanged: false, failures: [] })),
   readConfigStaleness: vi.fn(async () => ({
@@ -163,7 +166,7 @@ import { startKeepawake } from "./keepawake.js";
 import { run } from "./run.js";
 
 const config: RunConfig = {
-  ghOwner: "o", ghRepo: "r", cwd: "/tmp", workDir: "sandbar-run-quota-test",
+  ghOwner: "o", ghRepo: "r", developers: "anyone", cwd: "/tmp", workDir: "sandbar-run-quota-test",
   sandboxImage: "image", botName: "bot", botEmail: "bot@example.com",
   sandboxHooks: {}, env: { GH_TOKEN: "token" },
   promptExtensions: {
@@ -656,6 +659,75 @@ describe("run quota orchestration (#109)", () => {
       admitted: [],
       waiting: [{ issue: 4, title: "Issue 4", reason: { kind: "no-slot" } }],
     }));
+  });
+
+  it("logs each label-actor exclusion once per recorded recompute", async () => {
+    const admitted = issue("1");
+    const outsider = issue("9");
+    seams.plan.mockResolvedValue({
+      ...resolution([admitted]),
+      candidates: [admitted, outsider].map((candidate) => ({
+        ...candidate,
+        ready: candidate.id === admitted.id,
+      })),
+      waiting: [{
+        issue: 9,
+        title: outsider.title,
+        reason: { kind: "label-actor", actor: "mallory" },
+      }],
+    });
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA",
+      provider: "claude",
+      window: "five_hour",
+      resetsAt: 42,
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:4");
+    const recomputes = eventsOf("recompute").filter((event) =>
+      (event.waiting as Array<{ issue: number }>).some((entry) => entry.issue === 9));
+    const exclusions = eventsOf("complaint").filter((event) =>
+      String(event.message).includes("Issue #9 (Issue 9) excluded") &&
+      String(event.message).includes("@mallory"));
+    expect(exclusions).toHaveLength(recomputes.length);
+  });
+
+  it("records a stable label-actor exclusion on every poll recompute", async () => {
+    const outsider = issue("9");
+    const excluded = {
+      ...resolution([]),
+      candidates: [{ ...outsider, ready: false }],
+      waiting: [{
+        issue: 9,
+        title: outsider.title,
+        reason: { kind: "label-actor" as const, actor: "mallory" },
+      }],
+    };
+    const arrived = issue("10");
+    seams.plan
+      .mockResolvedValueOnce(excluded)
+      .mockResolvedValueOnce(excluded)
+      .mockResolvedValue(resolution([arrived]));
+    vi.mocked(fetchOriginRefs).mockResolvedValue({ sourceChanged: false, failures: [] });
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA",
+      provider: "claude",
+      window: "five_hour",
+      resetsAt: 42,
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:4");
+    expect(eventsOf("complaint").filter((event) =>
+      String(event.message).includes("Issue #9 (Issue 9) excluded")))
+      .toHaveLength(2);
+    expect(eventsOf("recompute").slice(0, 3).map((event) => event.trigger))
+      .toEqual(["launch", "poll", "poll"]);
   });
 
   it("keeps planner waiting rows when the scheduler also declines a planned issue", async () => {

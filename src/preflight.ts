@@ -77,7 +77,7 @@
 //                               Unit-tested with hand-built fixtures.
 //   - gatherState() / runPreflight() — I/O wrappers that shell out to git/gh.
 //
-// All five outbound calls sit behind one credential-free reachability gate
+// All outbound calls sit behind one credential-free reachability gate
 // (#118): DNS lookup plus a TCP connection to port 443 for the gh host and the
 // origin host (deduplicated). An unreachable host is retried six times, ten
 // seconds apart, and then refuses ALONE: no credential was asked about and no
@@ -95,6 +95,9 @@
 // would let one run observe two prerequisite states. What a failing tracker
 // query means is a separate question the two-state `IssueNumberLookup` below
 // answers: not an empty issue set, but an unjudged one.
+// Restricted queue mode adds one authenticated identity read after those
+// probes: `viewer { login }` is resolved once here, used for preflight's own
+// branch classification, and returned to every planner recompute in the run.
 //
 // The git fetch is an answer too, not a best-effort warmup. Its failure joins
 // the ordinary invariant report and retains git's stderr (#81, absorbed by
@@ -133,7 +136,8 @@
 // host paths and this check is complete at that scope.
 //
 // Leftover `sandbar/issue-*` branches are classified four ways (#13):
-//   - resumable — the branch maps to a still-open `ready-for-agent` issue, i.e.
+//   - resumable — the branch maps to a still-open `ready-for-agent` issue whose
+//                 latest label actor passes #136's queue policy, i.e.
 //                 stranded work from an interrupted run (killed after the issue
 //                 agents finished but before/inside the merger). NOT an error:
 //                 the planner re-picks the issue and the inner loop continues
@@ -160,8 +164,9 @@
 //   - unmerged  — everything else: the issue reads CLOSED, or the branch
 //                 carries no issue number at all. Nothing will ever re-queue
 //                 it, so it stays a hard error.
-// The open/closed fact comes from `fetchIssueStates`, the same strongly
-// consistent GraphQL batch the planner uses for its CLOSED guard (#16).
+// The open/closed fact and the latest queue-label actor come from
+// `fetchIssueStates`, the same strongly consistent GraphQL batch the planner
+// uses for its CLOSED and admission guards (#16, #136).
 //
 // A tracker that could not be ASKED is its own answer, not a fourth reading of
 // CLOSED. Both issue lookups (`fetchOpenReadyIssueNumbers`,
@@ -242,9 +247,12 @@ import {
 } from "./git-ops.js";
 import { RUNTIME } from "./runtime.js";
 import {
+  type ReadyLabelPolicy,
   fetchCandidates,
   fetchIssueStates,
   readChunkMembers,
+  readyLabelApplicationAllowed,
+  resolveReadyLabelPolicy,
 } from "./plan-resolver.js";
 import {
   parseRepoFromRemoteUrl,
@@ -266,6 +274,11 @@ export type PreflightConfig = {
   // repository outright (#34) — including `fetchCandidates` below, which is why
   // preflight needs it. It is also one half of the agreement checked here.
   readonly repo: RepoRef;
+  // The required queue policy, used here for the same reason as the repo: a
+  // leftover branch is resumable only if the planner would admit its issue.
+  // `runPreflight` resolves the token login once and returns that resolved
+  // policy for every later planner recompute.
+  readonly developers: readonly string[] | "anyone";
   // The resolved `config.env`, already merged with the host environment per
   // declared key (#38). Preflight no longer knows where the values came from,
   // which is the point: sandbar names no file.
@@ -681,6 +694,9 @@ export async function gatherState(
   // query forbids, and would let one preflight run observe two prerequisite
   // states.
   trackerPrerequisites: TrackerPrerequisites,
+  // Null only when the prerequisite probe above failed, so the queue lookup is
+  // unjudged and cannot classify a branch as resumable.
+  readyLabelPolicy: ReadyLabelPolicy | null,
   // Git-derived chunk members (#93). Optional so a caller that has the set already
   // — `runPreflight`, which needs the same set for the delete pass — pays for
   // the query once instead of twice; omitted, it is fetched here.
@@ -719,7 +735,7 @@ export async function gatherState(
 
   const originUrl = await readOriginUrl(repoDir);
   const parsedOrigin = originUrl === null ? null : parseRepoFromRemoteUrl(originUrl);
-  const readyLookup = await fetchOpenReadyIssueNumbers(cfg.repo);
+  const readyLookup = await fetchOpenReadyIssueNumbers(cfg.repo, readyLabelPolicy);
   const openReadyIssues = lookedUp(readyLookup);
   const chunkMemberIssues =
     knownChunkMemberIssues ??
@@ -830,18 +846,35 @@ function lookedUp(l: IssueNumberLookup): ReadonlySet<number> {
   return l.ok ? l.numbers : NO_NUMBERS;
 }
 
-// The set of issue numbers currently in the planner queue (open +
-// `ready-for-agent`). Reuses the planner's own candidate query so the resume
-// classification can never desync from what the next cycle actually picks up.
+// The set of issue numbers currently in the planner queue (open + authorized
+// `ready-for-agent`). Reuses the planner's candidate query, authoritative facts
+// batch and actor decision so the resume classification can never desync from
+// what the next cycle actually picks up.
 // A gh hiccup answers `ok: false`: no branch is treated as resumable, and the
 // caller carries the distinction to `checkInvariants` rather than letting the
 // empty set impersonate "nothing is queued".
 async function fetchOpenReadyIssueNumbers(
   repo: RepoRef,
+  policy: ReadyLabelPolicy | null,
 ): Promise<IssueNumberLookup> {
+  if (policy === null) return { ok: false };
   try {
     const candidates = await fetchCandidates(repo);
-    return { ok: true, numbers: new Set(candidates.map((c) => c.number)) };
+    if (policy === "anyone") {
+      return { ok: true, numbers: new Set(candidates.map((c) => c.number)) };
+    }
+    const facts = await fetchIssueStates(candidates.map((c) => c.number), repo);
+    return {
+      ok: true,
+      numbers: new Set(candidates.flatMap((candidate) => {
+        const issue = facts.get(candidate.number);
+        return issue?.state === "OPEN" &&
+          issue.labels.includes("ready-for-agent") &&
+          readyLabelApplicationAllowed(issue.readyLabelApplication, policy)
+          ? [candidate.number]
+          : [];
+      })),
+    };
   } catch {
     return { ok: false };
   }
@@ -1325,10 +1358,15 @@ export async function fetchOriginRefs(
   };
 }
 
+export type PreflightResult = {
+  readonly configStaleness: ConfigStaleness;
+  readonly readyLabelPolicy: ReadyLabelPolicy;
+};
+
 export async function runPreflight(
   cfg: PreflightConfig,
   reachabilityAdapter: ForgeReachabilityAdapter = forgeReachabilityAdapter,
-): Promise<ConfigStaleness> {
+): Promise<PreflightResult> {
   const originUrl = await readOriginUrl(cfg.layout.repoDir);
   const originHost =
     originUrl === null ? null : parseRepoFromRemoteUrl(originUrl)?.host ?? null;
@@ -1377,6 +1415,9 @@ export async function runPreflight(
   const ghAuthOk = hasGh
     ? await runOk(cfg.layout.repoDir, "gh", ["auth", "status"])
     : false;
+  const readyLabelPolicy = hasGh && ghAuthOk
+    ? await resolveReadyLabelPolicy(cfg.developers)
+    : null;
 
   const deleted = await deleteMergedSandbarBranches({
     layout: cfg.layout,
@@ -1390,7 +1431,12 @@ export async function runPreflight(
       detail: `Cleaned up merged issue branches: ${deleted.join(", ")}`,
     });
   }
-  const state = await gatherState(cfg, { hasGh, ghAuthOk }, chunkMemberIssues);
+  const state = await gatherState(
+    cfg,
+    { hasGh, ghAuthOk },
+    readyLabelPolicy,
+    chunkMemberIssues,
+  );
   // The branches this run keeps are brought level with origin's copy first
   // (#112), so the two announcements below describe the tips the run will
   // actually resume from, and a diverged one is refused alongside the
@@ -1505,7 +1551,10 @@ export async function runPreflight(
   if (staleConfig !== null) {
     await cfg.onEvent({ kind: "complaint", severity: "warning", message: staleConfig });
   }
-  return configStaleness;
+  if (readyLabelPolicy === null) {
+    throw new Error("preflight passed without an authenticated gh viewer");
+  }
+  return { configStaleness, readyLabelPolicy };
 }
 
 // What the checkout's copy of the config file is missing, against origin (#66).

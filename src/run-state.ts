@@ -94,6 +94,10 @@ export function waitingReasonText(reason: WaitingReason): string {
     case "no-slot": return "no free slot";
     case "held": return "held: no chunk to land on";
     case "ongoing": return "ongoing";
+    case "label-actor":
+      return reason.actor === null
+        ? "excluded: ready-for-agent label actor unknown"
+        : `excluded: ready-for-agent applied by @${reason.actor}`;
   }
 }
 

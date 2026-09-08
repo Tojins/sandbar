@@ -494,6 +494,16 @@ export type RunConfig = {
   readonly ghOwner: string;
   readonly ghRepo: string;
 
+  // Who may put an issue in sandbar's `ready-for-agent` queue (#136). In the
+  // restricted form, the most recent recorded application of that label must
+  // come from one of these forge logins or from the token running sandbar.
+  // Logins are compared case-insensitively; bots and GitHub Apps are ordinary
+  // actors here and may be named explicitly. `"anyone"` restores the queue's
+  // pre-#136 behavior. Required because neither posture is a safe default for
+  // every existing host: restricting silently breaks workflow-labelled queues,
+  // while admitting everyone silently preserves the exposure this field closes.
+  readonly developers: readonly string[] | "anyone";
+
   // The image the AGENT runs in — the one with claude, git and the repo's
   // toolchain installed. Also the image the merger's resolve agent runs in.
   //
@@ -1701,6 +1711,24 @@ function requireRepoPart(field: string, raw: unknown): string {
   return value;
 }
 
+function requireDevelopers(value: unknown): readonly string[] | "anyone" {
+  if (value === "anyone") return value;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new SandbarError(
+      'config.developers is required and must be a non-empty array of forge logins or "anyone".',
+    );
+  }
+  const developers = value.map((login, index) => {
+    if (typeof login !== "string" || login.trim() === "") {
+      throw new SandbarError(
+        `config.developers[${index}] must be a non-empty forge login (got ${JSON.stringify(login)}).`,
+      );
+    }
+    return login.trim();
+  });
+  return developers;
+}
+
 // Validated at runtime even though the field is typed, for the reason every
 // other field here is: `sandbar.config.mjs` is a PROGRAM, and `.mjs` is not
 // type-checked by anything. A misspelt lane ("auto-land", say, borrowing the
@@ -1798,6 +1826,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   // entirely.
   const ghOwner = requireRepoPart("ghOwner", config.ghOwner);
   const ghRepo = requireRepoPart("ghRepo", config.ghRepo);
+  const developers = requireDevelopers(config.developers);
   const gateStack = resolveGateStack(config.gateStack);
   const images = resolveImages(config.images, config.sandboxImage);
   checkRebuildOnIsUsed(images, gateStack, config.sandboxImage);
@@ -1915,6 +1944,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     ...config,
     ghOwner,
     ghRepo,
+    developers,
     cwd,
     workDir: config.workDir ?? DEFAULT_WORK_DIR,
     uiPort: requirePort(config.uiPort ?? DEFAULT_UI_PORT),

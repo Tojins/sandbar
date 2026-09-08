@@ -36,6 +36,7 @@ import { sandbarVersion } from "./version.js";
 const minimal: RunConfig = {
   ghOwner: "acme",
   ghRepo: "widgets",
+  developers: "anyone",
   sandboxImage: "localhost/sandbar:widgets",
   botName: "sandbar-bot",
   botEmail: "bot@acme.dev",
@@ -68,6 +69,31 @@ const minimal: RunConfig = {
     ],
   },
 };
+
+describe("resolveConfig — developers is an explicit queue policy (#136)", () => {
+  it("accepts anyone and trims a non-empty login list", () => {
+    expect(resolveConfig({ ...minimal, developers: "anyone" }).developers).toBe("anyone");
+    expect(
+      resolveConfig({ ...minimal, developers: [" Alice ", "release-bot[bot]"] })
+        .developers,
+    ).toEqual(["Alice", "release-bot[bot]"]);
+  });
+
+  it("refuses an absent policy before the run can take its lock", () => {
+    const { developers: _developers, ...absent } = minimal;
+    expect(() => resolveConfig(absent as RunConfig)).toThrow(/config\.developers is required/);
+  });
+
+  it.each([
+    { name: "an empty list", developers: [] },
+    { name: "an empty login", developers: ["alice", " "] },
+    { name: "a non-list string", developers: "alice" },
+  ])("refuses $name", ({ developers }) => {
+    expect(() => resolveConfig({ ...minimal, developers } as RunConfig)).toThrow(
+      /config\.developers/,
+    );
+  });
+});
 
 // #37 — `rebuildOn` on an image nothing runs is inert, and inertness is the
 // failure itself: the operator wrote down what the image is a function of and

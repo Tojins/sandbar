@@ -169,7 +169,13 @@ import {
   reconcileLandedChunks,
 } from "./chunk-reconcile.js";
 import { postLaneOverrideNotices } from "./lanes.js";
-import { type PlanResolution, type PlannedIssue, buildPlan, readIssueBranchRefs } from "./plan-resolver.js";
+import {
+  type PlanResolution,
+  type PlannedIssue,
+  type ReadyLabelPolicy,
+  buildPlan,
+  readIssueBranchRefs,
+} from "./plan-resolver.js";
 import {
   ContinuousPool,
   decideSchedulerAction,
@@ -654,6 +660,7 @@ export async function run(
   // it is checked against the cache's `origin`, which is the one repository
   // identity sandbar does NOT get from config.
   const repo = { owner: config.ghOwner, name: config.ghRepo };
+  let readyLabelPolicy: ReadyLabelPolicy;
 
   // Preflight is still ahead of the sweep and every container operation below,
   // which is the dependency that matters: those assume a working container
@@ -687,6 +694,7 @@ export async function run(
       env,
       sourceBranch: config.sourceBranch,
       repo,
+      developers: config.developers,
       pulledImages: pulledImagesOf(config),
       // The gate stack is the whole of sandbar's consumer-supplied host-path
       // surface (#51), and a source podman cannot resolve is host state that
@@ -701,7 +709,8 @@ export async function run(
       agentProviders: requiredAgentProviders(config),
       onEvent: (event) => runRecord.emit(event).then(() => undefined),
     });
-    lastConfigStalenessCount = initialConfigStaleness.touchingConfig;
+    lastConfigStalenessCount = initialConfigStaleness.configStaleness.touchingConfig;
+    readyLabelPolicy = initialConfigStaleness.readyLabelPolicy;
   } catch (err) {
     return await stopAtStartup("preflight-failed", err);
   }
@@ -1095,6 +1104,18 @@ export async function run(
       })),
       refs: await readIssueBranchRefs(layout.repoDir),
     });
+    for (const excluded of resolution.waiting) {
+      if (excluded.reason.kind !== "label-actor") continue;
+      const actor = excluded.reason.actor === null
+        ? "an unknown actor (no usable application was present in the fetched timeline window)"
+        : `@${excluded.reason.actor}`;
+      await runRecord.emit({
+        kind: "complaint",
+        severity: "warning",
+        message: `Issue #${excluded.issue} (${excluded.title}) excluded from the queue: ` +
+          `the most recent recorded \`ready-for-agent\` application was by ${actor}.`,
+      });
+    }
     deferredChunksForRecompute = [];
   };
 
@@ -1335,6 +1356,7 @@ export async function run(
           ...[...pool.startedIds()].map(Number),
         ]),
         defaultLane: config.defaultLane,
+        readyLabelPolicy,
         k: Math.max(0, config.maxParallelIssues - pool.activeCount),
         repoDir: layout.repoDir,
         ongoing: new Set([...pool.startedIds()].map(Number)),
@@ -1525,6 +1547,7 @@ export async function run(
         sourceChangedOnPoll || configStalenessChanged || planDiagnosticsChanged ||
         followUps.length > 0 || laneNotices.length > 0 ||
         reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
+        resolution.waiting.some((entry) => entry.reason.kind === "label-actor") ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land";
       if (planTrigger === "poll" && pollDidWork) {
         activity.enterBusy();

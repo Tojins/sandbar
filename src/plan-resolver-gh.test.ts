@@ -23,7 +23,7 @@
 // through the second, and a disagreement resolves one repo's issue numbers in
 // another.
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -32,9 +32,63 @@ import { selectLandRequests } from "./chunk-land.js";
 import {
   buildPlan,
   fetchCandidates,
+  fetchIssueStates,
+  resolveReadyLabelPolicy,
 } from "./plan-resolver.js";
 
 const CONFIGURED = { owner: "acme", name: "app" };
+
+describe("authoritative ready-for-agent provenance (#136)", () => {
+  let shimBin: string;
+  let originalPath: string | undefined;
+  let callsPath: string;
+
+  beforeEach(async () => {
+    shimBin = await mkdtemp(join(tmpdir(), "sandbar-label-actor-"));
+    callsPath = join(shimBin, "calls");
+    await writeFile(join(shimBin, "gh"), [
+      "#!/bin/sh",
+      'printf "%s\\n" "$*" >> "$SANDBAR_TEST_GH_CALLS"',
+      'case "$*" in',
+      '  *"query=query{viewer{login}}"*)',
+      '    printf \'{"data":{"viewer":{"login":"token-bot"}}}\' ;;',
+      "  *)",
+      '    printf \'{"data":{"repository":{"i12":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]},"timelineItems":{"nodes":[{"actor":{"login":"alice"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T10:00:00Z"},{"actor":{"login":"mallory"},"label":{"name":"waiting"},"createdAt":"2026-09-08T12:00:00Z"},{"actor":{"login":"bob"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T11:00:00Z"}]}}}}}\' ;;',
+      "esac",
+    ].join("\n") + "\n", { mode: 0o755 });
+    originalPath = process.env["PATH"];
+    process.env["PATH"] = `${shimBin}:${originalPath ?? ""}`;
+    process.env["SANDBAR_TEST_GH_CALLS"] = callsPath;
+  });
+
+  afterEach(async () => {
+    if (originalPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = originalPath;
+    delete process.env["SANDBAR_TEST_GH_CALLS"];
+    await rm(shimBin, { recursive: true, force: true });
+  });
+
+  it("selects the most recent application of the queue label by createdAt", async () => {
+    const facts = await fetchIssueStates([12], CONFIGURED);
+    expect(facts.get(12)?.readyLabelApplication).toEqual({
+      actor: "bob",
+      createdAt: "2026-09-08T11:00:00Z",
+    });
+    expect(await readFile(callsPath, "utf8")).toContain(
+      "timelineItems(last: 100, itemTypes: [LABELED_EVENT])",
+    );
+  });
+
+  it("reads the token login once for restricted mode and not at all for anyone", async () => {
+    expect(await resolveReadyLabelPolicy(["alice"])).toEqual({
+      developers: ["alice"],
+      viewerLogin: "token-bot",
+    });
+    expect(await resolveReadyLabelPolicy("anyone")).toBe("anyone");
+    const calls = (await readFile(callsPath, "utf8")).trim().split("\n");
+    expect(calls.filter((line) => line.includes("viewer{login}")).length).toBe(1);
+  });
+});
 
 describe("fetchCandidates names the configured repo (#34)", () => {
   let shimBin: string;
@@ -189,7 +243,20 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
   });
 
   it("plans a labelled issue the listing has not caught up with", async () => {
-    const r = await buildPlan(CONFIGURED, { repoDir, extraCandidates: [FILED] });
+    const r = await buildPlan(CONFIGURED, {
+      repoDir,
+      extraCandidates: [FILED],
+      readyLabelPolicy: "anyone",
+    });
+    expect(r.plan.map((p) => p.id)).toEqual(["50"]);
+  });
+
+  it("trusts a same-cycle sandbar requeue without timeline evidence", async () => {
+    const r = await buildPlan(CONFIGURED, {
+      repoDir,
+      extraCandidates: [FILED],
+      readyLabelPolicy: { developers: ["alice"], viewerLogin: "token-bot" },
+    });
     expect(r.plan.map((p) => p.id)).toEqual(["50"]);
   });
 
@@ -198,12 +265,19 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
     // plan is dropped like any other candidate. Modelled by asking for #10,
     // which the batch above reports CLOSED.
     const closed = { ...FILED, number: 10, body: "" };
-    const r = await buildPlan(CONFIGURED, { repoDir, extraCandidates: [closed] });
+    const r = await buildPlan(CONFIGURED, {
+      repoDir,
+      extraCandidates: [closed],
+      readyLabelPolicy: "anyone",
+    });
     expect(r.plan).toEqual([]);
   });
 
   it("plans nothing when nothing is handed in", async () => {
-    expect((await buildPlan(CONFIGURED, { repoDir })).plan).toEqual([]);
+    expect((await buildPlan(CONFIGURED, {
+      repoDir,
+      readyLabelPolicy: "anyone",
+    })).plan).toEqual([]);
   });
 });
 
@@ -256,7 +330,11 @@ describe("buildPlan loads git-derived members into the candidate graph (#93, #94
   });
 
   it("requeues a git-derived member from authoritative labels onto its chunk", async () => {
-    const result = await buildPlan(CONFIGURED, { repoDir, defaultLane: "review" });
+    const result = await buildPlan(CONFIGURED, {
+      repoDir,
+      defaultLane: "review",
+      readyLabelPolicy: "anyone",
+    });
     expect(result.plan.map((p) => p.id)).toEqual(["60"]);
     expect(result.plan[0]?.chunk).not.toBeNull();
     expect(result.landedChunks[0]?.members).toEqual([{ number: 60, title: "Root" }]);
