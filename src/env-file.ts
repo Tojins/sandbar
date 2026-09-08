@@ -1,10 +1,17 @@
-// Dotenv parsing, and the opt-in helper that turns a file into `config.env`.
+// Dotenv parsing, plus the opt-in helpers that turn a file into `config.env`
+// and per-installation role routing (#38, #137).
 //
-// Not contract (#38): `config.env` is a record the host supplies however it
-// likes, and sandbar names no file — `readEnvFile` is the one-liner for hosts
-// that want a gitignored file beside the config. Keeping the parser here keeps
-// the escape dialect single: two parsers over one file is a credential that
-// differs between the preflight check and the container by a backslash.
+// `config.env` remains a record the host supplies however it likes, and sandbar
+// names no file (#38): `readEnvFile` is the opt-in one-liner for hosts that want
+// a gitignored file beside the config. `splitRoleRouting` (#137) partitions
+// fifteen reserved `SANDBAR_*` keys out of that record before the remainder is
+// used as the sandbox allowlist. The config remains a program: it decides
+// whether to call the helper and spreads the returned routing over its own
+// defaults. Keeping the split beside the parser gives one spelling of those
+// reserved keys and makes it impossible for one to cross into a sandbox.
+// Keeping the parser here keeps the escape dialect single: two parsers over
+// one file is a credential that differs between the preflight check and the
+// container by a backslash.
 //
 // Supported syntax: `KEY=value` lines; blank lines and `#` comments ignored;
 // surrounding single or double quotes stripped; inside double quotes the
@@ -12,7 +19,34 @@
 
 import { readFileSync } from "node:fs";
 
+import type { RunConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
+
+const ROLE_ROUTING_FIELDS = [
+  "implementerAgent",
+  "implementerModelId",
+  "implementerEffort",
+  "uiCheckAgent",
+  "uiCheckModelId",
+  "uiCheckEffort",
+  "reviewerAgent",
+  "reviewerModelId",
+  "reviewerEffort",
+  "reviewerQualityAgent",
+  "reviewerQualityModelId",
+  "reviewerQualityEffort",
+  "mergerAgent",
+  "mergerModelId",
+  "mergerEffort",
+] as const satisfies readonly (keyof RunConfig)[];
+
+type RoleRoutingField = (typeof ROLE_ROUTING_FIELDS)[number];
+
+type RoleRouting = Partial<Pick<RunConfig, RoleRoutingField>>;
+
+function routingEnvKey(field: RoleRoutingField): string {
+  return `SANDBAR_${field.replace(/[A-Z]/g, (letter) => `_${letter}`).toUpperCase()}`;
+}
 
 export function parseEnvFile(content: string): Record<string, string> {
   const vars: Record<string, string> = {};
@@ -61,4 +95,33 @@ export function readEnvFile(path: string | URL): Record<string, string> {
       { cause: err },
     );
   }
+}
+
+// Split a host-supplied env record into the role-routing deviations a config
+// spreads over its committed defaults and the allowlist that may enter agent
+// sandboxes. Empty reserved values mean "inherit the committed field", exactly
+// as empty `config.env` values mean "inherit from process.env". Reserved keys
+// are removed in both cases, so routing controls are never exported to an
+// agent. Values remain deliberately unvalidated here: `resolveConfig` is the
+// one boundary that parses providers and checks provider/model pairings and
+// effort shapes.
+export function splitRoleRouting(record: Record<string, string>): {
+  readonly routing: RoleRouting;
+  readonly env: Record<string, string>;
+} {
+  const routingValues: Record<string, string> = {};
+  const env = { ...record };
+
+  for (const field of ROLE_ROUTING_FIELDS) {
+    const key = routingEnvKey(field);
+    if (!Object.hasOwn(record, key)) continue;
+
+    delete env[key];
+    const value = record[key];
+    if (value !== undefined && value !== "") routingValues[field] = value;
+  }
+
+  // Agent names are still strings at this boundary. The cast describes the
+  // config fields they populate; resolveConfig performs the runtime narrowing.
+  return { routing: routingValues as RoleRouting, env };
 }

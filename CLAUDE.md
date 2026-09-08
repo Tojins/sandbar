@@ -335,9 +335,15 @@ outcomes.
    event. The release is registered immediately after record finalization so
    #35's LIFO drain puts it after every teardown and before `run-end`, and its
    event writes are awaited because `process.exit` grants no event-loop turn.
-- **Credentials are a value, not a path (#38).** `config.env` is an allowlist
-  record (empty value ⇒ inherit from `process.env`); `readEnvFile` is the
-  opt-in loader. `src/env.ts`. A credential whose vendor interface is a FILE is
+- **Credentials are a value, not a path (#38, #137).** `config.env` is an
+  allowlist record (empty value ⇒ inherit from `process.env`); `readEnvFile` is
+  the opt-in loader. A host may keep per-installation role routing in that same
+  gitignored record: `splitRoleRouting` consumes the fifteen
+  `SANDBAR_<ROLE>_{AGENT,MODEL_ID,EFFORT}` keys, omits absent/empty deviations,
+  and returns the remainder for `config.env`, so no routing key crosses into a
+  sandbox. The committed config remains a program and spreads `routing` over
+  its defaults; `resolveConfig` remains the one validation boundary.
+  `src/env-file.ts`, `src/env.ts`. A credential whose vendor interface is a FILE is
   not an exception (#73): codex's ChatGPT subscription IS
   `codex login`'s `~/.codex/auth.json`, so `CODEX_AUTH_JSON` carries that file's
   CONTENT — the config is a program and reads its own host copy — and the
@@ -363,7 +369,10 @@ outcomes.
   (`--effort`, `-c model_reasoning_effort=`) and the implementer/review-pass
   event carries it as `effort`; unset emits no flag and stays absent, because
   the sandbox reads no host `config.toml` and a driver default would be the
-  same invisible setting in a different place. `AgentProvider`
+  same invisible setting in a different place. These three per-role fields are
+  also the unit one installation may override through #137's env split; the
+  ordinary pairing check rejects a half-moved non-claude role after the config
+  spreads those deviations. `AgentProvider`
   (`src/agent-sandbox.ts`) was already the whole seam — argv plus a line parser,
   with the explicitly named completion watch, the idle timeout and commit collection reading
   parsed events and git — so `codex` is a second implementation of it and
@@ -564,8 +573,9 @@ outcomes.
 ## This repo runs itself (#39)
 
 `sandbar.config.mjs` at the root is the host-side surface, `Containerfile`
-builds the one image, `sandbar.env` (gitignored) holds credentials, `sandbar.pin`
-names the release that drives a run, and `npm run sandbar`
+builds the one image, `sandbar.env` (gitignored) holds credentials and this
+installation's role routing, `sandbar.pin` names the release that drives a run,
+and `npm run sandbar`
 (`scripts/sandbar-launch.mjs`) installs the pin and starts the daemon once.
 
 - **The driver is PINNED, not built from the checkout (#66).** The launcher

@@ -1,4 +1,7 @@
 import { readFileSync } from "node:fs";
+import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
@@ -39,26 +42,54 @@ function runConfigFields(source: string): RunConfigFields {
   return { required, optional };
 }
 
+function routingEnvKey(field: string): string {
+  return `SANDBAR_${field.replace(/[A-Z]/g, (letter) => `_${letter}`).toUpperCase()}`;
+}
+
 describe("sandbar.config.example.mjs", () => {
   it("keeps required fields active and every optional field discoverable", async () => {
     const configSource = readFileSync(new URL("config.ts", import.meta.url), "utf8");
     const exampleUrl = new URL("../sandbar.config.example.mjs", import.meta.url);
+    const envExampleUrl = new URL("../sandbar.env.example", import.meta.url);
     const exampleSource = readFileSync(exampleUrl, "utf8");
+    const envExampleSource = readFileSync(envExampleUrl, "utf8");
     const fields = runConfigFields(configSource);
     const documentedFields = new Set(
       [...exampleSource.matchAll(/^\s*\/\/\s*([A-Za-z_$][\w$]*)\s*:/gm)].map(
         (match) => match[1],
       ),
     );
-    const example = (
-      (await import(exampleUrl.href)) as { readonly default: RunConfig }
-    ).default;
+    // Execute the published idiom with its paired env template without reading
+    // or creating the developer's real, gitignored sandbar.env. Keeping the
+    // fixture under this package also exercises the package-root import exactly
+    // as a copied config uses it.
+    const fixtureParent = fileURLToPath(new URL("../.sandbar/", import.meta.url));
+    await mkdir(fixtureParent, { recursive: true });
+    const fixtureDir = await mkdtemp(join(fixtureParent, "config-example-"));
+    const fixtureConfig = join(fixtureDir, "sandbar.config.mjs");
+    await copyFile(exampleUrl, fixtureConfig);
+    await copyFile(envExampleUrl, join(fixtureDir, "sandbar.env"));
+    let example: RunConfig;
+    try {
+      example = (
+        (await import(pathToFileURL(fixtureConfig).href)) as {
+          readonly default: RunConfig;
+        }
+      ).default;
+    } finally {
+      await rm(fixtureDir, { recursive: true, force: true });
+    }
 
     expect(
       fields.required.filter((field) => !Object.hasOwn(example, field)),
     ).toEqual([]);
     expect(
-      fields.optional.filter((field) => !documentedFields.has(field)),
+      fields.optional.filter(
+        (field) =>
+          !Object.hasOwn(example, field) &&
+          !documentedFields.has(field) &&
+          !envExampleSource.includes(`# ${routingEnvKey(field)}=`),
+      ),
     ).toEqual([]);
     expect(() => resolveConfig(example)).not.toThrow();
   });
