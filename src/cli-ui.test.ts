@@ -51,4 +51,16 @@ describe("sandbar ui entrypoint", () => {
     expect((await seams.start.mock.results[0]?.value).close).toHaveBeenCalledOnce();
     log.mockRestore();
   });
+
+  it("uses the invocation port instead of config.uiPort when supplied", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "sandbar-cli-ui-"));
+    await writeFile(join(cwd, "sandbar.config.mjs"), "export default {};\n");
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await expect(main(["ui", "--port", "7555"], cwd)).resolves.toBe(0);
+    expect(seams.start).toHaveBeenLastCalledWith({
+      logsDir: "/resolved/repo/.state/logs",
+      port: 7555,
+    });
+    log.mockRestore();
+  });
 });

@@ -12,6 +12,11 @@
   ansible.builtin.systemd_service:
     daemon_reload: true
 
+- name: Reload Caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    state: reloaded
+
 # A subordinate-id change is applied to existing rootless storage by
 # `podman system migrate`; on a fresh box it only creates the storage.
 - name: Migrate podman storage

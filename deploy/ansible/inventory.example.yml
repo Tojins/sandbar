@@ -13,6 +13,11 @@ all:
     # Author identity for the commits the agents and the merger make.
     sandbar_git_name: sandbar-bot
     sandbar_git_email: sandbar-bot@example.invalid
+    # The standalone reader must differ from sandbar.config.mjs's uiPort. Set
+    # it to 0 to install neither the UI unit nor Caddy.
+    sandbar_ui_port: 7332
+    # The public plain-HTTP port Caddy exposes.
+    sandbar_ui_http_port: 80
     # Every key that may reach the box, for root and the service user alike.
     # Exclusive: a key not listed here is REMOVED.
     sandbar_operator_ssh_keys:

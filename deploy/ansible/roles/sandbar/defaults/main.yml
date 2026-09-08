@@ -26,6 +26,20 @@ sandbar_service_name: sandbar
 # and the wake lock — before systemd SIGKILLs what is left.
 sandbar_stop_timeout_sec: 900
 
+# The standalone run UI's loopback port. It must differ from the consumer
+# config's uiPort, which the daemon's in-process UI keeps. 0 disables both the
+# UI user unit and Caddy tasks.
+sandbar_ui_port: 7332
+
+# The public plain-HTTP port Caddy listens on. The role manages no firewall; a
+# host that adds one must allow this port.
+sandbar_ui_http_port: 80
+
+# The consumer's own spelling for the standalone reader, just as
+# sandbar_launch_command is its spelling for the daemon. A self-hosted checkout
+# can point this at .sandbar/driver/node_modules/@offergeist/sandbar/dist/cli.js.
+sandbar_ui_command: "/usr/bin/npx sandbar ui --port {{ sandbar_ui_port }}"
+
 # The git identity the implementer sandbox copies from the checkout's host
 # config and the merger's commits carry.
 sandbar_git_name: "{{ sandbar_user }}"

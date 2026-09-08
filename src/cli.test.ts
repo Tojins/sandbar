@@ -128,13 +128,51 @@ describe("parseArgs: the gate subcommand", () => {
 
 describe("parseArgs: the ui subcommand", () => {
   it("uses the same config-path contract as a run", () => {
-    expect(parseArgs(["ui"])).toEqual({ kind: "ui", configPath: "sandbar.config.mjs" });
+    expect(parseArgs(["ui"])).toEqual({
+      kind: "ui",
+      configPath: "sandbar.config.mjs",
+      port: null,
+    });
     expect(parseArgs(["ui", "--config", "other.mjs"]))
-      .toEqual({ kind: "ui", configPath: "other.mjs" });
+      .toEqual({ kind: "ui", configPath: "other.mjs", port: null });
+  });
+
+  it("takes --port in both spellings", () => {
+    expect(parseArgs(["ui", "--port", "7332"])).toEqual({
+      kind: "ui",
+      configPath: "sandbar.config.mjs",
+      port: 7332,
+    });
+    expect(parseArgs(["ui", "--port=8080"])).toEqual({
+      kind: "ui",
+      configPath: "sandbar.config.mjs",
+      port: 8080,
+    });
+  });
+
+  it.each(["", "0", "65536", "seven", "7.5"])(
+    "refuses %j as a UI port",
+    (port) => {
+      expect(() => parseArgs(["ui", `--port=${port}`])).toThrow(
+        /--port needs an integer from 1 through 65535/,
+      );
+    },
+  );
+
+  it("refuses --port without a value or with another flag as its value", () => {
+    expect(() => parseArgs(["ui", "--port"])).toThrow(/--port needs an integer/);
+    expect(() => parseArgs(["ui", "--port", "--help"])).toThrow(
+      /--port needs an integer/,
+    );
   });
 
   it("refuses gate-only flags", () => {
     expect(() => parseArgs(["ui", "--keep"])).toThrow(/sandbar gate/);
+  });
+
+  it("names the subcommand when --port arrives without it", () => {
+    expect(() => parseArgs(["--port", "7332"])).toThrow(/sandbar ui --port/);
+    expect(() => parseArgs(["gate", "--port=7332"])).toThrow(/sandbar ui --port/);
   });
 });
 
