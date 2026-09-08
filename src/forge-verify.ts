@@ -1098,6 +1098,7 @@ export type RealVerifyAdapterDeps = {
   readonly sourceBranch: string;
   readonly repo: RepoRef;
   readonly exec?: ExecFn;
+  readonly onNotice?: (message: string) => void | Promise<void>;
 };
 
 // Operator-facing reason out of a failed git invocation. BOTH streams matter:
@@ -1407,7 +1408,9 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
         try {
           await exec("git", ["merge", "--abort"], { cwd });
         } catch (abortErr) {
-          console.error("Failed to abort integration merge", { cause: abortErr });
+          await (deps.onNotice ?? ((message: string) => console.error(message)))(
+            `Failed to abort integration merge: ${String(abortErr)}`,
+          );
         }
         return { ok: false, reason: pushErrorReason(err) };
       }

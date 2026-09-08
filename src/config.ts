@@ -537,6 +537,11 @@ export type RunConfig = {
   readonly cwd?: string;
   readonly workDir?: string;
 
+  // Port for the file-fed pool UI hosted by run() and by `sandbar ui`.
+  // Fixed default: concurrent workdirs on one host choose distinct values and
+  // a bind collision refuses the run instead of silently hiding its UI (#132).
+  readonly uiPort?: number;
+
   // Branch issue worktrees seed from and merges land on. Default: "main".
   readonly sourceBranch?: string;
 
@@ -819,6 +824,7 @@ export const DEFAULT_MAX_QUALITY_ROUNDS = 4;
 export const DEFAULT_MAX_REVIEW_ROUNDS = 4;
 export const DEFAULT_MAX_TOTAL_ISSUES = 50;
 export const DEFAULT_MAX_PARALLEL_ISSUES = 3;
+export const DEFAULT_UI_PORT = 7331;
 export const DEFAULT_INTEGRATION_BRANCH = "sandbar/integration";
 // 20 minutes. Covers a queued runner plus a browser suite; a repo whose CI is
 // genuinely slower should raise it rather than have sandbar park good cycles.
@@ -1710,6 +1716,16 @@ function requirePositiveInteger(field: string, value: unknown): number {
   return value as number;
 }
 
+function requirePort(value: unknown): number {
+  const port = requirePositiveInteger("uiPort", value);
+  if (port > 65_535) {
+    throw new SandbarError(
+      `config.uiPort must be an integer from 1 through 65535 (got ${String(value)}).`,
+    );
+  }
+  return port;
+}
+
 // #121 renamed the second reviewer pass, and a renamed field is exactly #66's
 // silent failure: the config is IMPORTED, so a host still saying
 // `reviewerFollowupModelId` would have it spread through `...config` and never
@@ -1881,6 +1897,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     ghRepo,
     cwd,
     workDir: config.workDir ?? DEFAULT_WORK_DIR,
+    uiPort: requirePort(config.uiPort ?? DEFAULT_UI_PORT),
     sourceBranch,
     images,
     implementerModelId: config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,

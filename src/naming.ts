@@ -268,6 +268,12 @@ export const SANDBAR_BRANCH_REFGLOBS: readonly string[] =
     LOCAL_BRANCH_INFIXES.map((infix) => `refs/heads/${prefix}${infix}*`),
   );
 
+// The issue-branch subset, for readers that join branches to issues (#132's
+// recompute ref scan). Every prefix preflight cleanup enumerates, so a legacy
+// branch it would sync is also one the parked join can see.
+export const LOCAL_ISSUE_BRANCH_REFGLOBS: readonly string[] =
+  ALL_BRANCH_PREFIXES.map((prefix) => `refs/heads/${prefix}${ISSUE_BRANCH_INFIX}*`);
+
 export const STRANDED_HEAD_REFGLOB = "refs/sandbar/stranded/*";
 
 export function strandedHeadRef(sha: string): string {

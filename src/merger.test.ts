@@ -15,11 +15,29 @@ import {
   groupByChunk,
   type IssueRef,
   type MergerAdapter,
+  type RunMergerOptions,
   type PushResult,
+  DISCARD_MERGER_OBSERVATIONS,
   issueNumberOf,
-  runMergerWithAdapter,
+  runMergerWithAdapter as runMergerCore,
   sortIssuesAsc,
 } from "./merger.js";
+
+// Most merger tests exercise the standalone procedural layer and deliberately
+// discard structured observations. Production cannot: RunMergerOptions makes
+// the adapter required. Keep that distinction explicit in one test helper.
+const runMergerWithAdapter = (
+  issues: readonly IssueRef[],
+  adapter: MergerAdapter,
+  log?: Parameters<typeof runMergerCore>[2],
+  onGateRed?: Parameters<typeof runMergerCore>[3],
+  options: Omit<RunMergerOptions, "observations"> & {
+    readonly observations?: RunMergerOptions["observations"];
+  } = {},
+) => runMergerCore(issues, adapter, log, onGateRed, {
+  ...options,
+  observations: options.observations ?? DISCARD_MERGER_OBSERVATIONS,
+});
 
 function issue(n: number, title = `t-${n}`): IssueRef {
   return {
@@ -424,7 +442,17 @@ describe("runMergerWithAdapter — clean-merge happy paths", () => {
       merges: ["ok"],
       gates: [{ ok: true }],
     });
-    const summary = await runMergerWithAdapter([issue(42)], adapter);
+    const outcomes: unknown[] = [];
+    const summary = await runMergerWithAdapter(
+      [issue(42)],
+      adapter,
+      undefined,
+      undefined,
+      { observations: {
+        onGate: () => undefined,
+        onOutcome: (outcome) => { outcomes.push(outcome); },
+      } },
+    );
 
     expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
     expect(summary.skipped).toEqual([]);
@@ -435,6 +463,35 @@ describe("runMergerWithAdapter — clean-merge happy paths", () => {
     expect(calls.closes).toEqual([
       { n: 42, comment: "Completed by Sandbar" },
     ]);
+    expect(outcomes).toEqual([{ kind: "merged", issue: issue(42), durationMs: 0 }]);
+  });
+
+  it("reports each source landing's merge-unit duration rather than cumulative batch time", async () => {
+    const { adapter } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+    });
+    const durations: number[] = [];
+    let now = 0;
+    await runMergerWithAdapter(
+      [issue(41), issue(42)],
+      adapter,
+      undefined,
+      undefined,
+      {
+        clock: () => {
+          now += 10;
+          return now;
+        },
+        observations: {
+          onGate: () => undefined,
+          onOutcome: (outcome) => {
+            if (outcome.kind === "merged") durations.push(outcome.durationMs);
+          },
+        },
+      },
+    );
+    expect(durations).toEqual([30, 30]);
   });
 
   it("clean merge + npm install fails: resets to preMergeSha, comments install-failed, skips, no gate", async () => {
@@ -2286,6 +2343,66 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
         } as const,
       ]),
     );
+
+  it("emits every durable outcome shape and both initial and resolve gate observations", async () => {
+    const outcomes: unknown[] = [];
+    const gates: Array<{ key: string; gate: unknown }> = [];
+    const observations = {
+      onOutcome: (outcome: unknown) => { outcomes.push(outcome); },
+      onGate: (key: string, gate: unknown) => { gates.push({ key, gate }); },
+    };
+
+    await runMergerWithAdapter([issue(10)], makeAdapter({
+      merges: ["ok"], gates: [{ ok: false }, { ok: true }],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+    }).adapter, undefined, undefined, { observations });
+    await runMergerWithAdapter([issue(11)], makeAdapter({
+      merges: ["ok"], installs: [false], heads: ["pre"],
+    }).adapter, undefined, undefined, { observations });
+    await runMergerWithAdapter([{
+      ...issue(12), chunk: { root: 12, branch: "sandbar/chunk-12-c" },
+    }], makeAdapter({ merges: ["ok"], gates: [{ ok: true }] }).adapter,
+    undefined, undefined, { observations });
+    await runMergerWithAdapter([], makeAdapter({
+      chunkRefs: originHas(42),
+    }).adapter, undefined, undefined, {
+      ...landing(request(42)),
+      ongoingIssues: [{ ...issue(42), chunk: { root: 42, branch: "sandbar/chunk-42-c" } }],
+      observations,
+    });
+    await runMergerWithAdapter([], makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>ABANDON</promise><reason>irreconcilable</reason>" }],
+      chunkRefs: originHas(43),
+    }).adapter, undefined, undefined, { ...landing(request(43)), observations });
+    await runMergerWithAdapter([], makeAdapter({
+      merges: ["ok"], gates: [{ ok: true }], chunkRefs: originHas(44),
+    }).adapter, undefined, undefined, { ...landing(request(44)), observations });
+
+    expect(gates).toEqual([
+      { key: "10", gate: expect.objectContaining({ ok: false }) },
+      { key: "10", gate: expect.objectContaining({ ok: true }) },
+      { key: "12", gate: expect.objectContaining({ ok: true }) },
+      { key: "chunk-44", gate: expect.objectContaining({ ok: true }) },
+    ]);
+    expect(outcomes).toEqual([
+      { kind: "merged", issue: expect.objectContaining({ id: "10" }), durationMs: expect.any(Number) },
+      { kind: "skipped", issue: expect.objectContaining({ id: "11" }), reason: "install-failed", durationMs: expect.any(Number) },
+      { kind: "chunk-landed", landing: expect.objectContaining({
+        issue: expect.objectContaining({ id: "12" }), chunkBranch: "sandbar/chunk-12-c",
+      }), durationMs: expect.any(Number) },
+      { kind: "chunk-deferred", deferred: expect.objectContaining({
+        target: expect.objectContaining({ branch: "sandbar/chunk-42-c" }),
+      }), durationMs: expect.any(Number) },
+      { kind: "chunk-parked", skipped: expect.objectContaining({
+        target: expect.objectContaining({ branch: "sandbar/chunk-43-c" }),
+        reason: "conflict",
+      }), durationMs: expect.any(Number) },
+      { kind: "chunk-on-source", target: expect.objectContaining({
+        branch: "sandbar/chunk-44-c",
+      }), durationMs: expect.any(Number) },
+    ]);
+  });
 
   it("defers a request for a chunk this cycle grew, keeping `land` on", async () => {
     // #61 plans a layer of a chunk per cycle, so Phase A can put a member on

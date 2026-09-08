@@ -31,7 +31,6 @@ import { withPartialOutput, type Sandbox } from "./agent-sandbox.js";
 import {
   enforceReviewerSnapshot,
   priorReviewRound,
-  reviewRoundLine,
   reviewerPassRouting,
   readOnlyAgentSnapshotChanged,
   runGateAndReviewer,
@@ -45,6 +44,8 @@ import {
 import { qualityReviewContext } from "./prompt.js";
 import type { ReviewerOutcome } from "./reviewer-run.js";
 import type { HeadMismatch } from "./git-ops.js";
+import type { EventInput } from "./events.js";
+import { initialState } from "./inner-loop-machine.js";
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -55,7 +56,7 @@ const deferred = <T,>() => {
 };
 
 describe("runUiCheck (#126)", () => {
-  const context = (runs: readonly string[], lines: string[] = []) => {
+  const context = (runs: readonly string[], events: EventInput[] = []) => {
     innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
     innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
     innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
@@ -84,7 +85,7 @@ describe("runUiCheck (#126)", () => {
       ctx: {
         issue: { id: "126", title: "ui check", branch: "sandbar/issue-126" },
         sandbox,
-        opts: { onOrchestratorLog: (line: string) => lines.push(line) },
+        opts: { onEvent: (event: EventInput) => events.push(event) },
         config: {
           repo: { owner: "owner", name: "repo" },
           uiCheckAgent: "codex",
@@ -96,8 +97,8 @@ describe("runUiCheck (#126)", () => {
   };
 
   it("returns a classification from a cold call with no completion signal", async () => {
-    const lines: string[] = [];
-    const { sandbox, ctx } = context(["<ui-check>CLEAR</ui-check>"], lines);
+    const events: EventInput[] = [];
+    const { sandbox, ctx } = context(["<ui-check>CLEAR</ui-check>"], events);
     await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).resolves.toEqual({
       kind: "ui-check-result",
       result: { kind: "CLEAR" },
@@ -113,14 +114,17 @@ describe("runUiCheck (#126)", () => {
     const command = invocation.agent.buildPrintCommand({ prompt: "p" }).command;
     expect(command).toContain("--model 'gpt-5.6-sol'");
     expect(command).toContain("-c 'model_reasoning_effort=low'");
-    expect(lines[0]).toMatch(
-      /^issue=126 ui-check provider=codex model=gpt-5\.6-sol effort=low durationMs=\d+ toolCalls=1 invocation=1 maxGapMs=3$/,
-    );
+    expect(events).toEqual([{
+      kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
+      provider: "codex", model: "gpt-5.6-sol", effort: "low",
+      durationMs: expect.any(Number), maxGapMs: 3, result: "CLEAR",
+      usage: { toolCalls: 1 },
+    }]);
   });
 
   it("logs complete success and failed-invocation telemetry", async () => {
-    const successLines: string[] = [];
-    const success = context(["<ui-check>CLEAR</ui-check>"], successLines);
+    const successEvents: EventInput[] = [];
+    const success = context(["<ui-check>CLEAR</ui-check>"], successEvents);
     vi.mocked(success.sandbox.run).mockReset().mockResolvedValueOnce({
       stdout: "<ui-check>CLEAR</ui-check>",
       commits: [],
@@ -147,12 +151,19 @@ describe("runUiCheck (#126)", () => {
       },
     });
     await runUiCheck({ kind: "run-ui-check" }, success.ctx);
-    expect(successLines[0]).toMatch(
-      /^issue=126 ui-check provider=codex model=gpt-5\.6-sol effort=low durationMs=\d+ tokens=in:1,cached:2,write:3,out:4,reasoning:5 toolCalls=7 peakContext=8 apiMs=6 resolvedModel=resolved models=2 terminalReason=end_turn quotaStatus=allowed_warning quotaWindow=five_hour quotaUtilization=0\.9 quotaResetsAt=42 invocation=1 maxGapMs=9$/,
-    );
+    expect(successEvents).toEqual([{
+      kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
+      provider: "codex", model: "gpt-5.6-sol", effort: "low",
+      durationMs: expect.any(Number), maxGapMs: 9, result: "CLEAR",
+      usage: { inputTokens: 1, cachedInputTokens: 2, cacheWriteInputTokens: 3,
+        outputTokens: 4, reasoningTokens: 5, apiMs: 6, resolvedModel: "resolved",
+        models: 2, terminalReason: "end_turn", toolCalls: 7, peakContext: 8,
+        quota: { status: "allowed_warning", window: "five_hour", utilization: 0.9,
+          resetsAt: 42 } },
+    }]);
 
-    const failureLines: string[] = [];
-    const failure = context([], failureLines);
+    const failureEvents: EventInput[] = [];
+    const failure = context([], failureEvents);
     const err = withPartialOutput(
       new Error("disconnected"),
       "partial",
@@ -163,16 +174,21 @@ describe("runUiCheck (#126)", () => {
     );
     vi.mocked(failure.sandbox.run).mockReset().mockRejectedValueOnce(err);
     await expect(runUiCheck({ kind: "run-ui-check" }, failure.ctx)).rejects.toBe(err);
-    expect(failureLines[0]).toMatch(
-      /^issue=126 ui-check provider=codex model=gpt-5\.6-sol effort=low durationMs=\d+ tokens=in:11,out:12 toolCalls=13 peakContext=14 quotaStatus=rejected quotaWindow=weekly quotaUtilization=1 invocation=1$/,
-    );
+    expect(failureEvents).toEqual([{
+      kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
+      provider: "codex", model: "gpt-5.6-sol", effort: "low",
+      durationMs: expect.any(Number), result: "failed",
+      usage: { inputTokens: 11, outputTokens: 12, toolCalls: 13, peakContext: 14,
+        quota: { status: "rejected", window: "weekly", utilization: 1 } },
+    }]);
   });
 
   it("offers one cold correction for a malformed answer", async () => {
+    const events: EventInput[] = [];
     const { sandbox, ctx } = context([
       "<ui-check>PROTOTYPE-NEEDED</ui-check>",
       "<ui-check>CLEAR</ui-check>",
-    ]);
+    ], events);
     await expect(runUiCheck({ kind: "run-ui-check" }, ctx)).resolves.toMatchObject({
       result: { kind: "CLEAR" },
     });
@@ -182,6 +198,12 @@ describe("runUiCheck (#126)", () => {
       prompt: expect.stringContaining("provided no `<ui-impact>` block"),
       completionSignal: [],
     }));
+    expect(events).toEqual([
+      expect.objectContaining({ kind: "ui-check", invocation: 1,
+        result: "NO-SIGNAL", maxGapMs: 3 }),
+      expect.objectContaining({ kind: "ui-check", invocation: 2,
+        result: "CLEAR", maxGapMs: 4 }),
+    ]);
   });
 
   it("treats a second malformed answer as a harness failure", async () => {
@@ -263,7 +285,7 @@ describe("silent implementer attempt policy (#116)", () => {
       }),
     );
     const writes: string[] = [];
-    const lines: string[] = [];
+    const lines: EventInput[] = [];
     const sandbox = {
       worktreePath: "/unused",
       run: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(nudge),
@@ -276,7 +298,7 @@ describe("silent implementer attempt policy (#116)", () => {
         attemptLogger: {
           writeAttempt: vi.fn(async (_id, _attempt, text) => writes.push(text)),
         },
-        onOrchestratorLog: (line: string) => lines.push(line),
+        onEvent: (event: EventInput) => lines.push(event),
       },
       config: {
         implementerAgent: "codex",
@@ -323,7 +345,7 @@ describe("silent implementer attempt policy (#116)", () => {
 
     await expect(pending).resolves.toMatchObject({ kind: "implementer-result" });
     expect(writes).toEqual(["", "\n"]);
-    expect(lines.at(-1)).toContain("commits=2");
+    expect(lines.at(-1)).toMatchObject({ kind: "implementer", commits: 2 });
   });
 
   it("keeps a blip that speaks on the nudge and records exactly what was parsed", async () => {
@@ -338,7 +360,7 @@ describe("silent implementer attempt policy (#116)", () => {
       signal: { kind: "NEEDS-INFO" },
     });
     expect(writes).toEqual(["", `\n${spoken}`]);
-    expect(lines.at(-1)).toContain("commits=0");
+    expect(lines.at(-1)).toMatchObject({ kind: "implementer", commits: 0 });
   });
 
   it("hands only the implementer extension to the implementer prompt", async () => {
@@ -392,10 +414,10 @@ describe("silent implementer attempt policy (#116)", () => {
     expect(innerLoopMocks.fastForwardOffBranchHead.mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(sandbox.syncBranchToCache).mock.invocationCallOrder[1]!,
     );
-    expect(lines).toContain(
-      "issue=116 attempt=1 off-branch-fast-forward from=base456 to=head123",
-    );
-    expect(lines.at(-1)).toContain("commits=1");
+    expect(lines).toContainEqual(expect.objectContaining({
+      kind: "repair", action: "fast-forward", detail: "from=base456 to=head123",
+    }));
+    expect(lines.at(-1)).toMatchObject({ kind: "implementer", commits: 1 });
   });
 
   it("fails the attempt when publishing the repaired tip fails", async () => {
@@ -535,13 +557,31 @@ describe("runGateAndReviewer (#123)", () => {
     },
     historyEntry,
     specGap: null,
+    round: {
+      head: "head123",
+      qualityMode: "list" as const,
+      quality: "APPROVED" as const,
+      correctness: "APPROVED" as const,
+      rejectingPass: null,
+      durationMs: 10,
+    },
   };
-  const context = (lines: string[] = []) =>
+  const context = (events: EventInput[] = []) =>
     ({
       issue: { id: "123" },
-      opts: { onOrchestratorLog: (line: string) => lines.push(line) },
+      opts: { onEvent: (event: EventInput) => events.push(event) },
       priorReviewRounds: [],
       specGaps: [],
+      state: {
+        ...initialState({
+          issueBranch: "sandbar/issue-123",
+          maxQualityRounds: 4,
+          maxReviewRounds: 4,
+          uiPrototypeCheck: false,
+        }),
+        attempt: 2,
+        phase: "needs-gate-and-reviewer",
+      },
     }) as unknown as Parameters<typeof runGateAndReviewer>[1];
 
   it("starts both jobs immediately, awaits both, and records green-gate history", async () => {
@@ -574,6 +614,7 @@ describe("runGateAndReviewer (#123)", () => {
       kind: "gate-and-reviewer-result",
       gate: { ok: true, failureTrace: "" },
       reviewer: approved.event,
+      reviewRound: approved.round,
     });
     expect(ctx.priorReviewRounds).toEqual([historyEntry]);
     expect(ctx.specGaps).toEqual([]);
@@ -621,8 +662,8 @@ describe("runGateAndReviewer (#123)", () => {
 
   it("awaits a reviewer beside a red gate, discards its history, and logs the discard", async () => {
     const reviewer = deferred<typeof approved>();
-    const lines: string[] = [];
-    const ctx = context(lines);
+    const events: EventInput[] = [];
+    const ctx = context(events);
     const result = runGateAndReviewer(action, ctx, {
       gate: vi.fn(async () => ({ ok: false, failureTrace: "tests failed" })),
       reviewer: vi.fn(() => reviewer.promise),
@@ -639,11 +680,13 @@ describe("runGateAndReviewer (#123)", () => {
       kind: "gate-and-reviewer-result",
       gate: { ok: false, failureTrace: "tests failed" },
       reviewer: approved.event,
+      reviewRound: approved.round,
     });
     expect(ctx.priorReviewRounds).toEqual([]);
-    expect(lines).toEqual([
-      "issue=123 attempt=2 gate-1 red — discarded concurrent reviewer result",
-    ]);
+    expect(events).toEqual([expect.objectContaining({
+      kind: "complaint", severity: "warning",
+      message: "issue=123 attempt=2 gate-1 red — discarded concurrent reviewer result",
+    })]);
   });
 });
 
@@ -684,27 +727,21 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
       },
     ];
     const runCycle = vi.fn(async () => outcomes.shift()!);
-    const orchestratorLines: string[] = [];
-    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const events: EventInput[] = [];
 
-    try {
-      await expect(
+    await expect(
         runInnerLoop(
           { id: "115", title: "logging", branch: "sandbar/issue-115-logging" },
           {
-            onOrchestratorLog: (line) => orchestratorLines.push(line),
+            onEvent: (event) => events.push(event),
           } as unknown as Parameters<typeof runInnerLoop>[1],
           runCycle,
         ),
       ).resolves.toEqual({ type: "DONE", commits: [], specGaps: [] });
-      expect(orchestratorLines).toEqual([
-        "  115: HARD-ERROR (bringup failed) — retry 1/2 with a fresh sandbox.",
-        "  115: HARD-ERROR (socket refused) — retry 2/2 with a fresh sandbox.",
+      expect(events).toEqual([
+        expect.objectContaining({ kind: "hard-error", issue: 115, retry: 1, reason: "bringup failed\nstack" }),
+        expect.objectContaining({ kind: "hard-error", issue: 115, retry: 2, reason: "socket refused" }),
       ]);
-      expect(stderr.mock.calls.map(([line]) => line)).toEqual(orchestratorLines);
-    } finally {
-      stderr.mockRestore();
-    }
   });
 
   it("surfaces the full reason after the retries are exhausted", async () => {
@@ -720,7 +757,7 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
     await expect(
       runInnerLoop(
         { id: "115", title: "logging", branch: "sandbar/issue-115-logging" },
-        {} as Parameters<typeof runInnerLoop>[1],
+        { onEvent: () => undefined } as Parameters<typeof runInnerLoop>[1],
         runCycle,
       ),
     ).resolves.toEqual({
@@ -857,79 +894,6 @@ describe("reviewerPassRouting (#121)", () => {
   });
 });
 
-describe("reviewRoundLine (#88, #121)", () => {
-  it.each([
-    {
-      name: "quality-only round",
-      failed: null,
-      quality: "CHANGES-REQUESTED" as const,
-      correctness: "SKIPPED" as const,
-      qualityMode: "list" as const,
-      expected:
-        "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
-        "quality=CHANGES-REQUESTED correctness=SKIPPED mode=list durationMs=123",
-    },
-    {
-      name: "first quality listing carried to correctness",
-      failed: null,
-      quality: "APPROVED" as const,
-      correctness: "APPROVED" as const,
-      qualityMode: "list" as const,
-      expected:
-        "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
-        "quality=APPROVED correctness=APPROVED mode=list durationMs=123",
-    },
-    {
-      name: "completed round",
-      failed: null,
-      quality: "APPROVED" as const,
-      correctness: "CHANGES-REQUESTED" as const,
-      qualityMode: "verify" as const,
-      expected:
-        "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
-        "quality=APPROVED correctness=CHANGES-REQUESTED mode=verify durationMs=123",
-    },
-    {
-      name: "round whose gating pass harness-failed",
-      failed: { pass: "quality" as const, invocations: 2 },
-      quality: "HARNESS-FAILED" as const,
-      correctness: "SKIPPED" as const,
-      qualityMode: "list" as const,
-      expected:
-        "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
-        "pass=quality harness-failed invocations=2 " +
-        "quality=HARNESS-FAILED correctness=SKIPPED mode=list durationMs=123 " +
-        "(budgets not consumed)",
-    },
-    {
-      name: "harness-failed round",
-      failed: { pass: "correctness" as const, invocations: 2 },
-      quality: "APPROVED" as const,
-      correctness: "HARNESS-FAILED" as const,
-      qualityMode: "verify" as const,
-      expected:
-        "issue=88 attempt=5 reviewer round=4 head=abc1234 " +
-        "pass=correctness harness-failed invocations=2 " +
-        "quality=APPROVED correctness=HARNESS-FAILED mode=verify durationMs=123 " +
-        "(budgets not consumed)",
-    },
-  ])("formats a $name with its reviewed HEAD", ({ failed, quality, correctness, qualityMode, expected }) => {
-    expect(
-      reviewRoundLine({
-        issueId: "88",
-        attempt: 5,
-        reviewRound: 4,
-        head: "abc1234",
-        failed,
-        quality,
-        correctness,
-        qualityMode,
-        durationField: "durationMs=123",
-      }),
-    ).toBe(expected);
-  });
-});
-
 const snapshot = (
   over: Partial<ReadOnlyAgentSnapshot> = {},
 ): ReadOnlyAgentSnapshot => ({
@@ -980,20 +944,17 @@ describe("runSandboxAndPublish", () => {
       run: vi.fn().mockRejectedValue(agentError),
       syncBranchToCache: vi.fn().mockRejectedValue(new Error("packed-refs.lock")),
     } as unknown as Sandbox;
-    const reported = vi.spyOn(console, "error").mockImplementation(() => {});
+    const events: EventInput[] = [];
 
     try {
       await expect(
-        runSandboxAndPublish(sandbox, {} as Parameters<Sandbox["run"]>[0], "98"),
+        runSandboxAndPublish(sandbox, {} as Parameters<Sandbox["run"]>[0], "98", (event) => events.push(event)),
       ).rejects.toBe(agentError);
       expect(sandbox.syncBranchToCache).toHaveBeenCalledOnce();
-      expect(reported).toHaveBeenCalledWith(
-        expect.stringContaining("continuing with original error"),
-        expect.any(Error),
-      );
-    } finally {
-      reported.mockRestore();
-    }
+      expect(events).toEqual([expect.objectContaining({
+        kind: "complaint", message: expect.stringContaining("continuing with original error"),
+      })]);
+    } finally {}
   });
 
   // The publish failure is the error, not the agent's success: the merge phase

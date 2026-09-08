@@ -87,7 +87,7 @@ import { existsSync } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { onCleanup } from "./cleanup.js";
+import { onCleanup, reportCleanupNotice } from "./cleanup.js";
 import { resolveSandboxEnv } from "./env.js";
 import { isErrno } from "./errors.js";
 import { RESOURCE_PREFIX, strandedHeadRef } from "./naming.js";
@@ -454,6 +454,12 @@ export type CreateSandboxOptions = {
   // formed in, and a writable log mount is a channel out of the sandbox into
   // the host's run-log tree.
   extraMounts?: readonly Mount[];
+  // Run-owned callers route recoverable cleanup/preservation notices into the
+  // event record. Standalone callers retain the terminal renderer.
+  onNotice?: (
+    severity: "warning" | "error",
+    message: string,
+  ) => void | Promise<void>;
 };
 
 export type PrepareWorktreeOptions = {
@@ -463,6 +469,10 @@ export type PrepareWorktreeOptions = {
   // Only host.onWorktreeReady runs here; sandbox-side hooks need the
   // container and stay in createSandbox.
   hooks?: SandboxHooks;
+  onNotice?: (
+    severity: "warning" | "error",
+    message: string,
+  ) => void | Promise<void>;
 };
 
 // ---------------------------------------------------------------------------
@@ -1061,33 +1071,64 @@ export const codex = (model: string, options?: CodexOptions): AgentProvider => (
 //
 // `process.on("exit")` stays. It is synchronous and last-resort by nature, and
 // it is what covers a bare `process.exit` from elsewhere in the run, which
-// runs no cleanup action at all. Teardowns are therefore DRAINED rather than
-// iterated: a signal now reaches them twice — once through `runCleanup`, then
-// again through the `exit` event that `runCleanup`'s own `process.exit` fires
-// — and running them twice would `podman rm -f` a container that is already
-// gone and print the worktree-preserved notice to the operator twice.
+// runs no cleanup action at all. Each entry therefore has an ordinary cleanup
+// callback, which may await the run's event writer, and a synchronous exit
+// fallback. Entries are DRAINED rather than iterated: a signal reaches the
+// registry first and the exit hook second, and running either callback twice
+// would remove an already-gone container or duplicate a preservation notice.
 //
 // The dependency this creates is on `installCleanupTraps()` having run, which
 // `run()` does before the first sandbox. Deliberately NOT called from here:
 // those traps also catch uncaughtException/unhandledRejection and exit the
 // process, which is entry-point policy, and this module is imported by tests.
 
-const teardownCallbacks = new Set<() => void>();
+type ShutdownTeardown = {
+  readonly cleanup: () => Promise<void> | void;
+  readonly exitFallback: () => void;
+};
+
+const teardownCallbacks = new Set<ShutdownTeardown>();
 let exitHookInstalled = false;
 let cleanupRegistered = false;
 
-const runTeardowns = (): void => {
+const takeTeardowns = (): ShutdownTeardown[] => {
+  const pending = [...teardownCallbacks];
   // Drained, not iterated — see the note above on arriving twice.
-  for (const teardown of [...teardownCallbacks]) {
+  for (const teardown of pending) {
     teardownCallbacks.delete(teardown);
+  }
+  return pending;
+};
+const drainTeardowns = async (mode: "cleanup" | "exit"): Promise<void> => {
+  for (const teardown of takeTeardowns()) {
     try {
-      teardown();
+      if (mode === "cleanup") await teardown.cleanup();
+      else teardown.exitFallback();
     } catch (err) {
-      console.error("Sandbox shutdown cleanup failed:", err);
+      if (mode === "cleanup") {
+        await reportCleanupNotice(
+          "cleanup-failure",
+          "Sandbox shutdown cleanup failed",
+          err,
+        );
+      } else {
+        // There is no writable event loop here. The ordinary cleanup mode is
+        // the event-reporting path; this mode can only leave a synchronous
+        // diagnostic while continuing the remaining last-chance removals.
+        console.error("Sandbox shutdown fallback failed:", err);
+      }
     }
   }
 };
-const handleExit = (): void => runTeardowns();
+const runTeardowns = (): Promise<void> => drainTeardowns("cleanup");
+// Node's `exit` hook cannot await. Ordinary and signal exits drain through the
+// cleanup registry first; this last-resort hook can only make the synchronous
+// removal attempt, and any failure is already beyond a writable event loop.
+const handleExit = (): void => {
+  // The exit-mode branch contains no await, so the async function runs through
+  // the full drained snapshot before returning its already-settled promise.
+  void drainTeardowns("exit");
+};
 const installHooks = (): void => {
   if (!cleanupRegistered) {
     cleanupRegistered = true;
@@ -1102,19 +1143,27 @@ function removeExitHook(): void {
   exitHookInstalled = false;
   process.removeListener("exit", handleExit);
 }
-export const registerShutdown = (teardown: () => void): (() => void) => {
-  teardownCallbacks.add(teardown);
+const registerShutdownEntry = (entry: ShutdownTeardown): (() => void) => {
+  teardownCallbacks.add(entry);
   installHooks();
   let active = true;
   return () => {
     if (!active) return;
     active = false;
-    teardownCallbacks.delete(teardown);
+    teardownCallbacks.delete(entry);
     // The `onCleanup` entry cannot be withdrawn and is not withdrawn: it fans
     // out over a set that is empty by then, which costs nothing.
     if (teardownCallbacks.size === 0) removeExitHook();
   };
 };
+
+export const registerShutdown = (teardown: () => void): (() => void) =>
+  registerShutdownEntry({ cleanup: teardown, exitFallback: teardown });
+
+const registerAsyncShutdown = (
+  cleanup: () => Promise<void>,
+  exitFallback: () => void,
+): (() => void) => registerShutdownEntry({ cleanup, exitFallback });
 
 // ---------------------------------------------------------------------------
 // Mount formatting / image naming — verbatim from mountUtils.ts
@@ -1274,9 +1323,10 @@ const restoreIssueBranch = async (
 const fastForwardFromOrigin = async (
   worktreePath: string,
   branch: string,
+  notice: (severity: "warning" | "error", message: string) => void | Promise<void>,
 ): Promise<void> => {
   if (!(await isOnIssueBranch(worktreePath, branch))) {
-    console.log(
+    await notice("warning",
       `Reusing worktree at ${worktreePath} (branch '${branch}') — HEAD is not on '${branch}', skipping origin refresh`,
     );
     return;
@@ -1308,7 +1358,7 @@ const fastForwardFromOrigin = async (
   }
   const after = (await execGit(["rev-parse", "HEAD"], worktreePath)).trim();
   if (before && after && before !== after) {
-    console.log(
+    await notice("warning",
       `Fast-forwarded worktree at ${worktreePath} (branch '${branch}') to origin/${branch}`,
     );
   }
@@ -1453,6 +1503,7 @@ const worktreeCreate = (
   repoDir: string,
   branch: string,
   worktreesDir: string,
+  notice: (severity: "warning" | "error", message: string) => void | Promise<void>,
 ): Promise<{ path: string; branch: string }> =>
   withTimeout(
     (async () => {
@@ -1475,14 +1526,14 @@ const worktreeCreate = (
           await refreshIssueClone(repoDir, worktreePath);
           const dirty = await hasUncommittedChanges(worktreePath);
           if (dirty) {
-            console.warn(
+            await notice("warning",
               `Reusing worktree at ${worktreePath} (branch '${branch}') — worktree has uncommitted changes`,
             );
           } else {
             if (!(await isOnIssueBranch(worktreePath, branch))) {
               await restoreIssueBranch(repoDir, worktreePath, branch);
             }
-            await fastForwardFromOrigin(worktreePath, branch);
+            await fastForwardFromOrigin(worktreePath, branch, notice);
           }
           return { path: worktreePath, branch };
         }
@@ -1818,14 +1869,10 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
 
       const removeArgs = sandboxRemoveArgs(containerName);
       const removeContainerSync = (): void => {
-        try {
-          execFileSync("podman", removeArgs, {
-            stdio: "ignore",
-            timeout: 5000,
-          });
-        } catch (err) {
-          console.error(`Failed to remove sandbox container ${containerName}:`, err);
-        }
+        execFileSync("podman", removeArgs, {
+          stdio: "ignore",
+          timeout: 5000,
+        });
       };
       const unregisterShutdown = registerShutdown(removeContainerSync);
 
@@ -2296,15 +2343,20 @@ export const prepareWorktree = async (
   options: PrepareWorktreeOptions,
 ): Promise<string> => {
   const { repoDir, worktreesDir, hostCwd } = options.layout;
+  const notice = options.onNotice ?? ((severity: "warning" | "error", message: string) => {
+    if (severity === "warning") console.warn(message);
+    else console.error(message);
+  });
 
   const { path: worktreePath } = await withIssueCloneSetupLock(async () => {
-    await pruneStaleIssueClones(repoDir, worktreesDir).catch((err) => {
-      console.error("Stale issue-clone sweep failed (continuing):", err);
+    await pruneStaleIssueClones(repoDir, worktreesDir).catch(async (err) => {
+      await notice("error", `Stale issue-clone sweep failed (continuing): ${String(err)}`);
     });
     return worktreeCreate(
       repoDir,
       options.branch,
       worktreesDir,
+      notice,
     );
   });
 
@@ -2324,7 +2376,7 @@ export const prepareWorktree = async (
     try {
       await rm(worktreePath, { recursive: true, force: true });
     } catch (cleanupError) {
-      console.error("Failed to remove worktree after setup failure:", cleanupError);
+      await notice("error", `Failed to remove worktree after setup failure: ${String(cleanupError)}`);
     }
     throw e;
   }
@@ -2336,6 +2388,10 @@ export const createSandbox = async (
 ): Promise<Sandbox> => {
   const { branch } = options;
   const { repoDir, hostCwd } = options.layout;
+  const notice = options.onNotice ?? ((severity: "warning" | "error", message: string) => {
+    if (severity === "warning") console.warn(message);
+    else console.error(message);
+  });
 
   const prepared = options.preparedWorktreePath !== undefined;
   if (prepared && options.copyToWorktree && options.copyToWorktree.length > 0) {
@@ -2413,7 +2469,7 @@ export const createSandbox = async (
       try {
         await providerHandle.close();
       } catch (cleanupError) {
-        console.error("Failed to close provider after sandbox setup failure:", cleanupError);
+        await notice("error", `Failed to close provider after sandbox setup failure: ${String(cleanupError)}`);
       }
       throw e;
     }
@@ -2427,18 +2483,20 @@ export const createSandbox = async (
       try {
         await rm(worktreePath, { recursive: true, force: true });
       } catch (cleanupError) {
-        console.error("Failed to remove worktree after sandbox failure:", cleanupError);
+        await notice("error", `Failed to remove worktree after sandbox failure: ${String(cleanupError)}`);
       }
     }
     throw e;
   }
 
-  const forceCleanup = (): void => {
-    console.error(`\nWorktree preserved at ${worktreePath}`);
-    console.error(`  To review: cd ${worktreePath}`);
-    console.error(`  To clean up: remove ${worktreePath}`);
-  };
-  const unregisterShutdown = registerShutdown(forceCleanup);
+  const preservedNotice =
+    `Worktree preserved at ${worktreePath}\n` +
+    `  To review: cd ${worktreePath}\n` +
+    `  To clean up: remove ${worktreePath}`;
+  const unregisterShutdown = registerAsyncShutdown(
+    () => Promise.resolve(notice("error", preservedNotice)),
+    () => console.error(`\n${preservedNotice}`),
+  );
 
   let closed = false;
   let keepReason: string | undefined;
@@ -2594,7 +2652,7 @@ export const createSandbox = async (
       await providerHandle.close();
       const reclaim = await reclaimIssueClone(repoDir, worktreePath, branch, keepReason);
       if (reclaim.kind !== "preserved") return { preservedWorktreePath: undefined };
-      console.error(`Issue clone preserved at ${worktreePath}: ${reclaim.reason}`);
+      await notice("error", `Issue clone preserved at ${worktreePath}: ${reclaim.reason}`);
       return { preservedWorktreePath: worktreePath };
     },
   };

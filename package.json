@@ -1,6 +1,6 @@
 {
   "name": "@offergeist/sandbar",
-  "version": "0.35.5",
+  "version": "0.36.14",
   "description": "Self-hosted issue-tracker-driven coding agent orchestrator.",
   "type": "module",
   "main": "dist/index.js",
@@ -17,6 +17,7 @@
   "files": [
     "dist/",
     "src/",
+    "ui/",
     "prompts/",
     "sandbar.config.example.mjs"
   ],

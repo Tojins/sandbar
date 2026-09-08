@@ -91,6 +91,91 @@ console.log("ready");
 setInterval(() => {}, 1000);
 `;
 
+const failingTeardownSource = (markerPath: string) => `
+import { appendFileSync } from "node:fs";
+import {
+  installCleanupTraps,
+  onCleanup,
+  setCleanupReporter,
+} from ${JSON.stringify(join(SRC_DIR, "cleanup.ts"))};
+import { registerShutdown } from ${JSON.stringify(join(SRC_DIR, "agent-sandbox.ts"))};
+
+const note = (line) => appendFileSync(${JSON.stringify(markerPath)}, line + "\\n");
+
+setCleanupReporter((kind, message, cause) => {
+  note(kind + ":" + message + ":" + (cause instanceof Error ? cause.message : String(cause)));
+});
+installCleanupTraps();
+onCleanup(() => note("remaining-cleanup-finished"));
+registerShutdown(() => { throw new Error("sandbox teardown exploded"); });
+
+console.log("ready");
+setInterval(() => {}, 1000);
+`;
+
+const rejectingReporterSource = (markerPath: string) => `
+import { appendFileSync } from "node:fs";
+import {
+  installCleanupTraps,
+  onCleanup,
+  setCleanupReporter,
+} from ${JSON.stringify(join(SRC_DIR, "cleanup.ts"))};
+import { registerShutdown } from ${JSON.stringify(join(SRC_DIR, "agent-sandbox.ts"))};
+
+const note = (line) => appendFileSync(${JSON.stringify(markerPath)}, line + "\\n");
+
+setCleanupReporter(async () => { throw new Error("event filesystem unavailable"); });
+installCleanupTraps();
+onCleanup(() => note("remaining-cleanup-finished"));
+registerShutdown(() => { throw new Error("first cleanup failed"); });
+registerShutdown(() => note("remaining-sandbox-cleanup-finished"));
+
+console.log("ready");
+setInterval(() => {}, 1000);
+`;
+
+const asyncPreservationSource = (markerPath: string) => `
+import { appendFileSync } from "node:fs";
+import {
+  installCleanupTraps,
+  onCleanup,
+} from ${JSON.stringify(join(SRC_DIR, "cleanup.ts"))};
+import { createSandbox } from ${JSON.stringify(join(SRC_DIR, "agent-sandbox.ts"))};
+
+const note = (line) => appendFileSync(${JSON.stringify(markerPath)}, line + "\\n");
+
+installCleanupTraps();
+onCleanup(() => note("later-cleanup-finished"));
+await createSandbox({
+  branch: "sandbar/issue-132-event-ui",
+  sandbox: {
+    env: {},
+    create: async () => ({
+      containerName: "fake-sandbox",
+      worktreePath: "/workspace",
+      close: async () => undefined,
+    }),
+  },
+  layout: {
+    hostCwd: "/unused/host",
+    stateDir: "/unused/state",
+    repoDir: "/unused/cache.git",
+    sourceWorktreeDir: "/unused/source",
+    worktreesDir: "/unused/worktrees",
+    logsDir: "/unused/logs",
+  },
+  env: {},
+  preparedWorktreePath: "/tmp/preserved-issue-132",
+  onNotice: async (severity, message) => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    note("preservation-event:" + severity + ":" + message.replaceAll("\\n", " | "));
+  },
+});
+
+console.log("ready");
+setInterval(() => {}, 1000);
+`;
+
 type ChildRun = { code: number | null; signal: string | null; lines: string[] };
 
 // `name` keeps each case's marker and script distinct — they share `dir`, and a
@@ -178,6 +263,38 @@ describe("SIGINT during a run", () => {
     // gets the worktree-preserved notice twice.
     expect(run.lines.filter((l) => l === "sandbox-teardown")).toHaveLength(1);
   });
+
+  it("reports a failed sandbox teardown and continues draining cleanup", async () => {
+    const failed = await sigintChild("failing-sandbox", failingTeardownSource);
+    expect(failed.lines).toContain(
+      "cleanup-failure:Sandbox shutdown cleanup failed:sandbox teardown exploded",
+    );
+    expect(failed.lines).toContain("remaining-cleanup-finished");
+    expect(failed.code).toBe(130);
+    expect(failed.signal).toBeNull();
+  }, 30_000);
+
+  it("drains after both the signal notice and a cleanup-failure notice reject", async () => {
+    const failed = await sigintChild("rejecting-reporter", rejectingReporterSource);
+    expect(failed.lines).toContain("remaining-sandbox-cleanup-finished");
+    expect(failed.lines).toContain("remaining-cleanup-finished");
+    expect(failed.code).toBe(130);
+    expect(failed.signal).toBeNull();
+  }, 30_000);
+
+  it("awaits the sandbox's asynchronous preservation event before later cleanup and exit", async () => {
+    const preserved = await sigintChild("async-preservation", asyncPreservationSource);
+    const event =
+      "preservation-event:error:Worktree preserved at /tmp/preserved-issue-132 | " +
+      "  To review: cd /tmp/preserved-issue-132 | " +
+      "  To clean up: remove /tmp/preserved-issue-132";
+    expect(preserved.lines).toContain(event);
+    expect(preserved.lines.indexOf(event)).toBeLessThan(
+      preserved.lines.indexOf("later-cleanup-finished"),
+    );
+    expect(preserved.code).toBe(130);
+    expect(preserved.signal).toBeNull();
+  }, 30_000);
 
   it("exits 130, the code cleanup.ts chose for SIGINT", () => {
     // The old handler's `process.exit(1)` won this race, so the run reported a

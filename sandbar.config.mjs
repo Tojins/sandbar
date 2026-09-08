@@ -343,7 +343,7 @@ export default {
   // sandbox reads no host config.toml (only the credential is seeded, #73),
   // so the `high` this host's interactive codex sessions run at never reached
   // a run. The field is the explicit spelling; the level a call ran at is on
-  // its `orchestrator.log` line as `effort=`. The correctness pass stays on
+  // its implementer/review-pass event as `effort`. The correctness pass stays on
   // claude's default, which is already `high`.
   //
   // These fields are what `requiresSandbar` above had to rise for: they are

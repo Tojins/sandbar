@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EXIT_CODE_BUDGET, EXIT_CODE_HALTED, EXIT_CODE_QUOTA, EXIT_CODE_RELAUNCH,
-  EXIT_CODE_STUCK, EXIT_CODE_SUCCESS, EXIT_TAGS, budgetExit, formatExitLine,
+  EXIT_CODE_STUCK, EXIT_CODE_SUCCESS, EXIT_TAGS, budgetExit,
   haltedExit, iterationCeilingExit, newRunState, planEmptyExit, quotaExit,
   relaunchExit, remainingBudget, stuckExit,
 } from "./exit-conditions.js";
@@ -17,11 +17,9 @@ describe("continuous-pool exits", () => {
     ["iteration-ceiling", iterationCeilingExit(100), EXIT_CODE_SUCCESS, /100 recomputes/],
   ] as const;
 
-  it.each(table)("%s has the stable code, reason, and one-line format", (tag, exit, code, reason) => {
+  it.each(table)("%s has the stable code and reason", (tag, exit, code, reason) => {
     expect(exit).toMatchObject({ tag, exitCode: code });
     expect(exit.reason).toMatch(reason);
-    expect(formatExitLine(exit)).toBe(`Exit (${tag}): ${exit.reason}`);
-    expect(formatExitLine(exit)).not.toContain("\n");
   });
 
   it("covers every exit tag", () => {

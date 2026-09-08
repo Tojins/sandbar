@@ -52,6 +52,9 @@ export default {
   // cwd: undefined,
   // Sandbar owns this disposable state directory inside cwd.
   // workDir: ".sandbar",
+  // The run UI binds this fixed port; use a distinct port for each workdir on
+  // the same host.
+  // uiPort: 7331,
   // Issue branches seed from, and successful work lands on, this branch.
   // sourceBranch: "main",
 

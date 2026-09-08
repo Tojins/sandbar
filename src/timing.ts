@@ -8,7 +8,7 @@
 // and every performance question about them had to be answered by hand off a
 // stopwatch or not at all.
 //
-// The precedent is `formatExitLine` (#70). A dozen call sites each writing
+// The precedent is the structured exit event (#70/#132). A dozen call sites each writing
 // `Date.now() - t0` is a dozen roundings, several renderings and nothing that
 // can be asserted once; one helper is one rounding, one field name, and a
 // single place to change if the field ever grows a unit.

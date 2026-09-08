@@ -14,7 +14,7 @@ describe("forge reachability gate (#118)", () => {
   it("retries only the unanswered host check and succeeds when it recovers", async () => {
     let lookups = 0;
     const waits: number[] = [];
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const warnings: string[] = [];
 
     const result = await checkForgeReachability(
       ["GitHub.com", "github.com"],
@@ -32,18 +32,18 @@ describe("forge reachability gate (#118)", () => {
         },
         now: () => 0,
       },
+      (message) => warnings.push(message),
     );
 
     expect(result).toEqual({ ok: true });
     expect(lookups).toBe(2);
     expect(waits).toEqual([10_000]);
-    expect(warning).toHaveBeenCalledTimes(1);
-    warning.mockRestore();
+    expect(warnings).toHaveLength(1);
   });
 
   it("reports every failed attempt and the final host reasons", async () => {
     let now = 0;
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const warnings: string[] = [];
     const result = await checkForgeReachability(["github.com", "forge.test"], {
       lookup: async (host) => {
         throw new Error(`${host} DNS unavailable`);
@@ -53,7 +53,7 @@ describe("forge reachability gate (#118)", () => {
         now += ms;
       },
       now: () => now,
-    });
+    }, (message) => warnings.push(message));
 
     expect(result).toEqual({
       ok: false,
@@ -64,8 +64,7 @@ describe("forge reachability gate (#118)", () => {
         "forge.test: forge.test DNS unavailable",
       ],
     });
-    expect(warning).toHaveBeenCalledTimes(6);
-    warning.mockRestore();
+    expect(warnings).toHaveLength(6);
   });
 
   it("retries when DNS answers but port 443 remains unreachable", async () => {
@@ -73,7 +72,7 @@ describe("forge reachability gate (#118)", () => {
     let lookups = 0;
     let connections = 0;
     const waits: number[] = [];
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const warnings: string[] = [];
 
     const result = await checkForgeReachability(["github.com"], {
       lookup: async () => {
@@ -89,7 +88,7 @@ describe("forge reachability gate (#118)", () => {
         now += ms;
       },
       now: () => now,
-    });
+    }, (message) => warnings.push(message));
 
     expect(result).toEqual({
       ok: false,
@@ -100,8 +99,7 @@ describe("forge reachability gate (#118)", () => {
     expect(lookups).toBe(6);
     expect(connections).toBe(6);
     expect(waits).toEqual([10_000, 10_000, 10_000, 10_000, 10_000]);
-    expect(warning).toHaveBeenCalledTimes(6);
-    warning.mockRestore();
+    expect(warnings).toHaveLength(6);
   });
 });
 

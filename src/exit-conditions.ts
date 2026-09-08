@@ -55,14 +55,8 @@
 // stuck on a run that was working. Only the first two move the source branch,
 // so only they trigger the in-process image rebuild; that split is run.ts's.
 //
-// ALL SEVEN ARE `TerminalExit`s, and `formatExitLine` is the one spelling of
-// the line an operator reads (#70). Before #70 the stops the orchestrator owned
-// each announced themselves in their own words — and one of them, the halt, in
-// no words at all on stdout — so "did this run stop normally?" could not be
-// answered from one place. The constructors are pure and `EXIT_TAGS` is
-// exhaustive over the union, so a tag with no line, or a line with no tag,
-// fails exit-conditions.test.ts rather than being noticed six weeks later in a
-// log that never mentioned it.
+// All seven are `TerminalExit`s. `run.ts` writes that value as one exit event;
+// the UI renders it and the launcher reads only the process code (#132).
 
 import { DEFAULT_MAX_TOTAL_ISSUES } from "./config.js";
 
@@ -121,22 +115,13 @@ export const EXIT_TAGS = [
 export type ExitTag = (typeof EXIT_TAGS)[number];
 
 // One stop, in the three parts every stop has: what it was, why, and what the
-// process exits with. Shared by the scheduler's decisions and by the stops the
-// orchestrator reaches on its own, because the LINE has to be identical either
-// way — which is the whole of #70's second half.
+// process exits with. Shared by scheduler decisions and orchestrator stops so
+// every terminal path produces the same event shape.
 export type TerminalExit = {
   readonly tag: ExitTag;
   readonly reason: string;
   readonly exitCode: number;
 };
-
-// THE line. Printed on stdout by whatever ends the run and written to
-// orchestrator.log beside it — pure, and pinned exactly by a test, because it
-// is the string an operator greps for and the one thing #70 promises will be
-// there whatever happened.
-export function formatExitLine(exit: TerminalExit): string {
-  return `Exit (${exit.tag}): ${exit.reason}`;
-}
 
 // (a). Success: the queue holds nothing sandbar can act on, which is the state
 // a series aims at, not a failure to reach one.
@@ -166,7 +151,7 @@ export function quotaExit(args: {
   };
 }
 
-// (f). `causes` are the short names the run log already uses for the same
+// (f). `causes` are the short names the event record uses for the same
 // stops (`preflight-failed`, `merger-halted`, `chunk-wrapup-incomplete`, …) —
 // this line says THAT the run stopped and which of them stopped it, never the
 // complaint itself, which was printed in full at the point it was reached and
@@ -175,7 +160,7 @@ export function haltedExit(causes: readonly string[]): TerminalExit {
   const named = causes.length > 0 ? causes.join(" + ") : "unspecified";
   return {
     tag: "halted",
-    reason: `${named} — the complaint is above and in orchestrator.log`,
+    reason: `${named} — see the complaint event for details`,
     exitCode: EXIT_CODE_HALTED,
   };
 }

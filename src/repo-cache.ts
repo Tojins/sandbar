@@ -266,13 +266,16 @@ async function hostOriginUrl(hostCwd: string): Promise<string> {
 // host checkout's on every run. Idempotent, and self-healing after a
 // `rm -rf .sandbar`: nothing in here is authoritative, so re-creating it costs
 // a local clone and a fetch.
-export async function ensureRepoCache(layout: RepoLayout): Promise<void> {
+export async function ensureRepoCache(
+  layout: RepoLayout,
+  log: (line: string) => void | Promise<void> = (line) => console.log(line),
+): Promise<void> {
   const { hostCwd, repoDir, stateDir } = layout;
   const url = await hostOriginUrl(hostCwd);
 
   if (!(await isPreparedCache(repoDir))) {
     await mkdir(stateDir, { recursive: true });
-    console.log(
+    await log(
       `Creating sandbar's object cache at ${repoDir} (one-time; cloned from ` +
         `${hostCwd}, so it is local and hardlinked)...`,
     );

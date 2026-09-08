@@ -126,6 +126,18 @@ describe("parseArgs: the gate subcommand", () => {
   });
 });
 
+describe("parseArgs: the ui subcommand", () => {
+  it("uses the same config-path contract as a run", () => {
+    expect(parseArgs(["ui"])).toEqual({ kind: "ui", configPath: "sandbar.config.mjs" });
+    expect(parseArgs(["ui", "--config", "other.mjs"]))
+      .toEqual({ kind: "ui", configPath: "other.mjs" });
+  });
+
+  it("refuses gate-only flags", () => {
+    expect(() => parseArgs(["ui", "--keep"])).toThrow(/sandbar gate/);
+  });
+});
+
 // The bin's headline behaviour. A test that runs from the directory it points
 // at cannot see this — `process.cwd()` and `dirname(configPath)` coincide and
 // it passes with the default deleted — so every case here names a config path

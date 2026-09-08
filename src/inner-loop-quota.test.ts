@@ -1,9 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { EventInput } from "./events.js";
 
 const seams = vi.hoisted(() => ({
   sandboxRun: vi.fn(),
   createSandbox: vi.fn(),
   dirtyWorktreePaths: vi.fn(async () => [] as string[]),
+  ensureIssueBranch: vi.fn(async () => ({
+    ref: "origin/main",
+    sha: "base-sha",
+  })),
   preserveWorktree: vi.fn(),
   partialUsage: new WeakMap<object, {
     usage?: { inputTokens?: number };
@@ -18,10 +23,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   headMismatch: vi.fn(async () => null),
   branchTip: vi.fn(async () => "implemented-sha"),
   symbolicHeadRef: vi.fn(async () => "refs/heads/test"),
-  ensureIssueBranch: vi.fn(async () => ({
-    ref: "origin/main",
-    sha: "base-sha",
-  })),
+  ensureIssueBranch: seams.ensureIssueBranch,
 }));
 
 vi.mock("./agent-sandbox.js", async (importOriginal) => {
@@ -127,6 +129,10 @@ const config = (
 describe("runInnerLoop run-scoped quota closure (#109)", () => {
   beforeEach(() => {
     seams.sandboxRun.mockReset();
+    seams.ensureIssueBranch.mockReset().mockResolvedValue({
+      ref: "origin/main",
+      sha: "base-sha",
+    });
     seams.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
     seams.preserveWorktree.mockReset();
     seams.createSandbox.mockReset().mockImplementation(async () => ({
@@ -140,8 +146,42 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     }));
   });
 
+  it("records branch abandonment as origin synchronization, not a fast-forward repair", async () => {
+    const events: EventInput[] = [];
+    seams.ensureIssueBranch.mockResolvedValueOnce({
+      ref: "origin/main",
+      sha: "base-sha",
+      originSync: { kind: "abandoned", tip: "abcdef123456" },
+    });
+    seams.sandboxRun.mockResolvedValueOnce({
+      stdout: "<promise>NEEDS-INFO</promise><questions>Which environment?</questions>",
+      headBefore: "base-sha",
+      headAfter: "base-sha",
+      signalMs: 1,
+      maxGapMs: 1,
+      toolCalls: 0,
+      peakContext: 1,
+      commits: [],
+    });
+
+    await expect(runInnerLoop(issue("132"), {
+      config: config("claude"), hooks: {}, copyToWorktree: [],
+      onEvent: (event) => events.push(event),
+    })).resolves.toMatchObject({ type: "NEEDS-INFO" });
+
+    expect(events.filter((event) => event.kind === "origin-sync")).toEqual([{
+      kind: "origin-sync",
+      issue: 132,
+      title: "Issue 132",
+      outcome: "abandoned",
+      detail: expect.stringContaining("abandoned"),
+    }]);
+    expect(events.filter((event) =>
+      event.kind === "repair" && event.action === "fast-forward")).toEqual([]);
+  });
+
   it("logs the larger peak context across an implementer and its promise nudge", async () => {
-    const lines: string[] = [];
+    const events: EventInput[] = [];
     seams.sandboxRun
       .mockResolvedValueOnce({
         stdout: "I need one detail.",
@@ -166,12 +206,15 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("124"), {
       config: config("claude"), hooks: {}, copyToWorktree: [],
-      onOrchestratorLog: (line) => lines.push(line),
+      onEvent: (event) => events.push(event),
     })).resolves.toMatchObject({ type: "NEEDS-INFO" });
 
-    expect(lines.find((line) => line.includes(" implementer signal="))).toContain(
-      "toolCalls=3 peakContext=41",
-    );
+    expect(events.filter((event) => event.kind === "implementer")).toEqual([{
+      kind: "implementer", issue: 124, title: "Issue 124", attempt: 1,
+      signal: "NEEDS-INFO", commits: 0, provider: "claude", model: "model",
+      effort: null, durationMs: expect.any(Number), signalMs: 1, maxGapMs: 1,
+      usage: { toolCalls: 3, peakContext: 41 },
+    }]);
   });
 
   it("runs the enabled UI check before attempt 1 and again after a fresh HARD-ERROR cycle", async () => {
@@ -212,6 +255,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     try {
       await expect(runInnerLoop(issue("126"), {
         config: config("codex", true), hooks: {}, copyToWorktree: [],
+        onEvent: () => undefined,
       })).resolves.toMatchObject({ type: "NEEDS-INFO" });
     } finally {
       stderr.mockRestore();
@@ -227,6 +271,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
   });
 
   it("closes UI-check quota, surfaces QUOTA, and never invokes a closed provider", async () => {
+    const events: EventInput[] = [];
     const state = createRunQuotaState();
     const measurement = {
       status: "rejected" as const,
@@ -239,24 +284,29 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("127"), {
       config: config("codex", true, "claude"), hooks: {}, copyToWorktree: [],
-      quotaState: state,
+      quotaState: state, onEvent: (event) => events.push(event),
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
     });
     expect(seams.createSandbox).toHaveBeenCalledOnce();
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event.kind === "ui-check")).toEqual([{
+      kind: "ui-check", issue: 127, title: "Issue 127", invocation: 1,
+      provider: "claude", model: "model", effort: null,
+      durationMs: expect.any(Number), result: "quota", usage: { quota: measurement },
+    }]);
 
     await expect(runInnerLoop(issue("128"), {
       config: config("codex", true, "claude"), hooks: {}, copyToWorktree: [],
-      quotaState: state,
+      quotaState: state, onEvent: () => undefined,
     })).resolves.toMatchObject({ type: "QUOTA", provider: "claude" });
     expect(seams.createSandbox).toHaveBeenCalledTimes(2);
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
   });
 
   it("logs peak context for successful and failed reviewer invocations", async () => {
-    const lines: string[] = [];
+    const events: EventInput[] = [];
     const reviewerFailure = new Error("reviewer disconnected");
     seams.partialUsage.set(reviewerFailure, {
       usage: { inputTokens: 7 }, toolCalls: 2, peakContext: 52,
@@ -290,21 +340,45 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("125"), {
       config: config("codex"), hooks: {}, copyToWorktree: [],
-      onOrchestratorLog: (line) => lines.push(line),
+      onEvent: (event) => events.push(event),
     })).resolves.toMatchObject({ type: "DONE" });
 
-    expect(lines.find((line) => line.includes("pass=quality invocation=1 "))).toContain(
-      "tokens=in:7 toolCalls=2 peakContext=52",
-    );
-    expect(lines.find((line) => line.includes("pass=quality invocation=2 "))).toContain(
-      "toolCalls=3 peakContext=61",
-    );
-    expect(lines.find((line) => line.includes("pass=correctness invocation=1 "))).toContain(
-      "toolCalls=4 peakContext=73",
-    );
+    const passes = events.filter((event) => event.kind === "review-pass");
+    expect(passes).toEqual([
+      {
+        kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
+        pass: "quality", invocation: 1, provider: "claude", model: "model",
+        effort: null, result: "failed", durationMs: expect.any(Number),
+        usage: { inputTokens: 7, toolCalls: 2, peakContext: 52 },
+      },
+      {
+        kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
+        pass: "quality", invocation: 2, provider: "claude", model: "model",
+        effort: null, result: "completed", durationMs: expect.any(Number), maxGapMs: 2,
+        usage: { toolCalls: 3, peakContext: 61 },
+      },
+      {
+        kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
+        pass: "correctness", invocation: 1, provider: "claude", model: "model",
+        effort: null, result: "completed", durationMs: expect.any(Number), maxGapMs: 2,
+        usage: { toolCalls: 4, peakContext: 73 },
+      },
+    ]);
+    expect(events.filter((event) => event.kind === "phase")).toEqual([
+      { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["implementer"] },
+      { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["gate-1", "review"] },
+      { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: [] },
+    ]);
+    expect(events.filter((event) => event.kind === "review-round")).toEqual([{
+      kind: "review-round", issue: 125, title: "Issue 125", attempt: 1, round: 1,
+      head: "implemented-sha", qualityMode: "list", gateOk: true,
+      quality: "APPROVED", correctness: "APPROVED", rejectingPass: null,
+      qualityFailures: 0, correctnessFailures: 0, durationMs: expect.any(Number),
+    }]);
   });
 
   it("surfaces quota without a fresh-sandbox retry and closes only that provider", async () => {
+    const events: EventInput[] = [];
     const state = createRunQuotaState();
     const measurement = {
       status: "rejected" as const,
@@ -315,15 +389,22 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("109"), {
       config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
+      onEvent: (event) => events.push(event),
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
     });
     expect(seams.createSandbox).toHaveBeenCalledOnce();
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event.kind === "implementer")).toEqual([{
+      kind: "implementer", issue: 109, title: "Issue 109", attempt: 1,
+      signal: "QUOTA", commits: 0, provider: "claude", model: "model",
+      effort: null, durationMs: expect.any(Number), usage: { quota: measurement },
+    }]);
 
     await expect(runInnerLoop(issue("110"), {
       config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
+      onEvent: () => undefined,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
@@ -341,11 +422,13 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     });
     await expect(runInnerLoop(issue("111"), {
       config: config("codex"), hooks: {}, copyToWorktree: [], quotaState: state,
+      onEvent: () => undefined,
     })).resolves.toMatchObject({ type: "NEEDS-INFO" });
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
   });
 
   it("surfaces reviewer quota after one invocation without the reviewer retry", async () => {
+    const events: EventInput[] = [];
     const state = createRunQuotaState();
     const measurement = {
       status: "rejected" as const,
@@ -366,14 +449,22 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("112"), {
       config: config("codex"), hooks: {}, copyToWorktree: [], quotaState: state,
+      onEvent: (event) => events.push(event),
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
     });
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
+    expect(events.filter((event) => event.kind === "review-pass")).toEqual([{
+      kind: "review-pass", issue: 112, title: "Issue 112", attempt: 1, round: 1,
+      pass: "quality", invocation: 1, provider: "claude", model: "model",
+      effort: null, result: "quota", durationMs: expect.any(Number),
+      usage: { quota: measurement },
+    }]);
 
     await expect(runInnerLoop(issue("113"), {
       config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
+      onEvent: () => undefined,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
@@ -402,7 +493,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("114"), {
       config: config("codex"), hooks: {}, copyToWorktree: [],
-      quotaState: createRunQuotaState(),
+      quotaState: createRunQuotaState(), onEvent: () => undefined,
     })).resolves.toMatchObject({ type: "NEEDS-HUMAN-REVIEW" });
     expect(seams.preserveWorktree).toHaveBeenCalledOnce();
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);

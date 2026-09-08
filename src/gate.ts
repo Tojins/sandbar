@@ -16,7 +16,7 @@
 // ONE rendering of them — four consumers log a gate verdict (inner-loop's
 // gate-1, the merger's gate-2, the resolve loop's re-gate and `sandbar gate`),
 // and four hand-written formats would be four formats a later stats reader has
-// to parse. Same argument as `formatExitLine` (#70).
+// to parse. Same argument as the structured exit event (#70/#132).
 //
 // The per-step numbers NEST inside one `steps=` field rather than being sprayed
 // as top-level `check=1120` keys, because step names are the HOST'S and

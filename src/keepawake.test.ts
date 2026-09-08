@@ -63,6 +63,12 @@ function linesOf(lock: ReturnType<typeof startKeepawake>): string[] {
   return seen;
 }
 
+function statusesOf(lock: ReturnType<typeof startKeepawake>) {
+  const seen: Array<NonNullable<ReturnType<typeof lock.status>>> = [];
+  lock.onStatus((_line, status) => seen.push(status));
+  return seen;
+}
+
 describe("startKeepawake — the lock is confirmed, not assumed", () => {
   it("is not held until the OS has confirmed it, however well the spawn went", () => {
     const child = new FakeChild();
@@ -96,6 +102,10 @@ describe("startKeepawake — the lock is confirmed, not assumed", () => {
       reason: "not WSL2 — the host OS owns power management here",
     });
     expect(linesOf(lock)[0]).toContain("NOT held");
+    expect(statusesOf(lock)).toEqual([{
+      kind: "refused",
+      reason: "not WSL2 — the host OS owns power management here",
+    }]);
   });
 
   it("reports a spawn that throws as a refusal carrying the cause", () => {
@@ -181,6 +191,11 @@ describe("startKeepawake — a lock that dies is noticed and retaken", () => {
       "wake-lock: held",
       "wake-lock: LOST",
       "wake-lock: held",
+    ]);
+    expect(statusesOf(lock).map((status) => status.kind)).toEqual([
+      "held",
+      "lost",
+      "held",
     ]);
   });
 

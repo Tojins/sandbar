@@ -6,6 +6,11 @@
 // reported with its cause and the drain continues, because partial cleanup is
 // always better than none and there is no original failure for this loop to
 // rethrow.
+// `setCleanupReporter` lets a lock-owning run route those notices into its
+// event record; standalone commands retain the terminal reporter above that
+// boundary. The run restores the prior reporter after its record is finalized.
+// Reporting is best-effort at this boundary: a full/deleted event filesystem
+// must not prevent the resource drain the notice was meant to describe.
 //
 // That holds only while this handler OWNS THE EXIT (#35): `runCleanup()` is
 // async, and a `process.exit` from any later signal listener kills the
@@ -20,10 +25,41 @@
 // for (#55).
 
 type CleanupAction = () => Promise<void> | void;
+export type CleanupNotice = "signal" | "cleanup-failure" | "internal-failure";
+type CleanupReporter = (
+  kind: CleanupNotice,
+  message: string,
+  cause?: unknown,
+) => Promise<void> | void;
 
 const actions: CleanupAction[] = [];
 let installed = false;
 let running = false;
+let report: CleanupReporter = (kind, message, cause) => {
+  if (kind === "cleanup-failure") console.error(message, { cause });
+  else if (cause === undefined) console.error(message);
+  else console.error(message, cause);
+};
+
+export function setCleanupReporter(next: CleanupReporter): () => void {
+  const previous = report;
+  report = next;
+  return () => { report = previous; };
+}
+
+export async function reportCleanupNotice(
+  kind: CleanupNotice,
+  message: string,
+  cause?: unknown,
+): Promise<void> {
+  // Invoke through a promise so both synchronous throws and rejected reporter
+  // promises become data. There is deliberately no second reporter for a
+  // reporter failure: recursively reporting it cannot recover the unavailable
+  // destination, while continuing cleanup can still recover real resources.
+  await Promise.allSettled([
+    Promise.resolve().then(() => report(kind, message, cause)),
+  ]);
+}
 
 export function onCleanup(action: CleanupAction): void {
   actions.push(action);
@@ -100,7 +136,7 @@ export async function runCleanup(): Promise<void> {
     try {
       await action();
     } catch (err) {
-      console.error("Cleanup action failed", { cause: err });
+      await reportCleanupNotice("cleanup-failure", "Cleanup action failed", err);
     }
   }
 }
@@ -110,18 +146,19 @@ export function installCleanupTraps(): void {
   installed = true;
 
   const handler = (signal: NodeJS.Signals) => {
-    console.error(`\nReceived ${signal}, cleaning up…`);
-    runCleanup().finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+    void reportCleanupNotice("signal", `Received ${signal}, cleaning up…`)
+      .then(runCleanup)
+      .finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
   };
 
   process.once("SIGINT", () => handler("SIGINT"));
   process.once("SIGTERM", () => handler("SIGTERM"));
   process.once("uncaughtException", (err) => {
-    console.error("Uncaught exception:", err);
-    runCleanup().finally(() => process.exit(1));
+    void reportCleanupNotice("internal-failure", "Uncaught exception", err)
+      .then(runCleanup).finally(() => process.exit(1));
   });
   process.once("unhandledRejection", (reason) => {
-    console.error("Unhandled rejection:", reason);
-    runCleanup().finally(() => process.exit(1));
+    void reportCleanupNotice("internal-failure", "Unhandled rejection", reason)
+      .then(runCleanup).finally(() => process.exit(1));
   });
 }

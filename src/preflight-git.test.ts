@@ -131,6 +131,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // merger, so the set the credential check walks is the one every
     // pre-#72 config produces.
     agentProviders: ["claude"] as readonly AgentProviderName[],
+    onEvent: () => undefined,
   });
   // What `runPreflight` hands `gatherState` once its own `gh` checks pass.
   const GH_READY = { hasGh: true, ghAuthOk: true } as const;
@@ -189,9 +190,9 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
 
   it("refuses an unreachable forge alone before credentials or branches are judged", async () => {
     let now = 0;
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const events: unknown[] = [];
     const error = await runPreflight(
-      cfg(layoutAt(target)) as Parameters<typeof runPreflight>[0],
+      { ...cfg(layoutAt(target)), onEvent: (event: unknown) => events.push(event) } as Parameters<typeof runPreflight>[0],
       {
         lookup: async () => {
           throw new Error("getaddrinfo EAI_AGAIN");
@@ -210,8 +211,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       "No credential was judged and no branch was classified",
     );
     expect(String(error)).not.toContain("gh auth login");
-    expect(warning).toHaveBeenCalledTimes(6);
-    warning.mockRestore();
+    expect(events).toHaveLength(6);
   });
 
   // The highest-stakes half, and the one that qualified #32's fix: #32 put this
