@@ -700,7 +700,6 @@ export async function run(
   });
   onCleanup(resetCleanupReporter);
   onCleanup(() => runRecord.finalize(cleanupReason));
-  unregisterEarlyOriginRelease();
   const stopInternalFailure = async (err: unknown): Promise<never> => {
     const exit = await recordInternalFailure(faultDetail(err));
     await runCleanup();
@@ -786,6 +785,7 @@ export async function run(
   // is attempted while the wake lock, reporter and event record are still
   // live. The wake lock stops next; run-end remains the last event.
   onCleanup(releaseOriginLock);
+  unregisterEarlyOriginRelease();
 
   // The one site that emits an exit (#70/#132), shared by startup refusals and
   // scheduler terminals. It also owns cleanupReason, so run-end agrees with it.

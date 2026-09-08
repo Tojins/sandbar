@@ -245,7 +245,7 @@ import { realAdapter as realFinalizeAdapter } from "./finalize.js";
 import { createBranchImages, ensureImages } from "./ensure-images.js";
 import { createAgentImages } from "./agent-tools.js";
 import { cleanupOrphanContainers } from "./containers.js";
-import { startUiServer } from "./ui-server.js";
+import { UiPortInUseError, startUiServer } from "./ui-server.js";
 import {
   checkForgeReachabilityForPreflight,
   fetchOriginRefs,
@@ -383,6 +383,23 @@ describe("run quota orchestration (#109)", () => {
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining("SANDBAR HALTED — internal failure"),
     );
+    expect(seams.originRelease).toHaveBeenCalledOnce();
+  });
+
+  it("releases the origin lease when the UI port is already in use", async () => {
+    vi.mocked(startUiServer).mockRejectedValueOnce(
+      new UiPortInUseError(config.uiPort, "127.0.0.1", new Error("EADDRINUSE")),
+    );
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
+      tag: "halted", exitCode: 1,
+    }));
+    expect(seams.originRelease).toHaveBeenCalledOnce();
   });
 
   it("acquires the origin lease after reachability and before ref-writing preflight", async () => {
