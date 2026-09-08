@@ -489,6 +489,11 @@ export type ResolvedMergeMode =
 // exists" (repo identity, the sandbox image, the gate stack, the bot identity,
 // the sandbox hooks). Optional ⇔ "has a de-facto-standard value sandbar fills
 // in".
+//
+// Execution has two orthogonal bounds (#142): `maxParallelIssues` owns agent
+// inner-loop slots, while `maxConcurrentGates` owns one run-wide FIFO shared
+// by gate-1 and gate-2. The gate bound defaults to unlimited so adding the
+// field changes no existing host until its config opts in.
 export type RunConfig = {
   // ---- Required: repo-specific facts with no sensible default -------------
   readonly ghOwner: string;
