@@ -448,10 +448,13 @@ describe("runMergerWithAdapter — clean-merge happy paths", () => {
       adapter,
       undefined,
       undefined,
-      { observations: {
-        onGate: () => undefined,
-        onOutcome: (outcome) => { outcomes.push(outcome); },
-      } },
+      {
+        clock: () => 0,
+        observations: {
+          onGate: () => undefined,
+          onOutcome: (outcome) => { outcomes.push(outcome); },
+        },
+      },
     );
 
     expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
