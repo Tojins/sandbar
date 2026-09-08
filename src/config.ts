@@ -649,7 +649,8 @@ export type RunConfig = {
   readonly maxQualityRounds?: number;
   readonly maxReviewRounds?: number;
   // Delay between tracker refreshes while the daemon has capacity. Default:
-  // 60 seconds. A poll fetches source, chunk and member refs before planning.
+  // 60 seconds. A poll fetches source plus issue, chunk and member refs before
+  // planning.
   readonly pollIntervalMs?: number;
 
   // Keep the host wake lock while the daemon is idle. Default false: ordinary

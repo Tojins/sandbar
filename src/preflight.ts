@@ -221,6 +221,7 @@ import type { EnvReader } from "./env.js";
 import { hasExitCode, isErrno, isExitStatus } from "./errors.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+  ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
@@ -1286,9 +1287,9 @@ async function originSourceTip(
   return result.ok ? result.stdout.trim() || null : null;
 }
 
-// The daemon's refresh boundary (#133). One fetch updates the source plus both
-// sandbar namespaces, so a planner never sees a half-refreshed cache and each
-// idle poll spends one network round trip. Measuring the source tip around it
+// The daemon's refresh boundary (#133). One fetch updates the source plus all
+// three sandbar namespaces, so a planner never sees a half-refreshed cache and
+// each idle poll spends one network round trip. Measuring the source tip around it
 // makes a human push trigger the same image refresh as a source landing
 // performed by sandbar itself.
 export async function fetchOriginRefs(
@@ -1299,13 +1300,14 @@ export async function fetchOriginRefs(
   const failure = await captureFailure(repoDir, "git", [
     "fetch", "origin", "--prune",
     `+refs/heads/${sourceBranch}:refs/remotes/origin/${sourceBranch}`,
+    ...ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
     ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
     ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
     "--quiet",
   ]);
   const failures = failure === null
     ? []
-    : [`Fetching origin refs (source, chunks, members) failed: ${failure}`];
+    : [`Fetching origin refs (source, issues, chunks, members) failed: ${failure}`];
   const after = failures.length === 0
     ? await originSourceTip(repoDir, sourceBranch)
     : before;

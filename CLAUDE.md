@@ -149,8 +149,8 @@ without consuming one of `maxParallelIssues` slots.
 ### Daemon polling and exits (`src/scheduler.ts`, `src/exit-conditions.ts`)
 
 An empty plan is idle, not terminal (#133). One cancellable wait races a freed
-slot with `pollIntervalMs` (default 60 seconds); a poll fetches source, chunk and
-member refs before running the ordinary planner. A moved source tip refreshes
+slot with `pollIntervalMs` (default 60 seconds); a poll fetches source plus the
+issue, chunk and member namespaces before running the ordinary planner. A moved source tip refreshes
 image inputs whether sandbar or a human moved it; each admission captures one
 immutable agent/branch-image bundle, so in-flight work keeps its original pair.
 No-op polls write nothing.

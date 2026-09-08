@@ -291,6 +291,24 @@ export const ORIGIN_CHUNK_BRANCH_REFGLOBS: readonly string[] =
     (prefix) => `refs/remotes/origin/${prefix}${CHUNK_BRANCH_INFIX}*`,
   );
 
+// Issue branches are refreshed as a namespace by the daemon poll (#133), not
+// only one at a time when an issue is admitted. They land in a prunable staging
+// namespace rather than `refs/remotes/origin`: the latter is the durable
+// evidence syncIssueBranchWithOrigin uses to distinguish "never published"
+// from "a human deleted this parked branch". Admission's exact fetch promotes
+// the selected branch into that canonical namespace; the poll warms its objects
+// without erasing the evidence for branches origin has just lost.
+export const ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS: readonly string[] =
+  ALL_BRANCH_PREFIXES.map(
+    (prefix) =>
+      `+refs/heads/${prefix}${ISSUE_BRANCH_INFIX}*:refs/sandbar/poll/origin/${prefix}${ISSUE_BRANCH_INFIX}*`,
+  );
+
+export const ORIGIN_ISSUE_BRANCH_POLL_REFGLOBS: readonly string[] =
+  ALL_BRANCH_PREFIXES.map(
+    (prefix) => `refs/sandbar/poll/origin/${prefix}${ISSUE_BRANCH_INFIX}*`,
+  );
+
 // Landing-only member refs are durable membership records since #93. They are
 // fetched and pruned beside chunk refs so containment questions are answered
 // from one fresh remote-tracking namespace.

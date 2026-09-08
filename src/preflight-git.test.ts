@@ -146,7 +146,11 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     await chmod(gh, 0o755);
   };
 
-  it("refreshes source, chunk, and member refs together and prunes namespaces (#133)", async () => {
+  it("refreshes source and all sandbar refs together and prunes namespaces (#133)", async () => {
+    await git(target, "update-ref", "refs/heads/sandbar/issue-1-test", "HEAD");
+    await git(
+      target, "update-ref", "refs/remotes/origin/sandbar/issue-1-test", "HEAD",
+    );
     await git(target, "update-ref", "refs/heads/sandbar/chunk-1-test", "HEAD");
     await git(target, "update-ref", "refs/heads/sandbar/member-1", "HEAD");
     await writeFile(join(target, "a.txt"), "moved\n");
@@ -156,16 +160,28 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     const first = await fetchOriginRefs(target, "main");
     expect(first).toEqual({ sourceChanged: true, failures: [] });
     await expect(git(
+      target, "show-ref", "--verify", "refs/sandbar/poll/origin/sandbar/issue-1-test",
+    )).resolves.toBeDefined();
+    await expect(git(
       target, "show-ref", "--verify", "refs/remotes/origin/sandbar/chunk-1-test",
     )).resolves.toBeDefined();
     await expect(git(
       target, "show-ref", "--verify", "refs/remotes/origin/sandbar/member-1",
     )).resolves.toBeDefined();
 
+    await git(target, "update-ref", "-d", "refs/heads/sandbar/issue-1-test");
     await git(target, "update-ref", "-d", "refs/heads/sandbar/chunk-1-test");
     await git(target, "update-ref", "-d", "refs/heads/sandbar/member-1");
     const second = await fetchOriginRefs(target, "main");
     expect(second).toEqual({ sourceChanged: false, failures: [] });
+    await expect(git(
+      target, "show-ref", "--verify", "refs/sandbar/poll/origin/sandbar/issue-1-test",
+    )).rejects.toBeDefined();
+    // The canonical ref is deletion history for the exact issue sync. Poll
+    // pruning must not erase it before that sync can classify the deletion.
+    await expect(git(
+      target, "show-ref", "--verify", "refs/remotes/origin/sandbar/issue-1-test",
+    )).resolves.toBeDefined();
     await expect(git(
       target, "show-ref", "--verify", "refs/remotes/origin/sandbar/chunk-1-test",
     )).rejects.toBeDefined();
@@ -211,7 +227,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     ).catch((err: unknown) => err);
 
     expect(error).toBeInstanceOf(Error);
-    expect(String(error)).toContain("Fetching origin refs (source, chunks, members) failed");
+    expect(String(error)).toContain("Fetching origin refs (source, issues, chunks, members) failed");
     expect(String(error)).toContain("does not appear to be a git repository");
   });
 

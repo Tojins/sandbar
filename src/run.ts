@@ -97,8 +97,8 @@
 // what it can and cannot claim.
 //
 // At capacity below `maxParallelIssues`, one cancellable wait races the next
-// slot completion against `pollIntervalMs`. A poll refreshes source, chunk and
-// member refs before running the ordinary plan. A no-op poll is silent; work,
+// slot completion against `pollIntervalMs`. A poll refreshes source, issue,
+// chunk and member refs before running the ordinary plan. A no-op poll is silent; work,
 // source movement, and changed config-staleness evidence are recorded. Source
 // movement from either a human push or this process refreshes the image inputs.
 // Agent and branch images are replaced as one bundle and captured by each
