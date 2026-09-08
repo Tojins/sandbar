@@ -34,26 +34,23 @@ describe("prepareCodexAuth (#134)", () => {
     const hostPath = join(stateDir, CODEX_AUTH_FILE_NAME);
 
     expect(result).toEqual({
-      action: "seeded",
-      mount: {
-        hostPath,
-        sandboxPath: "/home/agent/.codex/auth.json",
-      },
+      hostPath,
+      sandboxPath: "/home/agent/.codex/auth.json",
     });
     expect(await readFile(hostPath, "utf8")).toBe(configuredJson);
     expect((await stat(hostPath)).mode & 0o777).toBe(0o600);
   });
 
   it.each([
-    ["newer configured value", "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z", "updated", "configured"],
-    ["older configured value", "2026-09-03T00:00:00Z", "2026-09-02T00:00:00Z", "kept", "current"],
-    ["equal configured value", "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z", "kept", "current"],
+    ["newer configured value", "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z", "configured"],
+    ["older configured value", "2026-09-03T00:00:00Z", "2026-09-02T00:00:00Z", "current"],
+    ["equal configured value", "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z", "current"],
   ] as const)("orders the %s by last_refresh", async (
-    _label, currentDate, configuredDate, action, survivingFamily,
+    _label, currentDate, configuredDate, survivingFamily,
   ) => {
     const stateDir = await root();
     const hostPath = join(stateDir, CODEX_AUTH_FILE_NAME);
-    await writeFile(hostPath, auth(currentDate, "current"));
+    await writeFile(hostPath, auth(currentDate, "current"), { mode: 0o644 });
 
     const result = await prepareCodexAuth({
       stateDir,
@@ -61,10 +58,10 @@ describe("prepareCodexAuth (#134)", () => {
       codexHome: "/var/lib/codex",
     });
 
-    expect(result.action).toBe(action);
-    expect(result.mount.sandboxPath).toBe("/var/lib/codex/auth.json");
+    expect(result.sandboxPath).toBe("/var/lib/codex/auth.json");
     expect(JSON.parse(await readFile(hostPath, "utf8")).tokens.refresh_token)
       .toBe(survivingFamily);
+    expect((await stat(hostPath)).mode & 0o777).toBe(0o600);
   });
 
   it.each([

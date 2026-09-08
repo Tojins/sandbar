@@ -54,16 +54,11 @@ function parseDatedAuth(value: string, label: string): DatedAuth {
   return { value, lastRefreshMs };
 }
 
-export type PrepareCodexAuthResult = {
-  readonly mount: CodexAuthMount;
-  readonly action: "seeded" | "updated" | "kept";
-};
-
 export async function prepareCodexAuth(args: {
   readonly stateDir: string;
   readonly configuredJson: string;
   readonly codexHome?: string;
-}): Promise<PrepareCodexAuthResult> {
+}): Promise<CodexAuthMount> {
   const configured = parseDatedAuth(args.configuredJson, "CODEX_AUTH_JSON");
   const hostPath = join(args.stateDir, CODEX_AUTH_FILE_NAME);
   const codexHome = args.codexHome || DEFAULT_CODEX_SANDBOX_HOME;
@@ -91,8 +86,5 @@ export async function prepareCodexAuth(args: {
     await rename(incomingPath, hostPath);
   }
   await chmod(hostPath, 0o600);
-  return {
-    action,
-    mount: { hostPath, sandboxPath: join(codexHome, "auth.json") },
-  };
+  return { hostPath, sandboxPath: join(codexHome, "auth.json") };
 }

@@ -492,11 +492,10 @@ export class AgentQuotaError extends Error {
 }
 
 export class AgentCredentialError extends Error {
-  readonly provider: "claude" | "codex";
+  readonly provider = "codex" as const;
   readonly detail: string;
-  constructor(provider: "claude" | "codex", detail: string) {
-    super(`${provider} refused its credential: ${detail}`);
-    this.provider = provider;
+  constructor(detail: string) {
+    super(`codex refused its credential: ${detail}`);
     this.detail = detail;
   }
 }
@@ -2275,7 +2274,6 @@ const invokeAgent = async (
         }
         if (classification.verdict === "credential") {
           settleReject(new AgentCredentialError(
-            agent.name === "codex" ? "codex" : "claude",
             classification.detail ?? "credential refresh failed",
           ));
           return;

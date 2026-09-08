@@ -178,7 +178,7 @@ export type Verdict =
     }
   | {
       readonly type: "CREDENTIAL";
-      readonly provider: "claude" | "codex";
+      readonly provider: "codex";
       readonly detail: string;
     };
 

@@ -330,7 +330,7 @@ export type Terminal =
     }
   | {
       readonly type: "CREDENTIAL";
-      readonly provider: AgentProviderName;
+      readonly provider: "codex";
       readonly detail: string;
       readonly specGaps: readonly SpecGap[];
     };
@@ -346,26 +346,31 @@ export type ProviderClosure =
 
 export type RunProviderState = {
   get(provider: AgentProviderName): ProviderClosure | undefined;
-  close(provider: AgentProviderName, closure: ProviderClosure): void;
+  closeQuota(provider: AgentProviderName, measurement: RateLimitMeasurement): void;
+  closeCredential(detail: string): void;
 };
 
-export const providerClosureFor = (
+export const recordProviderClosure = (
+  state: RunProviderState | undefined,
   err: AgentQuotaError | AgentCredentialError,
-): ProviderClosure => err instanceof AgentQuotaError
-  ? { cause: "quota", measurement: err.measurement }
-  : { cause: "credential", detail: err.detail };
+): void => {
+  if (err instanceof AgentQuotaError) state?.closeQuota(err.provider, err.measurement);
+  else state?.closeCredential(err.detail);
+};
 
 export const createRunProviderState = (): RunProviderState => {
   const closed = new Map<AgentProviderName, ProviderClosure>();
+  const close = (provider: AgentProviderName, closure: ProviderClosure): void => {
+    const existing = closed.get(provider);
+    if (existing?.cause === "credential") return;
+    if (existing === undefined || closure.cause === "credential") {
+      closed.set(provider, closure);
+    }
+  };
   return {
     get: (provider) => closed.get(provider),
-    close: (provider, closure) => {
-      const existing = closed.get(provider);
-      if (existing?.cause === "credential") return;
-      if (existing === undefined || closure.cause === "credential") {
-        closed.set(provider, closure);
-      }
-    },
+    closeQuota: (provider, measurement) => close(provider, { cause: "quota", measurement }),
+    closeCredential: (detail) => close("codex", { cause: "credential", detail }),
   };
 };
 
@@ -375,7 +380,7 @@ export const assertProviderOpen = (
 ): void => {
   const closed = providerState?.get(provider);
   if (closed?.cause === "quota") throw new AgentQuotaError(provider, closed.measurement);
-  if (closed?.cause === "credential") throw new AgentCredentialError(provider, closed.detail);
+  if (closed?.cause === "credential") throw new AgentCredentialError(closed.detail);
 };
 
 // One invocation boundary owns both halves of run-scoped closure: an already
@@ -391,7 +396,7 @@ export async function runWithProviderState<T>(
     return await invoke();
   } catch (err) {
     if (err instanceof AgentQuotaError || err instanceof AgentCredentialError)
-      providerState?.close(err.provider, providerClosureFor(err));
+      recordProviderClosure(providerState, err);
     throw err;
   }
 }
@@ -1000,7 +1005,7 @@ async function runSandboxCycle(
     return { verdict: action.verdict, accumulatedCommits: accumulated, specGaps };
   } catch (err) {
     if (err instanceof AgentQuotaError) {
-      opts.providerState?.close(err.provider, providerClosureFor(err));
+      recordProviderClosure(opts.providerState, err);
       return {
         verdict: quotaVerdict(err),
         accumulatedCommits: accumulated,
@@ -1008,7 +1013,7 @@ async function runSandboxCycle(
       };
     }
     if (err instanceof AgentCredentialError) {
-      opts.providerState?.close(err.provider, providerClosureFor(err));
+      recordProviderClosure(opts.providerState, err);
       return {
         verdict: credentialVerdict(err),
         accumulatedCommits: accumulated,

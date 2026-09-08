@@ -9,6 +9,7 @@
 // and the two-phase completion timer (F5).
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { appendFile, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -54,7 +55,14 @@ import {
   sandboxExecArgs,
   sandboxRunArgs,
 } from "./agent-sandbox.js";
-import { existsSync } from "node:fs";
+
+const CODEX_REFRESH_FAILURE_LITERALS = [
+  "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
+  "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+  "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+  "Your access token could not be refreshed. Please log out and sign in again.",
+  "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.",
+] as const;
 
 const execFileP = promisify(execFile);
 
@@ -617,7 +625,11 @@ describe("parseCodexJsonLine", () => {
     }
   });
 
-  it.each(CODEX_REFRESH_FAILURE_MESSAGES)(
+  it("pins every permanent refresh failure sentence shipped by Codex 0.152.0", () => {
+    expect(CODEX_REFRESH_FAILURE_MESSAGES).toEqual(CODEX_REFRESH_FAILURE_LITERALS);
+  });
+
+  it.each(CODEX_REFRESH_FAILURE_LITERALS)(
     "tags the pinned permanent refresh failure as credential: %s",
     (message) => {
       expect(parseCodexJsonLine(JSON.stringify({
@@ -628,7 +640,7 @@ describe("parseCodexJsonLine", () => {
   );
 
   it("keeps credential classification when Codex appends server detail", () => {
-    const message = `${CODEX_REFRESH_FAILURE_MESSAGES[3]} request id: abc`;
+    const message = `${CODEX_REFRESH_FAILURE_LITERALS[3]} request id: abc`;
     expect(parseCodexJsonLine(JSON.stringify({
       type: "turn.failed",
       error: { message },

@@ -124,7 +124,7 @@ import {
   quotaExit,
   stuckExit,
 } from "./exit-conditions.js";
-import { type RunProviderState, createRunProviderState, providerClosureFor } from "./inner-loop.js";
+import { type RunProviderState, createRunProviderState, recordProviderClosure } from "./inner-loop.js";
 import {
   type FinalizeInput,
   type FinalizeResult,
@@ -299,7 +299,7 @@ export function closedProviderExit(
   for (const provider of providers) {
     const closed = providerState.get(provider);
     if (closed?.cause === "credential") {
-      return credentialExit({ provider, detail: closed.detail });
+      return credentialExit({ provider: "codex", detail: closed.detail });
     }
   }
   for (const provider of providers) {
@@ -723,11 +723,11 @@ export async function run(
       : undefined;
     if (configuredCodexAuth !== undefined) {
       const configuredCodexHome = env("CODEX_HOME");
-      codexAuthMount = (await prepareCodexAuth({
+      codexAuthMount = await prepareCodexAuth({
         stateDir: layout.stateDir,
         configuredJson: configuredCodexAuth,
         ...(configuredCodexHome === undefined ? {} : { codexHome: configuredCodexHome }),
-      })).mount;
+      });
     }
     lastConfigStalenessCount = initialConfigStaleness.touchingConfig;
   } catch (err) {
@@ -1877,7 +1877,7 @@ export async function run(
               err.cause instanceof AgentCredentialError
             ) {
               mergerProviderError = err.cause;
-              providerState.close(err.cause.provider, providerClosureFor(err.cause));
+              recordProviderClosure(providerState, err.cause);
             }
             // A MergerError built by the merger's `asHalt` wraps an underlying
             // error as `cause`. When that was an unexpected bug rather than an

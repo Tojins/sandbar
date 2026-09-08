@@ -79,7 +79,7 @@ export function quotaExit(args: {
 }
 
 export function credentialExit(args: {
-  provider: "claude" | "codex";
+  provider: "codex";
   detail: string;
 }): TerminalExit {
   const detail = args.detail.trim();

@@ -513,7 +513,7 @@ type FinalizeKindInput =
   | {
       readonly kind: "credential";
       readonly issue: IssueRef;
-      readonly provider: "claude" | "codex";
+      readonly provider: "codex";
       readonly detail: string;
     }
   // Silent-noop under the retry cap: discard the branch + worktree so the

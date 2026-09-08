@@ -434,7 +434,7 @@ export async function runResolveLoop(
       throw new AgentQuotaError("claude", run.rateLimit);
     }
     if (run.verdict === "credential") {
-      throw new AgentCredentialError("codex", run.detail ?? "credential refresh failed");
+      throw new AgentCredentialError(run.detail ?? "credential refresh failed");
     }
 
     // One journal entry per attempt, filed once the loop knows what it made of

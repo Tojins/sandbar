@@ -148,15 +148,9 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
   it("keeps credential as the provider's highest-priority closure cause", () => {
     const state = createRunProviderState();
-    state.close("codex", {
-      cause: "quota",
-      measurement: { status: "rejected", window: "five_hour" },
-    });
-    state.close("codex", { cause: "credential", detail: "refresh refused" });
-    state.close("codex", {
-      cause: "quota",
-      measurement: { status: "rejected", window: "seven_day" },
-    });
+    state.closeQuota("codex", { status: "rejected", window: "five_hour" });
+    state.closeCredential("refresh refused");
+    state.closeQuota("codex", { status: "rejected", window: "seven_day" });
     expect(state.get("codex")).toEqual({
       cause: "credential",
       detail: "refresh refused",
@@ -322,6 +316,33 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
   });
 
+  it("closes a refused UI-check credential after one invocation", async () => {
+    const events: EventInput[] = [];
+    const state = createRunProviderState();
+    const detail = "Your access token could not be refreshed. Please log out and sign in again.";
+    const codexAuthMount = {
+      hostPath: "/tmp/run/codex-auth.json",
+      sandboxPath: "/home/agent/.codex/auth.json",
+    };
+    seams.sandboxRun.mockRejectedValueOnce(new AgentCredentialError(detail));
+
+    await expect(runInnerLoop(issue("134"), {
+      config: { ...config("claude", true, "codex"), codexAuthMount },
+      hooks: {}, copyToWorktree: [], providerState: state,
+      onEvent: (event) => events.push(event),
+    })).resolves.toEqual({
+      type: "CREDENTIAL", provider: "codex", detail, specGaps: [],
+    });
+
+    expect(seams.sandboxRun).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event.kind === "ui-check")).toEqual([{
+      kind: "ui-check", issue: 134, title: "Issue 134", invocation: 1,
+      provider: "codex", model: "model", effort: null,
+      durationMs: expect.any(Number), result: "credential",
+    }]);
+    expect(state.get("codex")).toEqual({ cause: "credential", detail });
+  });
+
   it("logs peak context for successful and failed reviewer invocations", async () => {
     const events: EventInput[] = [];
     const reviewerFailure = new Error("reviewer disconnected");
@@ -452,7 +473,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       hostPath: "/tmp/run/codex-auth.json",
       sandboxPath: "/home/agent/.codex/auth.json",
     };
-    seams.sandboxRun.mockRejectedValueOnce(new AgentCredentialError("codex", detail));
+    seams.sandboxRun.mockRejectedValueOnce(new AgentCredentialError(detail));
 
     await expect(runInnerLoop(issue("134"), {
       config: { ...config("codex"), codexAuthMount },
@@ -525,6 +546,47 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       specGaps: [],
     });
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes a refused reviewer credential without a harness retry", async () => {
+    const events: EventInput[] = [];
+    const state = createRunProviderState();
+    const detail = "Your access token could not be refreshed. Please log out and sign in again.";
+    const codexAuthMount = {
+      hostPath: "/tmp/run/codex-auth.json",
+      sandboxPath: "/home/agent/.codex/auth.json",
+    };
+    seams.sandboxRun
+      .mockResolvedValueOnce({
+        stdout: "<promise>COMPLETE</promise>",
+        headBefore: "base-sha",
+        headAfter: "implemented-sha",
+        signalMs: 1,
+        maxGapMs: 1,
+        toolCalls: 0,
+        commits: [{ sha: "implemented-sha" }],
+      })
+      .mockRejectedValueOnce(new AgentCredentialError(detail));
+
+    await expect(runInnerLoop(issue("136"), {
+      config: {
+        ...config("claude"),
+        reviewerQualityAgent: "codex",
+        codexAuthMount,
+      },
+      hooks: {}, copyToWorktree: [], providerState: state,
+      onEvent: (event) => events.push(event),
+    })).resolves.toEqual({
+      type: "CREDENTIAL", provider: "codex", detail, specGaps: [],
+    });
+
+    expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
+    expect(events.filter((event) => event.kind === "review-pass")).toEqual([{
+      kind: "review-pass", issue: 136, title: "Issue 136", attempt: 1, round: 1,
+      pass: "quality", invocation: 1, provider: "codex", model: "model",
+      effort: null, result: "credential", durationMs: expect.any(Number),
+    }]);
+    expect(state.get("codex")).toEqual({ cause: "credential", detail });
   });
 
   it("preserves reviewer writes even when that invocation closes quota", async () => {

@@ -23,11 +23,8 @@ const seams = vi.hoisted(() => ({
     onStatus: ReturnType<typeof vi.fn>;
   }>,
   prepareCodexAuth: vi.fn(async () => ({
-    action: "seeded" as const,
-    mount: {
-      hostPath: "/tmp/sandbar-run-quota-test/codex-auth.json",
-      sandboxPath: "/home/agent/.codex/auth.json",
-    },
+    hostPath: "/tmp/sandbar-run-quota-test/codex-auth.json",
+    sandboxPath: "/home/agent/.codex/auth.json",
   })),
 }));
 
@@ -644,10 +641,15 @@ describe("run quota orchestration (#109)", () => {
     }));
   });
 
-  it("prepares and threads one shared auth mount while withholding the JSON env value", async () => {
+  it("forwards CODEX_HOME and threads one shared auth mount without the JSON env value", async () => {
     const done = issue("1");
     const refused = issue("134");
     const configuredJson = JSON.stringify({ last_refresh: "2026-09-08T08:00:57Z" });
+    const codexHome = "/var/lib/sandbar-codex";
+    seams.prepareCodexAuth.mockResolvedValueOnce({
+      hostPath: "/tmp/sandbar-run-quota-test/codex-auth.json",
+      sandboxPath: `${codexHome}/auth.json`,
+    });
     seams.plan.mockResolvedValue(resolution([done, refused]));
     seams.innerLoop.mockImplementation(async (candidate: ReturnType<typeof issue>) =>
       candidate.id === "1"
@@ -669,26 +671,27 @@ describe("run quota orchestration (#109)", () => {
       implementerModelId: "gpt-5.6-sol",
       mergerAgent: "codex",
       mergerModelId: "gpt-5.6-sol",
-      env: { ...config.env, CODEX_AUTH_JSON: configuredJson },
+      env: { ...config.env, CODEX_AUTH_JSON: configuredJson, CODEX_HOME: codexHome },
     })).rejects.toThrow("EXIT:4");
 
     expect(seams.prepareCodexAuth).toHaveBeenCalledWith({
       stateDir: "/tmp/sandbar-run-quota-test",
       configuredJson,
+      codexHome,
     });
     expect(seams.innerLoop.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
       config: expect.objectContaining({
         codexAuthMount: {
           hostPath: "/tmp/sandbar-run-quota-test/codex-auth.json",
-          sandboxPath: "/home/agent/.codex/auth.json",
+          sandboxPath: `${codexHome}/auth.json`,
         },
-        env: { GH_TOKEN: "token" },
+        env: { GH_TOKEN: "token", CODEX_HOME: codexHome },
       }),
     }));
     expect(vi.mocked(realAdapter)).toHaveBeenCalledWith(expect.objectContaining({
       codexAuthMount: {
         hostPath: "/tmp/sandbar-run-quota-test/codex-auth.json",
-        sandboxPath: "/home/agent/.codex/auth.json",
+        sandboxPath: `${codexHome}/auth.json`,
       },
     }));
   });
@@ -728,12 +731,12 @@ describe("run quota orchestration (#109)", () => {
       .slice(0, options.k)));
     seams.innerLoop.mockImplementation(async (
       candidate: ReturnType<typeof issue>,
-      options: { providerState: { close(provider: "claude", closure: object): void } },
+      options: { providerState: { closeQuota(provider: "claude", measurement: object): void } },
     ) => {
       if (candidate.id === "1") {
-        options.providerState.close("claude", { cause: "quota", measurement: {
+        options.providerState.closeQuota("claude", {
           status: "rejected", window: "five_hour", resetsAt: 42,
-        } });
+        });
       }
       return {
         type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
@@ -786,11 +789,11 @@ describe("run quota orchestration (#109)", () => {
     });
     seams.innerLoop.mockImplementation(async (
       _candidate: ReturnType<typeof issue>,
-      options: { providerState: { close(provider: "claude", closure: object): void } },
+      options: { providerState: { closeQuota(provider: "claude", measurement: object): void } },
     ) => {
-      options.providerState.close("claude", { cause: "quota", measurement: {
+      options.providerState.closeQuota("claude", {
         status: "rejected", window: "five_hour", resetsAt: 42,
-      } });
+      });
       return {
         type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
         specGaps: [],
@@ -882,7 +885,7 @@ describe("run quota orchestration (#109)", () => {
     const detail = "Your access token could not be refreshed. Please log out and sign in again.";
     seams.plan.mockResolvedValue(resolution([done]));
     seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "abc" }] });
-    const credential = new AgentCredentialError("codex", detail);
+    const credential = new AgentCredentialError(detail);
     seams.merger.mockRejectedValue(
       new MergerError("resolve failed", undefined, { cause: credential }),
     );
@@ -1266,11 +1269,11 @@ describe("run quota orchestration (#109)", () => {
     seams.plan.mockResolvedValue(resolution([issue("1")]));
     seams.innerLoop.mockImplementation(async (
       _candidate: ReturnType<typeof issue>,
-      options: { providerState: { close(provider: "claude", closure: object): void } },
+      options: { providerState: { closeQuota(provider: "claude", measurement: object): void } },
     ) => {
-      options.providerState.close("claude", { cause: "quota", measurement: {
+      options.providerState.closeQuota("claude", {
         status: "rejected", window: "seven_day", resetsAt: 84,
-      } });
+      });
       throw new Error("sandbox died after the provider closed");
     });
     const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
@@ -1283,6 +1286,36 @@ describe("run quota orchestration (#109)", () => {
     expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
       tag: "quota",
       reason: "claude seven_day quota window closed; resets at 1970-01-01T00:01:24.000Z",
+    }));
+    expect(eventsOf("exit").some((event) => event.tag === "halted")).toBe(false);
+  });
+
+  it("exits credential from shared provider state when the closing issue returned no terminal", async () => {
+    const detail = "Your access token could not be refreshed. Please log out and sign in again.";
+    seams.plan.mockResolvedValue(resolution([issue("134")]));
+    seams.innerLoop.mockImplementation(async (
+      _candidate: ReturnType<typeof issue>,
+      options: { providerState: { closeCredential(detail: string): void } },
+    ) => {
+      options.providerState.closeCredential(detail);
+      throw new Error("sandbox died after the provider closed");
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({
+      ...config,
+      maxParallelIssues: 1,
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+      env: { ...config.env, OPENAI_API_KEY: "openai" },
+    })).rejects.toThrow("EXIT:4");
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(seams.innerLoop).toHaveBeenCalledOnce();
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
+      tag: "credential",
+      reason: `codex refused its credential: ${detail} Log in again on the host and restart.`,
     }));
     expect(eventsOf("exit").some((event) => event.tag === "halted")).toBe(false);
   });
