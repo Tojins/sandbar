@@ -1,0 +1,32 @@
+# Installed by deploy/ansible (role sandbar). Edit the template there, not
+# this file. The template uses plain variable placeholders and nothing else
+# of Jinja, so src/deploy-unit.test.ts renders it without an engine.
+[Unit]
+Description=sandbar daemon in {{ sandbar_checkout }}
+# The gate stack's runner reaches this host's podman through the user socket
+# (#48); ordered after it so the first preflight cannot race the socket.
+Requires=podman.socket
+After=podman.socket
+
+[Service]
+Type=simple
+WorkingDirectory={{ sandbar_checkout }}
+# The host preflight's `gh auth status` and the `git pull` below read GH_TOKEN
+# from the process environment; the config reads the same file itself.
+EnvironmentFile={{ sandbar_checkout }}/sandbar.env
+# Nothing else refreshes the checkout since #66: every start runs the config
+# and the driver that origin carries at that moment.
+ExecStartPre=/usr/bin/git pull --ff-only
+ExecStartPre=/usr/bin/npm ci --no-audit
+ExecStart={{ sandbar_launch_command }}
+# Exits 2 (stuck) and 4 (quota) are deliberate stops (#133); a human reads
+# why and restarts over SSH. No retry loop, by decision.
+Restart=no
+# A stop is SIGTERM to the launcher alone, which is sandbar's ordinary cleanup
+# (#35): containers and pods are torn down before the process exits. Only
+# then does systemd SIGKILL whatever is left.
+KillMode=mixed
+TimeoutStopSec={{ sandbar_stop_timeout_sec }}
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,67 @@
+---
+- name: Install what the apt repositories below need
+  ansible.builtin.apt:
+    name:
+      - acl
+      - ca-certificates
+      - curl
+      - python3-debian
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Add the NodeSource repository
+  ansible.builtin.deb822_repository:
+    name: nodesource
+    types: deb
+    uris: "https://deb.nodesource.com/node_{{ sandbar_node_major }}.x"
+    suites: nodistro
+    components: main
+    signed_by: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+    state: present
+  notify: Update apt cache
+
+- name: Add the GitHub CLI repository
+  ansible.builtin.deb822_repository:
+    name: github-cli
+    types: deb
+    uris: https://cli.github.com/packages
+    suites: stable
+    components: main
+    architectures: "{{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
+    signed_by: https://cli.github.com/packages/githubcli-archive-keyring.gpg
+    state: present
+  notify: Update apt cache
+
+- name: Refresh the package index before installing from new repositories
+  ansible.builtin.meta: flush_handlers
+
+- name: Install rootless podman, netavark, git, gh, Node and unattended-upgrades
+  ansible.builtin.apt:
+    name:
+      - podman
+      - netavark
+      - aardvark-dns
+      - uidmap
+      - slirp4netns
+      - passt
+      - fuse-overlayfs
+      - crun
+      - git
+      - gh
+      - nodejs
+      - unattended-upgrades
+      - openssh-server
+    state: present
+
+- name: Read the installed Node version
+  ansible.builtin.command: node --version
+  register: sandbar_node_version
+  changed_when: false
+
+- name: Refuse a Node major other than {{ sandbar_node_major }}
+  ansible.builtin.assert:
+    that: sandbar_node_version.stdout is match('^v' ~ sandbar_node_major ~ '\.')
+    fail_msg: >-
+      `node --version` answered {{ sandbar_node_version.stdout }}; the
+      NodeSource package did not win over the distribution's.

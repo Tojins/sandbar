@@ -261,6 +261,12 @@ a landing. It bounds persistent failures such as a red source branch or a
 misconfigured gate stack. By default the wake lock is released while idle;
 `keepAwakeWhileIdle: true` keeps it for the daemon's lifetime.
 
+To run the daemon unattended on a dedicated Linux box, `deploy/ansible/` is
+the host contract: an Ansible role that prepares Ubuntu 24.04 (rootless
+podman, a lingering service user, swap, key-only SSH) and a systemd user unit
+that pulls and installs before each launch and never restarts on its own.
+[`deploy/ansible/README.md`](deploy/ansible/README.md) has the by-hand steps.
+
 ### The two inner-loop budgets
 
 `maxQualityRounds` (default 4) bounds consecutive attempts that do not end in

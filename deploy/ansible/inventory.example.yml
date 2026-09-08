@@ -1,0 +1,25 @@
+---
+# Copy to inventory.yml (gitignored in a consumer repo — it names hosts and
+# keys, not secrets) and fill in. Every `sandbar_*` variable is documented in
+# roles/sandbar/defaults/main.yml.
+all:
+  hosts:
+    sandbar-box:
+      ansible_host: 203.0.113.10
+      ansible_user: root
+  vars:
+    # The consumer checkout the daemon runs in, cloned by hand (README).
+    sandbar_checkout: /home/sandbar/outdoor
+    # Author identity for the commits the agents and the merger make.
+    sandbar_git_name: sandbar-bot
+    sandbar_git_email: sandbar-bot@example.invalid
+    # Every key that may reach the box, for root and the service user alike.
+    # Exclusive: a key not listed here is REMOVED.
+    sandbar_operator_ssh_keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... operator@laptop"
+    # Credentials placed by hand as the service user, mode 0600. The role
+    # stops until every one exists. Add the codex login only when a role in
+    # the consumer config routes to codex.
+    sandbar_secret_files:
+      - path: /home/sandbar/outdoor/sandbar.env
+      - path: /home/sandbar/.codex/auth.json

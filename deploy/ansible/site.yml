@@ -1,0 +1,9 @@
+---
+# Prepare one or more Linux hosts to run the sandbar daemon unattended (#140).
+# Run from the operator's machine; README.md beside this file is the host
+# contract and the by-hand steps this playbook deliberately does not take.
+- name: Prepare a host for the sandbar daemon
+  hosts: all
+  become: true
+  roles:
+    - role: sandbar

@@ -1,0 +1,59 @@
+---
+# Every knob of the sandbar host role. The inventory MUST set
+# `sandbar_checkout`, `sandbar_git_email` and `sandbar_operator_ssh_keys`;
+# the role refuses to run without them.
+
+# The dedicated service user. The checkout, podman storage, the `.sandbar`
+# workdir and every credential live in its home; nothing sandbar does runs as
+# any other account.
+sandbar_user: sandbar
+sandbar_home: "/home/{{ sandbar_user }}"
+
+# The consumer checkout the unit runs in — the repo whose `sandbar.config.mjs`
+# is the run's config. Cloned BY HAND with the bot's credentials, never by
+# this role: the clone is the first step that needs a secret.
+sandbar_checkout: ""
+
+# The command the unit starts. Whatever the consumer's own launch is; the
+# role's contract is only that it runs sandbar exactly once and exits with
+# its status.
+sandbar_launch_command: /usr/bin/npm run sandbar
+
+# The user unit's name; `systemctl --user <verb> sandbar` in the README.
+sandbar_service_name: sandbar
+
+# How long a `stop` waits for sandbar's own cleanup (#35) — containers, pods
+# and the wake lock — before systemd SIGKILLs what is left.
+sandbar_stop_timeout_sec: 900
+
+# The git identity the implementer sandbox copies from the checkout's host
+# config and the merger's commits carry.
+sandbar_git_name: "{{ sandbar_user }}"
+sandbar_git_email: ""
+
+# The ONLY public keys allowed to reach the box, for root and the service user.
+# Exclusive by decision: whoever holds the box holds the credentials.
+sandbar_operator_ssh_keys: []
+
+# Node major, from NodeSource. The consumer's images pin theirs to the host's
+# (the `Containerfile` header says why), so this is a shared decision.
+sandbar_node_major: 24
+
+# Swap. Hetzner images ship without it, sandbar applies no memory limits, and
+# an overlap of two builds must degrade to slowness rather than an OOM kill of
+# an arbitrary victim. 0 disables the swapfile tasks.
+sandbar_swap_size_mb: 4096
+
+# Subordinate uid/gid range for rootless podman. Must not overlap another
+# user's range in /etc/subuid; 200000 clears the 100000 range Ubuntu hands
+# the first interactive user.
+sandbar_subid_start: 200000
+sandbar_subid_count: 65536
+
+# Credentials placed by hand as the service user (README, "By hand"). The
+# role stats each one and stops unless it exists, is owned by the service user
+# and has `sandbar_secret_mode`. A consumer routing a role to codex adds
+# `{{ sandbar_home }}/.codex/auth.json`.
+sandbar_secret_files:
+  - path: "{{ sandbar_checkout }}/sandbar.env"
+sandbar_secret_mode: "0600"

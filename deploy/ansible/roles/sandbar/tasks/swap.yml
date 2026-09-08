@@ -1,0 +1,40 @@
+---
+- name: Allocate the swapfile
+  ansible.builtin.command: fallocate -l {{ sandbar_swap_size_mb }}M /swapfile
+  args:
+    creates: /swapfile
+  register: sandbar_swapfile
+  when: sandbar_swap_size_mb > 0
+
+- name: Restrict the swapfile to root
+  ansible.builtin.file:
+    path: /swapfile
+    owner: root
+    group: root
+    mode: "0600"
+  when: sandbar_swap_size_mb > 0
+
+- name: Format the swapfile
+  ansible.builtin.command: mkswap /swapfile
+  when: sandbar_swap_size_mb > 0 and sandbar_swapfile is changed
+  changed_when: true
+
+- name: Mount the swapfile at boot
+  ansible.posix.mount:
+    src: /swapfile
+    path: none
+    fstype: swap
+    opts: sw
+    state: present
+  when: sandbar_swap_size_mb > 0
+
+- name: Read the active swap devices
+  ansible.builtin.command: swapon --show=NAME --noheadings
+  register: sandbar_swapon
+  changed_when: false
+  when: sandbar_swap_size_mb > 0
+
+- name: Activate the swapfile now
+  ansible.builtin.command: swapon /swapfile
+  when: sandbar_swap_size_mb > 0 and '/swapfile' not in sandbar_swapon.stdout_lines
+  changed_when: true

@@ -1,0 +1,21 @@
+---
+- name: Apply security upgrades unattended
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+    owner: root
+    group: root
+    mode: "0644"
+
+# A reboot mid-run is the one thing the box must never do on its own: it
+# would kill every sandbox and landing in flight. Restarts are a human's.
+- name: Never reboot for an upgrade
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52sandbar-no-reboot
+    content: |
+      Unattended-Upgrade::Automatic-Reboot "false";
+    owner: root
+    group: root
+    mode: "0644"

@@ -1,0 +1,32 @@
+---
+- name: Create the service user's unit directory
+  ansible.builtin.file:
+    path: "{{ sandbar_home }}/.config/systemd/user"
+    state: directory
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0755"
+
+- name: Install the daemon unit
+  ansible.builtin.template:
+    src: sandbar.service.j2
+    dest: "{{ sandbar_home }}/.config/systemd/user/{{ sandbar_service_name }}.service"
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0644"
+  notify: Say a changed unit awaits a restart by hand
+
+# Enabled so a provider reboot brings the daemon back; started and restarted
+# by a human over SSH (README, "Operating it"). A changed unit is therefore
+# NOT applied to a running daemon here.
+- name: Enable the daemon unit at boot
+  ansible.builtin.systemd_service:
+    name: "{{ sandbar_service_name }}.service"
+    scope: user
+    enabled: true
+    daemon_reload: true
+  become: true
+  become_user: "{{ sandbar_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_result.uid }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ sandbar_user_result.uid }}/bus"

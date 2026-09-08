@@ -1,0 +1,63 @@
+---
+- name: Create the service user
+  ansible.builtin.user:
+    name: "{{ sandbar_user }}"
+    home: "{{ sandbar_home }}"
+    shell: /bin/bash
+    create_home: true
+    state: present
+  register: sandbar_user_result
+
+- name: Give the service user subordinate uid and gid ranges
+  ansible.builtin.lineinfile:
+    path: "{{ item }}"
+    regexp: "^{{ sandbar_user }}:"
+    line: "{{ sandbar_user }}:{{ sandbar_subid_start }}:{{ sandbar_subid_count }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - /etc/subuid
+    - /etc/subgid
+  notify: Migrate podman storage
+
+# Linger keeps the user manager — and with it podman.socket and the daemon
+# unit — running with no login session, and starts them at boot.
+- name: Enable linger for the service user
+  ansible.builtin.command: loginctl enable-linger {{ sandbar_user }}
+  args:
+    creates: "/var/lib/systemd/linger/{{ sandbar_user }}"
+
+- name: Wait for the service user's manager to come up
+  ansible.builtin.wait_for:
+    path: "/run/user/{{ sandbar_user_result.uid }}/bus"
+    timeout: 30
+
+- name: Authorize the operator's keys for the service user, and no others
+  ansible.posix.authorized_key:
+    user: "{{ sandbar_user }}"
+    key: "{{ sandbar_operator_ssh_keys | join('\n') }}"
+    exclusive: true
+
+- name: Set the git identity the agents and the merger commit with
+  community.general.git_config:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    scope: global
+  loop:
+    - { name: user.name, value: "{{ sandbar_git_name }}" }
+    - { name: user.email, value: "{{ sandbar_git_email }}" }
+  become: true
+  become_user: "{{ sandbar_user }}"
+
+# `gh auth setup-git`, as configuration: GitHub HTTPS remotes authenticate
+# with GH_TOKEN from the unit's environment, so the by-hand clone and the
+# ExecStartPre `git pull` need no stored password.
+- name: Route git's GitHub credentials through gh
+  community.general.git_config:
+    name: credential.https://github.com.helper
+    value: "!/usr/bin/gh auth git-credential"
+    scope: global
+  become: true
+  become_user: "{{ sandbar_user }}"

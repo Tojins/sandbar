@@ -612,6 +612,14 @@ names the release that drives a run, and `npm run sandbar`
   either, so their own `origin/<sourceBranch>` would answer for the run before
   the landing. `preflight.ts`'s header owns both halves.
 
+- **Hosting the daemon is a contract this repo ships (#140).**
+  `deploy/ansible/README.md` is the host contract in prose — Ubuntu 24.04,
+  rootless podman, a lingering `sandbar` user with `podman.socket`, swap,
+  key-only SSH, no automatic reboot — and `roles/sandbar` provides it. The
+  systemd USER unit pulls and `npm ci`s before every launch (the only thing
+  that refreshes a checkout since #66), never restarts on its own, and is
+  table-tested as a rendered string in `src/deploy-unit.test.ts`. Secrets are
+  placed by hand and only asserted; no GitHub Actions deploy, no timers.
 - **One image, both roles** (agent sandbox and gate pod member): the driver's
   augmentation supplies the sandbox's uid-1000 `agent` user, while the base
   keeps default `USER` root — `checkWorktreeImageUids` refuses the run if that

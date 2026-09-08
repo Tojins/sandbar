@@ -1,0 +1,32 @@
+---
+- name: Authorize the operator's keys for root, and no others
+  ansible.posix.authorized_key:
+    user: root
+    key: "{{ sandbar_operator_ssh_keys | join('\n') }}"
+    exclusive: true
+
+# `sshd -t` needs the privilege-separation directory even when ssh has never
+# started; a fresh package install creates it only at first start.
+- name: Create sshd's privilege separation directory
+  ansible.builtin.file:
+    path: /run/sshd
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Sorts ahead of cloud-init's 50-cloud-init.conf; sshd takes the first value
+# of each directive.
+- name: Accept keys only
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-sandbar.conf
+    content: |
+      PubkeyAuthentication yes
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin prohibit-password
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Reload sshd

@@ -1,0 +1,82 @@
+---
+- name: Look for the unified cgroup hierarchy
+  ansible.builtin.stat:
+    path: /sys/fs/cgroup/cgroup.controllers
+  register: sandbar_cgroup2
+
+- name: Refuse a host without cgroup v2
+  ansible.builtin.assert:
+    that: sandbar_cgroup2.stat.exists
+    fail_msg: >-
+      /sys/fs/cgroup is not cgroup v2; rootless podman's resource accounting
+      and the pod lifecycle sandbar drives need it.
+
+# systemd delegates these to user managers by default on 24.04; written
+# anyway so a future default cannot silently take them back.
+- name: Create the user@.service drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/user@.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Delegate cpu, memory and pids controllers to user managers
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/user@.service.d/sandbar-delegate.conf
+    content: |
+      [Service]
+      Delegate=cpu memory pids
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Apply the drop-in before reading it back
+  ansible.builtin.meta: flush_handlers
+
+- name: Read what the service user's manager is delegated  # noqa: command-instead-of-module — the systemd module sets state, it cannot read a property
+  ansible.builtin.command: systemctl show "user@{{ sandbar_user_result.uid }}.service" --property=DelegateControllers --value
+  register: sandbar_delegated
+  changed_when: false
+
+- name: Refuse a host whose user managers lack memory or pids delegation
+  ansible.builtin.assert:
+    that:
+      - "'memory' in sandbar_delegated.stdout.split()"
+      - "'pids' in sandbar_delegated.stdout.split()"
+    fail_msg: >-
+      the running user manager delegates only '{{ sandbar_delegated.stdout }}'; rootless
+      podman needs memory and pids.
+
+- name: Create the containers.conf drop-in directory
+  ansible.builtin.file:
+    path: /etc/containers/containers.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Use netavark as the network backend
+  ansible.builtin.copy:
+    dest: /etc/containers/containers.conf.d/10-sandbar.conf
+    content: |
+      [network]
+      network_backend = "netavark"
+    owner: root
+    group: root
+    mode: "0644"
+
+# The gate stack's runner drives this host's podman through the user socket
+# (#48); preflight refuses a run whose socket path does not exist.
+- name: Enable the service user's podman socket
+  ansible.builtin.systemd_service:
+    name: podman.socket
+    scope: user
+    enabled: true
+    state: started
+  become: true
+  become_user: "{{ sandbar_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_result.uid }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ sandbar_user_result.uid }}/bus"

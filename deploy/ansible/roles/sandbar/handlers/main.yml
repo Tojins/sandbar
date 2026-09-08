@@ -1,0 +1,31 @@
+---
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+
+- name: Reload sshd
+  ansible.builtin.systemd_service:
+    name: ssh
+    state: reloaded
+
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# A subordinate-id change is applied to existing rootless storage by
+# `podman system migrate`; on a fresh box it only creates the storage.
+- name: Migrate podman storage
+  ansible.builtin.command: podman system migrate
+  become: true
+  become_user: "{{ sandbar_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_result.uid }}"
+  changed_when: true
+
+# The role never restarts a running daemon (README, "Operating it").
+- name: Say a changed unit awaits a restart by hand
+  ansible.builtin.debug:
+    msg: >-
+      {{ sandbar_service_name }}.service changed. A running daemon keeps the old
+      unit until a human runs `systemctl --user restart {{ sandbar_service_name }}`
+      as {{ sandbar_user }}; a stopped one starts with `systemctl --user start`.

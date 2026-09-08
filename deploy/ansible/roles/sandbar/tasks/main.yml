@@ -1,0 +1,45 @@
+---
+- name: Refuse to run without the variables the role cannot default
+  ansible.builtin.assert:
+    that:
+      - sandbar_checkout | length > 0
+      - sandbar_git_email | length > 0
+      - sandbar_operator_ssh_keys | length > 0
+    fail_msg: >-
+      Set sandbar_checkout, sandbar_git_email and sandbar_operator_ssh_keys in
+      the inventory (inventory.example.yml). The key list is exclusive: a key
+      not listed is removed from root and the service user.
+
+- name: Refuse a host that is not Ubuntu 24.04
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_version'] == '24.04'
+    fail_msg: >-
+      This role targets Ubuntu 24.04: its podman 4.9 matches the podman-remote
+      client the gate images bake, and Debian 12's 4.3 is OLDER than that
+      client, which is the one direction skew bites.
+
+- name: Install packages
+  ansible.builtin.import_tasks: packages.yml
+
+- name: Create the service user
+  ansible.builtin.import_tasks: user.yml
+
+- name: Configure rootless podman
+  ansible.builtin.import_tasks: podman.yml
+
+- name: Provide swap
+  ansible.builtin.import_tasks: swap.yml
+
+- name: Restrict SSH
+  ansible.builtin.import_tasks: ssh.yml
+
+- name: Configure unattended upgrades
+  ansible.builtin.import_tasks: upgrades.yml
+
+- name: Check the credentials placed by hand
+  ansible.builtin.import_tasks: secrets.yml
+
+- name: Install the daemon unit
+  ansible.builtin.import_tasks: service.yml
