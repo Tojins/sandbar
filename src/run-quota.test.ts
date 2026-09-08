@@ -281,6 +281,9 @@ describe("run quota orchestration (#109)", () => {
       },
     );
     seams.plan.mockResolvedValue(resolution([]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
 
     await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
     expect(eventsOf("wake-lock")).toEqual([
@@ -304,6 +307,9 @@ describe("run quota orchestration (#109)", () => {
       return event;
     });
     seams.plan.mockResolvedValue(resolution([]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
 
     await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
     expect(eventsOf("wake-lock")).toEqual([
@@ -329,8 +335,10 @@ describe("run quota orchestration (#109)", () => {
     expect(exit).toHaveBeenCalledWith(4);
     expect(fetchOriginRefs).toHaveBeenCalledTimes(2);
     expect(seams.innerLoop).toHaveBeenCalledOnce();
-    expect(eventsOf("recompute").map((event) => event.trigger))
+    expect(eventsOf("recompute").slice(0, 2).map((event) => event.trigger))
       .toEqual(["launch", "poll"]);
+    expect(eventsOf("recompute").filter((event) => event.trigger === "poll"))
+      .toHaveLength(1);
     expect(eventsOf("idle")).toHaveLength(1);
     expect(vi.mocked(console.log).mock.calls).toEqual([["http://127.0.0.1:7331/"]]);
     expect(startKeepawake).toHaveBeenCalledTimes(2);
@@ -391,8 +399,10 @@ describe("run quota orchestration (#109)", () => {
         .toBeLessThan(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[0]!);
       expect(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[1])
         .toBeLessThan(seams.plan.mock.invocationCallOrder[1]!);
-      expect(eventsOf("recompute").map((event) => event.trigger))
+      expect(eventsOf("recompute").slice(0, 2).map((event) => event.trigger))
         .toEqual(["launch", "poll"]);
+      expect(eventsOf("recompute").filter((event) => event.trigger === "poll"))
+        .toHaveLength(1);
       expect(seams.innerLoop).toHaveBeenCalledOnce();
       expect(eventsOf("complaint").filter((event) => event.message === failureLine))
         .toHaveLength(1);
