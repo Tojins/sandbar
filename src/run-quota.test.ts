@@ -176,6 +176,17 @@ const deferred = <T>() => {
   return { promise, resolve };
 };
 
+const flushMicrotasksUntil = async (
+  predicate: () => boolean,
+  description: string,
+): Promise<void> => {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error(`Timed out waiting for ${description}`);
+};
+
 describe("run quota orchestration (#109)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -251,6 +262,8 @@ describe("run quota orchestration (#109)", () => {
   });
 
   it("reports a failed poll refresh and retries instead of halting", async () => {
+    vi.useFakeTimers();
+    const pollIntervalMs = 1_000;
     const arrived = issue("135");
     seams.plan
       .mockResolvedValueOnce(resolution([]))
@@ -267,29 +280,51 @@ describe("run quota orchestration (#109)", () => {
     const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`EXIT:${code}`);
     }) as never);
-
-    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:4");
-    expect(exit).toHaveBeenCalledWith(4);
-    expect(fetchOriginRefs).toHaveBeenCalledTimes(2);
-    expect(seams.plan.mock.invocationCallOrder[0])
-      .toBeLessThan(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[0]!);
-    expect(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[0])
-      .toBeLessThan(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[1]!);
-    expect(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[1])
-      .toBeLessThan(seams.plan.mock.invocationCallOrder[1]!);
-    expect(seams.writePlan.mock.calls.slice(0, 2).map((call) => call[0]))
-      .toEqual(["launch", "poll"]);
-    expect(seams.writePlan.mock.calls.filter((call) => call[0] === "poll"))
-      .toHaveLength(1);
-    expect(seams.innerLoop).toHaveBeenCalledOnce();
     const failureLine =
-      "Poll refresh failed; retrying in 1ms: " +
+      `Poll refresh failed; retrying in ${pollIntervalMs}ms: ` +
       "Fetching origin refs failed: network unavailable";
-    expect(seams.logLines.filter((line) => line === failureLine)).toHaveLength(1);
-    expect(vi.mocked(console.log).mock.calls.flat().filter((line) =>
-      String(line) === failureLine)).toHaveLength(1);
-    expect(vi.mocked(console.error).mock.calls.flat().join("\n"))
-      .not.toContain("SANDBAR HALTED");
+    const result = run({ ...config, pollIntervalMs }).catch((error: unknown) => error);
+
+    try {
+      await flushMicrotasksUntil(
+        () => vi.getTimerCount() === 1,
+        "the initial idle poll timer",
+      );
+      await vi.advanceTimersByTimeAsync(pollIntervalMs);
+      await flushMicrotasksUntil(
+        () => seams.logLines.includes(failureLine),
+        "the failed poll refresh to be reported",
+      );
+      expect(fetchOriginRefs).toHaveBeenCalledOnce();
+
+      await flushMicrotasksUntil(
+        () => vi.getTimerCount() === 1,
+        "the failed refresh to re-arm the poll timer",
+      );
+      await vi.advanceTimersByTimeAsync(pollIntervalMs - 1);
+      expect(fetchOriginRefs).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(await result).toEqual(expect.objectContaining({ message: "EXIT:4" }));
+      expect(exit).toHaveBeenCalledWith(4);
+      expect(fetchOriginRefs).toHaveBeenCalledTimes(2);
+      expect(seams.plan.mock.invocationCallOrder[0])
+        .toBeLessThan(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[0]!);
+      expect(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[1])
+        .toBeLessThan(seams.plan.mock.invocationCallOrder[1]!);
+      expect(seams.writePlan.mock.calls.slice(0, 2).map((call) => call[0]))
+        .toEqual(["launch", "poll"]);
+      expect(seams.writePlan.mock.calls.filter((call) => call[0] === "poll"))
+        .toHaveLength(1);
+      expect(seams.innerLoop).toHaveBeenCalledOnce();
+      expect(seams.logLines.filter((line) => line === failureLine)).toHaveLength(1);
+      expect(vi.mocked(console.log).mock.calls.flat().filter((line) =>
+        String(line) === failureLine)).toHaveLength(1);
+      expect(vi.mocked(console.error).mock.calls.flat().join("\n"))
+        .not.toContain("SANDBAR HALTED");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("releases a replacement wake lock when admitted work returns to idle", async () => {
