@@ -207,7 +207,10 @@ outcomes.
   of that removal, for the sandbox's `close()` and finalize alike: publish the
   branch and pin an off-branch HEAD in the cache first, delete only once the
   cache holds both, otherwise keep the clone and say why. Nothing decides
-  preservation by terminal kind. All resource
+  preservation by terminal kind. The origin lease is the one timing exception:
+  sandbox close silently defers reclamation until run.ts renews at the freed-slot
+  barrier, then finalization calls the same helper; loss leaves the clone in
+  place without manufacturing a human-inspection complaint. All resource
   names carry `w`+8-hex of the *realpath'd* locked workdir; the orphan sweep
   only ever touches its own scope, and unattributable debris is reported, never
   removed. `src/containers.ts` and `src/naming.ts` headers. Image **tags** are
@@ -325,6 +328,8 @@ outcomes.
   before preflight's ref work, renewed by one serialized heartbeat plus every
   scheduler wake and remote-write barrier, and released by exact-sha CAS
   (#139). Loss halts before admission or landing and preserves issue clones.
+  If another terminal already owns cleanup, loss rejects the pending write
+  barrier without adding a second complaint or exit event.
   `src/origin-lock.ts` owns the argument and Git contract.
 - **One cleanup registry owns signals and the exit (#35).** No module but
   `src/cleanup.ts` may trap a signal or exit on one. Anything created in a
