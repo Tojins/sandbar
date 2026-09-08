@@ -633,6 +633,7 @@ describe("run quota orchestration (#109)", () => {
     seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "work" }] });
     seams.originRenew
       .mockResolvedValueOnce({ kind: "renewed", claim: seams.originClaim })
+      .mockResolvedValueOnce({ kind: "renewed", claim: seams.originClaim })
       .mockResolvedValueOnce(loss);
     const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`EXIT:${code}`);
@@ -682,7 +683,7 @@ describe("run quota orchestration (#109)", () => {
 
       await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
         .rejects.toThrow("EXIT:1");
-      expect(seams.originRenew.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(seams.originRenew.mock.calls.length).toBeGreaterThanOrEqual(3);
       if (settlement === "fulfilled") {
         expect(seams.reclaimIssueClone).toHaveBeenCalledWith(
           "sandbar/issue-139-test",
@@ -694,7 +695,7 @@ describe("run quota orchestration (#109)", () => {
           "sandbar/issue-139-test",
         );
       }
-      expect(seams.originRenew.mock.invocationCallOrder[1])
+      expect(seams.originRenew.mock.invocationCallOrder[2])
         .toBeLessThan(seams.reclaimIssueClone.mock.invocationCallOrder[0]!);
     },
   );

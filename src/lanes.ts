@@ -215,12 +215,14 @@ export async function postLaneOverrideNotices(
   repo: RepoRef,
   overrides: readonly LaneOverride[],
   log: (line: string) => void | Promise<void> = () => {},
+  beforeOriginWrite?: () => Promise<void>,
 ): Promise<readonly number[]> {
   const posted: number[] = [];
   for (const override of overrides) {
     if (!needsLaneOverrideNotice(await existingComments(repo, override.issue))) {
       continue;
     }
+    await beforeOriginWrite?.();
     await exec("gh", [
       "issue",
       "comment",

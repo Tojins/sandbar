@@ -393,6 +393,7 @@ export function realAdapter(args: {
   // at another base — and post the ledger comment where the next scan will not
   // look for it.
   readonly sourceBranch: string;
+  readonly beforeOriginWrite?: () => Promise<void>;
 }): ChunkFollowUpAdapter {
   const { repo } = args;
   const slug = repoSlug(repo);
@@ -474,10 +475,12 @@ export function realAdapter(args: {
       return new Map(entries);
     },
     async requeueMember(issueNumber, comment) {
+      await args.beforeOriginWrite?.();
       await exec("gh", [
         "issue", "comment", String(issueNumber), "--repo", slug,
         "--body", comment,
       ]);
+      await args.beforeOriginWrite?.();
       await exec("gh", [
         "issue", "edit", String(issueNumber), "--repo", slug,
         "--add-label", READY_FOR_AGENT_LABEL,
@@ -498,6 +501,7 @@ export function realAdapter(args: {
       };
     },
     async postLedgerComment(prNumber, body) {
+      await args.beforeOriginWrite?.();
       await exec("gh", [
         "pr",
         "comment",

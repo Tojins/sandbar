@@ -1214,6 +1214,7 @@ export async function run(
     repo,
     repoDir: layout.repoDir,
     sourceBranch: config.sourceBranch,
+    beforeOriginWrite: renewOriginLease,
   });
 
   const innerLoopCfg = {
@@ -1722,6 +1723,7 @@ export async function run(
         repo,
         resolution.overrides,
         (line) => { laneNoticeLines.push(line); },
+        renewOriginLease,
       );
       const planDiagnostics = JSON.stringify({
         waiting: resolution.waiting,
@@ -1780,6 +1782,7 @@ export async function run(
         break;
       }
 
+      if (schedulerAction.kind === "admit") await renewOriginLease();
       const admission = schedulerAction.kind === "admit"
         ? pool.admit(resolution.plan)
         : [];
