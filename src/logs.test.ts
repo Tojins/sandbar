@@ -35,6 +35,20 @@ describe("raw transcript tree", () => {
       "--- stdout tail ---\nimplementer stdout\n" +
       "--- stderr tail ---\nimplementer stderr\n",
     );
+    await expect(issue.writeInvocation("attempt-2.log", {
+      agent: "replacement",
+      provider: "codex",
+      model: null,
+      end: "exit",
+      detail: null,
+      exitCode: 0,
+      durationMs: 1,
+      speech: "replacement",
+      stdout: "replacement",
+      stderr: "",
+    })).rejects.toMatchObject({ code: "EEXIST" });
+    expect(await readFile(join(issue.dir, "attempt-2.log"), "utf8"))
+      .toContain("implementer speech");
   });
 
   it("keeps merger and resolve transcripts as raw artefacts", async () => {

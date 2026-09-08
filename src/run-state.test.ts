@@ -169,6 +169,47 @@ describe("run event reducer", () => {
     ]);
   });
 
+  it("renders a historical parked ref with its recorded first-line cause", () => {
+    const events: RunEvent[] = [
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
+      }),
+      at(2, "2026-09-07T09:01:00Z", {
+        kind: "recompute", n: 1, trigger: "startup", admitted: [], active: [],
+        waiting: [], landRequests: [], deferredChunks: [],
+        candidates: [
+          { issue: 87, title: "Nightly job", branch: "sandbar/issue-87-job",
+            chunk: null, ready: false },
+        ],
+        refs: [{ issue: 87, branch: "sandbar/issue-87-job", tip: "abc" }],
+      }),
+    ];
+    const previous = {
+      issue: 87,
+      title: "Nightly job",
+      outcome: "HARD-ERROR",
+      reason: "provider cause\n(codex exited with code 1)",
+      attempts: 1,
+      rounds: 0,
+      ms: 10,
+      landed: "",
+      at: "2026-09-06T09:00:00Z",
+    };
+    const state = reduceRunEvents(events, {
+      now: new Date("2026-09-07T09:02:00Z"),
+      pidAlive: true,
+      recentFinished: [previous],
+    });
+
+    expect(state.waiting).toEqual([{
+      issue: 87,
+      title: "Nightly job",
+      why: "parked · HARD-ERROR · provider cause · before this run",
+      parked: true,
+    }]);
+  });
+
   it("distinguishes a crash from an orderly end", () => {
     const start = at(1, "2026-09-07T09:00:00Z", {
       kind: "run-start", schemaVersion: 1, driver: "sandbar", configPath: null,

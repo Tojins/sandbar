@@ -7,7 +7,8 @@
 // a byte otherwise leaves no evidence at all (#135). Structured run facts have
 // one write path, `events.ts`, and live in `events.jsonl`; adding an
 // orchestration/status writer here would recreate the two hand-paired records
-// #132 removed.
+// #132 removed. Invocation writes are create-only: a naming collision must
+// fail rather than erase the earlier invocation's evidence (#135).
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -108,6 +109,7 @@ async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLo
         `${header}\n--- speech ---\n${record.speech}\n` +
           `--- stdout tail ---\n${record.stdout}\n` +
           `--- stderr tail ---\n${record.stderr}\n`,
+        { flag: "wx" },
       );
     },
   };

@@ -2146,10 +2146,7 @@ const invokeAgent = async (
     let signalMs: number | undefined;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
-    let forcedEnd: {
-      readonly end: AgentInvocationRecord["end"];
-      readonly error: unknown;
-    } | undefined;
+    let forcedEnd = false;
     // Both timers stop waiting for the exec; this is how they also stop it
     // (#41). One controller per agent run, so the listener it installs on the
     // exec cannot outlive the run that made it.
@@ -2222,8 +2219,8 @@ const invokeAgent = async (
       end: AgentInvocationRecord["end"],
       error: unknown,
     ): void => {
-      if (settled || forcedEnd !== undefined) return;
-      forcedEnd = { end, error };
+      if (settled || forcedEnd) return;
+      forcedEnd = true;
       clearTimer();
       abort.abort();
       const detail = error instanceof Error ? error.message : String(error);
@@ -2325,7 +2322,7 @@ const invokeAgent = async (
         // The agent process has ended. Its idle/grace clock must not govern the
         // optional post-run evidence read below (#109).
         clearTimer();
-        if (forcedEnd !== undefined) {
+        if (forcedEnd) {
           // stopWith owns both the record and the rejection. The exec may
           // close first or much later depending on which descendants retain
           // its pipes; neither timing may duplicate the invocation record.
@@ -2424,7 +2421,7 @@ const invokeAgent = async (
         });
       }, async (err) => {
         clearTimer();
-        if (forcedEnd !== undefined) return;
+        if (forcedEnd) return;
         const detail = err instanceof Error ? err.message : String(err);
         await recordEnd("exec-error", detail, {
           stdout: stdoutTail.toString(),

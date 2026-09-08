@@ -62,6 +62,9 @@
 // which still parks. Reviewer history is recorded only after a green gate.
 // UI-check and reviewer invocations snapshot the tip and status; any mutation
 // parks the issue and preserves the clone rather than trusting that call.
+// Invocation filenames use one run-owned sequence across fresh HARD-ERROR
+// cycles: the state machine's attempt and UI-check counters restart with each
+// sandbox, but an earlier invocation record must never be overwritten (#135).
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -486,7 +489,9 @@ export type InnerLoopOptions = {
   // tree nobody remembers to look in. Absent, the sandbox stack still runs and
   // the logs go under the state directory's `logs/`.
   readonly sandboxLogBaseDir?: string;
-  readonly attemptLogger?: AttemptLogger;
+  // Every launched invocation must have a durable record before its result is
+  // classified (#135). The run owns this logger and always supplies it.
+  readonly attemptLogger: AttemptLogger;
   // Mandatory at this run-owned boundary: dropping it would make a terminal,
   // phase, or measurement silently disappear from the sole run record.
   readonly onEvent: (event: EventInput) => Promise<void> | void;
@@ -523,12 +528,11 @@ function eventUsage(
 }
 
 const invocationLog = (
-  logger: AttemptLogger | undefined,
+  logger: AttemptLogger,
   filename: string,
-): { readonly onInvocationEnd?: (record: AgentInvocationRecord) => Promise<void> } =>
-  logger === undefined
-    ? {}
-    : { onInvocationEnd: (record) => logger.writeInvocation(filename, record) };
+): { readonly onInvocationEnd: (record: AgentInvocationRecord) => Promise<void> } => ({
+  onInvocationEnd: (record) => logger.writeInvocation(filename, record),
+});
 
 export type AgentInvocationIdentity =
   | { readonly role: "implementer"; readonly attempt: number; readonly nudge: boolean }
@@ -551,12 +555,42 @@ export function agentInvocationFilename(identity: AgentInvocationIdentity): stri
   }
 }
 
+export type AgentInvocationSequence = {
+  filename(identity: AgentInvocationIdentity): string;
+};
+
+export function createAgentInvocationSequencer(): {
+  startCycle(): AgentInvocationSequence;
+} {
+  let nextAttempt = 1;
+  let nextUiCheck = 1;
+  return {
+    startCycle() {
+      const attemptOffset = nextAttempt - 1;
+      const uiCheckOffset = nextUiCheck - 1;
+      return {
+        filename(identity) {
+          if (identity.role === "ui-check") {
+            const invocation = uiCheckOffset + identity.invocation;
+            nextUiCheck = Math.max(nextUiCheck, invocation + 1);
+            return agentInvocationFilename({ ...identity, invocation });
+          }
+          const attempt = attemptOffset + identity.attempt;
+          nextAttempt = Math.max(nextAttempt, attempt + 1);
+          return agentInvocationFilename({ ...identity, attempt });
+        },
+      };
+    },
+  };
+}
+
 export async function runInnerLoop(
   issue: IssueRef,
   opts: InnerLoopOptions,
   runCycle: (
     issue: IssueRef,
     opts: InnerLoopOptions,
+    invocationSequence: AgentInvocationSequence,
   ) => Promise<SandboxCycleOutcome> = runSandboxCycle,
 ): Promise<Terminal> {
   let retriesUsed = 0;
@@ -572,8 +606,13 @@ export async function runInnerLoop(
       await opts.onEvent(event);
     },
   };
+  const invocationSequencer = createAgentInvocationSequencer();
   for (;;) {
-    const outcome = await runCycle(issue, cycleOptions);
+    const outcome = await runCycle(
+      issue,
+      cycleOptions,
+      invocationSequencer.startCycle(),
+    );
     specGaps.push(...outcome.specGaps);
     const decision = decideAfterTerminal(outcome.verdict, retriesUsed);
     if (decision.kind === "surface") {
@@ -667,6 +706,7 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
 async function runSandboxCycle(
   issue: IssueRef,
   opts: InnerLoopOptions,
+  invocationSequence: AgentInvocationSequence,
 ): Promise<SandboxCycleOutcome> {
   const { config } = opts;
   const branchImages = opts.branchImages;
@@ -989,6 +1029,7 @@ async function runSandboxCycle(
         specGaps,
         sandboxStatuses,
         state,
+        invocationSequence,
       });
       const r = step(state, event);
       state = r.state;
@@ -1163,6 +1204,7 @@ type ExecuteActionCtx = {
   // State before the action. Review aggregation applies the pure transition
   // once to record both independent budgets after the completed round.
   readonly state: LoopState;
+  readonly invocationSequence: AgentInvocationSequence;
 };
 
 async function executeAction(
@@ -1235,7 +1277,7 @@ export async function runUiCheck(
           }),
           prompt,
           completionSignal: [],
-          ...invocationLog(opts.attemptLogger, agentInvocationFilename({
+          ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
             role: "ui-check", invocation,
           })),
         }),
@@ -1390,7 +1432,7 @@ export async function runImplementer(
       }),
       prompt,
       completionSignal: PROMISE_COMPLETION_SIGNALS,
-      ...invocationLog(opts.attemptLogger, agentInvocationFilename({
+      ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
         role: "implementer", attempt: action.attempt, nudge: false,
       })),
     }));
@@ -1468,7 +1510,7 @@ export async function runImplementer(
       prompt: PROMISE_NUDGE_TPL,
       // Any of the three tags ends the wait, not just COMPLETE.
       completionSignal: PROMISE_COMPLETION_SIGNALS,
-      ...invocationLog(opts.attemptLogger, agentInvocationFilename({
+      ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
         role: "implementer", attempt: action.attempt, nudge: true,
       })),
     });
@@ -1843,7 +1885,7 @@ export async function runReviewer(
             completionSignal: [],
             ...invocationLog(
               opts.attemptLogger,
-              agentInvocationFilename({
+              ctx.invocationSequence.filename({
                 role: "reviewer", attempt: action.attempt, pass, invocation,
               }),
             ),
