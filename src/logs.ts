@@ -134,7 +134,7 @@ export type RunLogger = {
   readonly runDir: string;
   appendOrchestrator(line: string): Promise<void>;
   writePlan(
-    trigger: "launch" | "slot-freed" | "landing-finished" | "terminal-finalized",
+    trigger: "launch" | "slot-freed" | "landing-finished" | "terminal-finalized" | "poll",
     plan: unknown,
   ): Promise<void>;
   issue(issueId: string): Promise<IssueLogger>;

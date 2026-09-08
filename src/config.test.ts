@@ -15,7 +15,8 @@ import {
   DEFAULT_CONTEXT_MD_PATH,
   DEFAULT_MAX_QUALITY_ROUNDS,
   DEFAULT_MAX_REVIEW_ROUNDS,
-  DEFAULT_MAX_TOTAL_ISSUES,
+  DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_KEEP_AWAKE_WHILE_IDLE,
   DEFAULT_IMPLEMENTER_MODEL_ID,
   DEFAULT_UI_PROTOTYPE_CHECK,
   DEFAULT_REVIEWER_MODEL_ID,
@@ -143,11 +144,10 @@ describe("resolveConfig", () => {
     expect(r.env).toEqual({});
     expect(r.maxQualityRounds).toBe(DEFAULT_MAX_QUALITY_ROUNDS);
     expect(r.maxReviewRounds).toBe(DEFAULT_MAX_REVIEW_ROUNDS);
-    expect(r.maxTotalIssues).toBe(DEFAULT_MAX_TOTAL_ISSUES);
+    expect(r.pollIntervalMs).toBe(DEFAULT_POLL_INTERVAL_MS);
+    expect(r.keepAwakeWhileIdle).toBe(DEFAULT_KEEP_AWAKE_WHILE_IDLE);
     expect(r.copyToWorktree).toEqual([]);
     expect(r.labels).toEqual(DEFAULT_LABELS);
-    // Off by default (#65): only a host whose launcher loops on
-    // EXIT_CODE_RELAUNCH wants a landing cycle to end the process.
     expect(r.maxParallelIssues).toBe(3);
     // The auto lane (#57): the pre-lane behaviour, so a host that never sets
     // this — and this repo — is routed exactly as it was before lanes existed.
@@ -222,6 +222,24 @@ describe("resolveConfig", () => {
       );
     },
   );
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "refuses invalid pollIntervalMs %s (#133)",
+    (pollIntervalMs) => {
+      expect(() => resolveConfig({ ...minimal, pollIntervalMs })).toThrow(
+        /config\.pollIntervalMs.*positive integer/,
+      );
+    },
+  );
+
+  it("validates the idle wake-lock flag and refuses removed maxTotalIssues", () => {
+    expect(resolveConfig({ ...minimal, keepAwakeWhileIdle: true }).keepAwakeWhileIdle)
+      .toBe(true);
+    expect(() => resolveConfig({ ...minimal, keepAwakeWhileIdle: "yes" as never }))
+      .toThrow(/config\.keepAwakeWhileIdle must be a boolean/);
+    expect(() => resolveConfig({ ...minimal, maxTotalIssues: 3 } as RunConfig))
+      .toThrow(/config\.maxTotalIssues was removed/);
+  });
 
   // The comparison itself is `requires-sandbar.test.ts`'s, which drives both
   // versions directly. What is asserted HERE is only what wiring it into

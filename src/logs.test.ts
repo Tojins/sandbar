@@ -64,6 +64,7 @@ describe("startRunLogger", () => {
     await logger.writePlan("launch", plan);
     await logger.writePlan("slot-freed", [{ id: "49" }]);
     await logger.writePlan("landing-finished", []);
+    await logger.writePlan("poll", [{ id: "50" }]);
 
     const path = join(logger.runDir, "plans.jsonl");
     const body = await readFile(path, "utf8");
@@ -71,6 +72,7 @@ describe("startRunLogger", () => {
       { trigger: "launch", plan },
       { trigger: "slot-freed", plan: [{ id: "49" }] },
       { trigger: "landing-finished", plan: [] },
+      { trigger: "poll", plan: [{ id: "50" }] },
     ]);
     expect(body).toContain("\n");
   });

@@ -1,76 +1,18 @@
 #!/usr/bin/env node
-// The self-hosted launcher (#66, #39).
+// The self-hosted launcher (#66, #39, #133).
 //
-// `npm run sandbar` used to be one shell line: pull --ff-only, build, run, loop
-// on 75. Everything after the pull ran out of the operator's WORKING TREE —
-// `build` is `rm -rf dist && tsc` over `src/`, uncommitted edits included — so
-// the driver of an unattended series was whatever a human happened to have
-// saved, not a commit. On 2026-08-31 both halves of that fired at once: the
-// pull failed on one unpushed local commit and stopped a series (the cheap
-// form), while the same checkout held uncommitted edits to `gate-stack.ts` and
-// to `sandbar.config.mjs` that a successful pull would have promoted into the
-// driver and the gate stack (the expensive form, silent).
+// `sandbar.pin` names the installed release under `.sandbar/driver`; the stamp
+// avoids reinstalling an unchanged pin and a failed or bin-less install is
+// never stamped. The config still comes from the checkout and
+// `requiresSandbar` guards that version seam.
 //
-// So this repo now drives itself the way README documents for every consumer:
-// from an INSTALLED, PINNED release. `sandbar.pin` names a tag, `npm install`
-// puts it in `.sandbar/driver/`, and that is what runs. There is no pull to
-// fail and no working tree to inherit.
-//
-// WHAT STILL COMES FROM THE CHECKOUT, stated rather than glossed: the config
-// file, `sandbar.env` beside it, and this launcher. The config must — it
-// resolves against the process cwd and `sandbar.env` against its own
-// `import.meta.url` — so "the run is driven by a pinned commit" is precisely
-// true of the orchestrator and its prompts, and NOT of `gateStack`. The guard
-// for the seam that opens between them is `requiresSandbar`
-// (`requires-sandbar.ts`): a config newer than the driver is refused by name
-// instead of being read half-way. What a dirty config still buys an operator is
-// visible on the run's first line, which names the config's path and whether
-// its tree is dirty (#69).
-//
-// FOUR DECISIONS, so they are decisions and not drift:
-//
-//   - INSTALL LOCATION `.sandbar/driver/`, not a devDependency of this repo. A
-//     devDependency would be dragged into every issue worktree by
-//     `onWorktreeReady`'s `npm ci` and bind-mounted into every gate container,
-//     taxing every run with a dependency the judged code never imports. Under
-//     `.sandbar/` it is `node_modules`-shaped: gitignored, deletable, costing
-//     time and never correctness.
-//   - THE PIN IS COMMITTED, at the repo root, because `.sandbar/` is disposable
-//     and a decision cannot live somewhere `rm -rf` is a supported operation.
-//     A plain file rather than a config field: this script has to read it
-//     BEFORE the driver exists, and `sandbar.config.mjs` imports the driver.
-//   - INSTALL ONLY WHEN THE PIN MOVES. The stamp beside the install records the
-//     spec that produced it; a matching stamp with the bin present is skipped,
-//     so a relaunch re-runs a byte-identical driver and costs no network. The
-//     stamp is REMOVED before an install and written only after one that
-//     produced a bin, so an interrupted or failed install can never be mistaken
-//     for a complete one.
-//   - A FAILED INSTALL STOPS THE LOOP. Never silently continue on the driver
-//     that happens to be on disk: "could not fetch the pin" and "the pin is
-//     installed" are different states and only one of them may run. A
-//     zero-exit install with no bin behind it counts as failed — the package
-//     ships no build, `dist/` comes out of its `prepare` script, and npm is
-//     moving install scripts behind per-project approval.
-//
-// A consequence worth naming, since the config imports the driver: the hand
-// path `npm run build && node dist/cli.js` runs orchestrator code out of the
-// `dist/` just built, but a config that takes `readEnvFile` from
-// `.sandbar/driver/`. That is one function and harmless in the ordinary case —
-// but someone iterating `env.ts` is not exercising their change until they
-// move the pin or point the config's import at `./dist/` for the duration.
-//
-// Plain `.mjs` under `scripts/`, outside `files` and outside `src/`: it is not
-// part of the package, no consumer runs it, and it must run before anything is
-// built. `launcher.test.ts` covers all four decisions AND the loop contract
-// #65 states (continue on 75, propagate every other exit), which is why each is
-// a separately exported function and why the two that shell out take process
-// seams (`io.spawn`, `io.run`) instead of reaching for `spawnSync` directly:
-// those decisions ARE the safety property of #66, and a safety property nothing
-// exercises is a claim. `main` is exported for that reason alone — it still
-// runs only when this file IS the program, so importing it cannot start a
-// series.
+// Since #133 sandbar itself is the long-running daemon. This launcher starts it
+// exactly once and propagates its status; it has no exit-75 loop and no second
+// series wake-lock holder. `run.ts` owns polling and the work/idle wake-lock
+// transition. Process seams keep the install and one-launch contracts directly
+// testable without a network.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -90,17 +32,11 @@ import { fileURLToPath } from "node:url";
 // wrong on some platform.
 const SIGNALS = constants.signals;
 
-// Repeated by hand from `exit-conditions.ts` for the same reason the old shell
-// loop repeated it: this file runs before the package it would import exists.
-export const EXIT_CODE_RELAUNCH = 75;
-
 export const PIN_FILE = "sandbar.pin";
 
 // `github:<owner>/<repo>#v<major>.<minor>.<patch>` and nothing else. A branch
 // or a sha would install perfectly well and is refused anyway: a sha names a
-// state no consumer could ever reference, and a branch is not a pin at all —
-// it moves under the loop, which is the entire failure this file exists to
-// remove.
+// state no consumer could ever reference, and a branch is not a pin at all.
 const PIN_PATTERN = /^github:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+#v\d+\.\d+\.\d+$/;
 
 // A launch that cannot proceed, as opposed to a bug in this file. The
@@ -133,7 +69,7 @@ export function parsePin(content) {
     throw new LaunchError(
       `${PIN_FILE} does not name a tagged release: '${spec}'.\n` +
         "It must be `github:<owner>/<repo>#v<X.Y.Z>` — a tag, as a consumer " +
-        "would pin. A branch moves under the loop and a sha names a state no " +
+        "would pin. A branch moves over time and a sha names a state no " +
         "consumer could reference, so neither is accepted as a substitute.",
     );
   }
@@ -150,12 +86,6 @@ export function driverPaths(root) {
     // the symlink is one more thing that can be absent on a half-install, and
     // the file it points at is the thing that has to exist.
     cli: join(pkg, "dist", "cli.js"),
-    // The series-long wake lock (#117), run as a child for the whole loop. Its
-    // EXISTENCE is the capability probe: `sandbar.pin` lags this checkout
-    // always (#66), so this launcher will run against drivers that predate the
-    // file, and a version comparison would be a second statement of the same
-    // fact that can disagree with it.
-    wakeLock: join(pkg, "dist", "keepawake-hold.js"),
     manifest: join(dir, "package.json"),
     stamp: join(dir, "installed-pin"),
   };
@@ -164,8 +94,8 @@ export function driverPaths(root) {
 // Pure: the two facts about what is on disk, against what is asked for.
 //
 // The identity compared is the SPEC STRING, never the installed package's own
-// `version`, and that is the exact sense in which "a relaunch runs a
-// byte-identical driver" is true: it rests on git tags being immutable. A tag
+// `version`, and that is the exact sense in which repeated launches run a
+// byte-identical driver: it rests on git tags being immutable. A tag
 // moved at origin leaves this stamp matching and the previous bytes running,
 // silently, until somebody deletes `.sandbar/driver/`. Reading the installed
 // version back would not close it either — a moved tag need not change the
@@ -199,126 +129,16 @@ function say(message) {
   console.log(`sandbar launcher: ${message}`);
 }
 
-// The process seams in this file, and the reason they exist is that decisions 3
-// and 4 — plus #65's loop contract — are the safety properties of #66 and none
-// of them can be asserted against the real thing: `spawn` would need a network,
-// a tag and a way to make `npm install` fail on demand, and `run` would need a
-// driver that exits 75 exactly as often as a test wants. Production passes
-// nothing. A test passes a fake `spawn` and reads back what happened to the
-// STAMP, which is the fact deciding whether the next launch reinstalls or runs
-// what is on disk, and a fake `run` to count the launches a sequence of exit
-// codes produces. TWO seams rather than one because the two calls mean
-// different things — installing the driver, and being driven by it — and a test
-// that could not tell them apart could not assert either. `log` is seamed for
-// the ordinary reason: this file talks to an operator, and a test suite is not
-// one.
+// Process seams keep installation and launch testable without a network or a
+// real child. TWO seams rather than one because installing the driver and
+// running it are different operations. `log` is seamed because this file talks
+// to an operator, and a test suite is not one.
 function seams(io) {
   return {
     spawn: io.spawn ?? spawnSync,
     run: io.run ?? spawnSync,
-    // The wake lock is the one child that must OUTLIVE a call (#117), so it is
-    // the async `spawn` and a seam of its own: a test that could not tell it
-    // from `run` could not assert that exactly one is held for a whole series
-    // of relaunches, which is the entire property.
-    hold: io.hold ?? spawn,
-    // Seamed for the same reason `hold` is: "a holder that died is noticed" is
-    // a safety property, and the real probe answers off `/proc`, which a test
-    // cannot make say `Z` on demand for a process it did not fork.
-    alive: io.alive ?? wakeLockAlive,
     log: io.log ?? say,
   };
-}
-
-// The series-long wake lock (#117). On this repo's WSL2 host every observed
-// sleep began within minutes of a run ending, and one of them 6 ms after the
-// driver released its own lock — so the seam #65 opens between two driver
-// processes is exactly where the machine sleeps, and only this process spans
-// it. Held once, before the first launch, released when the loop is done.
-//
-// It is a CHILD rather than a call because this file cannot make the call: it
-// is synchronous by decision, it runs before the driver it would import
-// exists, and it is blocked inside `spawnSync` for hours at a time, so it
-// could neither await a confirmation nor notice the lock dying. The child has
-// a live event loop and inherits stdout, so it reports its own status.
-//
-// That blockage is also why a dead holder is found by POLLING rather than by
-// an event: `child.on("exit")` can never fire in this process and `exitCode`
-// stays null, so `wakeLockAlive` reads `/proc` once per iteration instead —
-// see it for why `kill(pid, 0)` is not the probe. Nothing is noticed DURING a
-// launch, which is the price of a synchronous launcher and is bounded by how
-// long one driver run lasts.
-//
-// A missing program is a driver older than the feature, not a failure: the pin
-// LAGS this checkout always (#66). Say so and carry on unlocked — a launcher
-// that refused to run on the pin it was given would be a worse bargain than a
-// host that may sleep.
-export function holdWakeLock(program, io = {}) {
-  const { hold, log } = seams(io);
-  if (!existsSync(program)) {
-    log(
-      "wake-lock: NOT held — the pinned driver predates it " +
-        `(${program} is missing). Move ${PIN_FILE} to pick it up.`,
-    );
-    return null;
-  }
-  let child;
-  try {
-    child = hold(process.execPath, [program], {
-      // stdin is the lock's lifeline: this process holding the write end IS
-      // the lock, and its death — clean or not — closes the pipe and releases
-      // it. stdout and stderr are inherited so the child's own status lines
-      // reach the terminal without needing an event loop turn here.
-      stdio: ["pipe", "inherit", "inherit"],
-    });
-  } catch (err) {
-    // `spawn` throws SYNCHRONOUSLY on argument and option faults, and an
-    // uncaught one here would escape `main`, fail to be a `LaunchError` and
-    // stop the series — for a wake lock. Same bargain as the missing program
-    // above: say so, run anyway.
-    log(`wake-lock: NOT held — ${err instanceof Error ? err.message : err}`);
-    return null;
-  }
-  // Async `spawn` reports a failure by event, and this process is about to
-  // stop turning its loop, so the handler is a best effort by construction.
-  // The only reachable cause is `process.execPath` being unrunnable, which is
-  // not a state this script could still be executing in.
-  child.on?.("error", (err) => log(`wake-lock: NOT held — ${err.message}`));
-  return child;
-}
-
-// Whether the holder is still alive, decided SYNCHRONOUSLY — which is the
-// whole difficulty. This process sits inside `spawnSync` for hours, so its
-// event loop never turns: `child.on("exit")` can never fire, and `exitCode`
-// stays null. `kill(pid, 0)` is no use either, because an unreaped child is a
-// zombie and answers "alive". So read the state field out of `/proc/<pid>/stat`
-// and treat `Z` as dead. Anything unreadable is treated as ALIVE: a probe that
-// cannot answer must not become a reason to spawn a second lock.
-//
-// Called once per iteration rather than continuously — the only moment this
-// process is running is between two driver launches, and that is exactly the
-// seam a fresh lock would be taken for.
-function wakeLockAlive(child) {
-  const pid = child?.pid;
-  if (typeof pid !== "number") return true;
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    // The state letter is the field after the parenthesised comm, which may
-    // itself contain spaces and parentheses — so split at the LAST ')'.
-    const after = stat.slice(stat.lastIndexOf(")") + 1).trim();
-    return after.charAt(0) !== "Z";
-  } catch {
-    return true;
-  }
-}
-
-function releaseWakeLock(child) {
-  if (!child) return;
-  try {
-    child.stdin?.end();
-    child.kill?.();
-  } catch {
-    // A lock that is already gone is the outcome this asks for.
-  }
 }
 
 // Throws LaunchError on every outcome that is not "there is a driver at
@@ -372,7 +192,7 @@ export function installDriver(paths, spec, io = {}) {
         : `exit ${result.status}`;
     throw new LaunchError(
       `npm install of ${spec} failed (${how}).\n` +
-        "The loop stops here rather than continuing on whichever driver is on " +
+        "The launcher stops here rather than continuing on whichever driver is on " +
         "disk. Usual causes: the tag does not exist yet (it is created by " +
         "auto-tag.yml on the push to main that lands the version), or the host " +
         "cannot reach GitHub.",
@@ -414,7 +234,7 @@ export function ensureDriver(root, io = {}) {
   } else {
     seams(io).log(`driver ${spec} already installed at ${paths.dir}`);
   }
-  return { spec, cli: paths.cli, wakeLock: paths.wakeLock };
+  return { spec, cli: paths.cli };
 }
 
 // Not exported: `main` is the only caller, and this file lives at a fixed depth
@@ -423,112 +243,58 @@ function repoRoot() {
   return resolve(dirname(fileURLToPath(import.meta.url)), "..");
 }
 
-// The loop itself, and #65's contract is the whole of it: continue on
-// EXIT_CODE_RELAUNCH and on nothing else, propagate every other exit code
+// Launch the daemon once and propagate its exit code
 // unchanged — and a driver killed by a signal as `128 + signal`, which is what
 // a shell would have propagated and is the one answer that is not an exit code
 // of the driver's own. `root` is a parameter so a test can point it at a
 // temporary directory holding a pin and a fake install; production passes
 // neither it nor the seams.
 export function main(argv, { root = repoRoot(), ...io } = {}) {
-  const { run, alive, log } = seams(io);
+  const { run, log } = seams(io);
   // `--install-only` is for the hand paths — `sandbar gate`, or a config load —
-  // which need the driver present but are not a series. Deliberately not a
-  // `--config`-style flag: it configures nothing, it stops the loop before it
+  // which need the driver present but are not a run. Deliberately not a
+  // `--config`-style flag: it configures nothing, it stops before the driver
   // starts, and so it is never forwarded: the one launch it could reach is the
   // one it returns ahead of.
   const installOnly = argv.includes("--install-only");
-  // Taken once, below, and released in the `finally` — so it spans every
-  // relaunch seam, which is the whole reason it lives here and not in `run()`
-  // (#117). `try`/`finally` rather than a release before each `return`: there
-  // are six ways out of this loop including two throws, and a wake lock that
-  // leaks on one of them is a host that will not sleep again until it reboots.
-  let wakeLock = null;
-  try {
-    for (;;) {
-      // Re-read every iteration, so a pin edited between cycles is honoured at
-      // the next relaunch rather than at the next series.
-      const { spec, cli, wakeLock: holder } = ensureDriver(root, io);
-      if (installOnly) return 0;
-      // After the first `ensureDriver`, because the program being run is the
-      // driver's. That leaves the FIRST install uncovered, deliberately: it is a
-      // human-initiated command whose install lasts seconds, against a seam that
-      // recurs unattended every time a cycle lands a merge.
-      //
-      // Re-taken when the holder has DIED. Held once and never checked, a lock
-      // that crashed in hour one would leave the rest of the series unlocked
-      // and silent, which is #117's own complaint wearing the launcher's
-      // clothes. This is the only moment there is to notice.
-      if (wakeLock !== null && !alive(wakeLock)) {
-        log("wake-lock: LOST — the holder is gone; retaking");
-        // Released before it is dropped, even though a dead holder needs no
-        // release. The probe only ever answers "dead" on an explicit `Z` and
-        // treats anything unreadable as alive, so this is unreachable today —
-        // but the alternative is a reference dropped on the floor, and the one
-        // thing this file must never do is leak a lock nobody can reach.
-        releaseWakeLock(wakeLock);
-        wakeLock = null;
-      }
-      if (wakeLock === null) wakeLock = holdWakeLock(holder, io);
-      log(`running ${spec}`);
-      // `cwd: root` rather than this process's own, and that is a decision. The
-      // config resolves against the process cwd (cli.ts) and `config.cwd`
-      // defaults to it, so the driver's cwd decides which repository a series
-      // operates on — and the answer must be the repo whose `sandbar.pin` chose
-      // the driver, not wherever the launcher happened to be invoked. Under
-      // `npm run sandbar` the two agree (npm runs scripts from the package
-      // root); invoked directly from a subdirectory, or through a symlink, they
-      // do not, and the old shell loop would have gone looking for a config that
-      // is not there. The one visible cost is that a RELATIVE `--config` passed
-      // through now resolves against the root as well — absolute paths are
-      // unaffected, and pinning it here at least makes the resolution the same
-      // on every launch of a series.
-      const child = run(process.execPath, [cli, ...argv], {
-        cwd: root,
-        stdio: "inherit",
-      });
-      if (child.error) {
-        throw new LaunchError(`could not run ${cli}: ${child.error.message}`);
-      }
-      // A driver killed by a signal is not a LaunchError: the launcher proceeded
-      // exactly as asked and the DRIVER died, which is the distinction that class
-      // exists to draw — printing it as one operator-addressed line and exiting 1
-      // makes an OOM-killed run indistinguishable from a pin that names nothing.
-      // So it is reported as a shell reports one, `128 + signal`, which is what
-      // the shell loop this file replaced already returned and what
-      // `cleanup.ts`'s own SIGINT/SIGTERM exits (130, 143) already look like. It
-      // stops the loop by construction: no signal maps onto 75.
-      if (child.status === null) {
-        const signal = child.signal ?? null;
-        const number = signal === null ? undefined : SIGNALS[signal];
-        if (number === undefined) {
-          // Nothing to encode — `spawnSync` answered neither a code nor a signal
-          // this platform names, so there is no verdict and no exit code that
-          // would mean one.
-          throw new LaunchError(
-            `the driver at ${cli} exited with neither a status nor a signal ` +
-              `this platform names (${JSON.stringify(signal)}).`,
-          );
-        }
-        log(`the driver was killed by ${signal} (exiting ${128 + number})`);
-        return 128 + number;
-      }
-      if (child.status !== EXIT_CODE_RELAUNCH) return child.status;
-      log(`relaunching (exit ${EXIT_CODE_RELAUNCH})`);
-    }
-  } finally {
-    releaseWakeLock(wakeLock);
+  const { spec, cli } = ensureDriver(root, io);
+  if (installOnly) return 0;
+  log(`running ${spec}`);
+  // The driver's cwd decides which repository it operates on, so use the repo
+  // whose pin chose it rather than wherever the launcher was invoked. Relative
+  // `--config` paths consequently resolve against this root as well.
+  const child = run(process.execPath, [cli, ...argv], {
+    cwd: root,
+    stdio: "inherit",
+  });
+  if (child.error) {
+    throw new LaunchError(`could not run ${cli}: ${child.error.message}`);
   }
+  // Launch succeeded if the driver later died by a signal. Preserve the usual
+  // shell status instead of reclassifying that as an operator launch error.
+  if (child.status === null) {
+    const signal = child.signal ?? null;
+    const number = signal === null ? undefined : SIGNALS[signal];
+    if (number === undefined) {
+      throw new LaunchError(
+        `the driver at ${cli} exited with neither a status nor a signal ` +
+          `this platform names (${JSON.stringify(signal)}).`,
+      );
+    }
+    log(`the driver was killed by ${signal} (exiting ${128 + number})`);
+    return 128 + number;
+  }
+  return child.status;
 }
 
 // Only when this file IS the program — `launcher.test.ts` imports it for the
-// pure functions above, and an import that launched a series would be its own
+// pure functions above, and an import that launched a daemon would be its own
 // kind of #66.
 //
 // `realpathSync` on both sides, because Node's ESM loader resolves symlinks
 // before it fills `import.meta.url`: invoked through a symlink, a plain
 // `resolve(argv[1])` compares the link against its target, does not match, and
-// the launcher exits 0 having done NOTHING — no series, no output, no error.
+// the launcher exits 0 having done NOTHING — no daemon, no output, no error.
 // `npm run sandbar` never takes that path, but a silent no-op is the worst
 // available failure for the one file whose job is to fail loudly.
 function isEntrypoint() {

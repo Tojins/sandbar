@@ -35,7 +35,6 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // The UI-check invocation (#126) classifies a failed read-only agent write
   // before rethrowing the original invocation error, mirroring the reviewer.
   "inner-loop.ts": 9,
-  "keepawake-hold.ts": 1,
   "keepawake.ts": 1,
   "lock.ts": 4,
   "merger.ts": 11,

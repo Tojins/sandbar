@@ -29,6 +29,7 @@ import { makeEnvReader } from "./env.js";
 import {
   type DeclaredMount,
   deleteMergedSandbarBranches,
+  fetchOriginRefs,
   gatherState,
   PreflightError,
   readConfigStaleness,
@@ -145,6 +146,17 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     await chmod(gh, 0o755);
   };
 
+  it("reports when refreshing origin observes a moved source tip (#133)", async () => {
+    await writeFile(join(target, "a.txt"), "moved\n");
+    await git(target, "add", "a.txt");
+    await git(target, "commit", "-qm", "move source");
+
+    const first = await fetchOriginRefs(target, "main");
+    const second = await fetchOriginRefs(target, "main");
+    expect(first).toEqual({ sourceChanged: true, failures: [] });
+    expect(second).toEqual({ sourceChanged: false, failures: [] });
+  });
+
   it("fetches origin member refs before later preflight checks", async () => {
     await git(target, "update-ref", "refs/heads/sandbar/member-7", "HEAD");
 
@@ -168,7 +180,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     ).resolves.toBeDefined();
   });
 
-  it("reports both failed fetches by name with git's error", async () => {
+  it("reports a failed origin refresh with git's error", async () => {
     await git(target, "remote", "set-url", "origin", join(target, "missing-origin"));
 
     const error = await runPreflight(
@@ -182,8 +194,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     ).catch((err: unknown) => err);
 
     expect(error).toBeInstanceOf(Error);
-    expect(String(error)).toContain("Fetching origin/main failed");
-    expect(String(error)).toContain("sandbar chunk and member refs failed");
+    expect(String(error)).toContain("Fetching origin refs (source, chunks, members) failed");
     expect(String(error)).toContain("does not appear to be a git repository");
   });
 

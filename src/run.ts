@@ -83,20 +83,10 @@
 //     and one empty directory per turned-away launch is noise in the one tree
 //     an operator greps.
 //
-// And the run STOPS IN ONE SHAPE. `Exit (<tag>): <reason>` on stdout, once, on
-// every terminal path — plan-empty, relaunch, stuck, budget, halted, and the
-// defensive iteration ceiling. There used to be five terminal shapes in four
-// spellings, one of which (the halt) printed nothing on stdout at all and one
-// of which (plan-empty) printed a success banner. `exit-conditions.ts` owns
-// the tags, the reasons and the line; `announceExit` below is the single site
-// that emits it, to BOTH streams — the log so `exit: <tag>` is greppable
-// however far the run got, stdout so a human reading a terminal gets the same
-// answer. It is reached by the startup stops as well as by the scheduler loop, and
-// a terminal path that does not call it prints nothing, which is the failure
-// this issue is named after. Nothing else in this file may format that line: a
-// `console.log` per call site is the same hand-pairing `logs.ts`'s invariant
-// exists to end, reproduced for the one line it is about — and this is the one
-// claim in the file no test can make, since nothing calls `run()`.
+// The daemon stops in one shape: `Exit (<tag>): <reason>` on stdout, once, for
+// quota, stuck, or halted. An empty plan is not a stop (#133). `announceExit`
+// emits the same line to stdout and the run log; exit-conditions.ts owns its
+// vocabulary and spelling.
 //
 // Ahead of all of it, on stdout and then again as orchestrator.log's first
 // line, is the DRIVER IDENTITY (#69) — the version, the tree `dist/` was built
@@ -106,11 +96,11 @@
 // verdict, or this complaint" has to be above them. `driver-identity.ts` owns
 // what it can and cannot claim.
 //
-// Termination is governed by exit-conditions.ts. Plan-empty requires a
-// quiescent pool; maxTotalIssues counts admissions; quota drains work already
-// running; and relaunch is checked only at post-landing quiescence, before a
-// newly-unblocked issue starts. A budget-derived recompute limit remains a
-// defensive ceiling.
+// At capacity below `maxParallelIssues`, one cancellable wait races the next
+// slot completion against `pollIntervalMs`. A poll refreshes source, chunk and
+// member refs before running the ordinary plan. A no-op poll is silent; work,
+// source movement, and changed config-staleness evidence are recorded. Source
+// movement from either a human push or this process refreshes the image inputs.
 
 import { realpathSync } from "node:fs";
 
@@ -152,16 +142,9 @@ import { SandbarError, faultDetail } from "./errors.js";
 import {
   type TerminalExit,
   MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
-  SILENT_NOOP_RETRY_LIMIT,
-  budgetExit,
   formatExitLine,
   haltedExit,
-  iterationCeilingExit,
-  newRunState,
-  planEmptyExit,
   quotaExit,
-  relaunchExit,
-  remainingBudget,
   stuckExit,
 } from "./exit-conditions.js";
 import { type RunQuotaState, createRunQuotaState } from "./inner-loop.js";
@@ -220,6 +203,7 @@ import {
 } from "./scheduler.js";
 import {
   absoluteMountSources,
+  fetchOriginRefs,
   PreflightError,
   readConfigStaleness,
   runPreflight,
@@ -231,19 +215,6 @@ import {
   ensureSourceWorktree,
   repoLayout,
 } from "./repo-cache.js";
-
-// Each start can produce several recomputes (slot release, finalization and a
-// landing), and silent-noop can execute the same ongoing issue three times.
-// Keep the defensive ceiling proportional to the configured run budget so it
-// cannot become the default-budget terminator.
-const MIN_MAX_RECOMPUTES = 100;
-
-export function maxRecomputesFor(maxTotalIssues: number): number {
-  return Math.max(
-    MIN_MAX_RECOMPUTES,
-    maxTotalIssues * (SILENT_NOOP_RETRY_LIMIT + 1) * 4 + 10,
-  );
-}
 
 // The merge phase's stack id. Distinct from every issue id (which are numeric),
 // so its pod, network and containers can never collide with an issue's.
@@ -357,19 +328,15 @@ export function closedProviderExit(
 function schedulerExit(
   reason: SchedulerExit,
   pool: ContinuousPool<PlannedIssue, Terminal>,
-  runState: ReturnType<typeof newRunState>,
   quota: TerminalExit | null,
 ): TerminalExit {
   switch (reason) {
-    case "plan-empty": return planEmptyExit();
-    case "relaunch": return relaunchExit(pool.landings);
     case "quota": {
       // `quotaClosed` is derived from the same two sources the caller resolves
       // `quota` from, so a miss here is a bug in that derivation, not a state.
       if (!quota) throw new Error("scheduler selected quota without a quota exit");
       return quota;
     }
-    case "budget": return budgetExit(runState.issuesAttempted, runState.maxTotalIssues);
     case "stuck": return stuckExit(pool.noProgressSinceLanding);
   }
 }
@@ -426,7 +393,7 @@ export async function run(
   // sit two `process.exit` calls that run no cleanup at all (`GH_TOKEN`, and
   // losing the lock), and neither leaks: the lock's lifetime is the stdin pipe,
   // so a process that dies without releasing releases anyway.
-  const wakeLock = startKeepawake();
+  let wakeLock: ReturnType<typeof startKeepawake> | null = startKeepawake();
 
   // The lock comes BEFORE preflight (#32). Preflight is not read-only: it
   // fetches, and it `git branch -D`s every `sandbar/issue-*` branch it finds
@@ -443,6 +410,7 @@ export async function run(
   // actionable one.
   const lockPaths = lockPathsFor(layout.stateDir);
   let release: (() => Promise<void>) | null = null;
+  let lastConfigStalenessCount = 0;
   try {
     release = await acquireLock(lockPaths);
   } catch (err) {
@@ -506,20 +474,18 @@ export async function run(
   // after a human touched the keyboard. The run was not over when its exit line
   // was printed, and the lock was.
   //
-  // What is left uncovered is the microsecond between this and the process
-  // exiting, plus the relaunch seam itself; `scripts/sandbar-launch.mjs` holds
-  // its own for the whole series precisely because no per-run holder can span
-  // an exit (#65).
+  // At quiescence the current holder is stopped unless
+  // `keepAwakeWhileIdle=true`; a poll that finds work takes a new one. Cleanup
+  // stops whichever holder is current.
   //
   // `await statusWrites` is not decoration. `appendFile` needs a real event
-  // loop turn, and every non-zero exit — including 75, the relaunch this issue
-  // was written about — leaves the drain for `process.exit`, which grants none:
+  // loop turn, and every non-zero exit leaves the drain for `process.exit`, which grants none:
   // a fire-and-forget append of the `released` line reached the log on the
   // exit-0 path alone. The chain is awaited so the last thing the lock says is
   // in the record it is claimed to be in.
   let statusWrites: Promise<void> = Promise.resolve();
   onCleanup(async () => {
-    wakeLock.stop();
+    wakeLock?.stop();
     await statusWrites;
   });
 
@@ -534,9 +500,8 @@ export async function run(
   //
   // The appends are CHAINED rather than fired: two of them racing would
   // interleave in an append-only file, and a bare `void` on a rejected write
-  // reaches `installCleanupTraps`'s `unhandledRejection` trap, which exits 1 —
-  // turning a failed log write into a relaunch that never happens.
-  wakeLock.onStatus((line) => {
+  // reaches `installCleanupTraps`'s `unhandledRejection` trap, which exits 1.
+  const watchWakeLock = (lock: ReturnType<typeof startKeepawake>): void => lock.onStatus((line) => {
     console.log(line);
     statusWrites = statusWrites
       .then(() => runLogger.appendOrchestrator(line))
@@ -544,12 +509,23 @@ export async function run(
         console.error(`Could not log wake-lock status: ${String(err)}`);
       });
   });
+  watchWakeLock(wakeLock);
+  const ensureWakeLock = (): void => {
+    if (wakeLock !== null) return;
+    wakeLock = startKeepawake();
+    watchWakeLock(wakeLock);
+  };
+  const releaseIdleWakeLock = (): void => {
+    if (config.keepAwakeWhileIdle || wakeLock === null) return;
+    wakeLock.stop();
+    wakeLock = null;
+  };
 
   // THE one site that emits a terminal (#70), and it is declared up here
   // because the startup stops below reach it as well as the scheduler loop does:
   // an operator greps `orchestrator.log` for how the run ended without knowing
-  // yet how far it got, so a run refused by preflight and a run that exhausted
-  // its budget must leave the same shape of line. It also owns
+  // yet how far it got, so a run refused by preflight and a run that hit the
+  // stuck backstop must leave the same shape of line. It also owns
   // `cleanupReason`, which makes `run-end (<tag>)` agree with it by
   // construction rather than by two assignments kept in step by hand.
   //
@@ -641,7 +617,7 @@ export async function run(
     // and, unlike letting it escape to the bin, it runs cleanup first, which is
     // what recovers the `run.pid` sidecar.
     await ensureRepoCache(layout);
-    await runPreflight({
+    const initialConfigStaleness = await runPreflight({
       layout,
       env,
       sourceBranch: config.sourceBranch,
@@ -659,6 +635,11 @@ export async function run(
       // startup, rather than an in-container death an attempt at a time.
       agentProviders: requiredAgentProviders(config),
     });
+    lastConfigStalenessCount = initialConfigStaleness.touchingConfig;
+    const initialConfigWarning = staleConfigWarning(initialConfigStaleness);
+    if (initialConfigWarning !== null) {
+      await runLogger.appendOrchestrator(initialConfigWarning);
+    }
   } catch (err) {
     return await stopAtStartup("preflight-failed", err);
   }
@@ -876,9 +857,7 @@ export async function run(
     return await stopAtStartup("image-uid-check-failed", err);
   }
 
-  const runState = newRunState({
-    maxTotalIssues: config.maxTotalIssues,
-  });
+  const silentNoopAttemptsByIssue = new Map<string, number>();
   const quotaState = createRunQuotaState();
   // The one stop this run ends on (#70). Every break out of the loop below
   // assigns it what `announceExit` has already emitted, and the process exit
@@ -1005,7 +984,10 @@ export async function run(
   let quotaPending: TerminalExit | null = null;
   let nextPlanTrigger: Parameters<typeof runLogger.writePlan>[0] = "launch";
   let landingNumber = 0;
-  const maxRecomputes = maxRecomputesFor(config.maxTotalIssues);
+  let iteration = 0;
+  let idle = false;
+  let lastPlanDiagnostics: string | null = null;
+  const deferredLandBranches = new Set<string>();
 
   // Consume freed-slot results through the same finalization path whether the
   // landing path is healthy or already halted. DONE has no terminal handoff;
@@ -1026,13 +1008,13 @@ export async function run(
         console.error(
           `  ✗ #${event.issue.id} (${event.issue.branch}) failed: ${event.reason}`,
         );
-        pool.finish(event.issue);
+        pool.finishRejected(event.issue);
       }
     }
     await runFinalize("agent terminals", terminalFinalizeInputs(outcomes));
     for (const outcome of outcomes) {
       if (finishDone || outcome.terminal.type !== "DONE") {
-        pool.finish(outcome.issue);
+        pool.finishTerminal(outcome.issue);
       }
     }
     return outcomes;
@@ -1079,12 +1061,48 @@ export async function run(
     if (landingFailure === null) throw primaryFailure;
   };
 
+  const refreshSourceImages = async (): Promise<void> => {
+    ensureWakeLock();
+    idle = false;
+    sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
+    baseFingerprints = await ensureImages(config.images, sourceWorktree, {
+      onImage: recordImage,
+    });
+    agentImages = await createAgentImages({
+      declaredBaseTag: config.sandboxImage,
+      providers: requiredAgentProviders(config),
+      scope,
+      onImage: recordImage,
+    });
+    branchImages = makeBranchImages(baseFingerprints);
+    agentImageRuns.push(agentImages);
+    branchImageRuns.push(branchImages);
+    innerLoopCfg.agentImages = agentImages;
+  };
+
   // -------------------------------------------------------------------------
   // Main loop
   // -------------------------------------------------------------------------
 
   try {
-    for (let iteration = 1; iteration <= maxRecomputes; iteration++) {
+    for (;;) {
+      iteration += 1;
+      const planTrigger: Parameters<typeof runLogger.writePlan>[0] = nextPlanTrigger;
+      let sourceChangedOnPoll = false;
+      if (planTrigger === "poll") {
+        pool.beginPoll();
+        const refresh = await fetchOriginRefs(layout.repoDir, config.sourceBranch);
+        if (refresh.failures.length > 0) {
+          throw new SandbarError(refresh.failures.join("\n"));
+        }
+        sourceChangedOnPoll = refresh.sourceChanged;
+        if (sourceChangedOnPoll) {
+          const line = `origin/${config.sourceBranch} moved during poll; refreshing source images`;
+          console.log(line);
+          await runLogger.appendOrchestrator(line);
+          await refreshSourceImages();
+        }
+      }
       // -----------------------------------------------------------------------
       // Between-recompute orphan sweep. Phase 2/3/4 already tear down their own
       // resources in finally blocks, and startStack registers its teardown
@@ -1108,21 +1126,27 @@ export async function run(
         );
       }
 
-      const budget = remainingBudget(runState);
+      if (planTrigger !== "poll") {
+        console.log(`\n=== Recompute ${iteration} ===\n`);
+        await runLogger.appendOrchestrator(`recompute ${iteration} start`);
+      }
 
-      console.log(`\n=== Recompute ${iteration}/${maxRecomputes} ===\n`);
-      await runLogger.appendOrchestrator(`recompute ${iteration} start`);
-      const planTrigger = nextPlanTrigger;
-
-      const configWarning = staleConfigWarning(await readConfigStaleness({
+      const configStaleness = await readConfigStaleness({
         layout,
         sourceBranch: config.sourceBranch,
         configPath: options.configPath ?? null,
-      }));
-      if (configWarning) {
-        console.warn(configWarning);
-        await runLogger.appendOrchestrator(configWarning);
+      });
+      const configStalenessChanged =
+        configStaleness.touchingConfig !== lastConfigStalenessCount;
+      if (configStalenessChanged) {
+        const configWarning = staleConfigWarning(configStaleness);
+        const line = configWarning ??
+          `Config staleness cleared: ${configStaleness.configPath ?? "programmatic config"} ` +
+          `is no longer behind a change from origin/${config.sourceBranch}.`;
+        console.warn(line);
+        await runLogger.appendOrchestrator(line);
       }
+      lastConfigStalenessCount = configStaleness.touchingConfig;
 
       // ---------------------------------------------------------------------
       // Phase 1: Plan
@@ -1137,14 +1161,6 @@ export async function run(
         repoDir: layout.repoDir,
       };
       let resolution = await buildPlan(repo, planOptions);
-      for (const drift of resolution.chunkNameDrifts) {
-        const derived = drift.derived ?? "no chunk branch can be derived";
-        const line =
-          `Origin chunk branch ${drift.existing} no longer matches the name ` +
-          `derived for its root: ${derived}`;
-        console.warn(line);
-        await runLogger.appendOrchestrator(line);
-      }
 
       // The chunk-review scan (#95). Every chunk with work on origin is asked
       // whether a human has requested changes on its pull request, and each
@@ -1184,9 +1200,9 @@ export async function run(
       // every question the plan asked, so the plan is REBUILT when it acted.
       //
       // Rebuilt immediately rather than left stale for the next recompute: closing a member
-      // unblocks its dependents, and a run whose plan came out empty exits
-      // `success` right below. Without the re-plan a chunk somebody merged by
-      // hand would reconcile, unblock three issues, and stop the run anyway.
+      // unblocks its dependents. Without the re-plan a chunk somebody merged by
+      // hand would reconcile and then leave newly unblocked issues waiting for
+      // the next poll instead of admitting them in this recompute.
       // The re-plan reads the same authoritative GraphQL batch, which is
       // strongly consistent about the closes just made even while the candidate
       // listing lags.
@@ -1285,10 +1301,13 @@ export async function run(
       // chunk it just finished off is not also merged again by the merge phase
       // (its branch is gone by then, which the merger would park on, but
       // asking in this order means it never gets there).
-      const landRequests = selectLandRequests(
+      const selectedLandRequests = selectLandRequests(
         await fetchLandRequestPullRequests(repo, LAND_LABEL),
         resolution.landedChunks,
       );
+      const landRequests: ReturnType<typeof selectLandRequests> = planTrigger === "landing-finished"
+        ? selectedLandRequests.filter((request) => !deferredLandBranches.has(request.branch))
+        : selectedLandRequests;
       if (landRequests.length > 0) {
         const named = landRequests
           .map((r) => `${r.branch} (PR #${r.pullRequest})`)
@@ -1299,18 +1318,36 @@ export async function run(
         await runLogger.appendOrchestrator(`plan: land requested — ${named}`);
       }
 
+      const laneNoticeLines: string[] = [];
+      const laneNotices = await postLaneOverrideNotices(
+        repo,
+        resolution.overrides,
+        (line) => { laneNoticeLines.push(line); },
+      );
+      const planDiagnostics = JSON.stringify({
+        heldForReview: resolution.heldForReview,
+        overrides: resolution.overrides,
+        landedChunks: resolution.landedChunks,
+        chunkNameDrifts: resolution.chunkNameDrifts,
+        selectedLandRequests,
+      });
+      const planDiagnosticsChanged = lastPlanDiagnostics !== null &&
+        planDiagnostics !== lastPlanDiagnostics;
+      lastPlanDiagnostics = planDiagnostics;
+      const chunkDriftLines = resolution.chunkNameDrifts.map((drift) => {
+        const derived = drift.derived ?? "no chunk branch can be derived";
+        return (
+          `Origin chunk branch ${drift.existing} no longer matches the name ` +
+          `derived for its root: ${derived}`
+        );
+      });
+
       const quotaClosed = quotaPending !== null || requiredAgentProviders(config).some(
         (provider) => quotaState.get(provider) !== undefined,
       );
       // The plan record is the resolver's answer, not the narrower admission
-      // this observation may make. Active slots, budget and scheduler state
+      // this observation may make. Active slots, cooldown and scheduler state
       // can all reduce admission without changing what the planner resolved.
-      await runLogger.writePlan(planTrigger, resolution.plan);
-      await runLogger.appendOrchestrator(
-        `plan: ${resolution.plan.length} unblocked issue(s) — ${resolution.plan
-          .map((issue) => `#${issue.id}`)
-          .join(", ") || "none"}`,
-      );
       const schedulerAction = decideSchedulerAction({
         active: pool.activeCount,
         ongoing: pool.ongoingCount,
@@ -1320,18 +1357,40 @@ export async function run(
         hasRetries: pool.hasRetries,
         hasLandRequests: landRequests.length > 0,
         hasCapacity: pool.activeCount < config.maxParallelIssues,
-        budgetRemaining: budget,
-        landings: pool.landings,
         noProgressSinceLanding: pool.noProgressSinceLanding,
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
         quotaClosed,
       });
+      const pollDidWork =
+        sourceChangedOnPoll || configStalenessChanged || planDiagnosticsChanged ||
+        followUps.length > 0 || laneNotices.length > 0 ||
+        reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
+        schedulerAction.kind === "admit" || schedulerAction.kind === "land";
+      if (planTrigger === "poll" && pollDidWork) {
+        ensureWakeLock();
+        idle = false;
+      }
+      if (planTrigger !== "poll" || pollDidWork) {
+        if (planTrigger === "poll") {
+          console.log(`\n=== Poll recompute ${iteration} ===\n`);
+          await runLogger.appendOrchestrator(`recompute ${iteration} start trigger=poll`);
+        }
+        for (const line of chunkDriftLines) {
+          console.warn(line);
+          await runLogger.appendOrchestrator(line);
+        }
+        await runLogger.writePlan(planTrigger, resolution.plan);
+        await runLogger.appendOrchestrator(
+          `plan: ${resolution.plan.length} unblocked issue(s) — ${resolution.plan
+            .map((issue) => `#${issue.id}`)
+            .join(", ") || "none"}`,
+        );
+      }
       if (schedulerAction.kind === "exit") {
         terminalExit = await announceExit(
           schedulerExit(
             schedulerAction.reason,
             pool,
-            runState,
             quotaPending ?? closedProviderExit(config, quotaState),
           ),
         );
@@ -1339,20 +1398,26 @@ export async function run(
       }
 
       const admission = schedulerAction.kind === "admit"
-        ? pool.admit(resolution.plan, budget)
-        : { issues: [], newStarts: 0 };
-      const executionIssues = [...admission.issues];
+        ? pool.admit(resolution.plan)
+        : [];
+      const executionIssues = [...admission];
       const issues = executionIssues;
-      runState.issuesAttempted += admission.newStarts;
-      await runLogger.appendOrchestrator(
-        `admit: ${issues.length} issue(s) — ${issues.map((i) => `#${i.id}`).join(", ") || "none"}`,
-      );
+      if (issues.length > 0) {
+        ensureWakeLock();
+        idle = false;
+        await runLogger.appendOrchestrator(
+          `admit: ${issues.length} issue(s) — ${issues.map((i) => `#${i.id}`).join(", ")}`,
+        );
+      }
 
-      // Both of these run BEFORE the plan-empty exit below (#57): a queue whose
+      // Both of these run before the scheduler decides whether to idle (#57): a queue whose
       // every ready issue is review-gated resolves to an empty plan, and that
       // is precisely the cycle where "no unblocked issues" on its own would be
       // read as "nothing left to do".
-      if (resolution.heldForReview.length > 0) {
+      if (
+        resolution.heldForReview.length > 0 &&
+        (planTrigger !== "poll" || pollDidWork)
+      ) {
         const held = resolution.heldForReview.map((n) => `#${n}`).join(", ");
         console.log(
           `Held for review (${resolution.heldForReview.length}): ${held} — each ` +
@@ -1367,15 +1432,14 @@ export async function run(
           `plan: held ${resolution.heldForReview.length} review-gated issue(s) — ${held}`,
         );
       }
-      await postLaneOverrideNotices(repo, resolution.overrides, (line) =>
-        runLogger.appendOrchestrator(line),
-      );
+      for (const line of laneNoticeLines) {
+        await runLogger.appendOrchestrator(line);
+      }
 
-      // A cycle with a `land` request has work even with an empty plan (#64):
+      // A recompute with a `land` request has work even with an empty plan (#64):
       // the merge phase lands the reviewed chunk, closes its members and
-      // unblocks whatever was waiting on them. Exiting `success` here would
-      // strand a chunk a human explicitly asked for, on the one cycle where
-      // there is nothing else to distract from it.
+      // unblocks whatever was waiting on them. Treating the empty issue plan as
+      // idle here would defer a chunk a human explicitly asked to land.
       if (
         landRequests.length > 0 &&
         (schedulerAction.kind === "land" ||
@@ -1387,9 +1451,11 @@ export async function run(
         );
       }
 
-      console.log(
-        `Planning complete. ${issues.length} issue(s) to work in parallel:`,
-      );
+      if (planTrigger !== "poll" || pollDidWork) {
+        console.log(
+          `Planning complete. ${issues.length} issue(s) to work in parallel:`,
+        );
+      }
       // Number and title only. The branch name is up to ~120 characters and
       // was printed three times per issue per cycle — here, at the terminal
       // line below, and again in the DONE list — which in a 3-issue cycle is a
@@ -1473,13 +1539,24 @@ export async function run(
         schedulerAction.kind === "land" ||
         (schedulerAction.kind === "admit" && schedulerAction.next === "land")
       ) {
+        ensureWakeLock();
+        idle = false;
         settled = [...pool.takeLandingBatch()];
       } else {
-        await pool.waitForFreedSlot();
-        await runLogger.appendOrchestrator(
-          `slot freed active=${pool.activeCount} ${durationField(phase2Timer())}`,
-        );
-        nextPlanTrigger = "slot-freed";
+        if (pool.activeCount === 0 && !idle) {
+          const line = `Idle; polling every ${config.pollIntervalMs}ms.`;
+          console.log(line);
+          await runLogger.appendOrchestrator(line);
+          idle = true;
+          releaseIdleWakeLock();
+        }
+        const wake = await pool.waitForWake(config.pollIntervalMs);
+        if (wake === "slot-freed") {
+          await runLogger.appendOrchestrator(
+            `slot freed active=${pool.activeCount} ${durationField(phase2Timer())}`,
+          );
+        }
+        nextPlanTrigger = wake;
         continue;
       }
       await runLogger.appendOrchestrator(
@@ -1783,13 +1860,17 @@ export async function run(
       // this only ever produces handoff inputs.
       const mergerOutcome = halt ? haltPartial : mergerSummary;
       if (mergerOutcome) {
+        deferredLandBranches.clear();
+        for (const deferred of mergerOutcome.deferredChunks) {
+          deferredLandBranches.add(deferred.target.branch);
+        }
         const { inputs, bumpedSilentNoop } = mergeFinalizeInputs(
           mergerOutcome,
-          runState.silentNoopAttemptsByIssue,
+          silentNoopAttemptsByIssue,
           outcomes,
         );
         for (const [issueId, attempts] of bumpedSilentNoop) {
-          runState.silentNoopAttemptsByIssue.set(issueId, attempts);
+          silentNoopAttemptsByIssue.set(issueId, attempts);
         }
         const freshAttempts = new Set(
           inputs
@@ -1857,7 +1938,7 @@ export async function run(
           }
         }
         for (const issue of completedIssues) {
-          if (!freshAttempts.has(issue.id)) pool.finish(issue);
+          if (!freshAttempts.has(issue.id)) pool.finishTerminal(issue);
         }
       }
 
@@ -1885,7 +1966,7 @@ export async function run(
       // (the wrap-up calls that harmless itself, and the planner never reads
       // that display label), or a pull request that would not close. Neither leaves an
       // issue on no queue, and halting on one would abandon the rest of the
-      // run's budget over a label — while promising a next-run repair that
+      // queued work over a label — while promising a next-run repair that
       // cannot happen, since the branch those lines came with is gone.
       const landedChunks = mergerSummary?.mergedChunks ?? [];
       const landedResidue = chunkResidue(landedChunks);
@@ -1977,7 +2058,7 @@ export async function run(
       // "did origin/<sourceBranch> move" — the image-rebuild question, since an
       // image that bakes dependencies is a function of that branch (#37).
       // `landedNow` is "did work leave the pool as durable progress", which is
-      // what the backstop and the relaunch ask, and a DONE branch landed on
+      // what the backstop asks, and a DONE branch landed on
       // its chunk branch (#60) is a yes: on a review-lane host that is the
       // ONLY way work ever leaves, so a backstop counting source merges alone
       // would exit stuck after six landed issues. Chunk landings are pushed
@@ -1987,28 +2068,14 @@ export async function run(
         : 0;
       const landedNow = sourceLandings + (mergerSummary?.chunkLanded.length ?? 0);
       pool.recordLandingOutcome(
-        settled.length,
+        outcomes.length,
         landedNow,
-        settled.length === 0 && landRequests.length > 0,
       );
       nextPlanTrigger = landRequests.length > 0 || landedNow > 0
         ? "landing-finished"
         : "terminal-finalized";
       if (sourceLandings > 0) {
-        sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
-        baseFingerprints = await ensureImages(config.images, sourceWorktree, {
-          onImage: recordImage,
-        });
-        agentImages = await createAgentImages({
-          declaredBaseTag: config.sandboxImage,
-          providers: requiredAgentProviders(config),
-          scope,
-          onImage: recordImage,
-        });
-        branchImages = makeBranchImages(baseFingerprints);
-        agentImageRuns.push(agentImages);
-        branchImageRuns.push(branchImages);
-        innerLoopCfg.agentImages = agentImages;
+        await refreshSourceImages();
       }
       if (selectedExit?.tag === "quota") quotaPending = selectedExit;
       if (selectedExit?.tag === "halted") {
@@ -2045,16 +2112,10 @@ export async function run(
     process.exit(exit.exitCode);
   }
 
-  // EVERY terminal path arrives here having announced itself exactly once
-  // (#70) — plan-empty and halted included, which between them used to print a
-  // success banner and nothing at all. The `??` is the DEFENSIVE CEILING and
-  // nothing else: falling out of the loop without a `break` means
-  // maxRecomputes observations and not one exit condition, which nothing has ever
-  // reached. Its exit code is unchanged (success); what changed is that it used
-  // to print "All done.", the one thing a run that ran out of iterations did
-  // not do.
-  const finalExit =
-    terminalExit ?? (await announceExit(iterationCeilingExit(maxRecomputes)));
+  if (terminalExit === null) {
+    throw new Error("scheduler loop ended without a terminal exit");
+  }
+  const finalExit = terminalExit;
 
   await runCleanup();
   if (finalExit.exitCode !== 0) process.exit(finalExit.exitCode);

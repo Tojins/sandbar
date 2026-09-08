@@ -648,7 +648,13 @@ export type RunConfig = {
   // remains the bound. There is deliberately no total attempt ceiling.
   readonly maxQualityRounds?: number;
   readonly maxReviewRounds?: number;
-  readonly maxTotalIssues?: number;
+  // Delay between tracker refreshes while the daemon has capacity. Default:
+  // 60 seconds. A poll fetches source, chunk and member refs before planning.
+  readonly pollIntervalMs?: number;
+
+  // Keep the host wake lock while the daemon is idle. Default false: ordinary
+  // desktop hosts may sleep between polls and poll immediately after waking.
+  readonly keepAwakeWhileIdle?: boolean;
 
   // Number of issue inner loops that may execute concurrently. DONE issues
   // release their slot while they wait for the serialized landing path.
@@ -817,8 +823,9 @@ export const DEFAULT_MAX_QUALITY_ROUNDS = 4;
 // one round before approval. This caps the deciding pass, not total loop cost:
 // each correctness rejection may be preceded by a fresh quality-failure streak.
 export const DEFAULT_MAX_REVIEW_ROUNDS = 4;
-export const DEFAULT_MAX_TOTAL_ISSUES = 50;
 export const DEFAULT_MAX_PARALLEL_ISSUES = 3;
+export const DEFAULT_POLL_INTERVAL_MS = 60_000;
+export const DEFAULT_KEEP_AWAKE_WHILE_IDLE = false;
 export const DEFAULT_INTEGRATION_BRANCH = "sandbar/integration";
 // 20 minutes. Covers a queued runner plus a browser suite; a repo whose CI is
 // genuinely slower should raise it rather than have sandbar park good cycles.
@@ -1751,6 +1758,11 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
         "bound correctness rejections.",
     );
   }
+  if ("maxTotalIssues" in config) {
+    throw new SandbarError(
+      "config.maxTotalIssues was removed (#133); sandbar is a daemon and no longer has a lifetime admission cap.",
+    );
+  }
   checkRenamedReviewerField(config);
   // Trimmed HERE, not just where it is compared. `resolveMergeMode` tests
   // `integrationBranch === sourceBranch.trim()`, so trimming only in the guard
@@ -1798,6 +1810,13 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   if (typeof uiPrototypeCheck !== "boolean") {
     throw new SandbarError(
       `config.uiPrototypeCheck must be a boolean, got ${JSON.stringify(config.uiPrototypeCheck)}.`,
+    );
+  }
+  const keepAwakeWhileIdle =
+    config.keepAwakeWhileIdle ?? DEFAULT_KEEP_AWAKE_WHILE_IDLE;
+  if (typeof keepAwakeWhileIdle !== "boolean") {
+    throw new SandbarError(
+      `config.keepAwakeWhileIdle must be a boolean, got ${JSON.stringify(config.keepAwakeWhileIdle)}.`,
     );
   }
   // Hoisted out of the literal below because the model ids are read against
@@ -1919,7 +1938,11 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       "maxReviewRounds",
       config.maxReviewRounds ?? DEFAULT_MAX_REVIEW_ROUNDS,
     ),
-    maxTotalIssues: config.maxTotalIssues ?? DEFAULT_MAX_TOTAL_ISSUES,
+    pollIntervalMs: requirePositiveInteger(
+      "pollIntervalMs",
+      config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+    ),
+    keepAwakeWhileIdle,
     maxParallelIssues: requirePositiveInteger(
       "maxParallelIssues",
       config.maxParallelIssues ?? DEFAULT_MAX_PARALLEL_ISSUES,
