@@ -254,6 +254,7 @@ import { OriginLeaseLostDuringCleanupError, run } from "./run.js";
 import { OriginLockHeldError, acquireOriginLock } from "./origin-lock.js";
 import { ensureRepoCache } from "./repo-cache.js";
 import { startEventRecord } from "./events.js";
+import { beginCleanup } from "./cleanup.js";
 
 const config: RunConfig = {
   ghOwner: "o", ghRepo: "r", cwd: "/tmp", workDir: "sandbar-run-quota-test",
@@ -622,6 +623,36 @@ describe("run quota orchestration (#109)", () => {
       .rejects.toBeInstanceOf(OriginLeaseLostDuringCleanupError);
     expect(eventsOf("exit")).toHaveLength(exitsBefore);
     expect(eventsOf("complaint")).toHaveLength(complaintsBefore);
+  });
+
+  it("propagates merger-wrapped lease loss to the existing cleanup owner", async () => {
+    const done = issue("139");
+    const loss = new OriginLeaseLostDuringCleanupError(
+      "origin lease was lost during terminal cleanup",
+    );
+    const priorExit = {
+      kind: "exit",
+      tag: "halted",
+      reason: "another terminal already owns cleanup",
+      exitCode: 1,
+    };
+    seams.plan.mockResolvedValue(resolution([done]));
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "work" }] });
+    seams.merger.mockImplementation(async () => {
+      await seams.emit(priorExit);
+      expect(beginCleanup().owner).toBe(true);
+      throw new MergerError("remote write barrier rejected", undefined, { cause: loss });
+    });
+
+    await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toBe(loss);
+    expect(eventsOf("exit")).toEqual([priorExit]);
+    expect(eventsOf("complaint").filter((event) =>
+      String(event["message"]).includes("Merger halted") ||
+      String(event["message"]).includes("internal failure"),
+    )).toEqual([]);
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining("SANDBAR HALTED — internal failure"),
+    );
   });
 
   it("records a release failure before run-end and continues cleanup", async () => {
