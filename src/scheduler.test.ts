@@ -110,6 +110,13 @@ describe("continuous pool", () => {
       await vi.advanceTimersByTimeAsync(100);
       await expect(pollWake).resolves.toBe("poll");
 
+      // A poll winner withdraws its completion subscription. Prove that while
+      // the original task is still hung by arming another poll wait: a stale
+      // waiter would make this throw "pool already has an active wake wait".
+      const nextPollWake = pollFirst.waitForWake(100);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(nextPollWake).resolves.toBe("poll");
+
       const slotFirst = new ContinuousPool<Issue, string>(2, (i) => i.id);
       const completing = deferred<string>();
       const second = slotFirst.admit([issue("2")])[0]!;
@@ -119,9 +126,8 @@ describe("continuous pool", () => {
       await expect(slotWake).resolves.toBe("slot-freed");
       expect(vi.getTimerCount()).toBe(0);
 
-      // The poll winner withdrew its completion subscription. Settling that
-      // old task is observed only by a fresh wait, not by a callback retained
-      // from the completed race.
+      // Settling the old task is observed only by a fresh wait, not by a
+      // callback retained from either completed poll race.
       hung.resolve("late");
       await Promise.resolve();
       await expect(pollFirst.waitForWake(100)).resolves.toBe("slot-freed");

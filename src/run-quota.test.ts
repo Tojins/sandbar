@@ -250,6 +250,56 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.wakeLocks[1]?.stop).toHaveBeenCalledOnce();
   });
 
+  it("releases a replacement wake lock when admitted work returns to idle", async () => {
+    const arrived = issue("133");
+    seams.plan
+      .mockResolvedValueOnce(resolution([]))
+      .mockResolvedValueOnce(resolution([arrived]))
+      .mockResolvedValue(resolution([]));
+    vi.mocked(fetchOriginRefs)
+      .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+      .mockRejectedValueOnce(new Error("stop after second idle transition"));
+    seams.innerLoop.mockResolvedValue({
+      type: "NEEDS-INFO", questions: "answer", strandedHead: null,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(seams.innerLoop).toHaveBeenCalledOnce();
+    expect(seams.logLines.filter((line) => line.startsWith("Idle; polling every")))
+      .toHaveLength(2);
+    expect(startKeepawake).toHaveBeenCalledTimes(2);
+    expect(seams.wakeLocks[0]?.stop).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[1]?.stop).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the original wake lock while an idle daemon waits for work", async () => {
+    const arrived = issue("133");
+    seams.plan
+      .mockResolvedValueOnce(resolution([]))
+      .mockResolvedValue(resolution([arrived]));
+    vi.mocked(fetchOriginRefs).mockResolvedValue({ sourceChanged: false, failures: [] });
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({
+      ...config, pollIntervalMs: 1, keepAwakeWhileIdle: true,
+    })).rejects.toThrow("EXIT:4");
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(seams.logLines.filter((line) => line.startsWith("Idle; polling every")))
+      .toHaveLength(1);
+    expect(seams.innerLoop).toHaveBeenCalledOnce();
+    expect(startKeepawake).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[0]?.stop).toHaveBeenCalledOnce();
+  });
+
   it("gives post-refresh work new images while an older admission stays immutable", async () => {
     const slow = issue("1");
     const fast = issue("2");
