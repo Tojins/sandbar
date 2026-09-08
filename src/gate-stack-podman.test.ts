@@ -91,7 +91,13 @@ describe.runIf(available)("gate stack against real podman", () => {
         worktreePath: repo,
         spec: resolveGateStack({
           containers: [
-            { name: "db", image: IMAGE, lifecycle: "issue", hold: true },
+            {
+              name: "db",
+              image: IMAGE,
+              lifecycle: "issue",
+              mountWorktree: "/work",
+              hold: true,
+            },
             { name: "cache", image: IMAGE, lifecycle: "issue", hold: true },
             { name: "runner", image: IMAGE, hold: true },
           ],
