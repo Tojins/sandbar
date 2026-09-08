@@ -399,7 +399,7 @@ describe("resolve provider invocation (#74)", () => {
       botEmail: "bot@example.test",
     });
     expect(argv).toEqual([
-      "run", "--rm", "-i", "--image-volume=ignore",
+      "run", "-i", "--image-volume=ignore",
       "--name", "resolve-1",
       "--userns=keep-id", "--user", "1000:1000",
       "-v", "/worktree:/workspace", "-v", "/git-common:/git-common",
@@ -412,6 +412,9 @@ describe("resolve provider invocation (#74)", () => {
       "--entrypoint", "/bin/sh", "sandbox-image", "-c", "agent --print",
     ]);
     expect(argv).not.toContain("--init");
+    // #141 reads inspect/cgroup evidence after the process exits, then the
+    // adapter removes the named container explicitly.
+    expect(argv).not.toContain("--rm");
   });
 
   it("mounts the shared Codex credential read-write without putting it in env", () => {

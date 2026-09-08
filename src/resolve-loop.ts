@@ -56,6 +56,8 @@
 // one in the log line and in the comment, which is the entire difference
 // between it and the sub-three-second no-ops it used to be indistinguishable
 // from.
+// Every attempt also carries the resolve container's peak-memory/OOM evidence
+// in its event, transcript header, merger line and abandon prose (#141).
 
 import { SandbarError } from "./errors.js";
 import {
@@ -78,6 +80,10 @@ import {
   type RateLimitMeasurement,
 } from "./agent-run-end.js";
 import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
+import {
+  formatContainerResources,
+  type ContainerResources,
+} from "./container-resources.js";
 
 export const RESOLVE_MAX_ATTEMPTS = 4;
 
@@ -135,8 +141,9 @@ export type ResolveMode =
       readonly failedChecks: string;
     };
 
-// A Codex merger's structured quota rollout dies with its --rm container
-// (#109). Its permanent credential refusal is on JSONL instead and is a typed
+// A Codex merger's structured quota rollout dies when its short-lived container
+// is explicitly removed after #141's resource read (#109). Its permanent
+// credential refusal is on JSONL instead and is a typed
 // provider closure (#134), so it escapes without spending another attempt.
 //
 // How one resolve-provider `podman run` invocation ended. `timeout` is
@@ -148,7 +155,7 @@ export type ResolveAgentEnd = AgentRunEnd;
 // What one invocation actually did. The token parser only ever needed
 // `output`; every other field here exists so that an attempt which produced
 // nothing can be told apart from an agent that chose to say nothing (#67).
-export type ResolveAgentRun = {
+export type ResolveAgentRun = ContainerResources & {
   readonly stdout: string;
   readonly stderr: string;
   // Agent speech parsed by the selected provider. Raw stdout remains above for
@@ -219,7 +226,7 @@ export type ResolveAttemptVerdict =
 // what the loop then made of it. Deliberately holds SIZES and not the output
 // itself — the output is on disk, and a comment that inlined four agent
 // transcripts would be unreadable and would hit GitHub's body limit.
-export type ResolveAttemptSummary = {
+export type ResolveAttemptSummary = ContainerResources & {
   readonly attempt: number;
   readonly end: ResolveAgentEnd;
   readonly exitCode: number | null;
@@ -448,6 +455,8 @@ export async function runResolveLoop(
         exitCode: run.exitCode,
         signal: run.signal,
         durationMs: run.durationMs,
+        ...(run.peakMemoryBytes === undefined ? {} : { peakMemoryBytes: run.peakMemoryBytes }),
+        ...(run.oomKilled === undefined ? {} : { oomKilled: run.oomKilled }),
         container: run.container,
         stdoutBytes: run.stdout.length,
         stderrBytes: run.stderr.length,
@@ -584,20 +593,25 @@ const bytes = (n: number): string =>
 
 // The log line's half: dense, greppable, one attempt per line.
 function describeRunEnd(run: ResolveAgentRun): string {
+  const resources = formatContainerResources(run);
   return (
     `ended=${run.end} after=${seconds(run.durationMs)} ` +
     `exit=${run.exitCode ?? "-"} signal=${run.signal ?? "-"} ` +
-    `stdout=${bytes(run.stdout.length)} stderr=${bytes(run.stderr.length)}`
+    `stdout=${bytes(run.stdout.length)} stderr=${bytes(run.stderr.length)}` +
+    (resources ? ` ${resources}` : "")
   );
 }
 
 // The prose half, for a comment a human reads once and acts on.
-function describeEndForHumans(run: {
+function describeEndForHumans(run: ContainerResources & {
   readonly end: ResolveAgentEnd;
   readonly exitCode: number | null;
   readonly signal: string | null;
   readonly durationMs: number;
 }): string {
+  if (run.oomKilled === true) {
+    return `was OOM-killed after ${seconds(run.durationMs)}`;
+  }
   switch (run.end) {
     case "timeout":
       return (
@@ -670,11 +684,14 @@ export function formatResolveAttempts(
   return attempts
     .map((a) => {
       const where = a.logPath ? ` Output: \`${a.logPath}\`.` : "";
+      const resources = formatContainerResources(a);
       return (
         `- **Attempt ${a.attempt}** — the agent ${describeEndForHumans(a)}, ` +
         `writing ${bytes(a.stdoutBytes)} of stdout and ${bytes(a.stderrBytes)} ` +
         `of stderr; ${VERDICT_PROSE[a.verdict]}.` +
-        ` Container \`${a.container}\`.${where}`
+        ` Container \`${a.container}\`.` +
+        (resources ? ` ${resources}.` : "") +
+        where
       );
     })
     .join("\n");

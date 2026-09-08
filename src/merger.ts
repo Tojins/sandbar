@@ -222,7 +222,10 @@
 // and byte-verbatim stdout/stderr capture before judgement. The shared end
 // classification lives in agent-run-end.ts; the lifecycles stay different.
 // Unlike the long-lived sandbox's `sleep infinity` pid 1, this short-lived
-// `--rm` container runs the agent as pid 1, so #42's `--init` does not transfer.
+// container runs the agent as pid 1, so #42's `--init` does not transfer. It
+// remains named after exit just long enough to inspect cgroup memory.peak and
+// OOMKilled, then is explicitly removed (#141); `--rm` would erase the record
+// before it could be measured.
 // `captureAgentRun` keeps both raw streams for the byte-verbatim attempt log,
 // then `parseCapturedAgentRun` puts only parsed agent speech in the output
 // register that the resolve promise parser may read. It answers with the exit
@@ -320,6 +323,16 @@ import {
   runVerifiedLanding,
 } from "./forge-verify.js";
 import { type GateResult, formatGateFields } from "./gate.js";
+import {
+  CONTAINER_RM_ARGS,
+  CONTROL_TIMEOUT_MS,
+  boundedOk,
+  boundedPodman,
+} from "./gate-stack.js";
+import {
+  readContainerResources,
+  systemContainerResourceDeps,
+} from "./container-resources.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import {
   memberBranchName,
@@ -2382,8 +2395,9 @@ export function captureAgentRun(
   });
 }
 
-// Codex merger quota remains the deliberate #109 gap: its `--rm` container's
-// session rollout disappears before it can be read. Permanent credential
+// Codex merger quota remains the deliberate #109 gap: its short-lived
+// container's session rollout disappears when it is explicitly removed after
+// resource measurement. Permanent credential
 // refusal is not part of that gap: it arrives on JSONL and closes the provider
 // through #134. Claude quota state is on stdout and retained here.
 //
@@ -2445,7 +2459,6 @@ export function buildResolveRunArgv(args: {
 }): readonly string[] {
   const argv = [
     "run",
-    "--rm",
     "-i",
     "--image-volume=ignore",
     "--name",
@@ -2706,7 +2719,18 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         container,
         timeoutMs: RESOLVE_AGENT_TIMEOUT_MS,
       });
-      return parseCapturedAgentRun(run, agentProvider);
+      const resources = await readContainerResources(
+        container,
+        systemContainerResourceDeps(boundedPodman),
+      );
+      const removed = await boundedPodman(CONTAINER_RM_ARGS(container), CONTROL_TIMEOUT_MS);
+      if (!boundedOk(removed)) {
+        throw new SandbarError(
+          `merger: failed to remove resolve container '${container}': ` +
+            (removed.timedOut ? "podman rm timed out" : removed.errorMessage),
+        );
+      }
+      return parseCapturedAgentRun({ ...run, ...resources }, agentProvider);
     },
     async isMergeInProgress() {
       // NOT `<cwd>/.git/MERGE_HEAD`. Since #10 the merger always runs in a

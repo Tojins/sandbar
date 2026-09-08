@@ -28,6 +28,9 @@
 // terminal. Attempt containers come up ONE AT A TIME (issue ones as a group)
 // because `bringUpContainers` abandons the rest on first failure and
 // "degraded" has to mean the other siblings still came up.
+// At stop, every claimed sibling is inspected before removal for cgroup-v2
+// memory.peak and OOMKilled (#141), then its duration-bearing record is handed
+// to the issue event stream after removal. These are evidence only.
 //
 // Logs: each sibling's `podman logs -f` is followed into a host file
 // bind-mounted READ-ONLY into the agent at `/sandbar/logs/<name>.log`. Every
@@ -77,6 +80,13 @@ import {
 } from "./gate-stack.js";
 import { type RunScope, sandboxContainerNameFor } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
+import {
+  readContainerResources,
+  systemContainerResourceDeps,
+  type ContainerResources,
+  type ContainerTeardown,
+} from "./container-resources.js";
+import { startTimer } from "./timing.js";
 
 // What this stack is called in the messages `bringUpContainers` raises about
 // it. The whole reason `BringUpCtx` carries a label: the shared bringup is the
@@ -147,6 +157,9 @@ export type SandboxStackOptions = {
   // BEFORE the anchor, because a bind-mount source is read at container start.
   readonly logDir: string;
   readonly onNotice?: (message: string) => void | Promise<void>;
+  readonly onContainerTeardown?: (
+    record: ContainerTeardown,
+  ) => void | Promise<void>;
 };
 
 // Everything this module does to podman, behind one seam — because what is
@@ -172,12 +185,15 @@ export type SandboxStackDeps = {
   // implementation rather than in `stop`.
   readonly remove: (containerName: string) => Promise<string | null>;
   readonly follow: (containerName: string, filePath: string) => LogFollower;
+  readonly measure: (containerName: string) => Promise<ContainerResources>;
 };
 
 export const realSandboxStackDeps: SandboxStackDeps = {
   bringUp: bringUpContainers,
   remove: removeSibling,
   follow: startLogFollower,
+  measure: (containerName) =>
+    readContainerResources(containerName, systemContainerResourceDeps(boundedPodman)),
 };
 
 // Create the log directory before the anchor is created. Separate from
@@ -198,6 +214,8 @@ export async function startSandboxStack(
 
   const followers: LogFollower[] = [];
   const created: string[] = [];
+  const lifetimes = new Map<string, () => number>();
+  const teardowns: ContainerTeardown[] = [];
   let stopped = false;
 
   const stop = async (): Promise<void> => {
@@ -224,6 +242,18 @@ export async function startSandboxStack(
     const failures: string[] = [];
     const leaked: string[] = [];
     for (const name of [...created].reverse()) {
+      const configured = containers.find((c) => nameOf(c) === name);
+      const elapsed = lifetimes.get(name);
+      if (configured !== undefined && elapsed !== undefined) {
+        teardowns.push({
+          name: configured.name,
+          container: name,
+          lifecycle: configured.lifecycle,
+          durationMs: elapsed(),
+          ...(await deps.measure(name)),
+        });
+        lifetimes.delete(name);
+      }
       const failure = await deps.remove(name);
       if (failure === null) continue;
       failures.push(failure);
@@ -237,6 +267,7 @@ export async function startSandboxStack(
           `Clean up with: ${RUNTIME} rm -f -t 0 ${leaked.join(" ")}`,
       );
     }
+    for (const record of teardowns) await opts.onContainerTeardown?.(record);
   };
   // Registered before the first container exists, so a signal anywhere in the
   // bringup below still sweeps what was created. ONE entry for the whole stack
@@ -248,7 +279,9 @@ export async function startSandboxStack(
   // comment above leans on when it says the LIFO drain reaches this stack
   // before the agent-sandbox teardown. `registerDisposable`'s own header owns
   // the rest of that argument.
-  const dispose = registerDisposable(stop);
+  const dispose = registerDisposable(async () => {
+    await stop();
+  });
 
   const attach: ContainerAttachment = {
     kind: "netns",
@@ -277,7 +310,11 @@ export async function startSandboxStack(
   // A container that reached `podman run` has a name to remove even if it never
   // became ready, so teardown has to know about it before readiness is decided.
   const claim = (group: readonly ResolvedStackContainer[]): void => {
-    for (const c of group) if (!created.includes(nameOf(c))) created.push(nameOf(c));
+    for (const c of group) {
+      const name = nameOf(c);
+      if (!created.includes(name)) created.push(name);
+      if (!lifetimes.has(name)) lifetimes.set(name, startTimer());
+    }
   };
 
   // Why a sibling is not up, by container name. Collected rather than pushed

@@ -6,6 +6,30 @@ const at = (seq: number, ts: string, event: object): RunEvent =>
   ({ seq, ts, ...event }) as RunEvent;
 
 describe("run event reducer", () => {
+  it("passes container resource facts through to feed rows without defaulting absences", () => {
+    const steps = {
+      test: { durationMs: 12, peakMemoryBytes: 4096, oomKilled: false },
+    };
+    const state = reduceRunEvents([
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: 1, driver: "sandbar", configPath: null,
+        workdir: "/r", maxParallelIssues: 1, pid: 1,
+      }),
+      at(2, "2026-09-07T09:01:00Z", {
+        kind: "gate", gate: "gate-1", issue: 2, attempt: 1, ok: false,
+        durationMs: 12, steps,
+      }),
+      at(3, "2026-09-07T09:02:00Z", {
+        kind: "review-pass", issue: 2, attempt: 1, round: 1, pass: "quality",
+        invocation: 1, provider: "codex", model: "m", effort: null,
+        result: "failed", durationMs: 9, peakMemoryBytes: 8192, oomKilled: true,
+      }),
+    ], { now: new Date("2026-09-07T09:03:00Z"), pidAlive: true });
+    expect(state.events[0]).toMatchObject({ peakMemoryBytes: 8192, oomKilled: true });
+    expect(state.events[1]?.steps).toBe(steps);
+    expect(state.events[1]).not.toHaveProperty("peakMemoryBytes");
+  });
+
   it("projects every event kind into a newest-first, attributed feed", () => {
     const rows: object[] = [
       { kind: "run-start", schemaVersion: 1, driver: "sandbar", configPath: null,

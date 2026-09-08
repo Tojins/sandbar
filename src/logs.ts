@@ -12,15 +12,19 @@
 // allocated for that issue. Invocation writes are create-only: a naming
 // collision must fail rather than erase the earlier invocation's evidence
 // (#135).
+// Duration headers for container-backed invocations and resolve attempts also
+// render their available peak-memory/OOM facts (#141), so the raw artefact a
+// human opens says OOMKilled even without consulting events.jsonl.
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-// Type-only, so this module still pulls in nothing at runtime — resolve-loop.ts
-// loads prompt templates from disk at import, and the log tree must not depend
-// on those existing.
+// Resolve types stay type-only — resolve-loop.ts loads prompt templates from
+// disk at import, and the log tree must not depend on those existing. The
+// resource formatter is the sole runtime helper and has no template inputs.
 import type { ResolveAttemptRecord } from "./resolve-loop.js";
 import type { AgentInvocationRecord } from "./agent-sandbox.js";
+import { formatContainerResources } from "./container-resources.js";
 
 export type AttemptLogger = {
   writeInvocation(filename: string, record: AgentInvocationRecord): Promise<void>;
@@ -151,6 +155,7 @@ async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLo
     dir,
     startInvocationCycle: () => invocationSequencer.startCycle(),
     async writeInvocation(filename, record) {
+      const resources = formatContainerResources(record);
       const header = [
         `agent:      ${record.agent}`,
         `provider:   ${record.provider}`,
@@ -158,6 +163,7 @@ async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLo
         `ended:      ${record.end}${record.detail ? ` (${record.detail})` : ""}`,
         `exit code:  ${record.exitCode ?? "-"}`,
         `duration:   ${record.durationMs}ms`,
+        ...(resources ? [`resources:  ${resources}`] : []),
         "",
       ].join("\n");
       await writeFile(
@@ -218,6 +224,7 @@ function makeLandingLogger(runDir: string, n: number): LandingLogger {
       // that died at startup does NOT have: on the failure this file exists for,
       // everything below the header is empty and the header is the whole
       // artefact.
+      const resources = formatContainerResources(record);
       const header = [
         `resolve attempt ${record.attempt} for #${record.issueId} (mode=${record.mode})`,
         `container:  ${record.container}`,
@@ -226,6 +233,7 @@ function makeLandingLogger(runDir: string, n: number): LandingLogger {
         `exit code:  ${record.exitCode ?? "-"}`,
         `signal:     ${record.signal ?? "-"}`,
         `duration:   ${record.durationMs}ms`,
+        ...(resources ? [`resources:  ${resources}`] : []),
         `stdout:     ${record.stdout.length} bytes`,
         `stderr:     ${record.stderr.length} bytes`,
         "",

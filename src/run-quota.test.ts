@@ -52,7 +52,7 @@ vi.mock("./cleanup.js", () => ({
 vi.mock("./keepawake.js", () => ({
   startKeepawake: vi.fn(() => {
     const lock = {
-      stop: vi.fn(),
+      stop: vi.fn(async () => undefined),
       onStatus: vi.fn((sink: (line: string, status: WakeLockStatus) => void) => {
       for (const report of seams.wakeStatusReports) sink(report.line, report.status);
       }),

@@ -23,9 +23,11 @@
 // through a socket, so a test that holds only for a LOCAL client (its signal
 // semantics, whose user the invoking user is) is not a test the gate can run
 // at all, and
-// its file skips even under the flag. TWO files ask for that axis and they are
-// the whole of the human's host-side step: gate-stack-hostpodman.test.ts and
-// sandbox-stack-podman.test.ts. Each says so in its own header, because a list
+// its file skips even under the flag. THREE files ask for that axis and they are
+// the whole of the human's host-side step: gate-stack-hostpodman.test.ts,
+// sandbox-stack-podman.test.ts, and container-resources-podman.test.ts (the
+// cgroup path a remote client returns belongs to the remote host). Each says so
+// in its own header, because a list
 // kept only here goes stale the first time a file is added or removed and
 // nothing points back — as it did between #48 and #52, when
 // agent-sandbox-podman.test.ts asked for the axis on an unknown rather than a

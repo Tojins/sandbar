@@ -4,12 +4,17 @@
 // the pool timeline, waiting/parked join and compact event prose, while the
 // HTTP server owns only file discovery and delivery. Wall-clock `now` and PID
 // liveness are explicit inputs so tests do not depend on either ambient fact.
+// Container resource fields stay attached to feed rows verbatim (#141), and a
+// gate's per-step map is passed by reference; the reducer neither reinterprets
+// unavailable measurements nor turns them into zeroes.
 
 import type {
+  GateStepEvent,
   RecomputeWaiting,
   RunEvent,
   WaitingReason,
 } from "./events.js";
+import type { ContainerResources } from "./container-resources.js";
 
 export type TimelineSpan = {
   readonly kind: "impl" | "review";
@@ -47,11 +52,12 @@ export type FinishedIssueState = {
   readonly at: string;
 };
 
-export type FeedEvent = {
+export type FeedEvent = ContainerResources & {
   readonly at: string;
   readonly issue: number | null;
   readonly text: string;
   readonly tone: "" | "dim" | "good" | "warn" | "bad";
+  readonly steps?: Readonly<Record<string, GateStepEvent>>;
 };
 
 export type UiState = {
@@ -157,6 +163,14 @@ function feedText(event: RunEvent): FeedEvent | null {
     case "review-pass":
       text = `round ${event.round} · ${event.pass} pass · invocation ${event.invocation}`;
       break;
+    case "resolve-attempt":
+      text = `resolve attempt ${event.attempt} · ${event.end}`;
+      tone = event.oomKilled === true ? "bad" : "";
+      break;
+    case "container":
+      text = `${event.stack} container ${event.name} stopped`;
+      tone = event.oomKilled === true ? "bad" : "dim";
+      break;
     case "review-round":
       text = `round ${event.round} · ${
         !event.gateOk
@@ -230,7 +244,21 @@ function feedText(event: RunEvent): FeedEvent | null {
     default:
       return null;
   }
-  return { at: event.ts, issue, text, tone };
+  return {
+    at: event.ts,
+    issue,
+    text,
+    tone,
+    ...(event.kind === "gate" && event.steps !== undefined
+      ? { steps: event.steps }
+      : {}),
+    ...("peakMemoryBytes" in event && event.peakMemoryBytes !== undefined
+      ? { peakMemoryBytes: event.peakMemoryBytes }
+      : {}),
+    ...("oomKilled" in event && event.oomKilled !== undefined
+      ? { oomKilled: event.oomKilled }
+      : {}),
+  };
 }
 
 function finishRunningSpan(issue: MutableIssue, at: string): void {

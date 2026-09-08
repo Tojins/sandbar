@@ -67,6 +67,9 @@
 // UI-check counters restart at both boundaries, but an earlier invocation
 // record must never be overwritten (#135). The cached IssueLogger owns that
 // sequence beside the directory whose names it allocates.
+// Each duration-bearing agent event carries that invocation's peak-memory/OOM
+// evidence, gate events retain it per step, and both stacks emit each sibling's
+// final teardown record after their resources are removed (#141).
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -78,7 +81,16 @@ import {
   buildAgentProvider,
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
-import { AgentCredentialError, AgentError, AgentQuotaError, agentPartialOutput, agentPartialUsage, podman, withPartialOutput } from "./agent-sandbox.js";
+import {
+  AgentCredentialError,
+  AgentError,
+  AgentQuotaError,
+  agentPartialContainerResources,
+  agentPartialOutput,
+  agentPartialUsage,
+  podman,
+  withPartialOutput,
+} from "./agent-sandbox.js";
 import type { RateLimitMeasurement } from "./agent-run-end.js";
 import type { AgentInvocationRecord, Sandbox, SandboxHooks } from "./agent-sandbox.js";
 import { maxContextDepth, sumAgentUsage } from "./agent-usage.js";
@@ -145,6 +157,11 @@ import {
 import type { RepoLayout } from "./repo-cache.js";
 import type { RepoRef } from "./repo-ref.js";
 import { startTimer } from "./timing.js";
+import {
+  containerResourcesOf,
+  mergeContainerResources,
+  type ContainerResources,
+} from "./container-resources.js";
 import {
   type ProjectAnchorOptions,
   type PriorReviewRound,
@@ -871,6 +888,13 @@ async function runSandboxCycle(
                     onNotice: (message) => opts.onEvent({
                       kind: "complaint", severity: "warning", message,
                     }),
+                    onContainerTeardown: (record) => opts.onEvent({
+                      kind: "container",
+                      stack: "sandbox",
+                      issue: Number(issue.id),
+                      title: issue.title,
+                      ...record,
+                    }),
                   });
                 },
               }
@@ -887,6 +911,13 @@ async function runSandboxCycle(
         hideWorktreeGit: true,
         onNotice: (message) => opts.onEvent({
           kind: "complaint", severity: "warning", message,
+        }),
+        onContainerTeardown: (record) => opts.onEvent({
+          kind: "container",
+          stack: "gate",
+          issue: Number(issue.id),
+          title: issue.title,
+          ...record,
         }),
         // A thunk, not a value: the stack calls it before every gate run, and
         // the answer changes as the agent commits (#37). It hands back the
@@ -1199,6 +1230,7 @@ export async function runUiCheck(
       toolCalls: number | undefined,
       peakContext: number | undefined,
       rateLimit: RateLimitMeasurement | undefined,
+      resources: ContainerResources,
     ): Promise<void> => {
       await opts.onEvent({
         kind: "ui-check",
@@ -1214,6 +1246,7 @@ export async function runUiCheck(
         ...(eventUsage(usage, toolCalls, peakContext, rateLimit) === undefined
           ? {}
           : { usage: eventUsage(usage, toolCalls, peakContext, rateLimit) }),
+        ...resources,
       });
     };
 
@@ -1235,6 +1268,7 @@ export async function runUiCheck(
       );
     } catch (err) {
       const partial = agentPartialUsage(err);
+      const resources = agentPartialContainerResources(err);
       await logInvocation(
         err instanceof AgentQuotaError
           ? "quota"
@@ -1247,6 +1281,7 @@ export async function runUiCheck(
         partial.peakContext,
         partial.rateLimit ??
           (err instanceof AgentQuotaError ? err.measurement : undefined),
+        resources,
       );
       const wrote = await enforceReadOnlyAgentSnapshot(
         sandbox,
@@ -1274,6 +1309,7 @@ export async function runUiCheck(
         run.toolCalls,
         run.peakContext,
         run.rateLimit,
+        containerResourcesOf(run),
       );
       return { kind: "ui-checker-wrote", detail: wrote };
     }
@@ -1285,6 +1321,7 @@ export async function runUiCheck(
       run.toolCalls,
       run.peakContext,
       run.rateLimit,
+      containerResourcesOf(run),
     );
     if (result.kind !== "NO-SIGNAL") {
       return { kind: "ui-check-result", result };
@@ -1390,6 +1427,7 @@ export async function runImplementer(
   } catch (err) {
     if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) {
       const partial = agentPartialUsage(err);
+      const resources = agentPartialContainerResources(err);
       const usage = eventUsage(
         partial.usage,
         partial.toolCalls,
@@ -1408,6 +1446,7 @@ export async function runImplementer(
         effort: config.implementerEffort ?? null,
         durationMs: implementerTimer(),
         ...(usage === undefined ? {} : { usage }),
+        ...resources,
       });
     }
     throw err;
@@ -1423,6 +1462,7 @@ export async function runImplementer(
   let attemptPeakContext = run.peakContext;
   let attemptRateLimit = run.rateLimit;
   let attemptMaxGapMs = run.maxGapMs;
+  let attemptResources: ContainerResources = containerResourcesOf(run);
   let attemptStdout = run.stdout;
 
   // The promise nudge: output with NO tag at all gets one same-conversation
@@ -1471,6 +1511,7 @@ export async function runImplementer(
     attemptPeakContext = maxContextDepth(attemptPeakContext, nudge.peakContext);
     attemptRateLimit = nudge.rateLimit ?? attemptRateLimit;
     attemptMaxGapMs = Math.max(attemptMaxGapMs, nudge.maxGapMs);
+    attemptResources = mergeContainerResources(attemptResources, nudge);
     const combined = combinePromiseNudge(run, nudge);
     attemptStdout = combined.stdout;
     attemptCommits = combined.commitCount;
@@ -1568,6 +1609,7 @@ export async function runImplementer(
     ...(eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit) === undefined
       ? {}
       : { usage: eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit) }),
+    ...attemptResources,
   });
   return {
     kind: "implementer-result",
@@ -1628,7 +1670,7 @@ async function runGate1(
     gate: "gate-1",
     ok: gate1.ok,
     durationMs: gate1.durationMs,
-    steps: Object.fromEntries(gate1.steps.map((step) => [step.name, step.durationMs])),
+    steps: Object.fromEntries(gate1.steps.map(({ name, ...step }) => [name, step])),
   });
   return {
     ok: gate1.ok,
@@ -1801,6 +1843,7 @@ export async function runReviewer(
           toolCalls: number | undefined,
           peakContext: number | undefined,
           rateLimit: RateLimitMeasurement | undefined,
+          resources: ContainerResources,
         ): Promise<void> => {
           await opts.onEvent({
             kind: "review-pass",
@@ -1819,6 +1862,7 @@ export async function runReviewer(
             ...(eventUsage(usage, toolCalls, peakContext, rateLimit) === undefined
               ? {}
               : { usage: eventUsage(usage, toolCalls, peakContext, rateLimit) }),
+            ...resources,
           });
         };
         try {
@@ -1848,6 +1892,7 @@ export async function runReviewer(
             reviewerRun.toolCalls,
             reviewerRun.peakContext,
             reviewerRun.rateLimit,
+            containerResourcesOf(reviewerRun),
           );
           const event = await detectWrite(beforeInvocation, reviewerRun.stdout);
           return event === null
@@ -1858,6 +1903,7 @@ export async function runReviewer(
           // minutes and died is the expensive case, and one that fell over in a
           // second is a different fault entirely.
           const partial = agentPartialUsage(err);
+          const resources = agentPartialContainerResources(err);
           await logPass(
             err instanceof AgentQuotaError
               ? "quota"
@@ -1870,6 +1916,7 @@ export async function runReviewer(
             partial.peakContext,
             partial.rateLimit ??
               (err instanceof AgentQuotaError ? err.measurement : undefined),
+            resources,
           );
           const transcript = agentPartialOutput(err);
           const event = await detectWrite(beforeInvocation, transcript);

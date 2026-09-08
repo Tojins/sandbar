@@ -671,7 +671,7 @@ describe("runResolveLoop — logging", () => {
       initiallyConflicted: true,
       agentRuns: [{
         stdout: "<promise>COMMITTED</promise>",
-        run: { peakContext: 4321 },
+        run: { peakContext: 4321, peakMemoryBytes: 918_000_000, oomKilled: true },
       }],
       gates: [{ ok: true }],
     });
@@ -688,6 +688,9 @@ describe("runResolveLoop — logging", () => {
     );
     expect(lines.find((l) => l.startsWith("resolve-attempt 1 ended="))).toContain(
       "peakContext=4321",
+    );
+    expect(lines.find((l) => l.startsWith("resolve-attempt 1 ended="))).toContain(
+      "peakMemoryBytes=918000000 oomKilled=true",
     );
     expect(lines.some((l) => l.includes("gate green"))).toBe(true);
     // #82. The install and the re-gate are reported on the GREEN path too —

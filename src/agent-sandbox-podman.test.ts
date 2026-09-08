@@ -34,8 +34,10 @@
 // them.
 //
 // SO IT IS NO LONGER PART OF THE HUMAN'S STEP. #48 shrank that step from "run
-// the full suite on the host" to three files; this leaves two,
-// gate-stack-hostpodman.test.ts and sandbox-stack-podman.test.ts, each
+// the full suite on the host" to three files; #141's host-side cgroup-path
+// assertion makes the remaining manual set three files:
+// gate-stack-hostpodman.test.ts, sandbox-stack-podman.test.ts, and
+// container-resources-podman.test.ts, each
 // host-only because a remote client demonstrably does something else rather
 // than because nobody looked. Prose describing that step is load-bearing in
 // both directions: naming this file still sends a human to re-run what the gate

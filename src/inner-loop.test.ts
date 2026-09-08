@@ -53,6 +53,7 @@ import type { ReviewerOutcome } from "./reviewer-run.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { EventInput } from "./events.js";
 import { initialState } from "./inner-loop-machine.js";
+import type { ContainerResources } from "./container-resources.js";
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -169,6 +170,8 @@ describe("runUiCheck (#126)", () => {
       },
       toolCalls: 7,
       peakContext: 8,
+      peakMemoryBytes: 344_000_000,
+      oomKilled: true,
       rateLimit: {
         status: "allowed_warning",
         window: "five_hour",
@@ -181,6 +184,7 @@ describe("runUiCheck (#126)", () => {
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
       durationMs: expect.any(Number), maxGapMs: 9, result: "CLEAR",
+      peakMemoryBytes: 344_000_000, oomKilled: true,
       usage: { inputTokens: 1, cachedInputTokens: 2, cacheWriteInputTokens: 3,
         outputTokens: 4, reasoningTokens: 5, apiMs: 6, resolvedModel: "resolved",
         models: 2, terminalReason: "end_turn", toolCalls: 7, peakContext: 8,
@@ -306,12 +310,18 @@ describe("runUiCheck (#126)", () => {
 });
 
 describe("silent implementer attempt policy (#116)", () => {
-  const sandboxResult = (stdout: string, silent: boolean, commits: string[] = []) => ({
+  const sandboxResult = (
+    stdout: string,
+    silent: boolean,
+    commits: string[] = [],
+    resources: ContainerResources = {},
+  ) => ({
     stdout,
     silent,
     commits: commits.map((sha) => ({ sha })),
     maxGapMs: 1,
     toolCalls: 0,
+    ...resources,
   });
 
   const runPath = (
@@ -426,6 +436,26 @@ describe("silent implementer attempt policy (#116)", () => {
     });
     expect(writes).toEqual(["", spoken]);
     expect(lines.at(-1)).toMatchObject({ kind: "implementer", commits: 0 });
+  });
+
+  it("keeps the largest peak and any OOM across a promise nudge", async () => {
+    const { pending, lines } = runPath(
+      sandboxResult("no signal", false, [], {
+        peakMemoryBytes: 1024,
+        oomKilled: false,
+      }),
+      sandboxResult("<promise>COMPLETE</promise>", false, [], {
+        peakMemoryBytes: 2048,
+        oomKilled: true,
+      }),
+    );
+
+    await expect(pending).resolves.toMatchObject({ kind: "implementer-result" });
+    expect(lines.at(-1)).toMatchObject({
+      kind: "implementer",
+      peakMemoryBytes: 2048,
+      oomKilled: true,
+    });
   });
 
   it("hands only the implementer extension to the implementer prompt", async () => {

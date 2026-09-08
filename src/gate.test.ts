@@ -35,6 +35,19 @@ describe("formatGateSteps", () => {
 });
 
 describe("formatGateFields", () => {
+  it("renders peak memory and an OOM kill beside the step they describe", () => {
+    expect(formatGateFields({
+      ok: false,
+      durationMs: 10,
+      steps: [{
+        name: "browser", ok: false, durationMs: 9,
+        peakMemoryBytes: 344_000_000, oomKilled: true,
+      }],
+    })).toBe(
+      "ok=false durationMs=10 steps=browser:9(peakMemoryBytes=344000000 oomKilled=true)",
+    );
+  });
+
   it("renders the full result in the order the gate-1 line already used", () => {
     expect(
       formatGateFields({

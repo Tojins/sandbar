@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resolveGateStack } from "./config.js";
+import type { ContainerTeardown } from "./container-resources.js";
 import { ContainerBringupError } from "./gate-stack.js";
 import { runScope } from "./naming.js";
 import {
@@ -178,6 +179,7 @@ describe("startSandboxStack (#44 D3)", () => {
         followed.push(name);
         return { stop: () => {} };
       },
+      measure: async () => ({}),
     };
     return { broughtUp, labels, removed, followed, deps };
   };
@@ -243,10 +245,28 @@ describe("startSandboxStack (#44 D3)", () => {
   // runner takes HARD-ERROR, and the issue retries with a fresh sandbox.
   it("throws when an issue-lifecycle sibling will not start", async () => {
     const r = recorder((n) => (n === "db" ? bringupError(n) : null));
-    await expect(start(r)).rejects.toThrow(/did not become ready/);
+    const records: ContainerTeardown[] = [];
+    await expect(startSandboxStack(
+      {
+        issueId: "44",
+        scope: SCOPE,
+        spec: twoLifecycles(),
+        worktreePath: "/wt",
+        anchorContainerName: ANCHOR,
+        logDir,
+        onContainerTeardown: (record) => records.push(record),
+      },
+      {
+        ...r.deps,
+        measure: async () => ({ peakMemoryBytes: 1024, oomKilled: true }),
+      },
+    )).rejects.toThrow(/did not become ready/);
     // And it takes what it created with it rather than leaving the agent
     // container anchoring debris.
     expect(r.removed).toEqual([`sandbar-${SCOPE}-sbx-44-db`]);
+    expect(records).toEqual([expect.objectContaining({
+      name: "db", peakMemoryBytes: 1024, oomKilled: true,
+    })]);
   });
 
   // D3, the other half, and the one that is easy to get backwards. An app
@@ -413,6 +433,43 @@ describe("startSandboxStack (#44 D3)", () => {
     // itself.
     await stack.stop();
     expect(r.removed).toHaveLength(2);
+  });
+
+  it("reports each sibling's resource evidence from immediately before removal", async () => {
+    const r = recorder();
+    const measured: string[] = [];
+    const records: ContainerTeardown[] = [];
+    const stack = await startSandboxStack(
+      {
+        issueId: "44",
+        scope: SCOPE,
+        spec: twoLifecycles(),
+        worktreePath: "/wt",
+        anchorContainerName: ANCHOR,
+        logDir,
+        onContainerTeardown: (record) => records.push(record),
+      },
+      {
+        ...r.deps,
+        measure: async (name) => {
+          measured.push(name);
+          return { peakMemoryBytes: 4096, oomKilled: name.endsWith("-app") };
+        },
+      },
+    );
+    await stack.stop();
+    expect(measured).toEqual([
+      `sandbar-${SCOPE}-sbx-44-app`,
+      `sandbar-${SCOPE}-sbx-44-db`,
+    ]);
+    expect(records).toEqual([
+      expect.objectContaining({
+        name: "app", lifecycle: "attempt", peakMemoryBytes: 4096, oomKilled: true,
+      }),
+      expect.objectContaining({
+        name: "db", lifecycle: "issue", peakMemoryBytes: 4096, oomKilled: false,
+      }),
+    ]);
   });
 
   // What leaks here is a running container holding a worktree mount, and the

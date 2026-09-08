@@ -209,8 +209,10 @@ export default {
     // their own say-so. That remains the safety net when the glob collects a
     // newly added local-client file before this exclusion list knows its name.
     //
-    // `npm test` on the host still runs everything. The two host-only files
-    // above are the whole of the manual step: run them on the host after a
+    // `npm test` on the host still runs everything. Those two plus
+    // `container-resources-podman.test.ts` (whose host-side cgroup path is
+    // meaningful only for a local client) are the whole of the manual step:
+    // run them on the host after a
     // cycle that touched the podman layer, the sandbox run args or the sandbox
     // stack.
     steps: [

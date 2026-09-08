@@ -39,6 +39,7 @@ import {
   AgentQuotaError,
   AgentIdleTimeoutError,
   agentFailureMessage,
+  agentPartialContainerResources,
   agentPartialOutput,
   agentPartialUsage,
   claudeCode,
@@ -2113,7 +2114,10 @@ describe("createSandbox integration (local provider)", () => {
 
   it("rejects via the completion-grace timer when the pipe is held open (F5)", async () => {
     await git(["branch", "sandbar/issue-4-grace"], dir);
-    const provider = makeLocalProvider();
+    const provider = {
+      ...makeLocalProvider(),
+      containerResources: async () => ({ peakMemoryBytes: 931_000_000, oomKilled: true }),
+    };
     const sandbox = await createSandbox({
       env: {},
       branch: "sandbar/issue-4-grace",
@@ -2147,6 +2151,10 @@ describe("createSandbox integration (local provider)", () => {
       expect(err).toBeInstanceOf(AgentError);
       expect((err as Error).message).toContain("without exiting");
       expect(agentPartialOutput(err)).toContain("<promise>COMPLETE</promise>");
+      expect(agentPartialContainerResources(err)).toEqual({
+        peakMemoryBytes: 931_000_000,
+        oomKilled: true,
+      });
       expect(elapsed).toBeLessThan(5000);
       expect(records).toHaveLength(1);
       expect(records[0]).toMatchObject({
@@ -2155,6 +2163,8 @@ describe("createSandbox integration (local provider)", () => {
         end: "completion-timeout",
         exitCode: null,
         speech: "<promise>COMPLETE</promise>",
+        peakMemoryBytes: 931_000_000,
+        oomKilled: true,
       });
       expect(records[0]?.stdout).toContain("<promise>COMPLETE</promise>");
       expect(records[0]?.stderr).toContain("completion stderr tail");

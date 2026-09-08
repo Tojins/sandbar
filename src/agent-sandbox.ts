@@ -53,6 +53,10 @@
 //         the exit. It contains parsed speech and both bounded raw stream tails;
 //         timeout paths retain their own tails so recording never waits for a
 //         descendant that kept an exec pipe open (#135).
+//   F12 — at every invocation end, before the long-lived sandbox can disappear,
+//         the record and returned result carry cgroup memory.peak and Podman's
+//         OOMKilled bit when available (#141). Failed runs retain the same facts
+//         beside their partial speech/usage, so an OOM cannot be laundered.
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
@@ -105,6 +109,11 @@ import {
 import type { AgentUsage } from "./agent-usage.js";
 import { classifyAgentRunEnd } from "./agent-run-end.js";
 import type { AgentFailure, RateLimitMeasurement } from "./agent-run-end.js";
+import {
+  readContainerResources,
+  systemContainerResourceDeps,
+  type ContainerResources,
+} from "./container-resources.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -334,6 +343,7 @@ export type SandboxProvider = {
   readonly name: string;
   readonly env: Record<string, string>;
   readonly sandboxHomedir: string;
+  readonly containerResources?: (containerName: string) => Promise<ContainerResources>;
   create(o: ProviderCreateOptions): Promise<SandboxHandle>;
 };
 
@@ -374,7 +384,7 @@ export type RunOptions = {
   readonly completionTimeoutSeconds?: number;
 };
 
-export type AgentInvocationRecord = {
+export type AgentInvocationRecord = ContainerResources & {
   readonly agent: string;
   readonly provider: string;
   readonly model: string | null;
@@ -392,7 +402,7 @@ export type AgentInvocationRecord = {
   readonly stderr: string;
 };
 
-export type SandboxRunResult = {
+export type SandboxRunResult = ContainerResources & {
   readonly stdout: string;
   readonly commits: { sha: string }[];
   // Derived by the shared end classifier, which remains the only definition
@@ -573,6 +583,7 @@ const AGENT_PARTIAL_USAGE = new WeakMap<object, {
   peakContext?: number;
   rateLimit?: RateLimitMeasurement;
 }>();
+const AGENT_PARTIAL_RESOURCES = new WeakMap<object, ContainerResources>();
 
 export const withPartialOutput = (
   err: unknown,
@@ -603,6 +614,23 @@ export const agentPartialUsage = (
 ): { usage?: AgentUsage; toolCalls?: number; peakContext?: number; rateLimit?: RateLimitMeasurement } =>
   typeof err === "object" && err !== null
     ? AGENT_PARTIAL_USAGE.get(err) ?? {}
+    : {};
+
+export const withPartialContainerResources = (
+  err: unknown,
+  resources: ContainerResources,
+): unknown => {
+  if (typeof err === "object" && err !== null) {
+    AGENT_PARTIAL_RESOURCES.set(err, resources);
+  }
+  return err;
+};
+
+export const agentPartialContainerResources = (
+  err: unknown,
+): ContainerResources =>
+  typeof err === "object" && err !== null
+    ? AGENT_PARTIAL_RESOURCES.get(err) ?? {}
     : {};
 
 class WorktreeError extends Error {
@@ -1844,6 +1872,10 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
     name: "podman",
     env: options?.env ?? {},
     sandboxHomedir: SANDBOX_HOMEDIR,
+    containerResources: (containerName) => readContainerResources(
+      containerName,
+      systemContainerResourceDeps(),
+    ),
     create: async (createOptions) => {
       const containerName = `${namePrefix}${randomUUID()}`;
       const sandboxWorktreePath =
@@ -2729,19 +2761,30 @@ export const createSandbox = async (
       const completionTimeoutMs =
         (o.completionTimeoutSeconds ?? DEFAULT_COMPLETION_TIMEOUT_SECONDS) * 1000;
 
-      const iter = await runOneIteration(
-        o.agent,
-        o.prompt,
-        idleTimeoutMs,
-        completionTimeoutMs,
-        o.completionSignal,
-        startTimer(),
-        {
-          agent: o.name ?? o.agent.name,
-          model: o.model ?? null,
-          onEnd: o.onInvocationEnd,
-        },
-      );
+      let resources: ContainerResources = {};
+      let iter: Awaited<ReturnType<typeof runOneIteration>>;
+      try {
+        iter = await runOneIteration(
+          o.agent,
+          o.prompt,
+          idleTimeoutMs,
+          completionTimeoutMs,
+          o.completionSignal,
+          startTimer(),
+          {
+            agent: o.name ?? o.agent.name,
+            model: o.model ?? null,
+            onEnd: async (record) => {
+              resources = await options.sandbox.containerResources?.(
+                providerHandle.containerName,
+              ) ?? {};
+              await o.onInvocationEnd?.({ ...record, ...resources });
+            },
+          },
+        );
+      } catch (err) {
+        throw withPartialContainerResources(err, resources);
+      }
 
       return {
         stdout: iter.result,
@@ -2753,6 +2796,7 @@ export const createSandbox = async (
         ...(iter.peakContext === undefined ? {} : { peakContext: iter.peakContext }),
         ...(iter.rateLimit === undefined ? {} : { rateLimit: iter.rateLimit }),
         toolCalls: iter.toolCalls,
+        ...resources,
       };
     },
     async syncBranchToCache() {
