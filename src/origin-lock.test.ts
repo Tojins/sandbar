@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ORIGIN_LOCK_LEASE_MS,
+  ORIGIN_LOCK_OBSERVED_REF,
   ORIGIN_LOCK_REF,
   OriginLockCommandError,
   OriginLockHeldError,
@@ -326,6 +327,16 @@ describe("origin lock git argv (#139)", () => {
       `--force-with-lease=${ORIGIN_LOCK_REF}:${holder.sha}`,
       "origin",
       `takeover:${ORIGIN_LOCK_REF}`,
+    ]);
+    expect(calls.find((call) => call.args[0] === "fetch")?.args).toEqual([
+      "fetch",
+      "--quiet",
+      "origin",
+      `+${ORIGIN_LOCK_REF}:${ORIGIN_LOCK_OBSERVED_REF}`,
+    ]);
+    expect(calls.find((call) => call.args[0] === "rev-parse")?.args).toEqual([
+      "rev-parse",
+      ORIGIN_LOCK_OBSERVED_REF,
     ]);
   });
 

@@ -10,7 +10,9 @@
 // expiry. Acquire pushes with an expected-ABSENT force-with-lease; takeover
 // expects the expired holder's exact sha; renewal expects our current sha; and
 // release deletes only the sha we still hold. No operation uses an implicit
-// tracking ref or an unconditional force.
+// tracking ref or an unconditional force. Holder lookup fetches into the
+// cache-private `refs/sandbar/observed-lock`, never shared `FETCH_HEAD`, because
+// issue publication and polling fetch concurrently in the same bare cache.
 //
 // A failed push is not itself called contention. Git uses the same process
 // failure channel for a lease rejection and for transport/server failures, and
@@ -48,6 +50,7 @@ import { faultDetail, SandbarError } from "./errors.js";
 const execFileAsync = promisify(execFile);
 
 export const ORIGIN_LOCK_REF = "refs/sandbar/lock";
+export const ORIGIN_LOCK_OBSERVED_REF = "refs/sandbar/observed-lock";
 export const ORIGIN_LOCK_LEASE_MS = 10 * 60 * 1000;
 export const ORIGIN_LOCK_RENEW_INTERVAL_MS = 60 * 1000;
 
@@ -405,12 +408,20 @@ async function lookupOriginLock(
   try {
     // Fetch the ref, not the sha observed milliseconds earlier. Renewal
     // commits are orphaned, so once the ref moves the old object may no longer
-    // be fetchable by object id. FETCH_HEAD gives us the coherent fetch-time
-    // holder even when it moved between ls-remote and this command.
-    await exec("git", ["fetch", "--quiet", "origin", ORIGIN_LOCK_REF], {
-      cwd: repoDir,
-    });
-    const fetched = await exec("git", ["rev-parse", "FETCH_HEAD"], {
+    // be fetchable by object id. A private destination ref gives us the
+    // coherent fetch-time holder without sharing FETCH_HEAD with parallel
+    // issue publication and poll fetches in the same bare cache.
+    await exec(
+      "git",
+      [
+        "fetch",
+        "--quiet",
+        "origin",
+        `+${ORIGIN_LOCK_REF}:${ORIGIN_LOCK_OBSERVED_REF}`,
+      ],
+      { cwd: repoDir },
+    );
+    const fetched = await exec("git", ["rev-parse", ORIGIN_LOCK_OBSERVED_REF], {
       cwd: repoDir,
     });
     const fetchedSha = fetched.stdout.trim();

@@ -341,15 +341,18 @@ outcomes.
    `run()` takes a host wake lock before the single-instance lock. It releases
    that holder when the daemon becomes quiescent and retakes one when a poll
   finds work; `keepAwakeWhileIdle: true` retains it for a dedicated machine.
-  #35's LIFO drain releases the current holder after later teardown. A lock is
+  #35's LIFO drain releases the current holder after later teardown. The origin
+  lease is released first, while the host is still forbidden to sleep; the wake
+  holder then stops before `run-end` is appended. A lock is
   HELD only when the OS has confirmed it (the
   script prints its marker after `SetThreadExecutionState` returns a non-zero
   previous state), and it is released by EOF ON STDIN so it cannot outlive its
   owner — which is also what makes the `process.exit` paths that run no cleanup
    safe. Every held / refused / lost / released transition is a `wake-lock`
-   event. The release is registered immediately after record finalization so
-   #35's LIFO drain puts it after every teardown and before `run-end`, and its
-   event writes are awaited because `process.exit` grants no event-loop turn.
+  event. The wake teardown is registered immediately before the origin-lease
+  release so #35's LIFO drain puts both after every later teardown and before
+  `run-end`, and its event writes are awaited because `process.exit` grants no
+  event-loop turn.
 - **Credentials enter as values, including Codex auth (#38, #73, #134).**
   `config.env` is an allowlist record (empty value ⇒ inherit from
   `process.env`); `readEnvFile` is the opt-in loader. `src/env.ts`. Codex's

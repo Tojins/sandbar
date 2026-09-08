@@ -12,6 +12,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  ORIGIN_LOCK_OBSERVED_REF,
   ORIGIN_LOCK_REF,
   OriginLockCommandError,
   OriginLockHeldError,
@@ -182,5 +183,52 @@ describe("origin ref lease against a bare remote", () => {
     });
     expect(raced).toBe(true);
     expect(winner).not.toBeNull();
+  });
+
+  it("reads a replacement from its private ref when another fetch overwrites FETCH_HEAD", async () => {
+    let clock = Date.parse("2026-09-08T12:00:00.000Z");
+    let interpose = false;
+    let clobbered = false;
+    const isolatedExec: OriginLockExec = async (file, args, options) => {
+      const result = await gitExec(file, args, options);
+      if (
+        interpose &&
+        !clobbered &&
+        args[0] === "fetch" &&
+        args[3] === `+${ORIGIN_LOCK_REF}:${ORIGIN_LOCK_OBSERVED_REF}`
+      ) {
+        clobbered = true;
+        await git(cacheA, "fetch", "--quiet", "origin", "refs/heads/main");
+      }
+      return result;
+    };
+    const first = await acquireOriginLock({
+      repoDir: cacheA,
+      identity: identity("host-a"),
+      now: () => new Date(clock),
+      exec: isolatedExec,
+    });
+    locks.push(first.lock);
+    const firstSha = first.lock.claim().sha;
+
+    const second = await acquireOriginLock({
+      repoDir: cacheB,
+      identity: identity("host-b"),
+      now: () => new Date(clock + 11 * 60_000),
+    });
+    locks.push(second.lock);
+    await git(cacheA, "push", "--quiet", "origin", `${firstSha}:refs/heads/main`);
+
+    clock += 11 * 60_000;
+    interpose = true;
+    await expect(first.lock.renew()).resolves.toMatchObject({
+      kind: "lost",
+      reason: "replaced",
+      holder: { lease: { hostname: "host-b" } },
+    });
+    expect(clobbered).toBe(true);
+    expect((await git(cacheA, "rev-parse", "FETCH_HEAD")).stdout.trim()).toBe(firstSha);
+    expect((await git(cacheA, "rev-parse", ORIGIN_LOCK_OBSERVED_REF)).stdout.trim())
+      .toBe(second.lock.claim().sha);
   });
 });

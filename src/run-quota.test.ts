@@ -19,6 +19,7 @@ const seams = vi.hoisted(() => ({
   }>,
   cleanupCallbacks: [] as Array<() => unknown>,
   cleanupOrder: [] as string[],
+  trackWakeStop: false,
   cleanupDrain: null as Promise<void> | null,
   cleanupReporter: (async () => undefined) as (
     kind: string, message: string, cause?: unknown,
@@ -106,7 +107,9 @@ vi.mock("./cleanup.js", () => {
 vi.mock("./keepawake.js", () => ({
   startKeepawake: vi.fn(() => {
     const lock = {
-      stop: vi.fn(),
+      stop: vi.fn(() => {
+        if (seams.trackWakeStop) seams.cleanupOrder.push("wake-lock-stop");
+      }),
       onStatus: vi.fn((sink: (line: string, status: WakeLockStatus) => void) => {
       for (const report of seams.wakeStatusReports) sink(report.line, report.status);
       }),
@@ -335,6 +338,7 @@ describe("run quota orchestration (#109)", () => {
     seams.reclaimIssueClone.mockReset();
     seams.reclaimIssueClone.mockResolvedValue({ kind: "removed" });
     seams.cleanupOrder.length = 0;
+    seams.trackWakeStop = false;
     seams.cleanupDrain = null;
     seams.cleanupReporter = async () => undefined;
     seams.wakeStatusReports.length = 0;
@@ -461,18 +465,21 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.originRelease).not.toHaveBeenCalled();
   });
 
-  it("releases origin before finalizing the event record", async () => {
+  it("releases origin before the wake lock and event record", async () => {
     seams.plan.mockResolvedValue(resolution([]));
+    seams.trackWakeStop = true;
     vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`EXIT:${code}`);
     }) as never);
 
-    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
-    expect(seams.cleanupOrder).toEqual(expect.arrayContaining([
-      "origin-release", "record-finalize",
-    ]));
-    expect(seams.cleanupOrder.indexOf("origin-release"))
-      .toBeLessThan(seams.cleanupOrder.indexOf("record-finalize"));
+    await expect(run({
+      ...config,
+      pollIntervalMs: 1,
+      keepAwakeWhileIdle: true,
+    })).rejects.toThrow("EXIT:1");
+    expect(seams.cleanupOrder).toEqual([
+      "origin-release", "wake-lock-stop", "record-finalize",
+    ]);
   });
 
   it("threads the serialized lease barrier into finalization and landing adapters", async () => {
@@ -859,6 +866,28 @@ describe("run quota orchestration (#109)", () => {
     expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
       message: expect.stringContaining("before reclamation"),
     }));
+  });
+
+  it("reports why a rejected issue clone could not be reclaimed", async () => {
+    seams.plan.mockResolvedValue(resolution([issue("139")]));
+    seams.innerLoop.mockRejectedValue(new Error("sandbox failed"));
+    seams.reclaimIssueClone.mockResolvedValueOnce({
+      kind: "preserved",
+      reason: "the worktree has uncommitted changes",
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+    expect(eventsOf("complaint")).toContainEqual({
+      kind: "complaint",
+      severity: "error",
+      message: expect.stringMatching(
+        /Issue clone preserved at .*sandbar-issue-139-test: the worktree has uncommitted changes/,
+      ),
+    });
   });
 
   it.each(["fulfilled", "rejected"] as const)(

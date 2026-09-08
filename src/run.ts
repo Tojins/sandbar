@@ -701,11 +701,6 @@ export async function run(
   onCleanup(resetCleanupReporter);
   onCleanup(() => runRecord.finalize(cleanupReason));
   unregisterEarlyOriginRelease();
-  // LIFO: resource teardowns and the heartbeat stop first, then release is
-  // attempted while the reporter and event record are still live, then
-  // run-end is appended and only afterwards is the reporter reset.
-  onCleanup(releaseOriginLock);
-
   const stopInternalFailure = async (err: unknown): Promise<never> => {
     const exit = await recordInternalFailure(faultDetail(err));
     await runCleanup();
@@ -741,10 +736,11 @@ export async function run(
   console.log(ui.url);
 
   // THE WAKE LOCK IS RELEASED HERE, and #35's LIFO drain is the whole of #117's
-  // ordering: registered immediately after `finalize`, it drains immediately
-  // BEFORE it — so every teardown registered later (the image removal below,
-  // and every lazy `registerDisposable` a cycle adds) has already run while the
-  // host was still forbidden to sleep, and `run-end` is still the last event.
+  // ordering. The origin-lease release is registered immediately after this
+  // action, so it drains while the host is still forbidden to sleep; this
+  // action then drains before `finalize`. Every teardown registered later (the
+  // image removal below, and every lazy `registerDisposable` a cycle adds) has
+  // already run, and `run-end` is still the last event.
   //
   // It used to be registered at step fifteen, after the image builds, which put
   // it ahead of every teardown, ahead of the lock release and ahead of the
@@ -786,6 +782,10 @@ export async function run(
     activity.stop();
     await Promise.all(statusWrites);
   });
+  // LIFO: the heartbeat and later resource teardowns stop first, then release
+  // is attempted while the wake lock, reporter and event record are still
+  // live. The wake lock stops next; run-end remains the last event.
+  onCleanup(releaseOriginLock);
 
   // The one site that emits an exit (#70/#132), shared by startup refusals and
   // scheduler terminals. It also owns cleanupReason, so run-end agrees with it.
@@ -1367,11 +1367,19 @@ export async function run(
       if (event.status === "fulfilled") {
         outcomes.push({ issue: event.issue, terminal: event.value });
       } else {
-        await reclaimIssueClone(
+        const path = worktreePathFor(layout.worktreesDir, event.issue.branch);
+        const reclaim = await reclaimIssueClone(
           layout.repoDir,
-          worktreePathFor(layout.worktreesDir, event.issue.branch),
+          path,
           event.issue.branch,
         );
+        if (reclaim.kind === "preserved") {
+          await runRecord.emit({
+            kind: "complaint",
+            severity: "error",
+            message: `Issue clone preserved at ${path}: ${reclaim.reason}`,
+          });
+        }
         pool.finishRejected(event.issue);
       }
     }
