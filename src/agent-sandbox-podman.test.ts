@@ -71,7 +71,7 @@ const IMAGE = "docker.io/library/mariadb:10.11";
 //
 // No `needsLocalClient`, which is the whole of the wiring change (#52): the
 // `podman-test` step's `podman.test.ts` filter collects this file, and it is not
-// one of that step's two explicit local-client exclusions. Dropping the flag is
+// one of that step's three explicit local-client exclusions. Dropping the flag is
 // also what makes `SANDBAR_REQUIRE_PODMAN_TESTS=1` reach these two tests — under
 // it an unreachable podman is a failing test here rather than a silent skip,
 // which is the point of putting the file in a step at all.
