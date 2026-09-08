@@ -468,7 +468,9 @@ outcomes.
   purely reduces events into the pool timeline, waiting and parked rows, recent
   events, and finished issues across recent run directories. `src/ui-server.ts`
   serves the shipped vanilla page and `/state.json`, rereading the record on
-  every request. A live run hosts it in-process; `sandbar ui` hosts the same
+  every request. Terminal causes stay full in the event feed and lead the
+  compact HARD-ERROR retry, parked and recently-finished projections. A live
+  run hosts it in-process; `sandbar ui` hosts the same
   module for post-mortem browsing. The page polls every two seconds. A growing
   file plus live matching `run.pid` means working; a dead/missing PID without
   `run-end` means crashed. `uiPort` is per-workdir host configuration and a
