@@ -3,6 +3,12 @@
 # `sandbar_checkout`, `sandbar_git_email` and `sandbar_operator_ssh_keys`;
 # the role refuses to run without them.
 
+# Ubuntu releases the role accepts. Both ship a podman no older than the 4.9
+# podman-remote client the gate images bake (tasks/main.yml).
+sandbar_ubuntu_releases:
+  - "24.04"
+  - "26.04"
+
 # The dedicated service user. The checkout, podman storage, the `.sandbar`
 # workdir and every credential live in its home; nothing sandbar does runs as
 # any other account.

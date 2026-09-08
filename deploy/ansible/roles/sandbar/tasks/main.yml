@@ -10,15 +10,18 @@
       the inventory (inventory.example.yml). The key list is exclusive: a key
       not listed is removed from root and the service user.
 
-- name: Refuse a host that is not Ubuntu 24.04
+# 24.04's podman 4.9 equals the podman-remote client the gate images bake;
+# 26.04's 5.x is newer than it, the safe direction. Debian 12's 4.3 is OLDER
+# than the client, which is the one direction skew bites, so it is refused.
+- name: Refuse a host that is not Ubuntu 24.04 or 26.04
   ansible.builtin.assert:
     that:
       - ansible_facts['distribution'] == 'Ubuntu'
-      - ansible_facts['distribution_version'] == '24.04'
+      - ansible_facts['distribution_version'] in sandbar_ubuntu_releases
     fail_msg: >-
-      This role targets Ubuntu 24.04: its podman 4.9 matches the podman-remote
-      client the gate images bake, and Debian 12's 4.3 is OLDER than that
-      client, which is the one direction skew bites.
+      This role targets Ubuntu {{ sandbar_ubuntu_releases | join(' or ') }};
+      this host is {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_version'] }}.
 
 - name: Install packages
   ansible.builtin.import_tasks: packages.yml

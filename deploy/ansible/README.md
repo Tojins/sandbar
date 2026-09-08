@@ -15,13 +15,15 @@ readable by anyone who can edit a workflow.
 
 ## What the box gets
 
-Target: **Ubuntu 24.04**. Its podman 4.9 matches the podman-remote client the
-gate images bake; Debian 12 ships 4.3, older than the client, and that is the
-one direction version skew bites. The role refuses any other release.
+Target: **Ubuntu 24.04 or 26.04**. 24.04's podman 4.9 equals the
+podman-remote client the gate images bake and 26.04's 5.7 is newer than it,
+the safe direction (verified: the 4.9.3 client drives a 5.7 server over the
+user socket). Debian 12 ships 4.3, older than the client, and that is the one
+direction version skew bites. The role refuses any other release.
 
 The role, `roles/sandbar`, provides:
 
-- rootless **podman** 4.9 with netavark and aardvark-dns, a subordinate
+- rootless **podman** with netavark and aardvark-dns, a subordinate
   uid/gid range for the service user, and a check that the host runs cgroup v2
   with `memory` and `pids` delegated to user managers;
 - **Node** (major from NodeSource, default 24), **git**, **gh**;
@@ -132,8 +134,8 @@ ansible-playbook -i inventory.yml --syntax-check site.yml
 ansible-playbook -i inventory.yml --check site.yml      # against a real box
 ```
 
-For a full run without a box, a systemd-enabled Ubuntu 24.04 container is
-enough, with three inventory overrides: `ansible_connection:
+For a full run without a box, a systemd-enabled Ubuntu container of either
+release is enough, with three inventory overrides: `ansible_connection:
 containers.podman.podman` (collection `containers.podman`),
 `sandbar_swap_size_mb: 0` (a container may not `swapon`), and a subordinate
 range that fits inside the container's own uid space when podman is itself

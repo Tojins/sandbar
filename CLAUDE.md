@@ -630,7 +630,7 @@ names the release that drives a run, and `npm run sandbar`
   the landing. `preflight.ts`'s header owns both halves.
 
 - **Hosting the daemon is a contract this repo ships (#140).**
-  `deploy/ansible/README.md` is the host contract in prose — Ubuntu 24.04,
+  `deploy/ansible/README.md` is the host contract in prose — Ubuntu 24.04 or 26.04,
   rootless podman, a lingering `sandbar` user with `podman.socket`, swap,
   key-only SSH, no automatic reboot — and `roles/sandbar` provides it. The
   systemd USER unit pulls and `npm ci`s before every launch (the only thing
