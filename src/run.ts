@@ -1485,7 +1485,7 @@ export async function run(
         (line) => { laneNoticeLines.push(line); },
       );
       const planDiagnostics = JSON.stringify({
-        heldForReview: resolution.heldForReview,
+        waiting: resolution.waiting,
         overrides: resolution.overrides,
         landedChunks: resolution.landedChunks,
         chunkNameDrifts: resolution.chunkNameDrifts,
