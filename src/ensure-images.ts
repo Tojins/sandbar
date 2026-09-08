@@ -300,6 +300,11 @@ export async function buildImage(
   let timedOut = false;
   await new Promise<void>((resolve, reject) => {
     let tar: ChildProcess | undefined;
+    // A generated context has its own stderr stream. `podman` can exit as soon
+    // as that producer fails, before Node has delivered the producer's final
+    // stderr chunk, so a failing build must not snapshot `output` until the tar
+    // process and its stdio have closed.
+    let contextStreamClosed = Promise.resolve();
     const child = spawn(RUNTIME, args, {
       stdio: [
         buildUsesStdin(image, opts) ? "pipe" : "ignore",
@@ -335,10 +340,14 @@ export async function buildImage(
       clearTimeout(timer);
       reject(err);
     });
-    child.on("exit", (code) => {
+    // `close`, not `exit`: the latter may precede the final stdout/stderr data
+    // events, which would make a captured ImageBuildError intermittently lose
+    // the diagnosis at the end of the build.
+    child.on("close", async (code) => {
       tar?.kill("SIGKILL");
       untrack();
       clearTimeout(timer);
+      await contextStreamClosed;
       if (code === 0 && !timedOut) {
         resolve();
         return;
@@ -363,6 +372,7 @@ export async function buildImage(
       tar = spawn("tar", ["-cf", "-", "-C", opts.contextRoot, "."], {
         stdio: ["ignore", "pipe", "pipe"],
       });
+      contextStreamClosed = new Promise((closed) => tar!.on("close", closed));
       const untrackTar = trackBuild(tar);
       tar.stderr?.on("data", (c: Buffer) => { output = appendTail(output, c.toString()); });
       tar.on("error", (err) => {
