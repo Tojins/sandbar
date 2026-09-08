@@ -475,6 +475,8 @@ describe("run quota orchestration (#109)", () => {
     const slow = issue("1");
     const fast = issue("2");
     const arrived = issue("134");
+    const codexHome = "/var/lib/sandbar-codex";
+    const configuredJson = JSON.stringify({ last_refresh: "2026-09-08T08:00:57Z" });
     const slowTerminal = deferred<{
       type: "NEEDS-INFO"; questions: string; strandedHead: null;
     }>();
@@ -496,6 +498,10 @@ describe("run quota orchestration (#109)", () => {
     vi.mocked(createBranchImages)
       .mockReturnValueOnce(oldBranchImages)
       .mockReturnValue(newBranchImages);
+    seams.prepareCodexAuth.mockResolvedValueOnce({
+      hostPath: "/tmp/sandbar-run-quota-test/codex-auth.json",
+      sandboxPath: `${codexHome}/auth.json`,
+    });
     let polled = false;
     seams.plan.mockImplementation(async () =>
       resolution(polled ? [arrived] : [slow, fast]));
@@ -516,11 +522,20 @@ describe("run quota orchestration (#109)", () => {
     }) as never);
 
     await expect(run({
-      ...config, maxParallelIssues: 2, pollIntervalMs: 1, keepAwakeWhileIdle: true,
+      ...config,
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+      env: { ...config.env, CODEX_AUTH_JSON: configuredJson, CODEX_HOME: codexHome },
+      maxParallelIssues: 2,
+      pollIntervalMs: 1,
+      keepAwakeWhileIdle: true,
     }))
       .rejects.toThrow("EXIT:4");
     expect(ensureImages).toHaveBeenCalledTimes(2);
     expect(createAgentImages).toHaveBeenCalledTimes(2);
+    for (const [options] of vi.mocked(createAgentImages).mock.calls) {
+      expect(options).toEqual(expect.objectContaining({ codexHome }));
+    }
     expect(eventsOf("preflight")).toContainEqual(expect.objectContaining({
       action: "origin-refreshed",
       detail: "origin/main moved during poll; refreshing source images",

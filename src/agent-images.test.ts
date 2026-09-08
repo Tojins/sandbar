@@ -113,6 +113,30 @@ describe("run-owned agent images", () => {
     );
   });
 
+  it("forwards a configured Codex home into the generated build recipe", async () => {
+    const codexHome = "/var/lib/sandbar-codex";
+    let containerfile = "";
+    await createAgentImages({
+      declaredBaseTag: "localhost/app:base",
+      providers: ["codex"],
+      codexHome,
+      scope: runScope("/agent-images-codex-home"),
+      prepareArtifacts: fakeAgentArtifacts,
+      inputsLabel: async (tag) => (tag === "localhost/app:base" ? "base-fp" : null),
+      build: async (_image, opts) => {
+        containerfile = await readFile(join(opts.contextRoot!, "Containerfile"), "utf8");
+      },
+      log: () => {},
+    });
+
+    expect(containerfile).toContain(
+      `if [ ! -e '${codexHome}' ]; then mkdir -p '${codexHome}'`,
+    );
+    expect(containerfile).toContain(
+      `test "$(stat -c %u '${codexHome}')" = 1000`,
+    );
+  });
+
   // #82. The augment build happens on EVERY run since #75 — the end-of-run
   // cleanup drops the tag unconditionally, so the next startup finds it gone —
   // and its cost has never been measured on any run, because the last logged
