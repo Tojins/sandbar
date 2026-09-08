@@ -109,6 +109,7 @@ import {
   findUnattributableResources,
 } from "./containers.js";
 import {
+  beginCleanup,
   installCleanupTraps,
   onCleanup,
   registerDisposable,
@@ -816,7 +817,9 @@ export async function run(
     // releasing. This call is itself inside that renewal, so mark the one path
     // where waiting would await the current promise and deadlock.
     leaseLossIsCleaningUp = true;
-    await runCleanup();
+    const cleanup = beginCleanup();
+    if (!cleanup.owner) return;
+    await cleanup.done;
     process.exit(exit.exitCode);
   };
 
