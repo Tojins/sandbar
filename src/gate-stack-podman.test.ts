@@ -95,7 +95,7 @@ describe.runIf(available)("gate stack against real podman", () => {
             { name: "cache", image: IMAGE, lifecycle: "issue", hold: true },
             { name: "runner", image: IMAGE, hold: true },
           ],
-          steps: [],
+          steps: [{ name: "noop", in: "db", command: ["true"] }],
         }),
         containerResources: async (name) => {
           if (name.endsWith("-runner")) throw measurementFailure;
