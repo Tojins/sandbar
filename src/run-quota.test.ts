@@ -270,6 +270,9 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.merger).toHaveBeenCalledOnce();
     expect(ensureImages).toHaveBeenCalledTimes(2);
     expect(createAgentImages).toHaveBeenCalledTimes(2);
+    for (const call of vi.mocked(ensureImages).mock.calls) {
+      expect(call[2]).toEqual(expect.objectContaining({ captureBuild: true }));
+    }
     // Every image-build seam is silenced: stdout is the UI URL only, and the
     // per-branch resolver runs per attempt and per landing (#37), not at startup.
     for (const seam of [ensureImages, createAgentImages, createBranchImages]) {
@@ -293,6 +296,28 @@ describe("run quota orchestration (#109)", () => {
       reason: "claude five_hour quota window closed; resets at 1970-01-01T00:00:42.000Z",
       exitCode: 4,
     }));
+  });
+
+  it("records the duration supplied by an image build observation", async () => {
+    vi.mocked(ensureImages).mockImplementationOnce(async (_images, _root, opts) => {
+      await opts?.onImage?.({
+        tag: "image",
+        built: true,
+        reason: "inputs-changed",
+        durationMs: 321,
+      });
+      return new Map();
+    });
+    seams.plan.mockResolvedValue(resolution([]));
+
+    await expect(run(config)).resolves.toBeUndefined();
+    expect(eventsOf("image")).toEqual([{
+      kind: "image",
+      action: "built",
+      image: "image",
+      durationMs: 321,
+      detail: "image",
+    }]);
   });
 
   it("stops admissions as soon as the shared provider state closes", async () => {

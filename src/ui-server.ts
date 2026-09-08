@@ -8,12 +8,18 @@
 // an HTTP 500 and can never terminate the run being observed — but it is not
 // silent either: the page renders the failure, and `onFailure` hands the host
 // each NEW failure message once (a live run records it as a complaint; the
-// page polls every two seconds, so per-request would flood the record). The
-// same seam takes a server error after listen, which would otherwise be an
-// unhandled 'error' and the internal-failure halt the first sentence rules
-// out. Binding is exclusive and EADDRINUSE is a startup refusal.
+// page polls every two seconds, so per-request would flood the record). That
+// observer callback is best-effort and cannot reject into an HTTP or server
+// event callback. The same seam takes a server error after listen, which would
+// otherwise be an unhandled 'error' and the internal-failure halt the first
+// sentence rules out. Binding is exclusive and EADDRINUSE is a startup refusal.
 
-import { createServer, type Server } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import type { AddressInfo } from "node:net";
 import { readFile, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -130,9 +136,14 @@ export type StartUiServerOptions = {
   readonly host?: string;
   readonly liveRunDir?: string;
   // Called once per distinct failure message, for a failed `/state.json`
-  // request or a server error after listen. Awaited; its own failure is the
-  // host's, not this module's.
+  // request or a server error after listen. Best-effort: its rejection cannot
+  // escape this observer boundary.
   readonly onFailure?: (err: unknown) => void | Promise<void>;
+  // Dependency seam used to exercise post-listen server failures with a real
+  // Server; production always uses node:http's createServer.
+  readonly serverFactory?: (
+    listener: (request: IncomingMessage, response: ServerResponse) => void,
+  ) => Server;
 };
 
 async function closeServer(server: Server): Promise<void> {
@@ -148,9 +159,15 @@ export async function startUiServer(options: StartUiServerOptions): Promise<UiSe
     const message = err instanceof Error ? err.message : String(err);
     if (message === lastFailure) return;
     lastFailure = message;
-    await options.onFailure?.(err);
+    // Reporting an observer failure is itself best-effort. In particular, a
+    // live run may be unable to append the complaint because events.jsonl is
+    // the file whose read just failed; that must not become an unhandled
+    // rejection which stops the scheduler.
+    await Promise.allSettled([
+      Promise.resolve().then(() => options.onFailure?.(err)),
+    ]);
   };
-  const server = createServer((request, response) => {
+  const server = (options.serverFactory ?? createServer)((request, response) => {
     void (async () => {
       if (request.method !== "GET") {
         response.writeHead(405, { Allow: "GET" }).end();

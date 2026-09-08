@@ -4,6 +4,8 @@
 // typed event. Submissions are chained, and `seq` advances only after a durable
 // append, so file order is event order even when issue tasks finish concurrently
 // and one failed append cannot poison later writes or leave a sequence gap.
+// Finalization follows the same durability boundary: concurrent callers share
+// one run-end append, and a failed append leaves finalization retryable.
 // `ts` is wall-clock display data only; no decision reads it. Raw subprocess
 // transcripts remain separate files through `logs.ts`. A `landed` duration is
 // one merge unit; `landing-batch` carries the distinct whole-phase duration.
@@ -116,7 +118,7 @@ export type EventInput =
   | { readonly kind: "wake-lock"; readonly state: "held" | "refused" | "lost" | "released"; readonly detail: string }
   | { readonly kind: "preflight"; readonly action: string; readonly detail: string }
   | { readonly kind: "sweep"; readonly scope: "startup" | "quiescent"; readonly removed: readonly string[]; readonly failures: readonly string[] }
-  | { readonly kind: "image"; readonly action: string; readonly image: string; readonly durationMs?: number; readonly detail: string }
+  | { readonly kind: "image"; readonly action: "built" | "reused"; readonly image: string; readonly durationMs: number; readonly detail: string }
   | { readonly kind: "landing-batch"; readonly n: number; readonly durationMs: number }
   | {
       readonly kind: "recompute";
@@ -187,6 +189,7 @@ export async function startEventRecord(
   let seq = 0;
   let tail: Promise<void> = Promise.resolve();
   let finalized = false;
+  let finalizing: Promise<void> | null = null;
 
   const emit = async (input: EventInput): Promise<RunEvent> => {
     const write = tail.then(async () => {
@@ -208,8 +211,17 @@ export async function startEventRecord(
     emit,
     async finalize(reason) {
       if (finalized) return;
-      finalized = true;
-      await emit({ kind: "run-end", reason });
+      if (finalizing !== null) return await finalizing;
+      finalizing = emit({ kind: "run-end", reason }).then(
+        () => {
+          finalized = true;
+        },
+        (err: unknown) => {
+          finalizing = null;
+          throw err;
+        },
+      );
+      await finalizing;
     },
   };
   await emit({

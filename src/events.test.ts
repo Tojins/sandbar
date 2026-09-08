@@ -20,8 +20,10 @@ describe("event record", () => {
       record.emit({ kind: "complaint", severity: "warning", message: "one" }),
       record.emit({ kind: "complaint", severity: "error", message: "two" }),
     ]);
-    await record.finalize("done");
-    await record.finalize("ignored");
+    await Promise.all([
+      record.finalize("done"),
+      record.finalize("ignored"),
+    ]);
     const events = await readEventsFile(record.eventsPath);
     expect(events.map((event) => [event.seq, event.kind])).toEqual([
       [1, "run-start"], [2, "complaint"], [3, "complaint"], [4, "run-end"],
@@ -54,6 +56,32 @@ describe("event record", () => {
       [1, "run-start"], [2, "complaint"],
     ]);
     expect(events[1]).toMatchObject({ message: "recovered" });
+  });
+
+  it("retries finalization when the run-end append fails", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "sandbar-events-"));
+    let runEndAttempts = 0;
+    const record = await startEventRecord({
+      baseDir,
+      now: new Date("2026-05-05T21:15:32.101Z"),
+      start,
+      append: async (path, data) => {
+        if (data.includes('"kind":"run-end"') && runEndAttempts++ === 0) {
+          throw new Error("transient run-end failure");
+        }
+        await appendFile(path, data);
+      },
+    });
+
+    await expect(record.finalize("first")).rejects.toThrow("transient run-end failure");
+    await expect(record.finalize("retry")).resolves.toBeUndefined();
+    await expect(record.finalize("ignored")).resolves.toBeUndefined();
+
+    const events = await readEventsFile(record.eventsPath);
+    expect(events.map((event) => [event.seq, event.kind])).toEqual([
+      [1, "run-start"], [2, "run-end"],
+    ]);
+    expect(events[1]).toMatchObject({ reason: "retry" });
   });
 
   it("refuses an unknown schema", async () => {

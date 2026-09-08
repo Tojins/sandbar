@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
@@ -205,6 +206,45 @@ describe("run UI server", () => {
       expect((await fetch(new URL("state.json", server.url))).status).toBe(500);
       expect(reported).toHaveLength(2);
     } finally {
+      await server.close();
+    }
+  });
+
+  it("contains a rejecting reporter on a post-listen server error", async () => {
+    const tree = await runTree(false);
+    let rawServer: Server | undefined;
+    const onFailure = vi.fn(async () => {
+      throw new Error("event filesystem unavailable");
+    });
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    const server = await startUiServer({
+      logsDir: tree.logsDir,
+      liveRunDir: tree.runDir,
+      host: "127.0.0.1",
+      port: 0,
+      onFailure,
+      serverFactory: (listener) => {
+        rawServer = createHttpServer(listener);
+        return rawServer;
+      },
+    });
+    try {
+      expect(() => rawServer?.emit("error", new Error("post-listen fault")))
+        .not.toThrow();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(onFailure).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ message: "post-listen fault" }),
+      );
+      expect(unhandled).not.toHaveBeenCalled();
+
+      const response = await fetch(new URL("state.json", server.url));
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        run: { driver: "sandbar test" },
+      });
+    } finally {
+      process.off("unhandledRejection", unhandled);
       await server.close();
     }
   });

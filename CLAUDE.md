@@ -451,6 +451,8 @@ starts, ongoing work, landings, and the terminal-without-landing backstop;
   reject unknown schemas; older log-only runs are intentionally unreadable.
   Appends are serialized, but a rejected append does not poison that latch or
   consume a sequence number; a later write can resume with a contiguous record.
+  Finalization becomes complete only after its `run-end` append succeeds, so
+  concurrent calls share one write and a failed write remains retryable.
   Every outcome or refusal after the lock is an event. Refused config, missing
   `GH_TOKEN`, and losing the lock remain stderr-only because no record can be
   owned safely. Raw agent, reviewer, gate, merger, and resolve transcripts stay
@@ -466,8 +468,8 @@ starts, ongoing work, landings, and the terminal-without-landing backstop;
   file plus live matching `run.pid` means working; a dead/missing PID without
   `run-end` means crashed. `uiPort` is per-workdir host configuration and a
   bind collision refuses the run. Unreadable history is omitted, and any
-  current request failure is an HTTP error only—the observing UI cannot stop a
-  healthy run.
+  current request or post-listen server failure stays inside the observing UI;
+  its best-effort complaint callback cannot stop a healthy run.
 - **Every outcome carries how long it took, and nothing decides on it (#82).**
   `src/timing.ts` is the one measurement — `startTimer` on a MONOTONIC clock,
   injectable because suites assert event objects exactly, and `durationMs` as
