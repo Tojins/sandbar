@@ -302,9 +302,10 @@ describe("createBranchImages", () => {
   const scope = runScope("/repo") as RunScope;
 
   // A resolver over a fake podman: `built` records what was actually built, so
-  // the reuse/rebuild decision is asserted rather than the argv.
+  // the reuse/rebuild decision and the run-safe output capture are asserted
+  // rather than inferred from the argv.
   function harness(images: readonly BuiltImage[], base: Map<string, string>) {
-    const built: { tag: string; root: string }[] = [];
+    const built: { tag: string; root: string; capture: boolean }[] = [];
     // tag -> the fingerprint that tag was built from, i.e. what podman would
     // report from the image's `sandbar.inputs` label.
     const present = new Map<string, string>();
@@ -314,7 +315,7 @@ describe("createBranchImages", () => {
       baseFingerprints: base,
       inputsLabel: async (tag) => present.get(tag) ?? null,
       build: async (image: BuiltImage, opts: BuildOptions) => {
-        built.push({ tag: image.tag, root: opts.root });
+        built.push({ tag: image.tag, root: opts.root, capture: opts.capture });
         present.set(image.tag, opts.fingerprint ?? "");
       },
       log: () => {},
@@ -345,7 +346,9 @@ describe("createBranchImages", () => {
     expect(map.get("app")).toBe(variant);
     // Rooted at the branch's worktree — building it from the host checkout
     // would answer the same wrong question the whole feature exists to stop.
-    expect(built).toEqual([{ tag: variant, root: branch }]);
+    // A run's stdout is the UI URL only. The adjacent no-op log seam suppresses
+    // progress prose, and capture keeps the underlying build process there too.
+    expect(built).toEqual([{ tag: variant, root: branch, capture: true }]);
   });
 
   it("is content-addressed: two worktrees with the same change share one build", async () => {
