@@ -1,5 +1,8 @@
-// Copy this file to `sandbar.config.mjs`, then replace the ALL_CAPS
-// placeholders and the gate command for your repository.
+// Copy this file to `sandbar.config.mjs` and copy `sandbar.env.example` to
+// `sandbar.env` beside it, then replace the ALL_CAPS placeholders and the gate
+// command for your repository. The env file is required because this config
+// reads it when the module loads; keep it gitignored even if every value comes
+// from the launching process.
 //
 // Required fields are active. Optional host fields are commented out at their
 // defaults; per-installation role fields live in sandbar.env instead.

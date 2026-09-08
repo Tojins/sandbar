@@ -221,7 +221,7 @@ See `sandbar.env.example` for the complete list.
 ```
 your-repo/
   sandbar.config.mjs   <- committed; the whole host-side surface
-  sandbar.env          <- gitignored, if you use a file at all
+  sandbar.env          <- gitignored; required by the published example config
   .sandbar/            <- gitignored; node_modules-shaped, `rm -rf` at will
     repo.git/            bare object cache; re-created if you delete it
     worktrees/           source/ (image build context), issue-<n>-<slug>/, merger/
@@ -253,11 +253,15 @@ sits in).
 
 ### Optional fields and their defaults
 
-The published package includes
-[`sandbar.config.example.mjs`](./sandbar.config.example.mjs), a complete
-copyable config with every optional `RunConfig` field commented out at its
-default. Copy it beside your `package.json`, fill in the required placeholders,
-then uncomment only the settings this repository needs to change.
+The published package includes the paired
+[`sandbar.config.example.mjs`](./sandbar.config.example.mjs) and
+[`sandbar.env.example`](./sandbar.env.example) templates. Copy the first beside
+your `package.json` as `sandbar.config.mjs` and the second beside it as
+gitignored `sandbar.env`; the config reads that file at module load, even when
+all its values inherit from the launching process. Fill in the required config
+placeholders, then uncomment only the host settings this repository needs to
+change. Optional host fields are documented in the config; the fifteen
+per-installation role-routing fields are documented in the env template.
 
 ### Daemon pool and launcher
 
