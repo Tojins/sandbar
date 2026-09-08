@@ -78,6 +78,7 @@
 // admission, so a poll cannot change the images beneath in-flight work.
 
 import { realpathSync } from "node:fs";
+import { dirname } from "node:path";
 
 import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
 import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
@@ -865,6 +866,9 @@ export async function run(
     initialAgentImages = await createAgentImages({
       declaredBaseTag: config.sandboxImage,
       providers: agentProviders,
+      ...(codexAuthMount === undefined
+        ? {}
+        : { codexHome: dirname(codexAuthMount.sandboxPath) }),
       scope,
       onImage: recordImage,
       log: () => undefined,
@@ -1281,7 +1285,10 @@ export async function run(
     });
     const nextAgentImages = await createAgentImages({
       declaredBaseTag: config.sandboxImage,
-      providers: requiredAgentProviders(config),
+      providers: agentProviders,
+      ...(codexAuthMount === undefined
+        ? {}
+        : { codexHome: dirname(codexAuthMount.sandboxPath) }),
       scope,
       onImage: recordImage,
       log: () => undefined,

@@ -679,6 +679,9 @@ describe("run quota orchestration (#109)", () => {
       configuredJson,
       codexHome,
     });
+    expect(vi.mocked(createAgentImages)).toHaveBeenCalledWith(
+      expect.objectContaining({ codexHome }),
+    );
     expect(seams.innerLoop.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
       config: expect.objectContaining({
         codexAuthMount: {

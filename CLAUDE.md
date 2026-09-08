@@ -346,7 +346,9 @@ outcomes.
   ChatGPT subscription is `auth.json`, so `CODEX_AUTH_JSON` carries its content.
   At preflight the driver reconciles that value by `last_refresh` into one
   `<workDir>/codex-auth.json`; every Codex sandbox and merger container mounts
-  the run-owned file read-write at `$CODEX_HOME/auth.json`. This is the one
+  the run-owned file read-write at `$CODEX_HOME/auth.json`, and the augmented
+  image pre-creates that directory owned by the uid-1000 agent so Codex can
+  write its per-sandbox session state beside the mount. This is the one
   deliberate exception to per-sandbox write isolation: same-trust holders need
   Codex's reload-before-refresh cooperation around one token family. The host
   config should read a dedicated login (this repo uses `~/.codex-sandbar`) so

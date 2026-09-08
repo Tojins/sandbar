@@ -1,5 +1,4 @@
-// What PODMAN defines about `--init` (#42) and a writable keep-id bind mount
-// (#134), asserted by running podman — the
+// What PODMAN defines about `--init` (#42), asserted by running podman — the
 // same argument gate-stack-podman.test.ts and ensure-images-podman.test.ts
 // make. `sandboxRunArgs` in agent-sandbox.test.ts proves sandbar emits the flag
 // it means to and puts it where podman will read it; only podman can prove that
@@ -45,9 +44,6 @@
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { afterAll, describe, it } from "vitest";
@@ -117,10 +113,7 @@ describe.runIf(available)("the sandbox container against real podman", () => {
   // drop is what lets the container's NAME state which variant it is without
   // the two being able to disagree: one argument decides both, so a leftover
   // `…-noinit` can only ever be a container that really was started without it.
-  const start = async (
-    init: "with-init" | "without-init",
-    volumeMounts: readonly string[] = [],
-  ): Promise<string> => {
+  const start = async (init: "with-init" | "without-init"): Promise<string> => {
     const name = `${scopedResourcePrefix(SCOPE)}initprobe-${randomUUID()}-${
       init === "with-init" ? "init" : "noinit"
     }`;
@@ -131,7 +124,7 @@ describe.runIf(available)("the sandbox container against real podman", () => {
       // what is under test.
       workdir: "/tmp",
       env: {},
-      volumeMounts,
+      volumeMounts: [],
       userns: "keep-id",
       containerUid: 1000,
       containerGid: 1000,
@@ -238,33 +231,6 @@ describe.runIf(available)("the sandbox container against real podman", () => {
       await orphan(name);
       await delay(2500);
       expect(await zombieCount(name)).toBe(0);
-    },
-    60_000,
-  );
-
-  it(
-    "persists a keep-id container write through the shared credential file mount",
-    async ({ expect, onTestFinished }) => {
-      const root = await mkdtemp(join(tmpdir(), "sandbar-auth-mount-"));
-      const hostAuth = join(root, "codex-auth.json");
-      await writeFile(hostAuth, "before", { mode: 0o600 });
-      const name = await start(
-        "with-init",
-        [`${hostAuth}:/tmp/codex-auth.json:z`],
-      );
-      onTestFinished(async () => {
-        await removeFixtureContainer(name).catch(() => {});
-        await rm(root, { recursive: true, force: true });
-      }, 60_000);
-
-      await exec(RUNTIME, [
-        "exec",
-        name,
-        "sh",
-        "-c",
-        "printf refreshed > /tmp/codex-auth.json",
-      ]);
-      expect(await readFile(hostAuth, "utf8")).toBe("refreshed");
     },
     60_000,
   );

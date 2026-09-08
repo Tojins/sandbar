@@ -17,8 +17,12 @@
 // exit 0 is an answer (#119): podman can trap a timeout signal and itself exit
 // cleanly even when no container started. Bases need only /bin/sh, CA roots,
 // and git or apt/apk/dnf; the generated layer supplies git, uid 1000, and each
-// standalone CLI, then probes every installed binary. Bare CLI probes cannot
-// prove their embedded trust stores, so CA roots remain a base requirement.
+// standalone CLI, then probes every installed binary. When Codex's shared auth
+// file will be mounted, the layer also creates its configured CODEX_HOME as the
+// agent user: a file bind whose missing parent is created by the runtime would
+// otherwise leave Codex unable to write sibling session state (#134). Bare CLI
+// probes cannot prove their embedded trust stores, so CA roots remain a base
+// requirement.
 //
 // Sandbox resolution is deliberately softer than gate image resolution (#46).
 // A branch-image build failure falls back to the augmented declared image so
@@ -59,6 +63,9 @@ import { startTimer } from "./timing.js";
 
 const exec = promisify(execFile);
 
+const shellQuote = (value: string): string =>
+  `'${value.replace(/'/g, `'\\''`)}'`;
+
 // Standalone agent releases are large enough to need a generous transfer
 // window, but staging happens while the run owns the single-instance lock. A
 // trickling or stalled CDN response must therefore have a total deadline just
@@ -87,6 +94,7 @@ export function agentToolsContainerfile(
     readonly arch?: "x64" | "arm64";
     readonly packages?: typeof AGENT_PROVIDER_PACKAGES;
     readonly libc: "glibc" | "musl";
+    readonly codexHome?: string;
   },
 ): string {
   const arch = options.arch ?? hostAgentArchitecture();
@@ -130,6 +138,14 @@ export function agentToolsContainerfile(
     "elif command -v dnf >/dev/null; then dnf install -y git && dnf clean all;",
     "else echo 'git is missing and no supported package manager (apt-get, apk, dnf) is available' >&2; exit 1; fi",
   ].join(" ");
+  const codexHome = providers.includes("codex")
+    ? options.codexHome ?? "/home/agent/.codex"
+    : undefined;
+  const codexHomeClause = codexHome === undefined
+    ? ""
+    : `; if [ ! -e ${shellQuote(codexHome)} ]; then ` +
+      `mkdir -p ${shellQuote(codexHome)} && ` +
+      `chown 1000:$(id -g agent) ${shellQuote(codexHome)}; fi`;
   const agentUserClause = [
     "uid_user=$(awk -F: '$3 == 1000 { print $1; exit }' /etc/passwd);",
     'if [ -n "$uid_user" ] && [ "$uid_user" != agent ]; then',
@@ -138,13 +154,20 @@ export function agentToolsContainerfile(
     "if command -v useradd >/dev/null; then",
     "useradd -u 1000 -m -d /home/agent agent;",
     "else adduser -D -u 1000 -h /home/agent agent; fi; fi;",
-    "mkdir -p /home/agent && chown -R 1000:$(id -g agent) /home/agent",
+    "mkdir -p /home/agent && chown -R 1000:$(id -g agent) /home/agent" +
+      codexHomeClause,
   ].join(" ");
   const probeClause = [
     probes,
     "git --version",
     'test "$(id -u agent)" = 1000',
     'test "$(stat -c %u /home/agent)" = 1000',
+    ...(codexHome === undefined
+      ? []
+      : [
+          `test -d ${shellQuote(codexHome)}`,
+          `test "$(stat -c %u ${shellQuote(codexHome)})" = 1000`,
+        ]),
   ].join(" && ");
   return [
     `FROM ${baseTag}`,
@@ -466,6 +489,7 @@ export type AgentImages = {
 export async function createAgentImages(opts: {
   readonly declaredBaseTag: string;
   readonly providers: readonly AgentProviderName[];
+  readonly codexHome?: string;
   readonly scope: RunScope;
   readonly build?: (image: BuiltImage, opts: BuildOptions) => Promise<unknown>;
   readonly inputsLabel?: (tag: string) => Promise<string | null>;
@@ -533,7 +557,9 @@ export async function createAgentImages(opts: {
           ? await (opts.detectLibc ?? detectImageLibc)(baseTag)
           : "glibc";
         const containerfile = agentToolsContainerfile(baseTag, opts.providers, {
-          arch, libc,
+          arch,
+          libc,
+          ...(opts.codexHome === undefined ? {} : { codexHome: opts.codexHome }),
         });
         const fingerprint = createHash("sha256")
           .update(JSON.stringify([baseInputs ?? "unknown", containerfile]))

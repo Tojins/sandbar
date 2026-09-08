@@ -266,13 +266,30 @@ describe("run-owned agent images", () => {
     expect(file).toContain("useradd -u 1000 -m -d /home/agent agent");
     expect(file).toContain("adduser -D -u 1000 -h /home/agent agent");
     expect(file).toContain("chown -R 1000:$(id -g agent) /home/agent");
+    expect(file).toContain("if [ ! -e '/home/agent/.codex' ]; then mkdir -p '/home/agent/.codex'");
+    expect(file).toContain("chown 1000:$(id -g agent) '/home/agent/.codex'");
     expect(file).toContain('test "$(id -u agent)" = 1000');
     expect(file).toContain('test "$(stat -c %u /home/agent)" = 1000');
+    expect(file).toContain(
+      'test "$(stat -c %u \'/home/agent/.codex\')" = 1000',
+    );
     for (const artifacts of Object.values(AGENT_PROVIDER_PACKAGES.claude.artifacts)) {
       for (const artifact of artifacts) expect(file).toContain(artifact.sha256);
     }
     expect(file).toContain(AGENT_PROVIDER_PACKAGES.codex.artifacts.arm64[0]!.sha256);
     expect(file).not.toContain("npm");
+  });
+
+  it("creates a configured Codex home without interpolating it as shell", () => {
+    const file = agentToolsContainerfile("base", ["codex"], {
+      libc: "glibc",
+      codexHome: "/home/agent/codex's state",
+    });
+    expect(file).toContain(
+      "if [ ! -e '/home/agent/codex'\\''s state' ]; then " +
+        "mkdir -p '/home/agent/codex'\\''s state'",
+    );
+    expect(file).toContain("chown 1000:$(id -g agent) '/home/agent/codex'\\''s state'");
   });
 
   // The inverse of the guard this used to be. While the host Containerfile still
