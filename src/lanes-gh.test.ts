@@ -9,7 +9,7 @@
 // Driven through a `gh` shim on PATH that records its own argv and answers
 // `issue view --json comments` from an env var, so the "already told" branch is
 // stated as the tracker state it really is.
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -21,6 +21,7 @@ import {
 } from "./lanes.js";
 
 const REPO = { owner: "acme", name: "app" };
+const allowOriginWrite = async (): Promise<void> => undefined;
 
 describe("postLaneOverrideNotices", () => {
   let shimBin: string;
@@ -96,9 +97,12 @@ describe("postLaneOverrideNotices", () => {
   });
 
   it("posts the notice to the configured repo, naming the blocker", async () => {
+    const barrier = async (): Promise<void> => {
+      await appendFile(argvLog, '["lease"]\n');
+    };
     const posted = await postLaneOverrideNotices(REPO, [
       { issue: 42, gatedBy: 7 },
-    ]);
+    ], () => undefined, barrier);
 
     expect(posted).toEqual([42]);
     const [argv] = await commentCalls();
@@ -106,10 +110,16 @@ describe("postLaneOverrideNotices", () => {
     expect(repoFlagOf(argv ?? [])).toBe("acme/app");
     expect(bodyOf(argv ?? [])).toContain("#7");
     expect(bodyOf(argv ?? [])).toContain(LANE_OVERRIDE_MARKER);
+    expect(await calls()).toEqual([
+      expect.arrayContaining(["issue", "view", "42"]),
+      ["lease"],
+      expect.arrayContaining(["issue", "comment", "42"]),
+    ]);
   });
 
   it("reads the issue's existing comments from the same repo first", async () => {
-    await postLaneOverrideNotices(REPO, [{ issue: 42, gatedBy: 7 }]);
+    await postLaneOverrideNotices(REPO, [{ issue: 42, gatedBy: 7 }],
+      () => undefined, allowOriginWrite);
 
     const [read] = await calls();
     expect(read?.slice(0, 3)).toEqual(["issue", "view", "42"]);
@@ -129,7 +139,7 @@ describe("postLaneOverrideNotices", () => {
 
     const posted = await postLaneOverrideNotices(REPO, [
       { issue: 42, gatedBy: 7 },
-    ]);
+    ], () => undefined, allowOriginWrite);
 
     expect(posted).toEqual([42]);
     expect((await commentCalls()).map((argv) => argv[2])).toEqual(["42"]);
@@ -145,7 +155,7 @@ describe("postLaneOverrideNotices", () => {
 
     const posted = await postLaneOverrideNotices(REPO, [
       { issue: 42, gatedBy: 7 },
-    ]);
+    ], () => undefined, allowOriginWrite);
 
     expect(posted).toEqual([]);
     expect(await commentCalls()).toEqual([]);
@@ -155,7 +165,7 @@ describe("postLaneOverrideNotices", () => {
     const posted = await postLaneOverrideNotices(REPO, [
       { issue: 42, gatedBy: 7 },
       { issue: 43, gatedBy: 42 },
-    ]);
+    ], () => undefined, allowOriginWrite);
 
     expect(posted).toEqual([42, 43]);
     expect((await commentCalls()).map((argv) => argv[2])).toEqual(["42", "43"]);
@@ -165,7 +175,8 @@ describe("postLaneOverrideNotices", () => {
     process.env["SANDBAR_TEST_GH_FAIL"] = "1";
 
     await expect(
-      postLaneOverrideNotices(REPO, [{ issue: 42, gatedBy: 7 }]),
+      postLaneOverrideNotices(REPO, [{ issue: 42, gatedBy: 7 }],
+        () => undefined, allowOriginWrite),
     ).rejects.toThrow();
   });
 
@@ -190,7 +201,7 @@ describe("postLaneOverrideNotices", () => {
       postLaneOverrideNotices(REPO, [
         { issue: 42, gatedBy: 7 },
         { issue: 43, gatedBy: 7 },
-      ]),
+      ], () => undefined, allowOriginWrite),
     ).rejects.toThrow();
     expect(await commentCalls()).toEqual([]);
   });

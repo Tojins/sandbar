@@ -1504,6 +1504,54 @@ describe("createSandbox integration (local provider)", () => {
     await rm(path, { recursive: true, force: true });
   });
 
+  it("silently defers clone reclamation to the run-level lease barrier", async () => {
+    const branch = "sandbar/issue-139-deferred-reclaim";
+    await git(["branch", branch], dir);
+    const notices: Array<{ severity: "warning" | "error"; message: string }> = [];
+    const sandbox = await createSandbox({
+      env: {},
+      branch,
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+      onNotice: (severity, message) => { notices.push({ severity, message }); },
+    });
+    const path = sandbox.worktreePath;
+
+    sandbox.deferWorktreeReclaim();
+    await expect(sandbox.close()).resolves.toEqual({ preservedWorktreePath: undefined });
+
+    expect(existsSync(path)).toBe(true);
+    expect(notices).toEqual([]);
+    await rm(path, { recursive: true, force: true });
+  });
+
+  it("retains a genuine preservation reason when reclamation is also deferred", async () => {
+    const branch = "sandbar/issue-139-deferred-reviewer-write";
+    await git(["branch", branch], dir);
+    const notices: Array<{ severity: "warning" | "error"; message: string }> = [];
+    const sandbox = await createSandbox({
+      env: {},
+      branch,
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+      onNotice: (severity, message) => { notices.push({ severity, message }); },
+    });
+    const path = sandbox.worktreePath;
+
+    sandbox.preserveWorktree("the reviewer changed the repository; kept for human inspection");
+    sandbox.deferWorktreeReclaim();
+    await sandbox.close();
+
+    expect(notices).toEqual([{
+      severity: "error",
+      message: expect.stringContaining(
+        "the reviewer changed the repository; kept for human inspection",
+      ),
+    }]);
+    expect(notices[0]?.message).not.toContain("lease");
+    await rm(path, { recursive: true, force: true });
+  });
+
   // #98: a clean off-branch clone is reclaimed, not preserved — its HEAD is
   // pinned in the cache first, and the pin is what the handoff comment names.
   it("reclaims a clean off-branch clone after pinning its HEAD in the cache", async () => {

@@ -1,11 +1,13 @@
 // Pre-flight invariants for sandbar runs.
 //
-// After the run owns the lock, structured preflight outcomes and warnings are
+// After the run owns both locks, structured preflight outcomes and warnings are
 // emitted through `onEvent` into events.jsonl; this module writes no terminal
 // rendering or orchestration log. Throws remain refusals for run.ts to record
 // with their exit event.
 //
-// Runs UNDER the single-instance lock (#32), and must keep doing so. This
+// The reachability gate alone runs under only the workdir lock. Everything
+// after it runs under both that lock (#32) and the origin lease (#139), and
+// must keep doing so. This
 // module is not read-only: it fetches, and `deleteMergedSandbarBranches` runs
 // `git branch -D` over every `sandbar/issue-*` branch it finds merged. It used
 // to run before the lock was taken, which made the one destructive step in
@@ -72,10 +74,14 @@
 // owns only when it is printed — before the invariant throw, beside the
 // origin-URL warning and for the same reason.
 //
-// Two layers:
+// Three layers:
 //   - checkInvariants(state)  — pure function over a captured RepoState.
 //                               Unit-tested with hand-built fixtures.
-//   - gatherState() / runPreflight() — I/O wrappers that shell out to git/gh.
+//   - checkForgeReachabilityForPreflight() — the read-only network gate. The
+//                               orchestrator runs this before acquiring the
+//                               repository-wide origin lease (#139).
+//   - gatherState() / runPreflightAfterReachability() — I/O wrappers that
+//                               fetch, classify and clean up under both locks.
 //
 // All outbound calls sit behind one credential-free reachability gate
 // (#118): DNS lookup plus a TCP connection to port 443 for the gh host and the
@@ -1366,10 +1372,10 @@ export type PreflightResult = {
   readonly readyLabelPolicy: ReadyLabelPolicy;
 };
 
-export async function runPreflight(
+export async function checkForgeReachabilityForPreflight(
   cfg: PreflightConfig,
   reachabilityAdapter: ForgeReachabilityAdapter = forgeReachabilityAdapter,
-): Promise<PreflightResult> {
+): Promise<void> {
   const originUrl = await readOriginUrl(cfg.layout.repoDir);
   const originHost =
     originUrl === null ? null : parseRepoFromRemoteUrl(originUrl)?.host ?? null;
@@ -1389,7 +1395,14 @@ export async function runPreflight(
         "then retry.",
     ]);
   }
+}
 
+// Every operation after the reachability gate runs under the origin lease
+// (#139). Kept separate from the public composition below so run.ts can place
+// the lease between the read-only probe and the first fetch/cleanup.
+export async function runPreflightAfterReachability(
+  cfg: PreflightConfig,
+): Promise<PreflightResult> {
   const refresh = await fetchOriginRefs(cfg.layout.repoDir, cfg.sourceBranch);
   const fetchFailures = [...refresh.failures];
   // Fetch before the cleanup pass so that merged-on-origin branches can be
@@ -1564,6 +1577,17 @@ export async function runPreflight(
     throw new Error("preflight passed without an authenticated gh viewer");
   }
   return { configStaleness, readyLabelPolicy };
+}
+
+// The complete preflight remains one call for tests and programmatic users of
+// this internal module. The daemon uses the split functions so it can acquire
+// the origin lease at their boundary.
+export async function runPreflight(
+  cfg: PreflightConfig,
+  reachabilityAdapter: ForgeReachabilityAdapter = forgeReachabilityAdapter,
+): Promise<PreflightResult> {
+  await checkForgeReachabilityForPreflight(cfg, reachabilityAdapter);
+  return await runPreflightAfterReachability(cfg);
 }
 
 // What the checkout's copy of the config file is missing, against origin (#66).

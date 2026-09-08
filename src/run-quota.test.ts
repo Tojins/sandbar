@@ -19,6 +19,12 @@ const seams = vi.hoisted(() => ({
     status: WakeLockStatus;
   }>,
   cleanupCallbacks: [] as Array<() => unknown>,
+  cleanupOrder: [] as string[],
+  trackWakeStop: false,
+  cleanupDrain: null as Promise<void> | null,
+  cleanupReporter: (async () => undefined) as (
+    kind: string, message: string, cause?: unknown,
+  ) => Promise<void> | void,
   wakeLocks: [] as Array<{
     stop: ReturnType<typeof vi.fn>;
     onStatus: ReturnType<typeof vi.fn>;
@@ -27,6 +33,28 @@ const seams = vi.hoisted(() => ({
     hostPath: "/tmp/sandbar-run-quota-test/codex-auth.json",
     sandboxPath: "/home/agent/.codex/auth.json",
   })),
+  originClaim: {
+    sha: "lease-sha",
+    lease: {
+      hostname: "test-host",
+      workdir: "/tmp",
+      pid: 123,
+      run: "test-run",
+      startedAt: "2026-09-08T12:00:00.000Z",
+      expires: "2099-09-08T12:10:00.000Z",
+    },
+  },
+  originDisplaced: null as null | {
+    sha: string;
+    lease: {
+      hostname: string; workdir: string; pid: number; run: string;
+      startedAt: string; expires: string;
+    };
+  },
+  originRenew: vi.fn(),
+  originRelease: vi.fn(async () => undefined),
+  recordFinalize: vi.fn(async () => undefined),
+  reclaimIssueClone: vi.fn(async () => ({ kind: "removed" as const })),
 }));
 
 vi.mock("./codex-auth.js", async (importOriginal) => ({
@@ -38,22 +66,51 @@ vi.mock("./driver-identity.js", () => ({
   readDriverIdentity: vi.fn(async () => ({ kind: "unknown" })),
   formatDriverIdentity: vi.fn(() => "driver: test"),
 }));
-vi.mock("./cleanup.js", () => ({
+vi.mock("./cleanup.js", () => {
+  const beginCleanup = () => {
+    if (seams.cleanupDrain !== null) {
+      return { owner: false, done: seams.cleanupDrain };
+    }
+    seams.cleanupDrain = (async () => {
+      while (seams.cleanupCallbacks.length > 0) {
+        const action = seams.cleanupCallbacks.pop();
+        if (!action) continue;
+        try {
+          await action();
+        } catch (err) {
+          await seams.cleanupReporter("cleanup-failure", "Cleanup action failed", err);
+        }
+      }
+    })();
+    return { owner: true, done: seams.cleanupDrain };
+  };
+  return {
   installCleanupTraps: vi.fn(),
   onCleanup: vi.fn((callback: () => unknown) => {
     seams.cleanupCallbacks.push(callback);
   }),
-  setCleanupReporter: vi.fn(() => vi.fn()),
-  runCleanup: vi.fn(async () => {
-    while (seams.cleanupCallbacks.length > 0) {
-      await seams.cleanupCallbacks.pop()?.();
-    }
+  registerDisposable: vi.fn((callback: () => unknown) => {
+    seams.cleanupCallbacks.push(callback);
+    return () => {
+      const at = seams.cleanupCallbacks.indexOf(callback);
+      if (at >= 0) seams.cleanupCallbacks.splice(at, 1);
+    };
   }),
-}));
+  setCleanupReporter: vi.fn((next: typeof seams.cleanupReporter) => {
+    const previous = seams.cleanupReporter;
+    seams.cleanupReporter = next;
+    return () => { seams.cleanupReporter = previous; };
+  }),
+    beginCleanup: vi.fn(beginCleanup),
+    runCleanup: vi.fn(async () => { await beginCleanup().done; }),
+  };
+});
 vi.mock("./keepawake.js", () => ({
   startKeepawake: vi.fn(() => {
     const lock = {
-      stop: vi.fn(),
+      stop: vi.fn(() => {
+        if (seams.trackWakeStop) seams.cleanupOrder.push("wake-lock-stop");
+      }),
       onStatus: vi.fn((sink: (line: string, status: WakeLockStatus) => void) => {
       for (const report of seams.wakeStatusReports) sink(report.line, report.status);
       }),
@@ -68,10 +125,22 @@ vi.mock("./lock.js", async (importOriginal) => ({
   lockPathsFor: vi.fn(() => ({ workDir: "/tmp", lockDir: "/tmp/lock", pidPath: "/tmp/pid" })),
   acquireLock: vi.fn(async () => vi.fn()),
 }));
+vi.mock("./origin-lock.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./origin-lock.js")>(),
+  acquireOriginLock: vi.fn(async () => ({
+    displaced: seams.originDisplaced,
+    lock: {
+      claim: () => seams.originClaim,
+      renew: seams.originRenew,
+      release: seams.originRelease,
+    },
+  })),
+}));
 vi.mock("./events.js", () => ({
+  runStampFromDate: vi.fn(() => "test-run"),
   startEventRecord: vi.fn(async () => ({
     runDir: "/tmp/run-quota-test",
-    finalize: vi.fn(),
+    finalize: seams.recordFinalize,
     emit: seams.emit,
     issue: vi.fn(async (id: string) => ({
       dir: `/tmp/run-quota-test/issue-${id}`,
@@ -84,6 +153,10 @@ vi.mock("./events.js", () => ({
     })),
   })),
 }));
+vi.mock("./agent-sandbox.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./agent-sandbox.js")>(),
+  reclaimIssueClone: seams.reclaimIssueClone,
+}));
 vi.mock("./ui-server.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./ui-server.js")>(),
   startUiServer: vi.fn(async () => ({ url: "http://127.0.0.1:7331/", close: vi.fn() })),
@@ -94,7 +167,8 @@ vi.mock("./repo-cache.js", async (importOriginal) => ({
 }));
 vi.mock("./preflight.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./preflight.js")>(),
-  runPreflight: vi.fn(async () => ({
+  checkForgeReachabilityForPreflight: vi.fn(async () => undefined),
+  runPreflightAfterReachability: vi.fn(async () => ({
     configStaleness: {
       configPath: null, sourceBranch: "main", hostCwd: "/repo",
       behind: 0, touchingConfig: 0,
@@ -146,7 +220,11 @@ vi.mock("./inner-loop.js", async (importOriginal) => ({
 }));
 vi.mock("./finalize.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./finalize.js")>(),
-  realAdapter: vi.fn(() => ({ issueLabels: seams.issueLabels })), finalizeAll: seams.finalize,
+  realAdapter: vi.fn(() => ({
+    issueLabels: seams.issueLabels,
+    reclaimIssueClone: seams.reclaimIssueClone,
+  })),
+  finalizeAll: seams.finalize,
 }));
 vi.mock("./merger-worktree.js", () => ({
   createMergerWorktree: vi.fn(async () => ({
@@ -172,13 +250,23 @@ import type { RunConfig } from "./config.js";
 import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
 import type { InnerLoopOptions } from "./inner-loop.js";
 import { MergerError, realAdapter, type RunMergerOptions } from "./merger.js";
+import { realAdapter as realFinalizeAdapter } from "./finalize.js";
 import { createBranchImages, ensureImages } from "./ensure-images.js";
 import { createAgentImages } from "./agent-tools.js";
 import { cleanupOrphanContainers } from "./containers.js";
-import { startUiServer } from "./ui-server.js";
-import { fetchOriginRefs, readConfigStaleness } from "./preflight.js";
+import { UiPortInUseError, startUiServer } from "./ui-server.js";
+import {
+  checkForgeReachabilityForPreflight,
+  fetchOriginRefs,
+  readConfigStaleness,
+  runPreflightAfterReachability,
+} from "./preflight.js";
 import { startKeepawake } from "./keepawake.js";
-import { run } from "./run.js";
+import { OriginLeaseLostDuringCleanupError, run } from "./run.js";
+import { OriginLockHeldError, acquireOriginLock } from "./origin-lock.js";
+import { ensureRepoCache } from "./repo-cache.js";
+import { startEventRecord } from "./events.js";
+import { beginCleanup } from "./cleanup.js";
 
 const config: RunConfig = {
   ghOwner: "o", ghRepo: "r", developers: "anyone", cwd: "/tmp", workDir: "sandbar-run-quota-test",
@@ -209,8 +297,9 @@ const summary = (merged: ReturnType<typeof issue>[], pushed = true) => ({
 });
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((yes) => { resolve = yes; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 };
 const eventsOf = (kind: string) => seams.events.filter((event) => event.kind === kind);
 
@@ -245,6 +334,23 @@ describe("run quota orchestration (#109)", () => {
     });
     seams.events.length = 0;
     seams.prepareCodexAuth.mockClear();
+    seams.originRenew.mockReset();
+    seams.originRenew.mockResolvedValue({ kind: "renewed", claim: seams.originClaim });
+    seams.originRelease.mockReset();
+    seams.originDisplaced = null;
+    seams.originRelease.mockImplementation(async () => {
+      seams.cleanupOrder.push("origin-release");
+    });
+    seams.recordFinalize.mockReset();
+    seams.recordFinalize.mockImplementation(async () => {
+      seams.cleanupOrder.push("record-finalize");
+    });
+    seams.reclaimIssueClone.mockReset();
+    seams.reclaimIssueClone.mockResolvedValue({ kind: "removed" });
+    seams.cleanupOrder.length = 0;
+    seams.trackWakeStop = false;
+    seams.cleanupDrain = null;
+    seams.cleanupReporter = async () => undefined;
     seams.wakeStatusReports.length = 0;
     vi.mocked(fetchOriginRefs).mockReset();
     vi.mocked(fetchOriginRefs).mockRejectedValue(new Error("stop after idle poll"));
@@ -287,6 +393,320 @@ describe("run quota orchestration (#109)", () => {
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining("SANDBAR HALTED — internal failure"),
     );
+    expect(seams.originRelease).toHaveBeenCalledOnce();
+  });
+
+  it("releases the origin lease when the UI port is already in use", async () => {
+    vi.mocked(startUiServer).mockRejectedValueOnce(
+      new UiPortInUseError(config.uiPort, "127.0.0.1", new Error("EADDRINUSE")),
+    );
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
+      tag: "halted", exitCode: 1,
+    }));
+    expect(seams.originRelease).toHaveBeenCalledOnce();
+  });
+
+  it("acquires the origin lease after reachability and before ref-writing preflight", async () => {
+    seams.plan.mockResolvedValue(resolution([]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(vi.mocked(ensureRepoCache).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(checkForgeReachabilityForPreflight).mock.invocationCallOrder[0]!);
+    expect(vi.mocked(checkForgeReachabilityForPreflight).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(acquireOriginLock).mock.invocationCallOrder[0]!);
+    expect(vi.mocked(acquireOriginLock).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(runPreflightAfterReachability).mock.invocationCallOrder[0]!);
+  });
+
+  it.each([
+    ["origin-lock-acquired", null],
+    ["origin-lock-taken-over", {
+      ...seams.originClaim,
+      sha: "expired-holder",
+      lease: { ...seams.originClaim.lease, hostname: "old-host" },
+    }],
+  ] as const)("records %s with holder evidence", async (action, displaced) => {
+    seams.originDisplaced = displaced;
+    seams.plan.mockResolvedValue(resolution([]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(eventsOf("preflight")).toContainEqual(expect.objectContaining({
+      action,
+      detail: expect.stringContaining(displaced === null ? "lease-sha" : "old-host"),
+    }));
+  });
+
+  it.each(["record creation", "first lease event"])(
+    "releases the origin lease when %s fails",
+    async (failurePoint) => {
+      const failure = new Error(`${failurePoint} failed`);
+      if (failurePoint === "record creation") {
+        vi.mocked(startEventRecord).mockRejectedValueOnce(failure);
+      } else {
+        seams.emit.mockRejectedValueOnce(failure);
+      }
+
+      await expect(run(config)).rejects.toBe(failure);
+      expect(seams.originRelease).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("keeps an origin-lock refusal stderr-only with no event record", async () => {
+    vi.mocked(acquireOriginLock).mockRejectedValueOnce(
+      new OriginLockHeldError({
+        ...seams.originClaim,
+        lease: { ...seams.originClaim.lease, hostname: "holder-host" },
+      }),
+    );
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:1");
+    expect(startEventRecord).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("holder-host"));
+    expect(seams.originRelease).not.toHaveBeenCalled();
+  });
+
+  it("cleans up and propagates an unexpected origin-lock programming failure", async () => {
+    const bug = new Error("origin adapter invariant broke");
+    vi.mocked(acquireOriginLock).mockRejectedValueOnce(bug);
+
+    await expect(run(config)).rejects.toBe(bug);
+    expect(startEventRecord).not.toHaveBeenCalled();
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining("origin adapter invariant broke"),
+    );
+    expect(seams.originRelease).not.toHaveBeenCalled();
+  });
+
+  it("releases origin before the wake lock and event record", async () => {
+    seams.plan.mockResolvedValue(resolution([]));
+    seams.trackWakeStop = true;
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({
+      ...config,
+      pollIntervalMs: 1,
+      keepAwakeWhileIdle: true,
+    })).rejects.toThrow("EXIT:1");
+    expect(seams.cleanupOrder).toEqual([
+      "origin-release", "wake-lock-stop", "record-finalize",
+    ]);
+  });
+
+  it("threads the serialized lease barrier into finalization and landing adapters", async () => {
+    seams.plan.mockResolvedValue(resolution([issue("139")]));
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "work" }] });
+    seams.merger.mockResolvedValue(summary([issue("139")]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+    expect(vi.mocked(realFinalizeAdapter)).toHaveBeenCalledWith(
+      expect.objectContaining({ beforeOriginWrite: expect.any(Function) }),
+    );
+    expect(vi.mocked(realAdapter)).toHaveBeenCalledWith(
+      expect.objectContaining({ beforeOriginWrite: expect.any(Function) }),
+    );
+  });
+
+  it("renews by heartbeat while post-acquisition preflight is still running", async () => {
+    vi.useFakeTimers();
+    try {
+      const slowPreflight = deferred<Awaited<ReturnType<typeof runPreflightAfterReachability>>>();
+      vi.mocked(runPreflightAfterReachability).mockReturnValueOnce(slowPreflight.promise);
+      vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        throw new Error(`EXIT:${code}`);
+      }) as never);
+      const result = run(config).catch((error: unknown) => error);
+      await flushMicrotasksUntil(
+        () => vi.mocked(runPreflightAfterReachability).mock.calls.length === 1,
+        "post-acquisition preflight to start",
+      );
+
+      expect(seams.originRenew).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(seams.originRenew).toHaveBeenCalledOnce();
+
+      slowPreflight.reject(new Error("stop slow preflight"));
+      expect(await result).toEqual(expect.objectContaining({ message: "EXIT:1" }));
+      expect(seams.originRelease).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for an in-flight heartbeat renewal before terminal cleanup releases origin", async () => {
+    vi.useFakeTimers();
+    try {
+      const slowPreflight = deferred<Awaited<ReturnType<typeof runPreflightAfterReachability>>>();
+      const renewal = deferred<Awaited<ReturnType<typeof seams.originRenew>>>();
+      vi.mocked(runPreflightAfterReachability).mockReturnValueOnce(slowPreflight.promise);
+      seams.originRenew.mockReturnValueOnce(renewal.promise);
+      vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        throw new Error(`EXIT:${code}`);
+      }) as never);
+      const result = run(config).catch((error: unknown) => error);
+      await flushMicrotasksUntil(
+        () => vi.mocked(runPreflightAfterReachability).mock.calls.length === 1,
+        "post-acquisition preflight to start",
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(seams.originRenew).toHaveBeenCalledOnce();
+
+      slowPreflight.reject(new Error("stop during renewal"));
+      await flushMicrotasksUntil(
+        () => eventsOf("exit").length === 1,
+        "terminal cleanup to start",
+      );
+      expect(seams.originRelease).not.toHaveBeenCalled();
+      expect(seams.recordFinalize).not.toHaveBeenCalled();
+
+      renewal.resolve({ kind: "renewed", claim: seams.originClaim });
+      expect(await result).toEqual(expect.objectContaining({ message: "EXIT:1" }));
+      expect(seams.cleanupOrder).toEqual(["origin-release", "record-finalize"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets terminal cleanup own the exit when its in-flight renewal reports loss", async () => {
+    vi.useFakeTimers();
+    try {
+      const slowPreflight = deferred<Awaited<ReturnType<typeof runPreflightAfterReachability>>>();
+      const renewal = deferred<Awaited<ReturnType<typeof seams.originRenew>>>();
+      vi.mocked(runPreflightAfterReachability).mockReturnValueOnce(slowPreflight.promise);
+      seams.originRenew.mockReturnValueOnce(renewal.promise);
+      const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        throw new Error(`EXIT:${code}`);
+      }) as never);
+      const result = run(config).catch((error: unknown) => error);
+      await flushMicrotasksUntil(
+        () => vi.mocked(runPreflightAfterReachability).mock.calls.length === 1,
+        "post-acquisition preflight to start",
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      slowPreflight.reject(new Error("stop during lost renewal"));
+      await flushMicrotasksUntil(
+        () => eventsOf("exit").length === 1,
+        "terminal cleanup to start",
+      );
+
+      renewal.resolve({
+        kind: "lost",
+        holder: null,
+        reason: "expired-unrenewable",
+        detail: "origin could not be asked during cleanup",
+      });
+      expect(await result).toEqual(expect.objectContaining({ message: "EXIT:1" }));
+      expect(exit).toHaveBeenCalledOnce();
+      expect(eventsOf("exit")).toHaveLength(1);
+      expect(eventsOf("complaint").filter((event) =>
+        String(event["message"]).includes("origin could not be asked during cleanup"),
+      )).toEqual([]);
+      expect(seams.originRelease.mock.invocationCallOrder[0])
+        .toBeLessThan(exit.mock.invocationCallOrder[0]!);
+      expect(seams.recordFinalize.mock.invocationCallOrder[0])
+        .toBeLessThan(exit.mock.invocationCallOrder[0]!);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a remote-write barrier after terminal cleanup released the lease", async () => {
+    seams.plan
+      .mockResolvedValueOnce(resolution([issue("139")]))
+      .mockResolvedValue(resolution([]));
+    seams.innerLoop.mockResolvedValue({
+      type: "NEEDS-INFO", questions: "question", commits: [], specGaps: [],
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    const adapterArgs = vi.mocked(realFinalizeAdapter).mock.calls.at(-1)?.[0];
+    expect(adapterArgs).toBeDefined();
+    const exitsBefore = eventsOf("exit").length;
+    const complaintsBefore = eventsOf("complaint").length;
+    seams.originRenew.mockResolvedValueOnce({
+      kind: "lost",
+      holder: null,
+      reason: "replaced",
+      detail: "the released lease is no longer active",
+    });
+
+    await expect(adapterArgs!.beforeOriginWrite())
+      .rejects.toBeInstanceOf(OriginLeaseLostDuringCleanupError);
+    expect(eventsOf("exit")).toHaveLength(exitsBefore);
+    expect(eventsOf("complaint")).toHaveLength(complaintsBefore);
+  });
+
+  it("propagates merger-wrapped lease loss to the existing cleanup owner", async () => {
+    const done = issue("139");
+    const loss = new OriginLeaseLostDuringCleanupError(
+      "origin lease was lost during terminal cleanup",
+    );
+    const priorExit = {
+      kind: "exit",
+      tag: "halted",
+      reason: "another terminal already owns cleanup",
+      exitCode: 1,
+    };
+    seams.plan.mockResolvedValue(resolution([done]));
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "work" }] });
+    seams.merger.mockImplementation(async () => {
+      await seams.emit(priorExit);
+      expect(beginCleanup().owner).toBe(true);
+      throw new MergerError("remote write barrier rejected", undefined, { cause: loss });
+    });
+
+    await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toBe(loss);
+    expect(eventsOf("exit")).toEqual([priorExit]);
+    expect(eventsOf("complaint").filter((event) =>
+      String(event["message"]).includes("Merger halted") ||
+      String(event["message"]).includes("internal failure"),
+    )).toEqual([]);
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining("SANDBAR HALTED — internal failure"),
+    );
+  });
+
+  it("records a release failure before run-end and continues cleanup", async () => {
+    seams.plan.mockResolvedValue(resolution([]));
+    seams.originRelease.mockImplementationOnce(async () => {
+      seams.cleanupOrder.push("origin-release");
+      throw new Error("lease delete failed");
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      severity: "error",
+      message: expect.stringContaining("lease delete failed"),
+    }));
+    expect(seams.cleanupOrder).toEqual([
+      "origin-release", "record-finalize",
+    ]);
   });
 
   it("records wake-lock state from the structured status, not its rendered prose", async () => {
@@ -368,6 +788,175 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.wakeLocks[1]?.stop).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    {
+      name: "a replacement holder",
+      loss: {
+        kind: "lost" as const,
+        holder: {
+          ...seams.originClaim,
+          sha: "replacement-sha",
+          lease: { ...seams.originClaim.lease, hostname: "other-host" },
+        },
+        reason: "replaced" as const,
+        detail: "current holder is other-host",
+      },
+    },
+    {
+      name: "an expired lease while origin is unreachable",
+      loss: {
+        kind: "lost" as const,
+        holder: null,
+        reason: "expired-unrenewable" as const,
+        detail: "origin could not be asked",
+      },
+    },
+  ])("halts at a freed-slot wake and lands nothing after $name", async ({ loss }) => {
+    seams.plan.mockResolvedValue(resolution([issue("139")]));
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "work" }] });
+    seams.originRenew
+      .mockResolvedValueOnce({ kind: "renewed", claim: seams.originClaim })
+      .mockResolvedValueOnce({ kind: "renewed", claim: seams.originClaim })
+      .mockResolvedValueOnce(loss);
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(seams.merger).not.toHaveBeenCalled();
+    expect(seams.finalize).not.toHaveBeenCalled();
+    expect(seams.innerLoop).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "139" }),
+      expect.any(Object),
+    );
+    expect(seams.innerLoop.mock.calls[0]?.[1]).not.toHaveProperty(
+      "deferIssueCloneReclaim",
+    );
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      severity: "error",
+      message: expect.stringContaining(loss.detail),
+    }));
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
+      tag: "halted", exitCode: 1,
+    }));
+    expect(seams.reclaimIssueClone).not.toHaveBeenCalled();
+    expect(seams.originRelease).toHaveBeenCalledOnce();
+  });
+
+  it("halts at the admission barrier before admitting an issue", async () => {
+    seams.plan.mockResolvedValue(resolution([issue("139")]));
+    seams.originRenew
+      .mockResolvedValueOnce({ kind: "renewed", claim: seams.originClaim })
+      .mockResolvedValueOnce({
+        kind: "lost",
+        holder: null,
+        reason: "expired-unrenewable",
+        detail: "origin could not be asked at admission",
+      });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:1");
+    expect(seams.originRenew).toHaveBeenCalledTimes(2);
+    expect(seams.innerLoop).not.toHaveBeenCalled();
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining("at admission"),
+    }));
+  });
+
+  it("halts at the finalization barrier before reclaiming a settled clone", async () => {
+    seams.plan.mockResolvedValue(resolution([issue("139")]));
+    seams.innerLoop.mockResolvedValue({
+      type: "NEEDS-INFO", questions: "question", commits: [], specGaps: [],
+    });
+    seams.originRenew
+      .mockResolvedValueOnce({ kind: "renewed", claim: seams.originClaim })
+      .mockResolvedValueOnce({ kind: "renewed", claim: seams.originClaim })
+      .mockResolvedValueOnce({ kind: "renewed", claim: seams.originClaim })
+      .mockResolvedValueOnce({
+        kind: "lost",
+        holder: null,
+        reason: "expired-unrenewable",
+        detail: "origin could not be asked before reclamation",
+      });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:1");
+    expect(seams.innerLoop).toHaveBeenCalledOnce();
+    expect(seams.originRenew).toHaveBeenCalledTimes(4);
+    expect(seams.finalize).not.toHaveBeenCalled();
+    expect(seams.reclaimIssueClone).not.toHaveBeenCalled();
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining("before reclamation"),
+    }));
+  });
+
+  it("reports why a rejected issue clone could not be reclaimed", async () => {
+    seams.plan.mockResolvedValue(resolution([issue("139")]));
+    seams.innerLoop.mockRejectedValue(new Error("sandbox failed"));
+    seams.reclaimIssueClone.mockResolvedValueOnce({
+      kind: "preserved",
+      reason: "the worktree has uncommitted changes",
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+    expect(eventsOf("complaint")).toContainEqual({
+      kind: "complaint",
+      severity: "error",
+      message: expect.stringMatching(
+        /Issue clone preserved at .*sandbar-issue-139-test: the worktree has uncommitted changes/,
+      ),
+    });
+  });
+
+  it.each(["fulfilled", "rejected"] as const)(
+    "reclaims a %s issue clone only after a successful wake renewal",
+    async (settlement) => {
+      seams.plan.mockResolvedValue(resolution([issue("139")]));
+      if (settlement === "fulfilled") {
+        seams.innerLoop.mockResolvedValue({
+          type: "NEEDS-INFO", questions: "question", commits: [], specGaps: [],
+        });
+        seams.finalize.mockImplementation(async (inputs, adapter) => {
+          for (const input of inputs) {
+            await adapter.reclaimIssueClone(input.issue.branch);
+          }
+          return [];
+        });
+      } else {
+        seams.innerLoop.mockRejectedValue(new Error("sandbox failed"));
+      }
+      vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        throw new Error(`EXIT:${code}`);
+      }) as never);
+
+      await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+        .rejects.toThrow("EXIT:1");
+      expect(seams.originRenew.mock.calls.length).toBeGreaterThanOrEqual(3);
+      if (settlement === "fulfilled") {
+        expect(seams.reclaimIssueClone).toHaveBeenCalledWith(
+          "sandbar/issue-139-test",
+        );
+      } else {
+        expect(seams.reclaimIssueClone).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.stringContaining("sandbar-issue-139-test"),
+          "sandbar/issue-139-test",
+        );
+      }
+      expect(seams.originRenew.mock.invocationCallOrder[2])
+        .toBeLessThan(seams.reclaimIssueClone.mock.invocationCallOrder[0]!);
+    },
+  );
+
   it("reports a failed poll refresh and retries instead of halting", async () => {
     vi.useFakeTimers();
     const pollIntervalMs = 1_000;
@@ -394,7 +983,7 @@ describe("run quota orchestration (#109)", () => {
 
     try {
       await flushMicrotasksUntil(
-        () => vi.getTimerCount() === 1,
+        () => vi.getTimerCount() === 2,
         "the initial idle poll timer",
       );
       await vi.advanceTimersByTimeAsync(pollIntervalMs);
@@ -405,7 +994,7 @@ describe("run quota orchestration (#109)", () => {
       expect(fetchOriginRefs).toHaveBeenCalledOnce();
 
       await flushMicrotasksUntil(
-        () => vi.getTimerCount() === 1,
+        () => vi.getTimerCount() === 2,
         "the failed refresh to re-arm the poll timer",
       );
       await vi.advanceTimersByTimeAsync(pollIntervalMs - 1);

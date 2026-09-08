@@ -10,6 +10,7 @@ const seams = vi.hoisted(() => ({
     sha: "base-sha",
   })),
   preserveWorktree: vi.fn(),
+  deferWorktreeReclaim: vi.fn(),
   partialUsage: new WeakMap<object, {
     usage?: { inputTokens?: number };
     toolCalls?: number;
@@ -153,10 +154,12 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     });
     seams.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
     seams.preserveWorktree.mockReset();
+    seams.deferWorktreeReclaim.mockReset();
     seams.createSandbox.mockReset().mockImplementation(async () => ({
       run: seams.sandboxRun,
       syncBranchToCache: vi.fn(async () => undefined),
       preserveWorktree: seams.preserveWorktree,
+      deferWorktreeReclaim: seams.deferWorktreeReclaim,
       close: vi.fn(),
       containerName: "sandbox",
       branch: "test",
@@ -207,6 +210,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     }]);
     expect(events.filter((event) =>
       event.kind === "repair" && event.action === "fast-forward")).toEqual([]);
+    expect(seams.deferWorktreeReclaim).toHaveBeenCalledOnce();
   });
 
   it("logs the larger peak context across an implementer and its promise nudge", async () => {
@@ -630,7 +634,10 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       config: config("codex"), hooks: {}, copyToWorktree: [],
       providerState: createRunProviderState(), onEvent: () => undefined,
     })).resolves.toMatchObject({ type: "NEEDS-HUMAN-REVIEW" });
-    expect(seams.preserveWorktree).toHaveBeenCalledOnce();
+    expect(seams.preserveWorktree).toHaveBeenCalledWith(
+      expect.stringContaining("reviewer changed the repository"),
+    );
+    expect(seams.deferWorktreeReclaim).toHaveBeenCalledOnce();
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
   });
 });

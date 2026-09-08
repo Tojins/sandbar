@@ -158,6 +158,7 @@ describe("realAdapter gate admission (#142)", () => {
       mergerModelId: "gpt-5.6-sol",
       sandboxImage: "sandbox-image",
       env: () => undefined,
+      beforeOriginWrite: async () => undefined,
       runStackGate: async () => ({
         queuedMs: 31,
         value: {
@@ -505,6 +506,7 @@ describe("resolve provider invocation (#74)", () => {
         sandboxImage: "sandbox-image",
         env: (key) => key === "CODEX_AUTH_JSON" ? "secret-json" : undefined,
         codexAuthMount,
+        beforeOriginWrite: async () => undefined,
         runStackGate: async () => { throw new Error("not called"); },
       });
 

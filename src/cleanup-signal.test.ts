@@ -134,6 +134,45 @@ console.log("ready");
 setInterval(() => {}, 1000);
 `;
 
+// The #139 race in miniature: signal cleanup owns the drain and waits for a
+// renewal; that renewal reports lease loss and requests cleanup concurrently.
+// The observer must return to the renewal so the owner's later actions can run.
+const renewalDuringCleanupSource = (markerPath: string) => `
+import { appendFileSync } from "node:fs";
+import {
+  beginCleanup,
+  installCleanupTraps,
+  onCleanup,
+} from ${JSON.stringify(join(SRC_DIR, "cleanup.ts"))};
+
+const note = (line) => appendFileSync(${JSON.stringify(markerPath)}, line + "\\n");
+let resolveRenewal;
+const renewalResult = new Promise((resolve) => { resolveRenewal = resolve; });
+const renewalInFlight = renewalResult.then(async () => {
+  note("lease-loss-observed");
+  const cleanup = beginCleanup();
+  if (!cleanup.owner) {
+    note("lease-loss-yielded-to-cleanup-owner");
+    return;
+  }
+  await cleanup.done;
+  note("lease-loss-owned-cleanup");
+});
+
+installCleanupTraps();
+onCleanup(() => note("record-finalized"));
+onCleanup(() => note("origin-released"));
+onCleanup(async () => {
+  note("cleanup-awaiting-renewal");
+  await renewalInFlight;
+  note("renewal-finished");
+});
+setTimeout(() => resolveRenewal(), 100);
+
+console.log("ready");
+setInterval(() => {}, 1000);
+`;
+
 const asyncPreservationSource = (markerPath: string) => `
 import { appendFileSync } from "node:fs";
 import {
@@ -294,6 +333,20 @@ describe("SIGINT during a run", () => {
     );
     expect(preserved.code).toBe(130);
     expect(preserved.signal).toBeNull();
+  }, 30_000);
+
+  it("lets signal-owned cleanup finish when its in-flight renewal reports lease loss", async () => {
+    const raced = await sigintChild("renewal-cleanup", renewalDuringCleanupSource);
+    expect(raced.lines).toEqual([
+      "cleanup-awaiting-renewal",
+      "lease-loss-observed",
+      "lease-loss-yielded-to-cleanup-owner",
+      "renewal-finished",
+      "origin-released",
+      "record-finalized",
+    ]);
+    expect(raced.code).toBe(130);
+    expect(raced.signal).toBeNull();
   }, 30_000);
 
   it("exits 130, the code cleanup.ts chose for SIGINT", () => {

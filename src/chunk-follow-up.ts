@@ -35,6 +35,7 @@ import type { ChunkMember, LandedChunk } from "./chunks.js";
 import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX, READY_FOR_AGENT_LABEL } from "./finalize.js";
 import { memberBranchName } from "./naming.js";
+import type { OriginWriteBarrier } from "./origin-lock.js";
 import type { IssueSummary } from "./plan-resolver.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
@@ -393,6 +394,7 @@ export function realAdapter(args: {
   // at another base — and post the ledger comment where the next scan will not
   // look for it.
   readonly sourceBranch: string;
+  readonly beforeOriginWrite: OriginWriteBarrier;
 }): ChunkFollowUpAdapter {
   const { repo } = args;
   const slug = repoSlug(repo);
@@ -474,10 +476,12 @@ export function realAdapter(args: {
       return new Map(entries);
     },
     async requeueMember(issueNumber, comment) {
+      await args.beforeOriginWrite();
       await exec("gh", [
         "issue", "comment", String(issueNumber), "--repo", slug,
         "--body", comment,
       ]);
+      await args.beforeOriginWrite();
       await exec("gh", [
         "issue", "edit", String(issueNumber), "--repo", slug,
         "--add-label", READY_FOR_AGENT_LABEL,
@@ -498,6 +502,7 @@ export function realAdapter(args: {
       };
     },
     async postLedgerComment(prNumber, body) {
+      await args.beforeOriginWrite();
       await exec("gh", [
         "pr",
         "comment",

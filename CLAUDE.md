@@ -214,7 +214,10 @@ outcomes.
   of that removal, for the sandbox's `close()` and finalize alike: publish the
   branch and pin an off-branch HEAD in the cache first, delete only once the
   cache holds both, otherwise keep the clone and say why. Nothing decides
-  preservation by terminal kind. All resource
+  preservation by terminal kind. The origin lease is the one timing exception:
+  sandbox close silently defers reclamation until run.ts renews at the freed-slot
+  barrier, then finalization calls the same helper; loss leaves the clone in
+  place without manufacturing a human-inspection complaint. All resource
   names carry `w`+8-hex of the *realpath'd* locked workdir; the orphan sweep
   only ever touches its own scope, and unattributable debris is reported, never
   removed. `src/containers.ts` and `src/naming.ts` headers. Image **tags** are
@@ -330,6 +333,13 @@ outcomes.
   without the merge. `src/chunk-land.ts`'s header owns the rest.
 - **Single-instance lock per workdir**, taken *before* preflight, with a
   `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
+- **One repository-wide origin lease**, acquired after forge reachability and
+  before preflight's ref work, renewed by one serialized heartbeat plus every
+  scheduler wake and remote-write barrier, and released by exact-sha CAS
+  (#139). Loss halts before admission or landing and preserves issue clones.
+  If another terminal already owns cleanup, loss rejects the pending write
+  barrier without adding a second complaint or exit event.
+  `src/origin-lock.ts` owns the argument and Git contract.
 - **One cleanup registry owns signals and the exit (#35).** No module but
   `src/cleanup.ts` may trap a signal or exit on one. Anything created in a
   loop registers with `registerDisposable` and withdraws itself when its
@@ -340,17 +350,21 @@ outcomes.
    `run()` takes a host wake lock before the single-instance lock. It releases
    that holder when the daemon becomes quiescent and retakes one when a poll
   finds work; `keepAwakeWhileIdle: true` retains it for a dedicated machine.
-  #35's LIFO drain releases the current holder after later teardown. A lock is
+  #35's LIFO drain releases the current holder after later teardown. The origin
+  lease is released first, while the host is still forbidden to sleep; the wake
+  holder then stops before `run-end` is appended. A lock is
   HELD only when the OS has confirmed it (the
   script prints its marker after `SetThreadExecutionState` returns a non-zero
   previous state), and it is released by EOF ON STDIN so it cannot outlive its
   owner — which is also what makes the `process.exit` paths that run no cleanup
    safe. Every held / refused / lost / released transition is a `wake-lock`
-   event. The release is registered immediately after record finalization so
-   #35's LIFO drain puts it after every teardown and before `run-end`, and its
-   event writes are awaited because `process.exit` grants no event-loop turn.
+  event. The wake teardown is registered immediately before the origin-lease
+  release so #35's LIFO drain puts both after every later teardown and before
+  `run-end`, and its event writes are awaited because `process.exit` grants no
+  event-loop turn.
 - **Credentials and per-installation routing enter as values (#38, #73, #134,
-  #137).** `config.env` is an allowlist record (empty value ⇒ inherit from
+  #137).**
+  `config.env` is an allowlist record (empty value ⇒ inherit from
   `process.env`); `readEnvFile` is the opt-in loader. A host may keep
   per-installation role routing in that same gitignored record:
   `splitRoleRouting` consumes the fifteen
@@ -466,7 +480,7 @@ outcomes.
   keeps only structure. Every git range a prompt renders anchors at the issue
   branch's SEED REF, never a bare branch name (#40, #61) — `src/prompt.ts`.
 - **One append-only event record is the run's source of truth (#70/#132).**
-  Immediately after `acquireLock`, `src/events.ts` creates
+  Immediately after both daemon locks are acquired, `src/events.ts` creates
   `run-<stamp>/events.jsonl`; every event has monotonic `seq`, wall-clock `ts`
   and a typed `kind`, and `run-start` declares the schema version. Readers
   reject unknown schemas; older log-only runs are intentionally unreadable.
@@ -474,15 +488,17 @@ outcomes.
   consume a sequence number; a later write can resume with a contiguous record.
   Finalization becomes complete only after its `run-end` append succeeds, so
   concurrent calls share one write and a failed write remains retryable.
-  Every outcome or refusal after the lock is an event. Refused config, missing
-  `GH_TOKEN`, and losing the lock remain stderr-only because no record can be
-  owned safely. Every launched inner-loop agent invocation writes one bounded
-  record before its result is classified: a diagnostic header, parsed speech,
-  and raw stdout/stderr tails. The run-cached per-issue logger owns invocation
-  names, so they remain sequenced across fresh HARD-ERROR sandboxes and later
-  admissions of the same issue; an existing name is never overwritten. Those
-  records, gate artefacts, merger logs and resolve transcripts stay as files
-  through `src/logs.ts`; they are artefacts, not a second event stream.
+  Every outcome or refusal after both daemon locks are held is an event.
+  Refused config, missing `GH_TOKEN`, forge unreachability before the origin
+  lease, and either startup lock refusal remain stderr-only because no record
+  can be owned safely. Every launched inner-loop agent invocation writes one
+  bounded record before its result is classified: a diagnostic header, parsed
+  speech, and raw stdout/stderr tails. The run-cached per-issue logger owns
+  invocation names, so they remain sequenced across fresh HARD-ERROR sandboxes
+  and later admissions of the same issue; an existing name is never
+  overwritten. Those records, gate artefacts, merger logs and resolve
+  transcripts stay as files through `src/logs.ts`; they are artefacts, not a
+  second event stream.
   `run()` hosts the file-fed UI and writes its URL—and nothing else—to stdout.
   The internal-failure banner is the sole post-record stderr rendering.
 - **The UI is a projection, never scheduler state (#132).** `src/run-state.ts`

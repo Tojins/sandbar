@@ -17,10 +17,10 @@
 // REAL adapters. The shim resolves nothing from the working directory: the
 // point is only that `--repo <owner>/<name>` is present and correct, which is
 // what a fake cannot see.
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { chunkForgeWrites } from "./chunk-land.js";
 import {
@@ -37,15 +37,20 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
   let shimBin: string;
   let argvLog: string;
   let originalPath: string | undefined;
+  const beforeOriginWrite = async (): Promise<void> => {
+    await appendFile(argvLog, '["lease"]\n');
+  };
 
   // Every recorded invocation, as argv arrays.
-  const calls = async (): Promise<string[][]> => {
+  const records = async (): Promise<string[][]> => {
     const raw = await readFile(argvLog, "utf8");
     return raw
       .split("\n")
       .filter((l) => l.length > 0)
       .map((l) => JSON.parse(l) as string[]);
   };
+  const calls = async (): Promise<string[][]> =>
+    (await records()).filter((argv) => argv[0] !== "lease");
 
   const repoFlagOf = (argv: readonly string[]): string | undefined => {
     const i = argv.indexOf("--repo");
@@ -94,6 +99,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         layout: repoLayout("/nonexistent-host-cwd", ".sandbar"),
         repo: REPO,
         sourceBranch: "main",
+        beforeOriginWrite,
       });
 
     it("posts the handoff comment to the configured repo", async () => {
@@ -103,6 +109,34 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       expect(argv?.slice(0, 3)).toEqual(["issue", "comment", "42"]);
       expect(repoFlagOf(argv ?? [])).toBe("acme/app");
       expect(argv).toContain("handoff body");
+    });
+
+    it("checks repository ownership before tracker writes", async () => {
+      const beforeOriginWrite = vi.fn(async () => undefined);
+      const guarded = realFinalizeAdapter({
+        layout: repoLayout("/nonexistent-host-cwd", ".sandbar"),
+        repo: REPO,
+        sourceBranch: "main",
+        beforeOriginWrite,
+      });
+
+      await guarded.postComment(42, "handoff body");
+      await guarded.editLabels(42, ["ready-for-agent"], ["agent-stuck"]);
+      expect(beforeOriginWrite).toHaveBeenCalledTimes(3);
+    });
+
+    it("does not classify a rejected ownership barrier as a label failure", async () => {
+      const lost = new Error("origin lease lost");
+      const guarded = realFinalizeAdapter({
+        layout: repoLayout("/nonexistent-host-cwd", ".sandbar"),
+        repo: REPO,
+        sourceBranch: "main",
+        beforeOriginWrite: async () => { throw lost; },
+      });
+
+      await expect(guarded.editLabels(42, ["ready-for-agent"], []))
+        .rejects.toBe(lost);
+      expect(await calls()).toEqual([]);
     });
 
     // Two separate `gh issue edit` calls, remove first (#8). BOTH must carry
@@ -139,6 +173,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         cwd: "/nonexistent-merger-worktree",
         repo: REPO,
         sourceBranch: "main",
+        beforeOriginWrite,
       } as unknown as Parameters<typeof realMergerAdapter>[0]);
 
     it("comments the abandon/revert reason on the configured repo", async () => {
@@ -147,6 +182,33 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       const [argv] = await calls();
       expect(argv?.slice(0, 3)).toEqual(["issue", "comment", "7"]);
       expect(repoFlagOf(argv ?? [])).toBe("acme/app");
+    });
+
+    it("checks repository ownership before merger and chunk-wrapup writes", async () => {
+      const beforeOriginWrite = vi.fn(async () => undefined);
+      const guarded = realMergerAdapter({
+        cwd: "/nonexistent-merger-worktree",
+        repo: REPO,
+        sourceBranch: "main",
+        beforeOriginWrite,
+      } as unknown as Parameters<typeof realMergerAdapter>[0]);
+
+      await guarded.commentOnIssue(7, "reverted because…");
+      await guarded.closeIssue(7, "landed");
+      expect(beforeOriginWrite).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not classify a rejected ownership barrier as a merger write failure", async () => {
+      const lost = new Error("origin lease lost");
+      const guarded = realMergerAdapter({
+        cwd: "/nonexistent-merger-worktree",
+        repo: REPO,
+        sourceBranch: "main",
+        beforeOriginWrite: async () => { throw lost; },
+      } as unknown as Parameters<typeof realMergerAdapter>[0]);
+
+      await expect(guarded.commentOnIssue(7, "never posted")).rejects.toBe(lost);
+      expect(await calls()).toEqual([]);
     });
 
     // #62 — the chunk PR is a WRITE too, and the wrong repo here is a review
@@ -159,6 +221,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         cwd: shimBin,
         repo: REPO,
         sourceBranch: "main",
+        beforeOriginWrite,
       } as unknown as Parameters<typeof realMergerAdapter>[0]).ensureChunkPullRequest({
         chunkBranch: "sandbar/chunk-42-c",
         title: "Sandbar chunk #42: x",
@@ -192,6 +255,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
           cwd: "/nonexistent-merger-worktree",
           repo: REPO,
           sourceBranch: "main",
+          beforeOriginWrite,
         } as unknown as Parameters<typeof realMergerAdapter>[0]),
     ],
     [
@@ -203,6 +267,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
           repo: REPO,
           gitCwd: "/nonexistent-bare-cache",
           errPrefix: "reconcile",
+          beforeOriginWrite,
         }),
     ],
   ])("the chunk wrap-up's writes, via the %s adapter", (_name, adapter) => {
@@ -215,6 +280,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       expect(argv?.slice(0, 3)).toEqual(["issue", "close", "7"]);
       expect(repoFlagOf(argv ?? [])).toBe("acme/app");
       expect(argv).toContain("the chunk landed on main");
+      expect(await records()).toEqual([["lease"], argv]);
     });
 
     // The same call the auto lane drops `ready-for-agent` with, which is why it
@@ -227,6 +293,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       expect(repoFlagOf(argv ?? [])).toBe("acme/app");
       expect(argv).toContain("--remove-label");
       expect(argv).toContain("needs-review");
+      expect(await records()).toEqual([["lease"], argv]);
     });
 
     // `land` is the chunk's queue, so the wrong repository here is a request
@@ -240,6 +307,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       expect(repoFlagOf(argv ?? [])).toBe("acme/app");
       expect(argv).toContain("--remove-label");
       expect(argv).toContain("land");
+      expect(await records()).toEqual([["lease"], argv]);
     });
 
     it("comments on and closes the chunk pull request in the configured repo", async () => {
@@ -254,6 +322,10 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       // The branch delete is the wrap-up's own last step and is conditional on
       // every member having closed, which this call cannot know.
       expect(close).not.toContain("--delete-branch");
+      expect(await records()).toEqual([
+        ["lease"], comment,
+        ["lease"], close,
+      ]);
     });
   });
 
@@ -277,6 +349,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       repo: REPO,
       gitCwd: shimBin,
       errPrefix: "test",
+      beforeOriginWrite,
     });
 
     await adapter.deleteChunkBranch("sandbar/chunk-42-root", [42, 43]);
@@ -290,6 +363,10 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       "refs/heads/sandbar/member-42",
       "refs/heads/sandbar/member-43",
     ]]);
+    expect(await records()).toEqual([
+      ["lease"],
+      expect.arrayContaining(["push", "--atomic"]),
+    ]);
   });
 
   // #64 — the two READS that decide which chunks are acted on at all. A wrong

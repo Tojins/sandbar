@@ -80,6 +80,7 @@ import { SandbarError, isExitCode } from "./errors.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { IssueRef } from "./merger.js";
 import type { SpecGap } from "./inner-loop.js";
+import type { OriginWriteBarrier } from "./origin-lock.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
@@ -1137,6 +1138,8 @@ export type RealFinalizeAdapterDeps = {
   // seeding change's.
   readonly sourceBranch: string;
   readonly onNotice?: (message: string) => void | Promise<void>;
+  // Daemon ownership barrier (#139), immediately before each remote write.
+  readonly beforeOriginWrite: OriginWriteBarrier;
 };
 
 export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
@@ -1146,6 +1149,7 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       // Required: the whole point of the non-merged terminals is to hand the
       // branch to a human. If the push fails we must NOT report success and
       // move on (the #8 class of bug) — fail loud.
+      await deps.beforeOriginWrite();
       try {
         await exec("git", ["push", "origin", `${branch}:${branch}`], { cwd });
       } catch (err) {
@@ -1212,6 +1216,7 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       // Required: the comment is the issue's handoff payload (questions, failure
       // trace, reviewer prose). A silently-dropped comment strands the human
       // without the context they need — fail loud.
+      await deps.beforeOriginWrite();
       try {
         await exec("gh", [
           "issue",
@@ -1247,6 +1252,7 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
           repoSlug(deps.repo),
         ];
         for (const l of labelsToApply) args.push(flag, l);
+        await deps.beforeOriginWrite();
         try {
           await exec("gh", args);
           return undefined;

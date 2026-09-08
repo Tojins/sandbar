@@ -27,12 +27,50 @@ const args = {
   base: "main",
   title: "T",
   body: "B",
+  beforeOriginWrite: async () => undefined,
 };
 
 const flag = (argv: readonly string[], name: string): string | undefined =>
   argv.indexOf(name) < 0 ? undefined : argv[argv.indexOf(name) + 1];
 
 describe("ensurePullRequest", () => {
+  it.each([
+    ["create", "[]"],
+    ["edit", JSON.stringify([{ number: 42, url: "u42" }])],
+  ])("checks ownership immediately before the %s write", async (_shape, listed) => {
+    const order: string[] = [];
+    const { exec } = fakeExec((call) => {
+      order.push(`${call.args[0]} ${call.args[1]}`);
+      return call.args[1] === "list"
+        ? { stdout: listed }
+        : { stdout: "u/pull/42" };
+    });
+
+    await ensurePullRequest({
+      ...args,
+      exec,
+      beforeOriginWrite: async () => { order.push("lease"); },
+    });
+
+    expect(order).toEqual([
+      "pr list",
+      "lease",
+      listed === "[]" ? "pr create" : "pr edit",
+    ]);
+  });
+
+  it("propagates a rejected ownership barrier without attempting the write", async () => {
+    const lost = new Error("origin lease lost");
+    const { exec, calls } = fakeExec(() => ({ stdout: "[]" }));
+
+    await expect(ensurePullRequest({
+      ...args,
+      exec,
+      beforeOriginWrite: async () => { throw lost; },
+    })).rejects.toBe(lost);
+    expect(calls.map((call) => call.args.slice(0, 2))).toEqual([["pr", "list"]]);
+  });
+
   it("looks for the OPEN PR on this head→base pair, in the named repo", async () => {
     const { exec, calls } = fakeExec(() => ({ stdout: "[]" }));
     await ensurePullRequest({ ...args, exec });

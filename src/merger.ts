@@ -312,6 +312,7 @@ import { classifyAgentRunEnd } from "./agent-run-end.js";
 import { SandbarError, hasExitCode, isErrno, isExitCode } from "./errors.js";
 import { type PullRequestRef, ensurePullRequest } from "./forge-pr.js";
 import { dirtyWorktreePaths, fetchOriginChunkBranch } from "./git-ops.js";
+import type { OriginWriteBarrier } from "./origin-lock.js";
 import {
   type Clock,
   type VerifiedFailureReason,
@@ -2244,6 +2245,9 @@ export type RealAdapterDeps = {
   // build the stack itself: run.ts owns the stack's lifecycle for the whole
   // merge phase, so a single bringup covers every branch in the cycle.
   readonly runStackGate: () => Promise<AdmittedGate<GateResult>>;
+  // Daemon ownership barrier (#139), immediately before each origin/tracker
+  // write.
+  readonly beforeOriginWrite: OriginWriteBarrier;
 };
 
 type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "usage" | "toolCalls" | "peakContext" | "rateLimit" | "cause" | "verdict">;
@@ -2539,6 +2543,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     };
   };
   const pushHeadTo = async (dest: string): Promise<PushResult> => {
+    await deps.beforeOriginWrite();
     try {
       await exec("git", ["push", "origin", `HEAD:${dest}`], { cwd });
       return { kind: "ok" };
@@ -2630,7 +2635,12 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     // given this worktree as the cwd `git push --delete` runs in; the
     // reconciler passes the bare cache instead and that is the whole of the
     // difference. See `chunk-land.ts`.
-    ...chunkForgeWrites({ repo: deps.repo, gitCwd: cwd, errPrefix: "merger" }),
+    ...chunkForgeWrites({
+      repo: deps.repo,
+      gitCwd: cwd,
+      errPrefix: "merger",
+      beforeOriginWrite: deps.beforeOriginWrite,
+    }),
     async mergeNoFf(unit) {
       // Fetch failures are infrastructure failures, not merge conflicts. Keep
       // this outside the merge-only catch so the caller's halt path preserves
@@ -2876,6 +2886,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     async commentOnIssue(n, msg) {
       // Required: this comment is the merger's explanation of an abandon/revert.
       // Swallowing it would strand the human without the reason — fail loud.
+      await deps.beforeOriginWrite();
       try {
         await exec("gh", [
           "issue",
@@ -2948,22 +2959,23 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // Fully qualified, unlike the source branch's: a chunk branch may not
       // exist on origin yet, and git only creates a ref from an unambiguous
       // destination.
-      try {
-        for (const member of members) {
-          const contained = await exec(
-            "git",
-            ["merge-base", "--is-ancestor", member.source, "HEAD"],
-            { cwd },
-          ).then(() => true, () => false);
-          if (!contained) {
-            return {
-              kind: "fatal",
-              reason:
-                `membership source ${member.source} is not contained in ` +
-                `the composed chunk branch ${chunkBranch}`,
-            };
-          }
+      for (const member of members) {
+        const contained = await exec(
+          "git",
+          ["merge-base", "--is-ancestor", member.source, "HEAD"],
+          { cwd },
+        ).then(() => true, () => false);
+        if (!contained) {
+          return {
+            kind: "fatal",
+            reason:
+              `membership source ${member.source} is not contained in ` +
+              `the composed chunk branch ${chunkBranch}`,
+          };
         }
+      }
+      await deps.beforeOriginWrite();
+      try {
         await exec("git", [
           "push",
           "--atomic",
@@ -3008,6 +3020,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         title,
         body,
         draft: true,
+        beforeOriginWrite: deps.beforeOriginWrite,
       });
     },
   };

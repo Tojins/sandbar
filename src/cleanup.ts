@@ -23,6 +23,12 @@
 // still sweeps whatever got created. The cost is that a caller inside a loop
 // grows the registry without limit; that is what `registerDisposable` below is
 // for (#55).
+//
+// Concurrent cleanup requests share one drain promise. `beginCleanup` also
+// identifies its single owner because only that caller may perform a terminal
+// action after the drain; an observer can be the lease-loss callback running
+// inside a renewal the owner is already awaiting, so it must return and let
+// the owner finish rather than await itself (#139).
 
 type CleanupAction = () => Promise<void> | void;
 export type CleanupNotice = "signal" | "cleanup-failure" | "internal-failure";
@@ -34,7 +40,7 @@ type CleanupReporter = (
 
 const actions: CleanupAction[] = [];
 let installed = false;
-let running = false;
+let drain: Promise<void> | null = null;
 let report: CleanupReporter = (kind, message, cause) => {
   if (kind === "cleanup-failure") console.error(message, { cause });
   else if (cause === undefined) console.error(message);
@@ -127,18 +133,31 @@ export function registerDisposable(action: CleanupAction): () => void {
   };
 }
 
-export async function runCleanup(): Promise<void> {
-  if (running) return;
-  running = true;
-  while (actions.length > 0) {
-    const action = actions.pop();
-    if (!action) break;
-    try {
-      await action();
-    } catch (err) {
-      await reportCleanupNotice("cleanup-failure", "Cleanup action failed", err);
+export type CleanupClaim = {
+  // Exactly one caller owns the terminal action that follows cleanup. A
+  // concurrent caller observes the same drain but must not race that action.
+  readonly owner: boolean;
+  readonly done: Promise<void>;
+};
+
+export function beginCleanup(): CleanupClaim {
+  if (drain !== null) return { owner: false, done: drain };
+  drain = (async () => {
+    while (actions.length > 0) {
+      const action = actions.pop();
+      if (!action) break;
+      try {
+        await action();
+      } catch (err) {
+        await reportCleanupNotice("cleanup-failure", "Cleanup action failed", err);
+      }
     }
-  }
+  })();
+  return { owner: true, done: drain };
+}
+
+export async function runCleanup(): Promise<void> {
+  await beginCleanup().done;
 }
 
 export function installCleanupTraps(): void {

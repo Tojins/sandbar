@@ -67,6 +67,9 @@
 // UI-check counters restart at both boundaries, but an earlier invocation
 // record must never be overwritten (#135). The cached IssueLogger owns that
 // sequence beside the directory whose names it allocates.
+// Sandbox close defers clone reclamation silently to run.ts's next origin-lease
+// barrier; this is distinct from the human-inspection preservation channel and
+// therefore cannot overwrite or manufacture an operator-facing reason (#139).
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -1118,6 +1121,7 @@ async function runSandboxCycle(
     }
     if (sandbox) {
       try {
+        sandbox.deferWorktreeReclaim();
         await sandbox.close();
       } catch (err) {
         await opts.onEvent({

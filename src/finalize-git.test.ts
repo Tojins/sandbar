@@ -71,6 +71,7 @@ describe("finalize real adapter git classifications", () => {
       layout: repoLayout(root, ".sandbar"),
       repo: { owner: "o", name: "r" },
       sourceBranch: "main",
+      beforeOriginWrite: async () => undefined,
     });
 
   it("classifies branches by containment in origin/main", async () => {

@@ -131,6 +131,7 @@ import {
   runResolveLoop,
 } from "./resolve-loop.js";
 import type { PromptExtension } from "./config.js";
+import type { OriginWriteBarrier } from "./origin-lock.js";
 import type { RepoRef } from "./repo-ref.js";
 
 const execFileAsync = promisify(execFile);
@@ -1099,6 +1100,8 @@ export type RealVerifyAdapterDeps = {
   readonly repo: RepoRef;
   readonly exec?: ExecFn;
   readonly onNotice?: (message: string) => void | Promise<void>;
+  // Daemon ownership barrier (#139), immediately before each remote write.
+  readonly beforeOriginWrite: OriginWriteBarrier;
 };
 
 // Operator-facing reason out of a failed git invocation. BOTH streams matter:
@@ -1208,6 +1211,7 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
       const force = remoteSha
         ? [`--force-with-lease=refs/heads/${branch}:${remoteSha}`]
         : [];
+      await deps.beforeOriginWrite();
       try {
         await exec(
           "git",
@@ -1367,6 +1371,7 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
     },
 
     async fastForwardSource(sha) {
+      await deps.beforeOriginWrite();
       try {
         await exec(
           "git",
@@ -1429,11 +1434,13 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
         base: deps.sourceBranch,
         title,
         body,
+        beforeOriginWrite: deps.beforeOriginWrite,
       });
     },
 
     async closePullRequest(number, comment) {
       if (number <= 0) return;
+      await deps.beforeOriginWrite();
       try {
         await exec(
           "gh",

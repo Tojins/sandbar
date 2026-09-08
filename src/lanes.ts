@@ -37,6 +37,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
+import type { OriginWriteBarrier } from "./origin-lock.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
 const exec = promisify(execFile);
@@ -215,12 +216,14 @@ export async function postLaneOverrideNotices(
   repo: RepoRef,
   overrides: readonly LaneOverride[],
   log: (line: string) => void | Promise<void> = () => {},
+  beforeOriginWrite: OriginWriteBarrier,
 ): Promise<readonly number[]> {
   const posted: number[] = [];
   for (const override of overrides) {
     if (!needsLaneOverrideNotice(await existingComments(repo, override.issue))) {
       continue;
     }
+    await beforeOriginWrite();
     await exec("gh", [
       "issue",
       "comment",
