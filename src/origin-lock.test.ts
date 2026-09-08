@@ -153,15 +153,21 @@ describe("origin lock decisions (#139)", () => {
     ["array", "[]"],
     ["missing hostname", JSON.stringify({ ...claim().lease, hostname: undefined })],
     ["blank hostname", JSON.stringify({ ...claim().lease, hostname: " " })],
+    ["non-string hostname", JSON.stringify({ ...claim().lease, hostname: 1 })],
+    ["missing workdir", JSON.stringify({ ...claim().lease, workdir: undefined })],
     ["non-string workdir", JSON.stringify({ ...claim().lease, workdir: 1 })],
+    ["missing pid", JSON.stringify({ ...claim().lease, pid: undefined })],
     ["zero pid", JSON.stringify({ ...claim().lease, pid: 0 })],
     ["fractional pid", JSON.stringify({ ...claim().lease, pid: 1.5 })],
     ["non-number pid", JSON.stringify({ ...claim().lease, pid: "1" })],
     ["missing run", JSON.stringify({ ...claim().lease, run: undefined })],
+    ["non-string run", JSON.stringify({ ...claim().lease, run: 1 })],
+    ["missing startedAt", JSON.stringify({ ...claim().lease, startedAt: undefined })],
     ["invalid startedAt", JSON.stringify({ ...claim().lease, startedAt: "soon" })],
     ["non-string startedAt", JSON.stringify({ ...claim().lease, startedAt: 1 })],
     ["missing expires", JSON.stringify({ ...identity })],
     ["invalid expires", JSON.stringify({ ...claim().lease, expires: "later" })],
+    ["non-string expires", JSON.stringify({ ...claim().lease, expires: 1 })],
   ])("fails closed on a %s lease commit", (_name, message) => {
     expect(() => parseOriginLockLease(message)).toThrow(/Origin lock/);
   });
