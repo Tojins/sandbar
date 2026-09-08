@@ -51,6 +51,11 @@ export const ORIGIN_LOCK_REF = "refs/sandbar/lock";
 export const ORIGIN_LOCK_LEASE_MS = 10 * 60 * 1000;
 export const ORIGIN_LOCK_RENEW_INTERVAL_MS = 60 * 1000;
 
+// Every adapter capable of mutating origin or its tracker requires this
+// capability explicitly. Daemon callers pass the serialized lease renewal;
+// deliberate standalone/test callers pass an explicit no-op.
+export type OriginWriteBarrier = () => Promise<void>;
+
 export type OriginLockIdentity = {
   readonly hostname: string;
   readonly workdir: string;

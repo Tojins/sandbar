@@ -39,6 +39,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import type { OriginWriteBarrier } from "./origin-lock.js";
+
 const execFileAsync = promisify(execFile);
 
 // `gh pr list --json` on a busy head, and `gh pr create`'s echoed URL. Same
@@ -69,6 +71,9 @@ export type EnsurePullRequestArgs = {
   readonly base: string;
   readonly title: string;
   readonly body: string;
+  // Repository ownership is re-established after the read and immediately
+  // before whichever create/update write this call chooses (#139).
+  readonly beforeOriginWrite: OriginWriteBarrier;
   // Create as a draft. Consulted ON CREATE ONLY — see the header.
   readonly draft?: boolean;
   readonly exec?: PrExec;
@@ -112,6 +117,7 @@ export async function ensurePullRequest(
     // Re-title and re-body it, and nothing else: not the draft state (header),
     // not the base, not the labels a human put on it.
     if (number > 0) {
+      await args.beforeOriginWrite();
       await exec(
         "gh",
         [
@@ -130,6 +136,7 @@ export async function ensurePullRequest(
     }
     return { number, url };
   }
+  await args.beforeOriginWrite();
   const created = await exec(
     "gh",
     [

@@ -312,6 +312,7 @@ import { classifyAgentRunEnd } from "./agent-run-end.js";
 import { SandbarError, hasExitCode, isErrno, isExitCode } from "./errors.js";
 import { type PullRequestRef, ensurePullRequest } from "./forge-pr.js";
 import { dirtyWorktreePaths, fetchOriginChunkBranch } from "./git-ops.js";
+import type { OriginWriteBarrier } from "./origin-lock.js";
 import {
   type Clock,
   type VerifiedFailureReason,
@@ -2244,8 +2245,8 @@ export type RealAdapterDeps = {
   // merge phase, so a single bringup covers every branch in the cycle.
   readonly runStackGate: () => Promise<GateResult>;
   // Daemon ownership barrier (#139), immediately before each origin/tracker
-  // write. Adapter tests and non-daemon consumers may omit it.
-  readonly beforeOriginWrite?: () => Promise<void>;
+  // write.
+  readonly beforeOriginWrite: OriginWriteBarrier;
 };
 
 type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "usage" | "toolCalls" | "peakContext" | "rateLimit" | "cause" | "verdict">;
@@ -2541,8 +2542,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     };
   };
   const pushHeadTo = async (dest: string): Promise<PushResult> => {
+    await deps.beforeOriginWrite();
     try {
-      await deps.beforeOriginWrite?.();
       await exec("git", ["push", "origin", `HEAD:${dest}`], { cwd });
       return { kind: "ok" };
     } catch (err) {
@@ -2637,9 +2638,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       repo: deps.repo,
       gitCwd: cwd,
       errPrefix: "merger",
-      ...(deps.beforeOriginWrite === undefined
-        ? {}
-        : { beforeOriginWrite: deps.beforeOriginWrite }),
+      beforeOriginWrite: deps.beforeOriginWrite,
     }),
     async mergeNoFf(unit) {
       // Fetch failures are infrastructure failures, not merge conflicts. Keep
@@ -2881,8 +2880,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     async commentOnIssue(n, msg) {
       // Required: this comment is the merger's explanation of an abandon/revert.
       // Swallowing it would strand the human without the reason — fail loud.
+      await deps.beforeOriginWrite();
       try {
-        await deps.beforeOriginWrite?.();
         await exec("gh", [
           "issue",
           "comment",
@@ -2954,23 +2953,23 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // Fully qualified, unlike the source branch's: a chunk branch may not
       // exist on origin yet, and git only creates a ref from an unambiguous
       // destination.
-      try {
-        for (const member of members) {
-          const contained = await exec(
-            "git",
-            ["merge-base", "--is-ancestor", member.source, "HEAD"],
-            { cwd },
-          ).then(() => true, () => false);
-          if (!contained) {
-            return {
-              kind: "fatal",
-              reason:
-                `membership source ${member.source} is not contained in ` +
-                `the composed chunk branch ${chunkBranch}`,
-            };
-          }
+      for (const member of members) {
+        const contained = await exec(
+          "git",
+          ["merge-base", "--is-ancestor", member.source, "HEAD"],
+          { cwd },
+        ).then(() => true, () => false);
+        if (!contained) {
+          return {
+            kind: "fatal",
+            reason:
+              `membership source ${member.source} is not contained in ` +
+              `the composed chunk branch ${chunkBranch}`,
+          };
         }
-        await deps.beforeOriginWrite?.();
+      }
+      await deps.beforeOriginWrite();
+      try {
         await exec("git", [
           "push",
           "--atomic",
@@ -3007,7 +3006,6 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // and never touches its draft state, so a human who marked this one
       // ready for review keeps that decision. chunk-pr.ts's header owns the
       // argument.
-      await deps.beforeOriginWrite?.();
       return ensurePullRequest({
         cwd,
         repoFlag: repoSlug(deps.repo),
@@ -3016,6 +3014,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         title,
         body,
         draft: true,
+        beforeOriginWrite: deps.beforeOriginWrite,
       });
     },
   };

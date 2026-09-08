@@ -1,6 +1,6 @@
 // Real-adapter coverage: path ownership depends on matching each durable
 // member ref to its merge, and every forge call must name its repository.
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -71,8 +71,12 @@ describe("the chunk-review scan's real adapter", () => {
     .split("\u0001").slice(0, -1).map((record) => record.split("\0").slice(0, -1));
 
   it("matches both member refs to their merges and passes complete argv", async () => {
+    const beforeOriginWrite = async (): Promise<void> => {
+      await appendFile(log, "lease\0\u0001");
+    };
     const result = await routeChunkReviewFollowUps({ chunks: [CHUNK], adapter: realAdapter({
       repo: { owner: "acme", name: "app" }, repoDir: bin, sourceBranch: "main",
+      beforeOriginWrite,
     }) });
     expect(result).toEqual([
       { number: 42, title: "Issue 42", body: "body 42", labels: ["ready-for-agent"] },
@@ -104,6 +108,14 @@ describe("the chunk-review scan's real adapter", () => {
     expect(ledger?.[6]).toContain(followUpMarker("PRR_a"));
     expect(ledger?.[6]).toContain("#42 and #44");
     expect(recorded.some((call) => call[0] === "issue" && call[1] === "create")).toBe(false);
+    const writes = recorded
+      .map((call, index) => ({ call, index }))
+      .filter(({ call }) =>
+        (call[0] === "issue" && ["comment", "edit"].includes(call[1] ?? "")) ||
+        (call[0] === "pr" && call[1] === "comment"),
+      );
+    expect(writes).toHaveLength(5);
+    for (const { index } of writes) expect(recorded[index - 1]).toEqual(["lease"]);
   });
 
   it.each([
@@ -113,6 +125,7 @@ describe("the chunk-review scan's real adapter", () => {
     process.env["SANDBAR_TEST_LARGE_GIT_OUTPUT"] = output;
     const paths = await realAdapter({
       repo: { owner: "acme", name: "app" }, repoDir: bin, sourceBranch: "main",
+      beforeOriginWrite: async () => undefined,
     }).memberPaths(CHUNK);
 
     expect(paths.get(42)?.has("src/first.ts")).toBe(true);

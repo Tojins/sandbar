@@ -71,6 +71,7 @@ import {
 } from "./chunk-land.js";
 import type { LandedChunk } from "./chunks.js";
 import { hasExitCode } from "./errors.js";
+import type { OriginWriteBarrier } from "./origin-lock.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
@@ -285,7 +286,7 @@ export async function reconcileLandedChunks(cfg: {
   // The plan's derivation: how a branch learns which issues are on it.
   readonly chunks: readonly LandedChunk[];
   readonly log?: (line: string) => void | Promise<void>;
-  readonly beforeOriginWrite?: () => Promise<void>;
+  readonly beforeOriginWrite: OriginWriteBarrier;
   // Test seam. The real one talks to `gh` and to origin.
   readonly adapter?: ChunkWrapupAdapter;
   readonly findLanded?: (
@@ -324,9 +325,7 @@ export async function reconcileLandedChunks(cfg: {
       repo: cfg.repo,
       gitCwd: repoDir,
       errPrefix: "reconcile",
-      ...(cfg.beforeOriginWrite === undefined
-        ? {}
-        : { beforeOriginWrite: cfg.beforeOriginWrite }),
+      beforeOriginWrite: cfg.beforeOriginWrite,
     });
 
   const reconciled: ChunkWrapup[] = [];

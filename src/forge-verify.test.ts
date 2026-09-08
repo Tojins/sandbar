@@ -992,7 +992,7 @@ function fakeExec(
 function adapterWith(
   exec: ExecFn,
   statuses: unknown[] = [],
-  beforeOriginWrite?: () => Promise<void>,
+  beforeOriginWrite: () => Promise<void> = async () => undefined,
 ) {
   const wrapped: ExecFn = async (file, args, opts) =>
     args.some((a) => a.includes("/status?"))
@@ -1014,7 +1014,7 @@ function adapterWith(
     sourceBranch: "main",
     repo: { owner: "o", name: "r" },
     exec: wrapped,
-    ...(beforeOriginWrite === undefined ? {} : { beforeOriginWrite }),
+    beforeOriginWrite,
   });
 }
 
@@ -1143,6 +1143,15 @@ describe("realVerifyAdapter push primitives", () => {
     await adapter.pushIntegration("sandbar/integration");
     await adapter.fastForwardSource("deadbeef");
     expect(order).toEqual(["lease", "push", "lease", "push"]);
+  });
+
+  it("does not classify a rejected ownership barrier as a rejected push", async () => {
+    const lost = new Error("origin lease lost");
+    const { exec, calls } = fakeExec(() => ({ stdout: "" }));
+    const adapter = adapterWith(exec, [], async () => { throw lost; });
+
+    await expect(adapter.fastForwardSource("deadbeef")).rejects.toBe(lost);
+    expect(calls).toEqual([]);
   });
 
   it("lease-protects the force-push against the ref it observed", async () => {

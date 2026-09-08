@@ -72,6 +72,7 @@ describe("realAdapter.isMergeInProgress (real linked worktree)", () => {
       ghOwner: "o",
       ghRepo: "r",
       sandboxImage: "img",
+      beforeOriginWrite: async () => undefined,
       // These cases exercise only the git primitives; the cast covers the
       // adapter deps they never reach.
     } as unknown as Parameters<typeof realAdapter>[0]);
@@ -163,6 +164,7 @@ describe("realAdapter.mergeNoFf issue-ref import (#98)", () => {
       botName: "bot",
       botEmail: "bot@e",
       coauthorTrailer: "",
+      beforeOriginWrite: async () => undefined,
     } as unknown as Parameters<typeof realAdapter>[0]);
     const before = await git(merger, "rev-parse", "HEAD");
 
@@ -194,6 +196,7 @@ describe("realAdapter.mergeNoFf issue-ref import (#98)", () => {
       botName: "bot",
       botEmail: "bot@e",
       coauthorTrailer: "",
+      beforeOriginWrite: async () => undefined,
     } as unknown as Parameters<typeof realAdapter>[0]);
 
     await adapter.mergeNoFf({ id: "98", title: "import", branch });
@@ -245,7 +248,7 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     await rm(root, { recursive: true, force: true });
   });
 
-  const adapter = (beforeOriginWrite?: () => Promise<void>) =>
+  const adapter = (beforeOriginWrite: () => Promise<void> = async () => undefined) =>
     realAdapter({
       cwd: wt,
       cacheDir: cache,
@@ -253,7 +256,7 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
       botName: "bot",
       botEmail: "bot@e",
       coauthorTrailer: "",
-      ...(beforeOriginWrite === undefined ? {} : { beforeOriginWrite }),
+      beforeOriginWrite,
     } as unknown as Parameters<typeof realAdapter>[0]);
 
   const originHas = async (branch: string): Promise<string | null> =>
@@ -607,6 +610,7 @@ describe("resolveVersionCollision (real conflicting merge in a linked worktree)"
       ghOwner: "o",
       ghRepo: "r",
       sandboxImage: "img",
+      beforeOriginWrite: async () => undefined,
     } as unknown as Parameters<typeof realAdapter>[0]);
 
   // Both branches did what AGENTS.md requires, from the same base.

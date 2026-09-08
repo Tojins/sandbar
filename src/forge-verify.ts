@@ -131,6 +131,7 @@ import {
   runResolveLoop,
 } from "./resolve-loop.js";
 import type { PromptExtension } from "./config.js";
+import type { OriginWriteBarrier } from "./origin-lock.js";
 import type { RepoRef } from "./repo-ref.js";
 
 const execFileAsync = promisify(execFile);
@@ -1100,7 +1101,7 @@ export type RealVerifyAdapterDeps = {
   readonly exec?: ExecFn;
   readonly onNotice?: (message: string) => void | Promise<void>;
   // Daemon ownership barrier (#139), immediately before each remote write.
-  readonly beforeOriginWrite?: () => Promise<void>;
+  readonly beforeOriginWrite: OriginWriteBarrier;
 };
 
 // Operator-facing reason out of a failed git invocation. BOTH streams matter:
@@ -1210,8 +1211,8 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
       const force = remoteSha
         ? [`--force-with-lease=refs/heads/${branch}:${remoteSha}`]
         : [];
+      await deps.beforeOriginWrite();
       try {
-        await deps.beforeOriginWrite?.();
         await exec(
           "git",
           ["push", ...force, "origin", `HEAD:refs/heads/${branch}`],
@@ -1370,8 +1371,8 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
     },
 
     async fastForwardSource(sha) {
+      await deps.beforeOriginWrite();
       try {
-        await deps.beforeOriginWrite?.();
         await exec(
           "git",
           ["push", "origin", `${sha}:refs/heads/${deps.sourceBranch}`],
@@ -1425,7 +1426,6 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
       // it would only make the merge button GitHub is not being asked to press
       // look disabled for a reason that does not apply here. The chunk PR (#62)
       // is the one that draws on the draft mechanism.
-      await deps.beforeOriginWrite?.();
       return ensureForgePullRequest({
         exec,
         cwd,
@@ -1434,13 +1434,14 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
         base: deps.sourceBranch,
         title,
         body,
+        beforeOriginWrite: deps.beforeOriginWrite,
       });
     },
 
     async closePullRequest(number, comment) {
       if (number <= 0) return;
+      await deps.beforeOriginWrite();
       try {
-        await deps.beforeOriginWrite?.();
         await exec(
           "gh",
           ["pr", "close", String(number), "--repo", repoFlag, "--comment", comment],

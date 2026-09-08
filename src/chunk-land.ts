@@ -205,6 +205,7 @@ import {
 } from "./chunks.js";
 import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
+import type { OriginWriteBarrier } from "./origin-lock.js";
 import {
   memberBranchName,
   rootIssueFromChunkBranch,
@@ -615,7 +616,7 @@ export function chunkForgeWrites(deps: {
   // only thing that says which of them was standing there.
   readonly errPrefix: string;
   // Daemon ownership barrier (#139), immediately before each remote write.
-  readonly beforeOriginWrite?: () => Promise<void>;
+  readonly beforeOriginWrite: OriginWriteBarrier;
 }): ChunkWrapupAdapter {
   // Read per call, not once at construction. `realAdapter` is built for its git
   // primitives alone in places that have no tracker to name (merger-git's
@@ -628,8 +629,8 @@ export function chunkForgeWrites(deps: {
       { cause: err },
     );
   const gh = async (args: readonly string[], what: string): Promise<void> => {
+    await deps.beforeOriginWrite();
     try {
-      await deps.beforeOriginWrite?.();
       await exec("gh", [...args]);
     } catch (err) {
       throw wrap(what, err);
@@ -681,8 +682,8 @@ export function chunkForgeWrites(deps: {
       // force to give. It is safe on the one precondition every caller
       // establishes first — the branch's commits are contained in
       // `origin/<sourceBranch>`, so nothing is lost with the ref.
+      await deps.beforeOriginWrite();
       try {
-        await deps.beforeOriginWrite?.();
         // Delete only the strict membership set this wrap-up closed. Older
         // chunks kept for a failed close may be ancestors of this branch; their
         // member refs remain their recovery record and must survive.
