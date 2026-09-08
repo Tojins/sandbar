@@ -175,6 +175,11 @@ export type Verdict =
       readonly provider: "claude" | "codex";
       readonly window: string;
       readonly resetsAt?: number;
+    }
+  | {
+      readonly type: "CREDENTIAL";
+      readonly provider: "claude" | "codex";
+      readonly detail: string;
     };
 
 export type LoopAction =

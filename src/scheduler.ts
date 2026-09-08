@@ -25,13 +25,13 @@
 //
 //   1. recompute — a completion arrived while the plan was being built, so the
 //      snapshot describes a pool that no longer exists. Cheapest to rebuild.
-//   2. quota    — a provider closed for the process (#109). No new starts;
+//   2. provider — a provider closed for the process (#109, #134). No new starts;
 //      pending terminals land first, because committed-but-unlanded work is
 //      the expensive thing in this system; running work drains to its
 //      terminal (under a two-vendor config an issue routed to the other
 //      provider may genuinely finish); then exit 4. Outranks the backstop.
 //   3. stuck    — `noProgressBackstop` consecutive no-progress observations.
-//      Same shape as quota: land what is pending, drain what is active, exit
+//      Same shape as provider closure: land pending, drain active work, exit
 //      2. Evaluated on EVERY observation, not at quiescence — a deep queue
 //      refills every freed slot and is never quiescent until the candidates
 //      run out, which is the one case the backstop exists for.
@@ -69,7 +69,7 @@ export type SettledIssue<T, R> =
 
 export type PoolWake = "slot-freed" | "poll";
 
-export type SchedulerExit = "quota" | "stuck";
+export type SchedulerExit = "provider-closed" | "stuck";
 export type SchedulerAction =
   | { readonly kind: "recompute" }
   | { readonly kind: "admit"; readonly next: "land" | "wait" }
@@ -89,7 +89,7 @@ export type SchedulerSnapshot = {
   readonly hasCapacity: boolean;
   readonly noProgressSinceLanding: number;
   readonly noProgressBackstop: number;
-  readonly quotaClosed: boolean;
+  readonly providerClosed: boolean;
 };
 
 // The complete control decision for one scheduler observation. Keeping the
@@ -99,13 +99,13 @@ export type SchedulerSnapshot = {
 export function decideSchedulerAction(state: SchedulerSnapshot): SchedulerAction {
   if (state.hasCompleted) return { kind: "recompute" };
   if (
-    state.quotaClosed &&
+    state.providerClosed &&
     (state.hasPendingTerminals || (state.hasLandRequests && state.active === 0))
   ) {
     return { kind: "land" };
   }
-  if (state.quotaClosed) {
-    return state.active > 0 ? { kind: "drain" } : { kind: "exit", reason: "quota" };
+  if (state.providerClosed) {
+    return state.active > 0 ? { kind: "drain" } : { kind: "exit", reason: "provider-closed" };
   }
   if (state.noProgressSinceLanding >= state.noProgressBackstop) {
     if (state.hasPendingTerminals) return { kind: "land" };

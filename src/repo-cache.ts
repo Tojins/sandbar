@@ -6,7 +6,10 @@
 // operator's REAL checkout at `<hostCwd>/.sandbar/`: the bare cache
 // `repo.git` (every git call runs there; `gh` names its own repo with
 // `--repo`, #34), the worktrees, `run.lock`/`run.pid`, and logs. Sandbar
-// reads the host checkout and clones it once; it never writes to it.
+// reads the host checkout and clones it once; it never writes to it. The one
+// non-reproducible resident since #134 is `codex-auth.json`: deleting the state
+// directory can lose its live refresh-token family and cost one dedicated
+// `codex login`, which the credential terminal then surfaces loudly.
 //
 // `repo.git` being BARE is not tidiness: it is what makes the three
 // genuinely-destructive operations (`branch -D`, `worktree remove --force`,

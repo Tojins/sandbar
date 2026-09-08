@@ -22,6 +22,18 @@ const seams = vi.hoisted(() => ({
     stop: ReturnType<typeof vi.fn>;
     onStatus: ReturnType<typeof vi.fn>;
   }>,
+  prepareCodexAuth: vi.fn(async () => ({
+    action: "seeded" as const,
+    mount: {
+      hostPath: "/tmp/sandbar-run-quota-test/codex-auth.json",
+      sandboxPath: "/home/agent/.codex/auth.json",
+    },
+  })),
+}));
+
+vi.mock("./codex-auth.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./codex-auth.js")>(),
+  prepareCodexAuth: seams.prepareCodexAuth,
 }));
 
 vi.mock("./driver-identity.js", () => ({
@@ -152,8 +164,8 @@ vi.mock("./merger.js", async (importOriginal) => ({
 }));
 
 import type { RunConfig } from "./config.js";
-import { AgentQuotaError } from "./agent-sandbox.js";
-import { MergerError } from "./merger.js";
+import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
+import { MergerError, realAdapter } from "./merger.js";
 import { createBranchImages, ensureImages } from "./ensure-images.js";
 import { createAgentImages } from "./agent-tools.js";
 import { cleanupOrphanContainers } from "./containers.js";
@@ -225,6 +237,7 @@ describe("run quota orchestration (#109)", () => {
       return event;
     });
     seams.events.length = 0;
+    seams.prepareCodexAuth.mockClear();
     seams.wakeStatusReports.length = 0;
     vi.mocked(fetchOriginRefs).mockReset();
     vi.mocked(fetchOriginRefs).mockRejectedValue(new Error("stop after idle poll"));
@@ -598,6 +611,88 @@ describe("run quota orchestration (#109)", () => {
     }));
   });
 
+  it("drains other-provider work, finalizes credential handoff, and exits 4", async () => {
+    const done = issue("1");
+    const refused = issue("134");
+    const detail = "Your access token could not be refreshed. Please log out and sign in again.";
+    seams.plan.mockResolvedValue(resolution([done, refused]));
+    seams.innerLoop.mockImplementation(async (i: ReturnType<typeof issue>) => i.id === "1"
+      ? { type: "DONE", commits: [{ sha: "abc" }], specGaps: [] }
+      : { type: "CREDENTIAL", provider: "codex", detail, specGaps: [] });
+    seams.merger.mockResolvedValue(summary([done]));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:4");
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(seams.merger).toHaveBeenCalledOnce();
+    expect(seams.finalize).toHaveBeenCalledWith(
+      [expect.objectContaining({
+        kind: "credential",
+        provider: "codex",
+        detail,
+        issue: refused,
+      })],
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
+      tag: "credential",
+      reason: `codex refused its credential: ${detail} Log in again on the host and restart.`,
+      exitCode: 4,
+    }));
+  });
+
+  it("prepares and threads one shared auth mount while withholding the JSON env value", async () => {
+    const done = issue("1");
+    const refused = issue("134");
+    const configuredJson = JSON.stringify({ last_refresh: "2026-09-08T08:00:57Z" });
+    seams.plan.mockResolvedValue(resolution([done, refused]));
+    seams.innerLoop.mockImplementation(async (candidate: ReturnType<typeof issue>) =>
+      candidate.id === "1"
+        ? { type: "DONE", commits: [{ sha: "abc" }], specGaps: [] }
+        : {
+            type: "CREDENTIAL",
+            provider: "codex",
+            detail: "refresh refused",
+            specGaps: [],
+          });
+    seams.merger.mockResolvedValue(summary([done]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({
+      ...config,
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+      env: { ...config.env, CODEX_AUTH_JSON: configuredJson },
+    })).rejects.toThrow("EXIT:4");
+
+    expect(seams.prepareCodexAuth).toHaveBeenCalledWith({
+      stateDir: "/tmp/sandbar-run-quota-test",
+      configuredJson,
+    });
+    expect(seams.innerLoop.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      config: expect.objectContaining({
+        codexAuthMount: {
+          hostPath: "/tmp/sandbar-run-quota-test/codex-auth.json",
+          sandboxPath: "/home/agent/.codex/auth.json",
+        },
+        env: { GH_TOKEN: "token" },
+      }),
+    }));
+    expect(vi.mocked(realAdapter)).toHaveBeenCalledWith(expect.objectContaining({
+      codexAuthMount: {
+        hostPath: "/tmp/sandbar-run-quota-test/codex-auth.json",
+        sandboxPath: "/home/agent/.codex/auth.json",
+      },
+    }));
+  });
+
   it("records the duration supplied by an image build observation", async () => {
     vi.mocked(ensureImages).mockImplementationOnce(async (_images, _root, opts) => {
       await opts?.onImage?.({
@@ -633,12 +728,12 @@ describe("run quota orchestration (#109)", () => {
       .slice(0, options.k)));
     seams.innerLoop.mockImplementation(async (
       candidate: ReturnType<typeof issue>,
-      options: { quotaState: { close(provider: "claude", measurement: object): void } },
+      options: { providerState: { close(provider: "claude", closure: object): void } },
     ) => {
       if (candidate.id === "1") {
-        options.quotaState.close("claude", {
+        options.providerState.close("claude", { cause: "quota", measurement: {
           status: "rejected", window: "five_hour", resetsAt: 42,
-        });
+        } });
       }
       return {
         type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
@@ -691,11 +786,11 @@ describe("run quota orchestration (#109)", () => {
     });
     seams.innerLoop.mockImplementation(async (
       _candidate: ReturnType<typeof issue>,
-      options: { quotaState: { close(provider: "claude", measurement: object): void } },
+      options: { providerState: { close(provider: "claude", closure: object): void } },
     ) => {
-      options.quotaState.close("claude", {
+      options.providerState.close("claude", { cause: "quota", measurement: {
         status: "rejected", window: "five_hour", resetsAt: 42,
-      });
+      } });
       return {
         type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
         specGaps: [],
@@ -778,6 +873,28 @@ describe("run quota orchestration (#109)", () => {
     expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
       tag: "quota",
       reason: "codex seven_day quota window closed; resets at 1970-01-01T00:01:24.000Z",
+    }));
+    expect(eventsOf("exit").some((event) => event.tag === "halted")).toBe(false);
+  });
+
+  it("captures a merger credential refusal and exits 4 instead of halted", async () => {
+    const done = issue("1");
+    const detail = "Your access token could not be refreshed. Please log out and sign in again.";
+    seams.plan.mockResolvedValue(resolution([done]));
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "abc" }] });
+    const credential = new AgentCredentialError("codex", detail);
+    seams.merger.mockRejectedValue(
+      new MergerError("resolve failed", undefined, { cause: credential }),
+    );
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:4");
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
+      tag: "credential",
+      reason: `codex refused its credential: ${detail} Log in again on the host and restart.`,
     }));
     expect(eventsOf("exit").some((event) => event.tag === "halted")).toBe(false);
   });
@@ -1149,11 +1266,11 @@ describe("run quota orchestration (#109)", () => {
     seams.plan.mockResolvedValue(resolution([issue("1")]));
     seams.innerLoop.mockImplementation(async (
       _candidate: ReturnType<typeof issue>,
-      options: { quotaState: { close(provider: "claude", measurement: object): void } },
+      options: { providerState: { close(provider: "claude", closure: object): void } },
     ) => {
-      options.quotaState.close("claude", {
+      options.providerState.close("claude", { cause: "quota", measurement: {
         status: "rejected", window: "seven_day", resetsAt: 84,
-      });
+      } });
       throw new Error("sandbox died after the provider closed");
     });
     const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {

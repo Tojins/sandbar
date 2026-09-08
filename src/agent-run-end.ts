@@ -19,8 +19,12 @@
 // leading explanation.
 
 export type AgentRunEnd = "exit" | "timeout" | "signal" | "spawn-error";
-export type AgentRunCause = "clean" | "silent" | "provider-failure" | "quota" | "spawn-error" | "timeout" | "signal" | "parse-error";
+export type AgentRunCause = "clean" | "silent" | "provider-failure" | "quota" | "credential" | "spawn-error" | "timeout" | "signal" | "parse-error";
 export type SilentRunRecovery = "retryable" | "infra";
+export type AgentFailure = {
+  readonly kind: "provider" | "credential";
+  readonly message: string;
+};
 
 export type RateLimitMeasurement = {
   readonly status: "allowed" | "allowed_warning" | "rejected";
@@ -38,7 +42,7 @@ export const formatRateLimitFields = (
 
 export type AgentRunClassification = {
   readonly cause: AgentRunCause;
-  readonly verdict: "answer" | "infra" | "quota";
+  readonly verdict: "answer" | "infra" | "quota" | "credential";
   readonly rateLimit?: RateLimitMeasurement;
   // A provider or runtime's own narrow explanation. Consumers may add their
   // own presentation around it without accidentally embedding raw streams.
@@ -51,7 +55,7 @@ export type AgentRunEndInput = {
   readonly end: AgentRunEnd;
   readonly exitCode: number | null;
   readonly spoken: string;
-  readonly failure?: string;
+  readonly failure?: AgentFailure;
   readonly spawnError?: string;
   readonly parseError?: string;
   readonly stderr?: string;
@@ -61,7 +65,7 @@ export type AgentRunEndInput = {
 };
 
 const exitDetail = (input: AgentRunEndInput): string => {
-  if (input.failure?.trim()) return input.failure;
+  if (input.failure?.message.trim()) return input.failure.message;
   if (input.stderr?.trim()) return input.stderr;
   if (input.spoken.trim()) return input.spoken;
   return (input.stdout ?? "").split("\n").filter((line) => line.trim()).slice(-20).join("\n");
@@ -80,6 +84,16 @@ export function classifyAgentRunEnd(input: AgentRunEndInput): AgentRunClassifica
       cause: "spawn-error",
       verdict: "infra",
       ...(input.spawnError === undefined ? {} : { detail: input.spawnError }),
+    };
+  }
+  // A permanent refresh refusal closes the provider regardless of process exit
+  // code or partial speech. A fresh sandbox seeded from the same auth snapshot
+  // cannot recover it, and quota evidence must not hide the login action.
+  if (input.failure?.kind === "credential") {
+    return {
+      cause: "credential",
+      verdict: "credential",
+      ...(input.failure.message.trim() ? { detail: input.failure.message } : {}),
     };
   }
   if (
@@ -101,7 +115,7 @@ export function classifyAgentRunEnd(input: AgentRunEndInput): AgentRunClassifica
     return {
       cause: "provider-failure",
       verdict: input.spoken.trim() ? "answer" : "infra",
-      ...(input.failure?.trim() ? { detail: input.failure } : {}),
+      ...(input.failure?.message.trim() ? { detail: input.failure.message } : {}),
       diagnostic: exitDetail(input),
     };
   }

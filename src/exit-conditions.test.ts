@@ -4,6 +4,7 @@ import {
   EXIT_CODE_QUOTA,
   EXIT_CODE_STUCK,
   EXIT_TAGS,
+  credentialExit,
   haltedExit,
   quotaExit,
   stuckExit,
@@ -12,6 +13,7 @@ import {
 describe("daemon-pool exits", () => {
   const table = [
     ["quota", quotaExit({ provider: "claude", window: "five_hour", resetsAt: 42 }), EXIT_CODE_QUOTA, /1970-01-01T00:00:42/],
+    ["credential", credentialExit({ provider: "codex", detail: "refresh refused" }), EXIT_CODE_QUOTA, /Log in again on the host and restart/],
     ["stuck", stuckExit(6), EXIT_CODE_STUCK, /6 consecutive issue terminals/],
     ["halted", haltedExit(["merge", "tracker"]), EXIT_CODE_HALTED, /merge \+ tracker/],
   ] as const;

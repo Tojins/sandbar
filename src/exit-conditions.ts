@@ -2,9 +2,10 @@
 //
 // An empty plan is an idle state, never a terminal. Relaunch, the lifetime
 // admission budget, and its defensive recompute ceiling disappeared with that
-// finite-run model. Three exits remain: quota (4), stuck after six consecutive
-// issue terminals without a landing (2), and halted for faults sandbar cannot
-// safely continue past (1). Scheduler decisions own quota/stuck precedence;
+// finite-run model. Provider closure exits (quota or credential) use 4, stuck
+// after six consecutive issue terminals without a landing uses 2, and halted
+// covers faults sandbar cannot safely continue past (1). Scheduler decisions
+// own provider-closure/stuck precedence;
 // run.ts constructs halted exits at the failure boundary.
 //
 // A landing for the stuck counter is a source merge, a reviewed chunk merged
@@ -13,7 +14,7 @@
 // deferrals do not count: the daemon suppresses an immediate retry and lets the
 // poll timer provide the next observation instead.
 //
-// All three are `TerminalExit`s. `run.ts` writes that value as one exit event;
+// All four are `TerminalExit`s. `run.ts` writes that value as one exit event;
 // the UI renders it and the launcher reads only the process code (#132).
 // `EXIT_TAGS` is exhaustive over the union so its table test moves with it.
 
@@ -43,6 +44,7 @@ export const EXIT_CODE_QUOTA = 4;
 // fails the set-equality assertion, and a row naming no tag fails to compile.
 export const EXIT_TAGS = [
   "quota",
+  "credential",
   "stuck",
   "halted",
 ] as const;
@@ -60,7 +62,7 @@ export type TerminalExit = {
 
 // Built from whichever measurement closed the provider: a QUOTA terminal,
 // the merger's resolve loop, or — when the issue that closed it never returned
-// a terminal at all — the run's own quota state.
+// a terminal at all — the run's own provider state.
 export function quotaExit(args: {
   provider: "claude" | "codex";
   window: string;
@@ -72,6 +74,20 @@ export function quotaExit(args: {
   return {
     tag: "quota",
     reason: `${args.provider} ${args.window} quota window closed; resets at ${reset}`,
+    exitCode: EXIT_CODE_QUOTA,
+  };
+}
+
+export function credentialExit(args: {
+  provider: "claude" | "codex";
+  detail: string;
+}): TerminalExit {
+  const detail = args.detail.trim();
+  return {
+    tag: "credential",
+    reason: `${args.provider} refused its credential: ${detail}` +
+      (/[.!?]$/.test(detail) ? " " : ". ") +
+      "Log in again on the host and restart.",
     exitCode: EXIT_CODE_QUOTA,
   };
 }

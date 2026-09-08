@@ -281,7 +281,7 @@ import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -297,6 +297,7 @@ import {
 } from "./chunk-land.js";
 import { chunkMembersOnBranch, chunkPullRequestContent } from "./chunk-pr.js";
 import type { ChunkMember, ChunkTarget } from "./chunks.js";
+import type { CodexAuthMount } from "./codex-auth.js";
 import { type EnvReader } from "./env.js";
 import {
   buildAgentProvider,
@@ -2236,6 +2237,8 @@ export type RealAdapterDeps = {
   // routed by this run, unlike any gate-stack image (#24 D7, #75).
   readonly sandboxImage: string;
   readonly env: EnvReader;
+  // Shared with issue sandboxes when the run uses ChatGPT auth (#134).
+  readonly codexAuthMount?: CodexAuthMount;
   // Gate-2, already bound to the merger worktree's stack. The merger does not
   // build the stack itself: run.ts owns the stack's lifecycle for the whole
   // merge phase, so a single bringup covers every branch in the cycle.
@@ -2379,10 +2382,10 @@ export function captureAgentRun(
   });
 }
 
-// Codex merger quota remains the deliberate #109 gap: its `--rm` container
-// uses HOME=/tmp, so the rollout disappears before it can be read. Its vendor
-// message therefore follows the existing halt path. Claude quota state is on
-// stdout and is retained by the shared accumulator.
+// Codex merger quota remains the deliberate #109 gap: its `--rm` container's
+// session rollout disappears before it can be read. Permanent credential
+// refusal is not part of that gap: it arrives on JSONL and closes the provider
+// through #134. Claude quota state is on stdout and retained here.
 //
 // Interpret a completed capture through the SAME provider object that built
 // its command. Raw streams stay on the returned run for #67's attempt log;
@@ -2433,6 +2436,7 @@ export function buildResolveRunArgv(args: {
   readonly container: string;
   readonly cwd: string;
   readonly extraMounts: readonly string[];
+  readonly codexAuthMount?: CodexAuthMount;
   readonly image: string;
   readonly command: string;
   readonly credentials: Readonly<Record<string, string | undefined>>;
@@ -2452,10 +2456,17 @@ export function buildResolveRunArgv(args: {
     "-v",
     `${args.cwd}:/workspace`,
     ...args.extraMounts.flatMap((mount) => ["-v", `${mount}:${mount}`]),
+    ...(args.codexAuthMount === undefined ? [] : [
+      "-v",
+      `${args.codexAuthMount.hostPath}:${args.codexAuthMount.sandboxPath}:z`,
+    ]),
     "-w",
     "/workspace",
     "-e",
     "HOME=/tmp",
+    ...(args.codexAuthMount === undefined
+      ? []
+      : ["-e", `CODEX_HOME=${dirname(args.codexAuthMount.sandboxPath)}`]),
     "--label",
     "sandbar=true",
   ];
@@ -2485,7 +2496,14 @@ export function resolveAgentCredentials(
   env: EnvReader,
 ): Readonly<Record<string, string | undefined>> {
   return Object.fromEntries(
-    [...PROVIDER_CREDENTIALS[provider].map(({ key }) => key), "GH_TOKEN"].map(
+    [
+      ...PROVIDER_CREDENTIALS[provider]
+        .map(({ key }) => key)
+        // ChatGPT auth is a shared file mount since #134. Putting its JSON in
+        // podman's argv is redundant and exposes the refresh token to `ps`.
+        .filter((key) => key !== "CODEX_AUTH_JSON"),
+      "GH_TOKEN",
+    ].map(
       (key) => [key, env(key)],
     ),
   );
@@ -2675,6 +2693,9 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         container,
         cwd,
         extraMounts: [],
+        ...(deps.mergerAgent === "codex" && deps.codexAuthMount !== undefined
+          ? { codexAuthMount: deps.codexAuthMount }
+          : {}),
         image: deps.sandboxImage,
         command: command.command,
         credentials: resolveAgentCredentials(deps.mergerAgent, deps.env),

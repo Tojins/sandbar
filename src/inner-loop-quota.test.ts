@@ -72,9 +72,9 @@ vi.mock("./prompt.js", async (importOriginal) => ({
   })),
 }));
 
-import { AgentQuotaError } from "./agent-sandbox.js";
+import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
 import {
-  createRunQuotaState,
+  createRunProviderState,
   runInnerLoop,
   type InnerLoopConfig,
 } from "./inner-loop.js";
@@ -144,6 +144,23 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       branch: "test",
       worktreePath: "/tmp/issue-109-worktree",
     }));
+  });
+
+  it("keeps credential as the provider's highest-priority closure cause", () => {
+    const state = createRunProviderState();
+    state.close("codex", {
+      cause: "quota",
+      measurement: { status: "rejected", window: "five_hour" },
+    });
+    state.close("codex", { cause: "credential", detail: "refresh refused" });
+    state.close("codex", {
+      cause: "quota",
+      measurement: { status: "rejected", window: "seven_day" },
+    });
+    expect(state.get("codex")).toEqual({
+      cause: "credential",
+      detail: "refresh refused",
+    });
   });
 
   it("records branch abandonment as origin synchronization, not a fast-forward repair", async () => {
@@ -272,7 +289,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
   it("closes UI-check quota, surfaces QUOTA, and never invokes a closed provider", async () => {
     const events: EventInput[] = [];
-    const state = createRunQuotaState();
+    const state = createRunProviderState();
     const measurement = {
       status: "rejected" as const,
       window: "five_hour",
@@ -284,7 +301,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("127"), {
       config: config("codex", true, "claude"), hooks: {}, copyToWorktree: [],
-      quotaState: state, onEvent: (event) => events.push(event),
+      providerState: state, onEvent: (event) => events.push(event),
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
@@ -299,7 +316,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("128"), {
       config: config("codex", true, "claude"), hooks: {}, copyToWorktree: [],
-      quotaState: state, onEvent: () => undefined,
+      providerState: state, onEvent: () => undefined,
     })).resolves.toMatchObject({ type: "QUOTA", provider: "claude" });
     expect(seams.createSandbox).toHaveBeenCalledTimes(2);
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
@@ -379,7 +396,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
   it("surfaces quota without a fresh-sandbox retry and closes only that provider", async () => {
     const events: EventInput[] = [];
-    const state = createRunQuotaState();
+    const state = createRunProviderState();
     const measurement = {
       status: "rejected" as const,
       window: "five_hour",
@@ -388,7 +405,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     seams.sandboxRun.mockRejectedValueOnce(new AgentQuotaError("claude", measurement));
 
     await expect(runInnerLoop(issue("109"), {
-      config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
+      config: config("claude"), hooks: {}, copyToWorktree: [], providerState: state,
       onEvent: (event) => events.push(event),
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
@@ -403,7 +420,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     }]);
 
     await expect(runInnerLoop(issue("110"), {
-      config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
+      config: config("claude"), hooks: {}, copyToWorktree: [], providerState: state,
       onEvent: () => undefined,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
@@ -421,15 +438,53 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       commits: [],
     });
     await expect(runInnerLoop(issue("111"), {
-      config: config("codex"), hooks: {}, copyToWorktree: [], quotaState: state,
+      config: config("codex"), hooks: {}, copyToWorktree: [], providerState: state,
       onEvent: () => undefined,
     })).resolves.toMatchObject({ type: "NEEDS-INFO" });
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
   });
 
+  it("surfaces a permanent credential refusal once and blocks later provider calls", async () => {
+    const events: EventInput[] = [];
+    const state = createRunProviderState();
+    const detail = "Your access token could not be refreshed. Please log out and sign in again.";
+    const codexAuthMount = {
+      hostPath: "/tmp/run/codex-auth.json",
+      sandboxPath: "/home/agent/.codex/auth.json",
+    };
+    seams.sandboxRun.mockRejectedValueOnce(new AgentCredentialError("codex", detail));
+
+    await expect(runInnerLoop(issue("134"), {
+      config: { ...config("codex"), codexAuthMount },
+      hooks: {}, copyToWorktree: [], providerState: state,
+      onEvent: (event) => events.push(event),
+    })).resolves.toEqual({
+      type: "CREDENTIAL", provider: "codex", detail, specGaps: [],
+    });
+    expect(seams.createSandbox).toHaveBeenCalledOnce();
+    expect(seams.createSandbox).toHaveBeenCalledWith(expect.objectContaining({
+      extraMounts: [codexAuthMount],
+    }));
+    expect(seams.sandboxRun).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event.kind === "implementer")).toEqual([{
+      kind: "implementer", issue: 134, title: "Issue 134", attempt: 1,
+      signal: "CREDENTIAL", commits: 0, provider: "codex", model: "model",
+      effort: null, durationMs: expect.any(Number),
+    }]);
+
+    await expect(runInnerLoop(issue("135"), {
+      config: { ...config("codex"), codexAuthMount },
+      hooks: {}, copyToWorktree: [], providerState: state,
+      onEvent: () => undefined,
+    })).resolves.toEqual({
+      type: "CREDENTIAL", provider: "codex", detail, specGaps: [],
+    });
+    expect(seams.sandboxRun).toHaveBeenCalledOnce();
+  });
+
   it("surfaces reviewer quota after one invocation without the reviewer retry", async () => {
     const events: EventInput[] = [];
-    const state = createRunQuotaState();
+    const state = createRunProviderState();
     const measurement = {
       status: "rejected" as const,
       window: "five_hour",
@@ -448,7 +503,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       .mockRejectedValueOnce(new AgentQuotaError("claude", measurement));
 
     await expect(runInnerLoop(issue("112"), {
-      config: config("codex"), hooks: {}, copyToWorktree: [], quotaState: state,
+      config: config("codex"), hooks: {}, copyToWorktree: [], providerState: state,
       onEvent: (event) => events.push(event),
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
@@ -463,7 +518,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     }]);
 
     await expect(runInnerLoop(issue("113"), {
-      config: config("claude"), hooks: {}, copyToWorktree: [], quotaState: state,
+      config: config("claude"), hooks: {}, copyToWorktree: [], providerState: state,
       onEvent: () => undefined,
     })).resolves.toEqual({
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
@@ -493,7 +548,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     await expect(runInnerLoop(issue("114"), {
       config: config("codex"), hooks: {}, copyToWorktree: [],
-      quotaState: createRunQuotaState(), onEvent: () => undefined,
+      providerState: createRunProviderState(), onEvent: () => undefined,
     })).resolves.toMatchObject({ type: "NEEDS-HUMAN-REVIEW" });
     expect(seams.preserveWorktree).toHaveBeenCalledOnce();
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);

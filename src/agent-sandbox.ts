@@ -9,11 +9,9 @@
 // at. Everything downstream of that seam — the completion-signal watch, the
 // idle timeout, commit collection, the bounded tail — consumes parsed events
 // and git, never a CLI, so a provider is argv plus a line parser and nothing
-// else. `agent-providers.ts` owns which NAME resolves to which of them. #73
-// leans on exactly that: codex's ChatGPT-subscription credential is a FILE, and
-// a provider that owns its argv can materialise one in-container from a
-// `config.env` VALUE — so the seam absorbs a file-shaped credential without
-// sandbar learning a path or mounting anything (`CODEX_AUTH_SEED`).
+// else. `agent-providers.ts` owns which NAME resolves to which of them. Codex's
+// file-shaped ChatGPT credential is now a run-owned shared mount (#134), kept
+// outside this provider command; `codex-auth.ts` owns its lifecycle.
 //
 // A provider's parser answers in seven registers and the difference between
 // them is load-bearing: `text`/`result` is the agent's SPEECH and is the only
@@ -102,7 +100,7 @@ import {
 } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
 import { classifyAgentRunEnd } from "./agent-run-end.js";
-import type { RateLimitMeasurement } from "./agent-run-end.js";
+import type { AgentFailure, RateLimitMeasurement } from "./agent-run-end.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -166,14 +164,14 @@ export type ParsedStreamEvent =
   // without reaching an answer. Never folded into the run's output (it is not
   // the agent's speech, and #41 turns on that distinction) and never emitted
   // for a fault the provider is still recovering from: `invokeAgent` rejects on
-  // one, which is the HARD-ERROR path, so a parser that spent it on a reconnect
-  // notice would escalate a blip to a human.
+  // one, normally the HARD-ERROR path. #134's permanent credential subtype closes
+  // the provider for the run instead; a reconnect notice remains neither.
   //
   // What it buys, for a provider that reports faults in-band: the CAUSE, in the
   // provider's own words, ahead of whatever its stderr happens to hold — and,
   // where a CLI's exit code does not answer the question, #67's rule that an
   // attempt which captured no answer is an infra failure rather than an answer.
-  | { type: "failure"; message: string };
+  | ({ type: "failure" } & AgentFailure);
 
 export type AgentProvider = {
   readonly name: string;
@@ -193,7 +191,7 @@ export type AgentSpeechAccumulator = {
   ingest(events: readonly ParsedStreamEvent[]): void;
   readonly accumulated: string;
   readonly spoken: string;
-  readonly failure: string | undefined;
+  readonly failure: AgentFailure | undefined;
   readonly usage: AgentUsage | undefined;
   readonly toolCalls: number;
   readonly peakContext: number | undefined;
@@ -203,7 +201,7 @@ export type AgentSpeechAccumulator = {
 export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
   let result = "";
   let accumulated = "";
-  let failure: string | undefined;
+  let failure: AgentFailure | undefined;
   let usage: AgentUsage | undefined;
   let toolCalls = 0;
   let peakContext: number | undefined;
@@ -215,8 +213,9 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
         else if (event.type === "result") {
           result = event.result;
           accumulated += event.result;
-        } else if (event.type === "failure") failure = event.message;
-        else if (event.type === "usage") usage = event.usage;
+        } else if (event.type === "failure") {
+          failure = event;
+        } else if (event.type === "usage") usage = event.usage;
         else if (event.type === "tool_calls") toolCalls += event.count;
         else if (event.type === "context_depth") {
           peakContext = maxContextDepth(peakContext, event.tokens);
@@ -445,14 +444,13 @@ export type CreateSandboxOptions = {
   // caller has no handle yet. It is passed the container's name for the same
   // reason `containerName` is public at all.
   beforeSandboxReady?: (containerName: string) => Promise<void>;
-  // Extra bind mounts, appended after the self-contained issue clone
-  // (#44). The one caller is the sandbox stack's log directory — a host
-  // directory the followers write each sibling's `podman logs -f` into, mounted
-  // read-only so the agent can read its neighbours' logs without being handed
-  // anything that can write to them. Read-only is not incidental: the whole
-  // isolation argument is that the agent cannot reach the stack its verdict is
-  // formed in, and a writable log mount is a channel out of the sandbox into
-  // the host's run-log tree.
+  // Extra bind mounts, appended after the self-contained issue clone. The
+  // sandbox stack's log directory is read-only so the agent cannot write back
+  // into the evidence its verdict is formed from (#44). The deliberate #98
+  // exception is #134's Codex auth file: one shared writable channel between
+  // same-trust sandboxes that already hold the credential readable. Codex's
+  // reload-before-refresh protocol requires one file per serialized stream;
+  // separate writable copies rotate one token family away from each other.
   extraMounts?: readonly Mount[];
   // Run-owned callers route recoverable cleanup/preservation notices into the
   // event record. Standalone callers retain the terminal renderer.
@@ -490,6 +488,16 @@ export class AgentQuotaError extends Error {
     super(`quota closed: ${measurement.window}`);
     this.provider = provider;
     this.measurement = measurement;
+  }
+}
+
+export class AgentCredentialError extends Error {
+  readonly provider: "claude" | "codex";
+  readonly detail: string;
+  constructor(provider: "claude" | "codex", detail: string) {
+    super(`${provider} refused its credential: ${detail}`);
+    this.provider = provider;
+    this.detail = detail;
   }
 }
 
@@ -802,6 +810,20 @@ const codexErrorMessage = (err: unknown): string => {
   return "no message";
 };
 
+// Codex 0.152.0's five permanent refresh failures, pinned beside the JSONL
+// parser that interprets its wire. Keep these in step with
+// AGENT_PROVIDER_PACKAGES.codex and login/src/auth/manager.rs. Classification
+// intentionally uses their common prefix so added detail does not turn a dead
+// credential back into retryable infrastructure.
+export const CODEX_REFRESH_FAILURE_MESSAGES = [
+  "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
+  "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+  "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+  "Your access token could not be refreshed. Please log out and sign in again.",
+  "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.",
+] as const;
+export const CODEX_REFRESH_FAILURE_PREFIX = "Your access token could not be refreshed";
+
 // The four item types that ARE tool calls, counted independently of the two
 // whose argument is rendered as an informational `tool_call` (#85).
 const CODEX_TOOL_ITEM_TYPES = new Set([
@@ -826,7 +848,14 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
   // `error` ITEM fall through to [] — they are what the CLI says while it is
   // still trying.
   if (obj.type === "turn.failed") {
-    return [{ type: "failure", message: codexErrorMessage(obj.error) }];
+    const message = codexErrorMessage(obj.error);
+    return [{
+      type: "failure",
+      kind: message.startsWith(CODEX_REFRESH_FAILURE_PREFIX)
+        ? "credential"
+        : "provider",
+      message,
+    }];
   }
   // A MEASUREMENT, never a completion: the register is separate precisely
   // because this event is named `turn.completed` and arrives in a parser whose
@@ -930,58 +959,12 @@ export const parseCodexRolloutLine = (line: string): ParsedStreamEvent[] => {
   return events;
 };
 
-// The ChatGPT-subscription credential, materialised in-container (#73).
-//
-// codex has no env-var analogue of `CLAUDE_CODE_OAUTH_TOKEN`: `codex login`
-// writes `$CODEX_HOME/auth.json` (default `$HOME/.codex/auth.json`) and THAT
-// FILE is the whole credential — access token, refresh token,
-// `auth_mode: "chatgpt"`. Seeding it into a container is OpenAI's own
-// documented CI/CD route. Sandbar still names no file and mounts nothing: the
-// content arrives as a `config.env` value (`CODEX_AUTH_JSON`), exactly like
-// every other credential (#38), and this snippet is what turns that value back
-// into the file codex reads.
-//
-// The value is referenced, never interpolated. The secret is already in the
-// container's environment, so `$CODEX_AUTH_JSON` costs nothing; the host-side
-// value spliced into this string would put a refresh token in the `podman exec`
-// argv, where any process on the host can read it out of `ps`.
-//
-// ONLY IF MISSING, and that is the load-bearing half. codex refreshes tokens in
-// place and writes them back to this file — so on a later attempt in the same
-// sandbox (the container, and `$HOME` with it, lives for the whole issue) a
-// re-seed would roll the credential back to a token the refresh may already
-// have rotated away. Per-issue copies of one host file are sound for the same
-// reason the other direction is not: a container lives hours and the refresh
-// cycle is days, so the host's copy only has to be fresh when the series
-// starts. (What it costs is stated where the operator can act on it — the
-// `CODEX_AUTH_JSON` note in `agent-providers.ts` — since parallel sandboxes are
-// concurrent holders of one credential, and an in-container refresh can leave
-// the host's copy stale enough that a LATER series needs `codex login` again.)
-//
-// A seed that FAILS exits non-zero rather than falling through to `codex exec`.
-// Unauthenticated, codex would spend the run's idle budget on retries and end
-// in a `turn.failed` about a 401 — an answer-shaped report of a filesystem
-// problem. Exiting here puts it on `invokeAgent`'s non-zero path with the
-// mkdir/write error on stderr, which is where infra belongs (#67).
-//
-// `${CODEX_HOME:-$HOME/.codex}` because that is codex's own resolution order: a
-// config that declares `CODEX_HOME` would otherwise be handed a seeded file in
-// a directory the CLI never reads.
-export const CODEX_AUTH_SEED = [
-  'if [ -n "${CODEX_AUTH_JSON:-}" ]; then',
-  'codex_home="${CODEX_HOME:-$HOME/.codex}";',
-  '[ -f "$codex_home/auth.json" ] ||',
-  "(umask 077 && mkdir -p \"$codex_home\" && printf '%s' \"$CODEX_AUTH_JSON\" > \"$codex_home/auth.json\") ||",
-  '{ echo "sandbar: could not seed $codex_home/auth.json from CODEX_AUTH_JSON" >&2; exit 1; };',
-  "fi;",
-].join(" ");
-
 export type CodexOptions = {
   env?: Record<string, string>;
   // `-c model_reasoning_effort=<level>` (#130) — codex's global config
   // override, which is the only per-invocation spelling it has: the CLI reads
   // effort from `config.toml`, and sandbar seeds no config file into the
-  // sandbox (only the credential, #73), so with this absent codex falls back
+  // sandbox, so with this absent codex falls back
   // to the per-model default the server ships in its models cache. The level
   // set is model-dependent (`ultra` exists on gpt-5.6-sol alone), so it is a
   // string the CLI validates, not a union.
@@ -1018,14 +1001,8 @@ export const codex = (model: string, options?: CodexOptions): AgentProvider => (
     // documented stdin read (verified against the version pinned by
     // AGENT_PROVIDER_PACKAGES.codex: both print "Reading prompt from stdin…",
     // and an empty stdin is REFUSED rather than sent as an empty prompt).
-    // The seed runs ahead of every invocation rather than at bringup, and it is
-    // unconditional here rather than switched host-side: the condition is
-    // "`CODEX_AUTH_JSON` is in this container's environment", which the shell
-    // can ask directly and which no argument threaded down from the config
-    // could answer more accurately. With the key undeclared the guard is one
-    // `test` that falls through to the same `codex exec` as before.
     return {
-      command: `${CODEX_AUTH_SEED} codex exec${resume} --json${bypass}${effortFlag} --model ${shellEscape(model)}`,
+      command: `codex exec${resume} --json${bypass}${effortFlag} --model ${shellEscape(model)}`,
       stdin: prompt,
     };
   },
@@ -2293,6 +2270,13 @@ const invokeAgent = async (
           settleReject(new AgentQuotaError(
             agent.name === "codex" ? "codex" : "claude",
             classification.rateLimit,
+          ));
+          return;
+        }
+        if (classification.verdict === "credential") {
+          settleReject(new AgentCredentialError(
+            agent.name === "codex" ? "codex" : "claude",
+            classification.detail ?? "credential refresh failed",
           ));
           return;
         }

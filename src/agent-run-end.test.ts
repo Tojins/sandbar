@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { classifyAgentRunEnd } from "./agent-run-end.js";
 
 describe("classifyAgentRunEnd (#114)", () => {
+  const failure = (message: string, kind: "provider" | "credential" = "provider") => ({
+    kind,
+    message,
+  });
   type Row = readonly [
     end: "exit" | "timeout" | "signal" | "spawn-error",
     exitCode: 0 | 1 | null,
@@ -61,7 +65,7 @@ describe("classifyAgentRunEnd (#114)", () => {
       end,
       exitCode,
       spoken: hasSpeech ? "answer" : "",
-      failure: hasFailure ? "provider said why" : undefined,
+      failure: hasFailure ? failure("provider said why") : undefined,
       silentRunRecovery,
     });
     expect({ cause: actual.cause, verdict: actual.verdict }).toEqual({ cause, verdict });
@@ -84,7 +88,7 @@ describe("classifyAgentRunEnd (#114)", () => {
   it("classifies only a failed invocation with a rejected measurement as quota", () => {
     const rateLimit = { status: "rejected" as const, window: "five_hour", resetsAt: 42 };
     expect(classifyAgentRunEnd({
-      end: "exit", exitCode: 1, spoken: "", failure: "limit", rateLimit,
+      end: "exit", exitCode: 1, spoken: "", failure: failure("limit"), rateLimit,
       silentRunRecovery: "retryable",
     })).toMatchObject({ cause: "quota", verdict: "quota", rateLimit });
     expect(classifyAgentRunEnd({
@@ -93,10 +97,28 @@ describe("classifyAgentRunEnd (#114)", () => {
     }).verdict).toBe("answer");
   });
 
+  it("classifies a credential failure ahead of quota and independently of exit code", () => {
+    const rateLimit = { status: "rejected" as const, window: "five_hour" };
+    for (const exitCode of [0, 1]) {
+      expect(classifyAgentRunEnd({
+        end: "exit",
+        exitCode,
+        spoken: "partial speech does not reopen the provider",
+        failure: failure("Your access token could not be refreshed", "credential"),
+        rateLimit,
+        silentRunRecovery: "retryable",
+      })).toEqual({
+        cause: "credential",
+        verdict: "credential",
+        detail: "Your access token could not be refreshed",
+      });
+    }
+  });
+
   it("uses the provider, stderr, speech, stdout-tail detail ladder", () => {
     const base = { end: "exit" as const, exitCode: 1, silentRunRecovery: "infra" as const };
     expect(classifyAgentRunEnd({
-      ...base, spoken: "speech", failure: "provider", stderr: "stderr", stdout: "stdout",
+      ...base, spoken: "speech", failure: failure("provider"), stderr: "stderr", stdout: "stdout",
     }).diagnostic).toBe("provider");
     expect(classifyAgentRunEnd({
       ...base, spoken: "speech", stderr: "stderr", stdout: "stdout",
@@ -127,7 +149,7 @@ describe("classifyAgentRunEnd (#114)", () => {
       end: "spawn-error",
       exitCode: null,
       spoken: "",
-      failure: "provider",
+      failure: failure("provider"),
       spawnError: "ENOENT",
       silentRunRecovery: "infra",
     });
@@ -138,7 +160,7 @@ describe("classifyAgentRunEnd (#114)", () => {
 
   it("does not expose a blank provider failure as narrow detail", () => {
     const classified = classifyAgentRunEnd({
-      end: "exit", exitCode: 0, spoken: "", failure: "   ",
+      end: "exit", exitCode: 0, spoken: "", failure: failure("   "),
       silentRunRecovery: "infra",
     });
     expect({ cause: classified.cause, verdict: classified.verdict }).toEqual({

@@ -77,7 +77,7 @@ import {
   type AgentRunEnd,
   type RateLimitMeasurement,
 } from "./agent-run-end.js";
-import { AgentQuotaError } from "./agent-sandbox.js";
+import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
 
 export const RESOLVE_MAX_ATTEMPTS = 4;
 
@@ -135,9 +135,9 @@ export type ResolveMode =
       readonly failedChecks: string;
     };
 
-// A codex merger's structured quota rollout dies with its --rm container
-// (#109); until that route gets persistent scratch storage, it halts with the
-// vendor message through this existing failure path.
+// A Codex merger's structured quota rollout dies with its --rm container
+// (#109). Its permanent credential refusal is on JSONL instead and is a typed
+// provider closure (#134), so it escapes without spending another attempt.
 //
 // How one resolve-provider `podman run` invocation ended. `timeout` is
 // sandbar's own SIGTERM at RESOLVE_AGENT_TIMEOUT_MS and nothing else; `signal` is anything
@@ -172,7 +172,7 @@ export type ResolveAgentRun = {
   // The discriminated end classification shared with the sandbox wrapper.
   readonly cause: AgentRunCause;
   // Whether this caller should accept the run as an answer or halt as infra.
-  readonly verdict: "answer" | "infra" | "quota";
+  readonly verdict: "answer" | "infra" | "quota" | "credential";
   readonly usage?: AgentUsage;
   readonly toolCalls: number;
   readonly peakContext?: number;
@@ -432,6 +432,9 @@ export async function runResolveLoop(
     if (run.verdict === "quota") {
       if (!run.rateLimit) throw new Error("quota run missing rate-limit measurement");
       throw new AgentQuotaError("claude", run.rateLimit);
+    }
+    if (run.verdict === "credential") {
+      throw new AgentCredentialError("codex", run.detail ?? "credential refresh failed");
     }
 
     // One journal entry per attempt, filed once the loop knows what it made of

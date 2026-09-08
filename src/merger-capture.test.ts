@@ -251,6 +251,19 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(isInfraFailure(run)).toBe(true);
   });
 
+  it("retains the permanent Codex credential classification for the resolve loop", () => {
+    const detail = "Your access token could not be refreshed. Please log out and sign in again.";
+    const run = parseCapturedAgentRun(captured(JSON.stringify({
+      type: "turn.failed",
+      error: { message: detail },
+    })), buildAgentProvider("codex", "m"));
+    expect(run).toMatchObject({
+      cause: "credential",
+      verdict: "credential",
+      detail,
+    });
+  });
+
   it("does not promote raw stderr into the merger's narrow detail", () => {
     const run = parseCapturedAgentRun(
       { ...captured(""), exitCode: 125, stderr: "unbounded runtime stderr" },
@@ -334,8 +347,8 @@ describe("resolve provider invocation (#74)", () => {
     ],
     [
       "codex",
-      ["CODEX_AUTH_JSON", "OPENAI_API_KEY"],
-      ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+      ["OPENAI_API_KEY"],
+      ["CODEX_AUTH_JSON", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
     ],
   ] as const)(
     "routes only %s credentials into the resolve argv",
@@ -393,5 +406,25 @@ describe("resolve provider invocation (#74)", () => {
       "--entrypoint", "/bin/sh", "sandbox-image", "-c", "agent --print",
     ]);
     expect(argv).not.toContain("--init");
+  });
+
+  it("mounts the shared Codex credential read-write without putting it in env", () => {
+    const argv = buildResolveRunArgv({
+      container: "resolve-1",
+      cwd: "/worktree",
+      extraMounts: [],
+      codexAuthMount: {
+        hostPath: "/state/codex-auth.json",
+        sandboxPath: "/home/agent/.codex/auth.json",
+      },
+      image: "sandbox-image",
+      command: "codex exec",
+      credentials: {},
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+    });
+    expect(argv).toContain("/state/codex-auth.json:/home/agent/.codex/auth.json:z");
+    expect(argv).toContain("CODEX_HOME=/home/agent/.codex");
+    expect(argv.join(" ")).not.toContain("CODEX_AUTH_JSON=");
   });
 });
