@@ -5,14 +5,10 @@
 // powershell.exe child that calls SetThreadExecutionState with
 // ES_CONTINUOUS | ES_SYSTEM_REQUIRED for as long as it is alive.
 //
-// THE HOST SLEEPS THE MOMENT SANDBAR LETS GO. Every sleep on this repo's own
-// host on 2026-09-03 began within minutes of a run ending, and one of them
-// began 6 ms after the `exit: relaunch` line — `Kernel-Power` reason
-// `System Idle` each time, which is what says the request was not held: Windows
-// does not idle-sleep through a live ES_SYSTEM_REQUIRED. The day before, four
-// back-to-back runs covering fourteen hours recorded no sleep at all. The
-// request works; the failure was entirely in WHEN it is held. So three
-// properties, and each of them is a decision:
+// The request is held while sandbar is doing work. Since #133 run.ts releases
+// it at daemon quiescence by default and retakes it when a poll finds work;
+// `keepAwakeWhileIdle` keeps it for dedicated machines. Three properties of an
+// individual holder remain load-bearing:
 //
 //   - IT IS CONFIRMED, NOT ASSUMED. The script prints `HELD_MARKER` only after
 //     SetThreadExecutionState has returned a non-zero previous state, and only
@@ -36,15 +32,8 @@
 //     up to MAX_RETAKES so a permanently broken spawn cannot become a spawn
 //     loop.
 //
-// WHAT THIS MODULE DOES NOT DECIDE is when the lock is dropped around a
-// relaunch. #65's exit-75 seam is between two processes, so no per-run holder
-// can span it; `scripts/sandbar-launch.mjs` holds one of these for the whole
-// series by running `keepawake-hold.js`, and `run.ts` holds its own for the
-// run. Two overlapping requests are exactly one request to Windows, which ORs
-// them and drops the state when the last one goes — so the two need no
-// handshake, and inventing one would couple the launcher (which must work
-// before the driver it would import exists) to this module's internals to buy
-// nothing.
+// This module does not decide when a daemon is idle; run.ts owns that lifecycle
+// and may create more than one holder over the process lifetime.
 //
 // Not a `powercfg` call and not a scheduled task: both change the HOST's
 // configuration, and sandbar asks Windows not to sleep, it does not reconfigure
@@ -117,8 +106,7 @@ export interface WakeLock {
   // The rendered line remains for terminal-oriented callers, while the
   // structured status keeps event consumers from reverse-parsing that prose.
   onStatus(sink: (line: string, status: WakeLockStatus) => void): void;
-  // For tests and for `keepawake-hold.ts`, which has to keep a process alive
-  // exactly as long as the lock is worth holding.
+  // Exposed for tests and diagnostics that need the latest classified state.
   readonly status: () => WakeLockStatus | null;
 }
 

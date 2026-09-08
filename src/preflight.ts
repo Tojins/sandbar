@@ -53,9 +53,9 @@
 // one input a run still takes from the checkout — it resolves against the
 // process cwd, and `gateStack` is inside it — and since #66 pinned the driver
 // there is no longer a `git pull` anywhere in the launcher to refresh it. So a
-// gate-stack change that landed on origin reaches a series when the operator
-// pulls it and at no other moment, and untreated that is silent for as many
-// relaunches as the series runs. Two things make the check answer rather than
+// gate-stack change that landed on origin reaches the daemon when the operator
+// pulls it and restarts, and untreated that is silent across every poll. Two
+// things make the check answer rather than
 // merely look like it does, and `readConfigStaleness` owns both: it counts in
 // the CACHE, which the fetch above has just made current, because the operator
 // who has not pulled has not fetched either and their own `origin/<branch>` is
@@ -96,9 +96,9 @@
 // query means is a separate question the two-state `IssueNumberLookup` below
 // answers: not an empty issue set, but an unjudged one.
 //
-// The two git fetches are answers too, not best-effort warmups. Their failures
-// join the ordinary invariant report by name and retain git's stderr (#81,
-// absorbed by #118); a wildcard refspec matching nothing still exits zero.
+// The git fetch is an answer too, not a best-effort warmup. Its failure joins
+// the ordinary invariant report and retains git's stderr (#81, absorbed by
+// #118); a wildcard refspec matching nothing still exits zero.
 //
 // HOST STATE is what this module is for, and `missingMountSources` (#51) is the
 // same class as the `missingImages` check beside it. Nothing used to verify
@@ -226,6 +226,7 @@ import type { EnvReader } from "./env.js";
 import { hasExitCode, isErrno, isExitStatus } from "./errors.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+  ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
@@ -1277,10 +1278,57 @@ export async function syncKeptIssueBranches(
   return { lines, refusals, abandoned };
 }
 
+export type OriginRefresh = {
+  readonly sourceChanged: boolean;
+  readonly failures: readonly string[];
+};
+
+async function originSourceTip(
+  repoDir: string,
+  sourceBranch: string,
+): Promise<string | null> {
+  const result = await captureOk(repoDir, "git", [
+    "rev-parse",
+    "--verify",
+    `refs/remotes/origin/${sourceBranch}`,
+  ]);
+  return result.ok ? result.stdout.trim() || null : null;
+}
+
+// The daemon's refresh boundary (#133). One fetch updates the source plus all
+// three sandbar namespaces, so a planner never sees a half-refreshed cache and
+// each idle poll spends one network round trip. Measuring the source tip around it
+// makes a human push trigger the same image refresh as a source landing
+// performed by sandbar itself.
+export async function fetchOriginRefs(
+  repoDir: string,
+  sourceBranch: string,
+): Promise<OriginRefresh> {
+  const before = await originSourceTip(repoDir, sourceBranch);
+  const failure = await captureFailure(repoDir, "git", [
+    "fetch", "origin", "--prune",
+    `+refs/heads/${sourceBranch}:refs/remotes/origin/${sourceBranch}`,
+    ...ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
+    ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+    ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
+    "--quiet",
+  ]);
+  const failures = failure === null
+    ? []
+    : [`Fetching origin refs (source, issues, chunks, members) failed: ${failure}`];
+  const after = failures.length === 0
+    ? await originSourceTip(repoDir, sourceBranch)
+    : before;
+  return {
+    sourceChanged: before !== null && after !== null && before !== after,
+    failures,
+  };
+}
+
 export async function runPreflight(
   cfg: PreflightConfig,
   reachabilityAdapter: ForgeReachabilityAdapter = forgeReachabilityAdapter,
-): Promise<void> {
+): Promise<ConfigStaleness> {
   const originUrl = await readOriginUrl(cfg.layout.repoDir);
   const originHost =
     originUrl === null ? null : parseRepoFromRemoteUrl(originUrl)?.host ?? null;
@@ -1301,22 +1349,12 @@ export async function runPreflight(
     ]);
   }
 
-  const fetchFailures: string[] = [];
+  const refresh = await fetchOriginRefs(cfg.layout.repoDir, cfg.sourceBranch);
+  const fetchFailures = [...refresh.failures];
   // Fetch before the cleanup pass so that merged-on-origin branches can be
   // reaped even when the cache has not seen origin recently. Into the CACHE:
   // sandbar never fetches into the operator's checkout, so a run can neither
   // move their refs nor be blamed for doing so.
-  const sourceFetchFailure = await captureFailure(cfg.layout.repoDir, "git", [
-    "fetch",
-    "origin",
-    cfg.sourceBranch,
-    "--quiet",
-  ]);
-  if (sourceFetchFailure !== null) {
-    fetchFailures.push(
-      `Fetching origin/${cfg.sourceBranch} failed: ${sourceFetchFailure}`,
-    );
-  }
   // And origin's chunk branches (#60), which answer a different question: a
   // chunk branch lives on origin and is only cached here, so it is what says
   // whether a leftover member's issue branch is a duplicate of published work
@@ -1324,20 +1362,6 @@ export async function runPreflight(
   // chunk fetches nothing and succeeds; `--prune` scoped to those same
   // destinations, so a chunk branch deleted on origin stops answering for one
   // here rather than lingering as a cached yes.
-  const chunkFetchFailure = await captureFailure(cfg.layout.repoDir, "git", [
-    "fetch",
-    "origin",
-    "--prune",
-    ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
-    ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
-    "--quiet",
-  ]);
-  if (chunkFetchFailure !== null) {
-    fetchFailures.push(
-      `Fetching origin's sandbar chunk and member refs failed: ${chunkFetchFailure}`,
-    );
-  }
-
   // One query, two readers (#60): the delete pass uses it to decide which
   // leftover branches are duplicates of published work, and `gatherState` uses
   // it to decide which are none of its three classifications. Asking twice
@@ -1472,16 +1496,16 @@ export async function runPreflight(
   }
 
   // The second, which is the same read run the other way (#66).
-  const staleConfig = staleConfigWarning(
-    await readConfigStaleness({
-      layout: cfg.layout,
-      sourceBranch: cfg.sourceBranch,
-      configPath: cfg.configPath,
-    }),
-  );
+  const configStaleness = await readConfigStaleness({
+    layout: cfg.layout,
+    sourceBranch: cfg.sourceBranch,
+    configPath: cfg.configPath,
+  });
+  const staleConfig = staleConfigWarning(configStaleness);
   if (staleConfig !== null) {
     await cfg.onEvent({ kind: "complaint", severity: "warning", message: staleConfig });
   }
+  return configStaleness;
 }
 
 // What the checkout's copy of the config file is missing, against origin (#66).
@@ -1582,7 +1606,7 @@ export async function readConfigStaleness(args: {
 // Pure, and it warns about the CONFIG being behind rather than about the
 // checkout being behind (#66). Since the self-hosted launcher stopped pulling,
 // a checkout is behind origin after every landing its own series makes, so
-// warning on that alone would fire on nearly every relaunch and be tuned out by
+// warning on that alone would fire after nearly every landing and be tuned out by
 // the second day. What the checkout still supplies to a run is one file, so the
 // question worth asking the operator is whether the commits they are missing
 // touch THAT file.

@@ -647,7 +647,7 @@ describe("staleConfigWarning — a landed config change that never arrived (#66)
   });
 
   // The narrowing that keeps it readable: after a landing the checkout is
-  // behind by construction, and a warning that fires on every relaunch teaches
+  // behind by construction, and a warning that fires on every poll teaches
   // an operator to ignore the one that matters.
   it("says nothing when the missing commits leave the config alone", () => {
     expect(staleConfigWarning(stale({ touchingConfig: 0 }))).toBeNull();

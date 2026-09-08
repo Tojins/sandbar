@@ -10,14 +10,6 @@ export {
   type GateCommandOptions,
   runGateCommand,
 } from "./gate-run.js";
-// The relaunch contract's number (#65), for the same reason the gate codes
-// above are exported: a host's launcher loop continues on exactly this exit
-// code, and a re-derived or hand-copied 75 would be a second statement of it.
-// (A launcher that cannot import it repeats it by hand instead —
-// `scripts/sandbar-launch.mjs` runs before the package it would import exists,
-// and a consumer's shell loop has nowhere to import to — which is why the
-// constant's comment names that script and a test asserts the two agree.)
-export { EXIT_CODE_RELAUNCH } from "./exit-conditions.js";
 export { SandbarError } from "./errors.js";
 // Opt-in, not contract (#38). `config.env` is a plain record; this is the
 // convenience for hosts that keep their credentials in a dotenv-style file

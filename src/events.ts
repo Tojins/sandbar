@@ -49,7 +49,8 @@ export type RecomputeTrigger =
   | "launch"
   | "slot-freed"
   | "landing-finished"
-  | "terminal-finalized";
+  | "terminal-finalized"
+  | "poll";
 
 export type EventIssue = {
   readonly issue: number;
@@ -116,6 +117,7 @@ export type EventInput =
       readonly pid: number;
     }
   | { readonly kind: "wake-lock"; readonly state: "held" | "refused" | "lost" | "released"; readonly detail: string }
+  | { readonly kind: "idle"; readonly pollIntervalMs: number }
   | { readonly kind: "preflight"; readonly action: string; readonly detail: string }
   | { readonly kind: "sweep"; readonly scope: "startup" | "quiescent"; readonly removed: readonly string[]; readonly failures: readonly string[] }
   | { readonly kind: "image"; readonly action: "built" | "reused"; readonly image: string; readonly durationMs: number; readonly detail: string }

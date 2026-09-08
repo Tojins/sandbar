@@ -112,6 +112,10 @@ function feedText(event: RunEvent): FeedEvent | null {
       text = `wake lock ${event.state}`;
       tone = event.state === "held" || event.state === "released" ? "dim" : "warn";
       break;
+    case "idle":
+      text = `idle · polling every ${event.pollIntervalMs}ms`;
+      tone = "dim";
+      break;
     case "preflight":
       text = `preflight ${event.action} · ${event.detail}`;
       tone = "dim";
@@ -456,6 +460,8 @@ export function reduceRunEvents(
             });
           }
         }
+        break;
+      case "idle":
         break;
       case "complaint":
         complaints.push({ severity: event.severity, text: event.message });

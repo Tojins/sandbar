@@ -17,6 +17,11 @@ const seams = vi.hoisted(() => ({
     line: string;
     status: WakeLockStatus;
   }>,
+  cleanupCallbacks: [] as Array<() => unknown>,
+  wakeLocks: [] as Array<{
+    stop: ReturnType<typeof vi.fn>;
+    onStatus: ReturnType<typeof vi.fn>;
+  }>,
 }));
 
 vi.mock("./driver-identity.js", () => ({
@@ -24,17 +29,29 @@ vi.mock("./driver-identity.js", () => ({
   formatDriverIdentity: vi.fn(() => "driver: test"),
 }));
 vi.mock("./cleanup.js", () => ({
-  installCleanupTraps: vi.fn(), onCleanup: vi.fn(),
+  installCleanupTraps: vi.fn(),
+  onCleanup: vi.fn((callback: () => unknown) => {
+    seams.cleanupCallbacks.push(callback);
+  }),
   setCleanupReporter: vi.fn(() => vi.fn()),
-  runCleanup: vi.fn(async () => undefined),
+  runCleanup: vi.fn(async () => {
+    while (seams.cleanupCallbacks.length > 0) {
+      await seams.cleanupCallbacks.pop()?.();
+    }
+  }),
 }));
 vi.mock("./keepawake.js", () => ({
-  startKeepawake: vi.fn(() => ({
-    stop: vi.fn(),
-    onStatus: vi.fn((sink: (line: string, status: WakeLockStatus) => void) => {
+  startKeepawake: vi.fn(() => {
+    const lock = {
+      stop: vi.fn(),
+      onStatus: vi.fn((sink: (line: string, status: WakeLockStatus) => void) => {
       for (const report of seams.wakeStatusReports) sink(report.line, report.status);
-    }),
-  })),
+      }),
+      status: vi.fn(() => null),
+    };
+    seams.wakeLocks.push(lock);
+    return lock;
+  }),
 }));
 vi.mock("./lock.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./lock.js")>(),
@@ -66,7 +83,15 @@ vi.mock("./repo-cache.js", async (importOriginal) => ({
 }));
 vi.mock("./preflight.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./preflight.js")>(),
-  runPreflight: vi.fn(), absoluteMountSources: vi.fn(() => []),
+  runPreflight: vi.fn(async () => ({
+    configPath: null, sourceBranch: "main", hostCwd: "/repo",
+    behind: 0, touchingConfig: 0,
+  })), absoluteMountSources: vi.fn(() => []),
+  fetchOriginRefs: vi.fn(async () => ({ sourceChanged: false, failures: [] })),
+  readConfigStaleness: vi.fn(async () => ({
+    configPath: null, sourceBranch: "main", hostCwd: "/repo",
+    behind: 0, touchingConfig: 0,
+  })),
 }));
 vi.mock("./containers.js", () => ({
   cleanupOrphanContainers: vi.fn(async () => ({ removed: [], failures: [] })),
@@ -99,7 +124,8 @@ vi.mock("./chunk-reconcile.js", () => ({
   reconcileLandedChunks: vi.fn(async () => ({ reconciled: [], failures: [] })),
 }));
 vi.mock("./lanes.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./lanes.js")>(), postLaneOverrideNotices: vi.fn(),
+  ...await importOriginal<typeof import("./lanes.js")>(),
+  postLaneOverrideNotices: vi.fn(async () => []),
 }));
 vi.mock("./inner-loop.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./inner-loop.js")>(), runInnerLoop: seams.innerLoop,
@@ -132,6 +158,8 @@ import { createBranchImages, ensureImages } from "./ensure-images.js";
 import { createAgentImages } from "./agent-tools.js";
 import { cleanupOrphanContainers } from "./containers.js";
 import { startUiServer } from "./ui-server.js";
+import { fetchOriginRefs, readConfigStaleness } from "./preflight.js";
+import { startKeepawake } from "./keepawake.js";
 import { run } from "./run.js";
 
 const config: RunConfig = {
@@ -168,6 +196,17 @@ const deferred = <T>() => {
 };
 const eventsOf = (kind: string) => seams.events.filter((event) => event.kind === kind);
 
+const flushMicrotasksUntil = async (
+  predicate: () => boolean,
+  description: string,
+): Promise<void> => {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error(`Timed out waiting for ${description}`);
+};
+
 describe("run quota orchestration (#109)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -187,6 +226,25 @@ describe("run quota orchestration (#109)", () => {
     });
     seams.events.length = 0;
     seams.wakeStatusReports.length = 0;
+    vi.mocked(fetchOriginRefs).mockReset();
+    vi.mocked(fetchOriginRefs).mockRejectedValue(new Error("stop after idle poll"));
+    vi.mocked(readConfigStaleness).mockReset();
+    vi.mocked(readConfigStaleness).mockResolvedValue({
+      configPath: null, sourceBranch: "main", hostCwd: "/repo",
+      behind: 0, touchingConfig: 0,
+    });
+    vi.mocked(ensureImages).mockReset();
+    vi.mocked(ensureImages).mockResolvedValue(new Map());
+    vi.mocked(createBranchImages).mockReset();
+    vi.mocked(createBranchImages).mockReturnValue({
+      resolve: vi.fn(async () => new Map()), builtTags: () => [],
+    });
+    vi.mocked(createAgentImages).mockReset();
+    vi.mocked(createAgentImages).mockResolvedValue({
+      declaredTag: "image", augment: vi.fn(async () => "image"), builtTags: () => [],
+    });
+    seams.cleanupCallbacks.length = 0;
+    seams.wakeLocks.length = 0;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -198,7 +256,7 @@ describe("run quota orchestration (#109)", () => {
       throw new Error(`EXIT:${code}`);
     }) as never);
 
-    await expect(run(config)).rejects.toThrow("EXIT:1");
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
     expect(exit).toHaveBeenCalledWith(1);
     expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
       severity: "error", message: expect.stringContaining("UI asset vanished"),
@@ -224,7 +282,7 @@ describe("run quota orchestration (#109)", () => {
     );
     seams.plan.mockResolvedValue(resolution([]));
 
-    await expect(run(config)).resolves.toBeUndefined();
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
     expect(eventsOf("wake-lock")).toEqual([
       { kind: "wake-lock", state: "refused", detail: "wake-lock: NOT held — not WSL2" },
       { kind: "wake-lock", state: "lost", detail: "wake-lock: LOST — exit 1; giving up" },
@@ -247,13 +305,245 @@ describe("run quota orchestration (#109)", () => {
     });
     seams.plan.mockResolvedValue(resolution([]));
 
-    await expect(run(config)).resolves.toBeUndefined();
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
     expect(eventsOf("wake-lock")).toEqual([
       { kind: "wake-lock", state: "released", detail: "wake-lock: released" },
     ]);
   });
 
-  it("drives issue quota through run(), exits 4, and outranks landed-work relaunch", async () => {
+  it("keeps an empty queue alive, stays silent on a no-op poll, then admits new work", async () => {
+    const arrived = issue("133");
+    seams.plan
+      .mockResolvedValueOnce(resolution([]))
+      .mockResolvedValueOnce(resolution([]))
+      .mockResolvedValue(resolution([arrived]));
+    vi.mocked(fetchOriginRefs).mockResolvedValue({ sourceChanged: false, failures: [] });
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:4");
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(fetchOriginRefs).toHaveBeenCalledTimes(2);
+    expect(seams.innerLoop).toHaveBeenCalledOnce();
+    expect(eventsOf("recompute").map((event) => event.trigger))
+      .toEqual(["launch", "poll"]);
+    expect(eventsOf("idle")).toHaveLength(1);
+    expect(vi.mocked(console.log).mock.calls).toEqual([["http://127.0.0.1:7331/"]]);
+    expect(startKeepawake).toHaveBeenCalledTimes(2);
+    expect(seams.wakeLocks[0]?.onStatus).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[0]?.stop).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[1]?.onStatus).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[1]?.stop).toHaveBeenCalledOnce();
+  });
+
+  it("reports a failed poll refresh and retries instead of halting", async () => {
+    vi.useFakeTimers();
+    const pollIntervalMs = 1_000;
+    const arrived = issue("135");
+    seams.plan
+      .mockResolvedValueOnce(resolution([]))
+      .mockResolvedValue(resolution([arrived]));
+    vi.mocked(fetchOriginRefs)
+      .mockResolvedValueOnce({
+        sourceChanged: false,
+        failures: ["Fetching origin refs failed: network unavailable"],
+      })
+      .mockResolvedValue({ sourceChanged: false, failures: [] });
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+    const failureLine =
+      `Poll refresh failed; retrying in ${pollIntervalMs}ms: ` +
+      "Fetching origin refs failed: network unavailable";
+    const result = run({ ...config, pollIntervalMs }).catch((error: unknown) => error);
+
+    try {
+      await flushMicrotasksUntil(
+        () => vi.getTimerCount() === 1,
+        "the initial idle poll timer",
+      );
+      await vi.advanceTimersByTimeAsync(pollIntervalMs);
+      await flushMicrotasksUntil(
+        () => eventsOf("complaint").some((event) => event.message === failureLine),
+        "the failed poll refresh to be reported",
+      );
+      expect(fetchOriginRefs).toHaveBeenCalledOnce();
+
+      await flushMicrotasksUntil(
+        () => vi.getTimerCount() === 1,
+        "the failed refresh to re-arm the poll timer",
+      );
+      await vi.advanceTimersByTimeAsync(pollIntervalMs - 1);
+      expect(fetchOriginRefs).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(await result).toEqual(expect.objectContaining({ message: "EXIT:4" }));
+      expect(exit).toHaveBeenCalledWith(4);
+      expect(fetchOriginRefs).toHaveBeenCalledTimes(2);
+      expect(seams.plan.mock.invocationCallOrder[0])
+        .toBeLessThan(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[0]!);
+      expect(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[1])
+        .toBeLessThan(seams.plan.mock.invocationCallOrder[1]!);
+      expect(eventsOf("recompute").map((event) => event.trigger))
+        .toEqual(["launch", "poll"]);
+      expect(seams.innerLoop).toHaveBeenCalledOnce();
+      expect(eventsOf("complaint").filter((event) => event.message === failureLine))
+        .toHaveLength(1);
+      expect(vi.mocked(console.error).mock.calls.flat().join("\n"))
+        .not.toContain("SANDBAR HALTED");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases a replacement wake lock when admitted work returns to idle", async () => {
+    const arrived = issue("133");
+    seams.plan
+      .mockResolvedValueOnce(resolution([]))
+      .mockResolvedValueOnce(resolution([arrived]))
+      .mockResolvedValue(resolution([]));
+    vi.mocked(fetchOriginRefs)
+      .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+      .mockRejectedValueOnce(new Error("stop after second idle transition"));
+    seams.innerLoop.mockResolvedValue({
+      type: "NEEDS-INFO", questions: "answer", strandedHead: null,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(seams.innerLoop).toHaveBeenCalledOnce();
+    expect(eventsOf("idle")).toHaveLength(2);
+    expect(startKeepawake).toHaveBeenCalledTimes(2);
+    expect(seams.wakeLocks[0]?.stop).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[1]?.stop).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the original wake lock while an idle daemon waits for work", async () => {
+    const arrived = issue("133");
+    seams.plan
+      .mockResolvedValueOnce(resolution([]))
+      .mockResolvedValue(resolution([arrived]));
+    vi.mocked(fetchOriginRefs).mockResolvedValue({ sourceChanged: false, failures: [] });
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({
+      ...config, pollIntervalMs: 1, keepAwakeWhileIdle: true,
+    })).rejects.toThrow("EXIT:4");
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(eventsOf("idle")).toHaveLength(1);
+    expect(seams.innerLoop).toHaveBeenCalledOnce();
+    expect(startKeepawake).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[0]?.stop).toHaveBeenCalledOnce();
+  });
+
+  it("gives post-refresh work new images while an older admission stays immutable", async () => {
+    const slow = issue("1");
+    const fast = issue("2");
+    const arrived = issue("134");
+    const slowTerminal = deferred<{
+      type: "NEEDS-INFO"; questions: string; strandedHead: null;
+    }>();
+    const oldAgentImages = {
+      declaredTag: "agent-old", augment: vi.fn(async () => "agent-old"), builtTags: () => [],
+    };
+    const newAgentImages = {
+      declaredTag: "agent-new", augment: vi.fn(async () => "agent-new"), builtTags: () => [],
+    };
+    const oldBranchImages = {
+      resolve: vi.fn(async () => new Map()), builtTags: () => [],
+    };
+    const newBranchImages = {
+      resolve: vi.fn(async () => new Map()), builtTags: () => [],
+    };
+    vi.mocked(createAgentImages)
+      .mockResolvedValueOnce(oldAgentImages)
+      .mockResolvedValue(newAgentImages);
+    vi.mocked(createBranchImages)
+      .mockReturnValueOnce(oldBranchImages)
+      .mockReturnValue(newBranchImages);
+    let polled = false;
+    seams.plan.mockImplementation(async () =>
+      resolution(polled ? [arrived] : [slow, fast]));
+    vi.mocked(fetchOriginRefs).mockImplementation(async () => {
+      polled = true;
+      return { sourceChanged: true, failures: [] };
+    });
+    seams.innerLoop.mockImplementation(async (candidate: ReturnType<typeof issue>) => {
+      if (candidate.id === slow.id) return slowTerminal.promise;
+      if (candidate.id === fast.id) {
+        return { type: "NEEDS-INFO", questions: "answer", strandedHead: null };
+      }
+      slowTerminal.resolve({ type: "NEEDS-INFO", questions: "answer", strandedHead: null });
+      return { type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42 };
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({
+      ...config, maxParallelIssues: 2, pollIntervalMs: 1, keepAwakeWhileIdle: true,
+    }))
+      .rejects.toThrow("EXIT:4");
+    expect(ensureImages).toHaveBeenCalledTimes(2);
+    expect(createAgentImages).toHaveBeenCalledTimes(2);
+    expect(eventsOf("preflight")).toContainEqual(expect.objectContaining({
+      action: "origin-refreshed",
+      detail: "origin/main moved during poll; refreshing source images",
+    }));
+    const slowOptions = seams.innerLoop.mock.calls.find(([candidate]) =>
+      candidate.id === slow.id)?.[1];
+    const arrivedOptions = seams.innerLoop.mock.calls.find(([candidate]) =>
+      candidate.id === arrived.id)?.[1];
+    expect(slowOptions.config.agentImages).toBe(oldAgentImages);
+    expect(slowOptions.branchImages).toBe(oldBranchImages);
+    expect(arrivedOptions.config.agentImages).toBe(newAgentImages);
+    expect(arrivedOptions.branchImages).toBe(newBranchImages);
+    expect(startKeepawake).toHaveBeenCalledOnce();
+    expect(seams.wakeLocks[0]?.onStatus).toHaveBeenCalledOnce();
+    // The only stop is terminal cleanup: idle did not release this holder.
+    expect(seams.wakeLocks[0]?.stop).toHaveBeenCalledOnce();
+  });
+
+  it("reports a changed stale-config count once, not on every poll", async () => {
+    const stale = {
+      configPath: "/repo/sandbar.config.mjs", sourceBranch: "main", hostCwd: "/repo",
+      behind: 2, touchingConfig: 1,
+    };
+    seams.plan.mockResolvedValue(resolution([]));
+    vi.mocked(fetchOriginRefs)
+      .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+      .mockResolvedValueOnce({ sourceChanged: false, failures: [] });
+    vi.mocked(readConfigStaleness)
+      .mockResolvedValueOnce({ ...stale, behind: 0, touchingConfig: 0 })
+      .mockResolvedValue(stale);
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(eventsOf("complaint").filter((event) =>
+      String(event.message).includes("1 of them change /repo/sandbar.config.mjs")))
+      .toHaveLength(1);
+    expect(eventsOf("recompute").filter((event) => event.trigger === "poll"))
+      .toHaveLength(1);
+  });
+
+  it("drives issue quota through run(), exits 4, and lands completed work first", async () => {
     const done = issue("1");
     const quota = issue("109");
     seams.plan.mockResolvedValue(resolution([done, quota]));
@@ -309,8 +599,11 @@ describe("run quota orchestration (#109)", () => {
       return new Map();
     });
     seams.plan.mockResolvedValue(resolution([]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
 
-    await expect(run(config)).resolves.toBeUndefined();
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
     expect(eventsOf("image")).toEqual([{
       kind: "image",
       action: "built",
@@ -437,23 +730,25 @@ describe("run quota orchestration (#109)", () => {
       String(event.message).includes("Tracker read-back mismatch"))).toBe(true);
   });
 
-  it("relaunches only at post-landing quiescence before starting successors", async () => {
+  it("starts a successor in the same daemon after a landing", async () => {
     const done = issue("1");
     const successor = issue("2");
     seams.plan
       .mockResolvedValueOnce(resolution([done]))
       .mockResolvedValueOnce(resolution([]))
-      .mockResolvedValueOnce(resolution([successor]));
-    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "abc" }] });
+      .mockResolvedValue(resolution([successor]));
+    seams.innerLoop.mockImplementation(async (candidate: ReturnType<typeof issue>) =>
+      candidate.id === "1"
+        ? { type: "DONE", commits: [{ sha: "abc" }] }
+        : { type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42 });
     seams.merger.mockResolvedValue(summary([done]));
     const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`EXIT:${code}`);
     }) as never);
 
-    await expect(run(config)).rejects.toThrow("EXIT:75");
-    expect(exit).toHaveBeenCalledWith(75);
-    expect(seams.innerLoop).toHaveBeenCalledOnce();
-    expect(seams.innerLoop.mock.calls[0]?.[0].id).toBe("1");
+    await expect(run(config)).rejects.toThrow("EXIT:4");
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["1", "2"]);
   });
 
   it("captures a merger quota from run() and exits 4 instead of halted", async () => {
@@ -523,8 +818,11 @@ describe("run quota orchestration (#109)", () => {
       commits: [{ sha: "abc" }],
     });
     seams.merger.mockResolvedValue(summary([done]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
 
-    await expect(run(config)).resolves.toBeUndefined();
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
     expect(seams.merger).toHaveBeenCalledOnce();
     expect(eventsOf("landing-batch")).toEqual([{
       kind: "landing-batch",
@@ -539,8 +837,12 @@ describe("run quota orchestration (#109)", () => {
       .mockResolvedValueOnce(resolution([target]))
       .mockResolvedValue(resolution([]));
     seams.innerLoop.mockRejectedValue(new Error("sandbox disappeared"));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
 
-    await expect(run({ ...config, maxParallelIssues: 1 })).resolves.toBeUndefined();
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
     expect(eventsOf("terminal")).toContainEqual(expect.objectContaining({
       issue: 12,
       title: "Issue 12",
@@ -573,8 +875,9 @@ describe("run quota orchestration (#109)", () => {
       throw new Error(`EXIT:${code}`);
     }) as never);
 
-    await expect(run({ ...config, maxParallelIssues: 2 })).resolves.toBeUndefined();
-    expect(exit).not.toHaveBeenCalled();
+    await expect(run({ ...config, maxParallelIssues: 2, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
     expect(seams.merger.mock.calls[0]?.[0].map((candidate: ReturnType<typeof issue>) => candidate.id))
       .toEqual(["2"]);
     expect(seams.merger.mock.calls[1]?.[0].map((candidate: ReturnType<typeof issue>) => candidate.id))
@@ -594,9 +897,16 @@ describe("run quota orchestration (#109)", () => {
     seams.innerLoop.mockImplementation((candidate: ReturnType<typeof issue>) =>
       candidate.id === "1"
         ? Promise.reject(new Error("member rejected"))
-        : Promise.resolve({ type: "NEEDS-INFO", questions: "answer", strandedHead: null }));
+        : Promise.resolve({
+            type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+          }));
 
-    await expect(run({ ...config, maxParallelIssues: 1 })).resolves.toBeUndefined();
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:4");
+    expect(exit).toHaveBeenCalledWith(4);
     expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["1", "2"]);
     expect(vi.mocked(console.log).mock.calls).toEqual([["http://127.0.0.1:7331/"]]);
   });
@@ -656,6 +966,24 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.merger).not.toHaveBeenCalled();
   });
 
+  it("retries a still-ready HARD-ERROR once per poll until the stuck exit", async () => {
+    const target = issue("1");
+    seams.plan.mockResolvedValue(resolution([target]));
+    seams.innerLoop.mockResolvedValue({
+      type: "HARD-ERROR", reason: "infra flake", commits: [],
+    });
+    vi.mocked(fetchOriginRefs).mockResolvedValue({ sourceChanged: false, failures: [] });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:2");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(seams.innerLoop).toHaveBeenCalledTimes(6);
+    expect(fetchOriginRefs).toHaveBeenCalledTimes(5);
+  });
+
   it("requests enough planner candidates to fill a wider configured pool", async () => {
     const issues = Array.from({ length: 6 }, (_, index) => issue(String(index + 1)));
     let firstRecompute = true;
@@ -692,9 +1020,9 @@ describe("run quota orchestration (#109)", () => {
       throw new Error(`EXIT:${code}`);
     }) as never);
 
-    await expect(run({ ...config, maxParallelIssues: 1, maxTotalIssues: 1 }))
-      .rejects.toThrow("EXIT:3");
-    expect(exit).toHaveBeenCalledWith(3);
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
     expect(seams.innerLoop).toHaveBeenCalledTimes(2);
     expect(seams.innerLoop.mock.calls.map((call) => call[0].id)).toEqual(["87", "87"]);
     expect(seams.merger).toHaveBeenCalledTimes(2);
@@ -709,7 +1037,7 @@ describe("run quota orchestration (#109)", () => {
       .toBeLessThan(seams.innerLoop.mock.invocationCallOrder[1]!);
   });
 
-  it("drains and lands in-flight work before exiting the start budget", async () => {
+  it("drains and lands in-flight work before returning to idle polling", async () => {
     const first = issue("1");
     const second = issue("2");
     const slow = deferred<{ type: "DONE"; commits: { sha: string }[] }>();
@@ -728,40 +1056,46 @@ describe("run quota orchestration (#109)", () => {
       throw new Error(`EXIT:${code}`);
     }) as never);
 
-    await expect(run({ ...config, maxParallelIssues: 2, maxTotalIssues: 2 }))
-      .rejects.toThrow("EXIT:3");
-    expect(exit).toHaveBeenCalledWith(3);
+    await expect(run({ ...config, maxParallelIssues: 2, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
     expect(seams.innerLoop).toHaveBeenCalledTimes(2);
     expect(seams.merger.mock.calls.flatMap((call) => call[0]).map((item) => item.id).sort())
       .toEqual(["1", "2"]);
   });
   it("counts a chunk-branch landing as a landing, so a review-lane host never trips the backstop", async () => {
     const issues = Array.from({ length: 8 }, (_, index) => issue(String(index + 1)));
+    const landed = new Set<string>();
     seams.plan.mockImplementation(async (_repo, options: { excluded?: Set<number> }) =>
-      resolution(issues.filter((candidate) => !options.excluded?.has(Number(candidate.id)))));
+      resolution(issues.filter((candidate) =>
+        !landed.has(candidate.id) && !options.excluded?.has(Number(candidate.id)))));
     seams.innerLoop.mockImplementation(async (candidate: ReturnType<typeof issue>) =>
       ({ type: "DONE", commits: [{ sha: candidate.id }] }));
     // Every DONE lands on its chunk branch; nothing ever reaches the source
     // branch, which is the whole of a review-lane host's steady state.
-    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) => ({
-      ...summary([]),
-      chunkLanded: batch.map((member) => ({ issue: member, chunkBranch: "sandbar/chunk-1-x" })),
-    }));
+    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) => {
+      for (const member of batch) landed.add(member.id);
+      return {
+        ...summary([]),
+        chunkLanded: batch.map((member) => ({ issue: member, chunkBranch: "sandbar/chunk-1-x" })),
+      };
+    });
     const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`EXIT:${code}`);
     }) as never);
 
-    await expect(run({ ...config, maxParallelIssues: 3 })).resolves.toBeUndefined();
-    expect(exit).not.toHaveBeenCalled();
+    await expect(run({ ...config, maxParallelIssues: 3, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
     expect(seams.innerLoop).toHaveBeenCalledTimes(8);
     expect(eventsOf("exit").some((event) => event.tag === "stuck")).toBe(false);
-    expect(eventsOf("exit").some((event) => event.tag === "plan-empty")).toBe(true);
+    expect(eventsOf("idle").length).toBeGreaterThan(0);
     // A chunk landing does not move the source branch, so images are built
     // once, at startup, and never rebuilt.
     expect(ensureImages).toHaveBeenCalledTimes(1);
   });
 
-  it("exits stuck after six persistent deferred landing requests", async () => {
+  it("waits for a poll before retrying an unchanged deferred landing request", async () => {
     const target = {
       root: 42,
       branch: "sandbar/chunk-42-test",
@@ -784,15 +1118,21 @@ describe("run quota orchestration (#109)", () => {
       ...summary([]),
       deferredChunks: [{ target, landedNow: target.rework }],
     });
+    vi.mocked(fetchOriginRefs)
+      .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+      .mockRejectedValueOnce(new Error("stop after deferred-request retry"));
     const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`EXIT:${code}`);
     }) as never);
 
-    await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:2");
-    expect(exit).toHaveBeenCalledWith(2);
-    expect(seams.merger).toHaveBeenCalledTimes(6);
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(fetchOriginRefs).toHaveBeenCalledTimes(2);
+    expect(seams.merger).toHaveBeenCalledTimes(2);
     expect(seams.innerLoop).not.toHaveBeenCalled();
-    expect(eventsOf("exit").some((event) => event.tag === "stuck")).toBe(true);
+    expect(eventsOf("exit").some((event) => event.tag === "stuck")).toBe(false);
+    expect(eventsOf("idle").length).toBeGreaterThan(0);
   });
 
   it("exits quota from the shared provider state when the closing issue returned no terminal", async () => {

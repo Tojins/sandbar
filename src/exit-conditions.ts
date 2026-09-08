@@ -1,64 +1,21 @@
-// Exit vocabulary and run-wide budget for the continuous pool (#87).
+// Exit vocabulary for the daemon pool (#87, #133).
 //
-//   (a) plan-empty        — the pool is quiescent, no landing is in flight and
-//                           the recomputed plan holds nothing. Success (0).
-//   (b) quota             — a provider's subscription window closed (exit 4).
-//                           Outranks every other exit: it stops new starts at
-//                           once, lands what is already committed, drains the
-//                           rest to a terminal, and only then exits (#109).
-//   (c) relaunch          — the pool went quiescent AFTER a landing and the
-//                           recompute is non-empty (exit 75, #65). That instant
-//                           is the old cycle boundary: the last landing closed
-//                           a blocker and unblocked its successors.
-//   (d) stuck             — MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING
-//                           no-progress observations in a row: issue terminals
-//                           or human-requested landing passes that defer every
-//                           request and consume no terminal
-//                           (exit 2). The broken-world backstop: a red source
-//                           branch or a misconfigured gate stack parks every
-//                           issue after an hour of paid tokens, and without
-//                           this the only bound is `maxTotalIssues` of quota
-//                           discovering the same thing.
-//   (e) budget            — starts reached `maxTotalIssues` (exit 3). Counted
-//                           at admission, so the cap cannot be overshot; a
-//                           silent-noop re-admission (#87) is not a start.
-//   (f) halted            — the run stopped on something it cannot carry on
-//                           past (#70): a startup refusal, a landing that
-//                           threw, durable work the tracker disagrees with, or
-//                           an internal failure.
-//   (g) iteration-ceiling — `maxRecomputesFor(maxTotalIssues)` recomputes
-//                           without any of the above. Defensive; the
-//                           conditions above terminate first.
+// An empty plan is an idle state, never a terminal. Relaunch, the lifetime
+// admission budget, and its defensive recompute ceiling disappeared with that
+// finite-run model. Three exits remain: quota (4), stuck after six consecutive
+// issue terminals without a landing (2), and halted for faults sandbar cannot
+// safely continue past (1). Scheduler decisions own quota/stuck precedence;
+// run.ts constructs halted exits at the failure boundary.
 //
-// WHO DECIDES WHAT. `decideSchedulerAction` (scheduler.ts) owns (a)–(e) as one
-// precedence over a pool snapshot, because each of them is a judgement about
-// the pool's state — what is active, what is ongoing, what has landed — and a
-// second copy of that precedence in run.ts is #87's own spaghetti coming back.
-// (f) and (g) are the orchestrator's: they fire in the middle of a landing or
-// in place of a recompute, and no snapshot carries them. The constructors
-// below are what both hand to `announceExit`.
+// A landing for the stuck counter is a source merge, a reviewed chunk merged
+// onto source, or a DONE member landed on its chunk branch. The last matters on
+// review-lane hosts, where it is the ordinary durable progress. Unchanged land
+// deferrals do not count: the daemon suppresses an immediate retry and lets the
+// poll timer provide the next observation instead.
 //
-// THE ONE ORDERING THAT CARRIES WEIGHT. (c) before (e): budgets are per
-// process and reset across relaunches by design, so a run that both landed and
-// exhausted its budget relaunches rather than stopping. No spin hides in that:
-// (c) requires a landing in THIS process, and a process that lands nothing
-// falls through to codes that break the launcher's loop. (d) before (c) for
-// the same reason in reverse — a relaunch on a red source branch would loop the
-// launcher through the same six parks forever.
-//
-// WHAT A LANDING IS, for (c) and (d) alike: a DONE branch merged onto the
-// source branch, a reviewed chunk merged there on a `land` label (#64), or a
-// DONE branch landed on its chunk branch (#60). The third counts because on a
-// review-lane host it is the ONLY way work ever leaves the pool — every DONE
-// waits on a chunk branch for a human's `land` — and a backstop that ignored
-// it would call six landed issues "six terminals with zero landings" and exit
-// stuck on a run that was working. Only the first two move the source branch,
-// so only they trigger the in-process image rebuild; that split is run.ts's.
-//
-// All seven are `TerminalExit`s. `run.ts` writes that value as one exit event;
+// All three are `TerminalExit`s. `run.ts` writes that value as one exit event;
 // the UI renders it and the launcher reads only the process code (#132).
-
-import { DEFAULT_MAX_TOTAL_ISSUES } from "./config.js";
+// `EXIT_TAGS` is exhaustive over the union so its table test moves with it.
 
 // Cap on how many times the same issue can hit silent-noop in one run before
 // it parks. Each silent-noop attempt reclaims the clone and deletes the local
@@ -73,43 +30,21 @@ export const SILENT_NOOP_RETRY_LIMIT = 2;
 // than fifty.
 export const MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING = 6;
 
-export const EXIT_CODE_SUCCESS = 0;
 // The code every stop that is not a normal terminal already exited with — a
 // startup refusal, a landing halt, an internal failure. Named here (#70) only
 // so `haltedExit` can spell it the way its siblings do.
 export const EXIT_CODE_HALTED = 1;
 export const EXIT_CODE_STUCK = 2;
-export const EXIT_CODE_BUDGET = 3;
 export const EXIT_CODE_QUOTA = 4;
-// "Landed work and went quiet; relaunch me to continue" (#65). Unconditional
-// since #87 — there is no `relaunchAfterLanding` — because on quiescence there
-// is nothing to disrupt, and a host whose queue keeps the pool busy gets one
-// long process anyway. What a relaunch re-resolves narrowed with #66 and #87:
-// the driver is a pinned release that a landing does not move, images are now
-// rebuilt IN PROCESS after every source-branch landing, and the CONFIG is the
-// one object a running process cannot refresh — it is `import()`ed once at
-// launch, from the operator's checkout. The relaunch exists for that last one.
-//
-// 75 is sysexits' EX_TEMPFAIL ("temporary failure; retry"), which is the
-// meaning, and it is clear of the run's own 0/1/2/3/4 and of the shell's
-// reserved 126+. The number is repeated by hand in `scripts/sandbar-launch.mjs`,
-// which runs before the package it would import exists; `launcher.test.ts`
-// asserts the two spellings equal, and the README's launcher contract moves
-// with a change here.
-export const EXIT_CODE_RELAUNCH = 75;
 
 // The terminal union as a VALUE, with ExitTag derived from it rather than the
 // other way round. That direction is what makes the table in
 // exit-conditions.test.ts a real guard: a tag added here with no row there
 // fails the set-equality assertion, and a row naming no tag fails to compile.
 export const EXIT_TAGS = [
-  "plan-empty",
   "quota",
-  "relaunch",
   "stuck",
-  "budget",
   "halted",
-  "iteration-ceiling",
 ] as const;
 
 export type ExitTag = (typeof EXIT_TAGS)[number];
@@ -123,17 +58,7 @@ export type TerminalExit = {
   readonly exitCode: number;
 };
 
-// (a). Success: the queue holds nothing sandbar can act on, which is the state
-// a series aims at, not a failure to reach one.
-export function planEmptyExit(): TerminalExit {
-  return {
-    tag: "plan-empty",
-    reason: "no unblocked issues to work on, and no chunk waiting to land",
-    exitCode: EXIT_CODE_SUCCESS,
-  };
-}
-
-// (b). Built from whichever measurement closed the provider: a QUOTA terminal,
+// Built from whichever measurement closed the provider: a QUOTA terminal,
 // the merger's resolve loop, or — when the issue that closed it never returned
 // a terminal at all — the run's own quota state.
 export function quotaExit(args: {
@@ -151,7 +76,7 @@ export function quotaExit(args: {
   };
 }
 
-// (f). `causes` are the short names the event record uses for the same
+// `causes` are the short names the event record uses for the same
 // stops (`preflight-failed`, `merger-halted`, `chunk-wrapup-incomplete`, …) —
 // this line says THAT the run stopped and which of them stopped it, never the
 // complaint itself, which was printed in full at the point it was reached and
@@ -165,75 +90,10 @@ export function haltedExit(causes: readonly string[]): TerminalExit {
   };
 }
 
-// (g). The exit CODE is deliberately unchanged at success: the ceiling has
-// never fired, and #70 is about the run saying what it did, not about
-// re-grading an outcome nobody has observed. The line is what changes — a run
-// that hits the ceiling used to print "All done.", which is the one thing it is
-// not.
-export function iterationCeilingExit(maxRecomputes: number): TerminalExit {
-  return {
-    tag: "iteration-ceiling",
-    reason: `ran ${maxRecomputes} recomputes without an exit condition firing`,
-    exitCode: EXIT_CODE_SUCCESS,
-  };
-}
-
-// (e). `started` is the pool's admission count, which is what the cap bounds.
-export function budgetExit(started: number, maximum: number): TerminalExit {
-  return {
-    tag: "budget",
-    reason: `issuesStarted=${started} >= maxTotalIssues=${maximum}`,
-    exitCode: EXIT_CODE_BUDGET,
-  };
-}
-
-// (d).
 export function stuckExit(terminals: number): TerminalExit {
   return {
     tag: "stuck",
-    reason: `${terminals} consecutive terminal or requested-landing passes with zero landings`,
+    reason: `${terminals} consecutive issue terminals with zero landings`,
     exitCode: EXIT_CODE_STUCK,
   };
-}
-
-// (c). Counts LANDINGS in the header's sense, not merges: a chunk-branch
-// landing is one of them. What the next run re-resolves is named — the config
-// file — and nothing is claimed about the driver, which is the launcher's to
-// decide (#66).
-export function relaunchExit(landings: number): TerminalExit {
-  return {
-    tag: "relaunch",
-    reason:
-      `${landings} landing(s) this run; pool is quiescent and newly-unblocked ` +
-      "work remains, so relaunching to re-import the config file " +
-      "(which driver that run uses is the launcher's to decide)",
-    exitCode: EXIT_CODE_RELAUNCH,
-  };
-}
-
-export type RunState = {
-  // Admissions so far. Incremented when an issue enters the pool — never for a
-  // silent-noop re-admission — so `maxTotalIssues` cannot be overshot and
-  // needs no pre-cycle trim.
-  issuesAttempted: number;
-  // Per-issue silent-noop counter. The merger increments this whenever the
-  // resolve loop reports "resolved" but HEAD did not advance (the agent gave
-  // up via `git merge --abort` and returned). Reset across runs by design —
-  // a human re-running sandbar implicitly authorises a fresh budget.
-  readonly silentNoopAttemptsByIssue: Map<string, number>;
-  readonly maxTotalIssues: number;
-};
-
-export function newRunState(opts: { maxTotalIssues?: number } = {}): RunState {
-  return {
-    issuesAttempted: 0,
-    silentNoopAttemptsByIssue: new Map(),
-    maxTotalIssues: opts.maxTotalIssues ?? DEFAULT_MAX_TOTAL_ISSUES,
-  };
-}
-
-// Remaining headroom under the global cap: the most NEW starts the next
-// admission may make.
-export function remainingBudget(state: RunState): number {
-  return Math.max(0, state.maxTotalIssues - state.issuesAttempted);
 }

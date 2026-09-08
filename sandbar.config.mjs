@@ -2,12 +2,8 @@
 //
 // Since #66 this repo is worked on by a PINNED sandbar, exactly as a consumer's
 // would be: `sandbar.pin` names a tag, `npm run sandbar` installs it into
-// `.sandbar/driver/` and runs that, and nothing in a series is built from the
-// working tree. The old launcher was `git pull --ff-only && npm run build &&
-// node dist/cli.js` in a loop, which meant the orchestrator AND the gate stack
-// were whatever a human had saved; the loop now re-reads the pin and loops on
-// EXIT_CODE_RELAUNCH (75) alone. The continuous pool emits that code only at
-// quiescence after a landing, before it admits newly-unblocked work.
+// `.sandbar/driver/` and launches the daemon once. The daemon itself polls for
+// new work (#133); Ctrl-C and another launch reload this config.
 //
 // THIS FILE is the residual, and it is deliberate rather than overlooked: the
 // config resolves against the process cwd and `sandbar.env` against this file's
@@ -18,8 +14,7 @@
 // instead of silently ignoring what it cannot read — while #69's opening line
 // names this path and whether its tree is dirty. And nothing updates this file
 // any more: the launcher's `git pull` went with #66, so a gate-stack change that
-// lands on main judges nothing until a human pulls it here, however many
-// relaunches the series makes in between. That is the deliberate trade — a
+// lands on main judges nothing until a human pulls it here. That is the deliberate trade — a
 // series can run while the operator holds local commits — and preflight warns
 // when the commits this checkout is missing include ones that touch this file,
 // so it is reported rather than silent. What is gone is the ORCHESTRATOR and its

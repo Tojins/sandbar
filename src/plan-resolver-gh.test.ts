@@ -140,7 +140,7 @@ describe("fetchCandidates names the configured repo (#34)", () => {
 });
 
 // #63 — a follow-up issue filed at the top of a cycle has to be planned in that
-// same cycle, or the cycle that filed it exits plan-empty with the review
+// same recompute, or the daemon idles with the review
 // unanswered. The listing cannot deliver it (`gh issue list` lags, and nothing
 // in the queue is younger), so the scan hands the
 // issue back in. Through the shim rather than a fake, because what is being

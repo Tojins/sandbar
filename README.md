@@ -245,27 +245,21 @@ copyable config with every optional `RunConfig` field commented out at its
 default. Copy it beside your `package.json`, fill in the required placeholders,
 then uncomment only the settings this repository needs to change.
 
-### Continuous pool and launcher
+### Daemon pool and launcher
 
 Sandbar keeps up to `maxParallelIssues` issue sandboxes in flight and replans
-whenever a slot becomes free. If a landing leaves the process quiescent but the
-new plan has more work, sandbar exits 75 (`EXIT_CODE_RELAUNCH`, exported from
-the package root) so the launcher can re-import the config before continuing.
-A launcher that drains the queue must loop **only** on 75 and propagate every
-other exit code:
+whenever a slot becomes free. When the queue is empty it remains running and
+refreshes origin and the tracker every `pollIntervalMs` (default 60 seconds).
+Launch it once; stop it with a signal when you want to reload its config:
 
 ```sh
-while :; do
-  npx sandbar
-  code=$?
-  [ "$code" -eq 75 ] || exit "$code"
-done
+npx sandbar
 ```
 
-Exit 2 (`stuck`) stops the series after six consecutive issue terminals or
-unchanged requested-landing deferrals without a landing. It bounds persistent
-failures such as a red source branch or misconfigured gate stack instead of
-letting them consume the whole issue budget.
+Exit 2 (`stuck`) stops the daemon after six consecutive issue terminals without
+a landing. It bounds persistent failures such as a red source branch or a
+misconfigured gate stack. By default the wake lock is released while idle;
+`keepAwakeWhileIdle: true` keeps it for the daemon's lifetime.
 
 ### The two inner-loop budgets
 

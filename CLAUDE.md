@@ -147,27 +147,29 @@ without consuming one of `maxParallelIssues` slots.
    to remove `ready-for-agent` read that state back before the issue ceases to
    be ongoing; quota and infrastructure terminals deliberately remain queued.
 
-### Exit conditions (`src/exit-conditions.ts`)
+### Daemon polling and exits (`src/scheduler.ts`, `src/exit-conditions.ts`)
 
-The pool exits plan-empty only when no issue, landing, or plan remains. Provider
-quota stops new admissions and drains running and landing work before exit 4.
-`maxTotalIssues` counts admissions. Relaunch (75) is evaluated at quiescence,
-before admitting newly-unblocked work, and requires a landing in this process.
-After six consecutive no-progress observations — issue terminals or a
-human-requested landing pass that only defers unchanged requests — admissions stop immediately;
-already-running issues drain and are finalised before the run exits stuck. A
-LANDING, for both of those, is any of a source-branch merge, a chunk landed on
-the source branch, or a DONE branch landed on its chunk branch — the last one
-because on a review-lane host it is the only way work ever leaves the pool;
-only the first two move the source branch and trigger the in-process image
-rebuild. `src/exit-conditions.ts`'s header owns the precedence and
-`src/scheduler.ts`'s the decision that applies it.
+An empty plan is idle, not terminal (#133). One cancellable wait races a freed
+slot with `pollIntervalMs` (default 60 seconds); a poll fetches source plus the
+issue, chunk and member namespaces before running the ordinary planner. A moved source tip refreshes
+image inputs whether sandbar or a human moved it; each admission captures one
+immutable agent/branch-image bundle, so in-flight work keeps its original pair.
+No-op polls write nothing. A failed poll fetch is reported and retried after
+another interval; only the startup fetch remains a preflight refusal.
+The wake lock is released at quiescence unless `keepAwakeWhileIdle` is true.
 
-All seven are one type, `TerminalExit`, and the run writes exactly one `exit`
-event whichever fired (#70/#132). `EXIT_TAGS` is exhaustive over the union and
-a table test asserts every tag has a code and reason. The pool owns run-wide
-starts, ongoing work, landings, and the terminal-without-landing backstop;
-`run.ts` selects one exit from that state and provider or landing outcomes.
+Provider quota stops admissions and drains running and landing work before exit
+4. Six consecutive issue terminals without a landing stop admissions and drain
+running work before exit 2. An unchanged `land` deferral waits for another
+trigger and advances no counter. Remaining exits are `stuck`, `quota`, and
+`halted`; plan-empty, relaunch, budget, and the recompute ceiling are gone.
+
+All three are one type, `TerminalExit`, and the run ends with exactly one
+`exit` event whichever fired (#70/#132). `EXIT_TAGS` is exhaustive over the
+union and a table test asserts every tag has a code and reason. The pool owns
+run-wide starts, ongoing work, landings, and the terminal-without-landing
+backstop; `run.ts` selects one exit from that state and provider or landing
+outcomes.
 
 ## Key invariants — where the details live
 
@@ -320,26 +322,19 @@ starts, ongoing work, landings, and the terminal-without-landing backstop;
   idempotence latch flips (#55). Cleanup reporting is best-effort: a rejected
   event write cannot gate the drain, and one failed action or notice never
   prevents the remaining resource teardowns.
-- **The host must not sleep while sandbar is working (#117).** On WSL2 the
-  *Windows* host suspends the VM under a running series, and the failure was
-  never the request — it was WHEN it is held: every sleep observed on this
-  repo's host began within minutes of a run ending, one of them 6 ms after the
-  `exit: relaunch` line, all `Kernel-Power` reason `System Idle`. Two holders,
-  no handshake, because overlapping ES_SYSTEM_REQUIRED requests ARE one request
-  to Windows: `run()` takes one FIRST — ahead of the single-instance lock, so
-  #35's LIFO drain releases it LAST, after teardown and after `run-end` — and
-  `scripts/sandbar-launch.mjs` runs `dist/keepawake-hold.js` for the whole
-  series, because #65's exit-75 seam is between two processes and no per-run
-  holder can span it. A lock is HELD only when the OS has confirmed it (the
+- **The host must not sleep while sandbar is working (#117, #133).** On WSL2
+   `run()` takes a host wake lock before the single-instance lock. It releases
+   that holder when the daemon becomes quiescent and retakes one when a poll
+  finds work; `keepAwakeWhileIdle: true` retains it for a dedicated machine.
+  #35's LIFO drain releases the current holder after later teardown. A lock is
+  HELD only when the OS has confirmed it (the
   script prints its marker after `SetThreadExecutionState` returns a non-zero
   previous state), and it is released by EOF ON STDIN so it cannot outlive its
   owner — which is also what makes the `process.exit` paths that run no cleanup
-  safe. Every held / refused / lost / released transition of the RUN's holder
-  is a `wake-lock` event; the SERIES holder predates a run record and reaches
-  the terminal only. The release is registered immediately after record
-  finalization so #35's LIFO drain puts it after every teardown and before
-  `run-end`, and its event writes are awaited because `process.exit` grants no
-  event-loop turn.
+   safe. Every held / refused / lost / released transition is a `wake-lock`
+   event. The release is registered immediately after record finalization so
+   #35's LIFO drain puts it after every teardown and before `run-end`, and its
+   event writes are awaited because `process.exit` grants no event-loop turn.
 - **Credentials are a value, not a path (#38).** `config.env` is an allowlist
   record (empty value ⇒ inherit from `process.env`); `readEnvFile` is the
   opt-in loader. `src/env.ts`. A credential whose vendor interface is a FILE is
@@ -571,15 +566,14 @@ starts, ongoing work, landings, and the terminal-without-landing backstop;
 `sandbar.config.mjs` at the root is the host-side surface, `Containerfile`
 builds the one image, `sandbar.env` (gitignored) holds credentials, `sandbar.pin`
 names the release that drives a run, and `npm run sandbar`
-(`scripts/sandbar-launch.mjs`) is the launcher — a loop (#65): install the pin,
-run it, and around again only on exit 75.
+(`scripts/sandbar-launch.mjs`) installs the pin and starts the daemon once.
 
 - **The driver is PINNED, not built from the checkout (#66).** The launcher
   installs the tag `sandbar.pin` names into `.sandbar/driver/` and runs that, so
   a series is driven by a release somebody chose and an operator may hold local
   commits and uncommitted edits while it runs. It does not pull. An install that
-  fails stops the loop rather than falling back to what is on disk, and a
-  matching stamp is skipped, so a relaunch runs a byte-identical driver. The
+  fails stops the launch rather than falling back to what is on disk, and a
+  matching stamp is skipped, so repeated launches run a byte-identical driver. The
   price is that an orchestrator or PROMPT change takes effect only when the pin
   moves — which is how every consumer already experiences sandbar; iterate
   unlanded code with `npm run build && node dist/cli.js` by hand. The pin
@@ -596,12 +590,12 @@ run it, and around again only on exit 75.
   commit" is true of the orchestrator and its prompts and NOT of `gateStack`;
   `requiresSandbar` is the guard on the version seam that creates, and the
   `run-start` event's driver identity (#69) is what shows a dirty one. `npm run driver` installs the pin
-  without starting a series — which the hand paths need, since the config
+  without starting the daemon — which the hand paths need, since the config
   imports `readEnvFile` from the driver rather than from `./dist/`.
 - **Nothing refreshes that checkout, and that is the price of #66.** The
   launcher's `git pull` is gone — which is what lets a series run while the
   operator holds local commits — so a landed `gateStack` change starts judging
-  branches when a human pulls it, NOT one relaunch later. Unreported that is
+  branches when a human pulls it, not during the existing daemon. Unreported that is
   silent for an unbounded long-running process,
   so preflight's `staleConfigWarning` counts the commits the checkout is behind
   `origin/<sourceBranch>` that touch the config FILE — narrower than "behind" on

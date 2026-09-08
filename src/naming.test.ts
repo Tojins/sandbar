@@ -25,6 +25,8 @@ import {
   RESOURCE_PREFIX,
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
+  ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
+  ORIGIN_ISSUE_BRANCH_POLL_REFGLOBS,
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
   ORIGIN_MEMBER_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
@@ -198,6 +200,18 @@ describe("branch names (#58)", () => {
     expect(ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS).toContain(
       "+refs/heads/sandbar/member-*:refs/remotes/origin/sandbar/member-*",
     );
+  });
+
+  it("names origin's issue namespace for daemon refreshes", () => {
+    expect(ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS).toContain(
+      "+refs/heads/sandbar/issue-*:refs/sandbar/poll/origin/sandbar/issue-*",
+    );
+    expect(ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS).toContain(
+      "+refs/heads/sandcastle/issue-*:refs/sandbar/poll/origin/sandcastle/issue-*",
+    );
+    for (const spec of ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS) {
+      expect(ORIGIN_ISSUE_BRANCH_POLL_REFGLOBS).toContain(spec.split(":")[1]);
+    }
   });
 
   it("reserves member refs with every sandbar-owned branch shape", () => {

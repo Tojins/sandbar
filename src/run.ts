@@ -67,11 +67,15 @@
 // that exit (#35), so the record carries a complaint and `run-end (signal)`.
 // Readers use run.pid plus run-end to distinguish live, crashed and ended runs.
 //
-// Termination is governed by exit-conditions.ts. Plan-empty requires a
-// quiescent pool; maxTotalIssues counts admissions; quota drains work already
-// running; and relaunch is checked only at post-landing quiescence, before a
-// newly-unblocked issue starts. A budget-derived recompute limit remains a
-// defensive ceiling.
+// At capacity below `maxParallelIssues`, one cancellable wait races the next
+// slot completion against `pollIntervalMs`. A poll refreshes source, issue,
+// chunk and member refs before running the ordinary plan. A failed refresh is
+// reported and waits for the next wake instead of killing the daemon; startup
+// preflight remains fatal. A no-op poll is silent; work, source movement, and
+// changed config-staleness evidence are recorded. Source movement from either
+// a human push or this process refreshes the image inputs.
+// Agent and branch images are replaced as one bundle and captured by each
+// admission, so a poll cannot change the images beneath in-flight work.
 
 import { realpathSync } from "node:fs";
 
@@ -108,21 +112,14 @@ import {
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
 import { makeEnvReader } from "./env.js";
-import { durationField, startTimer } from "./timing.js";
+import { startTimer } from "./timing.js";
 import { SandbarError, faultDetail } from "./errors.js";
 import { startEventRecord, type EventInput, type RecomputeTrigger } from "./events.js";
 import {
   type TerminalExit,
   MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
-  SILENT_NOOP_RETRY_LIMIT,
-  budgetExit,
   haltedExit,
-  iterationCeilingExit,
-  newRunState,
-  planEmptyExit,
   quotaExit,
-  relaunchExit,
-  remainingBudget,
   stuckExit,
 } from "./exit-conditions.js";
 import { type RunQuotaState, createRunQuotaState } from "./inner-loop.js";
@@ -181,6 +178,7 @@ import {
 } from "./scheduler.js";
 import {
   absoluteMountSources,
+  fetchOriginRefs,
   PreflightError,
   readConfigStaleness,
   runPreflight,
@@ -194,19 +192,6 @@ import {
 } from "./repo-cache.js";
 import { startUiServer, UiPortInUseError } from "./ui-server.js";
 
-
-// Each start can produce several recomputes (slot release, finalization and a
-// landing), and silent-noop can execute the same ongoing issue three times.
-// Keep the defensive ceiling proportional to the configured run budget so it
-// cannot become the default-budget terminator.
-const MIN_MAX_RECOMPUTES = 100;
-
-export function maxRecomputesFor(maxTotalIssues: number): number {
-  return Math.max(
-    MIN_MAX_RECOMPUTES,
-    maxTotalIssues * (SILENT_NOOP_RETRY_LIMIT + 1) * 4 + 10,
-  );
-}
 
 // The merge phase's stack id. Distinct from every issue id (which are numeric),
 // so its pod, network and containers can never collide with an issue's.
@@ -317,22 +302,67 @@ export function closedProviderExit(
 function schedulerExit(
   reason: SchedulerExit,
   pool: ContinuousPool<PlannedIssue, Terminal>,
-  runState: ReturnType<typeof newRunState>,
   quota: TerminalExit | null,
 ): TerminalExit {
   switch (reason) {
-    case "plan-empty": return planEmptyExit();
-    case "relaunch": return relaunchExit(pool.landings);
     case "quota": {
       // `quotaClosed` is derived from the same two sources the caller resolves
       // `quota` from, so a miss here is a bug in that derivation, not a state.
       if (!quota) throw new Error("scheduler selected quota without a quota exit");
       return quota;
     }
-    case "budget": return budgetExit(runState.issuesAttempted, runState.maxTotalIssues);
     case "stuck": return stuckExit(pool.noProgressSinceLanding);
   }
 }
+
+type RunActivity = {
+  readonly isIdle: () => boolean;
+  readonly enterBusy: () => void;
+  readonly enterIdle: () => void;
+  readonly stop: () => void;
+};
+
+// One owner for the daemon's activity state and wake-lock lifetime (#133).
+// Callers report state transitions; they never pair a flag mutation with a
+// separate lock operation. A replacement holder is observed before it can
+// report a status, and `stop` always targets the holder current at cleanup.
+function createRunActivity(args: {
+  readonly initialLock: ReturnType<typeof startKeepawake>;
+  readonly keepAwakeWhileIdle: boolean;
+  readonly startLock: () => ReturnType<typeof startKeepawake>;
+  readonly observeLock: (lock: ReturnType<typeof startKeepawake>) => void;
+}): RunActivity {
+  let lock: ReturnType<typeof startKeepawake> | null = args.initialLock;
+  let idle = false;
+  args.observeLock(lock);
+  return {
+    isIdle: () => idle,
+    enterBusy: () => {
+      if (lock === null) {
+        lock = args.startLock();
+        args.observeLock(lock);
+      }
+      idle = false;
+    },
+    enterIdle: () => {
+      if (idle) return;
+      idle = true;
+      if (!args.keepAwakeWhileIdle && lock !== null) {
+        lock.stop();
+        lock = null;
+      }
+    },
+    stop: () => {
+      lock?.stop();
+      lock = null;
+    },
+  };
+}
+
+type RunImages = {
+  readonly agentImages: AgentImages;
+  readonly branchImages: BranchImages;
+};
 
 export async function run(
   rawConfig: RunConfig,
@@ -385,7 +415,7 @@ export async function run(
   // sit two `process.exit` calls that run no cleanup at all (`GH_TOKEN`, and
   // losing the lock), and neither leaks: the lock's lifetime is the stdin pipe,
   // so a process that dies without releasing releases anyway.
-  const wakeLock = startKeepawake();
+  const initialWakeLock = startKeepawake();
 
   // The lock comes BEFORE preflight (#32). Preflight is not read-only: it
   // fetches, and it `git branch -D`s every `sandbar/issue-*` branch it finds
@@ -402,6 +432,7 @@ export async function run(
   // actionable one.
   const lockPaths = lockPathsFor(layout.stateDir);
   let release: (() => Promise<void>) | null = null;
+  let lastConfigStalenessCount = 0;
   try {
     release = await acquireLock(lockPaths);
   } catch (err) {
@@ -529,22 +560,13 @@ export async function run(
   // after a human touched the keyboard. The run was not over when its exit line
   // was printed, and the lock was.
   //
-  // What is left uncovered is the microsecond between this and the process
-  // exiting, plus the relaunch seam itself; `scripts/sandbar-launch.mjs` holds
-  // its own for the whole series precisely because no per-run holder can span
-  // an exit (#65).
+  // At quiescence the current holder is stopped unless
+  // `keepAwakeWhileIdle=true`; a poll that finds work takes a new one. Cleanup
+  // stops whichever holder is current.
   //
-  // Awaiting the submitted writes is not decoration. `appendFile` needs a real
-  // event-loop turn, and every non-zero exit — including 75, the relaunch this
-  // issue was written about — leaves the drain for `process.exit`, which grants none:
-  // a fire-and-forget append of the `released` transition reached the record
-  // on the exit-0 path alone. The submitted writes are awaited so the last
-  // thing the lock says is in the record it is claimed to be in.
+  // Awaiting the submitted writes is not decoration. Every non-zero exit
+  // leaves the drain for `process.exit`, which grants no event-loop turn.
   const statusWrites: Promise<void>[] = [];
-  onCleanup(async () => {
-    wakeLock.stop();
-    await Promise.all(statusWrites);
-  });
 
   // Whether the host can sleep under this run is an outcome. Wake-lock
   // transitions are bounded and belong in the event record, not stdout.
@@ -554,11 +576,21 @@ export async function run(
   // a delayed handler would let Node's unhandledRejection trap stop a healthy
   // run before cleanup. A failed observation is best-effort at this callback
   // boundary; EventRecord's recovered latch lets the next status append.
-  wakeLock.onStatus((line, status) => {
+  const watchWakeLock = (lock: ReturnType<typeof startKeepawake>): void => lock.onStatus((line, status) => {
     statusWrites.push(
       runRecord.emit({ kind: "wake-lock", state: status.kind, detail: line })
         .then(() => undefined, () => undefined),
     );
+  });
+  const activity = createRunActivity({
+    initialLock: initialWakeLock,
+    keepAwakeWhileIdle: config.keepAwakeWhileIdle,
+    startLock: startKeepawake,
+    observeLock: watchWakeLock,
+  });
+  onCleanup(async () => {
+    activity.stop();
+    await Promise.all(statusWrites);
   });
 
   // The one site that emits an exit (#70/#132), shared by startup refusals and
@@ -650,7 +682,7 @@ export async function run(
       action: "cache-created",
       detail: line,
     }).then(() => undefined));
-    await runPreflight({
+    const initialConfigStaleness = await runPreflight({
       layout,
       env,
       sourceBranch: config.sourceBranch,
@@ -669,6 +701,7 @@ export async function run(
       agentProviders: requiredAgentProviders(config),
       onEvent: (event) => runRecord.emit(event).then(() => undefined),
     });
+    lastConfigStalenessCount = initialConfigStaleness.touchingConfig;
   } catch (err) {
     return await stopAtStartup("preflight-failed", err);
   }
@@ -791,17 +824,17 @@ export async function run(
       detail: formatImageRecord(r),
     }).then(() => undefined);
 
-  let sourceWorktree: string;
-  let baseFingerprints: ReadonlyMap<string, string>;
-  let agentImages: AgentImages;
+  let initialSourceWorktree: string;
+  let initialBaseFingerprints: ReadonlyMap<string, string>;
+  let initialAgentImages: AgentImages;
   try {
-    sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
-    baseFingerprints = await ensureImages(config.images, sourceWorktree, {
+    initialSourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
+    initialBaseFingerprints = await ensureImages(config.images, initialSourceWorktree, {
       onImage: recordImage,
       log: () => undefined,
       captureBuild: true,
     });
-    agentImages = await createAgentImages({
+    initialAgentImages = await createAgentImages({
       declaredBaseTag: config.sandboxImage,
       providers: requiredAgentProviders(config),
       scope,
@@ -830,9 +863,13 @@ export async function run(
       worktreeMountingTags: worktreeMountingTagsOf(config.gateStack),
       hostUid: process.getuid?.() ?? 0,
     });
-  let branchImages = makeBranchImages(baseFingerprints);
-  const branchImageRuns = [branchImages];
-  const agentImageRuns = [agentImages];
+  const initialBranchImages = makeBranchImages(initialBaseFingerprints);
+  let currentImages: RunImages = {
+    agentImages: initialAgentImages,
+    branchImages: initialBranchImages,
+  };
+  const branchImageRuns = [initialBranchImages];
+  const agentImageRuns = [initialAgentImages];
   onCleanup(async () => {
     // Augmented images are FROM-children of branch variants. Remove leaves
     // first so podman can then remove their parents.
@@ -870,9 +907,7 @@ export async function run(
     return await stopAtStartup("image-uid-check-failed", err);
   }
 
-  const runState = newRunState({
-    maxTotalIssues: config.maxTotalIssues,
-  });
+  const silentNoopAttemptsByIssue = new Map<string, number>();
   const quotaState = createRunQuotaState();
   // The one stop this run ends on (#70). Every break out of the loop below
   // assigns it what `announceExit` has already emitted, and the process exit
@@ -986,7 +1021,6 @@ export async function run(
     maxQualityRounds: config.maxQualityRounds,
     maxReviewRounds: config.maxReviewRounds,
     sandboxImage: config.sandboxImage,
-    agentImages,
     scope,
     gateStack: config.gateStack,
     claudeMdPath: config.claudeMdPath,
@@ -1005,7 +1039,9 @@ export async function run(
   let nextPlanTrigger: RecomputeTrigger = "launch";
   let deferredChunksForRecompute: string[] = [];
   let landingNumber = 0;
-  const maxRecomputes = maxRecomputesFor(config.maxTotalIssues);
+  let iteration = 0;
+  let lastPlanDiagnostics: string | null = null;
+  const deferredLandBranches = new Set<string>();
 
   const emitRecompute = async (
     iteration: number,
@@ -1075,13 +1111,13 @@ export async function run(
       if (event.status === "fulfilled") {
         outcomes.push({ issue: event.issue, terminal: event.value });
       } else {
-        pool.finish(event.issue);
+        pool.finishRejected(event.issue);
       }
     }
     await runFinalize("agent terminals", terminalFinalizeInputs(outcomes));
     for (const outcome of outcomes) {
       if (finishDone || outcome.terminal.type !== "DONE") {
-        pool.finish(outcome.issue);
+        pool.finishTerminal(outcome.issue);
       }
     }
     return outcomes;
@@ -1201,12 +1237,60 @@ export async function run(
     }
   };
 
+  const refreshSourceImages = async (): Promise<void> => {
+    activity.enterBusy();
+    const nextSourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
+    const nextBaseFingerprints = await ensureImages(config.images, nextSourceWorktree, {
+      onImage: recordImage,
+      log: () => undefined,
+      captureBuild: true,
+    });
+    const nextAgentImages = await createAgentImages({
+      declaredBaseTag: config.sandboxImage,
+      providers: requiredAgentProviders(config),
+      scope,
+      onImage: recordImage,
+      log: () => undefined,
+    });
+    const nextBranchImages = makeBranchImages(nextBaseFingerprints);
+    currentImages = {
+      agentImages: nextAgentImages,
+      branchImages: nextBranchImages,
+    };
+    agentImageRuns.push(nextAgentImages);
+    branchImageRuns.push(nextBranchImages);
+  };
+
   // -------------------------------------------------------------------------
   // Main loop
   // -------------------------------------------------------------------------
 
   try {
-    for (let iteration = 1; iteration <= maxRecomputes; iteration++) {
+    for (;;) {
+      iteration += 1;
+      const planTrigger: RecomputeTrigger = nextPlanTrigger;
+      let sourceChangedOnPoll = false;
+      if (planTrigger === "poll") {
+        const refresh = await fetchOriginRefs(layout.repoDir, config.sourceBranch);
+        if (refresh.failures.length > 0) {
+          const message =
+            `Poll refresh failed; retrying in ${config.pollIntervalMs}ms: ` +
+            refresh.failures.join("; ");
+          await runRecord.emit({ kind: "complaint", severity: "warning", message });
+          nextPlanTrigger = await pool.waitForWake(config.pollIntervalMs);
+          continue;
+        }
+        // A terminal is eligible again only after the poll has refreshed the
+        // refs that planning and branch sync consume. A failed refresh is not
+        // a poll boundary and must not spend that guard.
+        pool.beginPoll();
+        sourceChangedOnPoll = refresh.sourceChanged;
+        if (sourceChangedOnPoll) {
+          const line = `origin/${config.sourceBranch} moved during poll; refreshing source images`;
+          await runRecord.emit({ kind: "preflight", action: "origin-refreshed", detail: line });
+          await refreshSourceImages();
+        }
+      }
       // -----------------------------------------------------------------------
       // Between-recompute orphan sweep. Phase 2/3/4 already tear down their own
       // resources in finally blocks, and startStack registers its teardown
@@ -1226,18 +1310,21 @@ export async function run(
         await reportSweepFailures(cycleOrphans, (event) => runRecord.emit(event), "quiescent");
       }
 
-      const budget = remainingBudget(runState);
-
-      const planTrigger = nextPlanTrigger;
-
-      const configWarning = staleConfigWarning(await readConfigStaleness({
+      const configStaleness = await readConfigStaleness({
         layout,
         sourceBranch: config.sourceBranch,
         configPath: options.configPath ?? null,
-      }));
-      if (configWarning) {
-        await runRecord.emit({ kind: "complaint", severity: "warning", message: configWarning });
+      });
+      const configStalenessChanged =
+        configStaleness.touchingConfig !== lastConfigStalenessCount;
+      if (configStalenessChanged) {
+        const configWarning = staleConfigWarning(configStaleness);
+        const line = configWarning ??
+          `Config staleness cleared: ${configStaleness.configPath ?? "programmatic config"} ` +
+          `is no longer behind a change from origin/${config.sourceBranch}.`;
+        await runRecord.emit({ kind: "complaint", severity: "warning", message: line });
       }
+      lastConfigStalenessCount = configStaleness.touchingConfig;
 
       // ---------------------------------------------------------------------
       // Phase 1: Plan
@@ -1253,13 +1340,6 @@ export async function run(
         ongoing: new Set([...pool.startedIds()].map(Number)),
       };
       let resolution = await buildPlan(repo, planOptions);
-      for (const drift of resolution.chunkNameDrifts) {
-        const derived = drift.derived ?? "no chunk branch can be derived";
-        const line =
-          `Origin chunk branch ${drift.existing} no longer matches the name ` +
-          `derived for its root: ${derived}`;
-        await runRecord.emit({ kind: "complaint", severity: "warning", message: line });
-      }
 
       // The chunk-review scan (#95). Every chunk with work on origin is asked
       // whether a human has requested changes on its pull request, and each
@@ -1300,9 +1380,9 @@ export async function run(
       // every question the plan asked, so the plan is REBUILT when it acted.
       //
       // Rebuilt immediately rather than left stale for the next recompute: closing a member
-      // unblocks its dependents, and a run whose plan came out empty exits
-      // `success` right below. Without the re-plan a chunk somebody merged by
-      // hand would reconcile, unblock three issues, and stop the run anyway.
+      // unblocks its dependents. Without the re-plan a chunk somebody merged by
+      // hand would reconcile and then leave newly unblocked issues waiting for
+      // the next poll instead of admitting them in this recompute.
       // The re-plan reads the same authoritative GraphQL batch, which is
       // strongly consistent about the closes just made even while the candidate
       // listing lags.
@@ -1384,10 +1464,13 @@ export async function run(
       // chunk it just finished off is not also merged again by the merge phase
       // (its branch is gone by then, which the merger would park on, but
       // asking in this order means it never gets there).
-      const landRequests = selectLandRequests(
+      const selectedLandRequests = selectLandRequests(
         await fetchLandRequestPullRequests(repo, LAND_LABEL),
         resolution.landedChunks,
       );
+      const landRequests: ReturnType<typeof selectLandRequests> = planTrigger === "landing-finished"
+        ? selectedLandRequests.filter((request) => !deferredLandBranches.has(request.branch))
+        : selectedLandRequests;
       if (landRequests.length > 0) {
         const named = landRequests
           .map((r) => `${r.branch} (PR #${r.pullRequest})`)
@@ -1395,9 +1478,36 @@ export async function run(
         await runRecord.emit({ kind: "reconcile", action: "land-requested", detail: named });
       }
 
+      const laneNoticeLines: string[] = [];
+      const laneNotices = await postLaneOverrideNotices(
+        repo,
+        resolution.overrides,
+        (line) => { laneNoticeLines.push(line); },
+      );
+      const planDiagnostics = JSON.stringify({
+        heldForReview: resolution.heldForReview,
+        overrides: resolution.overrides,
+        landedChunks: resolution.landedChunks,
+        chunkNameDrifts: resolution.chunkNameDrifts,
+        selectedLandRequests,
+      });
+      const planDiagnosticsChanged = lastPlanDiagnostics !== null &&
+        planDiagnostics !== lastPlanDiagnostics;
+      lastPlanDiagnostics = planDiagnostics;
+      const chunkDriftLines = resolution.chunkNameDrifts.map((drift) => {
+        const derived = drift.derived ?? "no chunk branch can be derived";
+        return (
+          `Origin chunk branch ${drift.existing} no longer matches the name ` +
+          `derived for its root: ${derived}`
+        );
+      });
+
       const quotaClosed = quotaPending !== null || requiredAgentProviders(config).some(
         (provider) => quotaState.get(provider) !== undefined,
       );
+      // The plan record is the resolver's answer, not the narrower admission
+      // this observation may make. Active slots, cooldown and scheduler state
+      // can all reduce admission without changing what the planner resolved.
       const schedulerAction = decideSchedulerAction({
         active: pool.activeCount,
         ongoing: pool.ongoingCount,
@@ -1407,19 +1517,24 @@ export async function run(
         hasRetries: pool.hasRetries,
         hasLandRequests: landRequests.length > 0,
         hasCapacity: pool.activeCount < config.maxParallelIssues,
-        budgetRemaining: budget,
-        landings: pool.landings,
         noProgressSinceLanding: pool.noProgressSinceLanding,
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
         quotaClosed,
       });
+      const pollDidWork =
+        sourceChangedOnPoll || configStalenessChanged || planDiagnosticsChanged ||
+        followUps.length > 0 || laneNotices.length > 0 ||
+        reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
+        schedulerAction.kind === "admit" || schedulerAction.kind === "land";
+      if (planTrigger === "poll" && pollDidWork) {
+        activity.enterBusy();
+      }
       if (schedulerAction.kind === "exit") {
         await emitRecompute(iteration, planTrigger, resolution, [], landRequests);
         terminalExit = await announceExit(
           schedulerExit(
             schedulerAction.reason,
             pool,
-            runState,
             quotaPending ?? closedProviderExit(config, quotaState),
           ),
         );
@@ -1427,17 +1542,22 @@ export async function run(
       }
 
       const admission = schedulerAction.kind === "admit"
-        ? pool.admit(resolution.plan, budget)
-        : { issues: [], newStarts: 0 };
-      const executionIssues = [...admission.issues];
+        ? pool.admit(resolution.plan)
+        : [];
+      const executionIssues = [...admission];
       const issues = executionIssues;
-      runState.issuesAttempted += admission.newStarts;
-      await emitRecompute(iteration, planTrigger, resolution, issues, landRequests);
-
-      await postLaneOverrideNotices(repo, resolution.overrides, (line) =>
-        runRecord.emit({ kind: "follow-up", action: "lane-override", detail: line }).then(() => undefined),
-      );
-
+      if (issues.length > 0) {
+        activity.enterBusy();
+      }
+      if (planTrigger !== "poll" || pollDidWork) {
+        await emitRecompute(iteration, planTrigger, resolution, issues, landRequests);
+        for (const line of chunkDriftLines) {
+          await runRecord.emit({ kind: "complaint", severity: "warning", message: line });
+        }
+        for (const line of laneNoticeLines) {
+          await runRecord.emit({ kind: "follow-up", action: "lane-override", detail: line });
+        }
+      }
       // ---------------------------------------------------------------------
       // Execute (inner-loop ralph)
       // ---------------------------------------------------------------------
@@ -1457,16 +1577,21 @@ export async function run(
       // and the record of that outcome never existed at all — for work sitting
       // committed on a branch. The catch rethrows so the pool still observes
       // and finalizes a rejected task.
+      const admissionImages = currentImages;
+      const admissionConfig = {
+        ...innerLoopCfg,
+        agentImages: admissionImages.agentImages,
+      };
       for (const issue of executionIssues) {
         const issueLogger = await runRecord.issue(issue.id);
         const task: Promise<Terminal> = (async () => {
           const issueTimer = startTimer();
           try {
             const terminal = await runInnerLoop(issue, {
-              config: innerLoopCfg,
+              config: admissionConfig,
               hooks: config.sandboxHooks,
               copyToWorktree: config.copyToWorktree,
-              branchImages,
+              branchImages: admissionImages.branchImages,
               // Sandbox-sibling logs land beside this issue's attempt
               // transcripts (#44 D4), so the offline artefact of what the
               // agent's stack was doing sits next to the transcript of what the
@@ -1510,10 +1635,15 @@ export async function run(
         schedulerAction.kind === "land" ||
         (schedulerAction.kind === "admit" && schedulerAction.next === "land")
       ) {
+        activity.enterBusy();
         settled = [...pool.takeLandingBatch()];
       } else {
-        await pool.waitForFreedSlot();
-        nextPlanTrigger = "slot-freed";
+        if (pool.activeCount === 0 && !activity.isIdle()) {
+          await runRecord.emit({ kind: "idle", pollIntervalMs: config.pollIntervalMs });
+          activity.enterIdle();
+        }
+        const wake = await pool.waitForWake(config.pollIntervalMs);
+        nextPlanTrigger = wake;
         continue;
       }
       const landingLogger = runRecord.landing(++landingNumber);
@@ -1558,6 +1688,7 @@ export async function run(
       // same resolve loop a DONE branch does, and a cycle can have one without
       // the other.
       if (completedIssues.length > 0 || landRequests.length > 0) {
+        const landingImages = currentImages;
         // The merger runs in a dedicated worktree detached at
         // origin/<sourceBranch>, NOT a checkout anyone stands in — so the
         // operator's uncommitted edits can never be swept into a merge commit
@@ -1589,7 +1720,7 @@ export async function run(
             // is a tree neither branch had, and two branches that each touched
             // the lockfile compose into a third lockfile. Resolved per gate
             // run, so each merge in the landing is gated against its own.
-            images: (only) => branchImages.resolve(mergerWorktreePath, only),
+            images: (only) => landingImages.branchImages.resolve(mergerWorktreePath, only),
           });
           const stackForGate2 = mergerStack;
           const adapter = realAdapter({
@@ -1604,7 +1735,7 @@ export async function run(
             mergerAgent: config.mergerAgent,
             mergerModelId: config.mergerModelId,
             mergerEffort: config.mergerEffort,
-            sandboxImage: agentImages.declaredTag,
+            sandboxImage: landingImages.agentImages.declaredTag,
             env,
             runStackGate: () => stackForGate2.runGate(),
           });
@@ -1802,13 +1933,17 @@ export async function run(
       // this only ever produces handoff inputs.
       const mergerOutcome = halt ? haltPartial : mergerSummary;
       if (mergerOutcome) {
+        deferredLandBranches.clear();
+        for (const deferred of mergerOutcome.deferredChunks) {
+          deferredLandBranches.add(deferred.target.branch);
+        }
         const { inputs, bumpedSilentNoop } = mergeFinalizeInputs(
           mergerOutcome,
-          runState.silentNoopAttemptsByIssue,
+          silentNoopAttemptsByIssue,
           outcomes,
         );
         for (const [issueId, attempts] of bumpedSilentNoop) {
-          runState.silentNoopAttemptsByIssue.set(issueId, attempts);
+          silentNoopAttemptsByIssue.set(issueId, attempts);
         }
         const freshAttempts = new Set(
           inputs
@@ -1845,7 +1980,7 @@ export async function run(
           }
         }
         for (const issue of completedIssues) {
-          if (!freshAttempts.has(issue.id)) pool.finish(issue);
+          if (!freshAttempts.has(issue.id)) pool.finishTerminal(issue);
         }
       }
 
@@ -1873,7 +2008,7 @@ export async function run(
       // (the wrap-up calls that harmless itself, and the planner never reads
       // that display label), or a pull request that would not close. Neither leaves an
       // issue on no queue, and halting on one would abandon the rest of the
-      // run's budget over a label — while promising a next-run repair that
+      // queued work over a label — while promising a next-run repair that
       // cannot happen, since the branch those lines came with is gone.
       const landedChunks = mergerSummary?.mergedChunks ?? [];
       const landedResidue = chunkResidue(landedChunks);
@@ -1946,7 +2081,7 @@ export async function run(
       // "did origin/<sourceBranch> move" — the image-rebuild question, since an
       // image that bakes dependencies is a function of that branch (#37).
       // `landedNow` is "did work leave the pool as durable progress", which is
-      // what the backstop and the relaunch ask, and a DONE branch landed on
+      // what the backstop asks, and a DONE branch landed on
       // its chunk branch (#60) is a yes: on a review-lane host that is the
       // ONLY way work ever leaves, so a backstop counting source merges alone
       // would exit stuck after six landed issues. Chunk landings are pushed
@@ -1956,31 +2091,14 @@ export async function run(
         : 0;
       const landedNow = sourceLandings + (mergerSummary?.chunkLanded.length ?? 0);
       pool.recordLandingOutcome(
-        settled.length,
+        outcomes.length,
         landedNow,
-        settled.length === 0 && landRequests.length > 0,
       );
       nextPlanTrigger = landRequests.length > 0 || landedNow > 0
         ? "landing-finished"
         : "terminal-finalized";
       if (sourceLandings > 0) {
-        sourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
-        baseFingerprints = await ensureImages(config.images, sourceWorktree, {
-          onImage: recordImage,
-          log: () => undefined,
-          captureBuild: true,
-        });
-        agentImages = await createAgentImages({
-          declaredBaseTag: config.sandboxImage,
-          providers: requiredAgentProviders(config),
-          scope,
-          onImage: recordImage,
-          log: () => undefined,
-        });
-        branchImages = makeBranchImages(baseFingerprints);
-        agentImageRuns.push(agentImages);
-        branchImageRuns.push(branchImages);
-        innerLoopCfg.agentImages = agentImages;
+        await refreshSourceImages();
       }
       if (selectedExit?.tag === "quota") quotaPending = selectedExit;
       if (selectedExit?.tag === "halted") {
@@ -2001,16 +2119,10 @@ export async function run(
     return await stopInternalFailure(err);
   }
 
-  // EVERY terminal path arrives here having announced itself exactly once
-  // (#70) — plan-empty and halted included, which between them used to print a
-  // success banner and nothing at all. The `??` is the DEFENSIVE CEILING and
-  // nothing else: falling out of the loop without a `break` means
-  // maxRecomputes observations and not one exit condition, which nothing has ever
-  // reached. Its exit code is unchanged (success); what changed is that it used
-  // to print "All done.", the one thing a run that ran out of iterations did
-  // not do.
-  const finalExit =
-    terminalExit ?? (await announceExit(iterationCeilingExit(maxRecomputes)));
+  if (terminalExit === null) {
+    throw new Error("scheduler loop ended without a terminal exit");
+  }
+  const finalExit = terminalExit;
 
   await runCleanup();
   if (finalExit.exitCode !== 0) process.exit(finalExit.exitCode);

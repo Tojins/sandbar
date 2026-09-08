@@ -112,10 +112,12 @@ export default {
   // leave both counters unchanged. Review counts correctness rejections only.
   // maxQualityRounds: 4,
   // maxReviewRounds: 4,
-  // Stop admitting new issues after this many have started in one process.
-  // maxTotalIssues: 50,
   // DONE work releases one of these concurrent inner-loop slots immediately.
   // maxParallelIssues: 3,
+  // Refresh origin and the tracker after this many idle milliseconds.
+  // pollIntervalMs: 60000,
+  // Keep the host awake even while no work is available.
+  // keepAwakeWhileIdle: false,
 
   // Override only the tracker labels whose names differ in this repository.
   // labels: { needsInfo: "needs-info", agentStuck: "agent-stuck" },
