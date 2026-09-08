@@ -627,8 +627,6 @@ describe("role prompt-extension wiring (#91)", () => {
     );
     const filenames: string[] = [];
     const invocationSequence = createAgentInvocationSequencer().startCycle();
-    invocationSequence.filename({ role: "implementer", attempt: 1, nudge: false });
-    invocationSequence.filename({ role: "implementer", attempt: 2, nudge: false });
     const outputs = [
       { output: "", error: new Error("review provider failed") },
       { output: "<verdict>APPROVED</verdict>", error: null },
@@ -901,6 +899,19 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
           sequence.filename({ role: "implementer", attempt: 1, nudge: false }),
           record,
         );
+        await opts.attemptLogger.writeInvocation(
+          sequence.filename({ role: "implementer", attempt: 1, nudge: true }),
+          record,
+        );
+        await opts.attemptLogger.writeInvocation(
+          sequence.filename({
+            role: "reviewer",
+            attempt: 1,
+            pass: "quality",
+            invocation: 1,
+          }),
+          record,
+        );
         return cycle < 3
           ? {
               verdict: { type: "HARD-ERROR" as const, reason: `failed-${cycle}` },
@@ -922,8 +933,14 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
         runCycle,
       )).resolves.toMatchObject({ type: "DONE" });
       expect((await readdir(issueLogger.dir)).sort()).toEqual([
+        "attempt-1-nudge.log",
+        "attempt-1-reviewer-quality-1.log",
         "attempt-1.log",
+        "attempt-2-nudge.log",
+        "attempt-2-reviewer-quality-1.log",
         "attempt-2.log",
+        "attempt-3-nudge.log",
+        "attempt-3-reviewer-quality-1.log",
         "attempt-3.log",
         "ui-check-1.log",
         "ui-check-2.log",
