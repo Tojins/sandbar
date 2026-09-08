@@ -62,8 +62,10 @@
 // a lost lock remain stderr-only because no run owns the workdir yet (or, for a
 // lost lock, another run owns it). The winner immediately emits run-start,
 // including driver identity, before preflight and image preparation. Every
-// terminal path emits one structured exit and cleanup appends run-end. Readers
-// use run.pid plus run-end to distinguish live, crashed and ended runs.
+// terminal path the run selects emits one structured exit, and cleanup appends
+// run-end; a signal is the one ending with no exit event — cleanup.ts owns
+// that exit (#35), so the record carries a complaint and `run-end (signal)`.
+// Readers use run.pid plus run-end to distinguish live, crashed and ended runs.
 //
 // Termination is governed by exit-conditions.ts. Plan-empty requires a
 // quiescent pool; maxTotalIssues counts admissions; quota drains work already
@@ -491,6 +493,13 @@ export async function run(
       logsDir: layout.logsDir,
       port: config.uiPort,
       liveRunDir: runRecord.runDir,
+      onFailure: async (err) => {
+        await runRecord.emit({
+          kind: "complaint",
+          severity: "error",
+          message: `UI: ${faultDetail(err)}`,
+        });
+      },
     });
   } catch (err) {
     if (!(err instanceof UiPortInUseError)) return await stopInternalFailure(err);
@@ -636,7 +645,11 @@ export async function run(
     // rule, a `PreflightError` by `stopAtStartup`'s one exception to it — and exits,
     // and, unlike letting it escape to the bin, it runs cleanup first, which is
     // what recovers the `run.pid` sidecar.
-    await ensureRepoCache(layout, () => undefined);
+    await ensureRepoCache(layout, (line) => runRecord.emit({
+      kind: "preflight",
+      action: "cache-created",
+      detail: line,
+    }).then(() => undefined));
     await runPreflight({
       layout,
       env,

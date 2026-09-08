@@ -26,13 +26,14 @@ const since = (iso,now) => dur(parse(now)-parse(iso));
 const hhmm = iso => new Date(iso).toISOString().slice(11,16);
 const shortDate = iso => new Intl.DateTimeFormat(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}).format(new Date(iso));
 const outcomeClass = value => value === "DONE" ? "good" : value === "NEEDS-INFO" ? "warn" : "bad";
-function render(state, serverGone=false) {
+function notice(text) { return `<div class="gone">${esc(text)}</div>` }
+function render(state, serverNotice=null) {
   lastState=state; const r=state.run, now=parse(state.now), t0=parse(r.startedAt), t1=Math.max(now+300000,t0+300000), width=t1-t0;
   const x=iso => Math.max(0,Math.min(100,(parse(iso)-t0)/width*100)).toFixed(2)+"%";
   const w=(from,to) => Math.max(.2,((to?parse(to):now)-parse(from))/width*100).toFixed(2)+"%";
   const ticks=[]; for(let t=Math.ceil(t0/1800000)*1800000;t<t1;t+=1800000) ticks.push(`<span style="left:${((t-t0)/width*100).toFixed(2)}%">${hhmm(new Date(t).toISOString())}</span>`);
   const pill=r.status==="live"?`<span class="pill live"><span class="dot"></span>live · ${since(r.startedAt,state.now)}</span>`:`<span class="pill ${r.status}">${r.status}${r.exit?` · ${esc(r.exit.tag)}`:""}</span>`;
-  const top=`<header class="top"><span class="name">${esc(r.driver)}</span>${pill}<span>${r.slots.used}/${r.slots.max} slots</span>${r.lastRecompute?`<span class="dim mono">recompute ${r.lastRecompute.n} · ${esc(r.lastRecompute.trigger)} · ${hhmm(r.lastRecompute.at)}</span>`:""}${serverGone?`<div class="gone">No run is serving; last state below. Reconnecting…</div>`:""}${r.complaints.length?`<div class="warnline">⚠ ${r.complaints.map(c=>esc(c.text)).join(" · ")}</div>`:""}</header>`;
+  const top=`<header class="top"><span class="name">${esc(r.driver)}</span>${pill}<span>${r.slots.used}/${r.slots.max} slots</span>${r.lastRecompute?`<span class="dim mono">recompute ${r.lastRecompute.n} · ${esc(r.lastRecompute.trigger)} · ${hhmm(r.lastRecompute.at)}</span>`:""}${serverNotice?notice(serverNotice):""}${r.complaints.length?`<div class="warnline">⚠ ${r.complaints.map(c=>esc(c.text)).join(" · ")}</div>`:""}</header>`;
   // Startup is deliberately one row. Preflight/image detail is still in the
   // event record, but the ledger appears only once the first pool observation
   // exists and there is scheduler state worth rendering.
@@ -44,11 +45,16 @@ function render(state, serverGone=false) {
   const events=`<details><summary>Events · ${state.eventCount}</summary><div class="feed">${state.events.map(e=>`<div class="${e.tone}"><span class="dim">${hhmm(e.at)}</span><span class="${e.tone?"":"dim"}">${e.issue?`#${e.issue}`:"run"}</span><span>${esc(e.text)}</span></div>`).join("")}</div></details>`;
   document.getElementById("app").innerHTML=top+pool+waiting+finished+events;
 }
+// A failed poll never leaves the page blank or stale without saying so: a
+// network failure means no run is serving (a relaunch on the same port picks
+// the tab back up), and a non-OK response carries the server's message — a
+// corrupt record or a reducer fault on a run that is still live.
+function failed(text) { if(lastState)render(lastState,text); else document.getElementById("app").innerHTML=`<header class="top">${notice(text)}</header>` }
 async function poll(){
   let response;
   try { response=await fetch("/state.json",{cache:"no-store"}) }
-  catch(_networkError) { if(lastState)render(lastState,true); return }
-  if(!response.ok)throw new Error(`state request failed: ${response.status}`);
+  catch(_networkError) { failed("No run is serving; last state below. Reconnecting…"); return }
+  if(!response.ok){ failed(`State request failed (${response.status}): ${await response.text()}`); return }
   const state=await response.json();
   render(state);
 }

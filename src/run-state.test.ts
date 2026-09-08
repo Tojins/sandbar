@@ -192,6 +192,35 @@ describe("run event reducer", () => {
     expect(landed.finished[0]).toMatchObject({ issue: 12, outcome: "DONE", landed: "main" });
   });
 
+  it("labels teardown 'finishing' until the terminal names the outcome", () => {
+    const events: RunEvent[] = [
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
+      }),
+      at(2, "2026-09-07T09:01:00Z", {
+        kind: "admitted", issue: 12, title: "Twelve",
+        branch: "sandbar/issue-12-twelve", chunk: null, seedRef: "origin/main",
+      }),
+      at(3, "2026-09-07T09:02:00Z", { kind: "phase", issue: 12, attempt: 1, phases: ["implementer"] }),
+      at(4, "2026-09-07T09:20:00Z", { kind: "phase", issue: 12, attempt: 1, phases: [] }),
+    ];
+    const tearingDown = reduceRunEvents(events, {
+      now: new Date("2026-09-07T09:21:00Z"), pidAlive: true,
+    });
+    expect(tearingDown.pool[0]).toMatchObject({ phase: "finishing", phaseSince: "2026-09-07T09:20:00Z" });
+    expect(tearingDown.run.slots.used).toBe(0);
+
+    events.push(at(5, "2026-09-07T09:22:00Z", {
+      kind: "terminal", issue: 12, title: "Twelve", terminal: "NEEDS-INFO",
+      reason: null, durationMs: 1_200_000,
+    }));
+    const parked = reduceRunEvents(events, {
+      now: new Date("2026-09-07T09:23:00Z"), pidAlive: true,
+    });
+    expect(parked.pool[0]).toMatchObject({ phase: "NEEDS-INFO" });
+  });
+
   it("keeps a handoff visible until finalisation without occupying a slot", () => {
     const events = [
       at(1, "2026-09-07T09:00:00Z", {

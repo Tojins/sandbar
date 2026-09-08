@@ -227,8 +227,11 @@ function finishRunningSpan(issue: MutableIssue, at: string): void {
   }
 }
 
+// An empty phase set is the loop tearing the sandbox down after its verdict;
+// the terminal event that follows names the outcome (and DONE then reads
+// "landing" until its landing outcome is recorded).
 function phaseLabel(phases: readonly string[]): string {
-  return phases.length === 0 ? "landing" : phases.join(" + ");
+  return phases.length === 0 ? "finishing" : phases.join(" + ");
 }
 
 function applyPhase(issue: MutableIssue, event: Extract<RunEvent, { kind: "phase" }>): void {

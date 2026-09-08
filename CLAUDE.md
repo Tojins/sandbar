@@ -36,8 +36,9 @@ run, check `ps -ef | grep [f]orks.js` for leftovers.
 `@offergeist/sandbar` is a **library with a thin bin** (#38): `run(config)` is
 the contract (`src/index.ts`), and `src/cli.ts` resolves `--config` (default
 `./sandbar.config.mjs`) and hands the default export to `run()`. The bin also
-dispatches one subcommand, `sandbar gate` → `runGateCommand` (#45), exported
-from the package root beside `run`.
+dispatches two subcommands: `sandbar gate` → `runGateCommand` (#45), exported
+from the package root beside `run`, and `sandbar ui` (#132), the standalone
+host of the run UI for post-mortem browsing.
 
 A host repo supplies one committed `sandbar.config.mjs` at its root, its own
 `Containerfile`(s), anchor docs (`CLAUDE.md`, `CONTEXT.md`, optional ADR dir),
@@ -591,8 +592,8 @@ run it, and around again only on exit 75.
   it, and the launcher). It must: the config resolves against the process cwd
   and `sandbar.env` against its own `import.meta.url`. So "driven by a pinned
   commit" is true of the orchestrator and its prompts and NOT of `gateStack`;
-  `requiresSandbar` is the guard on the version seam that creates, and #69's
-  opening line is what shows a dirty one. `npm run driver` installs the pin
+  `requiresSandbar` is the guard on the version seam that creates, and the
+  `run-start` event's driver identity (#69) is what shows a dirty one. `npm run driver` installs the pin
   without starting a series — which the hand paths need, since the config
   imports `readEnvFile` from the driver rather than from `./dist/`.
 - **Nothing refreshes that checkout, and that is the price of #66.** The

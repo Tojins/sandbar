@@ -83,6 +83,39 @@ describe("run UI server", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it("renders a failed state request, with or without a last state", async () => {
+    const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    const app = { innerHTML: "" };
+    let interval: (() => Promise<void>) | undefined;
+    const state = {
+      now: "2026-09-07T10:00:00Z",
+      run: { startedAt: "2026-09-07T09:00:00Z", status: "live", driver: "sandbar test",
+        slots: { used: 0, max: 2 }, lastRecompute: null, exit: null, complaints: [] },
+      pool: [], waiting: [], finished: [], eventCount: 0, events: [],
+    };
+    const failure = { ok: false, status: 500, text: async () => "Invalid event JSON at line 7" };
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(failure)
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => state })
+      .mockResolvedValueOnce(failure);
+    runInNewContext(script!, {
+      document: { getElementById: () => app }, fetch,
+      setInterval: (callback: () => Promise<void>) => { interval = callback; return 1; },
+      Date, Intl, Math, String, Error, TypeError,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    // No state yet: the failure is the whole page, not a blank one.
+    expect(app.innerHTML).toContain("State request failed (500): Invalid event JSON at line 7");
+    expect(app.innerHTML).not.toContain("sandbar test");
+    await interval?.();
+    expect(app.innerHTML).toContain("sandbar test");
+    expect(app.innerHTML).not.toContain("State request failed");
+    await interval?.();
+    expect(app.innerHTML).toContain("sandbar test");
+    expect(app.innerHTML).toContain("State request failed (500): Invalid event JSON at line 7");
+  });
+
   it("uses both run.pid and process liveness to classify standalone runs", async () => {
     const live = await runTree(true);
     await mkdir(join(live.logsDir, "run-2026-09-06T10-00-00-000Z"));
@@ -138,21 +171,27 @@ describe("run UI server", () => {
     }
   });
 
-  it("returns a request error without terminating the server", async () => {
+  it("returns a request error without terminating the server and reports each new failure once", async () => {
     const tree = await runTree(false);
     const eventsPath = join(tree.runDir, "events.jsonl");
     const valid = await readFile(eventsPath, "utf8");
+    const reported: string[] = [];
     const server = await startUiServer({
       logsDir: tree.logsDir,
       liveRunDir: tree.runDir,
       host: "127.0.0.1",
       port: 0,
+      onFailure: async (err) => { reported.push((err as Error).message); },
     });
     try {
       await writeFile(eventsPath, "not json\n");
       const failed = await fetch(new URL("state.json", server.url));
       expect(failed.status).toBe(500);
       expect(await failed.text()).toMatch(/Invalid event JSON/);
+      // The page polls every two seconds; the host hears a failure once.
+      expect((await fetch(new URL("state.json", server.url))).status).toBe(500);
+      expect(reported).toHaveLength(1);
+      expect(reported[0]).toMatch(/Invalid event JSON/);
 
       await writeFile(eventsPath, valid);
       const recovered = await fetch(new URL("state.json", server.url));
@@ -160,6 +199,11 @@ describe("run UI server", () => {
       expect(await recovered.json()).toMatchObject({
         run: { driver: "sandbar test" },
       });
+
+      // A recurrence after recovery is a new failure.
+      await writeFile(eventsPath, "not json\n");
+      expect((await fetch(new URL("state.json", server.url))).status).toBe(500);
+      expect(reported).toHaveLength(2);
     } finally {
       await server.close();
     }

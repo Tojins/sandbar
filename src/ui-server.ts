@@ -5,8 +5,13 @@
 // module. The server never holds scheduler state in memory: every request
 // rereads the newest events.jsonl, so post-mortem and in-process views cannot
 // disagree. An unreadable historical record is omitted; a request failure is
-// an HTTP 500 and can never terminate the run being observed. Binding is
-// exclusive and EADDRINUSE is a startup refusal.
+// an HTTP 500 and can never terminate the run being observed — but it is not
+// silent either: the page renders the failure, and `onFailure` hands the host
+// each NEW failure message once (a live run records it as a complaint; the
+// page polls every two seconds, so per-request would flood the record). The
+// same seam takes a server error after listen, which would otherwise be an
+// unhandled 'error' and the internal-failure halt the first sentence rules
+// out. Binding is exclusive and EADDRINUSE is a startup refusal.
 
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -124,6 +129,10 @@ export type StartUiServerOptions = {
   readonly port: number;
   readonly host?: string;
   readonly liveRunDir?: string;
+  // Called once per distinct failure message, for a failed `/state.json`
+  // request or a server error after listen. Awaited; its own failure is the
+  // host's, not this module's.
+  readonly onFailure?: (err: unknown) => void | Promise<void>;
 };
 
 async function closeServer(server: Server): Promise<void> {
@@ -134,6 +143,13 @@ async function closeServer(server: Server): Promise<void> {
 
 export async function startUiServer(options: StartUiServerOptions): Promise<UiServer> {
   const html = await readFile(UI_PATH);
+  let lastFailure: string | null = null;
+  const reportFailure = async (err: unknown): Promise<void> => {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message === lastFailure) return;
+    lastFailure = message;
+    await options.onFailure?.(err);
+  };
   const server = createServer((request, response) => {
     void (async () => {
       if (request.method !== "GET") {
@@ -151,6 +167,7 @@ export async function startUiServer(options: StartUiServerOptions): Promise<UiSe
         const state = await readUiState(options.logsDir, {
           ...(options.liveRunDir === undefined ? {} : { liveRunDir: options.liveRunDir }),
         });
+        lastFailure = null;
         response.writeHead(200, {
           "Content-Type": "application/json; charset=utf-8",
           "Cache-Control": "no-store",
@@ -158,12 +175,14 @@ export async function startUiServer(options: StartUiServerOptions): Promise<UiSe
         return;
       }
       response.writeHead(404).end("Not found\n");
-    })().catch((err: unknown) => {
+    })().catch(async (err: unknown) => {
       // The browser is an observer. No malformed record, reducer bug, or other
       // request-scoped failure may become an unhandled server error that kills
-      // the live run it is observing.
+      // the live run it is observing. The page shows the message; the host
+      // hears it once through `onFailure`.
       response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" })
         .end(err instanceof Error ? err.message : String(err));
+      await reportFailure(err);
     });
   });
   const host = options.host ?? "127.0.0.1";
@@ -178,6 +197,7 @@ export async function startUiServer(options: StartUiServerOptions): Promise<UiSe
     };
     const onListening = (): void => {
       server.off("error", onError);
+      server.on("error", (err) => void reportFailure(err));
       resolveListen();
     };
     server.once("error", onError);

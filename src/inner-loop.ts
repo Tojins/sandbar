@@ -662,22 +662,11 @@ async function runSandboxCycle(
         detail: originLine,
       });
     }
-    // Logged for a chunk member either way. The second line is now true by
-    // construction rather than by assumption — `ensureIssueBranch` gives the
-    // source branch to a chunk member only when that member IS the root, and
-    // throws otherwise — so what the log records is which of the two seeds a
-    // member got, not a guess about why.
-    if (issue.chunk) {
-      await opts.onEvent({
-        kind: "preflight",
-        action: "issue-seed",
-        detail: base.chunkBranch
-          ? `issue=${issue.id} seeded from chunk tip ${base.ref} (${base.chunkBranch})`
-          : `issue=${issue.id} roots chunk ${issue.chunk.branch} and seeded from ` +
-            `${base.ref} — origin carries no such chunk branch yet, which is where ` +
-            "the merge phase will create it",
-      });
-    }
+    // For a chunk member, `admitted` above already says which of the two
+    // seeds it got: `seedRef` is the chunk tip, or the source branch when the
+    // member roots a chunk origin does not carry yet (`ensureIssueBranch`
+    // gives the source branch to a member only when it IS the root, and
+    // throws otherwise), which is where the merge phase will create it.
 
     // Worktree first (fast git ops), then container bringups in parallel: the
     // stack's mounts resolve against this worktree and must see its files on
@@ -942,17 +931,16 @@ async function runSandboxCycle(
           correctnessFailures: state.correctnessFailures,
         });
       }
-      if (
-        action.kind === "run-implementer" &&
-        (event.kind === "implementer-result" || event.kind === "gate-and-reviewer-result")
-      ) {
+      // The #27 re-prompt only. A rejected review is the `review-round`
+      // event and a red gate the `gate` event; neither is a repair.
+      if (action.kind === "run-implementer" && action.extraReprompt !== null) {
         await opts.onEvent({
           kind: "repair",
           issue: Number(issue.id),
           title: issue.title,
           attempt: action.attempt,
           action: "re-prompt",
-          detail: action.extraReprompt ?? (action.failureTrace || "review changes requested"),
+          detail: action.extraReprompt,
         });
       }
       await opts.onEvent({

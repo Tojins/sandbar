@@ -184,6 +184,7 @@ import {
   laneOverrides,
 } from "./lanes.js";
 import {
+  LOCAL_ISSUE_BRANCH_REFGLOBS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
   ORIGIN_MEMBER_BRANCH_REFGLOBS,
   branchNameFromOriginRef,
@@ -586,7 +587,7 @@ export async function readIssueBranchRefs(repoDir: string): Promise<readonly {
   const { stdout } = await exec("git", [
     "for-each-ref",
     "--format=%(refname:short) %(objectname)",
-    "refs/heads/sandbar/issue-*",
+    ...LOCAL_ISSUE_BRANCH_REFGLOBS,
   ], { cwd: repoDir });
   return stdout.split("\n").flatMap((line) => {
     const split = line.lastIndexOf(" ");

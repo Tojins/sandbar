@@ -92,10 +92,12 @@ describe("local issue ref snapshot (#132)", () => {
     git(repo, "update-ref", "refs/heads/sandbar/issue-nope", base);
     git(repo, "update-ref", "refs/heads/sandbar/chunk-12-good", base);
     git(repo, "update-ref", "refs/remotes/origin/sandbar/issue-13-remote", base);
-    expect(await readIssueBranchRefs(repo)).toEqual([{
-      issue: 12,
-      branch: "sandbar/issue-12-good",
-      tip: base,
-    }]);
+    // A legacy-prefixed branch is one preflight still syncs, so the parked
+    // join sees it too (naming.ts owns the prefix list).
+    git(repo, "update-ref", "refs/heads/sandcastle/issue-14-legacy", base);
+    expect(await readIssueBranchRefs(repo)).toEqual([
+      { issue: 12, branch: "sandbar/issue-12-good", tip: base },
+      { issue: 14, branch: "sandcastle/issue-14-legacy", tip: base },
+    ]);
   });
 });
