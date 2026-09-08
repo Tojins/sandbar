@@ -58,6 +58,12 @@
 // test suite. Nothing reads a duration back: there is no adaptive bound and no
 // warning threshold, and `step.timeoutMs` stays the one bound this module has.
 //
+// Gate concurrency is deliberately OUTSIDE this module (#142). `run()` wraps
+// every inner-loop and merger `Stack.runGate` call in one run-wide FIFO
+// semaphore, so gate-1 and gate-2 contend for the same permits without making
+// stack lifecycle aware of orchestration. `sandbar gate` calls the stack
+// directly and therefore ignores the host's run-only `maxConcurrentGates`.
+//
 // A step that exceeds its bound is a gate RED, not a HARD-ERROR — same
 // argument as D5. Killing the `podman exec` CLIENT does not touch the process
 // inside the container, so `reapKilledStep` removes the container itself

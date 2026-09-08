@@ -80,6 +80,7 @@ import {
   type InnerLoopOptions,
 } from "./inner-loop.js";
 import { createAgentInvocationSequencer } from "./logs.js";
+import { createGateSemaphore } from "./gate-semaphore.js";
 import type { PlannedIssue } from "./plan-resolver.js";
 
 const issue = (id: string): PlannedIssue => ({
@@ -91,7 +92,7 @@ const issue = (id: string): PlannedIssue => ({
 
 const runInnerLoop = (
   plannedIssue: PlannedIssue,
-  opts: Omit<InnerLoopOptions, "attemptLogger">,
+  opts: Omit<InnerLoopOptions, "attemptLogger" | "gateSemaphore">,
 ) => {
   const invocationSequencer = createAgentInvocationSequencer();
   return runInnerLoopActual(plannedIssue, {
@@ -100,6 +101,7 @@ const runInnerLoop = (
       writeInvocation: vi.fn(),
       startInvocationCycle: () => invocationSequencer.startCycle(),
     },
+    gateSemaphore: createGateSemaphore(undefined),
   });
 };
 

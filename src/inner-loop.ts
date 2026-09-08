@@ -95,6 +95,7 @@ import type { BranchImages } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import type { EventInput, UsageFields } from "./events.js";
 import { summarizeGateFailure } from "./gate.js";
+import type { GateSemaphore } from "./gate-semaphore.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
 import {
   type HeadMismatch,
@@ -498,6 +499,8 @@ export type InnerLoopOptions = {
   // phase, or measurement silently disappear from the sole run record.
   readonly onEvent: (event: EventInput) => Promise<void> | void;
   readonly providerState?: RunProviderState;
+  // The one run-wide admission seam shared with the merger (#142).
+  readonly gateSemaphore: GateSemaphore;
 };
 
 type SandboxCycleOutcome = {
@@ -1614,12 +1617,13 @@ export async function runSandboxAndPublish(
   return result;
 }
 
-async function runGate1(
+export async function runGate1(
   action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
   ctx: ExecuteActionCtx,
 ): Promise<{ readonly ok: boolean; readonly failureTrace: string }> {
   const { issue, opts, gateStack } = ctx;
-  const gate1 = await gateStack.runGate();
+  const admitted = await opts.gateSemaphore.run(() => gateStack.runGate());
+  const gate1 = admitted.value;
   await opts.onEvent({
     kind: "gate",
     issue: Number(issue.id),
@@ -1628,6 +1632,7 @@ async function runGate1(
     gate: "gate-1",
     ok: gate1.ok,
     durationMs: gate1.durationMs,
+    ...(admitted.queuedMs === undefined ? {} : { queuedMs: admitted.queuedMs }),
     steps: Object.fromEntries(gate1.steps.map((step) => [step.name, step.durationMs])),
   });
   return {

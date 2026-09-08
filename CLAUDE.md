@@ -60,6 +60,8 @@ execution slot frees. Planner-visible **ongoing** work lasts from admission
 through landing or parking; an execution **slot** lasts only while the inner
 loop runs. DONE work therefore queues for the one serialized landing path
 without consuming one of `maxParallelIssues` slots.
+Gate-1 and gate-2 share one run-wide `maxConcurrentGates` semaphore; its
+default is unlimited, so existing hosts keep their prior concurrency.
 
 1. **Plan** (`src/plan-resolver.ts` + `src/chunk-reconcile.ts`) — purely
    deterministic, no LLM: lists issues labelled `ready-for-agent`, admits them

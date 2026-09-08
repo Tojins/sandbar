@@ -85,6 +85,9 @@
 // a human push or this process refreshes the image inputs.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
+// Every gate-1 and gate-2 call passes through one run-wide FIFO semaphore
+// (#142). `maxConcurrentGates` bounds its permits; absence is unlimited, and
+// queue time is evidence on the gate event rather than a scheduling decision.
 
 import { realpathSync } from "node:fs";
 import { dirname } from "node:path";
@@ -168,6 +171,7 @@ import {
   createMergerWorktree,
 } from "./merger-worktree.js";
 import { type Stack, startStack } from "./gate-stack.js";
+import { createGateSemaphore } from "./gate-semaphore.js";
 import {
   CHUNK_LANDED_UNNAMED_BANNER,
   CHUNK_RESIDUE_KEPT_BANNER,
@@ -1055,6 +1059,10 @@ export async function run(
     sourceBranch: config.sourceBranch,
   });
 
+  // One admission queue for every gate pod in this run (#142), independent of
+  // issue execution slots and shared with the serialized landing path below.
+  const gateSemaphore = createGateSemaphore(config.maxConcurrentGates);
+
   const innerLoopCfg = {
     layout,
     repo,
@@ -1673,6 +1681,7 @@ export async function run(
               // agent did.
               sandboxLogBaseDir: issueLogger.dir,
               attemptLogger: issueLogger,
+              gateSemaphore,
               onEvent: (event) => runRecord.emit(event).then(() => undefined),
               providerState,
             });
@@ -1813,7 +1822,7 @@ export async function run(
             sandboxImage: landingImages.agentImages.declaredTag,
             env,
             ...(codexAuthMount === undefined ? {} : { codexAuthMount }),
-            runStackGate: () => stackForGate2.runGate(),
+            runStackGate: () => gateSemaphore.run(() => stackForGate2.runGate()),
           });
 
           // The only site that supplies the probe tree by hand — the two
@@ -1888,6 +1897,7 @@ export async function run(
                     ...(planned ? { title: planned.title } : {}),
                     ok: gate.ok,
                     durationMs: gate.durationMs,
+                    ...(gate.queuedMs === undefined ? {} : { queuedMs: gate.queuedMs }),
                     steps: Object.fromEntries(
                       gate.steps.map((step) => [step.name, step.durationMs]),
                     ),

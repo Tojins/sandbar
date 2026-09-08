@@ -105,6 +105,8 @@ export default {
   // maxReviewRounds: 4,
   // DONE work releases one of these concurrent inner-loop slots immediately.
   // maxParallelIssues: 3,
+  // Gate-1 and gate-2 share this run-wide limit. Unset means unlimited.
+  // maxConcurrentGates: 1,
   // Refresh origin and the tracker after this many idle milliseconds.
   // pollIntervalMs: 60000,
   // Keep the host awake even while no work is available.

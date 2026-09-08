@@ -99,6 +99,9 @@ export function formatGateSteps(steps: readonly GateStepTiming[]): string {
 // gate to `{ ok: true }` and would otherwise drop it (#82).
 export type GateTimings = {
   readonly durationMs: number;
+  // Time before this gate acquired the run-wide semaphore (#142). Absent when
+  // it was admitted immediately, including every standalone `sandbar gate`.
+  readonly queuedMs?: number;
   readonly steps: readonly GateStepTiming[];
 };
 

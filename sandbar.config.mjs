@@ -259,6 +259,11 @@ export default {
     ],
   },
 
+  // This 4 GB host has room for two agent sandboxes and one gate pod, but not
+  // for overlapping gate-1/gate-2 pods. Waiting is recorded as `queuedMs` and
+  // spends no attempt budget (#142).
+  maxConcurrentGates: 1,
+
   // Restating the default `{ tag, containerfile }` only to add `rebuildOn`,
   // which is the one thing that default cannot express. An entry with an EMPTY
   // `rebuildOn` does not participate in fingerprinting at all

@@ -36,6 +36,7 @@ import {
   priorReviewRound,
   reviewerPassRouting,
   readOnlyAgentSnapshotChanged,
+  runGate1,
   runGateAndReviewer,
   runImplementer,
   runInnerLoop,
@@ -52,7 +53,9 @@ import { qualityReviewContext } from "./prompt.js";
 import type { ReviewerOutcome } from "./reviewer-run.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { EventInput } from "./events.js";
+import type { GateResult } from "./gate.js";
 import { initialState } from "./inner-loop-machine.js";
+import { createGateSemaphore } from "./gate-semaphore.js";
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -834,6 +837,64 @@ describe("runGateAndReviewer (#123)", () => {
       kind: "complaint", severity: "warning",
       message: "issue=123 attempt=2 gate-1 red — discarded concurrent reviewer result",
     })]);
+  });
+});
+
+describe("runGate1 admission (#142)", () => {
+  it("starts a second completed attempt only after the first gate finishes", async () => {
+    let now = 0;
+    const gateSemaphore = createGateSemaphore(1, () => now);
+    const firstGate = deferred<GateResult>();
+    const starts: string[] = [];
+    const events: EventInput[] = [];
+    const result: GateResult = {
+      ok: true,
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+      failedStep: null,
+      durationMs: 7,
+      steps: [],
+      containerLogs: "",
+    };
+    const context = (id: string, runGate: () => Promise<GateResult>) => ({
+      issue: { id, title: `Issue ${id}` },
+      opts: {
+        gateSemaphore,
+        onEvent: (event: EventInput) => events.push(event),
+      },
+      gateStack: { runGate },
+    }) as unknown as Parameters<typeof runGate1>[1];
+
+    const first = runGate1(
+      { kind: "run-gate-and-reviewer", attempt: 1, reviewRound: 1 },
+      context("1", async () => {
+        starts.push("attempt-1");
+        return await firstGate.promise;
+      }),
+    );
+    const second = runGate1(
+      { kind: "run-gate-and-reviewer", attempt: 1, reviewRound: 1 },
+      context("2", async () => {
+        starts.push("attempt-2");
+        return result;
+      }),
+    );
+
+    await Promise.resolve();
+    expect(starts).toEqual(["attempt-1"]);
+    now = 12;
+    firstGate.resolve(result);
+    await expect(first).resolves.toEqual({ ok: true, failureTrace: "" });
+    await expect(second).resolves.toEqual({ ok: true, failureTrace: "" });
+    expect(starts).toEqual(["attempt-1", "attempt-2"]);
+    expect(events).toEqual([
+      expect.objectContaining({ kind: "gate", issue: 1, gate: "gate-1" }),
+      expect.objectContaining({
+        kind: "gate", issue: 2, gate: "gate-1", queuedMs: 12,
+      }),
+    ]);
+    expect(events[0]).not.toHaveProperty("queuedMs");
   });
 });
 
