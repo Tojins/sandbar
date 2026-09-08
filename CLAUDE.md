@@ -153,7 +153,8 @@ slot with `pollIntervalMs` (default 60 seconds); a poll fetches source plus the
 issue, chunk and member namespaces before running the ordinary planner. A moved source tip refreshes
 image inputs whether sandbar or a human moved it; each admission captures one
 immutable agent/branch-image bundle, so in-flight work keeps its original pair.
-No-op polls write nothing.
+No-op polls write nothing. A failed poll fetch is reported and retried after
+another interval; only the startup fetch remains a preflight refusal.
 The wake lock is released at quiescence unless `keepAwakeWhileIdle` is true.
 
 Provider quota stops admissions and drains running and landing work before exit

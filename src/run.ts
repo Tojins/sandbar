@@ -98,9 +98,11 @@
 //
 // At capacity below `maxParallelIssues`, one cancellable wait races the next
 // slot completion against `pollIntervalMs`. A poll refreshes source, issue,
-// chunk and member refs before running the ordinary plan. A no-op poll is silent; work,
-// source movement, and changed config-staleness evidence are recorded. Source
-// movement from either a human push or this process refreshes the image inputs.
+// chunk and member refs before running the ordinary plan. A failed refresh is
+// reported and waits for the next wake instead of killing the daemon; startup
+// preflight remains fatal. A no-op poll is silent; work, source movement, and
+// changed config-staleness evidence are recorded. Source movement from either
+// a human push or this process refreshes the image inputs.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
 
@@ -1140,11 +1142,20 @@ export async function run(
       const planTrigger: Parameters<typeof runLogger.writePlan>[0] = nextPlanTrigger;
       let sourceChangedOnPoll = false;
       if (planTrigger === "poll") {
-        pool.beginPoll();
         const refresh = await fetchOriginRefs(layout.repoDir, config.sourceBranch);
         if (refresh.failures.length > 0) {
-          throw new SandbarError(refresh.failures.join("\n"));
+          const line =
+            `Poll refresh failed; retrying in ${config.pollIntervalMs}ms: ` +
+            refresh.failures.join("; ");
+          console.log(line);
+          await runLogger.appendOrchestrator(line);
+          nextPlanTrigger = await pool.waitForWake(config.pollIntervalMs);
+          continue;
         }
+        // A terminal is eligible again only after the poll has refreshed the
+        // refs that planning and branch sync consume. A failed refresh is not
+        // a poll boundary and must not spend that guard.
+        pool.beginPoll();
         sourceChangedOnPoll = refresh.sourceChanged;
         if (sourceChangedOnPoll) {
           const line = `origin/${config.sourceBranch} moved during poll; refreshing source images`;

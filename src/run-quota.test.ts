@@ -250,6 +250,48 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.wakeLocks[1]?.stop).toHaveBeenCalledOnce();
   });
 
+  it("reports a failed poll refresh and retries instead of halting", async () => {
+    const arrived = issue("135");
+    seams.plan
+      .mockResolvedValueOnce(resolution([]))
+      .mockResolvedValue(resolution([arrived]));
+    vi.mocked(fetchOriginRefs)
+      .mockResolvedValueOnce({
+        sourceChanged: false,
+        failures: ["Fetching origin refs failed: network unavailable"],
+      })
+      .mockResolvedValue({ sourceChanged: false, failures: [] });
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:4");
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(fetchOriginRefs).toHaveBeenCalledTimes(2);
+    expect(seams.plan.mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[0]!);
+    expect(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[1]!);
+    expect(vi.mocked(fetchOriginRefs).mock.invocationCallOrder[1])
+      .toBeLessThan(seams.plan.mock.invocationCallOrder[1]!);
+    expect(seams.writePlan.mock.calls.slice(0, 2).map((call) => call[0]))
+      .toEqual(["launch", "poll"]);
+    expect(seams.writePlan.mock.calls.filter((call) => call[0] === "poll"))
+      .toHaveLength(1);
+    expect(seams.innerLoop).toHaveBeenCalledOnce();
+    const failureLine =
+      "Poll refresh failed; retrying in 1ms: " +
+      "Fetching origin refs failed: network unavailable";
+    expect(seams.logLines.filter((line) => line === failureLine)).toHaveLength(1);
+    expect(vi.mocked(console.log).mock.calls.flat().filter((line) =>
+      String(line) === failureLine)).toHaveLength(1);
+    expect(vi.mocked(console.error).mock.calls.flat().join("\n"))
+      .not.toContain("SANDBAR HALTED");
+  });
+
   it("releases a replacement wake lock when admitted work returns to idle", async () => {
     const arrived = issue("133");
     seams.plan
