@@ -605,7 +605,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         "exit 1",
       ]);
 
-      await runPreflight(
+      await expect(runPreflight(
         {
           ...cfg(layoutAt(target)),
           developers: ["alice"],
@@ -617,7 +617,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
           wait: async () => undefined,
           now: () => 0,
         },
-      ).catch(() => undefined);
+      )).rejects.toBeInstanceOf(PreflightError);
 
       const parked = events.find((event) => event.action === "parked")?.detail ?? "";
       expect(parked).toContain("outside the admitted queue");
