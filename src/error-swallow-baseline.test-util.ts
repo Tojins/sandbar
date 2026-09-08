@@ -42,7 +42,7 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // vocabulary (#139); malformed leases, unexpected seam failures and CAS
   // failures outside the named command boundary still throw.
   "origin-lock.ts": 2,
-  "preflight.ts": 5,
+  "preflight.ts": 3,
   "prompt.ts": 1,
   // UI port contention is classified as a startup refusal; unexpected UI
   // startup faults share the run's internal-failure path (#132). The two
