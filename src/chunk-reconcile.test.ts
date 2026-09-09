@@ -42,6 +42,7 @@ function fakeAdapter(
       },
       async closePullRequest(p) {
         record("closePullRequest", String(p));
+        return "closed" as const;
       },
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);

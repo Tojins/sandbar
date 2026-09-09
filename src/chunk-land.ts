@@ -48,7 +48,13 @@
 //                     worktree and gate-stack bringup to discover the branch
 //                     is gone, and answers with prose about a branch somebody
 //                     deleted — alarming, for the most routine outcome there
-//                     is.
+//                     is. "Closed" here means NOT OPEN: GitHub marks a pull
+//                     request MERGED by itself the moment a push to its base
+//                     makes its head commit reachable, and the landing push
+//                     is exactly that, so by the time the wrap-up asks, the
+//                     forge has usually answered already and refuses a close.
+//                     `closePullRequest` reads that state back rather than
+//                     reporting the forge's own bookkeeping as residue.
 //   * abandoned     — a conflict or a red gate the resolve loop could not fix.
 //                     A human has to look, so `land` is REMOVED and the PR
 //                     says why: leaving it on would retry the same failing
@@ -470,9 +476,10 @@ export const CHUNK_LANDED_PR_COMMENT = (args: {
   }
   lines.push(
     "",
-    `This pull request is closed rather than merged: its commits reached ` +
-      `\`${args.sourceBranch}\` through sandbar's own merge, not through GitHub's ` +
-      `merge button, so there is nothing left for it to do.`,
+    `This pull request's commits reached \`${args.sourceBranch}\` through ` +
+      `sandbar's own merge, not through GitHub's merge button. GitHub marks it ` +
+      `merged on its own when that push lands; sandbar closes it otherwise. ` +
+      `Either way there is nothing left for it to do.`,
   );
   return lines.join("\n");
 };
@@ -581,6 +588,8 @@ export const CHUNK_BRANCH_MISSING_PR_COMMENT = (args: {
 // The wrap-up
 // ---------------------------------------------------------------------------
 
+export type PullRequestCloseOutcome = "closed" | "merged";
+
 // The tracker and forge writes the wrap-up needs. A structural subset of
 // `MergerAdapter`, so the merge phase passes itself; the reconciler builds its
 // own against the same shape.
@@ -592,7 +601,11 @@ export type ChunkWrapupAdapter = {
   // request, and by the merge phase on its own to park a chunk that would not
   // merge — the label is the queue either way.
   removePullRequestLabel(pr: number, label: string): Promise<void>;
-  closePullRequest(pr: number): Promise<void>;
+  // Leaves the pull request NOT OPEN and says which way: `closed` by this
+  // call, or `merged` because the forge had already marked it so on the
+  // landing push (see the header's `landed` bullet). Throws when it is still
+  // open and would not close.
+  closePullRequest(pr: number): Promise<PullRequestCloseOutcome>;
   deleteChunkBranch(
     chunkBranch: string,
     memberIssues: readonly number[],
@@ -666,17 +679,53 @@ export function chunkForgeWrites(deps: {
         ["pr", "edit", String(pr), "--repo", slug(), "--remove-label", label],
         `failed to remove label '${label}' from pull request #${pr}`,
       ),
-    // Closed, never merged: the commits reached the source branch through
-    // sandbar's own push, so there is nothing for GitHub's merge to do — and
-    // the PR is a DRAFT, which has no merge available anyway (#62).
+    // The commits reached the source branch through sandbar's own push, and
+    // the PR is a DRAFT with no merge button (#62) — but GitHub still marks a
+    // pull request MERGED on its own when a push to the base branch makes the
+    // head commit reachable, attributed to whoever pushed. In practice the
+    // forge wins that race every time (every chunk PR outdoor ever landed is
+    // MERGED, with `closedAt` equal to `mergedAt`), and `gh pr close` then
+    // exits 1 with "can't be closed because it was already merged". So: close,
+    // and on failure ask the forge for the state. MERGED is the outcome this
+    // call exists to reach, reported as such; anything else rethrows the
+    // close's own failure, which keeps a forge that is down or a PR that is
+    // genuinely stuck open loud. The state is read only AFTER a failed close
+    // rather than before it, because a read-then-close can lose the same race
+    // in the gap and the failure would be back.
     // `--delete-branch` is deliberately not passed: the branch delete is the
     // wrap-up's own last step and it is conditional on every member having
     // closed, which this call cannot know.
-    closePullRequest: (pr) =>
-      gh(
+    async closePullRequest(pr) {
+      const refused: unknown = await gh(
         ["pr", "close", String(pr), "--repo", slug()],
         `failed to close pull request #${pr}`,
-      ),
+      ).then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+      if (refused === undefined) return "closed";
+      // A read, so no lease barrier: nothing on origin moves. Everything that
+      // fails here still throws — the refused close is the failure, and a
+      // state that could not be read only adds to it.
+      let state: unknown;
+      try {
+        const { stdout } = await exec("gh", [
+          "pr", "view", String(pr), "--repo", slug(), "--json", "state",
+        ]);
+        const parsed: unknown = JSON.parse(stdout);
+        state =
+          parsed !== null && typeof parsed === "object"
+            ? (parsed as Record<string, unknown>)["state"]
+            : undefined;
+      } catch (readErr) {
+        throw new SandbarError(
+          `${detail(refused)}; reading the pull request's state back also failed: ${detail(readErr)}`,
+          { cause: readErr },
+        );
+      }
+      if (state === "MERGED") return "merged";
+      throw refused;
+    },
     async deleteChunkBranch(chunkBranch, memberIssues) {
       // Fully qualified, and not `--force`-anything: `git push --delete` has no
       // force to give. It is safe on the one precondition every caller
@@ -842,17 +891,20 @@ export async function wrapUpLandedChunk(
         `the pull request #${target.pullRequest} for ${target.branch} kept its \`${LAND_LABEL}\` label: ${detail(err)}`,
       );
     }
-    let pullRequestClosed = false;
+    let closeOutcome: PullRequestCloseOutcome | undefined;
     try {
-      await adapter.closePullRequest(target.pullRequest);
-      pullRequestClosed = true;
+      closeOutcome = await adapter.closePullRequest(target.pullRequest);
     } catch (err) {
       residue.push(
         `the pull request #${target.pullRequest} for ${target.branch} could not be closed: ${detail(err)}`,
       );
     }
-    if (pullRequestClosed) {
+    if (closeOutcome === "closed") {
       await log(`chunk ${target.branch}: closed PR #${target.pullRequest}`);
+    } else if (closeOutcome === "merged") {
+      await log(
+        `chunk ${target.branch}: PR #${target.pullRequest} was already marked merged by the forge on the landing push`,
+      );
     }
   }
 

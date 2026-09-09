@@ -228,6 +228,7 @@ function makeWrapupAdapter(
       },
       async closePullRequest(p) {
         record("closePullRequest", String(p));
+        return "closed" as const;
       },
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
@@ -360,6 +361,26 @@ describe("wrapUpLandedChunk (#64)", () => {
     expect(r.residue[0]).toContain("harmless");
   });
 
+  it("reports a PR the forge already marked merged as landed, not as residue", async () => {
+    const { adapter, calls } = makeWrapupAdapter();
+    adapter.closePullRequest = async (p) => {
+      calls.push({ op: "closePullRequest", arg: String(p) });
+      return "merged";
+    };
+    const lines: string[] = [];
+    const r = await wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+      log: async (line) => {
+        lines.push(line);
+      },
+    });
+    expect(r.branchDeleted).toBe(true);
+    expect(r.residue).toEqual([]);
+    expect(lines.join("\n")).toContain("PR #9 was already marked merged by the forge");
+    expect(lines.join("\n")).not.toContain("closed PR #9");
+  });
+
   it("still deletes the branch when the pull request will not close", async () => {
     const { adapter } = makeWrapupAdapter({ closePullRequest: "already merged" });
     const r = await wrapUpLandedChunk(target, adapter, {
@@ -466,7 +487,7 @@ describe("the prose (#64)", () => {
     expect(body).toContain("retired once every issue on it has closed");
   });
 
-  it("says the PR is closed rather than merged, and lists what actually closed", () => {
+  it("says the commits landed through sandbar's merge, and lists what actually closed", () => {
     const body = CHUNK_LANDED_PR_COMMENT({
       chunkBranch: "sandbar/chunk-42-alpha",
       sourceBranch: "main",
@@ -475,7 +496,7 @@ describe("the prose (#64)", () => {
       unclosed: [],
     });
     expect(body).toContain("- #42 — alpha");
-    expect(body).toContain("closed rather than merged");
+    expect(body).toContain("GitHub marks it merged on its own");
     expect(body).toContain("The chunk branch is being deleted.");
   });
 

@@ -379,6 +379,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       calls.order.push("pr-close");
       const e = script.wrapupFails?.closePullRequest;
       if (e) throw new SandbarError(e);
+      return "closed" as const;
     },
     async checkoutDetached(ref) {
       calls.checkouts.push(ref);

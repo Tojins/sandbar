@@ -137,7 +137,9 @@ default is unlimited, so existing hosts keep their prior concurrency.
    `origin/<chunk>` in the SAME source pass, ahead of the auto lane's branches,
    so one gate-2 and one landing cover both; the wrap-up then closes the
    members whose landing-only member refs it contains, drops `needs-review`,
-   takes `land` back off the PR, closes it and deletes the branch.
+   takes `land` back off the PR, closes it (or accepts the MERGED mark GitHub
+  itself puts on a PR whose head the landing push made reachable) and deletes
+  the branch.
    `src/chunk-land.ts` owns the label, the
    selection, the wrap-up and — as `chunkForgeWrites` — the one spelling of the
    `gh`/`git` writes it makes, which the merge phase and the plan-time

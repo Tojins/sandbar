@@ -292,6 +292,7 @@ import {
   type ChunkLandTarget,
   type ChunkWrapup,
   LAND_LABEL,
+  type PullRequestCloseOutcome,
   chunkForgeWrites,
   wrapUpLandedChunk,
 } from "./chunk-land.js";
@@ -708,7 +709,7 @@ export type MergerAdapter = ResolveAdapter & {
   // again. The wrap-up drops it when a chunk lands; the merge loop drops it on
   // its own when one is parked. See `chunk-land.ts` on the label as a queue.
   removePullRequestLabel(pr: number, label: string): Promise<void>;
-  closePullRequest(pr: number): Promise<void>;
+  closePullRequest(pr: number): Promise<PullRequestCloseOutcome>;
 };
 
 export type SkipReason =

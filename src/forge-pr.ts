@@ -8,9 +8,10 @@
 //     is abandoned;
 //   * the CHUNK PR (#62, chunk-pr.ts + merger.ts) — a durable review surface
 //     for a review-gated chunk, opened as a DRAFT and left open for as long as
-//     the review takes. Since #64 sandbar does close one, but only on the far
-//     side of the landing it asked for, and through its own `gh pr close`
-//     rather than through anything here.
+//     the review takes. Since #64 sandbar does retire one, but only on the far
+//     side of the landing it asked for, and through `chunk-land.ts`'s own
+//     close — which GitHub usually pre-empts by marking the PR merged on the
+//     landing push — rather than through anything here.
 //
 // What they share is the discipline, and it is the part that is easy to get
 // subtly wrong twice: find the open PR for this head→base pair, RE-TITLE and

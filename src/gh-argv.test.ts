@@ -329,6 +329,89 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
     });
   });
 
+  // GitHub marks a pull request MERGED by itself once the landing push makes
+  // its head reachable from the base, and refuses `gh pr close` from then on
+  // — which is the routine outcome, not the exception. Driven through the
+  // shim because what is under test is the real adapter's second question.
+  describe("closing a chunk pull request the forge already marked merged", () => {
+    const shim = (closeExit: number, state: string): Promise<void> =>
+      writeFile(
+        join(shimBin, "gh"),
+        [
+          "#!/bin/sh",
+          `log='${argvLog}'`,
+          'printf "[" >> "$log"',
+          'sep=""',
+          'for a in "$@"; do',
+          '  printf \'%s"%s"\' "$sep" "$a" >> "$log"',
+          '  sep=","',
+          "done",
+          'printf "]\\n" >> "$log"',
+          'case "$*" in',
+          `  "pr close"*) echo "X Pull request acme/app#9 can't be closed because it was already merged" >&2; exit ${closeExit} ;;`,
+          `  "pr view"*) printf '{"state":"${state}"}' ;;`,
+          "esac",
+          "exit 0",
+        ].join("\n") + "\n",
+        { mode: 0o755 },
+      );
+    const adapter = () =>
+      chunkForgeWrites({
+        repo: REPO,
+        gitCwd: "/nonexistent-bare-cache",
+        errPrefix: "merger",
+        beforeOriginWrite,
+      });
+
+    it("answers `merged` after reading the state back from the configured repo", async () => {
+      await shim(1, "MERGED");
+
+      await expect(adapter().closePullRequest(9)).resolves.toBe("merged");
+
+      const [close, view] = await calls();
+      expect(close?.slice(0, 3)).toEqual(["pr", "close", "9"]);
+      expect(view?.slice(0, 3)).toEqual(["pr", "view", "9"]);
+      expect(repoFlagOf(view ?? [])).toBe("acme/app");
+      expect(view).toContain("--json");
+      expect(view).toContain("state");
+      // The read is a read: no lease barrier ahead of it.
+      expect(await records()).toEqual([["lease"], close, view]);
+    });
+
+    it("answers `closed` without a second call when the close itself worked", async () => {
+      await shim(0, "MERGED");
+
+      await expect(adapter().closePullRequest(9)).resolves.toBe("closed");
+
+      expect(await calls()).toHaveLength(1);
+    });
+
+    it("names both failures when the state cannot be read back either", async () => {
+      await shim(1, "");
+      await writeFile(
+        join(shimBin, "gh"),
+        (await readFile(join(shimBin, "gh"), "utf8")).replace(
+          `"pr view"*) printf '{"state":""}' ;;`,
+          `"pr view"*) echo "gh: forge unreachable" >&2; exit 1 ;;`,
+        ),
+        { mode: 0o755 },
+      );
+
+      await expect(adapter().closePullRequest(9)).rejects.toThrow(
+        /failed to close pull request #9: .*already merged.*reading the pull request's state back also failed: .*forge unreachable/s,
+      );
+    });
+
+    it("rethrows the close's own failure when the pull request is still open", async () => {
+      await shim(1, "OPEN");
+
+      await expect(adapter().closePullRequest(9)).rejects.toThrow(
+        /merger: failed to close pull request #9: .*already merged/s,
+      );
+      expect(await calls()).toHaveLength(2);
+    });
+  });
+
   it("atomically deletes the chunk ref and its strict member refs", async () => {
     await writeFile(
       join(shimBin, "git"),
