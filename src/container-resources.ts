@@ -3,8 +3,11 @@
 // Sandbar does not set a memory limit and these facts never influence a
 // verdict, timeout, retry, or concurrency decision. They are measurements for
 // the operator: `peakMemoryBytes` is the cgroup-v2 `memory.peak` value and
-// `oomKilled` is Podman's recorded `.State.OOMKilled` bit. Missing cgroup-v2
-// delegation, an older kernel without `memory.peak`, a stopped container that
+// `oomKilled` is the cgroup's non-zero `memory.events` `oom_kill` counter,
+// OR-ed with Podman's recorded `.State.OOMKilled` bit. The cgroup counter is
+// what sees a workload killed under `podman exec` while a held PID 1 survives;
+// Podman's bit still sees the container-init case. Missing cgroup-v2
+// delegation, an older kernel without either file, a stopped container that
 // Podman can no longer sample, and an unreadable inspect all mean ABSENT —
 // never zero.
 //
@@ -89,9 +92,27 @@ export function parseContainerState(value: string): {
   };
 }
 
-export function memoryPeakPath(cgroupPath: string): string | null {
+const cgroupFilePath = (cgroupPath: string, file: string): string | null => {
   const path = resolve(CGROUP_ROOT, `.${cgroupPath.startsWith("/") ? cgroupPath : `/${cgroupPath}`}`);
-  return path.startsWith(`${CGROUP_ROOT}${sep}`) ? `${path}${sep}memory.peak` : null;
+  return path.startsWith(`${CGROUP_ROOT}${sep}`) ? `${path}${sep}${file}` : null;
+};
+
+export function memoryPeakPath(cgroupPath: string): string | null {
+  return cgroupFilePath(cgroupPath, "memory.peak");
+}
+
+export function memoryEventsPath(cgroupPath: string): string | null {
+  return cgroupFilePath(cgroupPath, "memory.events");
+}
+
+export function parseMemoryEvents(value: string): boolean | undefined {
+  for (const line of value.split("\n")) {
+    const match = /^oom_kill\s+(\d+)$/.exec(line.trim());
+    if (match === null) continue;
+    const count = bytes(match[1]!);
+    return count === undefined ? undefined : count > 0;
+  }
+  return undefined;
 }
 
 // `.MemUsageBytes` is `"<usage> / <limit>"`; only the sampled usage belongs
@@ -118,6 +139,19 @@ const unavailableFile = (err: unknown): boolean => {
   return typeof code === "string";
 };
 
+const readOptional = async (
+  path: string | null,
+  read: ContainerResourceDeps["read"],
+): Promise<string | undefined> => {
+  if (path === null) return undefined;
+  try {
+    return await read(path);
+  } catch (err) {
+    if (!unavailableFile(err)) throw err;
+    return undefined;
+  }
+};
+
 export async function readContainerResources(
   containerName: string,
   deps: ContainerResourceDeps,
@@ -134,15 +168,14 @@ export async function readContainerResources(
   const state = ok(inspected) ? parseContainerState(inspected.stdout) : {};
 
   let peakMemoryBytes: number | undefined;
+  let cgroupOomKilled: boolean | undefined;
   if (state.cgroupPath !== undefined) {
-    const path = memoryPeakPath(state.cgroupPath);
-    if (path !== null) {
-      try {
-        peakMemoryBytes = bytes(await deps.read(path));
-      } catch (err) {
-        if (!unavailableFile(err)) throw err;
-      }
-    }
+    const [peak, events] = await Promise.all([
+      readOptional(memoryPeakPath(state.cgroupPath), deps.read),
+      readOptional(memoryEventsPath(state.cgroupPath), deps.read),
+    ]);
+    if (peak !== undefined) peakMemoryBytes = bytes(peak);
+    if (events !== undefined) cgroupOomKilled = parseMemoryEvents(events);
   }
   if (peakMemoryBytes === undefined) {
     const sampled = await deps.podman(
@@ -152,9 +185,14 @@ export async function readContainerResources(
     if (ok(sampled)) peakMemoryBytes = parseStatsMemory(sampled.stdout);
   }
 
+  const oomKilled = cgroupOomKilled === true || state.oomKilled === true
+    ? true
+    : cgroupOomKilled === false
+      ? false
+      : undefined;
   return {
     ...(peakMemoryBytes === undefined ? {} : { peakMemoryBytes }),
-    ...(state.oomKilled === undefined ? {} : { oomKilled: state.oomKilled }),
+    ...(oomKilled === undefined ? {} : { oomKilled }),
   };
 }
 

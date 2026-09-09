@@ -3,9 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CONTAINER_RESOURCE_TIMEOUT_MS,
   formatContainerResources,
+  memoryEventsPath,
   memoryPeakPath,
   mergeContainerResources,
   parseContainerState,
+  parseMemoryEvents,
   parseStatsMemory,
   readContainerResources,
   type ContainerResourceResult,
@@ -37,17 +39,23 @@ describe("container resource evidence", () => {
     expect(memoryPeakPath("/user.slice/c.scope")).toBe(
       "/sys/fs/cgroup/user.slice/c.scope/memory.peak",
     );
+    expect(memoryEventsPath("/user.slice/c.scope")).toBe(
+      "/sys/fs/cgroup/user.slice/c.scope/memory.events",
+    );
     expect(memoryPeakPath("../../etc")).toBeNull();
+    expect(memoryEventsPath("../../etc")).toBeNull();
   });
 
-  it("reads memory.peak and OOMKilled through the injected seams", async () => {
+  it("reads memory.peak and the cgroup OOM counter through the injected seams", async () => {
     const podman = vi.fn(async () => result(
       "/user.slice/libpod-a.scope\nfalse\n",
     ));
-    const read = vi.fn(async () => "918552576\n");
+    const read = vi.fn(async (path: string) => path.endsWith("memory.peak")
+      ? "918552576\n"
+      : "low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n");
     await expect(readContainerResources("agent-a", { podman, read })).resolves.toEqual({
       peakMemoryBytes: 918552576,
-      oomKilled: false,
+      oomKilled: true,
     });
     expect(podman).toHaveBeenCalledWith(
       [
@@ -58,9 +66,8 @@ describe("container resource evidence", () => {
       ],
       CONTAINER_RESOURCE_TIMEOUT_MS,
     );
-    expect(read).toHaveBeenCalledWith(
-      "/sys/fs/cgroup/user.slice/libpod-a.scope/memory.peak",
-    );
+    expect(read).toHaveBeenCalledWith("/sys/fs/cgroup/user.slice/libpod-a.scope/memory.peak");
+    expect(read).toHaveBeenCalledWith("/sys/fs/cgroup/user.slice/libpod-a.scope/memory.events");
     expect(podman).toHaveBeenCalledTimes(1);
   });
 
@@ -69,7 +76,10 @@ describe("container resource evidence", () => {
       .mockResolvedValueOnce(result("/old.scope\ntrue\n"))
       .mockResolvedValueOnce(result("344064000 / 4294967296\n"));
     const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
-    const read = vi.fn(async () => { throw missing; });
+    const read = vi.fn(async (path: string) => {
+      if (path.endsWith("memory.peak")) throw missing;
+      return "oom_kill 0\n";
+    });
     await expect(readContainerResources("resolve-1", { podman, read })).resolves.toEqual({
       peakMemoryBytes: 344064000,
       oomKilled: true,
@@ -88,7 +98,7 @@ describe("container resource evidence", () => {
     await expect(readContainerResources("gone", {
       podman,
       read: vi.fn(),
-    })).resolves.toEqual({ oomKilled: false });
+    })).resolves.toEqual({});
     const uninspectable = vi.fn()
       .mockResolvedValueOnce(result("", 125))
       .mockResolvedValueOnce(result("2048 / 4096"));
@@ -102,6 +112,26 @@ describe("container resource evidence", () => {
       podman: async () => result("", 125),
       read: vi.fn(),
     })).resolves.toEqual({});
+  });
+
+  it("ORs cgroup and Podman OOM evidence without treating Podman false as proof", async () => {
+    expect(parseMemoryEvents("low 0\noom 2\noom_kill 0\n")).toBe(false);
+    expect(parseMemoryEvents("oom_kill 3\n")).toBe(true);
+    expect(parseMemoryEvents("oom 1\n")).toBeUndefined();
+
+    const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
+    const absentEvents = vi.fn(async (path: string) => {
+      if (path.endsWith("memory.events")) throw missing;
+      return "512\n";
+    });
+    await expect(readContainerResources("held", {
+      podman: async () => result("/held.scope\nfalse\n"),
+      read: absentEvents,
+    })).resolves.toEqual({ peakMemoryBytes: 512 });
+    await expect(readContainerResources("init-oom", {
+      podman: async () => result("/held.scope\ntrue\n"),
+      read: absentEvents,
+    })).resolves.toEqual({ peakMemoryBytes: 512, oomKilled: true });
   });
 
   it("parses and formats resource fields without rendering a routine false OOM bit", () => {

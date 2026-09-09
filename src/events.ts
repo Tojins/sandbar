@@ -11,8 +11,9 @@
 // one merge unit; `landing-batch` carries the distinct whole-phase duration.
 // Container-backed duration boundaries may also carry `peakMemoryBytes`
 // (cgroup-v2 `memory.peak`, or Podman's sampled usage only as a fallback) and
-// `oomKilled` (Podman's State.OOMKilled). Both are measurements only. An
-// unavailable fact is omitted rather than encoded as zero (#141).
+// `oomKilled` (cgroup-v2 `memory.events` `oom_kill`, OR-ed with Podman's
+// State.OOMKilled). Both are measurements only. An unavailable fact is omitted
+// rather than encoded as zero (#141).
 //
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an

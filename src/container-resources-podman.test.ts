@@ -15,7 +15,11 @@ import { promisify } from "node:util";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { memoryPeakPath, parseContainerState } from "./container-resources.js";
+import {
+  memoryEventsPath,
+  memoryPeakPath,
+  parseContainerState,
+} from "./container-resources.js";
 import { scopedResourcePrefix } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import { podmanTestScope } from "./podman-test-scope.test-util.js";
@@ -57,6 +61,9 @@ describe.runIf(available && rootless)("container resource cgroup evidence", () =
       const path = memoryPeakPath(state.cgroupPath ?? "");
       expect(path).not.toBeNull();
       expect((await readFile(path!, "utf8")).trim()).toMatch(/^\d+$/);
+      const eventsPath = memoryEventsPath(state.cgroupPath ?? "");
+      expect(eventsPath).not.toBeNull();
+      expect(await readFile(eventsPath!, "utf8")).toMatch(/^oom_kill \d+$/m);
     } finally {
       await exec(RUNTIME, ["rm", "-f", "-v", "-t", "0", name]).catch(() => undefined);
     }
