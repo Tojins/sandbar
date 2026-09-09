@@ -7,9 +7,10 @@ import { execFile } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, describe, it } from "vitest";
+import { afterAll, describe, it, vi } from "vitest";
 
 import { resolveGateStack } from "./config.js";
+import { setCleanupReporter } from "./cleanup.js";
 import {
   bringUpContainers,
   CONTAINER_RM_ARGS,
@@ -21,7 +22,11 @@ import {
   IMAGE,
   runExit,
 } from "./gate-stack-podman.test-util.js";
-import { scopedResourcePrefix, stackContainerNameFor } from "./naming.js";
+import {
+  networkNameFor,
+  scopedResourcePrefix,
+  stackContainerNameFor,
+} from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   podmanTestScope,
@@ -30,6 +35,7 @@ import {
   runFixtureContainer,
 } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
+import type { ContainerTeardown } from "./container-resources.js";
 
 const exec = promisify(execFile);
 
@@ -75,6 +81,97 @@ afterAll(async () => {
 
 describe.runIf(available)("gate stack against real podman", () => {
   it.concurrent(
+    "drains all containers before surfacing measurement or event failures",
+    async ({ expect, task, onTestFinished }) => {
+      const { repo, stackId, hold, maybeIdOf } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+      );
+      const measurementFailure = new Error("cgroup reader failed");
+      const reported: string[] = [];
+      const eventFailures: Error[] = [];
+      const notices: Array<{ message: string; cause: unknown }> = [];
+      let removalFailureInjected = false;
+      const stack = hold(await startStack({
+        stackId,
+        scope: SCOPE,
+        worktreePath: repo,
+        spec: resolveGateStack({
+          containers: [
+            {
+              name: "db",
+              image: IMAGE,
+              lifecycle: "issue",
+              mountWorktree: "/work",
+              hold: true,
+            },
+            { name: "cache", image: IMAGE, lifecycle: "issue", hold: true },
+            { name: "runner", image: IMAGE, hold: true },
+          ],
+          steps: [{ name: "noop", in: "db", command: ["true"] }],
+        }),
+        containerResources: async (name) => {
+          if (name.endsWith("-runner")) {
+            throw measurementFailure;
+          }
+          return { peakMemoryBytes: 1024 };
+        },
+        teardownPodman: async (args) => {
+          const removed = await exec(RUNTIME, [...args]);
+          const injectedFailure = args[0] === "pod";
+          if (injectedFailure) removalFailureInjected = true;
+          return {
+            stdout: removed.stdout,
+            stderr: removed.stderr,
+            exitCode: injectedFailure ? 125 : 0,
+            timedOut: false,
+            maxBufferExceeded: false,
+            errorMessage: injectedFailure ? "injected pod removal failure" : "",
+          };
+        },
+        onContainerTeardown: async (record) => {
+          reported.push(record.name);
+          const failure = new Error(`event failed for ${record.name}`);
+          eventFailures.push(failure);
+          throw failure;
+        },
+      }));
+      expect((await stack.runGate()).ok).toBe(true);
+
+      let failure: unknown;
+      const restoreReporter = setCleanupReporter((_kind, message, cause) => {
+        notices.push({ message, cause });
+      });
+      try {
+        await stack.stop();
+      } catch (err) {
+        failure = err;
+      } finally {
+        restoreReporter();
+      }
+      expect(removalFailureInjected).toBe(true);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toMatch(/failed, leaking podman resources/);
+      expect(failure).not.toBe(measurementFailure);
+      expect(eventFailures).toHaveLength(2);
+      expect(notices).toEqual([
+        expect.objectContaining({ cause: measurementFailure }),
+        ...eventFailures.map((cause) => expect.objectContaining({ cause })),
+      ]);
+      expect(reported).toEqual(["db", "cache"]);
+      expect(await maybeIdOf("db")).toBeNull();
+      expect(await maybeIdOf("cache")).toBeNull();
+      expect(await maybeIdOf("runner")).toBeNull();
+      expect((await runExit(["network", "exists", networkNameFor(SCOPE, stackId)]))).toEqual({
+        code: 1,
+        stdout: "",
+      });
+    },
+    180_000,
+  );
+
+  it.concurrent(
     "runs steps in a held container that sees the worktree, and reports the failing step",
     async ({ expect, task, onTestFinished }) => {
       const { repo, stackId, hold } = await gateStackFixture(
@@ -82,6 +179,26 @@ describe.runIf(available)("gate stack against real podman", () => {
         task.id,
         onTestFinished,
       );
+      const teardowns: ContainerTeardown[] = [];
+      const firstStepSnapshotReadMs: number[] = [];
+      let snapshotReads = 0;
+      const containerResources = vi.fn(async () => ({
+        peakMemoryBytes: 4096,
+        oomKilled: false,
+      }));
+      const containerResourceSnapshot = vi.fn(async () => {
+        snapshotReads += 1;
+        if (snapshotReads <= 2) {
+          const started = performance.now();
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          firstStepSnapshotReadMs.push(performance.now() - started);
+        }
+        return {
+          ...(snapshotReads % 2 === 0 ? { peakMemoryBytes: 4096 } : {}),
+          oomKillCount: snapshotReads === 1 ? 4 : 5,
+          podmanOomKilled: false,
+        };
+      });
 
       const stack = hold(
         await startStack({
@@ -110,6 +227,9 @@ describe.runIf(available)("gate stack against real podman", () => {
               },
             ],
           }),
+          containerResources,
+          containerResourceSnapshot,
+          onContainerTeardown: (record) => teardowns.push(record),
         }),
       );
 
@@ -135,11 +255,39 @@ describe.runIf(available)("gate stack against real podman", () => {
       ]);
       expect(green.steps.every((x) => x.ok)).toBe(true);
       expect(green.steps.every((x) => x.durationMs >= 0)).toBe(true);
+      expect(green.steps.find((x) => x.name === "read-marker")).toMatchObject({
+        peakMemoryBytes: 4096,
+        oomKilled: true,
+      });
+      expect(green.steps.find((x) => x.name === "env")).toMatchObject({
+        peakMemoryBytes: 4096,
+        oomKilled: false,
+      });
+      expect(firstStepSnapshotReadMs).toHaveLength(2);
+      expect(green.steps.find((x) => x.name === "read-marker")!.durationMs)
+        .toBeLessThan(firstStepSnapshotReadMs[0]!);
+      expect(green.steps.find((x) => x.name === "read-marker")!.durationMs)
+        .toBeLessThan(firstStepSnapshotReadMs[1]!);
       // The whole run is at least as long as any one phase of it, and the
       // phases do not sum past it either — a cheap check that all six are on
       // the same clock.
       const sum = green.steps.reduce((a, x) => a + x.durationMs, 0);
       expect(green.durationMs).toBeGreaterThanOrEqual(sum - green.steps.length);
+
+      // A second gate replaces the attempt generation; stop tears down its
+      // successor. Both records are retained and reported after the drain.
+      const second = await stack.runGate();
+      expect(second.ok).toBe(true);
+      expect(second.steps.filter((step) => step.name === "read-marker" || step.name === "env"))
+        .toEqual(second.steps
+          .filter((step) => step.name === "read-marker" || step.name === "env")
+          .map((step) => expect.objectContaining({ oomKilled: false })));
+      await stack.stop();
+      expect(teardowns).toHaveLength(2);
+      expect(teardowns).toEqual(teardowns.map((record) => expect.objectContaining({
+        name: "runner", lifecycle: "attempt", peakMemoryBytes: 4096,
+      })));
+      expect(containerResources).toHaveBeenCalled();
     },
     180_000,
   );
@@ -182,6 +330,10 @@ describe.runIf(available)("gate stack against real podman", () => {
               },
             ],
           }),
+          containerResources: async () => ({
+            peakMemoryBytes: 8192,
+            oomKilled: true,
+          }),
         }),
       );
 
@@ -208,6 +360,8 @@ describe.runIf(available)("gate stack against real podman", () => {
       expect(red.steps[red.steps.length - 1]).toMatchObject({
         name: "boom",
         ok: false,
+        peakMemoryBytes: 8192,
+        oomKilled: true,
       });
     },
     180_000,
@@ -238,9 +392,13 @@ describe.runIf(available)("gate stack against real podman", () => {
             ],
             steps: [{ name: "ok", in: "runner", command: ["true"] }],
           }),
+          containerResources: async () => ({}),
         }),
       );
-      expect((await stack.runGate()).ok).toBe(true);
+      const green = await stack.runGate();
+      expect(green.ok).toBe(true);
+      expect(green.steps.find((step) => step.name === "ok"))
+        .not.toHaveProperty("peakMemoryBytes");
 
       await writeFile(join(repo, "forgotten.ts"), "export const x = 1;\n");
       const refused = await stack.runGate();
@@ -447,12 +605,18 @@ describe.runIf(available)("gate stack against real podman", () => {
         task.id,
         onTestFinished,
       );
+      let attemptPhaseStartedAt: number | undefined;
+      let failedResourceReadStartedAt: number | undefined;
 
       const stack = hold(
         await startStack({
           stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
+          images: async () => {
+            attemptPhaseStartedAt = performance.now();
+            return new Map();
+          },
           spec: resolveGateStack({
             containers: [
               {
@@ -478,12 +642,30 @@ describe.runIf(available)("gate stack against real podman", () => {
             ],
             steps: [{ name: "ok", in: "runner", command: ["true"] }],
           }),
+          containerResources: async (name) => {
+            if (name === cName("broken")) {
+              failedResourceReadStartedAt = performance.now();
+              await new Promise((resolve) => setTimeout(resolve, 3_000));
+            }
+            return {};
+          },
         }),
       );
 
       const red = await stack.runGate();
       expect(red.ok).toBe(false);
       expect(red.failedStep).toBe(`container:${cName("broken")}`);
+      expect(attemptPhaseStartedAt).toBeDefined();
+      expect(failedResourceReadStartedAt).toBeDefined();
+      const durationBeforeResourceRead = Math.round(
+        failedResourceReadStartedAt! - attemptPhaseStartedAt!,
+      );
+      expect(red.steps.at(-1)!.durationMs).toBeGreaterThan(
+        durationBeforeResourceRead - 500,
+      );
+      expect(red.steps.at(-1)!.durationMs).toBeLessThan(
+        durationBeforeResourceRead + 500,
+      );
       // The container's own log is the trace — without it the agent is told
       // only that something failed to start.
       expect(red.containerLogs).toContain("bootstrap-failed");

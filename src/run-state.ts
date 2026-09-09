@@ -4,12 +4,19 @@
 // the pool timeline, waiting/parked join and compact event prose, while the
 // HTTP server owns only file discovery and delivery. Wall-clock `now` and PID
 // liveness are explicit inputs so tests do not depend on either ambient fact.
+// Container resource fields stay attached to feed rows verbatim (#141), and a
+// gate's per-step map is passed by reference; the reducer neither reinterprets
+// unavailable measurements nor turns them into zeroes. A failed, quota-closed
+// or credential-closed implementer invocation is failure evidence rather than
+// a completed attempt; an OOM kill names that failure in the feed.
 
 import type {
+  GateStepEvent,
   RecomputeWaiting,
   RunEvent,
   WaitingReason,
 } from "./events.js";
+import type { ContainerResources } from "./container-resources.js";
 
 export type TimelineSpan = {
   readonly kind: "impl" | "review";
@@ -47,11 +54,12 @@ export type FinishedIssueState = {
   readonly at: string;
 };
 
-export type FeedEvent = {
+export type FeedEvent = ContainerResources & {
   readonly at: string;
   readonly issue: number | null;
   readonly text: string;
   readonly tone: "" | "dim" | "good" | "warn" | "bad";
+  readonly steps?: Readonly<Record<string, GateStepEvent>>;
 };
 
 export type UiState = {
@@ -96,6 +104,20 @@ type MutableIssue = {
 };
 
 const triggerText = (trigger: string): string => trigger.replaceAll("-", " ");
+
+type ImplementerEvent = Extract<RunEvent, { kind: "implementer" }>;
+
+const implementerFailure = (event: ImplementerEvent): string | null => {
+  if (event.signal !== "FAILED" &&
+      event.signal !== "QUOTA" &&
+      event.signal !== "CREDENTIAL") {
+    return null;
+  }
+  if (event.oomKilled === true) return "OOM-killed";
+  if (event.signal === "QUOTA") return "quota";
+  if (event.signal === "CREDENTIAL") return "credential";
+  return "invocation failed";
+};
 
 export function waitingReasonText(reason: WaitingReason): string {
   switch (reason.kind) {
@@ -155,11 +177,24 @@ function feedText(event: RunEvent): FeedEvent | null {
         ? "warn"
         : "dim";
       break;
-    case "implementer":
-      text = `attempt ${event.attempt} complete · ${event.commits} commit${event.commits === 1 ? "" : "s"}`;
+    case "implementer": {
+      const failure = implementerFailure(event);
+      text = failure === null
+        ? `attempt ${event.attempt} complete · ${event.commits} commit${event.commits === 1 ? "" : "s"}`
+        : `attempt ${event.attempt} failed · ${failure} · ${event.commits} commit${event.commits === 1 ? "" : "s"}`;
+      if (failure !== null) tone = "bad";
       break;
+    }
     case "review-pass":
       text = `round ${event.round} · ${event.pass} pass · invocation ${event.invocation}`;
+      break;
+    case "resolve-attempt":
+      text = `resolve attempt ${event.attempt} · ${event.end}`;
+      tone = event.oomKilled === true ? "bad" : "";
+      break;
+    case "container":
+      text = `${event.stack} container ${event.name} stopped`;
+      tone = event.oomKilled === true ? "bad" : "dim";
       break;
     case "review-round":
       text = `round ${event.round} · ${
@@ -234,7 +269,21 @@ function feedText(event: RunEvent): FeedEvent | null {
     default:
       return null;
   }
-  return { at: event.ts, issue, text, tone };
+  return {
+    at: event.ts,
+    issue,
+    text,
+    tone,
+    ...(event.kind === "gate" && event.steps !== undefined
+      ? { steps: event.steps }
+      : {}),
+    ...("peakMemoryBytes" in event && event.peakMemoryBytes !== undefined
+      ? { peakMemoryBytes: event.peakMemoryBytes }
+      : {}),
+    ...("oomKilled" in event && event.oomKilled !== undefined
+      ? { oomKilled: event.oomKilled }
+      : {}),
+  };
 }
 
 function finishRunningSpan(issue: MutableIssue, at: string): void {
@@ -277,7 +326,7 @@ function finishedFrom(events: readonly RunEvent[]): readonly FinishedIssueState[
     if ("issue" in event && typeof event.issue === "number" && event.title) {
       titles.set(event.issue, event.title);
     }
-    if (event.kind === "implementer") {
+    if (event.kind === "implementer" && implementerFailure(event) === null) {
       attempts.set(event.issue, (attempts.get(event.issue) ?? 0) + 1);
     }
     if (event.kind === "review-round") {

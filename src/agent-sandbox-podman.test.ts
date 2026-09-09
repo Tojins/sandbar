@@ -34,8 +34,10 @@
 // them.
 //
 // SO IT IS NO LONGER PART OF THE HUMAN'S STEP. #48 shrank that step from "run
-// the full suite on the host" to three files; this leaves two,
-// gate-stack-hostpodman.test.ts and sandbox-stack-podman.test.ts, each
+// the full suite on the host" to three files; #141's host-side cgroup-path
+// assertion makes the remaining manual set three files:
+// gate-stack-hostpodman.test.ts, sandbox-stack-podman.test.ts, and
+// container-resources-podman.test.ts, each
 // host-only because a remote client demonstrably does something else rather
 // than because nobody looked. Prose describing that step is load-bearing in
 // both directions: naming this file still sends a human to re-run what the gate
@@ -69,7 +71,7 @@ const IMAGE = "docker.io/library/mariadb:10.11";
 //
 // No `needsLocalClient`, which is the whole of the wiring change (#52): the
 // `podman-test` step's `podman.test.ts` filter collects this file, and it is not
-// one of that step's two explicit local-client exclusions. Dropping the flag is
+// one of that step's three explicit local-client exclusions. Dropping the flag is
 // also what makes `SANDBAR_REQUIRE_PODMAN_TESTS=1` reach these two tests — under
 // it an unreachable podman is a failing test here rather than a silent skip,
 // which is the point of putting the file in a step at all.

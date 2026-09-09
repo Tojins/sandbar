@@ -108,7 +108,7 @@ vi.mock("./cleanup.js", () => {
 vi.mock("./keepawake.js", () => ({
   startKeepawake: vi.fn(() => {
     const lock = {
-      stop: vi.fn(() => {
+      stop: vi.fn(async () => {
         if (seams.trackWakeStop) seams.cleanupOrder.push("wake-lock-stop");
       }),
       onStatus: vi.fn((sink: (line: string, status: WakeLockStatus) => void) => {
@@ -233,9 +233,15 @@ vi.mock("./merger-worktree.js", () => ({
 }));
 vi.mock("./gate-stack.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./gate-stack.js")>(),
-  startStack: vi.fn(async () => ({
+  startStack: vi.fn(async (opts) => ({
     runGate: seams.mergerStackRunGate,
-    stop: seams.mergerStackStop,
+    stop: vi.fn(async () => {
+      await opts.onContainerTeardown?.({
+        name: "merger-db", container: "merger-db-1", lifecycle: "issue",
+        durationMs: 30, peakMemoryBytes: 3000, oomKilled: false,
+      });
+      await seams.mergerStackStop();
+    }),
   })),
 }));
 vi.mock("./prompt.js", async (importOriginal) => ({
@@ -1184,7 +1190,28 @@ describe("run quota orchestration (#109)", () => {
     seams.innerLoop.mockImplementation(async (i: ReturnType<typeof issue>) => i.id === "1"
       ? { type: "DONE", commits: [{ sha: "abc" }] }
       : { type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42 });
-    seams.merger.mockResolvedValue(summary([done]));
+    seams.merger.mockImplementation(async (...args: unknown[]) => {
+      const options = args[4] as {
+        onResolveAttempt: (key: string, record: Record<string, unknown>) => Promise<string>;
+        observations: {
+          onGate: (key: string, gate: Record<string, unknown>) => Promise<void>;
+        };
+      };
+      await options.onResolveAttempt("1", {
+        issueId: "1", attempt: 1, container: "resolve-1", end: "exit",
+        exitCode: 137, signal: null, durationMs: 40, stdout: "", stderr: "",
+        mode: "still-conflicted", peakMemoryBytes: 4000, oomKilled: true,
+      });
+      await options.observations.onGate("1", {
+        ok: false, durationMs: 50, stdout: "", stderr: "", exitCode: 137,
+        failedStep: "test", containerLogs: "",
+        steps: [{
+          name: "test", ok: false, durationMs: 49,
+          peakMemoryBytes: 5000, oomKilled: true,
+        }],
+      });
+      return summary([done]);
+    });
     const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`EXIT:${code}`);
     }) as never);
@@ -1219,6 +1246,20 @@ describe("run quota orchestration (#109)", () => {
       tag: "quota",
       reason: "claude five_hour quota window closed; resets at 1970-01-01T00:00:42.000Z",
       exitCode: 4,
+    }));
+    expect(eventsOf("resolve-attempt")).toContainEqual(expect.objectContaining({
+      issue: 1, peakMemoryBytes: 4000, oomKilled: true,
+    }));
+    expect(eventsOf("gate")).toContainEqual(expect.objectContaining({
+      gate: "gate-2",
+      steps: {
+        test: expect.objectContaining({
+          durationMs: 49, peakMemoryBytes: 5000, oomKilled: true,
+        }),
+      },
+    }));
+    expect(eventsOf("container")).toContainEqual(expect.objectContaining({
+      stack: "gate", name: "merger-db", peakMemoryBytes: 3000,
     }));
   });
 

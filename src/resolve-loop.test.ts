@@ -671,7 +671,7 @@ describe("runResolveLoop — logging", () => {
       initiallyConflicted: true,
       agentRuns: [{
         stdout: "<promise>COMMITTED</promise>",
-        run: { peakContext: 4321 },
+        run: { peakContext: 4321, peakMemoryBytes: 918_000_000, oomKilled: true },
       }],
       gates: [{ ok: true }],
     });
@@ -688,6 +688,9 @@ describe("runResolveLoop — logging", () => {
     );
     expect(lines.find((l) => l.startsWith("resolve-attempt 1 ended="))).toContain(
       "peakContext=4321",
+    );
+    expect(lines.find((l) => l.startsWith("resolve-attempt 1 ended="))).toContain(
+      "peakMemoryBytes=918000000 oomKilled=true",
     );
     expect(lines.some((l) => l.includes("gate green"))).toBe(true);
     // #82. The install and the re-gate are reported on the GREEN path too —
@@ -1028,6 +1031,8 @@ describe("the attempt-by-attempt prose (#67)", () => {
         stderrBytes: 0,
         verdict: "still-conflicted",
         logPath: "/logs/a1.log",
+        peakMemoryBytes: 900_000_000,
+        oomKilled: true,
       },
       {
         attempt: 2,
@@ -1041,6 +1046,20 @@ describe("the attempt-by-attempt prose (#67)", () => {
         verdict: "still-conflicted",
         logPath: "/logs/a2.log",
       },
+      {
+        attempt: 3,
+        end: "exit",
+        exitCode: 137,
+        signal: null,
+        durationMs: 3_000,
+        container: "c-3",
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        verdict: "still-conflicted",
+        logPath: "/logs/a3.log",
+        peakMemoryBytes: 931_000_000,
+        oomKilled: true,
+      },
     ]);
     expect(text).toContain("**Attempt 1**");
     expect(text).toContain("600.8s");
@@ -1048,6 +1067,9 @@ describe("the attempt-by-attempt prose (#67)", () => {
     expect(text).toContain("**Attempt 2**");
     expect(text).toContain("exited with code 1 after 2.5s");
     expect(text).toContain("/logs/a2.log");
+    expect(text).toContain("exited with code 137 after 3.0s");
+    expect(text).toContain("peakMemoryBytes=900000000 oomKilled=true");
+    expect(text).toContain("peakMemoryBytes=931000000 oomKilled=true");
   });
 
   it("says outright when an attempt's output went nowhere", () => {

@@ -222,6 +222,9 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
         task.id,
         onTestFinished,
       );
+      let heldResourceReads = 0;
+      let issuePhaseStartedAt: number | undefined;
+      let failedResourceReadStartedAt: number | undefined;
 
       const stack = hold(
         await startStack({
@@ -233,7 +236,23 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
           // test — the blame path is: whatever kills a recreate leaves the
           // container removed, and that is the state the next gate run has to
           // read correctly.
-          images: async () => new Map([[IMAGE, "localhost/Bad_Name:nope"]]),
+          images: async () => {
+            issuePhaseStartedAt = performance.now();
+            return new Map([[IMAGE, "localhost/Bad_Name:nope"]]);
+          },
+          containerResources: async (name) => {
+            if (name === cName("held")) {
+              heldResourceReads += 1;
+              // The first read records the healthy generation immediately
+              // before replacement. The second reads the failed replacement
+              // and must not inflate the already-finished bringup duration.
+              if (heldResourceReads === 2) {
+                failedResourceReadStartedAt = performance.now();
+                await new Promise((resolve) => setTimeout(resolve, 3_000));
+              }
+            }
+            return {};
+          },
           spec: resolveGateStack({
             containers: [
               { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
@@ -258,6 +277,17 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
       const first = await stack.runGate();
       expect(first.ok).toBe(false);
       expect(first.failedStep).toBe(`container:${cName("held")}`);
+      expect(issuePhaseStartedAt).toBeDefined();
+      expect(failedResourceReadStartedAt).toBeDefined();
+      const durationBeforeResourceRead = Math.round(
+        failedResourceReadStartedAt! - issuePhaseStartedAt!,
+      );
+      expect(first.steps.at(-1)!.durationMs).toBeGreaterThan(
+        durationBeforeResourceRead - 500,
+      );
+      expect(first.steps.at(-1)!.durationMs).toBeLessThan(
+        durationBeforeResourceRead + 500,
+      );
 
       // The container is gone, and the second run must NOT call that an
       // infrastructure failure — it must try the recreate again and red the

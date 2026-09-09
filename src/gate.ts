@@ -26,17 +26,25 @@
 // a space makes an awkward log line, and that is all it makes, because nothing
 // reads these lines back to decide anything.
 //
+// Since #141 each container-backed phase may also carry `peakMemoryBytes` and
+// `oomKilled`. The shared resource formatter keeps those facts nested beside
+// that phase's duration; they remain evidence and never affect the verdict.
+//
 // `summarizeGateFailure` (#15) post-processes a failed run's output before it
 // reaches a human (NEEDS-HUMAN trace) or the resolve agent: it collapses
 // uninformative timeout cascades to the root failure + a count and a hint, so
 // an environment/setup failure doesn't read as N independent flaky tests.
 
 import { durationField } from "./timing.js";
+import {
+  formatContainerResources,
+  type ContainerResources,
+} from "./container-resources.js";
 
 // One timed phase of a gate run, in execution order. The name is either a
 // consumer step's own (`gateStack.steps[].name`) or one of the sandbar-owned
 // phases `runStackGate` runs before the first step — see `GateResult.steps`.
-export type GateStepTiming = {
+export type GateStepTiming = ContainerResources & {
   readonly name: string;
   readonly ok: boolean;
   readonly durationMs: number;
@@ -84,7 +92,10 @@ export type GateResult = {
 // order. Empty string when nothing was timed, so the caller can omit the field
 // entirely rather than write `steps=` (#82 — an absent measurement is absent).
 export function formatGateSteps(steps: readonly GateStepTiming[]): string {
-  return steps.map((s) => `${s.name}:${s.durationMs}`).join(",");
+  return steps.map((s) => {
+    const resources = formatContainerResources(s);
+    return `${s.name}:${s.durationMs}${resources ? `(${resources})` : ""}`;
+  }).join(",");
 }
 
 // What every consumer logging a gate verdict renders. Deliberately a PARTIAL

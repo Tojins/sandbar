@@ -53,6 +53,12 @@
 //         the exit. It contains parsed speech and both bounded raw stream tails;
 //         timeout paths retain their own tails so recording never waits for a
 //         descendant that kept an exec pipe open (#135).
+//   F12 — at every invocation end, before the long-lived sandbox can disappear,
+//         the record and returned result carry cgroup memory.peak and the
+//         cgroup/Podman OOM-kill evidence available over that invocation
+//         (#141). The cumulative OOM counter is snapshotted at both edges, and
+//         the invocation duration stops before the teardown read. Failed runs
+//         retain the same facts beside their partial speech/usage.
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
@@ -109,6 +115,13 @@ import {
 import type { AgentUsage } from "./agent-usage.js";
 import { classifyAgentRunEnd } from "./agent-run-end.js";
 import type { AgentFailure, RateLimitMeasurement } from "./agent-run-end.js";
+import {
+  containerResourcesSince,
+  readContainerResourceSnapshot,
+  systemContainerResourceDeps,
+  type ContainerResourceSnapshot,
+  type ContainerResources,
+} from "./container-resources.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -338,6 +351,9 @@ export type SandboxProvider = {
   readonly name: string;
   readonly env: Record<string, string>;
   readonly sandboxHomedir: string;
+  readonly containerResourceSnapshot?: (
+    containerName: string,
+  ) => Promise<ContainerResourceSnapshot>;
   create(o: ProviderCreateOptions): Promise<SandboxHandle>;
 };
 
@@ -378,7 +394,7 @@ export type RunOptions = {
   readonly completionTimeoutSeconds?: number;
 };
 
-export type AgentInvocationRecord = {
+export type AgentInvocationRecord = ContainerResources & {
   readonly agent: string;
   readonly provider: string;
   readonly model: string | null;
@@ -396,15 +412,19 @@ export type AgentInvocationRecord = {
   readonly stderr: string;
 };
 
-export type SandboxRunResult = {
+export type SandboxRunResult = ContainerResources & {
   readonly stdout: string;
   readonly commits: { sha: string }[];
+  // The agent invocation boundary, stopped before cgroup inspection and host
+  // commit collection. Callers use this rather than timing the awaited
+  // teardown measurement (#141).
+  readonly durationMs: number;
   // Derived by the shared end classifier, which remains the only definition
   // of a silent provider run (#114). Callers may apply policy after commit
   // collection without re-reading provider output (#116).
   readonly silent: boolean;
-  // Milliseconds from the start of `run()` to the instant the completion signal
-  // was first seen in the agent's accumulated speech (#82). ABSENT when it was
+  // Milliseconds from the start of the agent invocation to the instant the
+  // completion signal was first seen in accumulated speech (#82). ABSENT when it was
   // never seen — the run ended by exec exit or by the idle kill instead — which
   // is the whole point of it being optional: a zero would read as "signalled
   // immediately".
@@ -412,11 +432,8 @@ export type SandboxRunResult = {
   // What it buys: `DEFAULT_COMPLETION_TIMEOUT_SECONDS` is 60, re-armed on every
   // output line, paid once per implementer attempt and up to twice per review
   // round, and nobody knows whether that grace is worth twelve minutes an issue
-  // or nearly none. The caller's own `durationMs` minus this is the answer,
-  // over-reporting only by the per-run git-identity setup that precedes the
-  // invocation (two `git config` reads and up to three `git config --global`
-  // writes — milliseconds, and named here so a reader of the difference knows
-  // exactly what is in it).
+  // or nearly none. `durationMs - signalMs` is that post-signal grace, over the
+  // same invocation clock and excluding resource measurement.
   readonly signalMs?: number;
   readonly maxGapMs: number;
   readonly usage?: AgentUsage;
@@ -580,6 +597,8 @@ const AGENT_PARTIAL_USAGE = new WeakMap<object, {
   peakContext?: number;
   rateLimit?: RateLimitMeasurement;
 }>();
+const AGENT_PARTIAL_RESOURCES = new WeakMap<object, ContainerResources>();
+const AGENT_PARTIAL_DURATION_MS = new WeakMap<object, number>();
 
 export const withPartialOutput = (
   err: unknown,
@@ -611,6 +630,35 @@ export const agentPartialUsage = (
   typeof err === "object" && err !== null
     ? AGENT_PARTIAL_USAGE.get(err) ?? {}
     : {};
+
+export const withPartialContainerResources = (
+  err: unknown,
+  resources: ContainerResources,
+): unknown => {
+  if (typeof err === "object" && err !== null) {
+    AGENT_PARTIAL_RESOURCES.set(err, resources);
+  }
+  return err;
+};
+
+export const agentPartialContainerResources = (
+  err: unknown,
+): ContainerResources =>
+  typeof err === "object" && err !== null
+    ? AGENT_PARTIAL_RESOURCES.get(err) ?? {}
+    : {};
+
+export const withPartialDurationMs = (err: unknown, durationMs: number): unknown => {
+  if (typeof err === "object" && err !== null) {
+    AGENT_PARTIAL_DURATION_MS.set(err, durationMs);
+  }
+  return err;
+};
+
+export const agentPartialDurationMs = (err: unknown): number | undefined =>
+  typeof err === "object" && err !== null
+    ? AGENT_PARTIAL_DURATION_MS.get(err)
+    : undefined;
 
 class WorktreeError extends Error {
   readonly exitCode: number | undefined;
@@ -1851,6 +1899,10 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
     name: "podman",
     env: options?.env ?? {},
     sandboxHomedir: SANDBOX_HOMEDIR,
+    containerResourceSnapshot: (containerName) => readContainerResourceSnapshot(
+      containerName,
+      systemContainerResourceDeps(),
+    ),
     create: async (createOptions) => {
       const containerName = `${namePrefix}${randomUUID()}`;
       const sandboxWorktreePath =
@@ -2122,8 +2174,6 @@ const invokeAgent = async (
   idleTimeoutMs: number,
   completionTimeoutMs: number,
   completionSignals: readonly string[],
-  // Elapsed since `run()` began, which is the instant `signalMs` records (#82).
-  elapsed: () => number,
   invocation: {
     readonly agent: string;
     readonly model: string | null;
@@ -2320,7 +2370,7 @@ const invokeAgent = async (
           if (matchedSignal !== undefined && signalMs === undefined) {
             // Read here rather than in the grace timer: this is the instant the
             // agent said it was done, and the timer fires up to a minute later.
-            signalMs = elapsed();
+            signalMs = invocationTimer();
           }
           resetTimer();
         },
@@ -2620,7 +2670,6 @@ export const createSandbox = async (
     idleTimeoutMs: number,
     completionTimeoutMs: number,
     completionSignals: readonly string[],
-    elapsed: () => number,
     invocation: {
       readonly agent: string;
       readonly model: string | null;
@@ -2694,7 +2743,6 @@ export const createSandbox = async (
         idleTimeoutMs,
         completionTimeoutMs,
         completionSignals,
-        elapsed,
         invocation,
       );
 
@@ -2737,23 +2785,48 @@ export const createSandbox = async (
       const completionTimeoutMs =
         (o.completionTimeoutSeconds ?? DEFAULT_COMPLETION_TIMEOUT_SECONDS) * 1000;
 
-      const iter = await runOneIteration(
-        o.agent,
-        o.prompt,
-        idleTimeoutMs,
-        completionTimeoutMs,
-        o.completionSignal,
-        startTimer(),
-        {
-          agent: o.name ?? o.agent.name,
-          model: o.model ?? null,
-          onEnd: o.onInvocationEnd,
-        },
+      let resources: ContainerResources = {};
+      let durationMs: number | undefined;
+      const resourceStart = await options.sandbox.containerResourceSnapshot?.(
+        providerHandle.containerName,
       );
+      let iter: Awaited<ReturnType<typeof runOneIteration>>;
+      try {
+        iter = await runOneIteration(
+          o.agent,
+          o.prompt,
+          idleTimeoutMs,
+          completionTimeoutMs,
+          o.completionSignal,
+          {
+            agent: o.name ?? o.agent.name,
+            model: o.model ?? null,
+            onEnd: async (record) => {
+              durationMs = record.durationMs;
+              const resourceEnd = await options.sandbox.containerResourceSnapshot?.(
+                providerHandle.containerName,
+              );
+              resources = resourceEnd === undefined
+                ? {}
+                : containerResourcesSince(resourceEnd, resourceStart);
+              await o.onInvocationEnd?.({ ...record, ...resources });
+            },
+          },
+        );
+      } catch (err) {
+        const withResources = withPartialContainerResources(err, resources);
+        throw durationMs === undefined
+          ? withResources
+          : withPartialDurationMs(withResources, durationMs);
+      }
+      if (durationMs === undefined) {
+        throw new Error("agent invocation completed without recording its duration");
+      }
 
       return {
         stdout: iter.result,
         commits: iter.commits,
+        durationMs,
         silent: iter.silent,
         maxGapMs: iter.maxGapMs,
         ...(iter.signalMs === undefined ? {} : { signalMs: iter.signalMs }),
@@ -2761,6 +2834,7 @@ export const createSandbox = async (
         ...(iter.peakContext === undefined ? {} : { peakContext: iter.peakContext }),
         ...(iter.rateLimit === undefined ? {} : { rateLimit: iter.rateLimit }),
         toolCalls: iter.toolCalls,
+        ...resources,
       };
     },
     async syncBranchToCache() {

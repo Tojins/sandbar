@@ -19,6 +19,9 @@
 //     in the operator's own checkout every invocation. A CI job starting from
 //     a bare checkout runs its own install line before `npx sandbar gate`.
 //
+// Step timings and final lifecycle-container lines include any cgroup peak and
+// OOMKilled evidence collected at their teardown boundary (#141).
+//
 // Residuals: `cleanup.ts`'s traps still `process.exit` on
 // `uncaughtException`/`unhandledRejection` (#35) — the one place this
 // command's "returns rather than exits" contract does not reach an embedding
@@ -75,6 +78,7 @@ import { dirtyWorktreePaths } from "./git-ops.js";
 import { type RunScope, gateScope } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 import { sandbarVersion } from "./version.js";
+import { formatContainerResources } from "./container-resources.js";
 
 // The standalone gate's stack id. Distinct from every id a run uses — issue
 // numbers are numeric and the merge phase's is `merger` — which costs nothing
@@ -414,9 +418,13 @@ function teardownFor(
     // being unwound — with a `pod rm` complaint loses the thing the operator
     // was waiting for. `stop` is idempotent, and a no-op under `--keep` —
     // once the bringup it is keeping actually finished.
-    await progress.stack?.stop().catch((e: unknown) => {
-      err(`${e instanceof Error ? e.message : String(e)}\n`);
-    });
+    if (progress.stack) {
+      try {
+        await progress.stack.stop();
+      } catch (e) {
+        err(`${e instanceof Error ? e.message : String(e)}\n`);
+      }
+    }
     const tags = progress.builtTags?.() ?? [];
     // Not under `--keep`: the containers the operator asked to keep are
     // running these, and podman's `rmi -f` takes a container using the image
@@ -582,6 +590,14 @@ async function gate(
     keepAlive: opts.keep,
     allowDirtyWorktree: true,
     onStepOutput: out,
+    onContainerTeardown: (record) => {
+      const resources = formatContainerResources(record);
+      err(
+        `container ${record.name} stopped durationMs=${record.durationMs}` +
+          (resources ? ` ${resources}` : "") +
+          "\n",
+      );
+    },
   });
   progress.stack = stack;
 

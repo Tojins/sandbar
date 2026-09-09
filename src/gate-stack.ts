@@ -57,6 +57,14 @@
 // per-branch build and a gate whose time went there must not read as a slow
 // test suite. Nothing reads a duration back: there is no adaptive bound and no
 // warning threshold, and `step.timeoutMs` stays the one bound this module has.
+// Each real step also snapshots its target container's cgroup-v2 memory peak
+// and the OOM-counter delta across that step (#141), so a reused container's
+// earlier kill is not attributed again. Container generations record the
+// same facts immediately before replacement or final pod teardown; the step's
+// duration clock stops before that snapshot begins. The teardown callback turns
+// those records into events even when initial bringup never returns a stack
+// handle. Missing delegation is absence, not zero, and none of these
+// measurements changes the gate verdict.
 //
 // Gate concurrency is deliberately OUTSIDE this module (#142). `run()` wraps
 // every inner-loop and merger `Stack.runGate` call in one run-wide FIFO
@@ -94,11 +102,9 @@
 // escape hatches are a static probe binary or `hold: true` + a
 // `postReadyCommand`.
 
-import { execFile } from "node:child_process";
 import { isAbsolute, resolve as resolvePath } from "node:path";
-import { promisify } from "node:util";
 
-import { registerDisposable } from "./cleanup.js";
+import { registerDisposable, reportCleanupNotice } from "./cleanup.js";
 import type {
   ResolvedGateStack,
   ResolvedStackContainer,
@@ -115,11 +121,22 @@ import {
   podNameFor,
   stackContainerNameFor,
 } from "./naming.js";
-import { RUNTIME } from "./runtime.js";
-
-const exec = promisify(execFile);
-
-const MAX_BUFFER = 50 * 1024 * 1024;
+import {
+  boundedRuntime,
+  boundedRuntimeOk,
+  type BoundedRuntimeResult,
+  RUNTIME,
+  RUNTIME_MAX_BUFFER,
+} from "./runtime.js";
+import {
+  containerResourcesSince,
+  readContainerResourceSnapshot,
+  readContainerResources,
+  systemContainerResourceDeps,
+  type ContainerResourceSnapshot,
+  type ContainerResources,
+  type ContainerTeardown,
+} from "./container-resources.js";
 
 // ---------------------------------------------------------------------------
 // Bounded podman calls (#26)
@@ -148,16 +165,7 @@ const MAX_BUFFER = 50 * 1024 * 1024;
 // tell "it failed" from "it never answered" — a readiness probe that exits 1 is
 // not ready, one that hangs is not ready AND has left a process behind — and an
 // exception collapses those into one channel.
-export type BoundedResult = {
-  readonly stdout: string;
-  readonly stderr: string;
-  // null when the process was killed rather than exiting on its own.
-  readonly exitCode: number | null;
-  readonly timedOut: boolean;
-  readonly maxBufferExceeded: boolean;
-  // Node's own message ("Command failed: …"), for prose. "" on success.
-  readonly errorMessage: string;
-};
+export type BoundedResult = BoundedRuntimeResult;
 
 // Exported since #44: sandbox-stack.ts drives podman for the sandbox siblings
 // and every claim this module makes about not hanging (and about `podman exec`
@@ -177,62 +185,18 @@ export function boundedPodman(
   timeoutMs: number,
   onChunk?: (chunk: string) => void,
 ): Promise<BoundedResult> {
-  return new Promise((resolve) => {
-    let killedByTimer = false;
-    // Hoisted, not declared after `execFile`. `clearTimeout(timer)` below is
-    // safe only because execFile never invokes its callback synchronously, and
-    // a TDZ ReferenceError raised inside that callback would surface as an
-    // uncaught throw rather than a rejected promise.
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const child = execFile(
-      RUNTIME,
-      [...args],
-      { maxBuffer: MAX_BUFFER },
-      (err, stdout, stderr) => {
-        clearTimeout(timer);
-        const e = err as
-          | (Error & { code?: number | string; signal?: string })
-          | null;
-        resolve({
-          stdout,
-          stderr,
-          exitCode: e === null ? 0 : typeof e.code === "number" ? e.code : null,
-          // `e !== null` keeps a call that exited 0 in the same tick the timer
-          // fired from being read as a timeout — a false red costing an
-          // implementation attempt. It does NOT cover the mirror case: a call
-          // that exits NON-ZERO inside that same window is reported as a
-          // timeout. Against a 15-minute default the window is microseconds,
-          // and both readings are red, so the asymmetry is priced in rather
-          // than closed.
-          timedOut: killedByTimer && e !== null,
-          maxBufferExceeded: e?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
-          errorMessage: e?.message ?? "",
-        });
-      },
-    );
-    if (onChunk !== undefined) {
-      // ANSI-stripped here rather than at the sink, so the live view and the
-      // trace read alike — a stream showing raw `^[[90m` where the trace shows
-      // clean text is two accounts of one step. Per CHUNK, so an escape or a
-      // multi-byte character straddling a chunk boundary survives into the live
-      // view; that is a cosmetic artefact of the tee alone and never reaches
-      // the buffer, which node decodes whole.
-      const tee = (buf: Buffer | string): void => {
-        onChunk(stripAnsi(buf.toString()));
-      };
-      child.stdout?.on("data", tee);
-      child.stderr?.on("data", tee);
-    }
-    timer = setTimeout(() => {
-      killedByTimer = true;
-      child.kill("SIGKILL");
-    }, timeoutMs);
-  });
+  return boundedRuntime(
+    args,
+    timeoutMs,
+    onChunk === undefined
+      ? undefined
+      : (chunk) => onChunk(stripAnsi(chunk.toString())),
+  );
 }
 
 // Did the call exit 0 on its own?
 export function boundedOk(r: BoundedResult): boolean {
-  return r.exitCode === 0 && !r.timedOut && !r.maxBufferExceeded;
+  return boundedRuntimeOk(r);
 }
 
 // A control-plane call whose failure means the stack cannot exist. Throws a
@@ -434,6 +398,22 @@ export type StackOptions = {
   // Run-owned stacks record notices as complaints; standalone `sandbar gate`
   // leaves this absent and keeps its direct diagnostic rendering.
   readonly onNotice?: (message: string) => void | Promise<void>;
+  // Test seam for #141's host-side cgroup/inspect read. Production keeps all
+  // Podman calls on this module's bounded seam.
+  readonly containerResources?: (containerName: string) => Promise<ContainerResources>;
+  // Reused step containers need both cumulative-counter edges so one OOM is
+  // attributed only to the step in which it happened. Kept separate from the
+  // teardown seam, whose one snapshot describes the whole container lifetime.
+  readonly containerResourceSnapshot?: (
+    containerName: string,
+  ) => Promise<ContainerResourceSnapshot>;
+  // Test seam for teardown failure arbitration. Production uses the same
+  // bounded Podman call as every other control-plane operation; injection lets
+  // a test perform the removals and independently classify one result as red.
+  readonly teardownPodman?: typeof boundedPodman;
+  readonly onContainerTeardown?: (
+    record: ContainerTeardown,
+  ) => void | Promise<void>;
 };
 
 export type Stack = {
@@ -852,6 +832,82 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   // the error. Read rather than recomputed, so it cannot come to disagree with
   // the early return that produced it.
   let podKept = false;
+  const resourceDeps = systemContainerResourceDeps(boundedPodman);
+  const resourceSnapshotReader = opts.containerResourceSnapshot ??
+    (opts.containerResources === undefined
+      ? (containerName: string) => readContainerResourceSnapshot(containerName, resourceDeps)
+      : undefined);
+  const resourceReader = opts.containerResources ?? ((containerName: string) =>
+    readContainerResources(containerName, resourceDeps));
+  const lifetimes = new Map<string, () => number>();
+  const teardowns: ContainerTeardown[] = [];
+  const teardownFailures: unknown[] = [];
+  const measureTeardown = async (
+    c: ResolvedStackContainer,
+  ): Promise<ContainerTeardown | null> => {
+    const container = nameOf(c);
+    const elapsed = lifetimes.get(container);
+    if (elapsed === undefined) return null;
+    const resources = await resourceReader(container);
+    return {
+      name: c.name,
+      container,
+      lifecycle: c.lifecycle,
+      durationMs: elapsed(),
+      ...resources,
+    };
+  };
+  const retainTeardown = (record: ContainerTeardown | null): void => {
+    if (record === null) return;
+    teardowns.push(record);
+    lifetimes.delete(record.container);
+  };
+  const recordTeardown = async (c: ResolvedStackContainer): Promise<void> => {
+    const measured = await Promise.allSettled([measureTeardown(c)]);
+    const result = measured[0];
+    if (result?.status === "fulfilled") retainTeardown(result.value);
+    else if (result?.status === "rejected") teardownFailures.push(result.reason);
+  };
+  const reportTeardowns = async (): Promise<void> => {
+    const reported = await Promise.allSettled(
+      teardowns.map((record) => opts.onContainerTeardown?.(record)),
+    );
+    for (const result of reported) {
+      if (result.status === "rejected") teardownFailures.push(result.reason);
+    }
+  };
+  const finishTeardown = async (primaryFailure?: unknown): Promise<void> => {
+    await reportTeardowns();
+    if (primaryFailure !== undefined) {
+      for (const failure of teardownFailures) {
+        await reportCleanupNotice(
+          "cleanup-failure",
+          `Gate stack '${opts.stackId}' resource reporting also failed`,
+          failure,
+        );
+      }
+      throw primaryFailure;
+    }
+    if (teardownFailures.length === 1) throw teardownFailures[0];
+    if (teardownFailures.length > 1) {
+      throw new AggregateError(
+        teardownFailures,
+        `Gate stack '${opts.stackId}' resource reporting failed`,
+      );
+    }
+  };
+  const bringUpCtx = (
+    attach: ContainerAttachment,
+    label = GATE_LABEL,
+  ): BringUpCtx => ({
+    attach,
+    label,
+    worktreePath: opts.worktreePath,
+    hideWorktreeGit: opts.hideWorktreeGit,
+    nameOf,
+    beforeRemove: recordTeardown,
+    afterStart: (c, containerName) => lifetimes.set(containerName, startTimer()),
+  });
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
@@ -922,8 +978,10 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // that path never enters the catch and `broughtUp` is long since true.
     if (opts.keepAlive === true && broughtUp) {
       podKept = true;
+      await finishTeardown();
       return;
     }
+    await Promise.all(opts.spec.containers.map(recordTeardown));
     // `pod rm -f` takes the member containers AND the infra container with it.
     // The infra container is named `<pod-id-prefix>-infra`, which matches no
     // sandbar prefix — removing containers by name would leave it, and the pod,
@@ -943,8 +1001,9 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // list stays empty, and sandbar reports a clean teardown of a pod that is
     // still running.
     const failures: string[] = [];
+    const teardownPodman = opts.teardownPodman ?? boundedPodman;
     const attempt = async (args: string[]): Promise<void> => {
-      const r = await boundedPodman(args, CONTROL_TIMEOUT_MS);
+      const r = await teardownPodman(args, CONTROL_TIMEOUT_MS);
       if (boundedOk(r)) return;
       failures.push(
         `  ${RUNTIME} ${args.join(" ")}\n    ${
@@ -956,14 +1015,15 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     };
     await attempt(POD_RM_ARGS(podName));
     await attempt(["network", "rm", "-f", networkName]);
-    if (failures.length > 0) {
-      throw new SandbarError(
+    const removalFailure = failures.length > 0
+      ? new SandbarError(
         `gate stack: teardown of pod '${podName}' / network '${networkName}' ` +
           `failed, leaking podman resources:\n${failures.join("\n")}\n` +
           `Clean up with: ${RUNTIME} ${POD_RM_ARGS(podName).join(" ")} && ` +
           `${RUNTIME} network rm -f ${networkName}`,
-      );
-    }
+      )
+      : undefined;
+    await finishTeardown(removalFailure);
   };
   // Registered before the first resource exists, so a signal anywhere in the
   // bringup window below still sweeps whatever was created. The local catch
@@ -1038,6 +1098,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     for (const c of issueContainers) {
       if (reusing && (await containerState(nameOf(c))) === "running") {
         reused.push(c);
+        lifetimes.set(nameOf(c), startTimer());
       } else {
         freshIssueContainers.push(c);
       }
@@ -1054,13 +1115,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // Nothing of the branch runs at this point in any case: `resolveGateStack`
     // refuses `lifecycle: "issue"` on an un-held container that mounts the
     // worktree, and a held one's entrypoint is `sleep infinity`.
-    await bringUpContainers(freshIssueContainers, {
-      attach,
-      label: GATE_LABEL,
-      worktreePath: opts.worktreePath,
-      hideWorktreeGit: opts.hideWorktreeGit,
-      nameOf,
-    });
+    await bringUpContainers(freshIssueContainers, bringUpCtx(attach));
     // Past this statement nothing THIS CALL created is half-built, which is the
     // fact `--keep` is conditioned on (see `stop`). Here rather than after the
     // last statement that can throw, because everything below creates nothing:
@@ -1129,16 +1184,23 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
           allowDirtyWorktree: opts.allowDirtyWorktree === true,
           onStepOutput: opts.onStepOutput,
           onNotice: opts.onNotice ?? ((message) => console.error(message)),
+          resourceReader,
+          resourceSnapshotReader,
+          recordTeardown,
+          bringUpCtx,
         }),
     };
   } catch (err) {
     // The bringup failure is the diagnosis; a teardown failure on top of it is
     // reported but must not replace it.
-    await stop().catch(async (stopErr: unknown) => {
-      await (opts.onNotice ?? ((message: string) => console.error(message)))(
-        stopErr instanceof Error ? stopErr.message : String(stopErr),
+    const stoppedResult = await Promise.allSettled([stop()]);
+    if (stoppedResult[0]?.status === "rejected") {
+      await reportCleanupNotice(
+        "cleanup-failure",
+        "Gate stack cleanup also failed after bringup failed",
+        stoppedResult[0].reason,
       );
-    });
+    }
     // What that `stop` DID with the pod, carried out on the error rather than
     // left for whoever catches it to infer (#45). This is the one place that
     // knows both — the pod identity, and whether its own early return kept it
@@ -1318,6 +1380,14 @@ export type BringUpCtx = {
   // Injectable so the deciding readiness deadline can be tested without
   // replacing the process wall clock.
   readonly clock?: Clock;
+  // Stack-owned lifecycle accounting. The initial namesake removal has no
+  // registered lifetime and is therefore ignored; later replacements record
+  // the generation that is actually being torn down (#141).
+  readonly beforeRemove?: (container: ResolvedStackContainer) => Promise<void>;
+  readonly afterStart?: (
+    container: ResolvedStackContainer,
+    containerName: string,
+  ) => void;
 };
 
 // Start every container, THEN wait for all of them, then run their post-ready
@@ -1343,6 +1413,7 @@ export async function bringUpContainers(
     // pre-upgrade sandbar, i.e. before `--image-volume=ignore`, and its
     // anonymous volume would otherwise outlive it as a permanently consumed
     // podman lock.
+    await ctx.beforeRemove?.(c);
     await boundedPodman(CONTAINER_RM_ARGS(containerName), CONTROL_TIMEOUT_MS);
     const started = await boundedPodman(
       containerRunArgs({
@@ -1365,6 +1436,7 @@ export async function bringUpContainers(
         await logTail(containerName),
       );
     }
+    ctx.afterStart?.(c, containerName);
   }
 
   for (const c of containers) {
@@ -1868,6 +1940,15 @@ type RunGateCtx = {
   readonly allowDirtyWorktree: boolean;
   readonly onStepOutput?: ((chunk: string) => void) | undefined;
   readonly onNotice: (message: string) => void | Promise<void>;
+  readonly resourceReader: (containerName: string) => Promise<ContainerResources>;
+  readonly resourceSnapshotReader?: (
+    containerName: string,
+  ) => Promise<ContainerResourceSnapshot>;
+  readonly recordTeardown: (container: ResolvedStackContainer) => Promise<void>;
+  readonly bringUpCtx: (
+    attach: ContainerAttachment,
+    label?: string,
+  ) => BringUpCtx;
 };
 
 // The long-lived half of the stack, re-checked before every gate run.
@@ -2025,13 +2106,7 @@ async function assertIssueContainerHealthy(
       "beyond its declared setup goes with it.",
   );
   try {
-    await bringUpContainers([running], {
-      attach: ctx.attach,
-      label: GATE_LABEL,
-      worktreePath: ctx.worktreePath,
-      hideWorktreeGit: ctx.hideWorktreeGit,
-      nameOf: ctx.nameOf,
-    });
+    await bringUpContainers([running], ctx.bringUpCtx(ctx.attach));
   } catch (err) {
     // The whole sequence, because none of it is recoverable afterwards: the
     // recreate's own error describes a container that would not come up and
@@ -2196,19 +2271,19 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   }
   if (staleIssueContainers.length > 0) {
     try {
-      await bringUpContainers(withImages(staleIssueContainers, images), {
-        attach: ctx.attach,
-        label: GATE_LABEL,
-        worktreePath: ctx.worktreePath,
-        hideWorktreeGit: ctx.hideWorktreeGit,
-        nameOf: ctx.nameOf,
-      });
+      await bringUpContainers(
+        withImages(staleIssueContainers, images),
+        ctx.bringUpCtx(ctx.attach),
+      );
     } catch (err) {
       if (err instanceof ContainerBringupError) {
+        const durationMs = tIssue();
+        const resources = await ctx.resourceReader(err.containerName);
         steps.push({
           name: `container:${err.containerName}`,
           ok: false,
-          durationMs: tIssue(),
+          durationMs,
+          ...resources,
         });
         return withContainerLogs(
           {
@@ -2253,20 +2328,20 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
   // later attempt's source.
   const tAttempt = startTimer();
   try {
-    await bringUpContainers(withImages(ctx.attemptContainers, images), {
-      attach: ctx.attach,
-      label: GATE_LABEL,
-      worktreePath: ctx.worktreePath,
-      hideWorktreeGit: ctx.hideWorktreeGit,
-      nameOf: ctx.nameOf,
-    });
+    await bringUpContainers(
+      withImages(ctx.attemptContainers, images),
+      ctx.bringUpCtx(ctx.attach),
+    );
     steps.push({ name: "containers:attempt", ok: true, durationMs: tAttempt() });
   } catch (err) {
     if (err instanceof ContainerBringupError) {
+      const durationMs = tAttempt();
+      const resources = await ctx.resourceReader(err.containerName);
       steps.push({
         name: `container:${err.containerName}`,
         ok: false,
-        durationMs: tAttempt(),
+        durationMs,
+        ...resources,
       });
       return withContainerLogs(
         {
@@ -2301,13 +2376,24 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     // with its first byte: a step that produces nothing for minutes is exactly
     // the one whose name a watcher needs (#45).
     ctx.onStepOutput?.(banner);
+    const resourceStart = await ctx.resourceSnapshotReader?.(containerName);
     const tStep = startTimer();
     const r = await boundedPodman(
       stepExecArgs(containerName, step.command),
       step.timeoutMs,
       ctx.onStepOutput,
     );
-    steps.push({ name: step.name, ok: boundedOk(r), durationMs: tStep() });
+    const durationMs = tStep();
+    const resourceEnd = await ctx.resourceSnapshotReader?.(containerName);
+    const resources = resourceEnd === undefined
+      ? await ctx.resourceReader(containerName)
+      : containerResourcesSince(resourceEnd, resourceStart);
+    steps.push({
+      name: step.name,
+      ok: boundedOk(r),
+      durationMs,
+      ...resources,
+    });
     if (boundedOk(r)) {
       stdout += banner + stripAnsi(r.stdout);
       stderr += stripAnsi(r.stderr);
@@ -2332,7 +2418,7 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
         "the work is genuinely this slow.\n"
       : r.maxBufferExceeded
         ? `\n\n[sandbar] step '${step.name}' produced more than ` +
-          `${MAX_BUFFER} bytes of output and was killed; the output above is ` +
+          `${RUNTIME_MAX_BUFFER} bytes of output and was killed; the output above is ` +
           "truncated and the exit code is unknown. This is an output-volume " +
           "failure, not necessarily a test failure — quieten the step's " +
           "reporter.\n"
@@ -2403,6 +2489,7 @@ async function reapKilledStep(
   ctx: RunGateCtx,
   stepName: string,
 ): Promise<void> {
+  await ctx.recordTeardown(container);
   const removed = await boundedPodman(
     CONTAINER_RM_ARGS(containerName),
     LOG_READ_TIMEOUT_MS,
@@ -2458,13 +2545,10 @@ async function reapKilledStep(
     // it must be the map as it STANDS: this is a restore of what was running,
     // not a new resolution, and re-resolving mid-red would pay a build for a
     // gate whose verdict is already decided.
-    await bringUpContainers(withImages([container], ctx.running.map), {
-      attach: ctx.attach,
-      label: GATE_LABEL,
-      worktreePath: ctx.worktreePath,
-      hideWorktreeGit: ctx.hideWorktreeGit,
-      nameOf: ctx.nameOf,
-    });
+    await bringUpContainers(
+      withImages([container], ctx.running.map),
+      ctx.bringUpCtx(ctx.attach),
+    );
   } catch (err) {
     // Deliberately not swallowed, even though it costs the red gate we were
     // about to return: a stack whose issue container will not come back up IS

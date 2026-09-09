@@ -36,6 +36,8 @@ describe("raw transcript tree", () => {
       detail: null,
       exitCode: 0,
       durationMs: 42,
+      peakMemoryBytes: 931_000_000,
+      oomKilled: true,
       speech: "implementer speech",
       stdout: "implementer stdout",
       stderr: "implementer stderr",
@@ -44,7 +46,8 @@ describe("raw transcript tree", () => {
     expect(await readFile(join(issue.dir, "attempt-2.log"), "utf8")).toBe(
       "agent:      implementer-47-attempt-2\n" +
       "provider:   codex\nmodel:      gpt-5.6-sol\nended:      exit\n" +
-      "exit code:  0\nduration:   42ms\n\n" +
+      "exit code:  0\nduration:   42ms\n" +
+      "resources:  peakMemoryBytes=931000000 oomKilled=true\n\n" +
       "--- speech ---\nimplementer speech\n" +
       "--- stdout tail ---\nimplementer stdout\n" +
       "--- stderr tail ---\nimplementer stderr\n",
@@ -77,6 +80,7 @@ describe("raw transcript tree", () => {
       attempt: 2, issueId: "64", mode: "still-conflicted",
       stdout: "agent said this", stderr: "agent complained", end: "exit",
       exitCode: 1, signal: null, durationMs: 6300,
+      peakMemoryBytes: 344_000_000, oomKilled: false,
       container: "sandbar-wdeadbeef-resolve-2-uuid",
     });
     expect(await readFile(join(landing.dir, "merger.log"), "utf8")).toContain("merge branch");
@@ -89,6 +93,7 @@ describe("raw transcript tree", () => {
       "resolve attempt 2 for #64 (mode=still-conflicted)\n" +
       "container:  sandbar-wdeadbeef-resolve-2-uuid\nended:      exit\n" +
       "exit code:  1\nsignal:     -\nduration:   6300ms\n" +
+      "resources:  peakMemoryBytes=344000000\n" +
       "stdout:     15 bytes\nstderr:     16 bytes\n\n" +
       "--- stdout ---\nagent said this\n--- stderr ---\nagent complained\n",
     );

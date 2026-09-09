@@ -15,11 +15,15 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { buildAgentProvider } from "./agent-providers.js";
+import { setCleanupReporter } from "./cleanup.js";
+import { SandbarError } from "./errors.js";
 import {
   buildResolveRunArgv,
+  buildResolveExecArgv,
+  buildResolveReapArgv,
   captureAgentRun,
   parseCapturedAgentRun,
   realAdapter,
@@ -27,6 +31,7 @@ import {
 } from "./merger.js";
 import { runScope } from "./naming.js";
 import { isInfraFailure, parseResolveSignal } from "./resolve-loop.js";
+import type { BoundedRuntimeResult } from "./runtime.js";
 
 const opts = (timeoutMs = 30_000) => ({ container: "c-under-test", timeoutMs });
 
@@ -405,7 +410,6 @@ describe("resolve provider invocation (#74)", () => {
         cwd: "/worktree",
         extraMounts: ["/git-common"],
         image: "sandbox-image",
-        command: "agent --print",
         credentials,
         botName: "sandbar-bot",
         botEmail: "bot@example.test",
@@ -416,12 +420,11 @@ describe("resolve provider invocation (#74)", () => {
       }
       for (const key of absent) expect(joined).not.toContain(`${key}=`);
       expect(joined).toContain("GH_TOKEN=github-key");
-      expect(argv.slice(-5)).toEqual([
+      expect(argv.slice(-4)).toEqual([
         "--entrypoint",
-        "/bin/sh",
+        "sleep",
         "sandbox-image",
-        "-c",
-        "agent --print",
+        "infinity",
       ]);
       expect(argv).toContain("/git-common:/git-common");
     },
@@ -433,13 +436,12 @@ describe("resolve provider invocation (#74)", () => {
       cwd: "/worktree",
       extraMounts: ["/git-common"],
       image: "sandbox-image",
-      command: "agent --print",
       credentials: {},
       botName: "sandbar-bot",
       botEmail: "bot@example.test",
     });
     expect(argv).toEqual([
-      "run", "--rm", "-i", "--image-volume=ignore",
+      "run", "-d", "--image-volume=ignore",
       "--name", "resolve-1",
       "--userns=keep-id", "--user", "1000:1000",
       "-v", "/worktree:/workspace", "-v", "/git-common:/git-common",
@@ -449,9 +451,18 @@ describe("resolve provider invocation (#74)", () => {
       "-e", "GIT_AUTHOR_EMAIL=bot@example.test",
       "-e", "GIT_COMMITTER_NAME=sandbar-bot",
       "-e", "GIT_COMMITTER_EMAIL=bot@example.test",
-      "--entrypoint", "/bin/sh", "sandbox-image", "-c", "agent --print",
+      "--entrypoint", "sleep", "sandbox-image", "infinity",
     ]);
     expect(argv).not.toContain("--init");
+    // #141 runs the agent through exec while this PID 1 keeps its cgroup live,
+    // then the adapter measures and explicitly removes the container.
+    expect(argv).not.toContain("--rm");
+    expect(buildResolveExecArgv("resolve-1", "agent --print")).toEqual([
+      "exec", "-i", "resolve-1", "/bin/sh", "-c", "agent --print",
+    ]);
+    expect(buildResolveReapArgv("resolve-1")).toEqual([
+      "exec", "resolve-1", "/bin/sh", "-c", expect.stringContaining("kill"),
+    ]);
   });
 
   it("mounts the shared Codex credential read-write without putting it in env", () => {
@@ -464,7 +475,6 @@ describe("resolve provider invocation (#74)", () => {
         sandboxPath: "/home/agent/.codex/auth.json",
       },
       image: "sandbox-image",
-      command: "codex exec",
       credentials: {},
       botName: "sandbar-bot",
       botEmail: "bot@example.test",
@@ -482,8 +492,12 @@ describe("resolve provider invocation (#74)", () => {
     await writeFile(podman, [
       `#!${process.execPath}`,
       'const { appendFileSync } = require("node:fs");',
-      `appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
-      'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"<promise>ABANDON</promise>"}}) + "\\n");',
+      'const args = process.argv.slice(2);',
+      `appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(args) + "\\n");`,
+      'if (args[0] === "run") process.stdout.write("container-id\\n");',
+      'if (args[0] === "exec") process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"<promise>ABANDON</promise>"}}) + "\\n");',
+      'if (args[0] === "inspect") process.stdout.write("\\nfalse\\n");',
+      'if (args[0] === "stats") process.stdout.write("2048 / 4096\\n");',
     ].join("\n"), { mode: 0o755 });
     process.env["PATH"] = `${root}:${originalPath ?? ""}`;
 
@@ -512,19 +526,467 @@ describe("resolve provider invocation (#74)", () => {
 
       const run = await adapter.runResolveAgent("resolve this", 1);
       expect(run.output).toBe("<promise>ABANDON</promise>");
-      const [argv] = (await readFile(argvLog, "utf8"))
+      const calls = (await readFile(argvLog, "utf8"))
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as string[]);
+      const argv = calls.find((args) => args[0] === "run")!;
       expect(argv).toContain(
         `${codexAuthMount.hostPath}:${codexAuthMount.sandboxPath}:z`,
       );
       expect(argv).toContain("CODEX_HOME=/var/lib/codex");
       expect(argv?.join(" ")).not.toContain("CODEX_AUTH_JSON=");
+      expect(calls.map((args) => args[0])).toEqual([
+        "run", "exec", "exec", "inspect", "stats", "rm",
+      ]);
+      expect(run).toMatchObject({ peakMemoryBytes: 2048 });
+      expect(run).not.toHaveProperty("oomKilled");
     } finally {
       if (originalPath === undefined) delete process.env["PATH"];
       else process.env["PATH"] = originalPath;
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it.each([
+    ["exit", 0, null],
+    ["exit", 7, null],
+    ["timeout", null, "SIGTERM"],
+    ["signal", null, "SIGKILL"],
+    ["spawn-error", null, null],
+  ] as const)(
+    "measures a live resolve cgroup before explicit removal after %s",
+    async (end, exitCode, signal) => {
+      const order: string[] = [];
+      const runtimeResult = (stdout = ""): BoundedRuntimeResult => ({
+        stdout,
+        stderr: "",
+        exitCode: 0,
+        timedOut: false,
+        maxBufferExceeded: false,
+        errorMessage: "",
+      });
+      const podman = vi.fn(async (args: readonly string[]) => {
+        order.push(args[0] ?? "");
+        if (args[0] === "inspect") {
+          return runtimeResult("\ntrue\n");
+        }
+        if (args[0] === "stats") return runtimeResult("8192 / 16384\n");
+        return runtimeResult();
+      });
+      const captureResolveProcess = vi.fn(async (
+        _file: string,
+        args: readonly string[],
+      ) => {
+        order.push(args[0] ?? "");
+        if (args[0] === "run") {
+          return {
+            stdout: "container-id\n", stderr: "", end: "exit" as const,
+            exitCode: 0, signal: null, durationMs: 1, container: "resolve-test",
+          };
+        }
+        return {
+          stdout: JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: "<promise>ABANDON</promise>" },
+          }),
+          stderr: "",
+          end,
+          exitCode,
+          signal,
+          durationMs: 2,
+          container: "resolve-test",
+        };
+      });
+      const adapter = realAdapter({
+        cwd: "/worktree",
+        cacheDir: "/cache.git",
+        scope: runScope("/worktree"),
+        repo: { owner: "acme", name: "app" },
+        sourceBranch: "main",
+        botName: "sandbar-bot",
+        botEmail: "bot@example.test",
+        coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+        mergerAgent: "codex",
+        mergerModelId: "gpt-5.6-sol",
+        sandboxImage: "sandbox-image",
+        env: () => undefined,
+        runStackGate: async () => { throw new Error("not called"); },
+        podman,
+        captureResolveProcess,
+      });
+
+      const run = await adapter.runResolveAgent("resolve this", 1);
+      expect(run).toMatchObject({ peakMemoryBytes: 8192, oomKilled: true });
+      expect(order).toEqual(["run", "exec", "exec", "inspect", "stats", "rm"]);
+      expect(order.indexOf("inspect")).toBeLessThan(order.indexOf("rm"));
+    },
+  );
+
+  it("removes the resolve container and preserves a thrown capture failure", async () => {
+    const primary = new Error("capture seam failed");
+    const order: string[] = [];
+    const runtimeResult = (stdout = ""): BoundedRuntimeResult => ({
+      stdout,
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+      maxBufferExceeded: false,
+      errorMessage: "",
+    });
+    const podman = vi.fn(async (args: readonly string[]) => {
+      order.push(args[0] ?? "");
+      if (args[0] === "inspect") return runtimeResult("\nfalse\n");
+      if (args[0] === "stats") return runtimeResult("1024 / 2048\n");
+      return runtimeResult();
+    });
+    const captureResolveProcess = vi.fn(async (
+      _file: string,
+      args: readonly string[],
+    ) => {
+      order.push(args[0] ?? "");
+      if (args[0] === "exec") throw primary;
+      return {
+        stdout: "container-id\n", stderr: "", end: "exit" as const,
+        exitCode: 0, signal: null, durationMs: 1, container: "resolve-test",
+      };
+    });
+    const adapter = realAdapter({
+      cwd: "/worktree",
+      cacheDir: "/cache.git",
+      scope: runScope("/worktree"),
+      repo: { owner: "acme", name: "app" },
+      sourceBranch: "main",
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+      sandboxImage: "sandbox-image",
+      env: () => undefined,
+      runStackGate: async () => { throw new Error("not called"); },
+      podman,
+      captureResolveProcess,
+    });
+
+    await expect(adapter.runResolveAgent("resolve this", 1)).rejects.toBe(primary);
+    expect(order).toEqual(["run", "exec", "exec", "inspect", "stats", "rm"]);
+  });
+
+  it("registers removal and gives signal cleanup its non-zero diagnosis", async () => {
+    const order: string[] = [];
+    const notices: Array<{ message: string; cause: unknown }> = [];
+    let cleanupFailure: unknown;
+    let cleanupAction: (() => Promise<void> | void) | undefined;
+    const unregister = vi.fn(() => order.push("unregister"));
+    const registerResolveCleanup = vi.fn((action: () => Promise<void> | void) => {
+      order.push("register");
+      cleanupAction = action;
+      return unregister;
+    });
+    const runtimeResult = (stdout = ""): BoundedRuntimeResult => ({
+      stdout,
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+      maxBufferExceeded: false,
+      errorMessage: "",
+    });
+    const podman = vi.fn(async (args: readonly string[]) => {
+      order.push(`podman:${args[0]}`);
+      if (args[0] === "inspect") return runtimeResult("\nfalse\n");
+      if (args[0] === "stats") return runtimeResult("1024 / 2048\n");
+      if (args[0] === "rm") {
+        return { ...runtimeResult(), exitCode: 125, errorMessage: "removal refused" };
+      }
+      return runtimeResult();
+    });
+    const captureResolveProcess = vi.fn(async (
+      _file: string,
+      args: readonly string[],
+    ) => {
+      order.push(`capture:${args[0]}`);
+      if (args[0] === "exec") {
+        try {
+          await cleanupAction?.();
+        } catch (err) {
+          cleanupFailure = err;
+        }
+        return {
+          stdout: JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: "<promise>ABANDON</promise>" },
+          }),
+          stderr: "", end: "exit" as const, exitCode: 0, signal: null,
+          durationMs: 2, container: "resolve-test",
+        };
+      }
+      return {
+        stdout: "container-id\n", stderr: "", end: "exit" as const,
+        exitCode: 0, signal: null, durationMs: 1, container: "resolve-test",
+      };
+    });
+    const adapter = realAdapter({
+      cwd: "/worktree",
+      cacheDir: "/cache.git",
+      scope: runScope("/worktree"),
+      repo: { owner: "acme", name: "app" },
+      sourceBranch: "main",
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+      sandboxImage: "sandbox-image",
+      env: () => undefined,
+      runStackGate: async () => { throw new Error("not called"); },
+      podman,
+      captureResolveProcess,
+      registerResolveCleanup,
+    });
+
+    const restoreReporter = setCleanupReporter((_kind, message, cause) => {
+      notices.push({ message, cause });
+    });
+    try {
+      await expect(adapter.runResolveAgent("resolve this", 1)).resolves.toMatchObject({
+        output: "<promise>ABANDON</promise>",
+      });
+    } finally {
+      restoreReporter();
+    }
+    expect(order).toEqual([
+      "capture:run", "register", "capture:exec", "podman:rm", "podman:exec",
+      "podman:inspect", "podman:stats", "unregister",
+    ]);
+    expect(cleanupFailure).toBeInstanceOf(SandbarError);
+    expect((cleanupFailure as Error).message).toMatch(
+      /^merger: failed to remove resolve container '.*': removal refused$/,
+    );
+    expect(notices).toEqual([
+      expect.objectContaining({ cause: cleanupFailure }),
+    ]);
+    expect(podman.mock.calls.filter(([args]) => args[0] === "rm")).toHaveLength(1);
+    expect(registerResolveCleanup).toHaveBeenCalledOnce();
+    expect(unregister).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      label: "timed-out",
+      stderr: "podman run did not return",
+      end: "timeout" as const,
+      exitCode: null,
+      signal: "SIGKILL",
+      durationMs: 120_000,
+    },
+    {
+      label: "non-zero",
+      stderr: "Error: image not known",
+      end: "exit" as const,
+      exitCode: 125,
+      signal: null,
+      durationMs: 7,
+    },
+  ])("maps a $label container start to infra and skips in-container reaping", async (start) => {
+    const order: string[] = [];
+    const notices: Array<{ message: string; cause: unknown }> = [];
+    const runtimeResult = (stdout = ""): BoundedRuntimeResult => ({
+      stdout,
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+      maxBufferExceeded: false,
+      errorMessage: "",
+    });
+    const podman = vi.fn(async (args: readonly string[]) => {
+      order.push(`podman:${args[0]}`);
+      if (args[0] === "inspect") return { ...runtimeResult(), exitCode: 125 };
+      if (args[0] === "stats") return { ...runtimeResult(), exitCode: 125 };
+      if (args[0] === "rm") {
+        return { ...runtimeResult(), exitCode: 125, errorMessage: "no such container" };
+      }
+      return runtimeResult();
+    });
+    const captureResolveProcess = vi.fn(async (
+      _file: string,
+      args: readonly string[],
+    ) => {
+      order.push(`capture:${args[0]}`);
+      return {
+        stdout: "",
+        stderr: start.stderr,
+        end: start.end,
+        exitCode: start.exitCode,
+        signal: start.signal,
+        durationMs: start.durationMs,
+        container: "resolve-test",
+      };
+    });
+    const adapter = realAdapter({
+      cwd: "/worktree",
+      cacheDir: "/cache.git",
+      scope: runScope("/worktree"),
+      repo: { owner: "acme", name: "app" },
+      sourceBranch: "main",
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+      sandboxImage: "missing-image",
+      env: () => undefined,
+      runStackGate: async () => { throw new Error("not called"); },
+      podman,
+      captureResolveProcess,
+    });
+
+    const restoreReporter = setCleanupReporter((_kind, message, cause) => {
+      notices.push({ message, cause });
+    });
+    let run: Awaited<ReturnType<typeof adapter.runResolveAgent>>;
+    try {
+      run = await adapter.runResolveAgent("resolve this", 1);
+    } finally {
+      restoreReporter();
+    }
+    expect(run).toMatchObject({
+      stderr: start.stderr,
+      exitCode: start.exitCode,
+      signal: start.signal,
+      durationMs: start.durationMs,
+      end: "spawn-error",
+    });
+    expect(isInfraFailure(run)).toBe(true);
+    expect(order).toEqual([
+      "capture:run", "podman:inspect", "podman:stats", "podman:rm",
+    ]);
+    expect(notices).toEqual([
+      expect.objectContaining({
+        message: expect.stringContaining("cleanup also failed"),
+        cause: expect.objectContaining({ message: expect.stringContaining("no such container") }),
+      }),
+    ]);
+  });
+
+  it("preserves capture failure while reporting every combined cleanup failure", async () => {
+    const primary = new Error("capture failed");
+    const reaping = new Error("reaping failed");
+    const measurement = new Error("measurement failed");
+    const removal = new Error("removal failed");
+    const order: string[] = [];
+    const notices: Array<{ message: string; cause: unknown }> = [];
+    const restoreReporter = setCleanupReporter((_kind, message, cause) => {
+      notices.push({ message, cause });
+    });
+    const captureResolveProcess = vi.fn(async (
+      _file: string,
+      args: readonly string[],
+    ) => {
+      order.push(`capture:${args[0]}`);
+      if (args[0] === "exec") throw primary;
+      return {
+        stdout: "container-id\n", stderr: "", end: "exit" as const,
+        exitCode: 0, signal: null, durationMs: 1, container: "resolve-test",
+      };
+    });
+    const podman = vi.fn(async (args: readonly string[]) => {
+      order.push(`podman:${args[0]}`);
+      if (args[0] === "exec") throw reaping;
+      if (args[0] === "inspect") throw measurement;
+      throw removal;
+    });
+    const adapter = realAdapter({
+      cwd: "/worktree",
+      cacheDir: "/cache.git",
+      scope: runScope("/worktree"),
+      repo: { owner: "acme", name: "app" },
+      sourceBranch: "main",
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+      sandboxImage: "sandbox-image",
+      env: () => undefined,
+      runStackGate: async () => { throw new Error("not called"); },
+      podman,
+      captureResolveProcess,
+    });
+
+    try {
+      await expect(adapter.runResolveAgent("resolve this", 1)).rejects.toBe(primary);
+    } finally {
+      restoreReporter();
+    }
+    expect(order).toEqual([
+      "capture:run", "capture:exec", "podman:exec", "podman:inspect", "podman:rm",
+    ]);
+    expect(notices).toEqual([
+      expect.objectContaining({ cause: reaping }),
+      expect.objectContaining({ cause: measurement }),
+      expect.objectContaining({ cause: removal }),
+    ]);
+  });
+
+  it("returns a captured agent result while reporting every cleanup failure", async () => {
+    const reaping = new Error("reaping failed");
+    const measurement = new Error("measurement failed");
+    const removal = new Error("removal failed");
+    const notices: Array<{ message: string; cause: unknown }> = [];
+    const restoreReporter = setCleanupReporter((_kind, message, cause) => {
+      notices.push({ message, cause });
+    });
+    const captureResolveProcess = vi.fn(async (
+      _file: string,
+      args: readonly string[],
+    ) => args[0] === "run"
+      ? {
+          stdout: "container-id\n", stderr: "", end: "exit" as const,
+          exitCode: 0, signal: null, durationMs: 1, container: "resolve-test",
+        }
+      : {
+          stdout: JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: "<promise>COMMITTED</promise>" },
+          }),
+          stderr: "", end: "exit" as const, exitCode: 0, signal: null,
+          durationMs: 2, container: "resolve-test",
+        });
+    const podman = vi.fn(async (args: readonly string[]) => {
+      if (args[0] === "exec") throw reaping;
+      if (args[0] === "inspect") throw measurement;
+      throw removal;
+    });
+    const adapter = realAdapter({
+      cwd: "/worktree",
+      cacheDir: "/cache.git",
+      scope: runScope("/worktree"),
+      repo: { owner: "acme", name: "app" },
+      sourceBranch: "main",
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+      sandboxImage: "sandbox-image",
+      env: () => undefined,
+      runStackGate: async () => { throw new Error("not called"); },
+      podman,
+      captureResolveProcess,
+    });
+
+    try {
+      await expect(adapter.runResolveAgent("resolve this", 1)).resolves.toMatchObject({
+        output: "<promise>COMMITTED</promise>",
+      });
+    } finally {
+      restoreReporter();
+    }
+    expect(notices).toEqual([
+      expect.objectContaining({ cause: reaping }),
+      expect.objectContaining({ cause: measurement }),
+      expect.objectContaining({ cause: removal }),
+    ]);
   });
 });

@@ -546,6 +546,11 @@ outcomes.
   rules: a duration is a REPORT (no budget, no threshold, no adaptive bound —
   `step.timeoutMs` stays the one bound `gate-stack.ts` has), and an absent
   measurement is ABSENT, never `0`, because a stats reader averages a zero.
+  Container-backed durations also record cgroup-v2 `memory.peak` and the
+  `memory.events` OOM-kill counter at teardown (#141), OR-ed with Podman's
+  `State.OOMKilled` and with sampled stats only as a peak fallback; reused
+  containers attribute OOM kills by counter delta over each execution span.
+  These remain evidence and never become a limit or scheduling input.
   Every deadline is computed on the monotonic clock (#122), so a wall-clock
   step cannot move a readiness or forge-verification verdict. This is a
   separate rule from durations being reports rather than decision inputs.
@@ -681,9 +686,10 @@ names the release that drives a run, and `npm run sandbar`
 - **The gate runs the podman-layer tests over the host's socket (#48)** —
   `CONTAINER_HOST` plus a read-only socket mount; test containers are scoped
   siblings of the run's own (#47). What a human still runs by hand is exactly
-  two host-only files: `gate-stack-hostpodman.test.ts` (local-client and
+  three host-only files: `gate-stack-hostpodman.test.ts` (local-client and
   systemd-session facts) and `sandbox-stack-podman.test.ts` (keep-id anchor
-  chain, #44).
+  chain, #44), plus `container-resources-podman.test.ts` (the host-side cgroup
+  path returned by a local rootless Podman, #141).
 - **`mergeMode` stays `direct` (#39)** — personal project; tests run on host
   machines, not hosted CI.
 - **One issue per change, however many modules it touches.** Do not carve a

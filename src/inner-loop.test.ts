@@ -30,7 +30,12 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   symbolicHeadRef: innerLoopMocks.symbolicHeadRef,
 }));
 
-import { withPartialOutput, type Sandbox } from "./agent-sandbox.js";
+import {
+  withPartialContainerResources,
+  withPartialDurationMs,
+  withPartialOutput,
+  type Sandbox,
+} from "./agent-sandbox.js";
 import {
   enforceReviewerSnapshot,
   priorReviewRound,
@@ -56,6 +61,10 @@ import type { EventInput } from "./events.js";
 import type { GateResult } from "./gate.js";
 import { initialState } from "./inner-loop-machine.js";
 import { createGateSemaphore } from "./gate-semaphore.js";
+import {
+  containerResourcesOf,
+  type ContainerResources,
+} from "./container-resources.js";
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -91,7 +100,14 @@ describe("runUiCheck (#126)", () => {
         stdout,
         stderr: "",
       });
-      return { stdout, commits: [], maxGapMs, toolCalls };
+      return {
+        stdout,
+        commits: [],
+        durationMs: 1,
+        silent: false,
+        maxGapMs,
+        toolCalls,
+      };
     };
     const sandbox = {
       worktreePath: "/worktree",
@@ -157,6 +173,7 @@ describe("runUiCheck (#126)", () => {
     vi.mocked(success.sandbox.run).mockReset().mockResolvedValueOnce({
       stdout: "<ui-check>CLEAR</ui-check>",
       commits: [],
+      durationMs: 17,
       silent: false,
       maxGapMs: 9,
       usage: {
@@ -172,6 +189,8 @@ describe("runUiCheck (#126)", () => {
       },
       toolCalls: 7,
       peakContext: 8,
+      peakMemoryBytes: 344_000_000,
+      oomKilled: true,
       rateLimit: {
         status: "allowed_warning",
         window: "five_hour",
@@ -183,7 +202,8 @@ describe("runUiCheck (#126)", () => {
     expect(successEvents).toEqual([{
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
-      durationMs: expect.any(Number), maxGapMs: 9, result: "CLEAR",
+      durationMs: 17, maxGapMs: 9, result: "CLEAR",
+      peakMemoryBytes: 344_000_000, oomKilled: true,
       usage: { inputTokens: 1, cachedInputTokens: 2, cacheWriteInputTokens: 3,
         outputTokens: 4, reasoningTokens: 5, apiMs: 6, resolvedModel: "resolved",
         models: 2, terminalReason: "end_turn", toolCalls: 7, peakContext: 8,
@@ -193,13 +213,19 @@ describe("runUiCheck (#126)", () => {
 
     const failureEvents: EventInput[] = [];
     const failure = context([], failureEvents);
-    const err = withPartialOutput(
-      new Error("disconnected"),
-      "partial",
-      { inputTokens: 11, outputTokens: 12 },
-      13,
-      14,
-      { status: "rejected", window: "weekly", utilization: 1 },
+    const err = withPartialDurationMs(
+      withPartialContainerResources(
+        withPartialOutput(
+          new Error("disconnected"),
+          "partial",
+          { inputTokens: 11, outputTokens: 12 },
+          13,
+          14,
+          { status: "rejected", window: "weekly", utilization: 1 },
+        ),
+        { peakMemoryBytes: 512_000_000, oomKilled: true },
+      ),
+      19,
     );
     vi.mocked(failure.sandbox.run).mockReset().mockImplementationOnce(
       async (options) => {
@@ -223,7 +249,8 @@ describe("runUiCheck (#126)", () => {
     expect(failureEvents).toEqual([{
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
-      durationMs: expect.any(Number), result: "failed",
+      durationMs: 19, result: "failed",
+      peakMemoryBytes: 512_000_000, oomKilled: true,
       usage: { inputTokens: 11, outputTokens: 12, toolCalls: 13, peakContext: 14,
         quota: { status: "rejected", window: "weekly", utilization: 1 } },
     }]);
@@ -309,17 +336,29 @@ describe("runUiCheck (#126)", () => {
 });
 
 describe("silent implementer attempt policy (#116)", () => {
-  const sandboxResult = (stdout: string, silent: boolean, commits: string[] = []) => ({
+  const sandboxResult = (
+    stdout: string,
+    silent: boolean,
+    commits: string[] = [],
+    resources: ContainerResources = {},
+  ) => ({
     stdout,
     silent,
     commits: commits.map((sha) => ({ sha })),
+    durationMs: 1,
     maxGapMs: 1,
     toolCalls: 0,
+    ...resources,
   });
+  type ScriptedImplementerRun = ReturnType<typeof sandboxResult> | {
+    readonly error: Error;
+    readonly resources: ContainerResources;
+    readonly durationMs: number;
+  };
 
   const runPath = (
-    first: ReturnType<typeof sandboxResult>,
-    nudge: ReturnType<typeof sandboxResult>,
+    first: ScriptedImplementerRun,
+    nudge: ScriptedImplementerRun,
     promptExtensions?: Parameters<typeof runImplementer>[1]["config"]["promptExtensions"],
     mismatch: HeadMismatch | null = null,
     latestReviewerFeedback: Parameters<
@@ -337,21 +376,31 @@ describe("silent implementer attempt policy (#116)", () => {
     const writes: string[] = [];
     const lines: EventInput[] = [];
     const record = async (
-      result: ReturnType<typeof sandboxResult>,
+      result: ScriptedImplementerRun,
       options: Parameters<Sandbox["run"]>[0],
     ) => {
+      const failed = "error" in result;
+      const resources = failed ? result.resources : containerResourcesOf(result);
+      const stdout = failed ? "" : result.stdout;
       await options.onInvocationEnd?.({
         agent: options.name ?? options.agent.name,
         provider: options.agent.name,
         model: options.model ?? null,
-        end: "exit",
-        detail: null,
-        exitCode: 0,
-        durationMs: 1,
-        speech: result.stdout,
-        stdout: result.stdout,
+        end: failed ? "exec-error" : "exit",
+        detail: failed ? result.error.message : null,
+        exitCode: failed ? null : 0,
+        durationMs: result.durationMs,
+        speech: stdout,
+        stdout,
         stderr: "",
+        ...resources,
       });
+      if (failed) {
+        throw withPartialDurationMs(
+          withPartialContainerResources(result.error, resources),
+          result.durationMs,
+        );
+      }
       return result;
     };
     const sandbox = {
@@ -432,6 +481,65 @@ describe("silent implementer attempt policy (#116)", () => {
     });
     expect(writes).toEqual(["", spoken]);
     expect(lines.at(-1)).toMatchObject({ kind: "implementer", commits: 0 });
+  });
+
+  it("keeps the largest peak and any OOM across a promise nudge", async () => {
+    const { pending, lines } = runPath(
+      sandboxResult("no signal", false, [], {
+        peakMemoryBytes: 1024,
+        oomKilled: false,
+      }),
+      sandboxResult("<promise>COMPLETE</promise>", false, [], {
+        peakMemoryBytes: 2048,
+        oomKilled: true,
+      }),
+    );
+
+    await expect(pending).resolves.toMatchObject({ kind: "implementer-result" });
+    expect(lines.at(-1)).toMatchObject({
+      kind: "implementer",
+      peakMemoryBytes: 2048,
+      oomKilled: true,
+    });
+  });
+
+  it("records an OOM-killed first invocation before propagating its failure", async () => {
+    const { pending, lines } = runPath(
+      {
+        error: new Error("agent exited 137"),
+        resources: { peakMemoryBytes: 4096, oomKilled: true },
+        durationMs: 7,
+      },
+      sandboxResult("unused", false),
+    );
+
+    await expect(pending).rejects.toThrow("agent exited 137");
+    expect(lines.at(-1)).toMatchObject({
+      kind: "implementer", signal: "FAILED", commits: 0,
+      durationMs: 7,
+      peakMemoryBytes: 4096, oomKilled: true,
+    });
+  });
+
+  it("merges prior evidence into an OOM-killed nudge failure event", async () => {
+    const { pending, lines } = runPath(
+      sandboxResult("no signal", false, ["a"], {
+        peakMemoryBytes: 1024,
+        oomKilled: false,
+      }),
+      {
+        error: new Error("nudge exited 137"),
+        resources: { peakMemoryBytes: 8192, oomKilled: true },
+        durationMs: 9,
+      },
+    );
+
+    await expect(pending).rejects.toThrow("nudge exited 137");
+    expect(lines.at(-1)).toMatchObject({
+      kind: "implementer", signal: "FAILED", commits: 1,
+      durationMs: 10,
+      peakMemoryBytes: 8192, oomKilled: true,
+    });
   });
 
   it("hands only the implementer extension to the implementer prompt", async () => {
@@ -641,9 +749,21 @@ describe("role prompt-extension wiring (#91)", () => {
     const filenames: string[] = [];
     const invocationSequence = createAgentInvocationSequencer().startCycle();
     const outputs = [
-      { output: "", error: new Error("review provider failed") },
-      { output: "<verdict>APPROVED</verdict>", error: null },
-      { output: "<verdict>APPROVED</verdict>", error: null },
+      {
+        output: "", error: new Error("review provider failed"),
+        durationMs: 11,
+        resources: { peakMemoryBytes: 1000, oomKilled: true },
+      },
+      {
+        output: "<verdict>APPROVED</verdict>", error: null,
+        durationMs: 22,
+        resources: { peakMemoryBytes: 2000, oomKilled: false },
+      },
+      {
+        output: "<verdict>APPROVED</verdict>", error: null,
+        durationMs: 33,
+        resources: { peakMemoryBytes: 3000, oomKilled: true },
+      },
     ];
     const sandbox = {
       worktreePath: "/worktree",
@@ -656,18 +776,26 @@ describe("role prompt-extension wiring (#91)", () => {
           end: result.error === null ? "exit" : "exec-error",
           detail: result.error?.message ?? null,
           exitCode: result.error === null ? 0 : null,
-          durationMs: 1,
+          durationMs: result.durationMs,
           speech: result.output,
           stdout: result.output,
           stderr: result.error?.message ?? "",
+          ...result.resources,
         });
-        if (result.error !== null) throw result.error;
+        if (result.error !== null) {
+          throw withPartialDurationMs(
+            withPartialContainerResources(result.error, result.resources),
+            result.durationMs,
+          );
+        }
         return {
           stdout: result.output,
           commits: [],
+          durationMs: result.durationMs,
           silent: false,
           maxGapMs: 1,
           toolCalls: 0,
+          ...result.resources,
         };
       }),
     } as unknown as Sandbox;
@@ -708,6 +836,16 @@ describe("role prompt-extension wiring (#91)", () => {
       "attempt-2-reviewer-quality-2.log",
       "attempt-2-reviewer-correctness-1.log",
     ]);
+    expect(ctx.opts.onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "review-pass", pass: "quality", invocation: 1, result: "failed",
+      durationMs: 11,
+      peakMemoryBytes: 1000, oomKilled: true,
+    }));
+    expect(ctx.opts.onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "review-pass", pass: "correctness", result: "completed",
+      durationMs: 33,
+      peakMemoryBytes: 3000, oomKilled: true,
+    }));
   });
 
   it("does not dispatch correctness when quality approves under a red gate", async () => {

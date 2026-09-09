@@ -71,6 +71,9 @@
 // Sandbox close defers clone reclamation silently to run.ts's next origin-lease
 // barrier; this is distinct from the human-inspection preservation channel and
 // therefore cannot overwrite or manufacture an operator-facing reason (#139).
+// Each duration-bearing agent event carries that invocation's peak-memory/OOM
+// evidence, gate events retain it per step, and both stacks emit each sibling's
+// final teardown record after their resources are removed (#141).
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -82,7 +85,18 @@ import {
   buildAgentProvider,
 } from "./agent-providers.js";
 import * as agentSandbox from "./agent-sandbox.js";
-import { AgentCredentialError, AgentError, AgentQuotaError, agentPartialOutput, agentPartialUsage, podman, withPartialOutput } from "./agent-sandbox.js";
+import {
+  AgentCredentialError,
+  AgentError,
+  AgentQuotaError,
+  agentPartialContainerResources,
+  agentPartialDurationMs,
+  agentPartialOutput,
+  agentPartialUsage,
+  podman,
+  withPartialContainerResources,
+  withPartialOutput,
+} from "./agent-sandbox.js";
 import type { RateLimitMeasurement } from "./agent-run-end.js";
 import type { AgentInvocationRecord, Sandbox, SandboxHooks } from "./agent-sandbox.js";
 import { maxContextDepth, sumAgentUsage } from "./agent-usage.js";
@@ -151,6 +165,11 @@ import {
 import type { RepoLayout } from "./repo-cache.js";
 import type { RepoRef } from "./repo-ref.js";
 import { startTimer } from "./timing.js";
+import {
+  containerResourcesOf,
+  mergeContainerResources,
+  type ContainerResources,
+} from "./container-resources.js";
 import {
   type ProjectAnchorOptions,
   type PriorReviewRound,
@@ -890,6 +909,13 @@ async function runSandboxCycle(
                     onNotice: (message) => opts.onEvent({
                       kind: "complaint", severity: "warning", message,
                     }),
+                    onContainerTeardown: (record) => opts.onEvent({
+                      kind: "container",
+                      stack: "sandbox",
+                      issue: Number(issue.id),
+                      title: issue.title,
+                      ...record,
+                    }),
                   });
                 },
               }
@@ -906,6 +932,13 @@ async function runSandboxCycle(
         hideWorktreeGit: true,
         onNotice: (message) => opts.onEvent({
           kind: "complaint", severity: "warning", message,
+        }),
+        onContainerTeardown: (record) => opts.onEvent({
+          kind: "container",
+          stack: "gate",
+          issue: Number(issue.id),
+          title: issue.title,
+          ...record,
         }),
         // A thunk, not a value: the stack calls it before every gate run, and
         // the answer changes as the agent commits (#37). It hands back the
@@ -1216,11 +1249,13 @@ export async function runUiCheck(
     const timer = startTimer();
     const logInvocation = async (
       result: Extract<EventInput, { kind: "ui-check" }>["result"],
+      durationMs: number,
       maxGapMs: number | undefined,
       usage: AgentUsage | undefined,
       toolCalls: number | undefined,
       peakContext: number | undefined,
       rateLimit: RateLimitMeasurement | undefined,
+      resources: ContainerResources,
     ): Promise<void> => {
       await opts.onEvent({
         kind: "ui-check",
@@ -1230,12 +1265,13 @@ export async function runUiCheck(
         provider: config.uiCheckAgent,
         model: config.uiCheckModelId,
         effort: config.uiCheckEffort ?? null,
-        durationMs: timer(),
+        durationMs,
         ...(maxGapMs === undefined ? {} : { maxGapMs }),
         result,
         ...(eventUsage(usage, toolCalls, peakContext, rateLimit) === undefined
           ? {}
           : { usage: eventUsage(usage, toolCalls, peakContext, rateLimit) }),
+        ...resources,
       });
     };
 
@@ -1257,18 +1293,21 @@ export async function runUiCheck(
       );
     } catch (err) {
       const partial = agentPartialUsage(err);
+      const resources = agentPartialContainerResources(err);
       await logInvocation(
         err instanceof AgentQuotaError
           ? "quota"
           : err instanceof AgentCredentialError
             ? "credential"
             : "failed",
+        agentPartialDurationMs(err) ?? timer(),
         undefined,
         partial.usage,
         partial.toolCalls,
         partial.peakContext,
         partial.rateLimit ??
           (err instanceof AgentQuotaError ? err.measurement : undefined),
+        resources,
       );
       const wrote = await enforceReadOnlyAgentSnapshot(
         sandbox,
@@ -1291,22 +1330,26 @@ export async function runUiCheck(
     if (wrote !== null) {
       await logInvocation(
         "wrote",
+        run.durationMs,
         run.maxGapMs,
         run.usage,
         run.toolCalls,
         run.peakContext,
         run.rateLimit,
+        containerResourcesOf(run),
       );
       return { kind: "ui-checker-wrote", detail: wrote };
     }
     const result = parseUiCheck(run.stdout);
     await logInvocation(
       result.kind,
+      run.durationMs,
       run.maxGapMs,
       run.usage,
       run.toolCalls,
       run.peakContext,
       run.rateLimit,
+      containerResourcesOf(run),
     );
     if (result.kind !== "NO-SIGNAL") {
       return { kind: "ui-check-result", result };
@@ -1386,6 +1429,46 @@ export async function runImplementer(
   const implementerTimer = startTimer();
   const runAgent = (options: Parameters<Sandbox["run"]>[0]) =>
     runSandboxAndPublish(sandbox, options, issue.id, opts.onEvent);
+  const logFailure = async (
+    err: unknown,
+    prior?: Awaited<ReturnType<typeof runAgent>>,
+  ): Promise<void> => {
+    const partial = agentPartialUsage(err);
+    const resources = prior === undefined
+      ? agentPartialContainerResources(err)
+      : mergeContainerResources(prior, agentPartialContainerResources(err));
+    const toolCalls = prior?.toolCalls === undefined && partial.toolCalls === undefined
+      ? undefined
+      : (prior?.toolCalls ?? 0) + (partial.toolCalls ?? 0);
+    const usage = eventUsage(
+      prior === undefined
+        ? partial.usage
+        : sumAgentUsage(prior.usage, partial.usage),
+      toolCalls,
+      maxContextDepth(prior?.peakContext, partial.peakContext),
+      partial.rateLimit ?? prior?.rateLimit ??
+        (err instanceof AgentQuotaError ? err.measurement : undefined),
+    );
+    await opts.onEvent({
+      kind: "implementer",
+      issue: Number(issue.id),
+      title: issue.title,
+      attempt: action.attempt,
+      signal: err instanceof AgentQuotaError
+        ? "QUOTA"
+        : err instanceof AgentCredentialError
+          ? "CREDENTIAL"
+          : "FAILED",
+      commits: prior?.commits.length ?? 0,
+      provider: config.implementerAgent,
+      model: config.implementerModelId,
+      effort: config.implementerEffort ?? null,
+      durationMs: (prior?.durationMs ?? 0) +
+        (agentPartialDurationMs(err) ?? (prior === undefined ? implementerTimer() : 0)),
+      ...(usage === undefined ? {} : { usage }),
+      ...resources,
+    });
+  };
   let run: Awaited<ReturnType<typeof runAgent>>;
   try {
     run = await runWithProviderState(opts.providerState, config.implementerAgent, () => runAgent({
@@ -1401,28 +1484,7 @@ export async function runImplementer(
       })),
     }));
   } catch (err) {
-    if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) {
-      const partial = agentPartialUsage(err);
-      const usage = eventUsage(
-        partial.usage,
-        partial.toolCalls,
-        partial.peakContext,
-        partial.rateLimit ?? (err instanceof AgentQuotaError ? err.measurement : undefined),
-      );
-      await opts.onEvent({
-        kind: "implementer",
-        issue: Number(issue.id),
-        title: issue.title,
-        attempt: action.attempt,
-        signal: err instanceof AgentQuotaError ? "QUOTA" : "CREDENTIAL",
-        commits: 0,
-        provider: config.implementerAgent,
-        model: config.implementerModelId,
-        effort: config.implementerEffort ?? null,
-        durationMs: implementerTimer(),
-        ...(usage === undefined ? {} : { usage }),
-      });
-    }
+    await logFailure(err);
     throw err;
   }
   accumulated.push(...run.commits);
@@ -1436,6 +1498,8 @@ export async function runImplementer(
   let attemptPeakContext = run.peakContext;
   let attemptRateLimit = run.rateLimit;
   let attemptMaxGapMs = run.maxGapMs;
+  let attemptDurationMs = run.durationMs;
+  let attemptResources: ContainerResources = containerResourcesOf(run);
   let attemptStdout = run.stdout;
 
   // The promise nudge: output with NO tag at all gets one same-conversation
@@ -1463,27 +1527,34 @@ export async function runImplementer(
   // sandbox): a container that cannot run a one-line follow-up cannot run the
   // next attempt either, and swallowing it would hide the infra fault.
   if (signal.kind === "NO-SIGNAL" && signal.missingTag) {
-    const nudgeTimer = startTimer();
-    const nudge = await runAgent({
-      name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
-      model: config.implementerModelId,
-      agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
-        continueSession: true,
-        effort: config.implementerEffort,
-      }),
-      prompt: PROMISE_NUDGE_TPL,
-      // Any of the three tags ends the wait, not just COMPLETE.
-      completionSignal: PROMISE_COMPLETION_SIGNALS,
-      ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
-        role: "implementer", attempt: action.attempt, nudge: true,
-      })),
-    });
+    let nudge: Awaited<ReturnType<typeof runAgent>>;
+    try {
+      nudge = await runAgent({
+        name: `implementer-${issue.id}-attempt-${action.attempt}-nudge`,
+        model: config.implementerModelId,
+        agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
+          continueSession: true,
+          effort: config.implementerEffort,
+        }),
+        prompt: PROMISE_NUDGE_TPL,
+        // Any of the three tags ends the wait, not just COMPLETE.
+        completionSignal: PROMISE_COMPLETION_SIGNALS,
+        ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
+          role: "implementer", attempt: action.attempt, nudge: true,
+        })),
+      });
+    } catch (err) {
+      await logFailure(err, run);
+      throw err;
+    }
     accumulated.push(...nudge.commits);
     attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
     attemptToolCalls += nudge.toolCalls;
     attemptPeakContext = maxContextDepth(attemptPeakContext, nudge.peakContext);
     attemptRateLimit = nudge.rateLimit ?? attemptRateLimit;
     attemptMaxGapMs = Math.max(attemptMaxGapMs, nudge.maxGapMs);
+    attemptDurationMs += nudge.durationMs;
+    attemptResources = mergeContainerResources(attemptResources, nudge);
     const combined = combinePromiseNudge(run, nudge);
     attemptStdout = combined.stdout;
     attemptCommits = combined.commitCount;
@@ -1496,7 +1567,7 @@ export async function runImplementer(
       title: issue.title,
       attempt: action.attempt,
       action: "promise-nudge",
-      detail: `signal=${signal.kind} durationMs=${nudgeTimer()} maxGapMs=${nudge.maxGapMs}`,
+      detail: `signal=${signal.kind} durationMs=${nudge.durationMs} maxGapMs=${nudge.maxGapMs}`,
     });
     // The nudge was the same-session re-ask. If both calls were silent and
     // this attempt committed nothing, there is no evidence that the provider
@@ -1505,20 +1576,30 @@ export async function runImplementer(
     try {
       requireImplementerAttemptEvidence(run, nudge);
     } catch (err) {
-      throw withPartialOutput(
+      await logFailure(err, {
+        ...nudge,
+        commits: [...run.commits, ...nudge.commits],
+        usage: attemptUsage,
+        toolCalls: attemptToolCalls,
+        peakContext: attemptPeakContext,
+        rateLimit: attemptRateLimit,
+        durationMs: attemptDurationMs,
+        ...attemptResources,
+      });
+      throw withPartialContainerResources(withPartialOutput(
         err,
         combined.stdout,
         attemptUsage,
         attemptToolCalls,
         attemptPeakContext,
         nudge.rateLimit ?? run.rateLimit,
-      );
+      ), attemptResources);
     }
   }
   // Stopped BEFORE the two git reads below: they are the state machine's
   // inputs, not the agent's cost, and folding them in would inflate every
   // implementer number by work the agent never did.
-  const implementerMs = implementerTimer();
+  const implementerMs = attemptDurationMs;
 
   // Read here, not in the gate: a COMPLETE claim over a dirty tree should never
   // cost a stack bringup, and the state machine wants the paths to re-prompt
@@ -1581,6 +1662,7 @@ export async function runImplementer(
     ...(eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit) === undefined
       ? {}
       : { usage: eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit) }),
+    ...attemptResources,
   });
   return {
     kind: "implementer-result",
@@ -1643,7 +1725,7 @@ export async function runGate1(
     ok: gate1.ok,
     durationMs: gate1.durationMs,
     ...(admitted.queuedMs === undefined ? {} : { queuedMs: admitted.queuedMs }),
-    steps: Object.fromEntries(gate1.steps.map((step) => [step.name, step.durationMs])),
+    steps: Object.fromEntries(gate1.steps.map(({ name, ...step }) => [name, step])),
   });
   return {
     ok: gate1.ok,
@@ -1812,11 +1894,13 @@ export async function runReviewer(
         // signal (#83), so the grace phase it measures is unreachable here.
         const logPass = async (
           result: "completed" | "failed" | "quota" | "credential",
+          durationMs: number,
           maxGapMs: number | undefined,
           usage: AgentUsage | undefined,
           toolCalls: number | undefined,
           peakContext: number | undefined,
           rateLimit: RateLimitMeasurement | undefined,
+          resources: ContainerResources,
         ): Promise<void> => {
           await opts.onEvent({
             kind: "review-pass",
@@ -1830,11 +1914,12 @@ export async function runReviewer(
             model: modelId,
             effort: effort ?? null,
             result,
-            durationMs: passTimer(),
+            durationMs,
             ...(maxGapMs === undefined ? {} : { maxGapMs }),
             ...(eventUsage(usage, toolCalls, peakContext, rateLimit) === undefined
               ? {}
               : { usage: eventUsage(usage, toolCalls, peakContext, rateLimit) }),
+            ...resources,
           });
         };
         try {
@@ -1859,11 +1944,13 @@ export async function runReviewer(
           }));
           await logPass(
             "completed",
+            reviewerRun.durationMs,
             reviewerRun.maxGapMs,
             reviewerRun.usage,
             reviewerRun.toolCalls,
             reviewerRun.peakContext,
             reviewerRun.rateLimit,
+            containerResourcesOf(reviewerRun),
           );
           const event = await detectWrite(beforeInvocation, reviewerRun.stdout);
           return event === null
@@ -1874,18 +1961,21 @@ export async function runReviewer(
           // minutes and died is the expensive case, and one that fell over in a
           // second is a different fault entirely.
           const partial = agentPartialUsage(err);
+          const resources = agentPartialContainerResources(err);
           await logPass(
             err instanceof AgentQuotaError
               ? "quota"
               : err instanceof AgentCredentialError
                 ? "credential"
                 : "failed",
+            agentPartialDurationMs(err) ?? passTimer(),
             undefined,
             partial.usage,
             partial.toolCalls,
             partial.peakContext,
             partial.rateLimit ??
               (err instanceof AgentQuotaError ? err.measurement : undefined),
+            resources,
           );
           const transcript = agentPartialOutput(err);
           const event = await detectWrite(beforeInvocation, transcript);

@@ -138,6 +138,9 @@ describe.runIf(available)("sandbar gate against real podman", () => {
       // It gated the tree as it stands — uncommitted, and in no repository at
       // all — which is the whole difference from the gate inside a run.
       expect(out.join("")).toContain("uncommitted");
+      expect(out.join("")).toMatch(
+        /container runner stopped durationMs=\d+ peakMemoryBytes=\d+/,
+      );
       expect(await podExists()).toBe(false);
 
       // The SECOND call is the assertion this file exists for: a teardown

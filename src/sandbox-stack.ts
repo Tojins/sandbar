@@ -28,6 +28,9 @@
 // terminal. Attempt containers come up ONE AT A TIME (issue ones as a group)
 // because `bringUpContainers` abandons the rest on first failure and
 // "degraded" has to mean the other siblings still came up.
+// At stop, every claimed sibling is inspected before removal for cgroup-v2
+// memory.peak and OOMKilled (#141), then its duration-bearing record is handed
+// to the issue event stream after removal. These are evidence only.
 //
 // Logs: each sibling's `podman logs -f` is followed into a host file
 // bind-mounted READ-ONLY into the agent at `/sandbar/logs/<name>.log`. Every
@@ -61,7 +64,7 @@ import { createWriteStream, type WriteStream } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
-import { registerDisposable } from "./cleanup.js";
+import { registerDisposable, reportCleanupNotice } from "./cleanup.js";
 import type { ResolvedGateStack, ResolvedStackContainer } from "./config.js";
 import { SandbarError } from "./errors.js";
 import {
@@ -77,6 +80,13 @@ import {
 } from "./gate-stack.js";
 import { type RunScope, sandboxContainerNameFor } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
+import {
+  readContainerResources,
+  systemContainerResourceDeps,
+  type ContainerResources,
+  type ContainerTeardown,
+} from "./container-resources.js";
+import { startTimer } from "./timing.js";
 
 // What this stack is called in the messages `bringUpContainers` raises about
 // it. The whole reason `BringUpCtx` carries a label: the shared bringup is the
@@ -147,6 +157,9 @@ export type SandboxStackOptions = {
   // BEFORE the anchor, because a bind-mount source is read at container start.
   readonly logDir: string;
   readonly onNotice?: (message: string) => void | Promise<void>;
+  readonly onContainerTeardown?: (
+    record: ContainerTeardown,
+  ) => void | Promise<void>;
 };
 
 // Everything this module does to podman, behind one seam — because what is
@@ -172,12 +185,15 @@ export type SandboxStackDeps = {
   // implementation rather than in `stop`.
   readonly remove: (containerName: string) => Promise<string | null>;
   readonly follow: (containerName: string, filePath: string) => LogFollower;
+  readonly measure: (containerName: string) => Promise<ContainerResources>;
 };
 
 export const realSandboxStackDeps: SandboxStackDeps = {
   bringUp: bringUpContainers,
   remove: removeSibling,
   follow: startLogFollower,
+  measure: (containerName) =>
+    readContainerResources(containerName, systemContainerResourceDeps(boundedPodman)),
 };
 
 // Create the log directory before the anchor is created. Separate from
@@ -198,6 +214,9 @@ export async function startSandboxStack(
 
   const followers: LogFollower[] = [];
   const created: string[] = [];
+  const lifetimes = new Map<string, () => number>();
+  const teardowns: ContainerTeardown[] = [];
+  const teardownFailures: unknown[] = [];
   let stopped = false;
 
   const stop = async (): Promise<void> => {
@@ -223,18 +242,65 @@ export async function startSandboxStack(
     // to skip: two ordinary paths arrive here with the container already gone.
     const failures: string[] = [];
     const leaked: string[] = [];
-    for (const name of [...created].reverse()) {
+    const names = [...created].reverse();
+    const measured = await Promise.allSettled(names.map(async (name) => {
+      const configured = containers.find((c) => nameOf(c) === name);
+      const elapsed = lifetimes.get(name);
+      if (configured !== undefined && elapsed !== undefined) {
+        return {
+          name: configured.name,
+          container: name,
+          lifecycle: configured.lifecycle,
+          durationMs: elapsed(),
+          ...(await deps.measure(name)),
+        } satisfies ContainerTeardown;
+      }
+      return null;
+    }));
+    for (let i = 0; i < names.length; i++) {
+      const result = measured[i];
+      if (result?.status === "fulfilled") {
+        if (result.value !== null) teardowns.push(result.value);
+      } else if (result?.status === "rejected") {
+        teardownFailures.push(result.reason);
+      }
+      lifetimes.delete(names[i]!);
+    }
+    for (const name of names) {
       const failure = await deps.remove(name);
       if (failure === null) continue;
       failures.push(failure);
       leaked.push(name);
     }
-    if (failures.length > 0) {
-      throw new SandbarError(
+    const removalFailure = failures.length > 0
+      ? new SandbarError(
         `sandbox stack: teardown of the sandbox siblings for issue ` +
           `${opts.issueId} failed, leaking podman resources:\n` +
           `${failures.join("\n")}\n` +
           `Clean up with: ${RUNTIME} rm -f -t 0 ${leaked.join(" ")}`,
+      )
+      : undefined;
+    const reported = await Promise.allSettled(
+      teardowns.map((record) => opts.onContainerTeardown?.(record)),
+    );
+    for (const result of reported) {
+      if (result.status === "rejected") teardownFailures.push(result.reason);
+    }
+    if (removalFailure !== undefined) {
+      for (const failure of teardownFailures) {
+        await reportCleanupNotice(
+          "cleanup-failure",
+          `Sandbox stack for issue ${opts.issueId} resource reporting also failed`,
+          failure,
+        );
+      }
+      throw removalFailure;
+    }
+    if (teardownFailures.length === 1) throw teardownFailures[0];
+    if (teardownFailures.length > 1) {
+      throw new AggregateError(
+        teardownFailures,
+        `Sandbox stack for issue ${opts.issueId} resource reporting failed`,
       );
     }
   };
@@ -277,7 +343,11 @@ export async function startSandboxStack(
   // A container that reached `podman run` has a name to remove even if it never
   // became ready, so teardown has to know about it before readiness is decided.
   const claim = (group: readonly ResolvedStackContainer[]): void => {
-    for (const c of group) if (!created.includes(nameOf(c))) created.push(nameOf(c));
+    for (const c of group) {
+      const name = nameOf(c);
+      if (!created.includes(name)) created.push(name);
+      if (!lifetimes.has(name)) lifetimes.set(name, startTimer());
+    }
   };
 
   // Why a sibling is not up, by container name. Collected rather than pushed
@@ -346,13 +416,14 @@ export async function startSandboxStack(
       followers.push(deps.follow(nameOf(c), join(opts.logDir, `${c.name}.log`)));
     }
   } catch (err) {
-    await stop().catch(async (stopErr: unknown) => {
-      // The bringup failure is the diagnosis; a teardown failure on top of it
-      // is reported but must not replace it.
-      await (opts.onNotice ?? ((message: string) => console.error(message)))(
-        `Failed to stop sandbox stack after bringup failed: ${String(stopErr)}`,
+    const stoppedResult = await Promise.allSettled([stop()]);
+    if (stoppedResult[0]?.status === "rejected") {
+      await reportCleanupNotice(
+        "cleanup-failure",
+        "Sandbox stack cleanup also failed after bringup failed",
+        stoppedResult[0].reason,
       );
-    });
+    }
     throw err;
   }
 

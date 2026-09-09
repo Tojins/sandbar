@@ -13,6 +13,63 @@ describe("run event reducer", () => {
       .toBe("excluded: ready-for-agent label actor unknown");
   });
 
+  it("passes container resource facts through to feed rows without defaulting absences", () => {
+    const steps = {
+      test: { ok: false, durationMs: 12, peakMemoryBytes: 4096, oomKilled: false },
+    };
+    const state = reduceRunEvents([
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
+        workdir: "/r", maxParallelIssues: 1, pid: 1,
+      }),
+      at(2, "2026-09-07T09:01:00Z", {
+        kind: "gate", gate: "gate-1", issue: 2, attempt: 1, ok: false,
+        durationMs: 12, steps,
+      }),
+      at(3, "2026-09-07T09:02:00Z", {
+        kind: "review-pass", issue: 2, attempt: 1, round: 1, pass: "quality",
+        invocation: 1, provider: "codex", model: "m", effort: null,
+        result: "failed", durationMs: 9, peakMemoryBytes: 8192, oomKilled: true,
+      }),
+    ], { now: new Date("2026-09-07T09:03:00Z"), pidAlive: true });
+    expect(state.events[0]).toMatchObject({ peakMemoryBytes: 8192, oomKilled: true });
+    expect(state.events[1]?.steps).toBe(steps);
+    expect(state.events[1]).not.toHaveProperty("peakMemoryBytes");
+  });
+
+  it.each([
+    ["FAILED", true, "attempt 1 failed · OOM-killed · 0 commits"],
+    ["QUOTA", false, "attempt 1 failed · quota · 0 commits"],
+    ["CREDENTIAL", false, "attempt 1 failed · credential · 0 commits"],
+  ] as const)(
+    "renders %s as failure evidence and excludes it from completed attempts",
+    (signal, oomKilled, expectedText) => {
+      const terminal = signal === "FAILED" ? "HARD-ERROR" : signal;
+      const state = reduceRunEvents([
+        at(1, "2026-09-07T09:00:00Z", {
+          kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
+          workdir: "/r", maxParallelIssues: 1, pid: 1,
+        }),
+        at(2, "2026-09-07T09:01:00Z", {
+          kind: "implementer", issue: 2, attempt: 1, signal, commits: 0,
+          provider: "codex", model: "m", effort: null, durationMs: 5,
+          peakMemoryBytes: 4096, oomKilled,
+        }),
+        at(3, "2026-09-07T09:02:00Z", {
+          kind: "terminal", issue: 2, title: "Two", terminal,
+          reason: "provider stopped", durationMs: 6,
+        }),
+      ], { now: new Date("2026-09-07T09:03:00Z"), pidAlive: false });
+
+      expect(state.events[1]).toMatchObject({
+        text: expectedText, tone: "bad", peakMemoryBytes: 4096, oomKilled,
+      });
+      expect(state.finished).toEqual([
+        expect.objectContaining({ issue: 2, attempts: 0 }),
+      ]);
+    },
+  );
+
   it("projects every event kind into a newest-first, attributed feed", () => {
     const rows: object[] = [
       { kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
@@ -39,6 +96,12 @@ describe("run event reducer", () => {
       { kind: "gate", issue: 2, attempt: 1, gate: "gate-1", ok: true, durationMs: 6 },
       { kind: "review-pass", issue: 2, attempt: 1, round: 1, pass: "quality", invocation: 1,
         provider: "codex", model: "m", effort: null, result: "completed", durationMs: 7 },
+      { kind: "resolve-attempt", issue: 2, attempt: 1, container: "resolve-1",
+        end: "exit", exitCode: 137, signal: null, durationMs: 8,
+        peakMemoryBytes: 7000, oomKilled: true },
+      { kind: "container", stack: "sandbox", issue: 2, title: "Two", name: "db",
+        container: "sandbox-db", lifecycle: "issue", durationMs: 9,
+        peakMemoryBytes: 8000, oomKilled: true },
       { kind: "review-round", issue: 2, attempt: 1, round: 1, head: "abc",
         qualityMode: "list", gateOk: true, quality: "APPROVED", correctness: "APPROVED",
         rejectingPass: null, qualityFailures: 0, gateFailures: 0,
@@ -69,6 +132,8 @@ describe("run event reducer", () => {
       [2, "hard error · retry 1/2 · pod", "bad"],
       [2, "repair · re-prompt", "warn"],
       [2, "round 1 · approved", "good"],
+      [2, "sandbox container db stopped", "bad"],
+      [2, "resolve attempt 1 · exit", "bad"],
       [2, "round 1 · quality pass · invocation 1", ""],
       [2, "gate-1 passed", "good"],
       [2, "attempt 1 complete · 1 commit", ""],
@@ -88,6 +153,10 @@ describe("run event reducer", () => {
       [null, "wake lock held", "dim"],
       [null, "run started", "dim"],
     ]);
+    expect(state.events.find((event) => event.text === "resolve attempt 1 · exit"))
+      .toMatchObject({ peakMemoryBytes: 7000, oomKilled: true });
+    expect(state.events.find((event) => event.text === "sandbox container db stopped"))
+      .toMatchObject({ peakMemoryBytes: 8000, oomKilled: true });
     expect(state.run.complaints).toEqual([{ severity: "warning", text: "stale config" }]);
   });
 
@@ -105,7 +174,7 @@ describe("run event reducer", () => {
   ] as const)("projects the cause for %j", (event, expected) => {
     const state = reduceRunEvents([
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 1, driver: "sandbar", configPath: null,
+        kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
         workdir: "/r", maxParallelIssues: 1, pid: 1,
       }),
       at(2, "2026-09-07T09:01:00Z", event),
@@ -180,7 +249,7 @@ describe("run event reducer", () => {
   it("renders a historical parked ref with its recorded first-line cause", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        kind: "run-start", schemaVersion: 2, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -317,7 +386,7 @@ describe("run event reducer", () => {
   it("carries a terminal cause into finished and parked projections", () => {
     const events = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 1, driver: "sandbar",
+        kind: "run-start", schemaVersion: 2, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {

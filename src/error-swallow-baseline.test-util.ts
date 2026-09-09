@@ -31,7 +31,7 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // is the classification the rule asks for — the same standing `fetchChunkRef`
   // has in chunk-land.ts.
   "git-ops.ts": 1,
-  "gate-stack.ts": 7,
+  "gate-stack.ts": 6,
   // The UI-check invocation (#126) classifies a failed read-only agent write
   // before rethrowing the original invocation error, mirroring the reviewer.
   "inner-loop.ts": 9,

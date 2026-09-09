@@ -81,6 +81,8 @@
 // hosts the file-fed UI; stdout contains its URL only. After the record exists,
 // operator complaints are events; stderr is reserved for the internal-failure
 // banner.
+// Container-backed events retain cgroup peak-memory and OOMKilled evidence;
+// merger-stack lifecycle records are emitted after teardown (#141).
 //
 // The locks are the record boundary (#70, #139). Refused config, missing
 // GH_TOKEN, forge-unreachable-before-origin-lock and either refused lock remain
@@ -219,6 +221,7 @@ import {
 } from "./merger-worktree.js";
 import { type Stack, startStack } from "./gate-stack.js";
 import { createGateSemaphore } from "./gate-semaphore.js";
+import { containerResourcesOf } from "./container-resources.js";
 import {
   CHUNK_LANDED_UNNAMED_BANNER,
   CHUNK_RESIDUE_KEPT_BANNER,
@@ -2041,6 +2044,11 @@ export async function run(
             onNotice: (message) => runRecord.emit({
               kind: "complaint", severity: "warning", message,
             }).then(() => undefined),
+            onContainerTeardown: (record) => runRecord.emit({
+              kind: "container",
+              stack: "gate",
+              ...record,
+            }).then(() => undefined),
             // gate-2 needs this as much as gate-1 does (#37): the merge result
             // is a tree neither branch had, and two branches that each touched
             // the lockfile compose into a third lockfile. Resolved per gate
@@ -2127,8 +2135,21 @@ export async function run(
               // #67: every resolve attempt's stdout and stderr, beside the
               // gate artefact it was prompted from. The writer answers with
               // the path, which is what the abandon comment points at.
-              onResolveAttempt: (key, record) =>
-                landingLogger.writeResolveAttempt(key, record),
+              onResolveAttempt: async (key, record) => {
+                const path = await landingLogger.writeResolveAttempt(key, record);
+                await runRecord.emit({
+                  kind: "resolve-attempt",
+                  issue: Number(record.issueId),
+                  attempt: record.attempt,
+                  container: record.container,
+                  end: record.end,
+                  exitCode: record.exitCode,
+                  signal: record.signal,
+                  durationMs: record.durationMs,
+                  ...containerResourcesOf(record),
+                });
+                return path;
+              },
               observations: {
                 onGate: (key, gate) => {
                   const issueId = key.startsWith("chunk-") ? key.slice("chunk-".length) : key;
@@ -2142,7 +2163,7 @@ export async function run(
                     durationMs: gate.durationMs,
                     ...(gate.queuedMs === undefined ? {} : { queuedMs: gate.queuedMs }),
                     steps: Object.fromEntries(
-                      gate.steps.map((step) => [step.name, step.durationMs]),
+                      gate.steps.map(({ name, ...step }) => [name, step]),
                     ),
                   }).then(() => undefined);
                 },

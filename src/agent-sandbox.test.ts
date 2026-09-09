@@ -39,6 +39,8 @@ import {
   AgentQuotaError,
   AgentIdleTimeoutError,
   agentFailureMessage,
+  agentPartialContainerResources,
+  agentPartialDurationMs,
   agentPartialOutput,
   agentPartialUsage,
   claudeCode,
@@ -1142,7 +1144,16 @@ describe("createSandbox integration (local provider)", () => {
   });
 
   it("creates a managed worktree under .sandbar/worktrees and captures a commit", async () => {
-    const provider = makeLocalProvider();
+    const provider = {
+      ...makeLocalProvider(),
+      containerResourceSnapshot: vi.fn()
+        .mockResolvedValueOnce({ oomKillCount: 2, podmanOomKilled: false })
+        .mockResolvedValueOnce({
+          peakMemoryBytes: 512_000_000,
+          oomKillCount: 2,
+          podmanOomKilled: false,
+        }),
+    };
     const sandbox = await createSandbox({
       env: {},
       branch: "sandbar/issue-1-demo",
@@ -1159,16 +1170,77 @@ describe("createSandbox integration (local provider)", () => {
         `git commit --allow-empty -m "agent work" >/dev/null 2>&1 && ` +
           `printf '%s\\n' '${JSON.stringify({ type: "result", result: "done <promise>COMPLETE</promise>" })}'`,
       );
-      const run = await sandbox.run({ agent, prompt: "go", completionSignal: [] });
+      let invocation: AgentInvocationRecord | undefined;
+      const run = await sandbox.run({
+        agent,
+        prompt: "go",
+        completionSignal: [],
+        onInvocationEnd: (record) => { invocation = record; },
+      });
 
       expect(run.stdout).toContain("<promise>COMPLETE</promise>");
       expect(run.commits).toHaveLength(1);
       expect(typeof run.maxGapMs).toBe("number");
       expect(run.commits[0]!.sha).toMatch(/^[0-9a-f]{40}$/);
+      expect(run).toMatchObject({
+        peakMemoryBytes: 512_000_000,
+        oomKilled: false,
+      });
+      expect(invocation).toMatchObject({
+        peakMemoryBytes: 512_000_000,
+        oomKilled: false,
+      });
       await sandbox.syncBranchToCache();
       // The captured commit is the one the agent made on the branch.
       const log = await git(["log", "-1", "--format=%H", "sandbar/issue-1-demo"], dir);
       expect(log.stdout.trim()).toBe(run.commits[0]!.sha);
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  it("attributes cumulative OOM counters to one invocation and excludes snapshot latency", async () => {
+    await git(["branch", "sandbar/issue-141-interval"], dir);
+    let reads = 0;
+    const snapshotReadMs: number[] = [];
+    const provider = {
+      ...makeLocalProvider(),
+      containerResourceSnapshot: vi.fn(async () => {
+        reads += 1;
+        if (reads <= 2) {
+          const started = performance.now();
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          snapshotReadMs.push(performance.now() - started);
+        }
+        return {
+          ...(reads % 2 === 0 ? { peakMemoryBytes: reads * 1024 } : {}),
+          oomKillCount: reads === 1 ? 7 : 8,
+          podmanOomKilled: false,
+        };
+      }),
+    };
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-141-interval",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const agent = scriptedAgent(
+        `printf '%s\\n' '${JSON.stringify({ type: "result", result: "done" })}'`,
+      );
+      const started = Date.now();
+      const first = await sandbox.run({ agent, prompt: "first", completionSignal: [] });
+      const firstElapsed = Date.now() - started;
+      const second = await sandbox.run({ agent, prompt: "second", completionSignal: [] });
+
+      expect(first).toMatchObject({ peakMemoryBytes: 2048, oomKilled: true });
+      expect(second).toMatchObject({ peakMemoryBytes: 4096, oomKilled: false });
+      expect(snapshotReadMs).toHaveLength(2);
+      expect(first.durationMs).toBeLessThan(snapshotReadMs[0]!);
+      expect(first.durationMs).toBeLessThan(snapshotReadMs[1]!);
+      expect(firstElapsed - first.durationMs).toBeGreaterThanOrEqual(250);
+      expect(provider.containerResourceSnapshot).toHaveBeenCalledTimes(4);
     } finally {
       await sandbox.close();
     }
@@ -2161,7 +2233,21 @@ describe("createSandbox integration (local provider)", () => {
 
   it("rejects via the completion-grace timer when the pipe is held open (F5)", async () => {
     await git(["branch", "sandbar/issue-4-grace"], dir);
-    const provider = makeLocalProvider();
+    let resourceSnapshotReads = 0;
+    const provider = {
+      ...makeLocalProvider(),
+      containerResourceSnapshot: vi.fn(async () => {
+        resourceSnapshotReads += 1;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return resourceSnapshotReads === 1
+          ? { oomKillCount: 4, podmanOomKilled: false }
+          : {
+              peakMemoryBytes: 931_000_000,
+              oomKillCount: 5,
+              podmanOomKilled: false,
+            };
+      }),
+    };
     const sandbox = await createSandbox({
       env: {},
       branch: "sandbar/issue-4-grace",
@@ -2195,6 +2281,12 @@ describe("createSandbox integration (local provider)", () => {
       expect(err).toBeInstanceOf(AgentError);
       expect((err as Error).message).toContain("without exiting");
       expect(agentPartialOutput(err)).toContain("<promise>COMPLETE</promise>");
+      expect(agentPartialContainerResources(err)).toEqual({
+        peakMemoryBytes: 931_000_000,
+        oomKilled: true,
+      });
+      expect(agentPartialDurationMs(err)).toBe(records[0]!.durationMs);
+      expect(elapsed - agentPartialDurationMs(err)!).toBeGreaterThanOrEqual(250);
       expect(elapsed).toBeLessThan(5000);
       expect(records).toHaveLength(1);
       expect(records[0]).toMatchObject({
@@ -2203,6 +2295,8 @@ describe("createSandbox integration (local provider)", () => {
         end: "completion-timeout",
         exitCode: null,
         speech: "<promise>COMPLETE</promise>",
+        peakMemoryBytes: 931_000_000,
+        oomKilled: true,
       });
       expect(records[0]?.stdout).toContain("<promise>COMPLETE</promise>");
       expect(records[0]?.stderr).toContain("completion stderr tail");

@@ -212,21 +212,23 @@ export default {
     // for the same kind of reason — it builds its anchor with the
     // production sandbox run args and then execs into it as the agent, so "the
     // invoking user" has to be whoever runs the test rather than whoever owns
-    // the socket. Those two stay host-only.
+    // the socket. `container-resources-podman.test.ts` is local-client-only too:
+    // the cgroup path returned by a remote client belongs to the remote host.
+    // Those three stay host-only.
     //
     // `agent-sandbox-podman.test.ts` is remote-safe (#52): its assertions are
     // made through `podman exec`. There is no by-hand podman file list now;
     // vitest's project include glob plus the filename filter collects every
-    // podman test except the two explicit local-client exceptions, so a new
+    // podman test except the three explicit local-client exceptions, so a new
     // podman file cannot silently disappear.
     //
-    // NONE of that depends on this comment being right. Both host-only files
+    // NONE of that depends on this comment being right. All host-only files
     // declare `needsLocalClient`, so they self-skip against a remote client on
     // their own say-so. That remains the safety net when the glob collects a
     // newly added local-client file before this exclusion list knows its name.
     //
-    // `npm test` on the host still runs everything. The two host-only files
-    // above are the whole of the manual step: run them on the host after a
+    // `npm test` on the host still runs everything. Those three are the whole
+    // of the manual step: run them on the host after a
     // cycle that touched the podman layer, the sandbox run args or the sandbox
     // stack.
     steps: [
@@ -245,12 +247,14 @@ export default {
           "test",
           "--",
           // A filename filter over the project's include glob owns the podman
-          // file list; only the two local-client suites stay outside it.
+          // file list; only the three local-client suites stay outside it.
           "podman.test.ts",
           "--exclude",
           "src/gate-stack-hostpodman.test.ts",
           "--exclude",
           "src/sandbox-stack-podman.test.ts",
+          "--exclude",
+          "src/container-resources-podman.test.ts",
           // Measured on the 12-core x3 host: 2 workers cost 254s per gate, 4
           // cost 222s, 8 cost 207s, and Vitest's 11-worker default cost 213s.
           // Eight is the flat optimum at K=1 and K=3 and leaves host capacity;
