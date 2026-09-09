@@ -104,8 +104,10 @@ describe("deploy/ansible sandbar.service template", () => {
     expect(values(unit, "Requires")).toEqual(["podman.socket"]);
     expect(values(unit, "After")).toEqual(["podman.socket"]);
 
-    // A stop is sandbar's own cleanup, given time.
-    expect(values(unit, "KillMode")).toEqual(["mixed"]);
+    // A stop is sandbar's own cleanup, given time. `mixed` only signals the
+    // main pid (npm), whose launcher child dies without forwarding, so the
+    // driver was SIGKILLed the same second; the whole cgroup is signalled.
+    expect(values(unit, "KillMode")).toEqual(["control-group"]);
     expect(values(unit, "TimeoutStopSec")).toEqual(["900"]);
   });
 

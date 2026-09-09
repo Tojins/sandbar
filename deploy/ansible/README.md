@@ -57,7 +57,13 @@ The role, `roles/sandbar`, provides:
   - `ExecStart` is the consumer's own launch command (default
     `npm run sandbar`);
   - `Restart=no`. Exits 2 (stuck) and 4 (quota) are deliberate stops; a
-    human reads why and restarts. No timers, no log sweep, no memory limit.
+    human reads why and restarts. No timers, no log sweep, no memory limit;
+  - `KillMode=control-group`, so `systemctl --user stop` SIGTERMs the driver
+    itself and sandbar's cleanup (#35) releases containers, pods, the wake
+    lock and the origin lease (#139) before systemd's `TimeoutStopSec`
+    SIGKILL. `mixed` only signals npm, whose launcher child dies without
+    forwarding, and the driver was SIGKILLed at once, leaving the ten-minute
+    lease dangling and the next start refused.
 - a second **systemd user unit**, `sandbar-ui.service`, running the standalone
   `sandbar ui` reader on loopback. It starts after the daemon's refresh and is
   part of the daemon for explicit stops and restarts, but it stays up when the
