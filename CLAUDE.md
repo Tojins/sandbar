@@ -614,7 +614,10 @@ outcomes.
 ## This repo runs itself (#39)
 
 `sandbar.config.mjs` at the root is the host-side surface, `Containerfile`
-builds the one image, `sandbar.env` (gitignored) holds credentials, `sandbar.pin`
+builds the one image, `sandbar.env` (gitignored) holds credentials AND this
+installation's per-role routing — the config calls `splitRoleRouting` on it
+(#137), so the committed file names no vendor and each box chooses its own —
+`sandbar.pin`
 names the release that drives a run, and `npm run sandbar`
 (`scripts/sandbar-launch.mjs`) installs the pin and starts the daemon once.
 
