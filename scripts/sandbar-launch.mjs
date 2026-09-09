@@ -79,7 +79,7 @@ export function parsePin(content) {
 // Every path this script touches, derived once from the repo root.
 export function driverPaths(root) {
   const dir = join(root, ".sandbar", "driver");
-  const pkg = join(dir, "node_modules", "@offergeist", "sandbar");
+  const pkg = join(dir, "node_modules", "sandbar");
   return {
     dir,
     // The bin, run directly rather than through `node_modules/.bin/sandbar`:
@@ -109,7 +109,7 @@ export function installNeeded(state, spec) {
 
 // `--prefix` rather than a cwd, so npm treats the driver directory as its own
 // project and this repo's `package.json` is never the one being installed into.
-// The driver's manifest is named `sandbar-driver`, not `@offergeist/sandbar`,
+// The driver's manifest is named `sandbar-driver`, not `sandbar`,
 // which also keeps the install clear of npm's self-dependency rules entirely.
 export function installArgv(dir, spec) {
   return ["install", "--prefix", dir, "--no-audit", "--no-fund", spec];
@@ -210,7 +210,7 @@ export function installDriver(paths, spec, io = {}) {
         "The package has no published build — `dist/` comes from its `prepare` " +
         "script — so this is an install whose scripts did not run. Approve them " +
         `for this install root and try again:\n\n` +
-        `  npm approve-scripts --prefix ${paths.dir} @offergeist/sandbar\n`,
+        `  npm approve-scripts --prefix ${paths.dir} sandbar\n`,
     );
   }
   writeFileSync(paths.stamp, `${spec}\n`);

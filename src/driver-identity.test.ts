@@ -76,7 +76,7 @@ describe("readTreeState", () => {
     // The node_modules case: `rev-parse` there would happily answer with the
     // HOST repo's HEAD, a true sha about a different repository.
     const { git, calls } = fakeGit(() => "");
-    expect(await readTreeState("/host/node_modules/@offergeist/sandbar", git)).toEqual(
+    expect(await readTreeState("/host/node_modules/sandbar", git)).toEqual(
       UNKNOWN_TREE,
     );
     expect(calls.map(verb)).toEqual(["check-ignore"]);
@@ -121,12 +121,12 @@ describe("readDriverIdentity", () => {
     );
     const id = await readDriverIdentity({
       configPath: "/host/repo/sandbar.config.mjs",
-      codePath: "/host/repo/node_modules/@offergeist/sandbar",
+      codePath: "/host/repo/node_modules/sandbar",
       version: "0.20.29",
       git,
     });
     expect(new Set(calls.map((c) => c.cwd))).toEqual(
-      new Set(["/host/repo", "/host/repo/node_modules/@offergeist/sandbar"]),
+      new Set(["/host/repo", "/host/repo/node_modules/sandbar"]),
     );
     expect(id.version).toBe("0.20.29");
     expect(id.configPath).toBe("/host/repo/sandbar.config.mjs");

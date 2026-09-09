@@ -36,7 +36,7 @@
 // own checkout.
 //
 // Which is exactly why every read is guarded by `check-ignore`. `git -C
-// node_modules/@offergeist/sandbar rev-parse HEAD` does not fail — it answers
+// node_modules/sandbar rev-parse HEAD` does not fail — it answers
 // with the HOST repo's HEAD, a true sha about an entirely different repository,
 // and printing that after the words "built from" would be worse than printing
 // nothing. So: a directory the enclosing repo IGNORES reports `unknown`, and

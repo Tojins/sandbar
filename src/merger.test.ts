@@ -750,7 +750,7 @@ describe("runMergerWithAdapter — conflict enters resolve loop", () => {
 describe("runMergerWithAdapter — the version collision is resolved without an agent", () => {
   const PKG_CONFLICT = [
     "{",
-    '  "name": "@offergeist/sandbar",',
+    '  "name": "sandbar",',
     "<<<<<<< HEAD",
     '  "version": "0.20.34",',
     "=======",
@@ -763,7 +763,7 @@ describe("runMergerWithAdapter — the version collision is resolved without an 
 
   const LOCK_CONFLICT = [
     "{",
-    '  "name": "@offergeist/sandbar",',
+    '  "name": "sandbar",',
     "<<<<<<< HEAD",
     '  "version": "0.20.34",',
     "=======",
@@ -820,7 +820,7 @@ describe("runMergerWithAdapter — the version collision is resolved without an 
     expect(pkg?.contents).not.toContain("0.20.35");
     expect(pkg?.contents).not.toContain("<<<<<<<");
     // Everything git had already agreed on survives byte for byte.
-    expect(pkg?.contents).toContain('  "name": "@offergeist/sandbar",');
+    expect(pkg?.contents).toContain('  "name": "sandbar",');
     expect(pkg?.contents).toContain('  "type": "module"');
 
     const lock = calls.fileWrites.find((w) => w.path === "package-lock.json");
@@ -873,7 +873,7 @@ describe("runMergerWithAdapter — the version collision is resolved without an 
   it("leaves a package-lock.json whose DEPENDENCY versions conflicted entirely alone", async () => {
     const depConflict = [
       "{",
-      '  "name": "@offergeist/sandbar",',
+      '  "name": "sandbar",',
       '  "version": "0.20.34",',
       '  "packages": {',
       '    "node_modules/left-pad": {',

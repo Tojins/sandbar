@@ -544,7 +544,7 @@ describe("resolveVersionCollision (real conflicting merge in a linked worktree)"
   const pkg = (v: string): string =>
     [
       "{",
-      '  "name": "@offergeist/sandbar",',
+      '  "name": "sandbar",',
       `  "version": "${v}",`,
       '  "type": "module"',
       "}",
@@ -554,12 +554,12 @@ describe("resolveVersionCollision (real conflicting merge in a linked worktree)"
   const lock = (v: string, dep = "4.1.2"): string =>
     [
       "{",
-      '  "name": "@offergeist/sandbar",',
+      '  "name": "sandbar",',
       `  "version": "${v}",`,
       '  "lockfileVersion": 3,',
       '  "packages": {',
       '    "": {',
-      '      "name": "@offergeist/sandbar",',
+      '      "name": "sandbar",',
       `      "version": "${v}",`,
       '      "dependencies": {',
       '        "proper-lockfile": "^4.1.2"',

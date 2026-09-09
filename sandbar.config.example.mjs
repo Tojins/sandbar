@@ -7,7 +7,7 @@
 // Required fields are active. Optional host fields are commented out at their
 // defaults; per-installation role fields live in sandbar.env instead.
 
-import { readEnvFile, splitRoleRouting } from "@offergeist/sandbar";
+import { readEnvFile, splitRoleRouting } from "sandbar";
 
 const SANDBOX_IMAGE = "localhost/YOUR_PROJECT:sandbar";
 const { routing, env } = splitRoleRouting(

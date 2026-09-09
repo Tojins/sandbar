@@ -20,7 +20,7 @@ Sandbar ships a `sandbar` bin. Put one `sandbar.config.mjs` at the root of the
 repo you want worked on, gitignore `.sandbar/`, and run it:
 
 ```sh
-npm i -D @offergeist/sandbar
+npm i -D sandbar
 npx sandbar                     # or: sandbar --config path/to/sandbar.config.mjs
 ```
 
@@ -36,7 +36,7 @@ directory you launched from. That is the whole point of the bin: there is
 nowhere to run it from that operates on the wrong repo.
 
 `run(config)` remains the API — the bin is thin, and a host that wants to embed
-sandbar can still `import { run } from "@offergeist/sandbar"` and call it.
+sandbar can still `import { run } from "sandbar"` and call it.
 
 ### `sandbar gate` — the gate stack on its own
 
@@ -126,7 +126,7 @@ letting node drain cannot. Faults are rendered to stderr on the way out; pass
 
 ```js
 // sandbar.config.mjs
-import { readEnvFile, splitRoleRouting } from "@offergeist/sandbar";
+import { readEnvFile, splitRoleRouting } from "sandbar";
 
 const { routing, env } = splitRoleRouting(
   readEnvFile(new URL("sandbar.env", import.meta.url)),

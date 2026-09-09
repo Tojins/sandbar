@@ -13,7 +13,7 @@ import {
 const PKG = (hunk: string): string =>
   [
     "{",
-    '  "name": "@offergeist/sandbar",',
+    '  "name": "sandbar",',
     hunk,
     '  "type": "module",',
     '  "scripts": {',
@@ -34,13 +34,13 @@ const VERSION_HUNK = conflict('  "version": "0.20.34",', '  "version": "0.20.35"
 const LOCK = (rootHunk: string, depHunk: string): string =>
   [
     "{",
-    '  "name": "@offergeist/sandbar",',
+    '  "name": "sandbar",',
     rootHunk,
     '  "lockfileVersion": 3,',
     '  "requires": true,',
     '  "packages": {',
     '    "": {',
-    '      "name": "@offergeist/sandbar",',
+    '      "name": "sandbar",',
     rootHunk.replace(/^ {2}"/gm, '      "').replace(/^ {2}(?=[<=>])/gm, ""),
     '      "dependencies": {',
     '        "proper-lockfile": "^4.1.2"',
@@ -153,7 +153,7 @@ describe("analyzeVersionConflict — package.json", () => {
   it("declines when the conflict also touches a script", () => {
     const text = [
       "{",
-      '  "name": "@offergeist/sandbar",',
+      '  "name": "sandbar",',
       VERSION_HUNK,
       '  "scripts": {',
       conflict('    "build": "tsc -p ."', '    "build": "tsc --build"'),
@@ -171,7 +171,7 @@ describe("analyzeVersionConflict — package.json", () => {
   it("declines when a whole dependency block conflicts around the version", () => {
     const text = [
       "{",
-      '  "name": "@offergeist/sandbar",',
+      '  "name": "sandbar",',
       conflict(
         ['  "version": "0.20.34",', '  "dependencies": {', '    "left-pad": "^1.0.0"', "  }"].join("\n"),
         ['  "version": "0.20.35",', '  "dependencies": {', '    "right-pad": "^2.0.0"', "  }"].join("\n"),
@@ -258,7 +258,7 @@ describe("analyzeVersionConflict — package-lock.json", () => {
   it("declines when the package graph itself conflicts", () => {
     const text = [
       "{",
-      '  "name": "@offergeist/sandbar",',
+      '  "name": "sandbar",',
       VERSION_HUNK,
       '  "packages": {',
       '    "": {',

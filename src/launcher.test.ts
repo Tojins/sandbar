@@ -32,7 +32,7 @@ describe("driver install (#66)", () => {
   it("derives the disposable install paths and npm argv", () => {
     const paths = driverPaths(root);
     expect(paths.cli).toBe(join(
-      root, ".sandbar", "driver", "node_modules", "@offergeist", "sandbar", "dist", "cli.js",
+      root, ".sandbar", "driver", "node_modules", "sandbar", "dist", "cli.js",
     ));
     expect(installArgv(paths.dir, PIN)).toEqual([
       "install", "--prefix", paths.dir, "--no-audit", "--no-fund", PIN,
@@ -79,7 +79,7 @@ describe("driver install (#66)", () => {
     const approved = JSON.stringify({
       name: "sandbar-driver",
       private: true,
-      allowScripts: { "@offergeist/sandbar": true },
+      allowScripts: { "sandbar": true },
     });
     writeFileSync(paths.manifest, approved);
     installDriver(paths, PIN, {

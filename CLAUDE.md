@@ -33,7 +33,7 @@ run, check `ps -ef | grep [f]orks.js` for leftovers.
 
 ## What this package is
 
-`@offergeist/sandbar` is a **library with a thin bin** (#38): `run(config)` is
+`sandbar` is a **library with a thin bin** (#38): `run(config)` is
 the contract (`src/index.ts`), and `src/cli.ts` resolves `--config` (default
 `./sandbar.config.mjs`) and hands the default export to `run()`. The bin also
 dispatches two subcommands: `sandbar gate` → `runGateCommand` (#45), exported

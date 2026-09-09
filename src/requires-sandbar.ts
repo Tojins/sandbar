@@ -117,7 +117,7 @@ export function checkRequiresSandbar(
       "simply never happen.\n" +
       "Either move the driver forward (for a self-hosted repo that is the pin " +
       "in `sandbar.pin`; for a consumer, the installed version of " +
-      "@offergeist/sandbar), or lower `requiresSandbar` to a version this " +
+      "sandbar), or lower `requiresSandbar` to a version this " +
       "config is actually written for.",
   );
 }

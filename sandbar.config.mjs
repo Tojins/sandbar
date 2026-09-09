@@ -31,7 +31,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DRIVER_ENTRY = new URL(
-  ".sandbar/driver/node_modules/@offergeist/sandbar/dist/index.js",
+  ".sandbar/driver/node_modules/sandbar/dist/index.js",
   import.meta.url,
 );
 if (!existsSync(DRIVER_ENTRY)) {
