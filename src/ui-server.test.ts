@@ -73,14 +73,18 @@ describe("run UI server", () => {
       Date, Intl, Math, String, Error, TypeError,
     });
     await new Promise((resolve) => setImmediate(resolve));
+    expect(app.innerHTML).toContain("<details id=\"events\"><summary>Events");
     expect(app.innerHTML).toContain("Pool title");
     expect(app.innerHTML).toContain("Waiting title");
     expect(app.innerHTML).toContain("Finished title");
     expect(app.innerHTML).toContain("HARD-ERROR · provider cause");
     expect(app.innerHTML).not.toContain("codex exited with code 1");
     expect(app.innerHTML).toContain("attempt started");
+    // A feed the reader opened stays open across the next poll's re-render.
+    (app as { open?: boolean }).open = true;
     await interval?.();
     expect(app.innerHTML).toContain("sandbar updated");
+    expect(app.innerHTML).toContain("<details id=\"events\" open><summary>Events");
     await interval?.();
     expect(app.innerHTML).toContain("No run is serving; last state below");
     expect(app.innerHTML).toContain("sandbar updated");
