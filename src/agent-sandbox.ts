@@ -54,9 +54,10 @@
 //         timeout paths retain their own tails so recording never waits for a
 //         descendant that kept an exec pipe open (#135).
 //   F12 — at every invocation end, before the long-lived sandbox can disappear,
-//         the record and returned result carry cgroup memory.peak and Podman's
-//         OOMKilled bit when available (#141). Failed runs retain the same facts
-//         beside their partial speech/usage, so an OOM cannot be laundered.
+//         the record and returned result carry cgroup memory.peak and the
+//         cgroup/Podman OOM-kill evidence available at that boundary (#141).
+//         Failed runs retain the same facts beside their partial speech/usage,
+//         so an OOM cannot be laundered.
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.

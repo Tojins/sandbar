@@ -2527,7 +2527,7 @@ const RESOLVE_REAP_SCRIPT = [
   "  for path in /proc/[0-9]*; do",
   "    pid=${path##*/}",
   "    case \"$pid\" in 1|\"$self\") continue ;; esac",
-  "    kill -\"$signal\" \"$pid\" 2>/dev/null || true",
+  "    kill -\"$signal\" \"$pid\" 2>/dev/null || [ ! -e \"$path\" ] || exit 1",
   "  done",
   "  sleep 1",
   "done",

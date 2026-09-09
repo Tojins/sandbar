@@ -54,7 +54,10 @@ describe.runIf(available && rootless)("container resource cgroup evidence", () =
       // its historical counters readable.
       const timedOut = await captureAgentRun(
         RUNTIME,
-        ["exec", name, "sh", "-c", "echo $$ >/tmp/agent-pid; sleep 60"],
+        [
+          "exec", name, "sh", "-c",
+          "echo $$ >/tmp/agent-pid; sleep 60 & echo $! >/tmp/child-pid; wait",
+        ],
         "",
         { container: name, timeoutMs: 150 },
       );
@@ -62,6 +65,9 @@ describe.runIf(available && rootless)("container resource cgroup evidence", () =
       await exec(RUNTIME, [...buildResolveReapArgv(name)]);
       await expect(exec(RUNTIME, [
         "exec", name, "sh", "-c", "kill -0 $(cat /tmp/agent-pid)",
+      ])).rejects.toBeDefined();
+      await expect(exec(RUNTIME, [
+        "exec", name, "sh", "-c", "kill -0 $(cat /tmp/child-pid)",
       ])).rejects.toBeDefined();
       const inspected = await exec(RUNTIME, [
         "inspect", "--format", "{{.State.CgroupPath}}\n{{.State.OOMKilled}}", name,

@@ -58,8 +58,8 @@
 // test suite. Nothing reads a duration back: there is no adaptive bound and no
 // warning threshold, and `step.timeoutMs` stays the one bound this module has.
 // Each real step also snapshots its target container's cgroup-v2 memory peak
-// and Podman OOMKilled bit (#141). Container generations record the same facts
-// immediately before replacement or final pod teardown; the teardown callback
+// and cgroup/Podman OOM-kill evidence (#141). Container generations record the
+// same facts immediately before replacement or final pod teardown; the teardown callback
 // turns those records into events even when initial bringup never returns a
 // stack handle. Missing delegation is absence, not zero, and none of these
 // measurements changes the gate verdict.
