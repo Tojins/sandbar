@@ -40,6 +40,7 @@ import {
   AgentIdleTimeoutError,
   agentFailureMessage,
   agentPartialContainerResources,
+  agentPartialDurationMs,
   agentPartialOutput,
   agentPartialUsage,
   claudeCode,
@@ -1201,12 +1202,15 @@ describe("createSandbox integration (local provider)", () => {
   it("attributes cumulative OOM counters to one invocation and excludes snapshot latency", async () => {
     await git(["branch", "sandbar/issue-141-interval"], dir);
     let reads = 0;
+    const snapshotReadMs: number[] = [];
     const provider = {
       ...makeLocalProvider(),
       containerResourceSnapshot: vi.fn(async () => {
         reads += 1;
-        if (reads === 2 || reads === 4) {
+        if (reads <= 2) {
+          const started = performance.now();
           await new Promise((resolve) => setTimeout(resolve, 150));
+          snapshotReadMs.push(performance.now() - started);
         }
         return {
           ...(reads % 2 === 0 ? { peakMemoryBytes: reads * 1024 } : {}),
@@ -1232,7 +1236,10 @@ describe("createSandbox integration (local provider)", () => {
 
       expect(first).toMatchObject({ peakMemoryBytes: 2048, oomKilled: true });
       expect(second).toMatchObject({ peakMemoryBytes: 4096, oomKilled: false });
-      expect(firstElapsed - first.durationMs).toBeGreaterThanOrEqual(100);
+      expect(snapshotReadMs).toHaveLength(2);
+      expect(first.durationMs).toBeLessThan(snapshotReadMs[0]!);
+      expect(first.durationMs).toBeLessThan(snapshotReadMs[1]!);
+      expect(firstElapsed - first.durationMs).toBeGreaterThanOrEqual(250);
       expect(provider.containerResourceSnapshot).toHaveBeenCalledTimes(4);
     } finally {
       await sandbox.close();
@@ -2178,15 +2185,20 @@ describe("createSandbox integration (local provider)", () => {
 
   it("rejects via the completion-grace timer when the pipe is held open (F5)", async () => {
     await git(["branch", "sandbar/issue-4-grace"], dir);
+    let resourceSnapshotReads = 0;
     const provider = {
       ...makeLocalProvider(),
-      containerResourceSnapshot: vi.fn()
-        .mockResolvedValueOnce({ oomKillCount: 4, podmanOomKilled: false })
-        .mockResolvedValueOnce({
-          peakMemoryBytes: 931_000_000,
-          oomKillCount: 5,
-          podmanOomKilled: false,
-        }),
+      containerResourceSnapshot: vi.fn(async () => {
+        resourceSnapshotReads += 1;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return resourceSnapshotReads === 1
+          ? { oomKillCount: 4, podmanOomKilled: false }
+          : {
+              peakMemoryBytes: 931_000_000,
+              oomKillCount: 5,
+              podmanOomKilled: false,
+            };
+      }),
     };
     const sandbox = await createSandbox({
       env: {},
@@ -2225,6 +2237,8 @@ describe("createSandbox integration (local provider)", () => {
         peakMemoryBytes: 931_000_000,
         oomKilled: true,
       });
+      expect(agentPartialDurationMs(err)).toBe(records[0]!.durationMs);
+      expect(elapsed - agentPartialDurationMs(err)!).toBeGreaterThanOrEqual(250);
       expect(elapsed).toBeLessThan(5000);
       expect(records).toHaveLength(1);
       expect(records[0]).toMatchObject({

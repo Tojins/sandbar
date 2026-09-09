@@ -136,6 +136,14 @@ describe("container resource evidence", () => {
       { peakMemoryBytes: 1100, oomKillCount: 6, podmanOomKilled: false },
       { peakMemoryBytes: 1000, podmanOomKilled: false },
     )).toEqual({ peakMemoryBytes: 1100 });
+    expect(containerResourcesSince(
+      { peakMemoryBytes: 1200, oomKillCount: 6, podmanOomKilled: true },
+      { peakMemoryBytes: 1100, oomKillCount: 6, podmanOomKilled: false },
+    )).toEqual({ peakMemoryBytes: 1200, oomKilled: true });
+    expect(containerResourcesSince(
+      { peakMemoryBytes: 1300, oomKillCount: 6, podmanOomKilled: true },
+      { peakMemoryBytes: 1200, oomKillCount: 6, podmanOomKilled: true },
+    )).toEqual({ peakMemoryBytes: 1300, oomKilled: false });
 
     const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
     const absentEvents = vi.fn(async (path: string) => {

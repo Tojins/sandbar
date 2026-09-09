@@ -730,7 +730,24 @@ describe("resolve provider invocation (#74)", () => {
     expect(unregister).toHaveBeenCalledOnce();
   });
 
-  it("maps a timed-out container start to infra and skips in-container reaping", async () => {
+  it.each([
+    {
+      label: "timed-out",
+      stderr: "podman run did not return",
+      end: "timeout" as const,
+      exitCode: null,
+      signal: "SIGKILL",
+      durationMs: 120_000,
+    },
+    {
+      label: "non-zero",
+      stderr: "Error: image not known",
+      end: "exit" as const,
+      exitCode: 125,
+      signal: null,
+      durationMs: 7,
+    },
+  ])("maps a $label container start to infra and skips in-container reaping", async (start) => {
     const order: string[] = [];
     const notices: Array<{ message: string; cause: unknown }> = [];
     const runtimeResult = (stdout = ""): BoundedRuntimeResult => ({
@@ -757,11 +774,11 @@ describe("resolve provider invocation (#74)", () => {
       order.push(`capture:${args[0]}`);
       return {
         stdout: "",
-        stderr: "podman run did not return",
-        end: "timeout" as const,
-        exitCode: null,
-        signal: "SIGKILL",
-        durationMs: 120_000,
+        stderr: start.stderr,
+        end: start.end,
+        exitCode: start.exitCode,
+        signal: start.signal,
+        durationMs: start.durationMs,
         container: "resolve-test",
       };
     });
@@ -793,8 +810,10 @@ describe("resolve provider invocation (#74)", () => {
       restoreReporter();
     }
     expect(run).toMatchObject({
-      stderr: "podman run did not return",
-      exitCode: null,
+      stderr: start.stderr,
+      exitCode: start.exitCode,
+      signal: start.signal,
+      durationMs: start.durationMs,
       end: "spawn-error",
     });
     expect(isInfraFailure(run)).toBe(true);

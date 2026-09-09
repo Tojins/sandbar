@@ -350,6 +350,7 @@ describe("silent implementer attempt policy (#116)", () => {
   type ScriptedImplementerRun = ReturnType<typeof sandboxResult> | {
     readonly error: Error;
     readonly resources: ContainerResources;
+    readonly durationMs: number;
   };
 
   const runPath = (
@@ -382,7 +383,7 @@ describe("silent implementer attempt policy (#116)", () => {
         end: failed ? "exec-error" : "exit",
         detail: failed ? result.error.message : null,
         exitCode: failed ? null : 0,
-        durationMs: 1,
+        durationMs: result.durationMs,
         speech: stdout,
         stdout,
         stderr: "",
@@ -391,7 +392,7 @@ describe("silent implementer attempt policy (#116)", () => {
       if (failed) {
         throw withPartialDurationMs(
           withPartialContainerResources(result.error, resources),
-          1,
+          result.durationMs,
         );
       }
       return result;
@@ -501,6 +502,7 @@ describe("silent implementer attempt policy (#116)", () => {
       {
         error: new Error("agent exited 137"),
         resources: { peakMemoryBytes: 4096, oomKilled: true },
+        durationMs: 7,
       },
       sandboxResult("unused", false),
     );
@@ -508,6 +510,7 @@ describe("silent implementer attempt policy (#116)", () => {
     await expect(pending).rejects.toThrow("agent exited 137");
     expect(lines.at(-1)).toMatchObject({
       kind: "implementer", signal: "FAILED", commits: 0,
+      durationMs: 7,
       peakMemoryBytes: 4096, oomKilled: true,
     });
   });
@@ -521,12 +524,14 @@ describe("silent implementer attempt policy (#116)", () => {
       {
         error: new Error("nudge exited 137"),
         resources: { peakMemoryBytes: 8192, oomKilled: true },
+        durationMs: 9,
       },
     );
 
     await expect(pending).rejects.toThrow("nudge exited 137");
     expect(lines.at(-1)).toMatchObject({
       kind: "implementer", signal: "FAILED", commits: 1,
+      durationMs: 10,
       peakMemoryBytes: 8192, oomKilled: true,
     });
   });
@@ -720,14 +725,17 @@ describe("role prompt-extension wiring (#91)", () => {
     const outputs = [
       {
         output: "", error: new Error("review provider failed"),
+        durationMs: 11,
         resources: { peakMemoryBytes: 1000, oomKilled: true },
       },
       {
         output: "<verdict>APPROVED</verdict>", error: null,
+        durationMs: 22,
         resources: { peakMemoryBytes: 2000, oomKilled: false },
       },
       {
         output: "<verdict>APPROVED</verdict>", error: null,
+        durationMs: 33,
         resources: { peakMemoryBytes: 3000, oomKilled: true },
       },
     ];
@@ -742,19 +750,22 @@ describe("role prompt-extension wiring (#91)", () => {
           end: result.error === null ? "exit" : "exec-error",
           detail: result.error?.message ?? null,
           exitCode: result.error === null ? 0 : null,
-          durationMs: 1,
+          durationMs: result.durationMs,
           speech: result.output,
           stdout: result.output,
           stderr: result.error?.message ?? "",
           ...result.resources,
         });
         if (result.error !== null) {
-          throw withPartialContainerResources(result.error, result.resources);
+          throw withPartialDurationMs(
+            withPartialContainerResources(result.error, result.resources),
+            result.durationMs,
+          );
         }
         return {
           stdout: result.output,
           commits: [],
-          durationMs: 1,
+          durationMs: result.durationMs,
           silent: false,
           maxGapMs: 1,
           toolCalls: 0,
@@ -801,10 +812,12 @@ describe("role prompt-extension wiring (#91)", () => {
     ]);
     expect(ctx.opts.onEvent).toHaveBeenCalledWith(expect.objectContaining({
       kind: "review-pass", pass: "quality", invocation: 1, result: "failed",
+      durationMs: 11,
       peakMemoryBytes: 1000, oomKilled: true,
     }));
     expect(ctx.opts.onEvent).toHaveBeenCalledWith(expect.objectContaining({
       kind: "review-pass", pass: "correctness", result: "completed",
+      durationMs: 33,
       peakMemoryBytes: 3000, oomKilled: true,
     }));
   });

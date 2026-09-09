@@ -180,7 +180,7 @@ describe.runIf(available)("gate stack against real podman", () => {
         onTestFinished,
       );
       const teardowns: ContainerTeardown[] = [];
-      let firstResourceReadMs: number | undefined;
+      const firstStepSnapshotReadMs: number[] = [];
       let snapshotReads = 0;
       const containerResources = vi.fn(async () => ({
         peakMemoryBytes: 4096,
@@ -188,10 +188,10 @@ describe.runIf(available)("gate stack against real podman", () => {
       }));
       const containerResourceSnapshot = vi.fn(async () => {
         snapshotReads += 1;
-        if (snapshotReads === 2) {
-          const started = Date.now();
-          await new Promise((resolve) => setTimeout(resolve, 3_000));
-          firstResourceReadMs = Date.now() - started;
+        if (snapshotReads <= 2) {
+          const started = performance.now();
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          firstStepSnapshotReadMs.push(performance.now() - started);
         }
         return {
           ...(snapshotReads % 2 === 0 ? { peakMemoryBytes: 4096 } : {}),
@@ -263,9 +263,11 @@ describe.runIf(available)("gate stack against real podman", () => {
         peakMemoryBytes: 4096,
         oomKilled: false,
       });
-      expect(firstResourceReadMs).toBeDefined();
+      expect(firstStepSnapshotReadMs).toHaveLength(2);
       expect(green.steps.find((x) => x.name === "read-marker")!.durationMs)
-        .toBeLessThan(firstResourceReadMs!);
+        .toBeLessThan(firstStepSnapshotReadMs[0]!);
+      expect(green.steps.find((x) => x.name === "read-marker")!.durationMs)
+        .toBeLessThan(firstStepSnapshotReadMs[1]!);
       // The whole run is at least as long as any one phase of it, and the
       // phases do not sum past it either — a cheap check that all six are on
       // the same clock.
