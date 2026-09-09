@@ -609,9 +609,6 @@ function describeEndForHumans(run: ContainerResources & {
   readonly signal: string | null;
   readonly durationMs: number;
 }): string {
-  if (run.oomKilled === true) {
-    return `was OOM-killed after ${seconds(run.durationMs)}`;
-  }
   switch (run.end) {
     case "timeout":
       return (

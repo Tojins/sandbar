@@ -30,6 +30,39 @@ describe("run event reducer", () => {
     expect(state.events[1]).not.toHaveProperty("peakMemoryBytes");
   });
 
+  it.each([
+    ["FAILED", true, "attempt 1 failed · OOM-killed · 0 commits"],
+    ["QUOTA", false, "attempt 1 failed · quota · 0 commits"],
+    ["CREDENTIAL", false, "attempt 1 failed · credential · 0 commits"],
+  ] as const)(
+    "renders %s as failure evidence and excludes it from completed attempts",
+    (signal, oomKilled, expectedText) => {
+      const terminal = signal === "FAILED" ? "HARD-ERROR" : signal;
+      const state = reduceRunEvents([
+        at(1, "2026-09-07T09:00:00Z", {
+          kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
+          workdir: "/r", maxParallelIssues: 1, pid: 1,
+        }),
+        at(2, "2026-09-07T09:01:00Z", {
+          kind: "implementer", issue: 2, attempt: 1, signal, commits: 0,
+          provider: "codex", model: "m", effort: null, durationMs: 5,
+          peakMemoryBytes: 4096, oomKilled,
+        }),
+        at(3, "2026-09-07T09:02:00Z", {
+          kind: "terminal", issue: 2, title: "Two", terminal,
+          reason: "provider stopped", durationMs: 6,
+        }),
+      ], { now: new Date("2026-09-07T09:03:00Z"), pidAlive: false });
+
+      expect(state.events[1]).toMatchObject({
+        text: expectedText, tone: "bad", peakMemoryBytes: 4096, oomKilled,
+      });
+      expect(state.finished).toEqual([
+        expect.objectContaining({ issue: 2, attempts: 0 }),
+      ]);
+    },
+  );
+
   it("projects every event kind into a newest-first, attributed feed", () => {
     const rows: object[] = [
       { kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
