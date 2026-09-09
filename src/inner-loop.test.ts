@@ -322,6 +322,9 @@ describe("silent implementer attempt policy (#116)", () => {
     nudge: ReturnType<typeof sandboxResult>,
     promptExtensions?: Parameters<typeof runImplementer>[1]["config"]["promptExtensions"],
     mismatch: HeadMismatch | null = null,
+    latestReviewerFeedback: Parameters<
+      typeof runImplementer
+    >[0]["latestReviewerFeedback"] = null,
   ) => {
     innerLoopMocks.headMismatch.mockReset().mockResolvedValue(mismatch);
     innerLoopMocks.fastForwardOffBranchHead.mockReset().mockImplementation(
@@ -388,7 +391,7 @@ describe("silent implementer attempt policy (#116)", () => {
         attempt: 1,
         failureTrace: null,
         extraReprompt: null,
-        latestReviewerFeedback: null,
+        latestReviewerFeedback,
       },
       ctx,
     );
@@ -447,6 +450,26 @@ describe("silent implementer attempt policy (#116)", () => {
     await pending;
     expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
       expect.objectContaining({ promptExtension: implementer }),
+      expect.anything(),
+    );
+  });
+
+  it("forwards retained red-round quality approval to the implementer prompt", async () => {
+    innerLoopMocks.buildPrompt.mockClear();
+    const latestReviewerFeedback = {
+      disposition: "APPROVED-CORRECTNESS-SKIPPED",
+      prose: "Quality checks look sound.",
+    } as const;
+    const { pending } = runPath(
+      sandboxResult("done", false),
+      sandboxResult("unused", false),
+      undefined,
+      null,
+      latestReviewerFeedback,
+    );
+    await pending;
+    expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ latestReviewerFeedback }),
       expect.anything(),
     );
   });
