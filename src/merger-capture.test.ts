@@ -730,7 +730,7 @@ describe("resolve provider invocation (#74)", () => {
     expect(unregister).toHaveBeenCalledOnce();
   });
 
-  it("preserves a failed container start and skips in-container reaping", async () => {
+  it("maps a timed-out container start to infra and skips in-container reaping", async () => {
     const order: string[] = [];
     const notices: Array<{ message: string; cause: unknown }> = [];
     const runtimeResult = (stdout = ""): BoundedRuntimeResult => ({
@@ -757,11 +757,11 @@ describe("resolve provider invocation (#74)", () => {
       order.push(`capture:${args[0]}`);
       return {
         stdout: "",
-        stderr: "Error: image not known",
-        end: "exit" as const,
-        exitCode: 125,
-        signal: null,
-        durationMs: 7,
+        stderr: "podman run did not return",
+        end: "timeout" as const,
+        exitCode: null,
+        signal: "SIGKILL",
+        durationMs: 120_000,
         container: "resolve-test",
       };
     });
@@ -793,10 +793,11 @@ describe("resolve provider invocation (#74)", () => {
       restoreReporter();
     }
     expect(run).toMatchObject({
-      stderr: "Error: image not known",
-      exitCode: 125,
-      end: "exit",
+      stderr: "podman run did not return",
+      exitCode: null,
+      end: "spawn-error",
     });
+    expect(isInfraFailure(run)).toBe(true);
     expect(order).toEqual([
       "capture:run", "podman:inspect", "podman:stats", "podman:rm",
     ]);

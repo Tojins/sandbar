@@ -411,6 +411,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     seams.sandboxRun
       .mockResolvedValueOnce({
         stdout: "<promise>COMPLETE</promise>",
+        durationMs: 11,
         headBefore: "base-sha",
         headAfter: "implemented-sha",
         signalMs: 1,
@@ -422,6 +423,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       .mockRejectedValueOnce(reviewerFailure)
       .mockResolvedValueOnce({
         stdout: "<verdict>APPROVED</verdict>",
+        durationMs: 21,
         maxGapMs: 2,
         toolCalls: 3,
         peakContext: 61,
@@ -429,6 +431,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       })
       .mockResolvedValueOnce({
         stdout: "<verdict>APPROVED</verdict>",
+        durationMs: 31,
         maxGapMs: 2,
         toolCalls: 4,
         peakContext: 73,
@@ -451,13 +454,13 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       {
         kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
         pass: "quality", invocation: 2, provider: "claude", model: "model",
-        effort: null, result: "completed", durationMs: expect.any(Number), maxGapMs: 2,
+        effort: null, result: "completed", durationMs: 21, maxGapMs: 2,
         usage: { toolCalls: 3, peakContext: 61 },
       },
       {
         kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
         pass: "correctness", invocation: 1, provider: "claude", model: "model",
-        effort: null, result: "completed", durationMs: expect.any(Number), maxGapMs: 2,
+        effort: null, result: "completed", durationMs: 31, maxGapMs: 2,
         usage: { toolCalls: 4, peakContext: 73 },
       },
     ]);

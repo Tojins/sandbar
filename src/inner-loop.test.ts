@@ -32,6 +32,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
 
 import {
   withPartialContainerResources,
+  withPartialDurationMs,
   withPartialOutput,
   type Sandbox,
 } from "./agent-sandbox.js";
@@ -96,7 +97,14 @@ describe("runUiCheck (#126)", () => {
         stdout,
         stderr: "",
       });
-      return { stdout, commits: [], maxGapMs, toolCalls };
+      return {
+        stdout,
+        commits: [],
+        durationMs: 1,
+        silent: false,
+        maxGapMs,
+        toolCalls,
+      };
     };
     const sandbox = {
       worktreePath: "/worktree",
@@ -162,6 +170,7 @@ describe("runUiCheck (#126)", () => {
     vi.mocked(success.sandbox.run).mockReset().mockResolvedValueOnce({
       stdout: "<ui-check>CLEAR</ui-check>",
       commits: [],
+      durationMs: 17,
       silent: false,
       maxGapMs: 9,
       usage: {
@@ -190,7 +199,7 @@ describe("runUiCheck (#126)", () => {
     expect(successEvents).toEqual([{
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
-      durationMs: expect.any(Number), maxGapMs: 9, result: "CLEAR",
+      durationMs: 17, maxGapMs: 9, result: "CLEAR",
       peakMemoryBytes: 344_000_000, oomKilled: true,
       usage: { inputTokens: 1, cachedInputTokens: 2, cacheWriteInputTokens: 3,
         outputTokens: 4, reasoningTokens: 5, apiMs: 6, resolvedModel: "resolved",
@@ -201,16 +210,19 @@ describe("runUiCheck (#126)", () => {
 
     const failureEvents: EventInput[] = [];
     const failure = context([], failureEvents);
-    const err = withPartialContainerResources(
-      withPartialOutput(
-        new Error("disconnected"),
-        "partial",
-        { inputTokens: 11, outputTokens: 12 },
-        13,
-        14,
-        { status: "rejected", window: "weekly", utilization: 1 },
+    const err = withPartialDurationMs(
+      withPartialContainerResources(
+        withPartialOutput(
+          new Error("disconnected"),
+          "partial",
+          { inputTokens: 11, outputTokens: 12 },
+          13,
+          14,
+          { status: "rejected", window: "weekly", utilization: 1 },
+        ),
+        { peakMemoryBytes: 512_000_000, oomKilled: true },
       ),
-      { peakMemoryBytes: 512_000_000, oomKilled: true },
+      19,
     );
     vi.mocked(failure.sandbox.run).mockReset().mockImplementationOnce(
       async (options) => {
@@ -234,7 +246,7 @@ describe("runUiCheck (#126)", () => {
     expect(failureEvents).toEqual([{
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
-      durationMs: expect.any(Number), result: "failed",
+      durationMs: 19, result: "failed",
       peakMemoryBytes: 512_000_000, oomKilled: true,
       usage: { inputTokens: 11, outputTokens: 12, toolCalls: 13, peakContext: 14,
         quota: { status: "rejected", window: "weekly", utilization: 1 } },
@@ -330,6 +342,7 @@ describe("silent implementer attempt policy (#116)", () => {
     stdout,
     silent,
     commits: commits.map((sha) => ({ sha })),
+    durationMs: 1,
     maxGapMs: 1,
     toolCalls: 0,
     ...resources,
@@ -376,7 +389,10 @@ describe("silent implementer attempt policy (#116)", () => {
         ...resources,
       });
       if (failed) {
-        throw withPartialContainerResources(result.error, resources);
+        throw withPartialDurationMs(
+          withPartialContainerResources(result.error, resources),
+          1,
+        );
       }
       return result;
     };
@@ -738,6 +754,7 @@ describe("role prompt-extension wiring (#91)", () => {
         return {
           stdout: result.output,
           commits: [],
+          durationMs: 1,
           silent: false,
           maxGapMs: 1,
           toolCalls: 0,

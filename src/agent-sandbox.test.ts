@@ -1145,10 +1145,13 @@ describe("createSandbox integration (local provider)", () => {
   it("creates a managed worktree under .sandbar/worktrees and captures a commit", async () => {
     const provider = {
       ...makeLocalProvider(),
-      containerResources: async () => ({
-        peakMemoryBytes: 512_000_000,
-        oomKilled: false,
-      }),
+      containerResourceSnapshot: vi.fn()
+        .mockResolvedValueOnce({ oomKillCount: 2, podmanOomKilled: false })
+        .mockResolvedValueOnce({
+          peakMemoryBytes: 512_000_000,
+          oomKillCount: 2,
+          podmanOomKilled: false,
+        }),
     };
     const sandbox = await createSandbox({
       env: {},
@@ -1190,6 +1193,47 @@ describe("createSandbox integration (local provider)", () => {
       // The captured commit is the one the agent made on the branch.
       const log = await git(["log", "-1", "--format=%H", "sandbar/issue-1-demo"], dir);
       expect(log.stdout.trim()).toBe(run.commits[0]!.sha);
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  it("attributes cumulative OOM counters to one invocation and excludes snapshot latency", async () => {
+    await git(["branch", "sandbar/issue-141-interval"], dir);
+    let reads = 0;
+    const provider = {
+      ...makeLocalProvider(),
+      containerResourceSnapshot: vi.fn(async () => {
+        reads += 1;
+        if (reads === 2 || reads === 4) {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+        }
+        return {
+          ...(reads % 2 === 0 ? { peakMemoryBytes: reads * 1024 } : {}),
+          oomKillCount: reads === 1 ? 7 : 8,
+          podmanOomKilled: false,
+        };
+      }),
+    };
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-141-interval",
+      sandbox: provider,
+      layout: layoutFor(dir),
+    });
+    try {
+      const agent = scriptedAgent(
+        `printf '%s\\n' '${JSON.stringify({ type: "result", result: "done" })}'`,
+      );
+      const started = Date.now();
+      const first = await sandbox.run({ agent, prompt: "first", completionSignal: [] });
+      const firstElapsed = Date.now() - started;
+      const second = await sandbox.run({ agent, prompt: "second", completionSignal: [] });
+
+      expect(first).toMatchObject({ peakMemoryBytes: 2048, oomKilled: true });
+      expect(second).toMatchObject({ peakMemoryBytes: 4096, oomKilled: false });
+      expect(firstElapsed - first.durationMs).toBeGreaterThanOrEqual(100);
+      expect(provider.containerResourceSnapshot).toHaveBeenCalledTimes(4);
     } finally {
       await sandbox.close();
     }
@@ -2136,7 +2180,13 @@ describe("createSandbox integration (local provider)", () => {
     await git(["branch", "sandbar/issue-4-grace"], dir);
     const provider = {
       ...makeLocalProvider(),
-      containerResources: async () => ({ peakMemoryBytes: 931_000_000, oomKilled: true }),
+      containerResourceSnapshot: vi.fn()
+        .mockResolvedValueOnce({ oomKillCount: 4, podmanOomKilled: false })
+        .mockResolvedValueOnce({
+          peakMemoryBytes: 931_000_000,
+          oomKillCount: 5,
+          podmanOomKilled: false,
+        }),
     };
     const sandbox = await createSandbox({
       env: {},

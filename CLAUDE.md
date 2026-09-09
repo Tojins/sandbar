@@ -518,8 +518,9 @@ outcomes.
   measurement is ABSENT, never `0`, because a stats reader averages a zero.
   Container-backed durations also record cgroup-v2 `memory.peak` and the
   `memory.events` OOM-kill counter at teardown (#141), OR-ed with Podman's
-  `State.OOMKilled` and with sampled stats only as a peak fallback; these remain
-  evidence and never become a limit or scheduling input.
+  `State.OOMKilled` and with sampled stats only as a peak fallback; reused
+  containers attribute OOM kills by counter delta over each execution span.
+  These remain evidence and never become a limit or scheduling input.
   Every deadline is computed on the monotonic clock (#122), so a wall-clock
   step cannot move a readiness or forge-verification verdict. This is a
   separate rule from durations being reports rather than decision inputs.

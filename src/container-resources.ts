@@ -3,10 +3,13 @@
 // Sandbar does not set a memory limit and these facts never influence a
 // verdict, timeout, retry, or concurrency decision. They are measurements for
 // the operator: `peakMemoryBytes` is the cgroup-v2 `memory.peak` value and
-// `oomKilled` is the cgroup's non-zero `memory.events` `oom_kill` counter,
-// OR-ed with Podman's recorded `.State.OOMKilled` bit. The cgroup counter is
-// what sees a workload killed under `podman exec` while a held PID 1 survives;
-// Podman's bit still sees the container-init case. Missing cgroup-v2
+// `oomKilled` is derived from the cgroup's cumulative `memory.events`
+// `oom_kill` counter, OR-ed with Podman's recorded `.State.OOMKilled` bit. A
+// reused container is snapshotted at both invocation boundaries and reports
+// only a counter increase, so one exec OOM is not attributed to every later
+// invocation. The cgroup counter sees a workload killed under `podman exec`
+// while a held PID 1 survives; Podman's bit still sees the container-init case.
+// Missing cgroup-v2
 // delegation, an older kernel without either file, a stopped container that
 // Podman can no longer sample, and an unreadable inspect all mean ABSENT —
 // never zero.
@@ -30,6 +33,15 @@ import {
 export type ContainerResources = {
   readonly peakMemoryBytes?: number;
   readonly oomKilled?: boolean;
+};
+
+// Raw cumulative facts used to attribute one reused container interval. This
+// type never reaches events: `oomKillCount` is meaningful only when compared
+// with the snapshot taken at the interval's start.
+export type ContainerResourceSnapshot = {
+  readonly peakMemoryBytes?: number;
+  readonly oomKillCount?: number;
+  readonly podmanOomKilled?: boolean;
 };
 
 export type ContainerTeardown = ContainerResources & {
@@ -105,12 +117,11 @@ export function memoryEventsPath(cgroupPath: string): string | null {
   return cgroupFilePath(cgroupPath, "memory.events");
 }
 
-export function parseMemoryEvents(value: string): boolean | undefined {
+export function parseMemoryEvents(value: string): number | undefined {
   for (const line of value.split("\n")) {
     const match = /^oom_kill\s+(\d+)$/.exec(line.trim());
     if (match === null) continue;
-    const count = bytes(match[1]!);
-    return count === undefined ? undefined : count > 0;
+    return bytes(match[1]!);
   }
   return undefined;
 }
@@ -152,10 +163,10 @@ const readOptional = async (
   }
 };
 
-export async function readContainerResources(
+export async function readContainerResourceSnapshot(
   containerName: string,
   deps: ContainerResourceDeps,
-): Promise<ContainerResources> {
+): Promise<ContainerResourceSnapshot> {
   const inspected = await deps.podman(
     [
       "inspect",
@@ -168,14 +179,14 @@ export async function readContainerResources(
   const state = ok(inspected) ? parseContainerState(inspected.stdout) : {};
 
   let peakMemoryBytes: number | undefined;
-  let cgroupOomKilled: boolean | undefined;
+  let oomKillCount: number | undefined;
   if (state.cgroupPath !== undefined) {
     const [peak, events] = await Promise.all([
       readOptional(memoryPeakPath(state.cgroupPath), deps.read),
       readOptional(memoryEventsPath(state.cgroupPath), deps.read),
     ]);
     if (peak !== undefined) peakMemoryBytes = bytes(peak);
-    if (events !== undefined) cgroupOomKilled = parseMemoryEvents(events);
+    if (events !== undefined) oomKillCount = parseMemoryEvents(events);
   }
   if (peakMemoryBytes === undefined) {
     const sampled = await deps.podman(
@@ -185,15 +196,40 @@ export async function readContainerResources(
     if (ok(sampled)) peakMemoryBytes = parseStatsMemory(sampled.stdout);
   }
 
-  const oomKilled = cgroupOomKilled === true || state.oomKilled === true
+  return {
+    ...(peakMemoryBytes === undefined ? {} : { peakMemoryBytes }),
+    ...(oomKillCount === undefined ? {} : { oomKillCount }),
+    ...(state.oomKilled === undefined ? {} : { podmanOomKilled: state.oomKilled }),
+  };
+}
+
+export function containerResourcesSince(
+  end: ContainerResourceSnapshot,
+  start?: ContainerResourceSnapshot,
+): ContainerResources {
+  const cgroupOomKilled = start === undefined
+    ? end.oomKillCount === undefined ? undefined : end.oomKillCount > 0
+    : start.oomKillCount === undefined || end.oomKillCount === undefined
+      ? undefined
+      : end.oomKillCount > start.oomKillCount;
+  const podmanOomKilled = end.podmanOomKilled === true &&
+    (start === undefined || start.podmanOomKilled !== true);
+  const oomKilled = podmanOomKilled || cgroupOomKilled === true
     ? true
     : cgroupOomKilled === false
       ? false
       : undefined;
   return {
-    ...(peakMemoryBytes === undefined ? {} : { peakMemoryBytes }),
+    ...(end.peakMemoryBytes === undefined ? {} : { peakMemoryBytes: end.peakMemoryBytes }),
     ...(oomKilled === undefined ? {} : { oomKilled }),
   };
+}
+
+export async function readContainerResources(
+  containerName: string,
+  deps: ContainerResourceDeps,
+): Promise<ContainerResources> {
+  return containerResourcesSince(await readContainerResourceSnapshot(containerName, deps));
 }
 
 export const systemContainerResourceDeps = (

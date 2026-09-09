@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   CONTAINER_RESOURCE_TIMEOUT_MS,
+  containerResourcesSince,
   formatContainerResources,
   memoryEventsPath,
   memoryPeakPath,
@@ -115,9 +116,26 @@ describe("container resource evidence", () => {
   });
 
   it("ORs cgroup and Podman OOM evidence without treating Podman false as proof", async () => {
-    expect(parseMemoryEvents("low 0\noom 2\noom_kill 0\n")).toBe(false);
-    expect(parseMemoryEvents("oom_kill 3\n")).toBe(true);
+    expect(parseMemoryEvents("low 0\noom 2\noom_kill 0\n")).toBe(0);
+    expect(parseMemoryEvents("oom_kill 3\n")).toBe(3);
     expect(parseMemoryEvents("oom 1\n")).toBeUndefined();
+
+    expect(containerResourcesSince(
+      { peakMemoryBytes: 900, oomKillCount: 4, podmanOomKilled: false },
+      { peakMemoryBytes: 100, oomKillCount: 4, podmanOomKilled: false },
+    )).toEqual({ peakMemoryBytes: 900, oomKilled: false });
+    expect(containerResourcesSince(
+      { peakMemoryBytes: 950, oomKillCount: 5, podmanOomKilled: false },
+      { peakMemoryBytes: 900, oomKillCount: 4, podmanOomKilled: false },
+    )).toEqual({ peakMemoryBytes: 950, oomKilled: true });
+    expect(containerResourcesSince(
+      { peakMemoryBytes: 1000, oomKillCount: 5, podmanOomKilled: false },
+      { peakMemoryBytes: 950, oomKillCount: 5, podmanOomKilled: false },
+    )).toEqual({ peakMemoryBytes: 1000, oomKilled: false });
+    expect(containerResourcesSince(
+      { peakMemoryBytes: 1100, oomKillCount: 6, podmanOomKilled: false },
+      { peakMemoryBytes: 1000, podmanOomKilled: false },
+    )).toEqual({ peakMemoryBytes: 1100 });
 
     const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
     const absentEvents = vi.fn(async (path: string) => {

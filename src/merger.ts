@@ -2778,7 +2778,9 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           container,
           timeoutMs: CONTROL_TIMEOUT_MS,
         });
-        if (started.exitCode !== 0 || started.end !== "exit") return started;
+        if (started.exitCode !== 0 || started.end !== "exit") {
+          return { ...started, end: "spawn-error" as const };
+        }
         containerStarted = true;
         disposeContainer = registerResolveCleanup(removeContainer);
         return captureResolveProcess(

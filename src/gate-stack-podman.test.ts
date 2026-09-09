@@ -181,15 +181,22 @@ describe.runIf(available)("gate stack against real podman", () => {
       );
       const teardowns: ContainerTeardown[] = [];
       let firstResourceReadMs: number | undefined;
-      const containerResources = vi.fn(async () => {
-        if (firstResourceReadMs === undefined) {
+      let snapshotReads = 0;
+      const containerResources = vi.fn(async () => ({
+        peakMemoryBytes: 4096,
+        oomKilled: false,
+      }));
+      const containerResourceSnapshot = vi.fn(async () => {
+        snapshotReads += 1;
+        if (snapshotReads === 2) {
           const started = Date.now();
           await new Promise((resolve) => setTimeout(resolve, 3_000));
           firstResourceReadMs = Date.now() - started;
         }
         return {
-          peakMemoryBytes: 4096,
-          oomKilled: false,
+          ...(snapshotReads % 2 === 0 ? { peakMemoryBytes: 4096 } : {}),
+          oomKillCount: snapshotReads === 1 ? 4 : 5,
+          podmanOomKilled: false,
         };
       });
 
@@ -221,6 +228,7 @@ describe.runIf(available)("gate stack against real podman", () => {
             ],
           }),
           containerResources,
+          containerResourceSnapshot,
           onContainerTeardown: (record) => teardowns.push(record),
         }),
       );
@@ -249,6 +257,10 @@ describe.runIf(available)("gate stack against real podman", () => {
       expect(green.steps.every((x) => x.durationMs >= 0)).toBe(true);
       expect(green.steps.find((x) => x.name === "read-marker")).toMatchObject({
         peakMemoryBytes: 4096,
+        oomKilled: true,
+      });
+      expect(green.steps.find((x) => x.name === "env")).toMatchObject({
+        peakMemoryBytes: 4096,
         oomKilled: false,
       });
       expect(firstResourceReadMs).toBeDefined();
@@ -262,7 +274,12 @@ describe.runIf(available)("gate stack against real podman", () => {
 
       // A second gate replaces the attempt generation; stop tears down its
       // successor. Both records are retained and reported after the drain.
-      expect((await stack.runGate()).ok).toBe(true);
+      const second = await stack.runGate();
+      expect(second.ok).toBe(true);
+      expect(second.steps.filter((step) => step.name === "read-marker" || step.name === "env"))
+        .toEqual(second.steps
+          .filter((step) => step.name === "read-marker" || step.name === "env")
+          .map((step) => expect.objectContaining({ oomKilled: false })));
       await stack.stop();
       expect(teardowns).toHaveLength(2);
       expect(teardowns).toEqual(teardowns.map((record) => expect.objectContaining({

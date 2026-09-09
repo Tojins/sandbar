@@ -86,6 +86,7 @@ import {
   AgentError,
   AgentQuotaError,
   agentPartialContainerResources,
+  agentPartialDurationMs,
   agentPartialOutput,
   agentPartialUsage,
   podman,
@@ -1226,6 +1227,7 @@ export async function runUiCheck(
     const timer = startTimer();
     const logInvocation = async (
       result: Extract<EventInput, { kind: "ui-check" }>["result"],
+      durationMs: number,
       maxGapMs: number | undefined,
       usage: AgentUsage | undefined,
       toolCalls: number | undefined,
@@ -1241,7 +1243,7 @@ export async function runUiCheck(
         provider: config.uiCheckAgent,
         model: config.uiCheckModelId,
         effort: config.uiCheckEffort ?? null,
-        durationMs: timer(),
+        durationMs,
         ...(maxGapMs === undefined ? {} : { maxGapMs }),
         result,
         ...(eventUsage(usage, toolCalls, peakContext, rateLimit) === undefined
@@ -1276,6 +1278,7 @@ export async function runUiCheck(
           : err instanceof AgentCredentialError
             ? "credential"
             : "failed",
+        agentPartialDurationMs(err) ?? timer(),
         undefined,
         partial.usage,
         partial.toolCalls,
@@ -1305,6 +1308,7 @@ export async function runUiCheck(
     if (wrote !== null) {
       await logInvocation(
         "wrote",
+        run.durationMs,
         run.maxGapMs,
         run.usage,
         run.toolCalls,
@@ -1317,6 +1321,7 @@ export async function runUiCheck(
     const result = parseUiCheck(run.stdout);
     await logInvocation(
       result.kind,
+      run.durationMs,
       run.maxGapMs,
       run.usage,
       run.toolCalls,
@@ -1445,7 +1450,8 @@ export async function runImplementer(
       provider: config.implementerAgent,
       model: config.implementerModelId,
       effort: config.implementerEffort ?? null,
-      durationMs: implementerTimer(),
+      durationMs: (prior?.durationMs ?? 0) +
+        (agentPartialDurationMs(err) ?? (prior === undefined ? implementerTimer() : 0)),
       ...(usage === undefined ? {} : { usage }),
       ...resources,
     });
@@ -1479,6 +1485,7 @@ export async function runImplementer(
   let attemptPeakContext = run.peakContext;
   let attemptRateLimit = run.rateLimit;
   let attemptMaxGapMs = run.maxGapMs;
+  let attemptDurationMs = run.durationMs;
   let attemptResources: ContainerResources = containerResourcesOf(run);
   let attemptStdout = run.stdout;
 
@@ -1507,7 +1514,6 @@ export async function runImplementer(
   // sandbox): a container that cannot run a one-line follow-up cannot run the
   // next attempt either, and swallowing it would hide the infra fault.
   if (signal.kind === "NO-SIGNAL" && signal.missingTag) {
-    const nudgeTimer = startTimer();
     let nudge: Awaited<ReturnType<typeof runAgent>>;
     try {
       nudge = await runAgent({
@@ -1534,6 +1540,7 @@ export async function runImplementer(
     attemptPeakContext = maxContextDepth(attemptPeakContext, nudge.peakContext);
     attemptRateLimit = nudge.rateLimit ?? attemptRateLimit;
     attemptMaxGapMs = Math.max(attemptMaxGapMs, nudge.maxGapMs);
+    attemptDurationMs += nudge.durationMs;
     attemptResources = mergeContainerResources(attemptResources, nudge);
     const combined = combinePromiseNudge(run, nudge);
     attemptStdout = combined.stdout;
@@ -1547,7 +1554,7 @@ export async function runImplementer(
       title: issue.title,
       attempt: action.attempt,
       action: "promise-nudge",
-      detail: `signal=${signal.kind} durationMs=${nudgeTimer()} maxGapMs=${nudge.maxGapMs}`,
+      detail: `signal=${signal.kind} durationMs=${nudge.durationMs} maxGapMs=${nudge.maxGapMs}`,
     });
     // The nudge was the same-session re-ask. If both calls were silent and
     // this attempt committed nothing, there is no evidence that the provider
@@ -1563,6 +1570,7 @@ export async function runImplementer(
         toolCalls: attemptToolCalls,
         peakContext: attemptPeakContext,
         rateLimit: attemptRateLimit,
+        durationMs: attemptDurationMs,
         ...attemptResources,
       });
       throw withPartialContainerResources(withPartialOutput(
@@ -1578,7 +1586,7 @@ export async function runImplementer(
   // Stopped BEFORE the two git reads below: they are the state machine's
   // inputs, not the agent's cost, and folding them in would inflate every
   // implementer number by work the agent never did.
-  const implementerMs = implementerTimer();
+  const implementerMs = attemptDurationMs;
 
   // Read here, not in the gate: a COMPLETE claim over a dirty tree should never
   // cost a stack bringup, and the state machine wants the paths to re-prompt
@@ -1870,6 +1878,7 @@ export async function runReviewer(
         // signal (#83), so the grace phase it measures is unreachable here.
         const logPass = async (
           result: "completed" | "failed" | "quota" | "credential",
+          durationMs: number,
           maxGapMs: number | undefined,
           usage: AgentUsage | undefined,
           toolCalls: number | undefined,
@@ -1889,7 +1898,7 @@ export async function runReviewer(
             model: modelId,
             effort: effort ?? null,
             result,
-            durationMs: passTimer(),
+            durationMs,
             ...(maxGapMs === undefined ? {} : { maxGapMs }),
             ...(eventUsage(usage, toolCalls, peakContext, rateLimit) === undefined
               ? {}
@@ -1919,6 +1928,7 @@ export async function runReviewer(
           }));
           await logPass(
             "completed",
+            reviewerRun.durationMs,
             reviewerRun.maxGapMs,
             reviewerRun.usage,
             reviewerRun.toolCalls,
@@ -1942,6 +1952,7 @@ export async function runReviewer(
               : err instanceof AgentCredentialError
                 ? "credential"
                 : "failed",
+            agentPartialDurationMs(err) ?? passTimer(),
             undefined,
             partial.usage,
             partial.toolCalls,

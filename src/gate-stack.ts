@@ -58,7 +58,8 @@
 // test suite. Nothing reads a duration back: there is no adaptive bound and no
 // warning threshold, and `step.timeoutMs` stays the one bound this module has.
 // Each real step also snapshots its target container's cgroup-v2 memory peak
-// and cgroup/Podman OOM-kill evidence (#141). Container generations record the
+// and the OOM-counter delta across that step (#141), so a reused container's
+// earlier kill is not attributed again. Container generations record the
 // same facts immediately before replacement or final pod teardown; the step's
 // duration clock stops before that snapshot begins. The teardown callback turns
 // those records into events even when initial bringup never returns a stack
@@ -122,8 +123,11 @@ import {
   RUNTIME_MAX_BUFFER,
 } from "./runtime.js";
 import {
+  containerResourcesSince,
+  readContainerResourceSnapshot,
   readContainerResources,
   systemContainerResourceDeps,
+  type ContainerResourceSnapshot,
   type ContainerResources,
   type ContainerTeardown,
 } from "./container-resources.js";
@@ -391,6 +395,12 @@ export type StackOptions = {
   // Test seam for #141's host-side cgroup/inspect read. Production keeps all
   // Podman calls on this module's bounded seam.
   readonly containerResources?: (containerName: string) => Promise<ContainerResources>;
+  // Reused step containers need both cumulative-counter edges so one OOM is
+  // attributed only to the step in which it happened. Kept separate from the
+  // teardown seam, whose one snapshot describes the whole container lifetime.
+  readonly containerResourceSnapshot?: (
+    containerName: string,
+  ) => Promise<ContainerResourceSnapshot>;
   // Test seam for teardown failure arbitration. Production uses the same
   // bounded Podman call as every other control-plane operation; injection lets
   // a test perform the removals and independently classify one result as red.
@@ -816,8 +826,13 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   // the error. Read rather than recomputed, so it cannot come to disagree with
   // the early return that produced it.
   let podKept = false;
+  const resourceDeps = systemContainerResourceDeps(boundedPodman);
+  const resourceSnapshotReader = opts.containerResourceSnapshot ??
+    (opts.containerResources === undefined
+      ? (containerName: string) => readContainerResourceSnapshot(containerName, resourceDeps)
+      : undefined);
   const resourceReader = opts.containerResources ?? ((containerName: string) =>
-    readContainerResources(containerName, systemContainerResourceDeps(boundedPodman)));
+    readContainerResources(containerName, resourceDeps));
   const lifetimes = new Map<string, () => number>();
   const teardowns: ContainerTeardown[] = [];
   const teardownFailures: unknown[] = [];
@@ -1164,6 +1179,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
           onStepOutput: opts.onStepOutput,
           onNotice: opts.onNotice ?? ((message) => console.error(message)),
           resourceReader,
+          resourceSnapshotReader,
           recordTeardown,
           bringUpCtx,
         }),
@@ -1919,6 +1935,9 @@ type RunGateCtx = {
   readonly onStepOutput?: ((chunk: string) => void) | undefined;
   readonly onNotice: (message: string) => void | Promise<void>;
   readonly resourceReader: (containerName: string) => Promise<ContainerResources>;
+  readonly resourceSnapshotReader?: (
+    containerName: string,
+  ) => Promise<ContainerResourceSnapshot>;
   readonly recordTeardown: (container: ResolvedStackContainer) => Promise<void>;
   readonly bringUpCtx: (
     attach: ContainerAttachment,
@@ -2351,6 +2370,7 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     // with its first byte: a step that produces nothing for minutes is exactly
     // the one whose name a watcher needs (#45).
     ctx.onStepOutput?.(banner);
+    const resourceStart = await ctx.resourceSnapshotReader?.(containerName);
     const tStep = startTimer();
     const r = await boundedPodman(
       stepExecArgs(containerName, step.command),
@@ -2358,7 +2378,10 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
       ctx.onStepOutput,
     );
     const durationMs = tStep();
-    const resources = await ctx.resourceReader(containerName);
+    const resourceEnd = await ctx.resourceSnapshotReader?.(containerName);
+    const resources = resourceEnd === undefined
+      ? await ctx.resourceReader(containerName)
+      : containerResourcesSince(resourceEnd, resourceStart);
     steps.push({
       name: step.name,
       ok: boundedOk(r),
