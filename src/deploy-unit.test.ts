@@ -108,6 +108,9 @@ describe("deploy/ansible sandbar.service template", () => {
     // main pid (npm), whose launcher child dies without forwarding, so the
     // driver was SIGKILLed the same second; the whole cgroup is signalled.
     expect(values(unit, "KillMode")).toEqual(["control-group"]);
+    // ...and the unit is not "stopped" when npm, the main pid, exits ahead of
+    // the driver, or systemd kills the driver mid-cleanup regardless.
+    expect(values(unit, "ExitType")).toEqual(["cgroup"]);
     expect(values(unit, "TimeoutStopSec")).toEqual(["900"]);
   });
 

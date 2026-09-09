@@ -30,11 +30,17 @@ Restart=no
 # the driver, a third pid, never hears the signal. Under `mixed` that main-pid
 # exit made systemd SIGKILL the driver in the same second (seen 2026-09-09:
 # no run-end, a lease held for ten more minutes, the restart refused).
-# `control-group` signals every process in the unit at once and waits up to
-# TimeoutStopSec for the cgroup to empty; rootless containers live in their
-# own libpod scopes, so only the driver's podman clients are hit and cleanup
-# spawns fresh ones.
+# `control-group` signals every process in the unit at once; rootless
+# containers live in their own libpod scopes, so only the driver's podman
+# clients are hit and cleanup spawns fresh ones. That alone is not enough:
+# under the default ExitType=main the unit counts as stopped the moment npm
+# exits, seconds before the driver is done, and the rest of the cgroup is
+# killed anyway (seen 2026-09-09 12:03: "Received SIGTERM" was the record's
+# last line). ExitType=cgroup keeps the unit deactivating until every process
+# has gone, up to TimeoutStopSec, and still reports npm's exit status, which
+# is the driver's.
 KillMode=control-group
+ExitType=cgroup
 TimeoutStopSec={{ sandbar_stop_timeout_sec }}
 
 [Install]
