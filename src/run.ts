@@ -39,18 +39,19 @@
 //                              rebuilt after either, so a member re-queued now
 //                              is carried into this recompute and one closed now
 //                              stops blocking its dependents.
-//   Execution pool:           Each issue runs in its own sandbox under two
-//                              independent consecutive-failure budgets (#129).
-//                              maxQualityRounds covers quality rejection, red
-//                              gates and pre-gate re-prompts, and resets when a
-//                              quality approval reaches a completed verdict.
-//                              maxReviewRounds covers only correctness
-//                              rejection. APPROVED → DONE;
+//   Execution pool:           Each issue runs in its own sandbox under three
+//                              independent consecutive-failure budgets
+//                              (#129/#143). maxQualityRounds covers quality
+//                              rejection and pre-gate re-prompts, then resets
+//                              when quality approval reaches a completed
+//                              verdict. maxGateRounds covers red gate-1 results
+//                              and resets on green. maxReviewRounds covers only
+//                              correctness rejection. APPROVED → DONE;
 //                              CHANGES-REQUESTED loops back to a new impl
 //                              attempt carrying the rejecting pass's prose.
-//                              Reviewer harness failure spends neither budget,
-//                              leaves both counters unchanged, and keeps its
-//                              two-consecutive stop rule (#41).
+//                              Reviewer harness failure spends none, leaves the
+//                              convergence counters unchanged, and its second
+//                              occurrence in the inner loop stops it (#41/#143).
 //   Serialized landing:       Procedural merger lands queued DONE branches into
 //                              the source branch and pushes once — directly,
 //                              or (config.mergeMode = verified, #22) only after
@@ -1295,6 +1296,7 @@ export async function run(
     reviewerEffort: config.reviewerEffort,
     reviewerQualityEffort: config.reviewerQualityEffort,
     maxQualityRounds: config.maxQualityRounds,
+    maxGateRounds: config.maxGateRounds,
     maxReviewRounds: config.maxReviewRounds,
     sandboxImage: config.sandboxImage,
     ...(codexAuthMount === undefined ? {} : { codexAuthMount }),

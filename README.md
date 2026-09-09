@@ -290,17 +290,21 @@ podman, a lingering service user, swap, key-only SSH) and a systemd user unit
 that pulls and installs before each launch and never restarts on its own.
 [`deploy/ansible/README.md`](deploy/ansible/README.md) has the by-hand steps.
 
-### The two inner-loop budgets
+### The three inner-loop budgets
 
-`maxQualityRounds` (default 4) bounds consecutive attempts that do not end in
-a quality approval: quality `CHANGES-REQUESTED`, a red gate, NO-SIGNAL, a dirty
-tree, or HEAD off the issue branch. A completed reviewer verdict following a
-quality approval resets that count.
+`maxQualityRounds` (default 4) bounds consecutive quality
+`CHANGES-REQUESTED` verdicts and pre-gate re-prompts: NO-SIGNAL, a dirty tree,
+or HEAD off the issue branch. A completed reviewer verdict following a quality
+approval resets that count.
+
+`maxGateRounds` (default 4) separately bounds consecutive red gate-1 results.
+Any green gate-1 result resets that count; red rounds neither spend nor reset
+the quality streak unless their retained quality verdict requests changes.
 
 `maxReviewRounds` (default 4) separately bounds correctness rejections. A
-quality rejection never spends it. Reviewer harness failures spend neither
-budget, leave both streaks unchanged, and retain their dedicated
-two-consecutive-failures stop rule. There is no total implementer-attempt
+quality rejection never spends it. Reviewer harness failures spend none of the
+three budgets, leave the convergence streaks unchanged, and the second harness
+failure anywhere in one inner loop stops it. There is no total implementer-attempt
 ceiling: each attempt is charged only to the pass or pre-review condition that
 rejected it.
 

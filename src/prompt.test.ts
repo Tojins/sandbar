@@ -5,6 +5,7 @@ import {
   NO_PROTOTYPE_NEEDED_PHRASE,
 } from "./finalize.js";
 import { sourceBranchBase } from "./git-ops.js";
+import { reviewerHarnessFailedReprompt } from "./inner-loop-machine.js";
 import {
   type PriorReviewRound,
   qualityReviewContext,
@@ -46,6 +47,59 @@ describe("renderAttemptSlot — unbounded attempt sequence (#129)", () => {
     expect(slot).toContain("# Attempt 6");
     expect(slot).toContain("This is attempt 6.");
     expect(slot).not.toMatch(/attempt 6 of \d+/i);
+  });
+});
+
+describe("renderAttemptSlot — retained reviewer disposition (#143)", () => {
+  it("renders a rejection as feedback to address", () => {
+    const slot = renderAttemptSlot({
+      ...implementerInputs,
+      latestReviewerFeedback: {
+        disposition: "CHANGES-REQUESTED",
+        prose: "Add the missing test.",
+      },
+    });
+    expect(slot).toContain("Previous reviewer feedback (CHANGES-REQUESTED)");
+    expect(slot).toContain("Add the missing test.");
+    expect(slot).toContain("Address the concerns above");
+  });
+
+  it("renders an approved red-round quality report as retained context", () => {
+    const slot = renderAttemptSlot({
+      ...implementerInputs,
+      lastFailureTrace: "gate failed",
+      latestReviewerFeedback: {
+        disposition: "APPROVED-CORRECTNESS-SKIPPED",
+        prose: "Quality checks look sound.",
+      },
+    });
+    expect(slot).toContain(
+      "Retained quality review (APPROVED; correctness skipped in that round)",
+    );
+    expect(slot).toContain("Quality checks look sound.");
+    expect(slot).toContain("requested no changes");
+    expect(slot).not.toContain("Previous reviewer feedback (CHANGES-REQUESTED)");
+    expect(slot).not.toContain("Address the concerns above");
+  });
+
+  it("does not contradict a later green gate when the retained approval survives a harness failure", () => {
+    const slot = renderAttemptSlot({
+      ...implementerInputs,
+      extraReprompt: reviewerHarnessFailedReprompt(
+        true,
+        "APPROVED-CORRECTNESS-SKIPPED",
+      ),
+      latestReviewerFeedback: {
+        disposition: "APPROVED-CORRECTNESS-SKIPPED",
+        prose: "Quality checks looked sound in the earlier round.",
+      },
+    });
+    expect(slot).toContain("Gate-1 passed on your last commit");
+    expect(slot).toContain("retained quality approval");
+    expect(slot).toContain("Quality checks looked sound in the earlier round.");
+    expect(slot).not.toContain("Gate-1 was red");
+    expect(slot).not.toContain("gate failure above");
+    expect(slot).not.toContain("Address the independent gate failure");
   });
 });
 

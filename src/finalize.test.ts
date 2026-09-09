@@ -234,6 +234,7 @@ describe("comment templates", () => {
     const body = NEEDS_HUMAN_COMMENT_TEMPLATE(
       "sandbar/issue-45-t-45",
       "E: boom\nstack…",
+      null,
       AGENT_STUCK,
       READY_FOR_AGENT,
     );
@@ -778,8 +779,8 @@ describe("finalizeOne", () => {
         issue: i,
         cause: "gate-red",
         failureTrace: "AssertionError: red",
-        latestReviewerProse: null,
-        qualityBudgetExhausted: 4,
+        latestReviewerProse: "quality review from the red round",
+        budgetExhausted: { budget: "gate", roundsUsed: 4 },
       },
       adapter,
       LABELS,
@@ -790,9 +791,9 @@ describe("finalizeOne", () => {
     expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.body).toContain("AssertionError: red");
-    expect(calls.comments[0]!.body).toContain("without a green gate");
-    expect(calls.comments[0]!.body).toContain("maxQualityRounds");
-    expect(calls.comments[0]!.body).toContain("4 consecutive quality failures");
+    expect(calls.comments[0]!.body).toContain("maxGateRounds");
+    expect(calls.comments[0]!.body).toContain("4 consecutive red gates");
+    expect(calls.comments[0]!.body).toContain("quality review from the red round");
     // #70 — "push a fix on this branch" used to never say which.
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
@@ -811,7 +812,7 @@ describe("finalizeOne", () => {
         cause: "no-signal-exhausted",
         failureTrace: "The final implementer signal failed validation: guard correction",
         latestReviewerProse: null,
-        qualityBudgetExhausted: 4,
+        budgetExhausted: { budget: "quality", roundsUsed: 4 },
       },
       adapter,
       LABELS,
@@ -823,6 +824,8 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).not.toContain("never emitted");
     expect(calls.comments[0]!.body).not.toContain("no gate ran");
     expect(calls.comments[0]!.body).not.toContain("Last failure trace");
+    expect(calls.comments[0]!.body).toContain("maxQualityRounds");
+    expect(calls.comments[0]!.body).toContain("4 consecutive quality failures");
   });
 
   it("quality review exhaustion names its budget, count, and latest prose", async () => {
@@ -866,7 +869,7 @@ describe("finalizeOne", () => {
           "invocation 1/2: the run failed and emitted no output at all: Agent idle for 600 seconds — no output received.",
         // No round ever produced a report, so the global claim is the true one.
         latestReviewerProse: null,
-        qualityBudgetExhausted: null,
+        budgetExhausted: null,
       },
       adapter,
       LABELS,
@@ -877,7 +880,7 @@ describe("finalizeOne", () => {
     expect(calls.pushes).toEqual([i.branch]);
     const body = calls.comments[0]!.body;
     expect(body).toContain("Agent idle for 600 seconds");
-    expect(body).toContain("no review at all");
+    expect(body).toContain("no verdict was reached");
     expect(body).toContain("harness or environment failure");
     expect(body).toContain("No reviewer has said anything about this branch at all");
     // #70 — and this one is telling the reader to review it themselves, so it
@@ -911,7 +914,7 @@ describe("finalizeOne", () => {
         failureTrace:
           "invocation 1/2: the run failed and emitted no output at all: Agent idle for 600 seconds — no output received.",
         latestReviewerProse: earlier,
-        qualityBudgetExhausted: null,
+        budgetExhausted: null,
       },
       adapter,
       LABELS,
@@ -924,7 +927,7 @@ describe("finalizeOne", () => {
     expect(body).toContain("earlier round");
     expect(body).toContain("whether it was addressed is unverified");
     // Scoped, not global — the two sentences that would be untrue.
-    expect(body).toContain("the last code-reviewer round produced no review at all");
+    expect(body).toContain("second code-reviewer harness failure");
     expect(body).not.toContain("No reviewer has said anything about this branch at all");
     // And still not presented as the blocker: this is not a CHANGES-REQUESTED
     // terminal, and the harness trace is not the reviewer speaking.
@@ -944,7 +947,7 @@ describe("finalizeOne", () => {
         cause: "uncommittable-worktree",
         failureTrace: "?? node_modules/.cache/foo",
         latestReviewerProse: null,
-        qualityBudgetExhausted: null,
+        budgetExhausted: null,
         strandedHead: null,
       },
       adapter,
@@ -970,7 +973,7 @@ describe("finalizeOne", () => {
         failureTrace:
           "You are not on the issue branch. HEAD is DETACHED at deadbeef1234,",
         latestReviewerProse: null,
-        qualityBudgetExhausted: null,
+        budgetExhausted: null,
         strandedHead: {
           branch: `sandbar/issue-45-t-45`,
           headRef: null,
@@ -1428,7 +1431,7 @@ describe("finalizeOne", () => {
           cause: "gate-red",
           failureTrace: "boom",
           latestReviewerProse: null,
-          qualityBudgetExhausted: 4,
+          budgetExhausted: { budget: "gate", roundsUsed: 4 },
         },
         adapter,
         LABELS,
@@ -1454,7 +1457,7 @@ describe("finalizeOne", () => {
           cause: "gate-red",
           failureTrace: "boom",
           latestReviewerProse: null,
-          qualityBudgetExhausted: 4,
+          budgetExhausted: { budget: "gate", roundsUsed: 4 },
         },
         adapter,
         LABELS,
@@ -1517,7 +1520,7 @@ describe("finalizeOne", () => {
           cause: "gate-red",
           failureTrace: "t",
           latestReviewerProse: null,
-          qualityBudgetExhausted: 4,
+          budgetExhausted: { budget: "gate", roundsUsed: 4 },
         },
         throwing,
         LABELS,
@@ -1538,7 +1541,7 @@ describe("finalizeOne", () => {
         cause: "gate-red",
         failureTrace: "boom",
         latestReviewerProse: null,
-        qualityBudgetExhausted: 4,
+        budgetExhausted: { budget: "gate", roundsUsed: 4 },
       },
       adapter,
       custom,
@@ -1564,7 +1567,7 @@ describe("finalizeOne", () => {
         cause: "gate-red",
         failureTrace: "boom",
         latestReviewerProse: null,
-        qualityBudgetExhausted: 4,
+        budgetExhausted: { budget: "gate", roundsUsed: 4 },
         specGaps: [{ round: 1, text: "must not be posted" }],
       },
       adapter,

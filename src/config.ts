@@ -661,14 +661,15 @@ export type RunConfig = {
   // leaks wholesale. Default: {}.
   readonly env?: Record<string, string>;
 
-  // Independent consecutive-failure budgets (#129). `maxQualityRounds` counts
-  // attempts that do not end in quality APPROVED: a quality rejection, red
-  // gate, NO-SIGNAL, dirty tree, or off-branch HEAD. It resets when quality
-  // approval leads to a completed reviewer verdict. `maxReviewRounds` counts
-  // correctness rejections only. Reviewer harness failures spend neither and
-  // leave both counters unchanged; their existing two-consecutive rule (#41)
-  // remains the bound. There is deliberately no total attempt ceiling.
+  // Independent consecutive-failure budgets (#129/#143). `maxQualityRounds`
+  // counts quality rejection, NO-SIGNAL, dirty tree, and off-branch HEAD, then
+  // resets after quality approval leads to a completed reviewer verdict.
+  // `maxGateRounds` counts red gate-1 results and resets on green gate-1.
+  // `maxReviewRounds` counts correctness rejections only. Reviewer harness
+  // failures spend none; their second occurrence anywhere in the inner loop is
+  // the separate #41 bound. There is deliberately no total attempt ceiling.
   readonly maxQualityRounds?: number;
+  readonly maxGateRounds?: number;
   readonly maxReviewRounds?: number;
   // Delay between tracker refreshes while the daemon has capacity. Default:
   // 60 seconds. A poll fetches source plus issue, chunk and member refs before
@@ -842,11 +843,14 @@ export const DEFAULT_MERGER_MODEL_ID = "opus";
 export const DEFAULT_CLAUDE_MD_PATH = "CLAUDE.md";
 export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
 export const DEFAULT_ADR_DIR = "docs/adr";
-// Four consecutive non-approving quality attempts are enough to establish a
-// circling cheap gate while still tolerating transient gate and standards
-// churn. Quality approval followed by a completed reviewer verdict resets the
-// count, so these do not consume the correctness budget they protect (#129).
+// Four consecutive quality/standards rejections or pre-gate failures are enough
+// to establish a circling quality path while tolerating transient churn.
+// Quality approval followed by a completed reviewer verdict resets the count,
+// so these do not consume the correctness budget they protect (#129/#143).
 export const DEFAULT_MAX_QUALITY_ROUNDS = 4;
+// A green gate completely answers earlier red gates, so only four consecutive
+// reds establish that the implementer cannot restore the branch's own checks.
+export const DEFAULT_MAX_GATE_ROUNDS = 4;
 // Four correctness rejections. #8 converged on its fourth correctness look
 // after three distinct real findings; a default of three would have parked it
 // one round before approval. This caps the deciding pass, not total loop cost:
@@ -1814,8 +1818,9 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   if ("maxImplAttempts" in config) {
     throw new SandbarError(
       "config.maxImplAttempts was removed (#129); use config.maxQualityRounds " +
-        "to bound consecutive quality failures and config.maxReviewRounds to " +
-        "bound correctness rejections.",
+        "to bound consecutive quality failures, config.maxGateRounds to bound " +
+        "consecutive red gates, and config.maxReviewRounds to bound correctness " +
+        "rejections.",
     );
   }
   if ("maxTotalIssues" in config) {
@@ -1996,6 +2001,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     maxQualityRounds: requirePositiveInteger(
       "maxQualityRounds",
       config.maxQualityRounds ?? DEFAULT_MAX_QUALITY_ROUNDS,
+    ),
+    maxGateRounds: requirePositiveInteger(
+      "maxGateRounds",
+      config.maxGateRounds ?? DEFAULT_MAX_GATE_ROUNDS,
     ),
     maxReviewRounds: requirePositiveInteger(
       "maxReviewRounds",

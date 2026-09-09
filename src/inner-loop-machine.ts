@@ -4,21 +4,19 @@
 // gate/reviewer routing, per-pass budget exhaustion)
 // lives here and is table-driven tested in inner-loop-machine.test.ts.
 //
-// Two independent budgets bound two kinds of non-convergence (#129). A quality
-// failure is any attempt that does not end in quality APPROVED: a quality
-// rejection, red gate (whose concurrent review is discarded), NO-SIGNAL,
-// dirty tree, or off-branch HEAD. `qualityFailures` is consecutive and resets
-// to zero when quality approval leads to a completed reviewer verdict.
-// `correctnessFailures` counts correctness rejections only; quality failures
-// neither spend nor reset it. There is no implementer-attempt budget: `attempt`
-// is a sequence number, not a ceiling.
+// Three independent consecutive-failure budgets bound three kinds of
+// non-convergence (#129, #143). `qualityFailures` counts quality rejection,
+// NO-SIGNAL, dirty tree, and off-branch HEAD; a completed reviewer verdict
+// after quality approval resets it. `gateFailures` counts red gate-1 results
+// and every green gate-1 resets it. `correctnessFailures` counts correctness
+// rejections only. No counter spends or resets another counter. There is no
+// implementer-attempt budget: `attempt` remains only a sequence number.
 //
-// Reviewer harness failure keeps #41's separate rule: it charges neither
-// budget, leaves both failure counters untouched, and a second consecutive
-// failure terminates. In particular, a correctness-harness failure does not
-// reset the quality streak: the aggregate attempt ended in harness failure,
-// not an approval, and resetting it permits alternating failures to run
-// forever now that there is no implementer-attempt ceiling.
+// Reviewer harness failure keeps #41's separate rule: it charges none of the
+// three budgets and leaves their streaks alone (apart from a green gate's own
+// reset). `reviewerHarnessFailures` is a per-inner-loop total that never resets;
+// its second failure terminates. This closes the otherwise unbounded
+// red+quality-approved / green+harness-failed alternation.
 //
 // A COMPLETE claim is routed on THREE inputs, not one: the promise token, a
 // clean worktree (#24 D1), and HEAD still being the issue branch (#27). The
@@ -31,17 +29,19 @@
 // hand-to-human terminals NEEDS-INFO and NEEDS-UI-PROTOTYPE (#21, stops
 // before the gate) are exempt — they land nothing by construction.
 //
-// Gate-1 and the reviewer run concurrently against the same immutable commit
-// (#123). Reviewer writes always park; a red gate otherwise discards the review
-// completely; only a green gate lets it spend a round or update reviewer prose.
+// Gate-1 and quality review run concurrently against the same immutable commit
+// (#123/#143). Reviewer writes always park. A red gate keeps the quality result
+// and history, then ends the round; correctness runs only after quality approval
+// AND a green gate. Thus red+quality-rejected spends both relevant counters,
+// while red+quality-approved spends only the gate counter.
 //
 // A reviewer that produced NO review is not a verdict (#41); that judgment is
 // reviewer-run.ts's. `reviewer-harness-failed` consumes no review round,
-// leaves `latestReviewerProse` untouched, and names itself in exhaustion
+// leaves retained reviewer feedback untouched, and names itself in exhaustion
 // rather than a rejection. The next implementer attempt is dispatched anyway
 // — unreviewed work must not read as DONE — with an orchestrator note,
-// not a finding. A SECOND consecutive harness failure terminates instead: an
-// implementer attempt sat between the two, so the branch is not what changed.
+// not a finding. The SECOND harness failure anywhere in this inner loop
+// terminates instead.
 //
 // HARD-ERROR is not a verdict the SM ever emits — it's how the runner wraps
 // unhandled exceptions; decideAfterTerminal answers "retry with a fresh
@@ -52,6 +52,14 @@ import type { ParseSignal } from "./promise-parser.js";
 import type { UiCheckResult } from "./ui-check-parser.js";
 
 export const HARD_ERROR_MAX_RETRIES = 2;
+export const REVIEWER_HARNESS_FAILURE_LIMIT = 2;
+
+export type ReviewerFeedback = {
+  readonly disposition:
+    | "CHANGES-REQUESTED"
+    | "APPROVED-CORRECTNESS-SKIPPED";
+  readonly prose: string;
+};
 
 export type LoopPhase =
   | "needs-ui-check"
@@ -62,13 +70,17 @@ export type LoopPhase =
 export type LoopState = {
   readonly issueBranch: string;
   readonly maxQualityRounds: number;
+  readonly maxGateRounds: number;
   readonly maxReviewRounds: number;
   readonly attempt: number;
   readonly qualityFailures: number;
+  readonly gateFailures: number;
   readonly correctnessFailures: number;
   readonly lastFailureTrace: string;
   readonly extraReprompt: string | null;
-  readonly latestReviewerProse: string | null;
+  // Includes disposition because paid-for quality prose under a red gate can
+  // be an approval even though correctness was deliberately skipped (#143).
+  readonly latestReviewerFeedback: ReviewerFeedback | null;
   // The dirty set that sent the PREVIOUS attempt back to commit its work, or
   // null if the last attempt didn't end that way. Only used to detect that an
   // attempt changed nothing — see onImplementerResult.
@@ -77,12 +89,10 @@ export type LoopState = {
   // branch (#27). One re-prompt is offered; a second consecutive off-branch
   // attempt terminates — see onImplementerResult.
   readonly lastOffBranch: boolean;
-  // Whether the review round on the PREVIOUS attempt yielded no review at all
-  // (#41). Cleared by any other route out of an attempt, so it means "the
-  // attempt immediately before this one ended that way" — a harness failure two
-  // attempts apart, with a real gate red or a real verdict between them, is two
-  // incidents and not a wedged reviewer.
-  readonly lastReviewerHarnessFailed: boolean;
+  // Total review rounds in this inner loop that yielded no review at all (#41,
+  // #143). Never reset: infrastructure faults are bounded independently of
+  // convergence streaks, including when ordinary verdicts occur between them.
+  readonly reviewerHarnessFailures: number;
   readonly phase: LoopPhase;
 };
 
@@ -116,7 +126,8 @@ export type Verdict =
       readonly strandedHead: HeadMismatch | null;
     }
   | {
-      // Quality-round budget exhausted, or a dedicated early-stop rule fired.
+      // Quality- or gate-round budget exhausted, or a dedicated early-stop rule
+      // fired.
       // `cause` names the real blocker so the human handoff is accurate:
       //   gate-red — the last gate failed;
       //     `failureTrace` carries the gate trace.
@@ -134,10 +145,11 @@ export type Verdict =
       //     second consecutive attempt was still off it (#27). `failureTrace`
       //     carries where HEAD actually is, which is the only handle anyone has
       //     on the stranded commits once the worktree is removed.
-      //   reviewer-harness-failed — gate-1 was green and the reviewer produced no
-      //     review at all, twice running (#41). `failureTrace` carries why each
-      //     invocation yielded nothing. Distinct from a rejection because the
-      //     code was never judged: there is no CHANGES-REQUESTED to act on, and the
+      //   reviewer-harness-failed — the reviewer produced no review at all twice
+      //     in this inner loop (#41/#143). `failureTrace` carries why every
+      //     invocation in the latest failed round yielded nothing. Distinct
+      //     from a rejection because the code was never judged: there is no
+      //     CHANGES-REQUESTED to act on, and the
       //     thing to fix is the harness. `latestReviewerProse` is whatever an
       //     EARLIER round said, if any — never the harness error.
       readonly type: "NEEDS-HUMAN";
@@ -149,9 +161,12 @@ export type Verdict =
         | "reviewer-harness-failed";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
-      // Present exactly when the quality budget, rather than a dedicated
+      // Present exactly when a convergence budget, rather than a dedicated
       // early-stop rule, ended the loop.
-      readonly qualityBudgetExhausted: number | null;
+      readonly budgetExhausted: {
+        readonly budget: "quality" | "gate";
+        readonly roundsUsed: number;
+      } | null;
       // Set only by `off-branch-head`, so finalize can render the rescue note
       // from structure rather than parse it back out of the trace prose.
       readonly strandedHead: HeadMismatch | null;
@@ -189,7 +204,7 @@ export type LoopAction =
       readonly attempt: number;
       readonly failureTrace: string;
       readonly extraReprompt: string | null;
-      readonly latestReviewerProse: string | null;
+      readonly latestReviewerFeedback: ReviewerFeedback | null;
     }
   | {
       readonly kind: "run-gate-and-reviewer";
@@ -241,7 +256,7 @@ export type LoopEvent =
       readonly reviewer: ReviewerResult;
       // Observation produced beside the machine decision. The runner emits it
       // only after this event has been applied once, using the returned state
-      // for the two post-round budgets (#132).
+      // for the three post-round budgets (#132/#143).
       readonly reviewRound?: {
         readonly head: string;
         readonly qualityMode: "list" | "verify";
@@ -287,6 +302,7 @@ export type StepResult = {
 export type InitialStateOptions = {
   readonly issueBranch: string;
   readonly maxQualityRounds: number;
+  readonly maxGateRounds: number;
   readonly maxReviewRounds: number;
   readonly uiPrototypeCheck: boolean;
 };
@@ -297,6 +313,11 @@ export function initialState(opts: InitialStateOptions): LoopState {
       `maxQualityRounds must be a positive integer, got ${opts.maxQualityRounds}`,
     );
   }
+  if (!Number.isInteger(opts.maxGateRounds) || opts.maxGateRounds < 1) {
+    throw new Error(
+      `maxGateRounds must be a positive integer, got ${opts.maxGateRounds}`,
+    );
+  }
   if (!Number.isInteger(opts.maxReviewRounds) || opts.maxReviewRounds < 1) {
     throw new Error(
       `maxReviewRounds must be a positive integer, got ${opts.maxReviewRounds}`,
@@ -305,16 +326,18 @@ export function initialState(opts: InitialStateOptions): LoopState {
   return {
     issueBranch: opts.issueBranch,
     maxQualityRounds: opts.maxQualityRounds,
+    maxGateRounds: opts.maxGateRounds,
     maxReviewRounds: opts.maxReviewRounds,
     attempt: 1,
     qualityFailures: 0,
+    gateFailures: 0,
     correctnessFailures: 0,
     lastFailureTrace: "",
     extraReprompt: null,
-    latestReviewerProse: null,
+    latestReviewerFeedback: null,
     lastDirtyPaths: null,
     lastOffBranch: false,
-    lastReviewerHarnessFailed: false,
+    reviewerHarnessFailures: 0,
     phase: opts.uiPrototypeCheck ? "needs-ui-check" : "needs-implementer",
   };
 }
@@ -326,7 +349,7 @@ export function initialAction(state: LoopState): LoopAction {
     attempt: state.attempt,
     failureTrace: state.lastFailureTrace,
     extraReprompt: state.extraReprompt,
-    latestReviewerProse: state.latestReviewerProse,
+    latestReviewerFeedback: state.latestReviewerFeedback,
   };
 }
 
@@ -491,18 +514,35 @@ function joinOrchestratorNotes(
 // from inside its sandbox, and an agent handed a failure it cannot fix will
 // try anyway. That text goes to the run log and, if this recurs, to the human
 // handoff, which are the two places someone can do something with it.
-export function reviewerHarnessFailedReprompt(): string {
+export function reviewerHarnessFailedReprompt(
+  gateOk: boolean,
+  priorDisposition: ReviewerFeedback["disposition"] | null = null,
+): string {
   return [
     "The code reviewer could not be run this round: every invocation returned",
     "no review at all. That is a fault in the orchestrator's harness, not a",
     "finding about your work — nothing was said about your code this round, and",
     "neither review-pass budget was charged for it.",
     "",
-    "Gate-1 passed on your last commit, and that verdict stands. Do not rework",
-    "or revert anything on the strength of this note. There is no NEW reviewer",
-    "feedback: if a \"Previous reviewer feedback\" section appears above, it is an",
-    "earlier round's, it still stands, and it is still what to address. If none",
-    "appears, no reviewer has said anything about this branch at all.",
+    gateOk
+      ? "Gate-1 passed on your last commit, and that verdict stands. Do not rework"
+      : "Gate-1 failed on your last commit; its independent trace appears above. Do not",
+    gateOk
+      ? "or revert anything on the strength of this note. There is no NEW reviewer"
+      : "infer any additional code finding from this harness fault. There is no NEW reviewer",
+    ...(priorDisposition === "CHANGES-REQUESTED"
+      ? [
+          "feedback. The retained CHANGES-REQUESTED report above is from an earlier",
+          "round; its concerns still stand and are still what to address.",
+        ]
+      : priorDisposition === "APPROVED-CORRECTNESS-SKIPPED"
+        ? [
+            "feedback. The retained quality approval above is from an earlier red-gate",
+            "round; it is informational, and correctness was not run in that round.",
+          ]
+        : [
+            "feedback. No reviewer has said anything about this branch at all.",
+          ]),
     "",
     "Use this attempt for whatever you already knew was outstanding. If the work",
     "is genuinely finished, confirm the worktree is clean and every commit is on",
@@ -578,8 +618,8 @@ function onImplementerResult(
       type: "NEEDS-HUMAN",
       cause: "off-branch-head",
       failureTrace: trace,
-      latestReviewerProse: state.latestReviewerProse,
-      qualityBudgetExhausted: null,
+      latestReviewerProse: reviewerProse(state),
+      budgetExhausted: null,
       strandedHead: offBranch,
     };
     return transitionAfterQualityFailure(
@@ -591,7 +631,7 @@ function onImplementerResult(
             // handoff names where the commits went rather than a gate that never ran.
             failureTrace: trace,
             extraReprompt: trace,
-            latestReviewerProse: state.latestReviewerProse,
+            latestReviewerFeedback: state.latestReviewerFeedback,
             offBranch: true,
           },
       exhausted,
@@ -621,8 +661,8 @@ function onImplementerResult(
           type: "NEEDS-HUMAN",
           cause: "uncommittable-worktree",
           failureTrace: trace,
-          latestReviewerProse: state.latestReviewerProse,
-          qualityBudgetExhausted: null,
+          latestReviewerProse: reviewerProse(state),
+          budgetExhausted: null,
           strandedHead: null,
         };
         return transitionAfterQualityFailure(state, null, earlyStop);
@@ -635,7 +675,7 @@ function onImplementerResult(
           // gate" for a run in which the gate never executed.
           failureTrace: trace,
           extraReprompt: joinOrchestratorNotes(fastForwardedNote, trace),
-          latestReviewerProse: state.latestReviewerProse,
+          latestReviewerFeedback: state.latestReviewerFeedback,
           dirtyPaths,
         },
         // Built from the dirty trace, not from state.lastFailureTrace: the gate
@@ -646,7 +686,7 @@ function onImplementerResult(
           cause: "uncommittable-worktree",
           failureTrace: trace,
           latestReviewerProse: null,
-          qualityBudgetExhausted: null,
+          budgetExhausted: null,
           strandedHead: null,
         },
       );
@@ -682,14 +722,14 @@ function onImplementerResult(
     {
       failureTrace: state.lastFailureTrace,
       extraReprompt: joinOrchestratorNotes(fastForwardedNote, signal.reprompt),
-      latestReviewerProse: state.latestReviewerProse,
+      latestReviewerFeedback: state.latestReviewerFeedback,
     },
     {
       type: "NEEDS-HUMAN",
       cause: "no-signal-exhausted",
       failureTrace,
       latestReviewerProse: null,
-      qualityBudgetExhausted: null,
+      budgetExhausted: null,
       strandedHead: null,
     },
   );
@@ -700,9 +740,16 @@ function onGateAndReviewerResult(
   gate: Gate1Result,
   reviewer: ReviewerResult,
 ): StepResult {
+  const gatedState: LoopState = gate.ok
+    ? { ...state, gateFailures: 0, lastFailureTrace: "" }
+    : {
+        ...state,
+        gateFailures: state.gateFailures + 1,
+        lastFailureTrace: gate.failureTrace,
+      };
   if (reviewer.kind === "reviewer-wrote") {
     return {
-      state: { ...state, phase: "terminated" },
+      state: { ...gatedState, phase: "terminated" },
       action: {
         kind: "terminate",
         verdict: {
@@ -713,21 +760,81 @@ function onGateAndReviewerResult(
       },
     };
   }
-  if (!gate.ok) {
-    const advanced = { ...state, lastFailureTrace: gate.failureTrace };
-    return transitionAfterQualityFailure(
-      advanced,
-      {
-        failureTrace: gate.failureTrace,
-        extraReprompt: state.extraReprompt,
-        latestReviewerProse: state.latestReviewerProse,
-      },
-      gateRedExhaustion(advanced),
+  if (!gate.ok) return onRedGateReviewerResult(gatedState, reviewer);
+  return reviewer.kind === "reviewer-result"
+    ? onReviewerResult(gatedState, reviewer)
+    : onReviewerHarnessFailed(gatedState, gate, reviewer.detail);
+}
+
+function onRedGateReviewerResult(
+  state: LoopState,
+  reviewer: Exclude<ReviewerResult, { kind: "reviewer-wrote" }>,
+): StepResult {
+  if (reviewer.kind === "reviewer-harness-failed") {
+    return onReviewerHarnessFailed(
+      state,
+      { ok: false, failureTrace: state.lastFailureTrace },
+      reviewer.detail,
     );
   }
-  return reviewer.kind === "reviewer-result"
-    ? onReviewerResult(state, reviewer)
-    : onReviewerHarnessFailed(state, reviewer.detail);
+  if (
+    reviewer.verdict === "CHANGES-REQUESTED" &&
+    reviewer.rejectingPass === "correctness"
+  ) {
+    throw new Error("correctness review completed under a red gate");
+  }
+
+  if (reviewer.verdict === "CHANGES-REQUESTED") {
+    const reviewedState: LoopState = {
+      ...state,
+      qualityFailures: state.qualityFailures + 1,
+      latestReviewerFeedback: {
+        disposition: "CHANGES-REQUESTED",
+        prose: reviewer.prose,
+      },
+    };
+    if (reviewedState.gateFailures >= reviewedState.maxGateRounds) {
+      return terminate(
+        reviewedState,
+        gateRedExhaustion(reviewedState, reviewer.prose),
+      );
+    }
+    if (reviewedState.qualityFailures >= reviewedState.maxQualityRounds) {
+      return terminate(reviewedState, {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "quality-budget-exhausted",
+        roundsUsed: reviewedState.qualityFailures,
+        latestReviewerProse: reviewer.prose,
+      });
+    }
+    return advanceAttempt(reviewedState, {
+      failureTrace: state.lastFailureTrace,
+      extraReprompt: state.extraReprompt,
+      latestReviewerFeedback: reviewedState.latestReviewerFeedback,
+    });
+  }
+
+  // Quality approved but the red gate prevented a completed reviewer verdict:
+  // preserve the quality streak, skip correctness, spend only the gate streak,
+  // and keep the paid-for quality prose for the implementer and history.
+  const reviewedState: LoopState = {
+    ...state,
+    latestReviewerFeedback: {
+      disposition: "APPROVED-CORRECTNESS-SKIPPED",
+      prose: reviewer.prose,
+    },
+  };
+  if (reviewedState.gateFailures >= reviewedState.maxGateRounds) {
+    return terminate(
+      reviewedState,
+      gateRedExhaustion(reviewedState, reviewer.prose),
+    );
+  }
+  return advanceAttempt(reviewedState, {
+    failureTrace: reviewedState.lastFailureTrace,
+    extraReprompt: reviewedState.extraReprompt,
+    latestReviewerFeedback: reviewedState.latestReviewerFeedback,
+  });
 }
 
 function onReviewerResult(
@@ -738,9 +845,12 @@ function onReviewerResult(
     return terminate({ ...state, qualityFailures: 0 }, { type: "DONE" });
   }
   if (reviewer.rejectingPass === "quality") {
-    const reviewingState = {
+    const reviewingState: LoopState = {
       ...state,
-      latestReviewerProse: reviewer.prose,
+      latestReviewerFeedback: {
+        disposition: "CHANGES-REQUESTED",
+        prose: reviewer.prose,
+      },
       lastFailureTrace: "",
     };
     return transitionAfterQualityFailure(
@@ -748,7 +858,7 @@ function onReviewerResult(
       {
         failureTrace: "",
         extraReprompt: state.extraReprompt,
-        latestReviewerProse: reviewer.prose,
+        latestReviewerFeedback: reviewingState.latestReviewerFeedback,
       },
       {
         type: "NEEDS-HUMAN-REVIEW",
@@ -760,11 +870,14 @@ function onReviewerResult(
   }
 
   const correctnessFailures = state.correctnessFailures + 1;
-  const reviewedState = {
+  const reviewedState: LoopState = {
     ...state,
     qualityFailures: 0,
     correctnessFailures,
-    latestReviewerProse: reviewer.prose,
+    latestReviewerFeedback: {
+      disposition: "CHANGES-REQUESTED",
+      prose: reviewer.prose,
+    },
     lastFailureTrace: "",
   };
   if (correctnessFailures >= state.maxReviewRounds) {
@@ -780,61 +893,78 @@ function onReviewerResult(
     {
       failureTrace: "",
       extraReprompt: state.extraReprompt,
-      latestReviewerProse: reviewer.prose,
+      latestReviewerFeedback: reviewedState.latestReviewerFeedback,
     },
   );
 }
 
-// The reviewer produced no review at all (#41). Gate-1 was green to get here,
-// so this attempt's work is not in question and nothing about it is being
-// charged: neither pass budget is consumed and `latestReviewerProse` keeps
-// whatever an earlier round actually said.
+// The reviewer produced no review at all (#41/#143). No convergence budget is
+// charged by that fault; a red gate still increments its own streak and a green
+// gate still resets it. `latestReviewerFeedback` keeps whatever an earlier
+// round actually said, including its disposition.
 //
 // The attempt number still advances so one more implementer run can do real
-// work and re-reach the reviewer through a fresh gate. The second-consecutive
-// rule below is the bound on a component that has already exhausted its own
-// invocation retries twice.
+// work and re-reach the reviewer through a fresh gate. The per-loop total below
+// bounds a component that has already exhausted its own invocation retries.
 function onReviewerHarnessFailed(
   state: LoopState,
+  gate: Gate1Result,
   detail: string,
 ): StepResult {
+  const reviewerHarnessFailures = state.reviewerHarnessFailures + 1;
+  const failedState = { ...state, reviewerHarnessFailures };
   const exhausted: Verdict = {
     type: "NEEDS-HUMAN",
     cause: "reviewer-harness-failed",
-    failureTrace: detail,
+    failureTrace: gate.ok
+      ? detail
+      : `Gate-1 failure:\n${gate.failureTrace}\n\nReviewer harness failure:\n${detail}`,
     // An earlier round's real report, if there was one. Never `detail` — the
     // handoff renders this as the reviewer speaking.
-    latestReviewerProse: state.latestReviewerProse,
-    qualityBudgetExhausted: null,
+    latestReviewerProse: reviewerProse(state),
+    budgetExhausted: null,
     strandedHead: null,
   };
-  if (state.lastReviewerHarnessFailed) return terminate(state, exhausted);
+  if (reviewerHarnessFailures >= REVIEWER_HARNESS_FAILURE_LIMIT) {
+    return terminate(failedState, exhausted);
+  }
+  if (!gate.ok && failedState.gateFailures >= failedState.maxGateRounds) {
+    return terminate(
+      failedState,
+      gateRedExhaustion(failedState, reviewerProse(failedState)),
+    );
+  }
   return advanceAttempt(
-    // Gate-1 was green this attempt, so there is no gate trace to carry: an
-    // older red would be re-shown to the implementer as if it were this
-    // attempt's, the same way onReviewerResult clears it.
-    { ...state, lastFailureTrace: "" },
+    failedState,
     {
-      failureTrace: "",
+      failureTrace: gate.failureTrace,
       extraReprompt: joinOrchestratorNotes(
         state.extraReprompt,
-        reviewerHarnessFailedReprompt(),
+        reviewerHarnessFailedReprompt(
+          gate.ok,
+          state.latestReviewerFeedback?.disposition ?? null,
+        ),
       ),
-      latestReviewerProse: state.latestReviewerProse,
-      reviewerHarnessFailed: true,
+      latestReviewerFeedback: state.latestReviewerFeedback,
     },
   );
 }
 
 // Gate-red is only reachable after a real gate execution, so its trace is
 // always present. NO-SIGNAL exhaustion has a distinct cause above (#116).
-function gateRedExhaustion(state: LoopState): Verdict {
+function gateRedExhaustion(
+  state: LoopState,
+  latestReviewerProse: string | null,
+): Verdict {
   return {
     type: "NEEDS-HUMAN",
     cause: "gate-red",
     failureTrace: state.lastFailureTrace,
-    latestReviewerProse: null,
-    qualityBudgetExhausted: null,
+    latestReviewerProse,
+    budgetExhausted: {
+      budget: "gate",
+      roundsUsed: state.gateFailures,
+    },
     strandedHead: null,
   };
 }
@@ -859,7 +989,10 @@ function transitionAfterQualityFailure(
     budgetExhausted && onBudgetExhausted.type === "NEEDS-HUMAN"
       ? {
           ...onBudgetExhausted,
-          qualityBudgetExhausted: charged.qualityFailures,
+          budgetExhausted: {
+            budget: "quality" as const,
+            roundsUsed: charged.qualityFailures,
+          },
         }
       : onBudgetExhausted;
   return terminate(charged, verdict);
@@ -870,7 +1003,7 @@ function advanceAttempt(
   next: {
     readonly failureTrace: string;
     readonly extraReprompt: string | null;
-    readonly latestReviewerProse: string | null;
+    readonly latestReviewerFeedback: ReviewerFeedback | null;
     // Carried only by the COMPLETE-over-a-dirty-tree route, so the next
     // attempt can tell "still dirty in a new way" from "changed nothing".
     // Every other route clears it.
@@ -878,9 +1011,6 @@ function advanceAttempt(
     // Same shape for #27/#127: only an unsafe off-branch route sets it. A
     // host-repaired ancestor mismatch therefore cannot spend this correction.
     readonly offBranch?: boolean;
-    // And for #41: only the harness-failure route sets it, so two failures with
-    // a real verdict or a gate red between them do not read as consecutive.
-    readonly reviewerHarnessFailed?: boolean;
   },
 ): StepResult {
   const newAttempt = state.attempt + 1;
@@ -889,10 +1019,9 @@ function advanceAttempt(
     attempt: newAttempt,
     phase: "needs-implementer",
     extraReprompt: next.extraReprompt,
-    latestReviewerProse: next.latestReviewerProse,
+    latestReviewerFeedback: next.latestReviewerFeedback,
     lastDirtyPaths: next.dirtyPaths ?? null,
     lastOffBranch: next.offBranch ?? false,
-    lastReviewerHarnessFailed: next.reviewerHarnessFailed ?? false,
   };
   return {
     state: ns,
@@ -901,9 +1030,13 @@ function advanceAttempt(
       attempt: newAttempt,
       failureTrace: next.failureTrace,
       extraReprompt: next.extraReprompt,
-      latestReviewerProse: next.latestReviewerProse,
+      latestReviewerFeedback: ns.latestReviewerFeedback,
     },
   };
+}
+
+function reviewerProse(state: LoopState): string | null {
+  return state.latestReviewerFeedback?.prose ?? null;
 }
 
 function terminate(state: LoopState, verdict: Verdict): StepResult {

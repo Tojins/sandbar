@@ -713,9 +713,9 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
         // error, no build is ever retried, and the issue lands on `agent-stuck`
         // with a trace telling its author their dependencies do not install.
         // The merger's gate-2 on a merge result with the same lockfile bytes
-        // would inherit it too. Evicting costs a repeated failing build per
-        // quality failure for a genuinely broken lockfile, bounded by
-        // `maxQualityRounds`.
+        // would inherit it too. Evicting costs a repeated failing build per red
+        // gate for a genuinely broken lockfile, bounded by
+        // `maxGateRounds`.
         pending = attempt.catch((err: unknown) => {
           builds.delete(tag);
           throw err;

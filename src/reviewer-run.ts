@@ -16,13 +16,15 @@
 //
 // A review ROUND first applies that policy to QUALITY — tests and standards.
 // A quality rejection finishes the round immediately; an approval asks the
-// runner for CORRECTNESS, and the second outcome completes the AND. This
+// runner to wait for gate-1 and run CORRECTNESS only when it is green (#143),
+// and the second outcome completes the AND. This
 // module returns the one event the state machine understands, including which
 // pass rejected so the machine can charge that pass's budget (#129), while
 // keeping pass order and aggregation out of the I/O runner.
 //
 // Quality protects the EXPENSIVE correctness pass (#121). Gate-1 runs beside
-// the review round (#123), whose result is discarded if the gate is red. #19
+// quality (#123); a red result keeps that paid-for verdict and history but ends
+// the round with correctness explicitly skipped (#143). #19
 // ran correctness first so a
 // correctness rejection would skip the checklist's cost; measured, correctness
 // approved 11 of 11 judged rounds after #107 while costing two thirds of all

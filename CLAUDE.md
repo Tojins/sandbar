@@ -91,22 +91,24 @@ default is unlimited, so existing hosts keep their prior concurrency.
    accumulate on the issue branch. All transitions
    live in the pure state machine; `inner-loop.ts` is I/O glue. The classifier
    spends neither inner-loop budget and is rerun after a fresh
-   HARD-ERROR cycle. Two independent consecutive-failure budgets bound the
-   loop (#129): `maxQualityRounds` (default 4) counts quality rejection, red
-   gates and pre-gate re-prompts, then resets when quality approval leads to a
-   completed reviewer verdict;
-   `maxReviewRounds` (default 4) counts correctness rejections only. Reviewer
-   harness failures spend neither, leave both streaks unchanged, and retain
-   #41's two-consecutive stop rule. There is no total implementer-attempt
-   ceiling. `src/config.ts` owns both defaults. The UI classifier and reviewer
-   are strictly advisory and
-   read-only; each
+   HARD-ERROR cycle. Three independent consecutive-failure budgets bound the
+   loop (#129, #143). `maxQualityRounds` (default 4) counts quality rejection
+   and pre-gate re-prompts, then resets when quality approval leads to a
+   completed reviewer verdict. `maxGateRounds` (default 4) counts red gate-1
+   results, then resets whenever gate-1 is green. `maxReviewRounds` (default 4)
+   counts correctness rejections only. Reviewer harness failures spend none,
+   leave the convergence streaks unchanged, and the second failure anywhere in
+   one inner loop stops it under #41's guard. There is no total
+   implementer-attempt ceiling. `src/config.ts` owns all three defaults. The UI
+   classifier and reviewer are strictly advisory and read-only; each
    invocation snapshots branch tip, status and HEAD, and any mutation parks the
    issue with the managed clone preserved. After a clean, on-branch
-   COMPLETE, gate-1 and the reviewer run concurrently against the same commit
-   (#123). A reviewer write always parks; otherwise a red gate discards the
-   review result, spends one quality failure, and does not update reviewer
-   prose, while any declared specification gap remains run evidence (#108).
+   COMPLETE, gate-1 and the quality reviewer run concurrently against the same
+   commit (#123, #143). A reviewer write always parks; otherwise a red gate
+   keeps the quality verdict and its history, re-prompts with the gate trace and
+   the retained report labelled as approval or rejection, and prevents
+   correctness from being dispatched. A declared specification gap remains run
+   evidence (#108).
    One review round
    is up to two sequential COLD calls (#19, #121): tests/standards first on
    `reviewerQualityAgent`/`reviewerQualityModelId`, then — only after its
