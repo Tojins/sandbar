@@ -24,8 +24,8 @@
 // the NO-SIGNAL reaches the SM
 // — the SM never sees the nudge, only the re-parsed result. The full argument
 // is at the call site. A review round is likewise a QUALITY pass followed, only
-// when approved, by the correctness pass on its own separately configured
-// provider and model (#121); the SM receives one aggregate reviewer result,
+// when approved AND gate-1 is green, by the correctness pass on its own
+// separately configured provider and model (#121/#143); the SM receives one aggregate reviewer result,
 // including the rejecting pass, and charges only that pass (#129). Both passes
 // are cold — nothing resumes anything — which is what lets them run on
 // different vendors.
@@ -57,9 +57,10 @@
 // Each implementer invocation publishes its private clone's issue ref to the
 // host cache on success (#98). After an invocation failure the same publish is
 // recovery-only: its failure is logged and may not replace the provider error.
-// Gate-1 and the reviewer are dispatched together after COMPLETE (#123). The
-// machine discards a review under a red gate except for reviewer mutation,
-// which still parks. Reviewer history is recorded only after a green gate.
+// Gate-1 and quality review are dispatched together after COMPLETE (#123).
+// A red gate keeps the quality result and reviewer history, while correctness
+// is not dispatched until both quality and gate-1 approve (#143). Reviewer
+// mutation still parks regardless of the gate result.
 // UI-check and reviewer invocations snapshot the tip and status; any mutation
 // parks the issue and preserves the clone rather than trusting that call.
 // Invocation filenames use one run-owned, per-issue sequence across fresh
@@ -113,6 +114,7 @@ import {
 } from "./git-ops.js";
 import {
   HARD_ERROR_MAX_RETRIES,
+  type Gate1Result,
   type LoopAction,
   type LoopEvent,
   type LoopState,
@@ -183,7 +185,8 @@ function combinePromiseNudge(
 
 // The runner-owned projection from pass outcomes to prompt history (#88).
 // A harness failure produced no review, so the whole round contributes no
-// entry; a quality rejection has no correctness pass by construction (#121).
+// entry; a quality rejection and an approved quality pass stopped by a red gate
+// both have no correctness outcome and retain the quality verdict (#121/#143).
 // Completed outcomes only: a detected reviewer write (#98) aborts the round
 // before any history could be recorded, so an abort is not a case this
 // projection answers for — the parameter type says so rather than the body
@@ -198,7 +201,13 @@ export function priorReviewRound(
   if (quality.verdict.verdict === "CHANGES-REQUESTED") {
     return { round: reviewRound, head, quality: quality.verdict };
   }
-  if (correctness?.kind !== "reviewed") return null;
+  // Approved quality with no correctness outcome is the deliberate red-gate
+  // skip (#143), not a harness failure: a correctness harness failure is a
+  // present, typed `harness-failed` outcome below.
+  if (correctness === undefined) {
+    return { round: reviewRound, head, quality: quality.verdict };
+  }
+  if (correctness.kind !== "reviewed") return null;
   return {
     round: reviewRound,
     head,
@@ -303,7 +312,10 @@ export type Terminal =
         | "reviewer-harness-failed";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
-      readonly qualityBudgetExhausted: number | null;
+      readonly budgetExhausted: {
+        readonly budget: "quality" | "gate";
+        readonly roundsUsed: number;
+      } | null;
       readonly strandedHead: HeadMismatch | null;
       readonly specGaps: readonly SpecGap[];
     }
@@ -465,6 +477,7 @@ export type InnerLoopConfig = {
   readonly uiCheckEffort?: string | undefined;
   readonly uiPrototypeCheck: boolean;
   readonly maxQualityRounds: number;
+  readonly maxGateRounds: number;
   readonly maxReviewRounds: number;
   readonly sandboxImage: string;
   readonly agentImages: AgentImages;
@@ -614,7 +627,7 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
         cause: verdict.cause,
         failureTrace: verdict.failureTrace,
         latestReviewerProse: verdict.latestReviewerProse,
-        qualityBudgetExhausted: verdict.qualityBudgetExhausted,
+        budgetExhausted: verdict.budgetExhausted,
         strandedHead: verdict.strandedHead,
         specGaps,
       };
@@ -958,6 +971,7 @@ async function runSandboxCycle(
     let state: LoopState = initialState({
       issueBranch: issue.branch,
       maxQualityRounds: config.maxQualityRounds,
+      maxGateRounds: config.maxGateRounds,
       maxReviewRounds: config.maxReviewRounds,
       uiPrototypeCheck: config.uiPrototypeCheck,
     });
@@ -1003,8 +1017,9 @@ async function runSandboxCycle(
           round: executedAction.reviewRound,
           ...event.reviewRound,
           gateOk: event.gate.ok,
-          rejectingPass: event.gate.ok ? event.reviewRound.rejectingPass : null,
+          rejectingPass: event.reviewRound.rejectingPass,
           qualityFailures: state.qualityFailures,
+          gateFailures: state.gateFailures,
           correctnessFailures: state.correctnessFailures,
         });
       }
@@ -1319,30 +1334,21 @@ export async function runGateAndReviewer(
 ): Promise<Extract<LoopEvent, { kind: "gate-and-reviewer-result" }>> {
   // Wait for both jobs before cycle teardown can remove resources either one
   // is still using. If both reject, the gate remains the first surfaced error.
+  const gateJob = jobs.gate(action, ctx);
+  const reviewerJob = jobs.reviewer(action, ctx, gateJob);
   const [gateResult, reviewerResult] = await Promise.allSettled([
-    jobs.gate(action, ctx),
-    jobs.reviewer(action, ctx),
+    gateJob,
+    reviewerJob,
   ]);
   if (gateResult.status === "rejected") throw gateResult.reason;
   if (reviewerResult.status === "rejected") throw reviewerResult.reason;
   const gate = gateResult.value;
   const reviewer = reviewerResult.value;
-  if (gate.ok && reviewer.historyEntry !== null) {
+  if (reviewer.historyEntry !== null) {
     ctx.priorReviewRounds.push(reviewer.historyEntry);
   }
   if (reviewer.specGap) {
     ctx.specGaps.push({ round: action.reviewRound, text: reviewer.specGap });
-  }
-  if (
-    !gate.ok &&
-    reviewer.event.kind !== "reviewer-wrote" &&
-    ctx.opts.onEvent
-  ) {
-    await ctx.opts.onEvent({
-      kind: "complaint",
-      severity: "warning",
-      message: `issue=${ctx.issue.id} attempt=${action.attempt} gate-1 red — discarded concurrent reviewer result`,
-    });
   }
   return {
     kind: "gate-and-reviewer-result",
@@ -1730,6 +1736,7 @@ export async function enforceReviewerSnapshot(
 export async function runReviewer(
   action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
   ctx: ExecuteActionCtx,
+  gateResult: Promise<Gate1Result>,
 ): Promise<{
   readonly event: ReviewerResult;
   readonly historyEntry: PriorReviewRound | null;
@@ -1930,17 +1937,34 @@ export async function runReviewer(
   // both spelled for completed outcomes.
   let correctness: CompletedReviewerOutcome | undefined;
   if (afterQuality.kind === "run-correctness") {
-    const correctnessOutcome = await runPass("correctness");
-    if (correctnessOutcome.kind === "aborted") {
-      return {
-        event: correctnessOutcome.event,
-        historyEntry: null,
-        specGap: null,
-        round: null,
+    const gate = await gateResult;
+    if (gate.ok) {
+      const correctnessOutcome = await runPass("correctness");
+      if (correctnessOutcome.kind === "aborted") {
+        return {
+          event: correctnessOutcome.event,
+          historyEntry: null,
+          specGap: null,
+          round: null,
+        };
+      }
+      correctness = correctnessOutcome;
+      decision = decideReviewRound(quality, correctness);
+    } else {
+      if (quality.kind !== "reviewed" || quality.verdict.verdict !== "APPROVED") {
+        throw new Error("red gate reached correctness skip without quality approval");
+      }
+      decision = {
+        kind: "finished",
+        event: {
+          kind: "reviewer-result",
+          verdict: "APPROVED",
+          prose: quality.verdict.prose,
+        },
+        quality: "APPROVED",
+        correctness: "SKIPPED",
       };
     }
-    correctness = correctnessOutcome;
-    decision = decideReviewRound(quality, correctness);
   } else {
     decision = afterQuality;
   }

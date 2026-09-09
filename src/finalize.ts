@@ -201,15 +201,18 @@ export const NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE = (
 export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
   branch: string,
   failureTrace: string,
+  latestReviewerProse: string | null,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} exhausted the consecutive quality-failure budget ` +
-  `without a green gate. ` +
+  `${BOT_COMMENT_PREFIX} stopped after repeated red gate-1 results. ` +
   `Investigate the trace below and push a fix on \`${branch}\`, then drop ` +
   `\`${stuckLabel}\` and re-apply \`${readyLabel}\` when ready.\n\n` +
   `<details><summary>Last failure trace</summary>\n\n` +
-  `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
+  `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>` +
+  (latestReviewerProse === null
+    ? ""
+    : `\n\n---\n\nThe latest quality review from the red round:\n\n${latestReviewerProse}`);
 
 export const NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE = (
   branch: string,
@@ -348,21 +351,21 @@ export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} stopped: the gate is GREEN and the last code-reviewer ` +
-  `round produced no review at all — every invocation returned nothing, so no ` +
+  `${BOT_COMMENT_PREFIX} stopped after the second code-reviewer harness failure ` +
+  `in this inner loop — every invocation in that round returned nothing, so no ` +
   `verdict was reached about the current commits. This is a harness or ` +
   `environment failure, not a \`CHANGES-REQUESTED\`: the reviewer did not ask for ` +
-  `changes this round, because it did not run, and the trace below is the ` +
-  `harness's rather than a finding about this branch.\n\n` +
+  `changes this round, because it did not run. The trace below records the ` +
+  `harness failure and any concurrent red gate; neither is a reviewer finding.\n\n` +
   (latestReviewerProse === null
     ? `No reviewer has said anything about this branch at all. `
     : `An earlier round did review this branch, and its report is reproduced at ` +
       `the bottom. Treat it as still standing: work went on after it, but nothing ` +
       `reviewed the result, so whether it was addressed is unverified. `) +
-  `\`${branch}\` is pushed and its commits pass the gate. Review it yourself, or ` +
+  `\`${branch}\` is pushed. Review it yourself, or ` +
   `fix what stopped the reviewer and re-run — then drop \`${stuckLabel}\` and ` +
   `re-apply \`${readyLabel}\`.\n\n` +
-  `<details><summary>Why each reviewer invocation produced nothing</summary>\n\n` +
+  `<details><summary>Latest gate and reviewer-harness trace</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>` +
   (latestReviewerProse === null
     ? ""
@@ -483,7 +486,10 @@ type FinalizeKindInput =
         | "reviewer-harness-failed";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
-      readonly qualityBudgetExhausted: number | null;
+      readonly budgetExhausted: {
+        readonly budget: "quality" | "gate";
+        readonly roundsUsed: number;
+      } | null;
       readonly strandedHead: StrandedHead | null;
     }
   | {
@@ -928,6 +934,7 @@ export async function finalizeOne(
             return NEEDS_HUMAN_COMMENT_TEMPLATE(
               input.issue.branch,
               input.failureTrace,
+              input.latestReviewerProse,
               labels.agentStuck,
               READY_FOR_AGENT_LABEL,
             );
@@ -943,10 +950,11 @@ export async function finalizeOne(
       await adapter.postComment(
         n,
         body +
-          (input.qualityBudgetExhausted === null
+          (input.budgetExhausted === null
             ? ""
-            : `\n\nThe \`maxQualityRounds\` budget ran out at ` +
-              `${input.qualityBudgetExhausted} consecutive quality failures.`),
+            : `\n\nThe \`${input.budgetExhausted.budget === "quality" ? "maxQualityRounds" : "maxGateRounds"}\` ` +
+              `budget ran out after ${input.budgetExhausted.roundsUsed} consecutive ` +
+              `${input.budgetExhausted.budget === "quality" ? "quality failures" : "red gates"}.`),
       );
       const r = await adapter.editLabels(
         n,

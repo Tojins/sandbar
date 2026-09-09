@@ -133,6 +133,7 @@ const config = (
   reviewerAgent: "claude",
   reviewerQualityAgent: "claude",
   maxQualityRounds: 1,
+  maxGateRounds: 1,
   maxReviewRounds: 1,
   sandboxImage: "image",
   agentImages: {
@@ -433,7 +434,8 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       kind: "review-round", issue: 125, title: "Issue 125", attempt: 1, round: 1,
       head: "implemented-sha", qualityMode: "list", gateOk: true,
       quality: "APPROVED", correctness: "APPROVED", rejectingPass: null,
-      qualityFailures: 0, correctnessFailures: 0, durationMs: expect.any(Number),
+      qualityFailures: 0, gateFailures: 0, correctnessFailures: 0,
+      durationMs: expect.any(Number),
     }]);
   });
 

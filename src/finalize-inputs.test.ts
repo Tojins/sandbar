@@ -46,7 +46,7 @@ describe("terminalFinalizeInputs", () => {
           cause: "gate-red",
           failureTrace: "boom",
           latestReviewerProse: null,
-          qualityBudgetExhausted: 4,
+          budgetExhausted: { budget: "gate", roundsUsed: 4 },
         },
       },
       {
@@ -106,7 +106,7 @@ describe("terminalFinalizeInputs", () => {
           cause: "uncommittable-worktree",
           failureTrace: "src/a.ts",
           latestReviewerProse: "prose",
-          qualityBudgetExhausted: null,
+          budgetExhausted: null,
         },
       },
     ]);
@@ -116,11 +116,11 @@ describe("terminalFinalizeInputs", () => {
       cause: "uncommittable-worktree",
       failureTrace: "src/a.ts",
       latestReviewerProse: "prose",
-      qualityBudgetExhausted: null,
+      budgetExhausted: null,
     });
   });
 
-  it("carries a non-null quality exhaustion count onto the handoff", () => {
+  it("carries a gate-budget discriminator and count onto the handoff", () => {
     const [input] = terminalFinalizeInputs([
       {
         issue: issue("129"),
@@ -129,7 +129,7 @@ describe("terminalFinalizeInputs", () => {
           cause: "gate-red",
           failureTrace: "tests failed",
           latestReviewerProse: "earlier review",
-          qualityBudgetExhausted: 4,
+          budgetExhausted: { budget: "gate", roundsUsed: 4 },
           strandedHead: null,
           specGaps: [{ round: 2, text: "gap" }],
         },
@@ -141,7 +141,7 @@ describe("terminalFinalizeInputs", () => {
       cause: "gate-red",
       failureTrace: "tests failed",
       latestReviewerProse: "earlier review",
-      qualityBudgetExhausted: 4,
+      budgetExhausted: { budget: "gate", roundsUsed: 4 },
       strandedHead: null,
       specGaps: [{ round: 2, text: "gap" }],
     });

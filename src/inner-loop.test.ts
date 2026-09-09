@@ -596,7 +596,7 @@ describe("role prompt-extension wiring (#91)", () => {
       kind: "run-gate-and-reviewer",
       attempt: 1,
       reviewRound: 1,
-    }, ctx)).rejects.toBe(stop);
+    }, ctx, Promise.resolve({ ok: true, failureTrace: "" }))).rejects.toBe(stop);
     expect(innerLoopMocks.buildReviewerPrompts).toHaveBeenCalledWith(
       expect.objectContaining({
         reviewerPromptExtension: reviewer,
@@ -677,7 +677,7 @@ describe("role prompt-extension wiring (#91)", () => {
       kind: "run-gate-and-reviewer",
       attempt: 2,
       reviewRound: 1,
-    }, ctx)).resolves.toMatchObject({
+    }, ctx, Promise.resolve({ ok: true, failureTrace: "" }))).resolves.toMatchObject({
       event: { kind: "reviewer-result", verdict: "APPROVED" },
     });
     expect(filenames).toEqual([
@@ -685,6 +685,67 @@ describe("role prompt-extension wiring (#91)", () => {
       "attempt-2-reviewer-quality-2.log",
       "attempt-2-reviewer-correctness-1.log",
     ]);
+  });
+
+  it("does not dispatch correctness when quality approves under a red gate", async () => {
+    innerLoopMocks.buildReviewerPrompts.mockResolvedValueOnce({
+      quality: "quality prompt",
+      correctness: "correctness prompt",
+    });
+    innerLoopMocks.branchTip.mockReset().mockResolvedValue("head123");
+    innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
+    innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
+      "refs/heads/sandbar/issue-143",
+    );
+    const invocations: string[] = [];
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(async (options: Parameters<Sandbox["run"]>[0]) => {
+        invocations.push(options.name ?? "");
+        return {
+          stdout: "quality prose\n<verdict>APPROVED</verdict>",
+          commits: [],
+          silent: false,
+          maxGapMs: 1,
+          toolCalls: 0,
+        };
+      }),
+    } as unknown as Sandbox;
+    const ctx = {
+      issue: { id: "143", title: "gate sequencing", branch: "sandbar/issue-143" },
+      sandbox,
+      opts: { attemptLogger: { writeInvocation: vi.fn() }, onEvent: vi.fn() },
+      config: {
+        repo: { owner: "owner", name: "repo" },
+        layout: { repoDir: "/repo" },
+        sourceBranch: "main",
+        claudeMdPath: "CLAUDE.md",
+        reviewerQualityAgent: "codex",
+        reviewerQualityModelId: "quality-model",
+        reviewerAgent: "codex",
+        reviewerModelId: "correctness-model",
+      },
+      base: { ref: "origin/main" },
+      accumulated: [{ sha: "head123" }],
+      priorReviewRounds: [],
+      invocationSequence: createAgentInvocationSequencer().startCycle(),
+    } as unknown as Parameters<typeof runReviewer>[1];
+
+    const result = await runReviewer(
+      { kind: "run-gate-and-reviewer", attempt: 1, reviewRound: 1 },
+      ctx,
+      Promise.resolve({ ok: false, failureTrace: "tests failed" }),
+    );
+
+    expect(invocations).toEqual(["reviewer-143-round-1-quality"]);
+    expect(result.round).toMatchObject({
+      quality: "APPROVED",
+      correctness: "SKIPPED",
+    });
+    expect(result.historyEntry).toMatchObject({
+      head: "head123",
+      quality: { verdict: "APPROVED" },
+    });
   });
 });
 
@@ -726,6 +787,7 @@ describe("runGateAndReviewer (#123)", () => {
         ...initialState({
           issueBranch: "sandbar/issue-123",
           maxQualityRounds: 4,
+          maxGateRounds: 4,
           maxReviewRounds: 4,
           uiPrototypeCheck: false,
         }),
@@ -770,7 +832,7 @@ describe("runGateAndReviewer (#123)", () => {
     expect(ctx.specGaps).toEqual([]);
   });
 
-  it("accumulates every correctness gap independently of the concurrent gate", async () => {
+  it("accumulates every gap from a completed correctness pass", async () => {
     const ctx = context();
     const reviewer = {
       ...approved,
@@ -791,14 +853,6 @@ describe("runGateAndReviewer (#123)", () => {
       { round: 1, text: "Which clock applies? Use the request clock." },
     ]);
 
-    const redCtx = context();
-    await runGateAndReviewer(action, redCtx, {
-      gate: vi.fn(async () => ({ ok: false, failureTrace: "red" })),
-      reviewer: vi.fn(async () => reviewer),
-    });
-    expect(redCtx.specGaps).toEqual([
-      { round: 1, text: "Which clock applies? Use the request clock." },
-    ]);
   });
 
   it("does not accumulate an empty correctness gap", async () => {
@@ -810,8 +864,12 @@ describe("runGateAndReviewer (#123)", () => {
     expect(ctx.specGaps).toEqual([]);
   });
 
-  it("awaits a reviewer beside a red gate, discards its history, and logs the discard", async () => {
-    const reviewer = deferred<typeof approved>();
+  it("awaits a reviewer beside a red gate and retains its history without a discard complaint", async () => {
+    const redApproved = {
+      ...approved,
+      round: { ...approved.round, correctness: "SKIPPED" as const },
+    };
+    const reviewer = deferred<typeof redApproved>();
     const events: EventInput[] = [];
     const ctx = context(events);
     const result = runGateAndReviewer(action, ctx, {
@@ -824,19 +882,20 @@ describe("runGateAndReviewer (#123)", () => {
     });
     await Promise.resolve();
     expect(finished).toBe(false);
-    reviewer.resolve(approved);
+    reviewer.resolve(redApproved);
 
     await expect(result).resolves.toEqual({
       kind: "gate-and-reviewer-result",
       gate: { ok: false, failureTrace: "tests failed" },
-      reviewer: approved.event,
-      reviewRound: approved.round,
+      reviewer: redApproved.event,
+      reviewRound: redApproved.round,
     });
-    expect(ctx.priorReviewRounds).toEqual([]);
-    expect(events).toEqual([expect.objectContaining({
-      kind: "complaint", severity: "warning",
-      message: "issue=123 attempt=2 gate-1 red — discarded concurrent reviewer result",
-    })]);
+    expect((await result).reviewRound).toMatchObject({
+      quality: "APPROVED",
+      correctness: "SKIPPED",
+    });
+    expect(ctx.priorReviewRounds).toEqual([historyEntry]);
+    expect(events).toEqual([]);
   });
 });
 

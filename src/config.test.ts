@@ -13,6 +13,7 @@ import {
   DEFAULT_CLAUDE_MD_PATH,
   DEFAULT_CONTAINERFILE_PATH,
   DEFAULT_CONTEXT_MD_PATH,
+  DEFAULT_MAX_GATE_ROUNDS,
   DEFAULT_MAX_QUALITY_ROUNDS,
   DEFAULT_MAX_REVIEW_ROUNDS,
   DEFAULT_POLL_INTERVAL_MS,
@@ -172,6 +173,7 @@ describe("resolveConfig", () => {
     // to DECLARE the keys, because the fallback is per declared key.
     expect(r.env).toEqual({});
     expect(r.maxQualityRounds).toBe(DEFAULT_MAX_QUALITY_ROUNDS);
+    expect(r.maxGateRounds).toBe(DEFAULT_MAX_GATE_ROUNDS);
     expect(r.maxReviewRounds).toBe(DEFAULT_MAX_REVIEW_ROUNDS);
     expect(r.pollIntervalMs).toBe(DEFAULT_POLL_INTERVAL_MS);
     expect(r.keepAwakeWhileIdle).toBe(DEFAULT_KEEP_AWAKE_WHILE_IDLE);
@@ -219,20 +221,22 @@ describe("resolveConfig", () => {
       .toThrow(message);
   });
 
-  it("defaults the independent quality and correctness budgets to four (#129)", () => {
+  it("defaults all three independent convergence budgets to four (#129/#143)", () => {
     expect(DEFAULT_MAX_QUALITY_ROUNDS).toBe(4);
+    expect(DEFAULT_MAX_GATE_ROUNDS).toBe(4);
     expect(DEFAULT_MAX_REVIEW_ROUNDS).toBe(4);
     const r = resolveConfig(minimal);
     expect(r.maxQualityRounds).toBe(4);
+    expect(r.maxGateRounds).toBe(4);
     expect(r.maxReviewRounds).toBe(4);
   });
 
   it.each([8, undefined])(
-    "refuses removed maxImplAttempts=%s and names both replacements",
+    "refuses removed maxImplAttempts=%s and names all three replacements",
     (maxImplAttempts) => {
       expect(() =>
         resolveConfig({ ...minimal, maxImplAttempts } as RunConfig),
-      ).toThrow(/maxImplAttempts.*maxQualityRounds.*maxReviewRounds/s);
+      ).toThrow(/maxImplAttempts.*maxQualityRounds.*maxGateRounds.*maxReviewRounds/s);
     },
   );
 
@@ -246,6 +250,8 @@ describe("resolveConfig", () => {
   it.each([
     ["maxQualityRounds", 0],
     ["maxQualityRounds", 1.5],
+    ["maxGateRounds", 0],
+    ["maxGateRounds", 1.5],
     ["maxReviewRounds", -1],
     ["maxReviewRounds", Number.POSITIVE_INFINITY],
   ] as const)("refuses invalid %s %s", (field, value) => {
@@ -341,6 +347,7 @@ describe("resolveConfig", () => {
       sourceBranch: "develop",
       implementerModelId: "claude-haiku-4-5-20251001",
       maxQualityRounds: 3,
+      maxGateRounds: 5,
       maxReviewRounds: 2,
       coauthorTrailer: "Co-authored-by: Someone Else <x@y.z>",
       copyToWorktree: [".npmrc"],
@@ -348,6 +355,7 @@ describe("resolveConfig", () => {
     expect(r.sourceBranch).toBe("develop");
     expect(r.implementerModelId).toBe("claude-haiku-4-5-20251001");
     expect(r.maxQualityRounds).toBe(3);
+    expect(r.maxGateRounds).toBe(5);
     expect(r.maxReviewRounds).toBe(2);
     expect(r.coauthorTrailer).toBe("Co-authored-by: Someone Else <x@y.z>");
     expect(r.copyToWorktree).toEqual([".npmrc"]);

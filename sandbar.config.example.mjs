@@ -97,11 +97,13 @@ export default {
   // host variables stay out.
   env,
 
-  // Independent consecutive-failure budgets. Quality counts rejections, red
-  // gates, NO-SIGNAL, dirty trees and off-branch HEADs, then resets when a
-  // quality approval leads to a completed review verdict. Harness failures
-  // leave both counters unchanged. Review counts correctness rejections only.
+  // Independent consecutive-failure budgets. Quality counts rejections,
+  // NO-SIGNAL, dirty trees and off-branch HEADs, then resets when a quality
+  // approval leads to a completed review verdict. Gate counts red gate-1 and
+  // resets on green. Review counts correctness rejections only. Harness
+  // failures spend none; their second occurrence in one inner loop parks it.
   // maxQualityRounds: 4,
+  // maxGateRounds: 4,
   // maxReviewRounds: 4,
   // DONE work releases one of these concurrent inner-loop slots immediately.
   // maxParallelIssues: 3,

@@ -103,7 +103,7 @@ export function terminalFinalizeInputs(
           cause: t.cause,
           failureTrace: t.failureTrace,
           latestReviewerProse: t.latestReviewerProse,
-          qualityBudgetExhausted: t.qualityBudgetExhausted,
+          budgetExhausted: t.budgetExhausted,
           strandedHead: t.strandedHead,
           specGaps: t.specGaps,
         });
