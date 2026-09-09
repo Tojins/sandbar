@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { afterAll, describe, it, vi } from "vitest";
 
 import { resolveGateStack } from "./config.js";
+import { setCleanupReporter } from "./cleanup.js";
 import {
   bringUpContainers,
   CONTAINER_RM_ARGS,
@@ -21,7 +22,12 @@ import {
   IMAGE,
   runExit,
 } from "./gate-stack-podman.test-util.js";
-import { scopedResourcePrefix, stackContainerNameFor } from "./naming.js";
+import {
+  networkNameFor,
+  podNameFor,
+  scopedResourcePrefix,
+  stackContainerNameFor,
+} from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   podmanTestScope,
@@ -86,6 +92,8 @@ describe.runIf(available)("gate stack against real podman", () => {
       const measurementFailure = new Error("cgroup reader failed");
       const reported: string[] = [];
       const eventFailures: Error[] = [];
+      const notices: Array<{ message: string; cause: unknown }> = [];
+      let removedPod = false;
       const stack = hold(await startStack({
         stackId,
         scope: SCOPE,
@@ -105,7 +113,13 @@ describe.runIf(available)("gate stack against real podman", () => {
           steps: [{ name: "noop", in: "db", command: ["true"] }],
         }),
         containerResources: async (name) => {
-          if (name.endsWith("-runner")) throw measurementFailure;
+          if (name.endsWith("-runner")) {
+            await exec(RUNTIME, [
+              "pod", "rm", "-f", "-t", "0", podNameFor(SCOPE, stackId),
+            ]);
+            removedPod = true;
+            throw measurementFailure;
+          }
           return { peakMemoryBytes: 1024 };
         },
         onContainerTeardown: async (record) => {
@@ -118,21 +132,33 @@ describe.runIf(available)("gate stack against real podman", () => {
       expect((await stack.runGate()).ok).toBe(true);
 
       let failure: unknown;
+      const restoreReporter = setCleanupReporter((_kind, message, cause) => {
+        notices.push({ message, cause });
+      });
       try {
         await stack.stop();
       } catch (err) {
         failure = err;
+      } finally {
+        restoreReporter();
       }
-      expect(failure).toBeInstanceOf(AggregateError);
-      expect((failure as AggregateError).message).toMatch(/resource reporting failed/);
-      expect((failure as AggregateError).errors).toEqual([
-        measurementFailure,
-        ...eventFailures,
+      expect(removedPod).toBe(true);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toMatch(/failed, leaking podman resources/);
+      expect(failure).not.toBe(measurementFailure);
+      expect(eventFailures).toHaveLength(2);
+      expect(notices).toEqual([
+        expect.objectContaining({ cause: measurementFailure }),
+        ...eventFailures.map((cause) => expect.objectContaining({ cause })),
       ]);
       expect(reported).toEqual(["db", "cache"]);
       expect(await maybeIdOf("db")).toBeNull();
       expect(await maybeIdOf("cache")).toBeNull();
       expect(await maybeIdOf("runner")).toBeNull();
+      expect((await runExit(["network", "exists", networkNameFor(SCOPE, stackId)]))).toEqual({
+        code: 1,
+        stdout: "",
+      });
     },
     180_000,
   );

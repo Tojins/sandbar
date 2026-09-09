@@ -8,7 +8,7 @@ const at = (seq: number, ts: string, event: object): RunEvent =>
 describe("run event reducer", () => {
   it("passes container resource facts through to feed rows without defaulting absences", () => {
     const steps = {
-      test: { durationMs: 12, peakMemoryBytes: 4096, oomKilled: false },
+      test: { ok: false, durationMs: 12, peakMemoryBytes: 4096, oomKilled: false },
     };
     const state = reduceRunEvents([
       at(1, "2026-09-07T09:00:00Z", {
@@ -56,6 +56,12 @@ describe("run event reducer", () => {
       { kind: "gate", issue: 2, attempt: 1, gate: "gate-1", ok: true, durationMs: 6 },
       { kind: "review-pass", issue: 2, attempt: 1, round: 1, pass: "quality", invocation: 1,
         provider: "codex", model: "m", effort: null, result: "completed", durationMs: 7 },
+      { kind: "resolve-attempt", issue: 2, attempt: 1, container: "resolve-1",
+        end: "exit", exitCode: 137, signal: null, durationMs: 8,
+        peakMemoryBytes: 7000, oomKilled: true },
+      { kind: "container", stack: "sandbox", issue: 2, title: "Two", name: "db",
+        container: "sandbox-db", lifecycle: "issue", durationMs: 9,
+        peakMemoryBytes: 8000, oomKilled: true },
       { kind: "review-round", issue: 2, attempt: 1, round: 1, head: "abc",
         qualityMode: "list", gateOk: true, quality: "APPROVED", correctness: "APPROVED",
         rejectingPass: null, qualityFailures: 0, correctnessFailures: 0, durationMs: 8 },
@@ -85,6 +91,8 @@ describe("run event reducer", () => {
       [2, "hard error · retry 1/2 · pod", "bad"],
       [2, "repair · re-prompt", "warn"],
       [2, "round 1 · approved", "good"],
+      [2, "sandbox container db stopped", "bad"],
+      [2, "resolve attempt 1 · exit", "bad"],
       [2, "round 1 · quality pass · invocation 1", ""],
       [2, "gate-1 passed", "good"],
       [2, "attempt 1 complete · 1 commit", ""],
@@ -104,6 +112,10 @@ describe("run event reducer", () => {
       [null, "wake lock held", "dim"],
       [null, "run started", "dim"],
     ]);
+    expect(state.events.find((event) => event.text === "resolve attempt 1 · exit"))
+      .toMatchObject({ peakMemoryBytes: 7000, oomKilled: true });
+    expect(state.events.find((event) => event.text === "sandbox container db stopped"))
+      .toMatchObject({ peakMemoryBytes: 8000, oomKilled: true });
     expect(state.run.complaints).toEqual([{ severity: "warning", text: "stale config" }]);
   });
 

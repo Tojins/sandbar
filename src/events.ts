@@ -113,6 +113,7 @@ export type UsageFields = {
 };
 
 export type GateStepEvent = ContainerResources & {
+  readonly ok: boolean;
   readonly durationMs: number;
 };
 

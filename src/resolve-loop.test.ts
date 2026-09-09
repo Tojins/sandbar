@@ -1044,6 +1044,20 @@ describe("the attempt-by-attempt prose (#67)", () => {
         verdict: "still-conflicted",
         logPath: "/logs/a2.log",
       },
+      {
+        attempt: 3,
+        end: "exit",
+        exitCode: 137,
+        signal: null,
+        durationMs: 3_000,
+        container: "c-3",
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        verdict: "still-conflicted",
+        logPath: "/logs/a3.log",
+        peakMemoryBytes: 931_000_000,
+        oomKilled: true,
+      },
     ]);
     expect(text).toContain("**Attempt 1**");
     expect(text).toContain("600.8s");
@@ -1051,6 +1065,8 @@ describe("the attempt-by-attempt prose (#67)", () => {
     expect(text).toContain("**Attempt 2**");
     expect(text).toContain("exited with code 1 after 2.5s");
     expect(text).toContain("/logs/a2.log");
+    expect(text).toContain("was OOM-killed after 3.0s");
+    expect(text).toContain("peakMemoryBytes=931000000 oomKilled=true");
   });
 
   it("says outright when an attempt's output went nowhere", () => {

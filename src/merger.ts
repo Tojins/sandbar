@@ -222,11 +222,11 @@
 // and byte-verbatim stdout/stderr capture before judgement. The shared end
 // classification lives in agent-run-end.ts; the lifecycles stay different.
 // A held `sleep infinity` pid 1 keeps the cgroup live while the fresh agent runs
-// through `podman exec`. Ending the Podman client does not end that exec, so
-// Sandbar explicitly signals every non-PID-1 process in this fresh container
-// and waits for that bounded reaper before it reads memory.peak/memory.events
-// and removes the container (#141). This is not the issue sandbox's resumable
-// conversation: only the resource lifetime is held.
+// through `podman exec`. After a successful start, ending the Podman client
+// does not end that exec, so Sandbar explicitly signals every non-PID-1 process
+// in this fresh container and waits for that bounded reaper before it reads
+// memory.peak/memory.events and removes the container (#141). This is not the
+// issue sandbox's resumable conversation: only the resource lifetime is held.
 // `captureAgentRun` keeps both raw streams for the byte-verbatim attempt log,
 // then `parseCapturedAgentRun` puts only parsed agent speech in the output
 // register that the resolve promise parser may read. It answers with the exit
@@ -2749,28 +2749,30 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         botName: deps.botName,
         botEmail: deps.botEmail,
       });
+      let containerStarted = false;
       const processResult = await Promise.resolve().then(async () => {
         const started = await captureResolveProcess(RUNTIME, args, "", {
           container,
           timeoutMs: CONTROL_TIMEOUT_MS,
         });
-        const run = started.exitCode === 0 && started.end === "exit"
-          ? await captureResolveProcess(
-              RUNTIME,
-              buildResolveExecArgv(container, command.command),
-              command.stdin ?? "",
-              { container, timeoutMs: RESOLVE_AGENT_TIMEOUT_MS },
-            )
-          : started;
-        return run;
+        if (started.exitCode !== 0 || started.end !== "exit") return started;
+        containerStarted = true;
+        return captureResolveProcess(
+          RUNTIME,
+          buildResolveExecArgv(container, command.command),
+          command.stdin ?? "",
+          { container, timeoutMs: RESOLVE_AGENT_TIMEOUT_MS },
+        );
       }).then(
         (run) => ({ run }) as const,
         (failure: unknown) => ({ failure }) as const,
       );
 
-      const reaped = await Promise.allSettled([
-        podman(buildResolveReapArgv(container), CONTROL_TIMEOUT_MS),
-      ]);
+      const reaped = containerStarted
+        ? await Promise.allSettled([
+            podman(buildResolveReapArgv(container), CONTROL_TIMEOUT_MS),
+          ])
+        : [];
       const reapResult = reaped[0];
       const reapingFailure = reapResult?.status === "rejected"
         ? reapResult.reason
@@ -2804,59 +2806,44 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       const measurementFailure = measurement?.status === "rejected"
         ? measurement.reason
         : undefined;
-
-      if ("failure" in processResult) {
-        if (reapingFailure !== undefined) {
-          await reportCleanupNotice(
-            "cleanup-failure",
-            `Resolve container '${container}' process reaping also failed`,
-            reapingFailure,
-          );
-        }
-        if (measurementFailure !== undefined) {
-          await reportCleanupNotice(
-            "cleanup-failure",
-            `Resolve container '${container}' resource measurement also failed`,
-            measurementFailure,
-          );
-        }
-        if (removalFailure !== undefined) {
-          await reportCleanupNotice(
-            "cleanup-failure",
-            `Resolve container '${container}' cleanup also failed`,
-            removalFailure,
-          );
-        }
-        throw processResult.failure;
+      const cleanupFailures = [
+        reapingFailure === undefined
+          ? undefined
+          : {
+              message: `Resolve container '${container}' process reaping also failed`,
+              cause: reapingFailure,
+            },
+        measurementFailure === undefined
+          ? undefined
+          : {
+              message: `Resolve container '${container}' resource measurement also failed`,
+              cause: measurementFailure,
+            },
+        removalFailure === undefined
+          ? undefined
+          : {
+              message: `Resolve container '${container}' cleanup also failed`,
+              cause: removalFailure,
+            },
+      ].filter((failure): failure is { readonly message: string; readonly cause: unknown } =>
+        failure !== undefined,
+      );
+      const startFailed = "run" in processResult && !containerStarted;
+      const primaryFailure = "failure" in processResult
+        ? processResult.failure
+        : startFailed
+          ? undefined
+          : cleanupFailures[0]?.cause;
+      const secondaryFailures = primaryFailure === undefined
+        ? cleanupFailures
+        : "failure" in processResult
+          ? cleanupFailures
+          : cleanupFailures.slice(1);
+      for (const failure of secondaryFailures) {
+        await reportCleanupNotice("cleanup-failure", failure.message, failure.cause);
       }
-      if (reapingFailure !== undefined) {
-        if (measurementFailure !== undefined) {
-          await reportCleanupNotice(
-            "cleanup-failure",
-            `Resolve container '${container}' resource measurement also failed`,
-            measurementFailure,
-          );
-        }
-        if (removalFailure !== undefined) {
-          await reportCleanupNotice(
-            "cleanup-failure",
-            `Resolve container '${container}' cleanup also failed`,
-            removalFailure,
-          );
-        }
-        throw reapingFailure;
-      }
-      if (removalFailure !== undefined) {
-        if (measurementFailure !== undefined) {
-          await reportCleanupNotice(
-            "cleanup-failure",
-            `Resolve container '${container}' resource measurement also failed`,
-            measurementFailure,
-          );
-        }
-        throw removalFailure;
-      }
-      if (measurementFailure !== undefined) throw measurementFailure;
+      if (primaryFailure !== undefined) throw primaryFailure;
+      if ("failure" in processResult) throw processResult.failure;
       const resources = measurement?.status === "fulfilled" ? measurement.value : {};
       return parseCapturedAgentRun({ ...processResult.run, ...resources }, agentProvider);
     },

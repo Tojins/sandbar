@@ -631,6 +631,84 @@ describe("resolve provider invocation (#74)", () => {
     expect(order).toEqual(["run", "exec", "exec", "inspect", "stats", "rm"]);
   });
 
+  it("preserves a failed container start and skips in-container reaping", async () => {
+    const order: string[] = [];
+    const notices: Array<{ message: string; cause: unknown }> = [];
+    const runtimeResult = (stdout = ""): BoundedRuntimeResult => ({
+      stdout,
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+      maxBufferExceeded: false,
+      errorMessage: "",
+    });
+    const podman = vi.fn(async (args: readonly string[]) => {
+      order.push(`podman:${args[0]}`);
+      if (args[0] === "inspect") return { ...runtimeResult(), exitCode: 125 };
+      if (args[0] === "stats") return { ...runtimeResult(), exitCode: 125 };
+      if (args[0] === "rm") {
+        return { ...runtimeResult(), exitCode: 125, errorMessage: "no such container" };
+      }
+      return runtimeResult();
+    });
+    const captureResolveProcess = vi.fn(async (
+      _file: string,
+      args: readonly string[],
+    ) => {
+      order.push(`capture:${args[0]}`);
+      return {
+        stdout: "",
+        stderr: "Error: image not known",
+        end: "exit" as const,
+        exitCode: 125,
+        signal: null,
+        durationMs: 7,
+        container: "resolve-test",
+      };
+    });
+    const adapter = realAdapter({
+      cwd: "/worktree",
+      cacheDir: "/cache.git",
+      scope: runScope("/worktree"),
+      repo: { owner: "acme", name: "app" },
+      sourceBranch: "main",
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+      sandboxImage: "missing-image",
+      env: () => undefined,
+      runStackGate: async () => { throw new Error("not called"); },
+      podman,
+      captureResolveProcess,
+    });
+
+    const restoreReporter = setCleanupReporter((_kind, message, cause) => {
+      notices.push({ message, cause });
+    });
+    let run: Awaited<ReturnType<typeof adapter.runResolveAgent>>;
+    try {
+      run = await adapter.runResolveAgent("resolve this", 1);
+    } finally {
+      restoreReporter();
+    }
+    expect(run).toMatchObject({
+      stderr: "Error: image not known",
+      exitCode: 125,
+      end: "exit",
+    });
+    expect(order).toEqual([
+      "capture:run", "podman:inspect", "podman:stats", "podman:rm",
+    ]);
+    expect(notices).toEqual([
+      expect.objectContaining({
+        message: expect.stringContaining("cleanup also failed"),
+        cause: expect.objectContaining({ message: expect.stringContaining("no such container") }),
+      }),
+    ]);
+  });
+
   it("preserves capture failure while reporting every combined cleanup failure", async () => {
     const primary = new Error("capture failed");
     const reaping = new Error("reaping failed");

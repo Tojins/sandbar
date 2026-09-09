@@ -201,13 +201,16 @@ describe("runUiCheck (#126)", () => {
 
     const failureEvents: EventInput[] = [];
     const failure = context([], failureEvents);
-    const err = withPartialOutput(
-      new Error("disconnected"),
-      "partial",
-      { inputTokens: 11, outputTokens: 12 },
-      13,
-      14,
-      { status: "rejected", window: "weekly", utilization: 1 },
+    const err = withPartialContainerResources(
+      withPartialOutput(
+        new Error("disconnected"),
+        "partial",
+        { inputTokens: 11, outputTokens: 12 },
+        13,
+        14,
+        { status: "rejected", window: "weekly", utilization: 1 },
+      ),
+      { peakMemoryBytes: 512_000_000, oomKilled: true },
     );
     vi.mocked(failure.sandbox.run).mockReset().mockImplementationOnce(
       async (options) => {
@@ -232,6 +235,7 @@ describe("runUiCheck (#126)", () => {
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
       durationMs: expect.any(Number), result: "failed",
+      peakMemoryBytes: 512_000_000, oomKilled: true,
       usage: { inputTokens: 11, outputTokens: 12, toolCalls: 13, peakContext: 14,
         quota: { status: "rejected", window: "weekly", utilization: 1 } },
     }]);
