@@ -34,3 +34,8 @@
       {{ sandbar_service_name }}.service changed. A running daemon keeps the old
       unit until a human runs `systemctl --user restart {{ sandbar_service_name }}`
       as {{ sandbar_user }}; a stopped one starts with `systemctl --user start`.
+
+# A replaced profile applies to the pasta processes already running under it.
+- name: Reload the pasta AppArmor profile
+  ansible.builtin.command: apparmor_parser --replace /etc/apparmor.d/usr.bin.pasta
+  changed_when: true

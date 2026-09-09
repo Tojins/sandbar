@@ -1,0 +1,34 @@
+---
+# Ubuntu's `apparmor` package ships a stub profile for podman
+# (/etc/apparmor.d/podman, flags=(unconfined)) whose only purpose is the
+# `userns` grant that kernel.apparmor_restrict_unprivileged_userns=1 demands.
+# It gives podman the label `podman` instead of `unconfined`. passt's `pasta`
+# profile (/etc/apparmor.d/usr.bin.pasta) has no signal rule; a confined
+# receiver accepts signals from `unconfined` implicitly and from nothing else.
+# So podman's SIGTERM to the rootless-netns pasta at container network cleanup
+# is DENIED (EACCES), every `podman pod rm` fails with
+#   rootless netns: kill network process: permission denied
+# and sandbar halts on the leaked gate stack after its first gate. Observed on
+# 26.04.1 (apparmor 5.0.2, passt 0.0~git20260120, podman 5.7). Debian dropped
+# the stub in apparmor 4.1.0~beta5-4 (Debian #1100135); Ubuntu keeps it
+# because its userns restriction needs it, so the receiver side is what a
+# host can fix. The pasta profile includes no local/ override file, hence the
+# rule is inserted into the profile itself. Applied only where both profiles
+# exist — a host with neither has no conflict.
+- name: Look for the podman stub profile and the pasta profile
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /etc/apparmor.d/podman
+    - /etc/apparmor.d/usr.bin.pasta
+  register: sandbar_apparmor_profiles
+
+- name: Let the pasta profile receive podman's teardown signals
+  ansible.builtin.lineinfile:
+    path: /etc/apparmor.d/usr.bin.pasta
+    regexp: '^\s*signal \(receive\).*peer=podman,'
+    line: "  signal (receive) set=(term, kill) peer=podman,  # sandbar role: rootless netns teardown (Debian #1100135)"
+    insertbefore: '^}'
+    firstmatch: true
+  when: sandbar_apparmor_profiles.results | map(attribute='stat.exists') | list == [true, true]
+  notify: Reload the pasta AppArmor profile

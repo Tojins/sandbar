@@ -26,6 +26,13 @@ The role, `roles/sandbar`, provides:
 - rootless **podman** with netavark and aardvark-dns, a subordinate
   uid/gid range for the service user, and a check that the host runs cgroup v2
   with `memory` and `pids` delegated to user managers;
+- one **AppArmor** rule, `signal (receive) peer=podman` in passt's `pasta`
+  profile, inserted only where Ubuntu's stub `podman` profile is present
+  too. Without it podman cannot SIGTERM the rootless-netns pasta at container
+  cleanup, every `podman pod rm` fails with `rootless netns: kill network
+  process: permission denied`, and sandbar halts on the leaked gate stack
+  after its first gate (seen on 26.04.1; Debian #1100135 is the same
+  conflict, which Debian resolved by dropping the stub Ubuntu keeps);
 - **Node** (major from NodeSource, default 24), **git**, **gh**, and Ubuntu's
   **Caddy** package when the public run UI is enabled;
 - a dedicated **`sandbar` user** with linger, so its user manager, its

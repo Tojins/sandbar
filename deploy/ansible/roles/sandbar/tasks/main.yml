@@ -32,6 +32,9 @@
 - name: Configure rootless podman
   ansible.builtin.import_tasks: podman.yml
 
+- name: Reconcile the AppArmor profiles rootless podman runs under
+  ansible.builtin.import_tasks: apparmor.yml
+
 - name: Provide swap
   ansible.builtin.import_tasks: swap.yml
 
