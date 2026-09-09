@@ -85,6 +85,7 @@ describe.runIf(available)("gate stack against real podman", () => {
       );
       const measurementFailure = new Error("cgroup reader failed");
       const reported: string[] = [];
+      const eventFailures: Error[] = [];
       const stack = hold(await startStack({
         stackId,
         scope: SCOPE,
@@ -109,12 +110,25 @@ describe.runIf(available)("gate stack against real podman", () => {
         },
         onContainerTeardown: async (record) => {
           reported.push(record.name);
-          throw new Error(`event failed for ${record.name}`);
+          const failure = new Error(`event failed for ${record.name}`);
+          eventFailures.push(failure);
+          throw failure;
         },
       }));
       expect((await stack.runGate()).ok).toBe(true);
 
-      await expect(stack.stop()).rejects.toThrow(/resource reporting failed/);
+      let failure: unknown;
+      try {
+        await stack.stop();
+      } catch (err) {
+        failure = err;
+      }
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect((failure as AggregateError).message).toMatch(/resource reporting failed/);
+      expect((failure as AggregateError).errors).toEqual([
+        measurementFailure,
+        ...eventFailures,
+      ]);
       expect(reported).toEqual(["db", "cache"]);
       expect(await maybeIdOf("db")).toBeNull();
       expect(await maybeIdOf("cache")).toBeNull();

@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resolveGateStack } from "./config.js";
+import { setCleanupReporter } from "./cleanup.js";
 import type { ContainerTeardown } from "./container-resources.js";
 import { ContainerBringupError } from "./gate-stack.js";
 import { runScope } from "./naming.js";
@@ -523,6 +524,64 @@ describe("startSandboxStack (#44 D3)", () => {
     await expect(stack.stop()).rejects.toBe(sinkFailure);
     expect(reported).toEqual(["app", "db"]);
     expect(r.removed).toHaveLength(2);
+  });
+
+  it("keeps removal primary and reports every simultaneous resource failure", async () => {
+    const r = recorder();
+    const measurementFailure = new Error("cgroup reader failed");
+    const sinkFailure = new Error("event append failed");
+    const notices: Array<{ message: string; cause: unknown }> = [];
+    const reported: string[] = [];
+    const restoreReporter = setCleanupReporter((_kind, message, cause) => {
+      notices.push({ message, cause });
+    });
+    const stack = await startSandboxStack(
+      {
+        issueId: "44",
+        scope: SCOPE,
+        spec: twoLifecycles(),
+        worktreePath: "/wt",
+        anchorContainerName: ANCHOR,
+        logDir,
+        onContainerTeardown: async (record) => {
+          reported.push(record.name);
+          throw sinkFailure;
+        },
+      },
+      {
+        ...r.deps,
+        measure: async (name) => {
+          if (name.endsWith("-app")) throw measurementFailure;
+          return { peakMemoryBytes: 1024 };
+        },
+        remove: async (name) => {
+          r.removed.push(name);
+          return `podman rm failed for ${name}`;
+        },
+      },
+    );
+
+    let primary: unknown;
+    try {
+      await stack.stop();
+    } catch (err) {
+      primary = err;
+    } finally {
+      restoreReporter();
+    }
+    expect(primary).toBeInstanceOf(Error);
+    expect((primary as Error).message).toContain("failed, leaking podman resources");
+    expect(primary).not.toBe(measurementFailure);
+    expect(primary).not.toBe(sinkFailure);
+    expect(r.removed).toEqual([
+      `sandbar-${SCOPE}-sbx-44-app`,
+      `sandbar-${SCOPE}-sbx-44-db`,
+    ]);
+    expect(reported).toEqual(["db"]);
+    expect(notices).toEqual([
+      expect.objectContaining({ cause: measurementFailure }),
+      expect.objectContaining({ cause: sinkFailure }),
+    ]);
   });
 
   // What leaks here is a running container holding a worktree mount, and the
