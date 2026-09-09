@@ -19,6 +19,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { buildAgentProvider } from "./agent-providers.js";
 import { setCleanupReporter } from "./cleanup.js";
+import { SandbarError } from "./errors.js";
 import {
   buildResolveRunArgv,
   buildResolveExecArgv,
@@ -631,8 +632,10 @@ describe("resolve provider invocation (#74)", () => {
     expect(order).toEqual(["run", "exec", "exec", "inspect", "stats", "rm"]);
   });
 
-  it("registers a successful start until the explicit removal finishes", async () => {
+  it("registers removal and gives signal cleanup its non-zero diagnosis", async () => {
     const order: string[] = [];
+    const notices: Array<{ message: string; cause: unknown }> = [];
+    let cleanupFailure: unknown;
     let cleanupAction: (() => Promise<void> | void) | undefined;
     const unregister = vi.fn(() => order.push("unregister"));
     const registerResolveCleanup = vi.fn((action: () => Promise<void> | void) => {
@@ -652,6 +655,9 @@ describe("resolve provider invocation (#74)", () => {
       order.push(`podman:${args[0]}`);
       if (args[0] === "inspect") return runtimeResult("\nfalse\n");
       if (args[0] === "stats") return runtimeResult("1024 / 2048\n");
+      if (args[0] === "rm") {
+        return { ...runtimeResult(), exitCode: 125, errorMessage: "removal refused" };
+      }
       return runtimeResult();
     });
     const captureResolveProcess = vi.fn(async (
@@ -660,7 +666,11 @@ describe("resolve provider invocation (#74)", () => {
     ) => {
       order.push(`capture:${args[0]}`);
       if (args[0] === "exec") {
-        await cleanupAction?.();
+        try {
+          await cleanupAction?.();
+        } catch (err) {
+          cleanupFailure = err;
+        }
         return {
           stdout: JSON.stringify({
             type: "item.completed",
@@ -694,12 +704,26 @@ describe("resolve provider invocation (#74)", () => {
       registerResolveCleanup,
     });
 
-    await expect(adapter.runResolveAgent("resolve this", 1)).resolves.toMatchObject({
-      output: "<promise>ABANDON</promise>",
+    const restoreReporter = setCleanupReporter((_kind, message, cause) => {
+      notices.push({ message, cause });
     });
+    try {
+      await expect(adapter.runResolveAgent("resolve this", 1)).resolves.toMatchObject({
+        output: "<promise>ABANDON</promise>",
+      });
+    } finally {
+      restoreReporter();
+    }
     expect(order).toEqual([
       "capture:run", "register", "capture:exec", "podman:rm", "podman:exec",
       "podman:inspect", "podman:stats", "unregister",
+    ]);
+    expect(cleanupFailure).toBeInstanceOf(SandbarError);
+    expect((cleanupFailure as Error).message).toMatch(
+      /^merger: failed to remove resolve container '.*': removal refused$/,
+    );
+    expect(notices).toEqual([
+      expect.objectContaining({ cause: cleanupFailure }),
     ]);
     expect(podman.mock.calls.filter(([args]) => args[0] === "rm")).toHaveLength(1);
     expect(registerResolveCleanup).toHaveBeenCalledOnce();

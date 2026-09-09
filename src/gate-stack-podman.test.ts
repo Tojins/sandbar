@@ -586,6 +586,7 @@ describe.runIf(available)("gate stack against real podman", () => {
         task.id,
         onTestFinished,
       );
+      let failedResourceReadMs: number | undefined;
 
       const stack = hold(
         await startStack({
@@ -617,12 +618,22 @@ describe.runIf(available)("gate stack against real podman", () => {
             ],
             steps: [{ name: "ok", in: "runner", command: ["true"] }],
           }),
+          containerResources: async (name) => {
+            if (name === cName("broken")) {
+              const started = Date.now();
+              await new Promise((resolve) => setTimeout(resolve, 3_000));
+              failedResourceReadMs = Date.now() - started;
+            }
+            return {};
+          },
         }),
       );
 
       const red = await stack.runGate();
       expect(red.ok).toBe(false);
       expect(red.failedStep).toBe(`container:${cName("broken")}`);
+      expect(failedResourceReadMs).toBeDefined();
+      expect(red.steps.at(-1)!.durationMs).toBeLessThan(failedResourceReadMs!);
       // The container's own log is the trace — without it the agent is told
       // only that something failed to start.
       expect(red.containerLogs).toContain("bootstrap-failed");

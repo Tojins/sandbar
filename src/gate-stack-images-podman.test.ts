@@ -222,6 +222,8 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
         task.id,
         onTestFinished,
       );
+      let heldResourceReads = 0;
+      let failedResourceReadMs: number | undefined;
 
       const stack = hold(
         await startStack({
@@ -234,6 +236,20 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
           // container removed, and that is the state the next gate run has to
           // read correctly.
           images: async () => new Map([[IMAGE, "localhost/Bad_Name:nope"]]),
+          containerResources: async (name) => {
+            if (name === cName("held")) {
+              heldResourceReads += 1;
+              // The first read records the healthy generation immediately
+              // before replacement. The second reads the failed replacement
+              // and must not inflate the already-finished bringup duration.
+              if (heldResourceReads === 2) {
+                const started = Date.now();
+                await new Promise((resolve) => setTimeout(resolve, 3_000));
+                failedResourceReadMs = Date.now() - started;
+              }
+            }
+            return {};
+          },
           spec: resolveGateStack({
             containers: [
               { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
@@ -258,6 +274,8 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
       const first = await stack.runGate();
       expect(first.ok).toBe(false);
       expect(first.failedStep).toBe(`container:${cName("held")}`);
+      expect(failedResourceReadMs).toBeDefined();
+      expect(first.steps.at(-1)!.durationMs).toBeLessThan(failedResourceReadMs!);
 
       // The container is gone, and the second run must NOT call that an
       // infrastructure failure — it must try the recreate again and red the

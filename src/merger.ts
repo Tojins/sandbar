@@ -338,7 +338,6 @@ import {
   boundedRuntime,
   boundedRuntimeOk,
   type BoundedRuntime,
-  type BoundedRuntimeResult,
   RUNTIME,
 } from "./runtime.js";
 import { fetchIssueText } from "./issue-anchor.js";
@@ -2758,10 +2757,20 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         botEmail: deps.botEmail,
       });
       let containerStarted = false;
-      let removePromise: Promise<BoundedRuntimeResult> | undefined;
+      let removePromise: Promise<void> | undefined;
       let disposeContainer: (() => void) | undefined;
-      const removeContainer = (): Promise<BoundedRuntimeResult> => {
-        removePromise ??= podman(CONTAINER_RM_ARGS(container), CONTROL_TIMEOUT_MS);
+      const removeContainer = (): Promise<void> => {
+        removePromise ??= podman(
+          CONTAINER_RM_ARGS(container),
+          CONTROL_TIMEOUT_MS,
+        ).then((removed) => {
+          if (!boundedRuntimeOk(removed)) {
+            throw new SandbarError(
+              `merger: failed to remove resolve container '${container}': ` +
+                (removed.timedOut ? "podman rm timed out" : removed.errorMessage),
+            );
+          }
+        });
         return removePromise;
       };
       const processResult = await Promise.resolve().then(async () => {
@@ -2771,15 +2780,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         });
         if (started.exitCode !== 0 || started.end !== "exit") return started;
         containerStarted = true;
-        disposeContainer = registerResolveCleanup(async () => {
-          const removed = await removeContainer();
-          if (!boundedRuntimeOk(removed)) {
-            throw new SandbarError(
-              `merger: failed to remove resolve container '${container}': ` +
-                (removed.timedOut ? "podman rm timed out" : removed.errorMessage),
-            );
-          }
-        });
+        disposeContainer = registerResolveCleanup(removeContainer);
         return captureResolveProcess(
           RUNTIME,
           buildResolveExecArgv(container, command.command),
@@ -2818,14 +2819,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       const removed = removal[0];
       const removalFailure = removed?.status === "rejected"
         ? removed.reason
-        : removed !== undefined && !boundedRuntimeOk(removed.value)
-          ? new SandbarError(
-              `merger: failed to remove resolve container '${container}': ` +
-                (removed.value.timedOut
-                  ? "podman rm timed out"
-                  : removed.value.errorMessage),
-            )
-          : undefined;
+        : undefined;
       const measurement = measured[0];
       const measurementFailure = measurement?.status === "rejected"
         ? measurement.reason
